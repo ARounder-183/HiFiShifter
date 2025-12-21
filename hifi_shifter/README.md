@@ -6,7 +6,7 @@ This package provides a GUI tool for pitch correction and synthesis using neural
 
 *   **Pitch Editing**: Draw pitch curves directly on the piano roll interface.
 *   **Real-time Synthesis**: Synthesize audio using the modified pitch curve.
-*   **Project Management**: Save and load projects (`.vsp` files) containing audio path, model path, pitch edits, and parameters.
+*   **Project Management**: Save and load projects (`.hsp` files) containing audio path, model path, pitch edits, and parameters.
 *   **Audio Export**: Export the synthesized audio to WAV format.
 *   **Long Audio Optimization**: Automatically segments long audio files to allow for incremental synthesis, significantly improving performance during editing.
 *   **Undo/Redo**: Full undo/redo support for pitch editing operations.

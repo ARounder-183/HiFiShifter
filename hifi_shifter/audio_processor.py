@@ -18,15 +18,8 @@ class AudioProcessor:
     def __init__(self):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model = None
-        self.config = None
+        self.config = {}
         self.mel_transform = None
-        
-        # Audio state
-        self.audio = None # Tensor (1, T)
-        self.sr = None
-        self.mel = None # Tensor (1, n_mels, T)
-        self.f0_original = None # Numpy array
-        self.segments = [] # List of tuples (start_frame, end_frame)
         
     def load_model(self, folder_path):
         """
@@ -120,13 +113,15 @@ class AudioProcessor:
                 if key in self.config:
                     self.config['model_args'][key] = self.config[key]
 
-    def load_audio(self, file_path):
+    def process_audio(self, file_path):
         """
         Load audio, resample, and extract features (Mel, F0).
         Returns:
             audio_np: numpy array of audio data
             sr: sample rate
-            f0: numpy array of F0 (MIDI)
+            mel: Mel spectrogram tensor
+            f0_midi: numpy array of F0 (MIDI)
+            segments: list of (start, end) tuples
         """
         if self.model is None:
             raise RuntimeError("请先加载模型以确保采样率正确。")
@@ -141,20 +136,17 @@ class AudioProcessor:
             audio = resampler(audio)
             sr = target_sr
         
-        self.audio = audio
-        self.sr = sr
-        
         # Extract Mel
-        self.mel = dynamic_range_compression_torch(self.mel_transform(self.audio, key_shift=0))
+        mel = dynamic_range_compression_torch(self.mel_transform(audio, key_shift=0))
         
         # Extract F0
         f0_np, uv = get_pitch(
             'parselmouth',
-            self.audio[0].numpy(), 
+            audio[0].numpy(), 
             hparams=self.config, 
             speed=1, 
             interp_uv=True, 
-            length=self.mel.shape[2]
+            length=mel.shape[2]
         )
         
         # Convert F0 to MIDI
@@ -163,22 +155,17 @@ class AudioProcessor:
         f0_midi[mask] = 69 + 12 * np.log2(f0_np[mask] / 440.0)
         f0_midi[~mask] = np.nan
         
-        self.f0_original = f0_midi.copy()
-        
         # Segment audio based on silence
-        # Use stricter settings to avoid cutting tails
-        self.segment_audio(threshold_db=-60, min_silence_frames=100)
+        segments = self._segment_audio(mel)
         
-        return self.audio[0].numpy(), sr, f0_midi
+        return audio[0].numpy(), sr, mel, f0_midi, segments
 
-    def segment_audio(self, threshold_db=-60, min_silence_frames=100):
+    def _segment_audio(self, mel, threshold_db=-60, min_silence_frames=100):
         """
         Segment audio based on Mel-spectrogram energy.
         """
-        if self.mel is None: return
-        
         # Calculate energy from Mel (approximate)
-        mel_np = self.mel.squeeze().cpu().numpy()
+        mel_np = mel.squeeze().cpu().numpy()
         energy = np.mean(mel_np, axis=0)
         
         # Normalize energy
@@ -194,37 +181,40 @@ class AudioProcessor:
         is_speech = binary_dilation(is_speech, structure=struct)
         
         # Find segments
-        self.segments = []
+        segments = []
         start = None
         for i, active in enumerate(is_speech):
             if active and start is None:
                 start = i
             elif not active and start is not None:
-                self.segments.append((start, i))
+                segments.append((start, i))
                 start = None
         if start is not None:
-            self.segments.append((start, len(is_speech)))
+            segments.append((start, len(is_speech)))
             
-        # If no segments found (e.g. all silence), treat as one empty or handle gracefully
-        if not self.segments:
-            self.segments = [(0, len(is_speech))]
+        # Ensure segments are valid
+        if not segments:
+            segments = [(0, len(is_speech))]  # Default to one segment if none found
+        segments = [(max(0, start), max(start, end)) for start, end in segments]
+            
+        return segments
 
-    def synthesize_segment(self, segment_idx, f0_midi_segment):
+    def synthesize_segment(self, mel, segment, f0_midi_segment):
         """
         Synthesize a specific segment with context padding to avoid artifacts.
         """
-        if self.model is None or self.mel is None:
-            raise RuntimeError("模型或音频未加载")
+        if self.model is None:
+            raise RuntimeError("模型未加载")
             
-        start, end = self.segments[segment_idx]
+        start, end = segment
         pad_frames = 64 # Increased context window size (approx 0.7s)
         
         # Calculate padded range
         p_start = max(0, start - pad_frames)
-        p_end = min(self.mel.shape[2], end + pad_frames)
+        p_end = min(mel.shape[2], end + pad_frames)
         
         # Get Mel slice with padding
-        mel_slice = self.mel[:, :, p_start:p_end].to(self.device)
+        mel_slice = mel[:, :, p_start:p_end].to(self.device)
         
         # Prepare F0 with padding
         # f0_midi_segment corresponds to [start:end]
@@ -270,18 +260,19 @@ class AudioProcessor:
             
         return audio_padded[trim_start:trim_end]
 
-    def synthesize(self, f0_midi):
+    def synthesize(self, mel, f0_midi):
         """
         Synthesize audio using the modified F0.
         Args:
+            mel: Mel spectrogram tensor
             f0_midi: numpy array of F0 in MIDI scale
         Returns:
             synthesized_audio: numpy array
         """
-        if self.model is None or self.audio is None:
-            raise RuntimeError("模型或音频未加载")
+        if self.model is None:
+            raise RuntimeError("模型未加载")
 
-        mel_tensor = self.mel.to(self.device)
+        mel_tensor = mel.to(self.device)
         
         # Convert MIDI back to Hz
         f0_hz = np.zeros_like(f0_midi)
@@ -300,3 +291,7 @@ class AudioProcessor:
              synthesized_audio = synthesized_audio.squeeze(0)
              
         return synthesized_audio
+
+        # Ensure config is initialized as a dictionary
+        if self.config is None:
+            self.config = {'hop_size': 512}  # Default configuration

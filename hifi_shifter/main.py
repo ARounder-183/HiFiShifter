@@ -1,10 +1,10 @@
 import sys
 from PyQt6.QtWidgets import QApplication
-from .main_window import VocalShifterGUI
+from .main_window import HifiShifterGUI
 
 def main():
     app = QApplication(sys.argv)
-    window = VocalShifterGUI()
+    window = HifiShifterGUI()
     window.show()
     sys.exit(app.exec())
 
