@@ -35,6 +35,7 @@ pip install PyQt6 pyqtgraph sounddevice numpy scipy torch torchaudio pyyaml
 2. **加载模型**:
    - 点击 `文件` -> `加载模型`。
    - 选择包含 `model.ckpt` 和 `config.json` 的文件夹。
+   - 默认提供的模型为：`pc_nsf_hifigan_44.1k_hop512_128bin_2025.02`。
 
 3. **加载音频**:
    - 点击 `文件` -> `加载音频`。

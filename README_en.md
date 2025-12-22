@@ -35,6 +35,7 @@ pip install PyQt6 pyqtgraph sounddevice numpy scipy torch torchaudio pyyaml
 2. **Load Model**:
    - Click `File` -> `Load Model`.
    - Select the folder containing `model.ckpt` and `config.json`.
+   - The default provided model is: `pc_nsf_hifigan_44.1k_hop512_128bin_2025.02`.
 
 3. **Load Audio**:
    - Click `File` -> `Load Audio`.
