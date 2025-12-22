@@ -1,146 +1,100 @@
 # HifiShifter Development Manual
 
-HifiShifter is a graphical pitch correction tool based on deep learning neural vocoders (NSF-HiFiGAN). It allows users to load audio files, visually edit pitch curves on a piano roll interface, and synthesize modified audio in real-time using pre-trained vocoder models.
+HifiShifter is a graphical pitch correction tool based on deep learning neural vocoders (NSF-HiFiGAN). This document aims to provide developers with an overview of the project architecture, module descriptions, and extension guides.
 
-## 1. Core Architecture and Principles
+## 1. Project Overview
 
-HifiShifter adopts a modular design, separating GUI interaction, audio processing, and data management.
+### 1.1 Directory Structure
 
-### 1.1 System Architecture
-
-```mermaid
-graph TD
-    GUI[Main Window (PyQt6)] -->|User Input| Processor[Audio Processor]
-    GUI -->|Visuals| Widgets[Custom Widgets (PyQtGraph)]
-    GUI -->|Data| Track[Track Object]
-    
-    Processor -->|Load/Infer| Model[NSF-HiFiGAN Model]
-    Processor -->|Extract| Features[Mel & F0]
-    
-    Track -->|Store| AudioData[Waveform]
-    Track -->|Store| PitchData[F0 Curve]
-    Track -->|Store| State[Edit History]
+```text
+HifiShifter/
+├── assets/                 # Resource files
+│   └── lang/               # Language packs (zh_CN.json, en_US.json)
+├── configs/                # Model configuration files (.yaml)
+├── hifi_shifter/           # Core source package
+│   ├── __init__.py
+│   ├── audio_processor.py  # Audio processing & model inference core
+│   ├── config_manager.py   # Configuration & i18n management
+│   ├── main_window.py      # Main Window GUI logic
+│   ├── timeline.py         # Timeline & Track management
+│   ├── track.py            # Track data model
+│   └── widgets.py          # Custom UI widgets (PyQtGraph)
+├── models/                 # Predefined model structures (NSF-HiFiGAN, UnivNet, etc.)
+├── modules/                # Neural network basic modules
+├── utils/                  # Utility functions (Audio processing, Config utils)
+├── run_gui.py              # Application entry point
+├── requirements.txt        # Dependency list
+└── ...
 ```
 
-### 1.2 Core Modules
+### 1.2 Core Architecture
 
-#### A. `hifi_shifter.audio_processor` (Audio Processing Core)
-The engine of the system. Handles all tasks related to PyTorch models and audio signal processing.
-*   **Model Loading**: Reads `.ckpt` and `.yaml` config files, initializes NSF-HiFiGAN generator.
+HifiShifter adopts a variant of the Model-View-Controller (MVC) architecture, achieving separation of data, view, and logic:
+
+*   **Model (Data Layer)**: The `Track` class encapsulates audio waveforms, F0 curves, Mel spectrograms, and user edit states (e.g., mute, solo, volume).
+*   **View (View Layer)**: `MainWindow` and `Timeline` use `PyQt6` to build the interface framework and utilize `pyqtgraph` for high-performance waveform and piano roll rendering.
+*   **Controller (Control Layer)**: `AudioProcessor` handles business logic (feature extraction, model inference, audio synthesis), while `MainWindow` coordinates user interaction and background processing.
+
+## 2. Core Modules Detail
+
+### 2.1 Audio Processing (`audio_processor.py`)
+This is the core engine of the system, responsible for all tasks related to PyTorch models and signal processing.
+*   **Model Loading**: Parses `.yaml` configuration files, instantiates the corresponding generator model based on the config, and loads `.ckpt` weights.
 *   **Feature Extraction**:
-    *   **Mel Spectrogram**: Converts waveform to Mel spectrogram using STFT.
-    *   **F0 (Fundamental Frequency)**: Extracts original pitch using Parselmouth (Praat) algorithm.
-*   **Segmentation**: For real-time editing, long audio is automatically split into segments (based on silence detection).
-    *   **Incremental Synthesis**: When pitch is modified, only affected segments are re-synthesized, ensuring fast response.
-*   **Synthesis**: Takes Mel spectrogram and modified F0 to output waveform.
+    *   **F0 (Fundamental Frequency)**: Uses `Parselmouth` (based on Praat algorithm) to extract high-precision F0 curves.
+    *   **Mel Spectrogram**: Uses STFT to convert waveforms into Mel spectrograms as the acoustic representation of content.
+*   **Smart Segmentation**:
+    *   To optimize performance and enable real-time editing, long audio is automatically split into multiple `Segments` based on silence thresholds.
+    *   **Incremental Synthesis**: When the user modifies pitch, the system only re-synthesizes the affected segments rather than the entire song, achieving millisecond-level editing feedback.
 
-#### B. `hifi_shifter.track` (Data Model)
-Each track is a `Track` object, encapsulating its state:
-*   **Raw Data**: Waveform, sample rate, original F0, Mel spectrogram.
-*   **Edit Data**: User-modified F0 curve (`f0_edited`).
-*   **State Flags**: `muted`, `solo`, `volume`, `start_frame` (timeline offset).
-*   **Cache**: `synthesized_audio` stores results to avoid re-computation.
-*   **History**: `undo_stack` and `redo_stack`.
+### 2.2 Track Management (`track.py` & `timeline.py`)
+*   **Track Object**: Each track is an independent object storing Raw Data and Edited Data. It also maintains an Undo/Redo Stack.
+*   **Timeline**: Manages multi-track mixing logic. It controls the Mute, Solo states, and Volume gain of all tracks, and calculates the final mixed audio output.
+*   **View Synchronization**: The Timeline Widget and the main editor window (Piano Roll) are synchronized via signal mechanisms, supporting drag-and-drop track alignment.
 
-#### C. `hifi_shifter.timeline` (Timeline Panel)
-Manages multi-track and macro view.
-*   **Track Management**: Controls for Mute, Solo, Volume, and waveform overview.
-*   **Time Control**: Ruler and playback head.
-*   **Interaction**: Dragging tracks for alignment, box selection, zooming.
+### 2.3 Internationalization (`config_manager.py`)
+The project has built-in lightweight internationalization (i18n) support.
+*   **Language Files**: Located in the `assets/lang/` directory, stored as JSON key-value pairs.
+*   **Loading Mechanism**: `ConfigManager` reads the configuration at startup and loads the corresponding language pack.
+*   **Usage**: Retrieve localized text in code via `self.cfg.get_text("key_name")`.
+*   **Adding New Languages**:
+    1. Create a new `xx_XX.json` in `assets/lang/`.
+    2. Copy the content of `en_US.json` and translate all Values.
+    3. Restart the software and select the new language in Settings.
 
-#### D. `hifi_shifter.main_window` (Main Interface & Logic)
-Central controller coordinating all components.
-*   **Event Loop**: Handles playback timer (`QTimer`).
-*   **Drawing Logic**: Uses `pyqtgraph` for Piano Roll and Waveform.
-*   **Sync Mechanism**: Ensures synchronization between timeline and editor views.
-*   **Project Management**: Handles `.hsp` file serialization.
+## 3. Development Guide
 
-#### E. `utils.i18n` (Internationalization)
-Manages multi-language support.
-*   **Resource Loading**: Loads `.json` language files from `assets/lang/`.
-*   **Dynamic Switching**: Saves language preference via `config_manager`, effective after restart.
-
-## 2. Features and Usage Guide
-
-### 2.1 Basic Operations
-1.  **Load Model**: Click "File -> Load Model" (or Open Project), select folder with `model.ckpt` and `config.json`.
-2.  **Import Audio**: Click "File -> Load Audio" or drag & drop files.
-3.  **View Operations**:
-    *   **Middle Click Drag**: Pan view.
-    *   **Ctrl + Scroll**: Zoom Time (Horizontal).
-    *   **Alt + Scroll**: Zoom Pitch (Vertical).
-4.  **Pitch Editing**:
-    *   **Draw (Left Click)**: Draw lines on piano roll to modify pitch.
-    *   **Erase (Right Click)**: Restore to original pitch.
-
-### 2.2 Advanced Features
-*   **Multi-language**: Switch between Chinese/English in "Settings -> Language" (Restart required).
-*   **Multi-track Mixing**: Support for BGM and multiple vocal tracks. Adjust volume, mute, solo in the left panel.
-*   **Time Alignment**: Drag track blocks in the timeline panel to adjust start time.
-*   **Parameters**:
-    *   **Shift**: Global pitch shift (semitones).
-    *   **BPM / Time Sig**: Set project tempo and time signature for grid lines.
-*   **Export**: Mix all non-muted tracks and export as WAV.
-
-## 3. Project File Structure (.hsp)
-
-Standard JSON format, supporting relative paths.
-
-```json
-{
-    "version": "2.1",
-    "model_path": "models/nsf_hifigan",
-    "params": {
-        "bpm": 120.0,
-        "beats": 4
-    },
-    "tracks": [
-        {
-            "name": "vocal_track",
-            "file_path": "audio/vocal.wav",
-            "type": "vocal",
-            "shift": 0.0,
-            "muted": false,
-            "solo": false,
-            "volume": 1.0,
-            "start_frame": 0,
-            "f0": [ ... ]
-        }
-    ]
-}
+### 3.1 Environment Setup
+Python 3.10+ environment is recommended.
+```bash
+git clone https://github.com/ARounder-183/HiFiShifter.git
+cd HifiShifter
+pip install -r requirements.txt
 ```
 
-## 4. Secondary Development Guide
+### 3.2 Run & Debug
+```bash
+python run_gui.py
+```
+**Debugging Suggestions**:
+*   Use VS Code or PyCharm.
+*   Key Breakpoints:
+    *   `MainWindow.synthesize_audio`: Check synthesis trigger logic.
+    *   `AudioProcessor.process_segment`: Check model inference input/output.
+    *   `Timeline.paint`: Check custom drawing logic.
 
-### 4.1 Adding Audio Effects
-1.  Add processing method in `AudioProcessor`.
-2.  Add parameter storage in `Track`.
-3.  Add UI controls in `TrackControlWidget` (`timeline.py`).
-4.  Apply effects in `mix_tracks` in `main_window.py`.
+### 3.3 Common Extension Tasks
+*   **Adding New Vocoder Support**:
+    1. Add new model definition files in the `models/` directory.
+    2. Modify the `load_model` method in `audio_processor.py` to add initialization logic for the new model.
+    3. Ensure the new model's input (Mel + F0) and output (Waveform) formats are compatible with the existing pipeline.
+*   **Modifying UI Interaction**:
+    *   Main interaction logic (mouse clicks, dragging) is located in the event handling functions of `main_window.py`.
+    *   If you need to modify drawing styles (e.g., colors, line thickness), check `widgets.py`.
 
-### 4.2 Modifying Vocoder Model
-Currently supports NSF-HiFiGAN. To support others:
-1.  Modify `AudioProcessor.load_model`.
-2.  Modify `AudioProcessor.synthesize` to adapt to new input formats.
+## 4. Known Issues
 
-### 4.3 Custom UI Components
-All drawing components are in `widgets.py`.
-*   Edit `MusicGridItem` or `PitchGridItem` for grid styles.
-*   Edit `AudioBlockItem` in `timeline.py` for note blocks.
+*   **Volume Adjustment Latency**: Adjusting track volume in real-time during playback may not take effect immediately or may have a slight delay.
+*   **Long Audio Freezing**: When importing very long audio files (e.g., over 10 minutes), the initial feature extraction (F0 and Mel calculation) may cause the interface to become unresponsive (freeze) for a long time. It is recommended to pre-cut long audio into shorter segments.
+*   **Memory Usage**: Loading multiple high-sample-rate tracks will consume a large amount of memory because each track stores complete floating-point waveform data and spectrograms.
 
-### 4.4 Debugging
-*   Run `run_gui.py`.
-*   Console outputs detailed logs.
-*   `segment_audio` in `AudioProcessor` is key for performance.
-
-## 5. FAQ
-
-*   **Q: No sound?**
-    *   A: Check if model is loaded, track is muted, or system audio device.
-*   **Q: Popping sound after edit?**
-    *   A: Likely segmentation boundary issues. Context padding is implemented but extreme pitch shifts may still cause artifacts. Smooth the curve.
-*   **Q: Project file won't open?**
-    *   A: Check if audio/model files were moved. Relative paths are supported but major structure changes require manual fix.
-
----
-Copyright © 2025 HifiShifter Team.

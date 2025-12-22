@@ -1,148 +1,100 @@
-# HifiShifter 开发与使用手册
+# HifiShifter 开发手册
 
-HifiShifter 是一个基于深度学习神经声码器（NSF-HiFiGAN）的图形化音高修正工具。它允许用户加载音频文件，在钢琴卷帘界面上直观地编辑音高曲线，并利用预训练的声码器模型实时合成修改后的音频。
+HifiShifter 是一个基于深度学习神经声码器（NSF-HiFiGAN）的图形化音高修正工具。本文档旨在为开发者提供项目的架构概览、模块说明以及扩展指南。
 
-## 1. 核心架构与工作原理
+## 1. 项目概览
 
-HifiShifter 采用了模块化的设计，将 GUI 交互、音频处理和数据管理分离。
+### 1.1 目录结构
 
-### 1.1 系统架构图
-
-```mermaid
-graph TD
-    GUI[Main Window (PyQt6)] -->|User Input| Processor[Audio Processor]
-    GUI -->|Visuals| Widgets[Custom Widgets (PyQtGraph)]
-    GUI -->|Data| Track[Track Object]
-    
-    Processor -->|Load/Infer| Model[NSF-HiFiGAN Model]
-    Processor -->|Extract| Features[Mel & F0]
-    
-    Track -->|Store| AudioData[Waveform]
-    Track -->|Store| PitchData[F0 Curve]
-    Track -->|Store| State[Edit History]
+```text
+HifiShifter/
+├── assets/                 # 资源文件
+│   └── lang/               # 语言包 (zh_CN.json, en_US.json)
+├── configs/                # 模型配置文件 (.yaml)
+├── hifi_shifter/           # 核心源码包
+│   ├── __init__.py
+│   ├── audio_processor.py  # 音频处理与模型推理核心
+│   ├── config_manager.py   # 配置与国际化管理
+│   ├── main_window.py      # 主窗口 GUI 逻辑
+│   ├── timeline.py         # 时间轴与轨道管理
+│   ├── track.py            # 音轨数据模型
+│   └── widgets.py          # 自定义 UI 组件 (PyQtGraph)
+├── models/                 # 预定义模型结构 (NSF-HiFiGAN, UnivNet 等)
+├── modules/                # 神经网络基础模块
+├── utils/                  # 工具函数 (音频处理, 配置文件)
+├── run_gui.py              # 程序启动入口
+├── requirements.txt        # 项目依赖列表
+└── ...
 ```
 
-### 1.2 核心模块详解
+### 1.2 核心架构
 
-#### A. `hifi_shifter.audio_processor` (音频处理核心)
-这是整个系统的引擎。它负责所有与 PyTorch 模型和音频信号处理相关的任务。
-*   **模型加载**: 读取 `.ckpt` 和 `.yaml` 配置文件，初始化 NSF-HiFiGAN 生成器。
+HifiShifter 采用 Model-View-Controller (MVC) 的变体架构，实现了数据、视图与逻辑的分离：
+
+*   **Model (数据层)**: `Track` 类封装了音频波形、F0 曲线、Mel 频谱以及用户的编辑状态（如静音、独奏、音量）。
+*   **View (视图层)**: `MainWindow` 和 `Timeline` 使用 `PyQt6` 构建界面框架，利用 `pyqtgraph` 进行高性能的波形和钢琴卷帘渲染。
+*   **Controller (控制层)**: `AudioProcessor` 负责业务逻辑（特征提取、模型推理、音频合成），`MainWindow` 负责协调用户交互与后台处理。
+
+## 2. 核心模块详解
+
+### 2.1 音频处理 (`audio_processor.py`)
+这是系统的核心引擎，负责所有与 PyTorch 模型和信号处理相关的任务。
+*   **模型加载**: 解析 `.yaml` 配置文件，根据配置实例化对应的生成器模型，并加载 `.ckpt` 权重。
 *   **特征提取**:
-    *   **Mel 频谱图**: 使用 STFT 将波形转换为 Mel 频谱，作为内容的表征。
-    *   **F0 (基频)**: 使用 Parselmouth (Praat) 算法提取原始音高。
-*   **智能分段 (Segmentation)**: 为了实现实时编辑，长音频会被自动切分为多个片段（基于静音检测）。
-    *   **增量合成**: 当用户修改音高时，只有受影响的片段会被重新送入模型合成，而不是整首歌曲。这使得编辑响应速度极快。
-*   **合成 (Synthesis)**: 接收 Mel 频谱和修改后的 F0，输出波形。
+    *   **F0 (基频)**: 使用 `Parselmouth` (基于 Praat 算法) 提取高精度的 F0 曲线。
+    *   **Mel 频谱**: 使用 STFT 将波形转换为 Mel 频谱，作为内容的声学表征。
+*   **智能分段 (Segmentation)**:
+    *   为了优化性能和实现实时编辑，长音频会被基于静音阈值自动切分为多个 `Segment`。
+    *   **增量合成**: 当用户修改音高时，系统仅重合成受影响的片段，而非整首歌曲，从而实现毫秒级的编辑反馈。
 
-#### B. `hifi_shifter.track` (数据模型)
-每个音轨都是一个 `Track` 对象，封装了该音轨的所有状态：
-*   **原始数据**: 原始音频波形、采样率、原始 F0、Mel 频谱。
-*   **编辑数据**: 用户修改后的 F0 曲线 (`f0_edited`)。
-*   **状态标志**: `muted` (静音), `solo` (独奏), `volume` (音量), `start_frame` (时间轴偏移)。
-*   **缓存**: `synthesized_audio` 存储合成后的结果，避免重复计算。
-*   **历史记录**: `undo_stack` 和 `redo_stack` 用于撤销/重做。
+### 2.2 轨道管理 (`track.py` & `timeline.py`)
+*   **Track 对象**: 每个音轨是一个独立的对象，存储了原始数据（Raw Data）和编辑数据（Edited Data）。它还维护了撤销/重做栈（Undo/Redo Stack）。
+*   **Timeline**: 负责多轨混音逻辑。它管理所有音轨的静音（Mute）、独奏（Solo）状态和音量增益，并计算最终的混合音频输出。
+*   **视图同步**: 时间轴面板（Timeline Widget）与主编辑窗口（Piano Roll）通过信号机制保持同步，支持拖拽对齐音轨时间。
 
-#### C. `hifi_shifter.timeline` (时间轴面板)
-负责多轨管理和宏观视图。
-*   **轨道管理**: 显示所有音轨的控制面板（静音、独奏、音量）和波形概览。
-*   **时间控制**: 包含标尺（Ruler），控制播放头位置。
-*   **交互**: 支持拖拽音轨进行时间对齐，支持框选和缩放。
+### 2.3 国际化 (`config_manager.py`)
+项目内置了轻量级的国际化（i18n）支持。
+*   **语言文件**: 位于 `assets/lang/` 目录，采用 JSON 格式存储键值对。
+*   **加载机制**: `ConfigManager` 在启动时读取配置文件，加载对应的语言包。
+*   **使用方法**: 在代码中通过 `self.cfg.get_text("key_name")` 获取当前语言的文本。
+*   **添加新语言**:
+    1. 在 `assets/lang/` 下新建 `xx_XX.json`。
+    2. 复制 `en_US.json` 的内容并翻译所有 Value。
+    3. 重启软件并在设置中选择新语言。
 
-#### D. `hifi_shifter.main_window` (主界面与逻辑)
-协调所有组件的中央控制器。
-*   **事件循环**: 处理播放定时器 (`QTimer`)，更新播放头位置。
-*   **绘图逻辑**: 使用 `pyqtgraph` 绘制钢琴卷帘（Piano Roll）和波形。
-*   **同步机制**: 确保时间轴面板和编辑面板的视图同步（或解耦）。
-*   **工程管理**: 处理 `.hsp` 文件的序列化和反序列化。
+## 3. 开发指南
 
-#### E. `utils.i18n` (国际化支持)
-负责多语言管理。
-*   **资源加载**: 从 `assets/lang/` 目录加载 `.json` 语言文件。
-*   **动态切换**: 通过 `config_manager` 保存语言设置，重启后生效。
-
-## 2. 功能特性与使用指南
-
-### 2.1 基础操作
-1.  **加载模型**: 启动后首先点击“文件 -> 加载模型”，选择包含 `model.ckpt` 和 `config.json` 的文件夹。
-2.  **导入音频**: 点击“文件 -> 加载音频”或直接拖入音频文件。
-3.  **视图操作**:
-    *   **中键拖动**: 平移视图。
-    *   **Ctrl + 滚轮**: 缩放时间轴（横向）。
-    *   **Alt + 滚轮**: 缩放音高轴（纵向）。
-4.  **音高编辑**:
-    *   **左键绘制**: 直接在钢琴卷帘上画线修改音高。
-    *   **右键擦除**: 还原为原始音高。
-
-### 2.2 高级功能
-*   **多语言支持**: 在“设置 -> 语言”中切换中文或英文（需重启）。
-*   **多轨混音**: 支持导入伴奏（BGM）和多条人声轨。在轨道左侧面板可以调节音量、静音和独奏。
-*   **时间对齐**: 在时间轴面板（下方区域），可以拖动音轨块来调整其开始时间。
-*   **参数设置**:
-    *   **移调 (Shift)**: 全局调整音高（半音为单位）。
-    *   **BPM / 拍号**: 设置项目的速度和节拍，影响网格线的显示。
-*   **导出**: 将所有非静音轨道混合并导出为 WAV 文件。
-
-## 3. 工程文件结构 (.hsp)
-
-工程文件是标准的 JSON 格式，支持相对路径，方便在不同设备间迁移。
-
-```json
-{
-    "version": "2.1",
-    "model_path": "models/nsf_hifigan",  // 模型路径（支持相对路径）
-    "params": {
-        "bpm": 120.0,
-        "beats": 4
-    },
-    "tracks": [
-        {
-            "name": "vocal_track",
-            "file_path": "audio/vocal.wav", // 音频路径（支持相对路径）
-            "type": "vocal",                // 类型: 'vocal' 或 'bgm'
-            "shift": 0.0,
-            "muted": false,
-            "solo": false,
-            "volume": 1.0,
-            "start_frame": 0,               // 时间轴偏移量
-            "f0": [ ... ]                   // 修改后的 F0 数据 (MIDI 编号数组)
-        }
-    ]
-}
+### 3.1 环境搭建
+建议使用 Python 3.10+ 环境。
+```bash
+git clone https://github.com/ARounder-183/HiFiShifter.git
+cd HifiShifter
+pip install -r requirements.txt
 ```
 
-## 4. 二次开发指南
+### 3.2 运行与调试
+```bash
+python run_gui.py
+```
+**调试建议**:
+*   使用 VS Code 或 PyCharm。
+*   关键断点位置：
+    *   `MainWindow.synthesize_audio`: 检查合成触发逻辑。
+    *   `AudioProcessor.process_segment`: 检查模型推理输入输出。
+    *   `Timeline.paint`: 检查自定义绘图逻辑。
 
-如果您想为 HifiShifter 添加新功能，请参考以下建议：
+### 3.3 常见扩展任务
+*   **添加新声码器支持**:
+    1. 在 `models/` 目录下添加新的模型定义文件。
+    2. 修改 `audio_processor.py` 中的 `load_model` 方法，添加新模型的初始化逻辑。
+    3. 确保新模型的输入（Mel + F0）和输出（Waveform）格式与现有管线兼容。
+*   **修改 UI 交互**:
+    *   主要交互逻辑（鼠标点击、拖拽）位于 `main_window.py` 的事件处理函数中。
+    *   如果需要修改绘图样式（如颜色、线条粗细），请查看 `widgets.py`。
 
-### 4.1 添加新的音频效果
-1.  在 `AudioProcessor` 类中添加处理方法（如混响、EQ）。
-2.  在 `Track` 类中添加相应的参数存储。
-3.  在 `TrackControlWidget` (`timeline.py`) 中添加 UI 控件。
-4.  在 `main_window.py` 的 `mix_tracks` 方法中应用这些效果。
+## 4. 已知问题 (Known Issues)
 
-### 4.2 修改声码器模型
-目前支持 NSF-HiFiGAN。如果想支持其他模型（如 DiffSinger 的声码器）：
-1.  修改 `AudioProcessor.load_model` 以加载新模型结构。
-2.  修改 `AudioProcessor.synthesize` 以适配新模型的输入格式（例如，如果新模型需要能量值 Energy，则需要增加提取和输入逻辑）。
+*   **音量调节延迟**: 在播放过程中实时调节音轨音量，可能不会立即生效，或者存在轻微的延迟。
+*   **长音频卡死**: 导入非常长的音频文件（例如超过 10 分钟）时，初始的特征提取（F0 和 Mel 计算）可能会导致界面长时间无响应（假死）。建议预先将长音频切割为较短的片段。
+*   **内存占用**: 加载多个高采样率音轨会消耗大量内存，因为每个音轨都保存了完整的浮点波形数据和频谱图。
 
-### 4.3 自定义 UI 组件
-所有的绘图组件都位于 `widgets.py`。
-*   如果需要修改网格样式，请编辑 `MusicGridItem` 或 `PitchGridItem`。
-*   如果需要修改音符块的显示，请编辑 `timeline.py` 中的 `AudioBlockItem`。
-
-### 4.4 调试
-*   使用 `run_gui.py` 启动程序。
-*   控制台会输出详细的加载和处理日志。
-*   `AudioProcessor` 中的 `segment_audio` 方法是性能优化的关键，修改时需谨慎。
-
-## 5. 常见问题 (FAQ)
-
-*   **Q: 为什么没有声音？**
-    *   A: 检查是否加载了模型。检查轨道是否被静音。检查系统音频设备设置。
-*   **Q: 为什么编辑后声音有爆音？**
-    *   A: 这通常是分段合成的边界问题。我们已经实现了 Context Padding 来缓解此问题，但极端的音高突变仍可能导致伪影。尝试平滑音高曲线。
-*   **Q: 工程文件打不开？**
-    *   A: 检查音频文件或模型文件夹是否被移动或删除。虽然支持相对路径，但如果文件结构发生巨大变化，仍需手动定位。
-
----
-Copyright © 2025 HifiShifter Team.
