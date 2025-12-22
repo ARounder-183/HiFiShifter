@@ -34,3 +34,14 @@ def set_default_model_path(path):
     config = load_config()
     config['default_model_path'] = str(path)
     save_config(config)
+
+def get_language():
+    """Get the language code from config."""
+    config = load_config()
+    return config.get('language', 'zh_CN')
+
+def set_language(lang_code):
+    """Set the language code in config."""
+    config = load_config()
+    config['language'] = lang_code
+    save_config(config)

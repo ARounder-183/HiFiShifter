@@ -9,9 +9,10 @@ import scipy.io.wavfile as wavfile
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                              QMessageBox, QComboBox, QDoubleSpinBox, QSpinBox,
-                             QButtonGroup, QSplitter, QScrollBar)
-from PyQt6.QtGui import QAction, QKeySequence
-from PyQt6.QtCore import Qt, QTimer
+                             QButtonGroup, QSplitter, QScrollBar, QGraphicsRectItem,
+                             QProgressBar)
+from PyQt6.QtGui import QAction, QKeySequence, QPen, QColor, QBrush, QShortcut, QActionGroup
+from PyQt6.QtCore import Qt, QTimer, QRectF
 import pyqtgraph as pg
 
 # Import widgets
@@ -22,11 +23,23 @@ from .track import Track
 from .audio_processor import AudioProcessor
 # Import Config Manager
 from . import config_manager
+# Import I18n
+from utils.i18n import i18n
 
 class HifiShifterGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("HifiShifter - 音高修正工具")
+        
+        # Initialize Language
+        lang = config_manager.get_language()
+        # Assuming assets folder is at project root/assets
+        # We need to find the project root. 
+        # Current file is in hifi_shifter/main_window.py
+        # Root is one level up
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        i18n.load_language(lang, os.path.join(root_dir, 'assets'))
+        
+        self.setWindowTitle(i18n.get("app.title"))
         self.resize(1200, 800)
         
         # Initialize Audio Processor
@@ -78,74 +91,102 @@ class HifiShifterGUI(QMainWindow):
         menu_bar = self.menuBar()
         
         # File Menu
-        file_menu = menu_bar.addMenu("文件")
+        file_menu = menu_bar.addMenu(i18n.get("menu.file"))
         
-        open_action = QAction("打开工程", self)
+        open_action = QAction(i18n.get("menu.file.open"), self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_project_dialog)
         file_menu.addAction(open_action)
         
-        save_action = QAction("保存工程", self)
+        save_action = QAction(i18n.get("menu.file.save"), self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
         
-        save_as_action = QAction("另存为工程", self)
+        save_as_action = QAction(i18n.get("menu.file.save_as"), self)
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_project_as)
         file_menu.addAction(save_as_action)
         
         file_menu.addSeparator()
 
-        load_model_action = QAction("加载模型", self)
+        load_model_action = QAction(i18n.get("menu.file.load_model"), self)
         load_model_action.triggered.connect(self.load_model_dialog)
         file_menu.addAction(load_model_action)
 
-        load_audio_action = QAction("加载音频", self)
+        load_audio_action = QAction(i18n.get("menu.file.load_audio"), self)
         load_audio_action.triggered.connect(self.load_audio_dialog)
         file_menu.addAction(load_audio_action)
         
         file_menu.addSeparator()
         
-        export_action = QAction("导出音频", self)
+        export_action = QAction(i18n.get("menu.file.export_audio"), self)
         export_action.triggered.connect(self.export_audio_dialog)
         file_menu.addAction(export_action)
 
         # Edit Menu
-        edit_menu = menu_bar.addMenu("编辑")
+        edit_menu = menu_bar.addMenu(i18n.get("menu.edit"))
         
-        undo_action = QAction("撤销", self)
+        undo_action = QAction(i18n.get("menu.edit.undo"), self)
         undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         undo_action.triggered.connect(self.undo)
         edit_menu.addAction(undo_action)
 
-        redo_action = QAction("重做", self)
+        redo_action = QAction(i18n.get("menu.edit.redo"), self)
         redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         redo_action.triggered.connect(self.redo)
         edit_menu.addAction(redo_action)
 
         # Playback Menu
-        play_menu = menu_bar.addMenu("播放")
+        play_menu = menu_bar.addMenu(i18n.get("menu.playback"))
         
-        play_orig_action = QAction("播放原音", self)
+        play_orig_action = QAction(i18n.get("menu.playback.original"), self)
         play_orig_action.triggered.connect(self.play_original)
         play_menu.addAction(play_orig_action)
         
-        synth_play_action = QAction("合成并播放", self)
+        synth_play_action = QAction(i18n.get("menu.playback.synthesize"), self)
         synth_play_action.triggered.connect(self.synthesize_and_play)
         play_menu.addAction(synth_play_action)
         
-        stop_action = QAction("停止", self)
+        stop_action = QAction(i18n.get("menu.playback.stop"), self)
         stop_action.setShortcut(Qt.Key.Key_Escape)
         stop_action.triggered.connect(self.stop_audio)
         play_menu.addAction(stop_action)
 
         # Settings Menu
-        settings_menu = menu_bar.addMenu("设置")
+        settings_menu = menu_bar.addMenu(i18n.get("menu.settings"))
         
-        set_default_model_action = QAction("设置默认模型", self)
+        set_default_model_action = QAction(i18n.get("menu.settings.default_model"), self)
         set_default_model_action.triggered.connect(self.set_default_model_dialog)
         settings_menu.addAction(set_default_model_action)
+        
+        # Language Submenu
+        lang_menu = settings_menu.addMenu(i18n.get("menu.settings.language"))
+        
+        zh_action = QAction("简体中文", self)
+        zh_action.setCheckable(True)
+        zh_action.setChecked(i18n.current_lang == 'zh_CN')
+        zh_action.triggered.connect(lambda: self.change_language('zh_CN'))
+        lang_menu.addAction(zh_action)
+        
+        en_action = QAction("English", self)
+        en_action.setCheckable(True)
+        en_action.setChecked(i18n.current_lang == 'en_US')
+        en_action.triggered.connect(lambda: self.change_language('en_US'))
+        lang_menu.addAction(en_action)
+        
+        # Group for exclusivity
+        lang_group = QActionGroup(self)
+        lang_group.addAction(zh_action)
+        lang_group.addAction(en_action)
+        lang_group.setExclusive(True)
+
+    def change_language(self, lang_code):
+        if lang_code == i18n.current_lang:
+            return
+            
+        config_manager.set_language(lang_code)
+        QMessageBox.information(self, i18n.get("msg.restart_required"), i18n.get("msg.restart_content"))
 
     def init_ui(self):
         self.create_menu_bar()
@@ -153,43 +194,52 @@ class HifiShifterGUI(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
+        layout.setContentsMargins(0, 0, 0, 0) # Remove outer margins
         
         # Controls Bar
         controls_layout = QHBoxLayout()
         controls_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         controls_layout.setContentsMargins(10, 5, 10, 5)
 
-        self.shift_spin = QDoubleSpinBox()
-        self.shift_spin.setRange(-24, 24)
-        self.shift_spin.setSingleStep(1)
-        self.shift_spin.setPrefix("移调: ")
-        self.shift_spin.setSuffix(" 半音")
-        self.shift_spin.valueChanged.connect(self.apply_shift)
+        # Tool Mode Selector
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([i18n.get("mode.edit"), i18n.get("mode.select")])
+        self.mode_combo.setCurrentIndex(0)
+        self.mode_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Spacebar toggle
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
         
+        # Tab Shortcut for Mode Toggle
+        self.tab_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Tab), self)
+        self.tab_shortcut.activated.connect(self.toggle_mode)
+
         self.bpm_spin = QDoubleSpinBox()
         self.bpm_spin.setRange(10, 300)
         self.bpm_spin.setValue(120)
-        self.bpm_spin.setPrefix("BPM: ")
+        self.bpm_spin.setPrefix(i18n.get("label.bpm") + ": ")
+        self.bpm_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus) # Allow typing but not tab focus
         self.bpm_spin.valueChanged.connect(self.on_bpm_changed)
 
         self.beats_spin = QSpinBox()
         self.beats_spin.setRange(1, 32)
         self.beats_spin.setValue(4)
-        self.beats_spin.setPrefix("拍号: ")
+        self.beats_spin.setPrefix(i18n.get("label.time_sig") + ": ")
         self.beats_spin.setSuffix(" / 4")
+        self.beats_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.beats_spin.valueChanged.connect(self.on_beats_changed)
 
         # Grid Resolution
         self.grid_combo = QComboBox()
         self.grid_combo.addItems(["1/4", "1/8", "1/16", "1/32"])
         self.grid_combo.setCurrentIndex(0) # Default 1/4
+        self.grid_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.grid_combo.currentIndexChanged.connect(self.on_grid_changed)
 
-        controls_layout.addWidget(QLabel("参数设置:"))
-        controls_layout.addWidget(self.shift_spin)
+        controls_layout.addWidget(QLabel(i18n.get("label.mode") + ":"))
+        controls_layout.addWidget(self.mode_combo)
+        controls_layout.addWidget(QLabel(i18n.get("label.params") + ":"))
         controls_layout.addWidget(self.bpm_spin)
         controls_layout.addWidget(self.beats_spin)
-        controls_layout.addWidget(QLabel("网格:"))
+        controls_layout.addWidget(QLabel(i18n.get("label.grid") + ":"))
         controls_layout.addWidget(self.grid_combo)
         
         controls_layout.addStretch()
@@ -233,10 +283,12 @@ class HifiShifterGUI(QMainWindow):
         
         # Disable AutoRange to prevent crash on startup with infinite items
         self.plot_widget.plotItem.vb.disableAutoRange()
+        self.plot_widget.plotItem.hideButtons() # Hide the "A" button
         self.timeline_panel.ruler_plot.plotItem.vb.disableAutoRange()
+        self.timeline_panel.ruler_plot.plotItem.hideButtons() # Hide the "A" button
         
         self.plot_widget.setBackground('#2b2b2b')
-        self.plot_widget.setLabel('left', '音高 (Note)')
+        self.plot_widget.setLabel('left', i18n.get("label.pitch"))
         # Disable default X grid, keep Y grid
         self.plot_widget.showGrid(x=False, y=True, alpha=0.5)
         self.plot_widget.getAxis('left').setGrid(128)
@@ -294,7 +346,7 @@ class HifiShifterGUI(QMainWindow):
 
         # Custom Mouse Interaction
         self.plot_widget.scene().sigMouseMoved.connect(self.on_scene_mouse_move)
-        self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_mouse_click)
+        # self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_mouse_click) # Replaced by on_viewbox_mouse_press
         
         # Curves
         self.waveform_curve = pg.PlotCurveItem(pen=pg.mkPen(color=(255, 255, 255, 30), width=1), name="Waveform")
@@ -302,10 +354,26 @@ class HifiShifterGUI(QMainWindow):
         
         self.f0_orig_curve_item = self.plot_widget.plot(pen=pg.mkPen(color=(255, 255, 255, 80), width=2, style=Qt.PenStyle.DashLine), name="Original F0")
         self.f0_curve_item = self.plot_widget.plot(pen=pg.mkPen('#00ff00', width=3), name="F0")
+        self.f0_selected_curve_item = self.plot_widget.plot(pen=pg.mkPen('#0099ff', width=3), name="Selected F0")
         
-        # Instructions
-        instructions = QLabel("使用说明: 加载模型 -> 加载音频 -> 左键绘制音高，右键还原音高，中键拖动，Ctrl+滚轮缩放X，Alt+滚轮缩放Y -> 合成")
-        layout.addWidget(instructions)
+        # Selection Box
+        self.selection_box_item = QGraphicsRectItem()
+        # Use cosmetic pen to ensure visibility at any zoom level
+        pen = pg.mkPen(color=(255, 255, 255), width=1, style=Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self.selection_box_item.setPen(pen)
+        self.selection_box_item.setBrush(QBrush(QColor(255, 255, 255, 50)))
+        self.selection_box_item.setZValue(1000) # Ensure on top
+        self.selection_box_item.setVisible(False)
+        self.plot_widget.addItem(self.selection_box_item)
+        
+        # Selection State
+        self.selection_mask = None
+        self.is_selecting = False
+        self.is_dragging_selection = False
+        self.selection_start_pos = None
+        self.drag_start_pos = None
+        self.drag_start_f0 = None
         
         # Update timeline bounds to ensure limits are applied to plot_widget
         self.timeline_panel.update_timeline_bounds()
@@ -313,9 +381,24 @@ class HifiShifterGUI(QMainWindow):
         # Ensure initial view range is set correctly after linking
         self.timeline_panel.set_initial_view_range()
         
-        # Status
-        self.status_label = QLabel("就绪")
-        layout.addWidget(self.status_label)
+        # Status Bar Layout
+        status_layout = QHBoxLayout()
+        layout.addLayout(status_layout)
+        
+        # Status Label
+        self.status_label = QLabel(i18n.get("status.ready"))
+        self.status_label.setFixedHeight(20) # Fix height to prevent jumping
+        status_layout.addWidget(self.status_label)
+        
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedSize(200, 15) # Fix size
+        self.progress_bar.setVisible(False)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addStretch()
 
     def on_grid_changed(self, index):
         resolutions = [4, 8, 16, 32]
@@ -328,6 +411,7 @@ class HifiShifterGUI(QMainWindow):
                     row.lane.music_grid.set_resolution(res)
 
     def on_bpm_changed(self):
+        self.plot_widget.getAxis('top').picture = None
         self.plot_widget.getAxis('top').update()
         self.music_grid.update()
         # Update all track grids
@@ -336,6 +420,7 @@ class HifiShifterGUI(QMainWindow):
                 row.lane.music_grid.update()
 
     def on_beats_changed(self):
+        self.plot_widget.getAxis('top').picture = None
         self.plot_widget.getAxis('top').update()
         self.music_grid.update()
         # Update all track grids
@@ -416,10 +501,16 @@ class HifiShifterGUI(QMainWindow):
         self.tool_mode = mode
         if mode == 'draw':
             self.plot_widget.setCursor(Qt.CursorShape.CrossCursor)
-            self.status_label.setText("工具: 绘制 (左键绘制音高, 右键擦除)")
+            self.status_label.setText(i18n.get("status.tool.draw"))
         elif mode == 'move':
             self.plot_widget.setCursor(Qt.CursorShape.OpenHandCursor)
-            self.status_label.setText("工具: 移动 (左键拖动音轨)")
+            self.status_label.setText(i18n.get("status.tool.move"))
+
+    def toggle_mode(self):
+        current = self.mode_combo.currentIndex()
+        # 0: Edit, 1: Select
+        new_index = 1 if current == 0 else 0
+        self.mode_combo.setCurrentIndex(new_index)
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Space:
@@ -454,7 +545,7 @@ class HifiShifterGUI(QMainWindow):
             return
 
         if not track.undo_stack:
-            self.status_label.setText("没有可撤销的操作")
+            self.status_label.setText(i18n.get("status.no_undo"))
             return
             
         # Save current state to redo
@@ -468,7 +559,7 @@ class HifiShifterGUI(QMainWindow):
             state['dirty'] = True
             
         self.update_plot()
-        self.status_label.setText("撤销")
+        self.status_label.setText(i18n.get("status.undo"))
 
     def redo(self):
         track = self.current_track
@@ -476,7 +567,7 @@ class HifiShifterGUI(QMainWindow):
             return
 
         if not track.redo_stack:
-            self.status_label.setText("没有可重做的操作")
+            self.status_label.setText(i18n.get("status.no_redo"))
             return
             
         # Save current state to undo
@@ -490,7 +581,7 @@ class HifiShifterGUI(QMainWindow):
             state['dirty'] = True
             
         self.update_plot()
-        self.status_label.setText("重做")
+        self.status_label.setText(i18n.get("status.redo"))
 
     def toggle_playback(self):
         if self.is_playing:
@@ -533,7 +624,7 @@ class HifiShifterGUI(QMainWindow):
             self.is_playing = True
             self.last_wall_time = time.time()
             self.playback_timer.start()
-            self.status_label.setText("正在播放...")
+            self.status_label.setText(i18n.get("status.playing"))
             
         except Exception as e:
             print(f"Playback error: {e}")
@@ -542,27 +633,45 @@ class HifiShifterGUI(QMainWindow):
     def synthesize_audio_only(self):
         """Helper to synthesize all dirty tracks"""
         try:
-            self.status_label.setText("正在合成...")
+            self.status_label.setText(i18n.get("status.synthesizing"))
+            
+            # Count total dirty segments
+            total_segments = 0
+            for track in self.tracks:
+                if track.track_type == 'vocal':
+                    for state in track.segment_states:
+                        if state['dirty']:
+                            total_segments += 1
+            
+            self.progress_bar.setRange(0, total_segments if total_segments > 0 else 1)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(True)
             QApplication.processEvents()
             
             hop_size = self.processor.config['hop_size'] if self.processor.config else 512
             
+            processed_count = 0
             for track in self.tracks:
                 if track.track_type == 'vocal':
                     # Check dirty segments
                     for i, state in enumerate(track.segment_states):
                         if state['dirty']:
                             track.synthesize_segment(self.processor, i)
+                            processed_count += 1
+                            self.progress_bar.setValue(processed_count)
+                            QApplication.processEvents()
                     
                     # Update full audio buffer for the track
                     track.update_full_audio(hop_size)
             
-            self.status_label.setText("合成完成")
+            self.status_label.setText(i18n.get("status.synthesis_complete"))
         except Exception as e:
             print(f"Auto-synthesis failed: {e}")
             import traceback
             traceback.print_exc()
-            self.status_label.setText("自动合成失败")
+            self.status_label.setText(i18n.get("status.auto_synthesis_failed"))
+        finally:
+            self.progress_bar.setVisible(False)
 
     def pause_playback(self):
         if not self.is_playing: return
@@ -574,7 +683,7 @@ class HifiShifterGUI(QMainWindow):
         # Update current time one last time
         now = time.time()
         self.current_playback_time += now - self.last_wall_time
-        self.status_label.setText("暂停")
+        self.status_label.setText(i18n.get("status.paused"))
 
     def stop_playback(self, reset=False):
         sd.stop()
@@ -594,7 +703,7 @@ class HifiShifterGUI(QMainWindow):
                 self.play_cursor.setValue(self.current_playback_time * sr / hop_size)
                 self.timeline_panel.set_cursor_position(self.current_playback_time * sr / hop_size)
                 
-        self.status_label.setText("停止")
+        self.status_label.setText(i18n.get("status.stopped"))
 
     def set_playback_position(self, x_frame):
         if x_frame < 0: x_frame = 0
@@ -611,10 +720,8 @@ class HifiShifterGUI(QMainWindow):
             self.playback_start_time = self.current_playback_time # Update start time on seek
             
             if self.is_playing:
-                # Restart playback from new position
-                sd.stop()
-                self.playback_timer.stop()
-                self.start_playback()
+                # Pause playback on seek
+                self.pause_playback()
 
     def update_cursor(self):
         if not self.is_playing: return
@@ -657,7 +764,7 @@ class HifiShifterGUI(QMainWindow):
         pass
 
     def load_model_dialog(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择模型文件夹")
+        folder = QFileDialog.getExistingDirectory(self, i18n.get("dialog.select_model_dir"))
         if folder:
             self.load_model(folder)
 
@@ -668,36 +775,41 @@ class HifiShifterGUI(QMainWindow):
                 self.processor.load_model(default_path)
                 self.model_path = default_path
                 if hasattr(self, 'status_label'):
-                    self.status_label.setText(f"已加载默认模型: {pathlib.Path(default_path).name}")
+                    self.status_label.setText(i18n.get("status.default_model_loaded") + f": {pathlib.Path(default_path).name}")
             except Exception as e:
                 if hasattr(self, 'status_label'):
-                    self.status_label.setText(f"加载默认模型失败: {e}")
+                    self.status_label.setText(i18n.get("status.default_model_failed") + f": {e}")
 
     def set_default_model_dialog(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "选择默认模型文件夹")
+        folder_path = QFileDialog.getExistingDirectory(self, i18n.get("dialog.select_default_model_dir"))
         if folder_path:
             config_manager.set_default_model_path(folder_path)
-            QMessageBox.information(self, "设置成功", f"默认模型已设置为: {folder_path}")
+            QMessageBox.information(self, i18n.get("msg.success"), i18n.get("msg.default_model_set") + f": {folder_path}")
             # Optionally load it now if no model is loaded
             if self.model_path is None:
                 self.load_model(folder_path)
 
     def load_model(self, folder):
         try:
-            self.status_label.setText(f"正在加载模型 {folder}...")
+            self.status_label.setText(i18n.get("status.loading_model") + f" {folder}...")
+            self.progress_bar.setRange(0, 0) # Busy indicator
+            self.progress_bar.setVisible(True)
             QApplication.processEvents()
             
             self.processor.load_model(folder)
             self.model_path = folder
             
-            self.status_label.setText(f"模型已加载: {pathlib.Path(folder).name}")
+            self.status_label.setText(i18n.get("status.model_loaded") + f": {pathlib.Path(folder).name}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载模型失败: {str(e)}")
-            self.status_label.setText("模型加载失败。")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.load_model_failed") + f": {str(e)}")
+            self.status_label.setText(i18n.get("status.model_load_failed"))
+        finally:
+            self.progress_bar.setVisible(False)
+            self.progress_bar.setRange(0, 100)
 
     def load_audio_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择音频文件", "", "音频文件 (*.wav *.flac *.mp3)")
+        file_path, _ = QFileDialog.getOpenFileName(self, i18n.get("dialog.select_audio"), "", i18n.get("filter.audio_files"))
         if file_path:
             self.add_track_from_file(file_path)
 
@@ -714,7 +826,7 @@ class HifiShifterGUI(QMainWindow):
         track = Track(name, file_path, track_type='vocal')
         
         try:
-            self.status_label.setText(f"正在加载音轨 {name}...")
+            self.status_label.setText(i18n.get("status.loading_track") + f" {name}...")
             QApplication.processEvents()
             
             track.load(self.processor)
@@ -728,11 +840,11 @@ class HifiShifterGUI(QMainWindow):
             # Trigger selection logic manually since select_track doesn't emit signal
             self.on_track_selected(len(self.tracks) - 1)
             
-            self.status_label.setText(f"已加载音轨: {name}")
+            self.status_label.setText(i18n.get("status.track_loaded") + f": {name}")
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load track: {e}")
-            self.status_label.setText("加载失败")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.load_track_failed") + f": {e}")
+            self.status_label.setText(i18n.get("status.load_failed"))
 
     def on_track_selected(self, index):
         self.current_track_idx = index
@@ -741,12 +853,10 @@ class HifiShifterGUI(QMainWindow):
         # Sync Timeline Selection (if triggered from elsewhere)
         # self.timeline_panel.select_track(index) # Avoid loop if triggered by timeline
         
-        if track:
-            self.shift_spin.blockSignals(True)
-            self.shift_spin.setValue(track.shift_value)
-            self.last_shift_value = track.shift_value
-            self.shift_spin.blockSignals(False)
-            
+        # Clear selection when switching tracks
+        self.selection_mask = None
+        self.selection_box_item.setVisible(False)
+        
         self.update_plot()
 
     def on_timeline_cursor_moved(self, x_frame):
@@ -774,10 +884,10 @@ class HifiShifterGUI(QMainWindow):
         track.track_type = new_type
         # Reload
         try:
-            self.status_label.setText(f"正在重新加载音轨 {track.name}...")
+            self.status_label.setText(i18n.get("status.reloading_track") + f" {track.name}...")
             QApplication.processEvents()
             track.load(self.processor)
-            self.status_label.setText(f"已重新加载: {track.name}")
+            self.status_label.setText(i18n.get("status.reloaded") + f": {track.name}")
             
             self.update_plot()
             
@@ -787,9 +897,9 @@ class HifiShifterGUI(QMainWindow):
             self.timeline_panel.select_track(self.current_track_idx)
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to reload track: {e}")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.reload_track_failed") + f": {e}")
 
-            self.status_label.setText("音频加载失败。")
+            self.status_label.setText(i18n.get("status.audio_load_failed"))
 
     def mix_tracks(self):
         max_len = 0
@@ -830,18 +940,87 @@ class HifiShifterGUI(QMainWindow):
         # Ensure everything is synthesized
         self.synthesize_audio_only()
         
-        mixed_audio = self.mix_tracks()
-        if mixed_audio is None:
-            QMessageBox.warning(self, "警告", "没有可导出的音频。请先合成音频或取消静音。")
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(i18n.get("dialog.export_audio"))
+        msg_box.setText(i18n.get("msg.select_export_mode"))
+        
+        btn_mixed = msg_box.addButton(i18n.get("btn.export_mixed"), QMessageBox.ButtonRole.AcceptRole)
+        btn_separated = msg_box.addButton(i18n.get("btn.export_separated"), QMessageBox.ButtonRole.AcceptRole)
+        btn_cancel = msg_box.addButton(i18n.get("btn.cancel"), QMessageBox.ButtonRole.RejectRole)
+        
+        msg_box.exec()
+        
+        clicked_button = msg_box.clickedButton()
+        
+        if clicked_button == btn_cancel:
             return
             
-        file_path, _ = QFileDialog.getSaveFileName(self, "导出音频", "output.wav", "WAV Audio (*.wav)")
-        if file_path:
-            self.export_audio(file_path, mixed_audio)
+        if clicked_button == btn_mixed:
+            mixed_audio = self.mix_tracks()
+            if mixed_audio is None:
+                QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.no_audio_to_export"))
+                return
+                
+            file_path, _ = QFileDialog.getSaveFileName(self, i18n.get("dialog.export_mixed"), "output.wav", "WAV Audio (*.wav)")
+            if file_path:
+                self.export_audio(file_path, mixed_audio)
+                
+        elif clicked_button == btn_separated:
+            dir_path = QFileDialog.getExistingDirectory(self, i18n.get("dialog.select_export_dir"))
+            if dir_path:
+                self.export_separated_tracks(dir_path)
+
+    def export_separated_tracks(self, dir_path):
+        count = 0
+        try:
+            sr = self.processor.config['audio_sample_rate'] if self.processor.config else 44100
+            hop_size = self.processor.config['hop_size'] if self.processor.config else 512
+            
+            for i, track in enumerate(self.tracks):
+                # Skip muted tracks and BGM tracks
+                if track.muted or track.track_type == 'bgm':
+                    continue
+                
+                if track.synthesized_audio is None:
+                    continue
+                    
+                # Construct file name
+                safe_name = "".join([c for c in track.name if c.isalnum() or c in (' ', '-', '_')]).strip()
+                if not safe_name:
+                    safe_name = f"track_{i+1}"
+                
+                file_path = os.path.join(dir_path, f"{safe_name}.wav")
+                
+                audio = track.synthesized_audio
+                if audio.dtype != np.float32:
+                    audio = audio.astype(np.float32)
+                
+                # Handle start_frame offset
+                start_sample = track.start_frame * hop_size
+                
+                if start_sample > 0:
+                    pad = np.zeros(start_sample, dtype=np.float32)
+                    audio_to_save = np.concatenate((pad, audio))
+                elif start_sample < 0:
+                    start_idx = -start_sample
+                    if start_idx < len(audio):
+                        audio_to_save = audio[start_idx:]
+                    else:
+                        audio_to_save = np.array([], dtype=np.float32)
+                else:
+                    audio_to_save = audio
+                    
+                wavfile.write(file_path, sr, audio_to_save)
+                count += 1
+            
+            QMessageBox.information(self, i18n.get("msg.success"), i18n.get("msg.export_separated_success").format(count, dir_path))
+            
+        except Exception as e:
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.export_failed") + f": {str(e)}")
 
     def export_audio(self, file_path, audio):
         try:
-            self.status_label.setText(f"正在导出到 {file_path}...")
+            self.status_label.setText(i18n.get("status.exporting") + f" {file_path}...")
             QApplication.processEvents()
             
             if audio.dtype != np.float32:
@@ -850,15 +1029,15 @@ class HifiShifterGUI(QMainWindow):
             sr = self.processor.config['audio_sample_rate'] if self.processor.config else 44100
             wavfile.write(file_path, sr, audio)
             
-            self.status_label.setText(f"导出成功: {file_path}")
-            QMessageBox.information(self, "成功", f"音频已导出到:\n{file_path}")
+            self.status_label.setText(i18n.get("status.export_success") + f": {file_path}")
+            QMessageBox.information(self, i18n.get("msg.success"), i18n.get("msg.export_success") + f":\n{file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
-            self.status_label.setText("导出失败。")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.export_failed") + f": {str(e)}")
+            self.status_label.setText(i18n.get("status.export_failed"))
 
     def open_project_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "打开工程", "", "HifiShifter Project (*.hsp *.json)")
+        file_path, _ = QFileDialog.getOpenFileName(self, i18n.get("menu.file.open"), "", "HifiShifter Project (*.hsp *.json)")
         if file_path:
             self.open_project(file_path)
 
@@ -889,7 +1068,7 @@ class HifiShifterGUI(QMainWindow):
                 if os.path.exists(model_path):
                     self.load_model(model_path)
                 else:
-                    QMessageBox.warning(self, "警告", f"找不到模型路径: {model_path}")
+                    QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.model_not_found") + f": {model_path}")
             
             # Restore Parameters
             if 'params' in data:
@@ -929,7 +1108,7 @@ class HifiShifterGUI(QMainWindow):
                         
                         self.tracks.append(track)
                     else:
-                         QMessageBox.warning(self, "警告", f"找不到音频文件: {file_p}")
+                         QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.audio_not_found") + f": {file_p}")
             
             # Backward compatibility for v1.0
             elif 'audio_path' in data:
@@ -958,11 +1137,11 @@ class HifiShifterGUI(QMainWindow):
             self.timeline_panel.refresh_tracks(self.tracks)
 
             self.project_path = file_path
-            self.status_label.setText(f"工程已加载: {file_path}")
+            self.status_label.setText(i18n.get("status.project_loaded") + f": {file_path}")
             self.setWindowTitle(f"HifiShifter - {os.path.basename(file_path)}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开工程失败: {str(e)}")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.open_project_failed") + f": {str(e)}")
             import traceback
             traceback.print_exc()
 
@@ -973,7 +1152,7 @@ class HifiShifterGUI(QMainWindow):
             self.save_project_as()
 
     def save_project_as(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "保存工程", "project.hsp", "HifiShifter Project (*.hsp *.json)")
+        file_path, _ = QFileDialog.getSaveFileName(self, i18n.get("menu.file.save_as"), "project.hsp", "HifiShifter Project (*.hsp *.json)")
         if file_path:
             self._save_project_file(file_path)
 
@@ -1025,11 +1204,11 @@ class HifiShifterGUI(QMainWindow):
                 json.dump(data, f, indent=4)
             
             self.project_path = file_path
-            self.status_label.setText(f"工程已保存: {file_path}")
+            self.status_label.setText(i18n.get("status.project_saved") + f": {file_path}")
             self.setWindowTitle(f"HifiShifter - {os.path.basename(file_path)}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存工程失败: {str(e)}")
+            QMessageBox.critical(self, i18n.get("msg.error"), i18n.get("msg.save_project_failed") + f": {str(e)}")
 
     def update_plot(self):
         track = self.current_track
@@ -1067,27 +1246,99 @@ class HifiShifterGUI(QMainWindow):
 
             if track.f0_edited is not None:
                 self.f0_curve_item.setData(x_f0, track.f0_edited, connect="finite")
+                
+                # Update Selection Curve
+                if self.selection_mask is not None and len(self.selection_mask) == len(track.f0_edited):
+                    # Create a masked array for display
+                    selected_f0 = track.f0_edited.copy()
+                    selected_f0[~self.selection_mask] = np.nan
+                    self.f0_selected_curve_item.setData(x_f0, selected_f0, connect="finite")
+                else:
+                    self.f0_selected_curve_item.clear()
             else:
                 self.f0_curve_item.clear()
+                self.f0_selected_curve_item.clear()
         else:
             self.f0_orig_curve_item.clear()
             self.f0_curve_item.clear()
+            self.f0_selected_curve_item.clear()
 
-    def on_scene_mouse_move(self, pos):
+    def on_mode_changed(self, index):
+        if index == 0:
+            self.tool_mode = 'draw'
+            self.plot_widget.setCursor(Qt.CursorShape.CrossCursor)
+            self.status_label.setText("工具: 绘制 (左键绘制音高, 右键擦除)")
+            # Clear selection
+            self.selection_mask = None
+            self.selection_box_item.setVisible(False)
+            self.update_plot()
+        elif index == 1:
+            self.tool_mode = 'select'
+            self.plot_widget.setCursor(Qt.CursorShape.ArrowCursor)
+            self.status_label.setText("工具: 选区 (左键框选, 拖动选区上下移动)")
+
+    def on_viewbox_mouse_release(self, ev):
+        if self.tool_mode == 'move':
+            self.move_start_x = None
+            self.plot_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+        
+        if self.tool_mode == 'select':
+            if self.is_selecting:
+                self.is_selecting = False
+                self.selection_box_item.setVisible(False)
+                
+                # Calculate Selection Mask
+                rect = self.selection_box_item.rect()
+                track = self.current_track
+                if track and track.track_type == 'vocal' and track.f0_edited is not None:
+                    x_min = rect.left() - track.start_frame
+                    x_max = rect.right() - track.start_frame
+                    y_min = rect.top()
+                    y_max = rect.bottom()
+                    
+                    # Vectorized check
+                    indices = np.arange(len(track.f0_edited))
+                    x_mask = (indices >= x_min) & (indices <= x_max)
+                    y_mask = (track.f0_edited >= y_min) & (track.f0_edited <= y_max)
+                    
+                    self.selection_mask = x_mask & y_mask
+                    self.update_plot()
+                    
+            elif self.is_dragging_selection:
+                self.is_dragging_selection = False
+                self.plot_widget.setCursor(Qt.CursorShape.ArrowCursor)
+                self.drag_start_f0 = None
+                
+                # Mark dirty segments
+                track = self.current_track
+                if track and self.selection_mask is not None:
+                    # Find affected range
+                    indices = np.where(self.selection_mask)[0]
+                    if len(indices) > 0:
+                        min_x, max_x = indices[0], indices[-1]
+                        for i, (seg_start, seg_end) in enumerate(track.segments):
+                            if not (max_x < seg_start or min_x >= seg_end):
+                                track.segment_states[i]['dirty'] = True
+                    
+                    self.is_dirty = True
+                    self.status_label.setText("音高已修改 (未合成)")
+
+        self.last_mouse_pos = None
+
+    def on_viewbox_mouse_move(self, ev):
+        """处理来自 ViewBox 的鼠标移动事件 (拖拽/绘制)"""
         track = self.current_track
         if not track:
             return
-            
-        buttons = QApplication.mouseButtons()
+
+        pos = ev.scenePos()
+        vb = self.plot_widget.plotItem.vb
+        mouse_point = vb.mapSceneToView(pos)
+        
+        buttons = ev.buttons()
         is_left = bool(buttons & Qt.MouseButton.LeftButton)
         is_right = bool(buttons & Qt.MouseButton.RightButton)
-        
-        if not (is_left or is_right):
-            self.last_mouse_pos = None
-            return
 
-        mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
-        
         if self.tool_mode == 'move' and is_left and self.move_start_x is not None:
             delta = mouse_point.x() - self.move_start_x
             new_start = int(self.move_start_frame + delta)
@@ -1099,17 +1350,58 @@ class HifiShifterGUI(QMainWindow):
                 self.status_label.setText(f"移动音轨: {new_start} 帧")
                 
         elif self.tool_mode == 'draw' and track.track_type == 'vocal' and track.f0_edited is not None:
-            self.handle_draw(mouse_point, is_left, is_right)
+            if is_left or is_right:
+                self.handle_draw(mouse_point, is_left, is_right)
+                
+        elif self.tool_mode == 'select':
+            if self.is_selecting:
+                # Update Selection Box
+                rect = QRectF(self.selection_start_pos, mouse_point).normalized()
+                self.selection_box_item.setRect(rect)
+                # Force update to ensure visibility
+                self.selection_box_item.update()
+            elif self.is_dragging_selection:
+                # Drag Selection
+                dy = mouse_point.y() - self.drag_start_pos.y()
+                
+                # Apply delta to selected points
+                if self.selection_mask is not None:
+                    track.f0_edited = self.drag_start_f0.copy()
+                    track.f0_edited[self.selection_mask] += dy
+                    self.update_plot()
 
-    def on_scene_mouse_click(self, ev):
+    def on_scene_mouse_move(self, pos):
+        """处理场景鼠标移动事件 (悬停/光标状态)"""
+        track = self.current_track
+        if not track:
+            return
+            
+        # Only handle hover logic here. Dragging is handled in on_viewbox_mouse_move
+        if self.is_selecting or self.is_dragging_selection:
+            return
+
+        mouse_point = self.plot_widget.plotItem.vb.mapSceneToView(pos)
+        
+        # Hover Logic (Cursor Shape)
+        if self.tool_mode == 'select':
+             if track and track.track_type == 'vocal' and track.f0_edited is not None and self.selection_mask is not None:
+                 x = int(mouse_point.x()) - track.start_frame
+                 if 0 <= x < len(self.selection_mask) and self.selection_mask[x]:
+                     y = mouse_point.y()
+                     if abs(y - track.f0_edited[x]) < 3.0: # Tolerance
+                         self.plot_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+                     else:
+                         self.plot_widget.setCursor(Qt.CursorShape.ArrowCursor)
+                 else:
+                     self.plot_widget.setCursor(Qt.CursorShape.ArrowCursor)
+             else:
+                 self.plot_widget.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def on_viewbox_mouse_press(self, ev):
         track = self.current_track
         if not track:
             return
         
-        # Check if event is already accepted (e.g. by Axis)
-        if ev.isAccepted():
-            return
-
         # Check if click is within the ViewBox geometry
         vb = self.plot_widget.plotItem.vb
         pos = ev.scenePos()
@@ -1130,6 +1422,34 @@ class HifiShifterGUI(QMainWindow):
             elif self.tool_mode == 'draw' and track.track_type == 'vocal' and track.f0_edited is not None:
                 self.last_mouse_pos = None
                 self.handle_draw(mouse_point, is_left, is_right)
+            elif self.tool_mode == 'select' and is_left and track.track_type == 'vocal' and track.f0_edited is not None:
+                # Check if clicking inside existing selection
+                x = int(mouse_point.x()) - track.start_frame
+                is_inside_selection = False
+                if self.selection_mask is not None and 0 <= x < len(self.selection_mask):
+                    if self.selection_mask[x]:
+                        # Check Y proximity
+                        y = mouse_point.y()
+                        if abs(y - track.f0_edited[x]) < 3.0:
+                            is_inside_selection = True
+                
+                if is_inside_selection:
+                    # Start Dragging Selection
+                    self.is_dragging_selection = True
+                    self.drag_start_pos = mouse_point
+                    self.drag_start_f0 = track.f0_edited.copy()
+                    self.push_undo() # Push undo before drag starts
+                    self.plot_widget.setCursor(Qt.CursorShape.ClosedHandCursor)
+                else:
+                    # Start Box Selection
+                    self.is_selecting = True
+                    self.selection_start_pos = mouse_point
+                    self.selection_box_item.setRect(QRectF(mouse_point, mouse_point))
+                    self.selection_box_item.setVisible(True)
+                    # Clear previous selection
+                    self.selection_mask = None
+                    self.update_plot()
+                    self.status_label.setText("开始框选...")
 
     def handle_draw(self, point, is_left, is_right):
         track = self.current_track
@@ -1241,8 +1561,8 @@ class HifiShifterGUI(QMainWindow):
 
     def delete_track(self, index):
         if 0 <= index < len(self.tracks):
-            reply = QMessageBox.question(self, 'Delete Track', 
-                                         f"Are you sure you want to delete track '{self.tracks[index].name}'?",
+            reply = QMessageBox.question(self, i18n.get("track.delete_confirm_title"), 
+                                         i18n.get("track.delete_confirm_msg").format(self.tracks[index].name),
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                                          QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:

@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                              QScrollArea, QSizePolicy, QMenu, QSplitter, QFrame, 
                              QCheckBox, QSlider, QGridLayout, QStyle, QApplication)
 import numpy as np
+from utils.i18n import i18n
 from .widgets import BPMAxis, PlaybackCursorItem, MusicGridItem, PitchGridItem
 
 # Constants
@@ -243,7 +244,8 @@ class TrackControlWidget(QWidget):
         # Delete Button
         self.del_btn = QPushButton("×")
         self.del_btn.setFixedSize(20, 20)
-        self.del_btn.setToolTip("Delete Track")
+        self.del_btn.setToolTip(i18n.get("track.delete"))
+        self.del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Tab capture
         self.del_btn.setStyleSheet("""
             QPushButton { background-color: transparent; color: #888; border: none; font-weight: bold; font-size: 14px; }
             QPushButton:hover { color: #f44; }
@@ -256,6 +258,7 @@ class TrackControlWidget(QWidget):
         self.mute_btn.setCheckable(True)
         self.mute_btn.setChecked(track.muted)
         self.mute_btn.setFixedSize(25, 25)
+        self.mute_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Spacebar toggle
         self.mute_btn.setStyleSheet("""
             QPushButton { background-color: #444; border: none; border-radius: 3px; }
             QPushButton:checked { background-color: #d44; color: white; }
@@ -267,6 +270,7 @@ class TrackControlWidget(QWidget):
         self.solo_btn.setCheckable(True)
         self.solo_btn.setChecked(track.solo)
         self.solo_btn.setFixedSize(25, 25)
+        self.solo_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Spacebar toggle
         self.solo_btn.setStyleSheet("""
             QPushButton { background-color: #444; border: none; border-radius: 3px; }
             QPushButton:checked { background-color: #dd4; color: black; }
@@ -276,17 +280,19 @@ class TrackControlWidget(QWidget):
         
         self.bgm_check = QCheckBox("BGM")
         self.bgm_check.setChecked(track.track_type == 'bgm')
+        self.bgm_check.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Spacebar toggle
         self.bgm_check.toggled.connect(self.on_bgm)
         layout.addWidget(self.bgm_check, 1, 2, 1, 2)
         
         # Row 3: Volume
-        vol_label = QLabel("Vol")
+        vol_label = QLabel(i18n.get("label.volume"))
         vol_label.setStyleSheet("color: #888;")
         layout.addWidget(vol_label, 2, 0)
         
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 150) # 0% to 150%
         self.vol_slider.setValue(int(track.volume * 100))
+        self.vol_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus) # Prevent Spacebar toggle
         self.vol_slider.valueChanged.connect(self.on_volume)
         layout.addWidget(self.vol_slider, 2, 1, 1, 3)
         
@@ -296,15 +302,15 @@ class TrackControlWidget(QWidget):
     def show_context_menu(self, pos):
         menu = QMenu(self)
         
-        copy_action = menu.addAction("Copy Pitch Curve")
+        copy_action = menu.addAction(i18n.get("track.copy_pitch"))
         copy_action.triggered.connect(self.copy_pitch_requested.emit)
         
-        paste_action = menu.addAction("Paste Pitch Curve")
+        paste_action = menu.addAction(i18n.get("track.paste_pitch"))
         paste_action.triggered.connect(self.paste_pitch_requested.emit)
         
         menu.addSeparator()
         
-        delete_action = menu.addAction("Delete Track")
+        delete_action = menu.addAction(i18n.get("track.delete"))
         delete_action.triggered.connect(self.delete_requested.emit)
         
         menu.exec(self.mapToGlobal(pos))

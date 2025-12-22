@@ -162,3 +162,5 @@ cython_debug/
 /data/
 /experiments/
 /pretrained/
+
+todo.md

@@ -140,11 +140,11 @@ class MusicGridItem(pg.GraphicsObject):
              return
         
         # Pens
-        bar_pen = QPen(QColor(100, 100, 100, 150), 1) # Match horizontal line width
+        bar_pen = QPen(QColor(180, 180, 180, 150), 1) # Brighter for visibility
         bar_pen.setCosmetic(True)
-        beat_pen = QPen(QColor(60, 60, 60, 100), 1)   # Match horizontal line width
+        beat_pen = QPen(QColor(100, 100, 100, 100), 1)   # Brighter for visibility
         beat_pen.setCosmetic(True)
-        sub_pen = QPen(QColor(40, 40, 40, 80), 1) # Match horizontal line width
+        sub_pen = QPen(QColor(70, 70, 70, 80), 1) # Brighter for visibility
         sub_pen.setCosmetic(True)
         
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -225,6 +225,12 @@ class CustomViewBox(pg.ViewBox):
         self.parent_gui = parent_gui
 
     def mousePressEvent(self, ev):
+        if hasattr(self.parent_gui, 'on_viewbox_mouse_press'):
+            self.parent_gui.on_viewbox_mouse_press(ev)
+            
+        if ev.isAccepted():
+            return
+
         if ev.button() == Qt.MouseButton.MiddleButton:
             ev.accept()
         elif ev.button() == Qt.MouseButton.LeftButton or ev.button() == Qt.MouseButton.RightButton:
@@ -235,6 +241,9 @@ class CustomViewBox(pg.ViewBox):
             super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        if hasattr(self.parent_gui, 'on_viewbox_mouse_move'):
+            self.parent_gui.on_viewbox_mouse_move(ev)
+            
         if ev.buttons() & Qt.MouseButton.MiddleButton:
             ev.accept()
             # Manual Pan
@@ -263,6 +272,11 @@ class CustomViewBox(pg.ViewBox):
             ev.ignore()
         else:
             super().mouseClickEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if hasattr(self.parent_gui, 'on_viewbox_mouse_release'):
+            self.parent_gui.on_viewbox_mouse_release(ev)
+        super().mouseReleaseEvent(ev)
 
 class PianoRollAxis(pg.AxisItem):
     def __init__(self, orientation='left', **kwargs):

@@ -1,0 +1,17 @@
+click
+torch
+torchaudio
+tqdm
+numpy
+pytorch-lightning
+PyYAML
+scipy
+PyQt6
+sounddevice
+pyqtgraph
+einops
+librosa
+matplotlib
+torchmetrics
+praat-parselmouth
+pyworld
