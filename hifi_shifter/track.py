@@ -155,3 +155,30 @@ class Track:
         
         # Ensure start_frame is always an integer
         self.start_frame = int(self.start_frame) if self.start_frame is not None else 0
+
+    def apply_external_pitch_data(self, frame_indices, pitch_values):
+        """
+        应用外部音高数据到指定帧
+        frame_indices: 帧索引列表
+        pitch_values: 对应的音高值列表（MIDI音高）
+        """
+        if self.track_type != 'vocal' or self.f0_edited is None:
+            return False
+        
+        if len(frame_indices) != len(pitch_values):
+            return False
+        
+        # 应用音高数据
+        for frame_idx, pitch in zip(frame_indices, pitch_values):
+            if 0 <= frame_idx < len(self.f0_edited):
+                self.f0_edited[frame_idx] = pitch
+        
+        # 标记所有受影响的段为脏
+        for i, (seg_start, seg_end) in enumerate(self.segments):
+            # 检查是否有音高点落在该段内
+            for frame_idx in frame_indices:
+                if seg_start <= frame_idx < seg_end:
+                    self.segment_states[i]['dirty'] = True
+                    break
+        
+        return True

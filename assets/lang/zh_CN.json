@@ -87,5 +87,18 @@
     "msg.model_not_found": "找不到模型路径",
     "btn.export_mixed": "导出混合音频",
     "btn.export_separated": "导出分轨音频",
-    "btn.cancel": "取消"
+    "btn.cancel": "取消",
+    "menu.edit.paste_vocalshifter": "粘贴 VocalShifter 数据",
+    "msg.no_vocal_track_selected": "请先选中一个音频轨",
+    "msg.no_pitch_data": "当前音频轨没有音高数据",
+    "msg.vocalshifter_file_not_found": "VocalShifter 文件未找到",
+    "msg.vocalshifter_file_empty": "VocalShifter 文件为空",
+    "msg.vocalshifter_invalid_format": "VocalShifter 文件格式无效",
+    "msg.no_valid_vocalshifter_data": "没有有效的 VocalShifter 数据",
+    "msg.vocalshifter_data_loaded": "VocalShifter 数据已加载",
+    "msg.load_vocalshifter_failed": "加载 VocalShifter 数据失败",
+    "status.loading_vocalshifter_data": "正在加载 VocalShifter 数据...",
+    "status.vocalshifter_data_applied": "VocalShifter 数据已应用",
+    "status.vocalshifter_load_failed": "加载 VocalShifter 数据失败",
+    "label.samples": "个采样点"
 }

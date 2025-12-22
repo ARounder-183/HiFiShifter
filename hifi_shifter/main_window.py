@@ -137,6 +137,10 @@ class HifiShifterGUI(QMainWindow):
         redo_action.triggered.connect(self.redo)
         edit_menu.addAction(redo_action)
 
+        paste_vocalshifter_action = QAction(i18n.get("menu.edit.paste_vocalshifter"), self)
+        paste_vocalshifter_action.triggered.connect(self.paste_vocalshifter_data)
+        edit_menu.addAction(paste_vocalshifter_action)
+
         # Playback Menu
         play_menu = menu_bar.addMenu(i18n.get("menu.playback"))
         
@@ -1623,3 +1627,135 @@ class HifiShifterGUI(QMainWindow):
 
     def stop_audio(self):
         self.stop_playback()
+
+    def paste_vocalshifter_data(self):
+        """
+        读取并应用 VocalShifter 剪贴板数据
+        """
+        import os
+        import struct
+        import tempfile
+        
+        track = self.current_track
+        if not track or track.track_type != 'vocal':
+            QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.no_vocal_track_selected"))
+            return
+        
+        if track.f0_edited is None:
+            QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.no_pitch_data"))
+            return
+        
+        # 构建文件路径
+        temp_dir = os.path.join(tempfile.gettempdir(), 'vocalshifter_tmp')
+        file_path = os.path.join(temp_dir, 'vocalshifter_id.clb')
+        
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, i18n.get("msg.warning"), 
+                            i18n.get("msg.vocalshifter_file_not_found") + f": {file_path}")
+            return
+        
+        try:
+            self.status_label.setText(i18n.get("status.loading_vocalshifter_data"))
+            QApplication.processEvents()
+            
+            # 读取二进制文件
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            
+            if len(data) == 0:
+                QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.vocalshifter_file_empty"))
+                return
+            
+            # 检查数据长度
+            if len(data) % 0x80 != 0:
+                QMessageBox.warning(self, i18n.get("msg.warning"), 
+                                i18n.get("msg.vocalshifter_invalid_format"))
+                return
+            
+            # 解析 VocalShifter 数据
+            num_samples = len(data) // 0x80
+            vocalshifter_data = []
+            
+            for i in range(num_samples):
+                sample_start = i * 0x80
+                sample_data = data[sample_start:sample_start + 0x80]
+                
+                # 读取16个double值（每个8字节）
+                doubles = []
+                for j in range(16):
+                    double_start = j * 8
+                    double_bytes = sample_data[double_start:double_start + 8]
+                    if len(double_bytes) == 8:
+                        value = struct.unpack('<d', double_bytes)[0]  # 小端序
+                        doubles.append(value)
+                
+                if len(doubles) >= 4:  # 至少需要4个值才能获取第1和第3个
+                    start_time = doubles[0]  # 第1个：起始时间（秒）
+                    pitch_cents = doubles[2]  # 第3个：音分
+                    
+                    # 将音分转换为MIDI音高
+                    # 0音分 = C-1 (MIDI 0)
+                    # 6000音分 = C4 (MIDI 60)
+                    midi_pitch = pitch_cents / 100.0
+                    
+                    vocalshifter_data.append((start_time, midi_pitch))
+            
+            if not vocalshifter_data:
+                QMessageBox.warning(self, i18n.get("msg.warning"), i18n.get("msg.no_valid_vocalshifter_data"))
+                return
+            
+            # 将VocalShifter数据应用到当前音轨
+            self.apply_vocalshifter_to_track(track, vocalshifter_data)
+            
+            self.status_label.setText(i18n.get("status.vocalshifter_data_applied"))
+            QMessageBox.information(self, i18n.get("msg.success"), 
+                                i18n.get("msg.vocalshifter_data_loaded") + 
+                                f": {len(vocalshifter_data)} {i18n.get('label.samples')}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, i18n.get("msg.error"), 
+                                i18n.get("msg.load_vocalshifter_failed") + f": {str(e)}")
+            self.status_label.setText(i18n.get("status.vocalshifter_load_failed"))
+
+    def apply_vocalshifter_to_track(self, track, vocalshifter_data):
+        """
+        将VocalShifter数据应用到音轨
+        """
+        # 推入撤销栈
+        self.push_undo()
+        
+        # 获取音频参数
+        sr = track.sr if track.sr else self.processor.config['audio_sample_rate']
+        hop_size = self.processor.config['hop_size']
+        
+        # 按时间排序
+        vocalshifter_data.sort(key=lambda x: x[0])
+        
+        # 将VocalShifter数据映射到f0帧
+        for i in range(len(track.f0_edited)):
+            # 计算当前帧对应的时间（秒）
+            frame_time = (i * hop_size) / sr
+            
+            # 找到最接近的VocalShifter采样点
+            closest_sample = None
+            min_time_diff = float('inf')
+            
+            for sample_time, sample_pitch in vocalshifter_data:
+                time_diff = abs(frame_time - sample_time)
+                if time_diff < min_time_diff:
+                    min_time_diff = time_diff
+                    closest_sample = (sample_time, sample_pitch)
+            
+            # 如果找到足够接近的采样点，则应用音高
+            if closest_sample and min_time_diff < (hop_size / sr):  # 在半个hop_size范围内
+                _, target_pitch = closest_sample
+                
+                # 应用音高（可以添加平滑过渡）
+                track.f0_edited[i] = target_pitch
+        
+        # 标记所有段为脏，需要重新合成
+        for state in track.segment_states:
+            state['dirty'] = True
+        
+        # 更新绘图
+        self.update_plot()
