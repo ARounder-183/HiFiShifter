@@ -87,5 +87,18 @@
     "msg.model_not_found": "Model path not found",
     "btn.export_mixed": "Export Mixed",
     "btn.export_separated": "Export Separated",
-    "btn.cancel": "Cancel"
+    "btn.cancel": "Cancel",
+    "menu.edit.paste_vocalshifter": "Paste VocalShifter Data",
+    "msg.no_vocal_track_selected": "Please select a vocal track first",
+    "msg.no_pitch_data": "Current track has no pitch data",
+    "msg.vocalshifter_file_not_found": "VocalShifter file not found",
+    "msg.vocalshifter_file_empty": "VocalShifter file is empty",
+    "msg.vocalshifter_invalid_format": "VocalShifter file has invalid format",
+    "msg.no_valid_vocalshifter_data": "No valid VocalShifter data",
+    "msg.vocalshifter_data_loaded": "VocalShifter data loaded",
+    "msg.load_vocalshifter_failed": "Failed to load VocalShifter data",
+    "status.loading_vocalshifter_data": "Loading VocalShifter data...",
+    "status.vocalshifter_data_applied": "VocalShifter data applied",
+    "status.vocalshifter_load_failed": "Failed to load VocalShifter data",
+    "label.samples": "samples"
 }
