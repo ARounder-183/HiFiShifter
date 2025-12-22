@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QComboBox, QDoubleSpinBox, QSpinBox,
                              QButtonGroup, QSplitter, QScrollBar, QGraphicsRectItem,
                              QProgressBar, QAbstractSpinBox)
-from PyQt6.QtGui import QAction, QKeySequence, QPen, QColor, QBrush, QShortcut, QActionGroup
+from PyQt6.QtGui import QAction, QKeySequence, QPen, QColor, QBrush, QShortcut, QActionGroup, QIcon
 from PyQt6.QtCore import Qt, QTimer, QRectF
 import pyqtgraph as pg
 
@@ -43,6 +43,14 @@ class HifiShifterGUI(QMainWindow):
         
         self.setWindowTitle(i18n.get("app.title"))
         self.resize(1200, 800)
+        
+        # Set Window Icon
+        assets_dir = os.path.join(root_dir, 'assets')
+        icon_path = os.path.join(assets_dir, 'icon.png')
+        if not os.path.exists(icon_path):
+             icon_path = os.path.join(assets_dir, 'icon.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         # Apply Theme
         current_theme_name = config_manager.get_theme()
@@ -407,6 +415,7 @@ class HifiShifterGUI(QMainWindow):
         # Selection Box
         self.selection_box_item = QGraphicsRectItem()
         # Use cosmetic pen to ensure visibility at any zoom level
+        # Initial colors, will be updated by update_plot or theme change
         pen = pg.mkPen(color=(255, 255, 255), width=1, style=Qt.PenStyle.DashLine)
         pen.setCosmetic(True)
         self.selection_box_item.setPen(pen)
@@ -446,6 +455,9 @@ class HifiShifterGUI(QMainWindow):
         self.progress_bar.setFixedSize(200, 15) # Fix size
         self.progress_bar.setVisible(False)
         status_layout.addWidget(self.progress_bar)
+
+        # Set initial cursor and status text
+        self.on_mode_changed(self.mode_combo.currentIndex())
         status_layout.addStretch()
 
     def on_grid_changed(self, index):
@@ -1260,6 +1272,17 @@ class HifiShifterGUI(QMainWindow):
 
     def update_plot(self):
         track = self.current_track
+        
+        # Update Selection Box Theme
+        current_theme = theme.get_current_theme()
+        sel_pen_color = current_theme['piano_roll'].get('selection_pen', (255, 255, 255, 200))
+        sel_brush_color = current_theme['piano_roll'].get('selection_brush', (255, 255, 255, 50))
+        
+        pen = pg.mkPen(color=sel_pen_color, width=1, style=Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self.selection_box_item.setPen(pen)
+        self.selection_box_item.setBrush(QBrush(QColor(*sel_brush_color)))
+
         if not track:
             self.waveform_curve.clear()
             self.f0_orig_curve_item.clear()
@@ -1294,6 +1317,8 @@ class HifiShifterGUI(QMainWindow):
             
             current_theme = theme.get_current_theme()
             f0_orig_pen = current_theme['graph'].get('f0_orig_pen', (255, 255, 255, 80))
+            f0_pen = current_theme['graph'].get('f0_pen', '#00ff00')
+            f0_selected_pen = current_theme['graph'].get('f0_selected_pen', '#0099ff')
             
             if track.f0_original is not None:
                 self.f0_orig_curve_item.setData(x_f0, track.f0_original, connect="finite")
@@ -1303,6 +1328,7 @@ class HifiShifterGUI(QMainWindow):
 
             if track.f0_edited is not None:
                 self.f0_curve_item.setData(x_f0, track.f0_edited, connect="finite")
+                self.f0_curve_item.setPen(pg.mkPen(color=f0_pen, width=3))
                 
                 # Update Selection Curve
                 if self.selection_mask is not None and len(self.selection_mask) == len(track.f0_edited):
@@ -1310,6 +1336,7 @@ class HifiShifterGUI(QMainWindow):
                     selected_f0 = track.f0_edited.copy()
                     selected_f0[~self.selection_mask] = np.nan
                     self.f0_selected_curve_item.setData(x_f0, selected_f0, connect="finite")
+                    self.f0_selected_curve_item.setPen(pg.mkPen(color=f0_selected_pen, width=3))
                 else:
                     self.f0_selected_curve_item.clear()
             else:

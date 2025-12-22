@@ -9,7 +9,7 @@ THEMES = {
         'palette': {
             QPalette.ColorRole.Window: '#353535',
             QPalette.ColorRole.WindowText: '#CCCCCC',
-            QPalette.ColorRole.Base: '#252525',
+            QPalette.ColorRole.Base: '#303030',
             QPalette.ColorRole.AlternateBase: '#353535',
             QPalette.ColorRole.ToolTipBase: '#CCCCCC',
             QPalette.ColorRole.ToolTipText: '#CCCCCC',
@@ -27,6 +27,8 @@ THEMES = {
             'waveform_pen': (255, 255, 255, 100),
             'waveform_brush': (255, 255, 255, 30),
             'f0_orig_pen': (255, 255, 255, 80),
+            'f0_pen': '#00ff00',
+            'f0_selected_pen': '#0099ff',
             'grid_alpha': 0.2,
         },
         'piano_roll': {
@@ -102,6 +104,8 @@ THEMES = {
             'waveform_pen': (0, 0, 0, 100),
             'waveform_brush': (0, 0, 0, 30),
             'f0_orig_pen': (0, 0, 0, 80),
+            'f0_pen': '#2E8B57',
+            'f0_selected_pen': '#1E90FF',
             'grid_alpha': 0.5,
         },
         'piano_roll': {
@@ -111,8 +115,8 @@ THEMES = {
             'black_key': (220, 220, 220, 100),
             'white_key_pen': (200, 200, 200, 50),
             'cursor': '#0099ff',
-            'selection_brush': (0, 0, 255, 50),
-            'selection_pen': (0, 0, 255, 200),
+            'selection_brush': (0, 120, 215, 80),
+            'selection_pen': (0, 120, 215, 255),
         },
         'track_control': {
             'bg_selected': '#ffffff',
