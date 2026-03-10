@@ -30,6 +30,7 @@ import {
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
 import { KeybindingsDialog } from "./KeybindingsDialog";
+import { ResamplerManagerDialog } from "./ResamplerManagerDialog";
 
 interface MenuBarProps {
     onNewProject: () => void;
@@ -50,6 +51,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
+    const [rsDialogOpen, setRsDialogOpen] = useState(false);
 
     /** 获取某个操作的快捷键显示文本 */
     function shortcutLabel(actionId: ActionId): string {
@@ -225,6 +227,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {t("menu_paste_vocalshifter_clipboard")}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => setRsDialogOpen(true)}>
+                        {(t as (key: string) => string)("menu_manage_resampler")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
+                        {(t as (key: string) => string)("menu_keybindings")}
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -276,10 +285,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             ? t("theme_dark")
                             : t("theme_light")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
-                        {(t as (key: string) => string)("menu_keybindings")}
-                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -316,6 +321,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <KeybindingsDialog
                 open={kbDialogOpen}
                 onOpenChange={setKbDialogOpen}
+            />
+            {/* Resampler 管理对话框 */}
+            <ResamplerManagerDialog
+                open={rsDialogOpen}
+                onOpenChange={setRsDialogOpen}
             />
         </Flex>
     );

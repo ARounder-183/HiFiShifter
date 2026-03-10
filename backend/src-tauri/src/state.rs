@@ -11,6 +11,81 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use uuid::Uuid;
 
+// ─── 外部 Resampler 注册表 ──────────────────────────────────────────────────
+
+/// 单个 flag 参数定义（如 B=气声, g=性别/共振峰, t=时值偏移）。
+///
+/// 每个 flag 参数会在前端参数面板中生成一个独立的 AutomationCurve 滑块/曲线，
+/// 并在调用 resampler 时拼接进 flags 字符串。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlagParam {
+    /// Flag 字母（如 "B"、"g"、"t"、"H"）。
+    pub key: String,
+    /// 显示名称（如 "气声 (Breathiness)"）。
+    pub display_name: String,
+    /// 参数最小值。
+    pub min_value: f64,
+    /// 参数最大值。
+    pub max_value: f64,
+    /// 默认值（即 orig 值，不编辑时使用此值）。
+    pub default_value: f64,
+}
+
+/// 外部 Resampler 注册条目（持久化到用户配置）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResamplerEntry {
+    /// 唯一 ID（UUID 或用户自定义短名）。
+    pub id: String,
+    /// 显示名称（如 "Moresampler"、"TIPS"、"tn_fnds"）。
+    pub display_name: String,
+    /// 可执行文件绝对路径。
+    pub exe_path: PathBuf,
+    /// 默认 flags 字符串（如 "B50Y0H0"），用于不在 flag_params 中的额外 flags。
+    pub default_flags: String,
+    /// 结构化的 flag 参数列表（用户可在前端通过 + 号添加/删除）。
+    #[serde(default)]
+    pub flag_params: Vec<FlagParam>,
+    /// 是否可用（exe 存在且可执行）。
+    pub available: bool,
+}
+
+/// 外部 Resampler 注册表（运行时存在 AppState 中，持久化到 config 目录）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResamplerRegistry {
+    pub entries: HashMap<String, ResamplerEntry>,
+}
+
+impl ResamplerRegistry {
+    /// 添加或更新一个 resampler 条目。
+    pub fn register(&mut self, entry: ResamplerEntry) {
+        self.entries.insert(entry.id.clone(), entry);
+    }
+
+    /// 移除指定 ID 的条目。返回是否存在并被移除。
+    pub fn remove(&mut self, id: &str) -> bool {
+        self.entries.remove(id).is_some()
+    }
+
+    /// 按 ID 查找条目。
+    pub fn get(&self, id: &str) -> Option<&ResamplerEntry> {
+        self.entries.get(id)
+    }
+
+    /// 刷新所有条目的可用性（检查 exe 文件是否存在）。
+    pub fn refresh_availability(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.available = entry.exe_path.exists();
+        }
+    }
+
+    /// 返回所有条目列表（按显示名称排序）。
+    pub fn list(&self) -> Vec<&ResamplerEntry> {
+        let mut entries: Vec<_> = self.entries.values().collect();
+        entries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        entries
+    }
+}
+
 fn default_frame_period_ms() -> f64 {
     5.0
 }
@@ -23,13 +98,15 @@ pub enum PitchAnalysisAlgo {
     NsfHifiganOnnx,
     #[serde(rename = "vslib")]
     VocalShifterVslib,
+    /// 外部 Resampler（ID = registry entry key）。
+    ExternalResampler(String),
     None,
     #[serde(other)]
     Unknown,
 }
 
 /// 合成链路类型，独立于 PitchAnalysisAlgo，面向声码器选择。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SynthPipelineKind {
     WorldVocoder,
@@ -37,6 +114,8 @@ pub enum SynthPipelineKind {
     /// VocalShifter vslib 原生声码器（仅限 Windows，需 vslib feature）。
     #[cfg(feature = "vslib")]
     VocalShifterVslib,
+    /// 外部 UTAU Resampler（ID = registry entry key）。
+    ExternalResampler(String),
 }
 
 impl SynthPipelineKind {
@@ -46,6 +125,7 @@ impl SynthPipelineKind {
             PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
             #[cfg(feature = "vslib")]
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
+            PitchAnalysisAlgo::ExternalResampler(id) => Self::ExternalResampler(id.clone()),
             _ => Self::WorldVocoder,
         }
     }
@@ -419,6 +499,9 @@ pub struct AppState {
 
     /// App config directory for persisting recent projects etc.
     pub config_dir: OnceLock<std::path::PathBuf>,
+
+    /// 外部 Resampler 注册表（持久化到 config 目录）。
+    pub resampler_registry: Mutex<ResamplerRegistry>,
 }
 
 impl Default for AppState {
@@ -448,6 +531,7 @@ impl Default for AppState {
 
             audio_engine: AudioEngine::new(),
             config_dir: OnceLock::new(),
+            resampler_registry: Mutex::new(ResamplerRegistry::default()),
         }
     }
 }
@@ -1284,6 +1368,7 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
                 PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
                 PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
                 PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
+                PitchAnalysisAlgo::ExternalResampler(id) => format!("external_resampler:{}", id),
                 PitchAnalysisAlgo::None => "none".to_string(),
                 PitchAnalysisAlgo::Unknown => "unknown".to_string(),
             }
@@ -1336,10 +1421,11 @@ fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {
                     solo: t.solo,
                     volume: t.volume,
                     compose_enabled: t.compose_enabled,
-                    pitch_analysis_algo: match t.pitch_analysis_algo {
+                    pitch_analysis_algo: match &t.pitch_analysis_algo {
                         PitchAnalysisAlgo::WorldDll => "world_dll".to_string(),
                         PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
                         PitchAnalysisAlgo::VocalShifterVslib => "vslib".to_string(),
+                        PitchAnalysisAlgo::ExternalResampler(id) => format!("external_resampler:{}", id),
                         PitchAnalysisAlgo::None => "none".to_string(),
                         PitchAnalysisAlgo::Unknown => "unknown".to_string(),
                     },

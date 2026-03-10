@@ -122,7 +122,21 @@ pub fn run() {
                     let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
                     p.recent = recent;
                 }
-                let _ = state.config_dir.set(cfg_dir);
+                let _ = state.config_dir.set(cfg_dir.clone());
+
+                // 加载持久化的外部 Resampler 注册表
+                let registry = crate::config::load_resampler_registry(&cfg_dir);
+                let count = registry.entries.len();
+                if count > 0 {
+                    eprintln!(
+                        "[startup] 已加载 {} 个外部 Resampler 注册条目",
+                        count
+                    );
+                }
+                {
+                    let mut reg = state.resampler_registry.lock().unwrap_or_else(|e| e.into_inner());
+                    *reg = registry;
+                }
             }
 
             // 启动时清理上次遗留的临时文件（后台线程，不阻塞启动）
@@ -203,7 +217,13 @@ pub fn run() {
             commands::clear_cache,
             commands::get_processor_params,
             commands::get_midi_tracks,
-            commands::import_midi_to_pitch
+            commands::import_midi_to_pitch,
+            commands::list_resamplers,
+            commands::add_resampler,
+            commands::remove_resampler,
+            commands::update_resampler,
+            commands::scan_resamplers,
+            commands::browse_resampler_exe
             // TODO: 异步音高刷新命令暂时禁用，等待基础设施完成
             // commands::start_pitch_refresh_task,
             // commands::get_pitch_refresh_status,

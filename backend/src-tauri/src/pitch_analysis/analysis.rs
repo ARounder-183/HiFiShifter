@@ -89,6 +89,7 @@ fn build_timeline_snapshot(
                     PitchAnalysisAlgo::WorldDll => "world_dll",
                     PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx",
                     PitchAnalysisAlgo::VocalShifterVslib => "vslib",
+                    PitchAnalysisAlgo::ExternalResampler(_) => "external_resampler",
                     PitchAnalysisAlgo::None => "none",
                     PitchAnalysisAlgo::Unknown => "unknown",
                 }.to_string(),
@@ -316,6 +317,7 @@ fn analyze_clip_with_cache(
         PitchAnalysisAlgo::WorldDll => "world_dll",
         PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx",
         PitchAnalysisAlgo::VocalShifterVslib => "vslib",
+        PitchAnalysisAlgo::ExternalResampler(_) => "external_resampler",
         PitchAnalysisAlgo::None => "none",
         PitchAnalysisAlgo::Unknown => "unknown",
     };
@@ -538,6 +540,7 @@ fn process_single_clip(
                 PitchAnalysisAlgo::WorldDll => "world_dll",
                 PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx",
                 PitchAnalysisAlgo::VocalShifterVslib => "vslib",
+                PitchAnalysisAlgo::ExternalResampler(_) => "external_resampler",
                 PitchAnalysisAlgo::None => "none",
                 PitchAnalysisAlgo::Unknown => "unknown",
             }.to_string(),

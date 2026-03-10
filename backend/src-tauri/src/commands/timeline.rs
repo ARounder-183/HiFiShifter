@@ -168,6 +168,10 @@ pub(super) fn set_track_state(
         "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => crate::state::PitchAnalysisAlgo::NsfHifiganOnnx,
         "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
         "none" => crate::state::PitchAnalysisAlgo::None,
+        other if other.starts_with("external_resampler:") => {
+            let id = other.trim_start_matches("external_resampler:").to_string();
+            crate::state::PitchAnalysisAlgo::ExternalResampler(id)
+        }
         _ => crate::state::PitchAnalysisAlgo::Unknown,
     });
     tl.set_track_state(&track_id, muted, solo, volume, compose_enabled, algo, color);

@@ -45,6 +45,8 @@ mod reaper_clipboard;
 mod cache;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
+#[path = "commands/resampler_registry.rs"]
+mod resampler_registry;
 #[path = "commands/midi.rs"]
 mod midi;
 // TODO: 异步音高刷新功能未完成，缺少必要的状态管理和依赖
@@ -608,6 +610,57 @@ pub fn clear_cache(state: State<'_, AppState>) -> Result<u64, String> {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_processor_params(algo: String) -> Vec<processor_caps::ParamDescriptorDto> {
     processor_caps::get_processor_params(algo)
+}
+
+// ===================== resampler_registry =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_resamplers(state: tauri::State<'_, crate::state::AppState>) -> resampler_registry::ResamplerListPayload {
+    resampler_registry::list_resamplers(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    display_name: String,
+    exe_path: String,
+    default_flags: Option<String>,
+    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::add_resampler(state, display_name, exe_path, default_flags, flag_params)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::remove_resampler(state, id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+    display_name: Option<String>,
+    exe_path: Option<String>,
+    default_flags: Option<String>,
+    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::update_resampler(state, id, display_name, exe_path, default_flags, flag_params)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn scan_resamplers(
+    state: tauri::State<'_, crate::state::AppState>,
+    directory: String,
+) -> resampler_registry::ResamplerListPayload {
+    resampler_registry::scan_resamplers(state, directory)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn browse_resampler_exe() -> Option<String> {
+    resampler_registry::browse_resampler_exe().await
 }
 
 // ===================== midi =====================

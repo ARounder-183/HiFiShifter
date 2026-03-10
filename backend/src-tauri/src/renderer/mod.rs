@@ -12,6 +12,7 @@ mod utils;
 pub(crate) mod world;
 pub(crate) mod hifigan;
 pub(crate) mod chain;
+pub(crate) mod external_resampler;
 
 #[cfg(feature = "vslib")]
 pub(crate) mod vslib_processor;
@@ -34,16 +35,29 @@ static VSLIB_RENDERER: vslib_processor::VslibRenderer = vslib_processor::VslibRe
 
 // ─── 注册表 ────────────────────────────────────────────────────────────────────
 
-/// 根据 [`SynthPipelineKind`] 返回对应的静态渲染器实例。
+/// 根据 [`SynthPipelineKind`] 返回对应的渲染器 ID 字符串（用于缓存 key）。
 ///
-/// 使用静态分发（`&'static dyn Renderer`）避免堆分配，
-/// 渲染器数量固定，静态分发足够高效。
-pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
+/// 对于内置渲染器使用静态实例；对于外部 resampler 返回对应的 entry id。
+pub fn get_renderer(kind: &SynthPipelineKind) -> &'static dyn Renderer {
     match kind {
         SynthPipelineKind::WorldVocoder => &WORLD_RENDERER,
         SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
         #[cfg(feature = "vslib")]
         SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
+        // 外部 resampler 不通过 get_renderer 使用（走 get_processor），
+        // 此处返回 WORLD_RENDERER 作为 fallback。
+        SynthPipelineKind::ExternalResampler(_) => &WORLD_RENDERER,
+    }
+}
+
+/// 返回渲染器 ID 字符串（用于缓存 key），支持外部 resampler。
+pub fn renderer_id(kind: &SynthPipelineKind) -> String {
+    match kind {
+        SynthPipelineKind::WorldVocoder => "world_vocoder".to_string(),
+        SynthPipelineKind::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
+        #[cfg(feature = "vslib")]
+        SynthPipelineKind::VocalShifterVslib => "vslib".to_string(),
+        SynthPipelineKind::ExternalResampler(id) => format!("external_resampler:{}", id),
     }
 }
 
@@ -59,6 +73,7 @@ pub fn all_renderers() -> Vec<&'static dyn Renderer> {
 ///
 /// 对于 World / HiFiGAN，返回对应的 [`ProcessorChain`]（含 RubberBand + 声码器 Stage）。
 /// 对于 vslib，返回 [`VslibProcessor`]（需 `feature = "vslib"`）。
+/// 对于外部 resampler，需要从 AppState 的 registry 中查找 entry。
 pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
     match kind {
         SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
@@ -67,21 +82,58 @@ pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
         SynthPipelineKind::VocalShifterVslib => {
             Box::new(vslib_processor::VslibProcessor)
         }
+        SynthPipelineKind::ExternalResampler(ref id) => {
+            // 需要从全局 registry 获取 entry——这里使用一个 fallback 的默认 entry
+            // 实际使用时由调用方通过 get_processor_with_registry() 提供。
+            eprintln!("[renderer] get_processor called for external resampler '{}' without registry context", id);
+            Box::new(chain::world_chain()) // fallback
+        }
+    }
+}
+
+/// 根据 [`SynthPipelineKind`] 创建 [`ClipProcessor`]，支持从 registry 查找外部 resampler。
+pub fn get_processor_with_registry(
+    kind: SynthPipelineKind,
+    registry: &crate::state::ResamplerRegistry,
+) -> Box<dyn ClipProcessor> {
+    match kind {
+        SynthPipelineKind::ExternalResampler(ref id) => {
+            match registry.get(id) {
+                Some(entry) => {
+                    if !entry.available {
+                        eprintln!(
+                            "[renderer] 外部 Resampler '{}' 已注册但不可用 (exe 不存在: {})",
+                            entry.display_name,
+                            entry.exe_path.display(),
+                        );
+                    }
+                    Box::new(external_resampler::ExternalResamplerProcessor::new(entry.clone()))
+                }
+                None => {
+                    eprintln!(
+                        "[renderer] 外部 Resampler '{}' 未在注册表中找到，回退到 WorldVocoder",
+                        id
+                    );
+                    Box::new(chain::world_chain())
+                }
+            }
+        }
+        other => get_processor(other),
     }
 }
 
 pub fn get_param_descriptor(
-    kind: SynthPipelineKind,
+    kind: &SynthPipelineKind,
     param_id: &str,
 ) -> Option<ParamDescriptor> {
-    get_processor(kind)
+    get_processor(kind.clone())
         .param_descriptors()
         .into_iter()
         .find(|descriptor| descriptor.id == param_id)
 }
 
 pub fn automation_curve_default_value(
-    kind: SynthPipelineKind,
+    kind: &SynthPipelineKind,
     param_id: &str,
 ) -> Option<f32> {
     match get_param_descriptor(kind, param_id)?.kind {
@@ -91,7 +143,7 @@ pub fn automation_curve_default_value(
 }
 
 pub fn static_enum_default_value(
-    kind: SynthPipelineKind,
+    kind: &SynthPipelineKind,
     param_id: &str,
 ) -> Option<i32> {
     match get_param_descriptor(kind, param_id)?.kind {

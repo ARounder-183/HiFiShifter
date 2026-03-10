@@ -130,6 +130,7 @@ impl PitchEditAlgorithm {
             PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::Unknown => Self::WorldVocoder,
             PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,
             PitchAnalysisAlgo::VocalShifterVslib => Self::WorldVocoder,
+            PitchAnalysisAlgo::ExternalResampler(_) => Self::Bypass,
             PitchAnalysisAlgo::None => Self::Bypass,
         }
     }
@@ -459,7 +460,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
         // 通过 Renderer trait 调用，解耦合成链路。
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let renderer = crate::renderer::get_renderer(kind);
+        let renderer = crate::renderer::get_renderer(&kind);
         if !renderer.is_available() {
             return Ok(None);
         }

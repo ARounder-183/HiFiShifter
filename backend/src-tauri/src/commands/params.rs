@@ -4,13 +4,13 @@ use tauri::State;
 // ===================== param curves =====================
 
 pub(super) fn resolve_extra_curve_default_value(
-    kind: crate::state::SynthPipelineKind,
+    kind: &crate::state::SynthPipelineKind,
     param: &str,
 ) -> f32 {
     crate::renderer::automation_curve_default_value(kind, param).unwrap_or(0.0)
 }
 
-fn resolve_param_reference_value(kind: crate::state::SynthPipelineKind, param: &str) -> f32 {
+fn resolve_param_reference_value(kind: &crate::state::SynthPipelineKind, param: &str) -> f32 {
     match param {
         "pitch" => 0.0,
         "tension" => 0.0,
@@ -38,7 +38,7 @@ fn resolve_extra_curve_frame_pair(
 }
 
 fn resolve_static_param_default_value(
-    kind: crate::state::SynthPipelineKind,
+    kind: &crate::state::SynthPipelineKind,
     param: &str,
 ) -> f64 {
     crate::renderer::static_enum_default_value(kind, param)
@@ -170,7 +170,7 @@ pub(super) fn get_param_frames(
             }
         }
         "tension" => {
-            let reference_value = resolve_param_reference_value(kind, &param);
+            let reference_value = resolve_param_reference_value(&kind, &param);
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));
                 let e = entry
@@ -186,7 +186,7 @@ pub(super) fn get_param_frames(
             // Extra automation curve: dashed orig should stay at the processor default,
             // while solid edit reflects the user-authored curve.
             let curve = entry.extra_curves.get(&param);
-            let default_value = resolve_param_reference_value(kind, &param);
+            let default_value = resolve_param_reference_value(&kind, &param);
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));
                 let (o, e) = resolve_extra_curve_frame_pair(curve, default_value, idx);
@@ -250,7 +250,7 @@ pub(super) fn set_param_frames(
         // Ensure the curve vector exists and is long enough.
         let curve = entry.extra_curves.entry(param.clone()).or_insert_with(Vec::new);
         let needed = start_frame as usize + values.len();
-        let default_value = resolve_extra_curve_default_value(kind, &param);
+        let default_value = resolve_extra_curve_default_value(&kind, &param);
         if curve.len() < needed {
             curve.resize(needed, default_value);
         }
@@ -267,7 +267,7 @@ pub(super) fn set_param_frames(
 
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let extra_curve_default = is_extra_curve
-        .then(|| resolve_extra_curve_default_value(kind, &param))
+        .then(|| resolve_extra_curve_default_value(&kind, &param))
         .unwrap_or(0.0);
 
     let start = start_frame as usize;
@@ -402,7 +402,7 @@ pub(super) fn restore_param_frames(
             }
         }
         "tension" => {
-            let reference_value = resolve_param_reference_value(kind, &param);
+            let reference_value = resolve_param_reference_value(&kind, &param);
             for i in 0..count {
                 let idx = start.saturating_add(i);
                 if idx >= entry.tension_edit.len() {
@@ -412,7 +412,7 @@ pub(super) fn restore_param_frames(
             }
         }
         _ => {
-            let default_value = resolve_param_reference_value(kind, &param);
+            let default_value = resolve_param_reference_value(&kind, &param);
             if let Some(curve) = entry.extra_curves.get_mut(&param) {
                 for i in 0..count {
                     let idx = start.saturating_add(i);
@@ -461,7 +461,7 @@ pub(super) fn get_static_param(
         .params_by_root_track
         .get(&root)
         .and_then(|entry| entry.extra_params.get(&param).copied())
-        .unwrap_or_else(|| resolve_static_param_default_value(kind, &param));
+        .unwrap_or_else(|| resolve_static_param_default_value(&kind, &param));
 
     crate::models::StaticParamValuePayload {
         ok: true,
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn breath_gain_uses_processor_default_value() {
         let value = resolve_extra_curve_default_value(
-            SynthPipelineKind::NsfHifiganOnnx,
+            &SynthPipelineKind::NsfHifiganOnnx,
             "breath_gain",
         );
         assert!((value - 1.0).abs() < 1e-6);
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn unknown_extra_curve_falls_back_to_zero() {
         let value = resolve_extra_curve_default_value(
-            SynthPipelineKind::NsfHifiganOnnx,
+            &SynthPipelineKind::NsfHifiganOnnx,
             "not_existing_param",
         );
         assert!(value.abs() < 1e-6);
@@ -527,9 +527,9 @@ mod tests {
 
     #[test]
     fn non_pitch_reference_curve_uses_backend_default_value() {
-        let tension = resolve_param_reference_value(SynthPipelineKind::NsfHifiganOnnx, "tension");
+        let tension = resolve_param_reference_value(&SynthPipelineKind::NsfHifiganOnnx, "tension");
         let breath_gain =
-            resolve_param_reference_value(SynthPipelineKind::NsfHifiganOnnx, "breath_gain");
+            resolve_param_reference_value(&SynthPipelineKind::NsfHifiganOnnx, "breath_gain");
 
         assert!(tension.abs() < 1e-6);
         assert!((breath_gain - 1.0).abs() < 1e-6);

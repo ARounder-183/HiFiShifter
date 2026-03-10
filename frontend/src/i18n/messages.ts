@@ -308,6 +308,26 @@ export const messages = {
         midi_no_notes: "No notes in selected track",
         midi_no_frames_touched:
             "MIDI import did not write any frames. Check the playhead position and project length.",
+
+        // 外部 Resampler
+        add_resampler: "+ Add Resampler...",
+        remove_resampler: "Remove this Resampler",
+        add_flag_param: "Add Flag Param",
+        cancel: "Cancel",
+        confirm: "Confirm",
+        menu_manage_resampler: "Manage Resamplers...",
+        resampler_dialog_title: "Manage External Resamplers",
+        resampler_dialog_desc: "Register, configure and remove external UTAU Resamplers.",
+        resampler_empty: "No resamplers registered. Click below to add one.",
+        resampler_unavailable: "Unavailable",
+        resampler_extra_flags: "Extra Flags",
+        resampler_flag_params: "Flag Params",
+        resampler_flag_letter: "Flag Letter",
+        resampler_flag_name: "Name",
+        resampler_flag_range: "Range",
+        resampler_flag_default: "Default",
+        resampler_flag_remove: "Remove param",
+        resampler_close: "Close",
     },
     "zh-CN": {
         menu_file: "文件",
@@ -612,6 +632,26 @@ export const messages = {
         midi_no_notes: "选中的轨道没有音符",
         midi_no_frames_touched:
             "MIDI 导入没有写入任何帧，请检查播放头位置和工程长度",
+
+        // 外部 Resampler
+        add_resampler: "+ 添加 Resampler...",
+        remove_resampler: "移除此 Resampler",
+        add_flag_param: "添加 Flag 参数",
+        cancel: "取消",
+        confirm: "确认",
+        menu_manage_resampler: "管理 Resampler...",
+        resampler_dialog_title: "管理外部 Resampler",
+        resampler_dialog_desc: "注册、配置和移除外部 UTAU Resampler。",
+        resampler_empty: "暂无已注册的 Resampler，点击下方添加。",
+        resampler_unavailable: "不可用",
+        resampler_extra_flags: "额外 Flags",
+        resampler_flag_params: "Flag 参数",
+        resampler_flag_letter: "Flag 字母",
+        resampler_flag_name: "名称",
+        resampler_flag_range: "范围",
+        resampler_flag_default: "默认",
+        resampler_flag_remove: "删除参数",
+        resampler_close: "关闭",
     },
 } as const;
 

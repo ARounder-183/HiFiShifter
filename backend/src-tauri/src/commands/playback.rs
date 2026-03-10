@@ -427,7 +427,7 @@ fn collect_clips_needing_render(
             None => continue,
         };
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let renderer_id = crate::renderer::get_renderer(kind).id();
+            let renderer_id = crate::renderer::get_renderer(&kind).id();
         let pitch_edit = entry.pitch_edit.as_slice();
         let frame_period_ms = entry.frame_period_ms.max(0.1);
 

@@ -360,6 +360,36 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[2] !== undefined ? { offsetSec: args[2] } : {}),
             };
 
+        // ─── resampler registry ────────────────────────────────────
+        case "list_resamplers":
+            return {};
+
+        case "add_resampler":
+            return {
+                displayName: args[0],
+                exePath: args[1],
+                ...(args[2] !== undefined ? { defaultFlags: args[2] } : {}),
+                ...(args[3] !== undefined ? { flagParams: args[3] } : {}),
+            };
+
+        case "remove_resampler":
+            return { id: args[0] };
+
+        case "update_resampler":
+            return {
+                id: args[0],
+                ...(args[1] !== undefined ? { displayName: args[1] } : {}),
+                ...(args[2] !== undefined ? { exePath: args[2] } : {}),
+                ...(args[3] !== undefined ? { defaultFlags: args[3] } : {}),
+                ...(args[4] !== undefined ? { flagParams: args[4] } : {}),
+            };
+
+        case "scan_resamplers":
+            return { directory: args[0] };
+
+        case "browse_resampler_exe":
+            return {};
+
         default:
             return { __unwired: true };
     }

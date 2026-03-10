@@ -85,6 +85,10 @@ fn algo_to_kind(algo: &str) -> crate::state::SynthPipelineKind {
         "nsf_hifigan_onnx" => SynthPipelineKind::NsfHifiganOnnx,
         #[cfg(feature = "vslib")]
         "vslib" | "vocalshifter_vslib" => SynthPipelineKind::VocalShifterVslib,
+        other if other.starts_with("external_resampler:") => {
+            let id = other.trim_start_matches("external_resampler:").to_string();
+            SynthPipelineKind::ExternalResampler(id)
+        }
         _ => SynthPipelineKind::WorldVocoder,
     }
 }

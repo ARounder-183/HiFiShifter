@@ -349,7 +349,7 @@ pub(crate) fn build_snapshot(
                 let entry = timeline.params_by_root_track.get(&root)?;
                 let track = timeline.tracks.iter().find(|t| t.id == root)?;
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-                let renderer_id = crate::renderer::get_renderer(kind).id();
+                let renderer_id = crate::renderer::get_renderer(&kind).id();
                 Some((
                     entry.pitch_orig.as_slice(),
                     entry.pitch_edit.as_slice(),

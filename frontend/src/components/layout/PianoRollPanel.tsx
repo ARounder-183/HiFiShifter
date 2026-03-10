@@ -22,6 +22,12 @@ import { useAppTheme } from "../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
 import { paramsApi } from "../../services/api/params";
+import {
+    listResamplers,
+    browseResamplerExe,
+    addResampler,
+    type ResamplerEntry,
+} from "../../services/api/resampler";
 
 import {
     BackgroundGrid,
@@ -86,6 +92,12 @@ export const PianoRollPanel: React.FC = () => {
     // MIDI 导入弹窗状态
     const [midiDialogOpen, setMidiDialogOpen] = useState(false);
     const [midiPath, setMidiPath] = useState<string | null>(null);
+
+    // ─── 外部 Resampler 列表 ────────────────────────────────────
+    const [resamplerList, setResamplerList] = useState<ResamplerEntry[]>([]);
+    useEffect(() => {
+        void listResamplers().then(setResamplerList).catch(() => {});
+    }, []);
 
     const handleOpenMidiDialog = useCallback(async () => {
         try {
@@ -1040,12 +1052,49 @@ export const PianoRollPanel: React.FC = () => {
                                         "nsf_hifigan_onnx",
                                         "vslib",
                                         "none",
-                                    ].includes(rootTrack.pitchAnalysisAlgo)
+                                    ].includes(rootTrack.pitchAnalysisAlgo) ||
+                                    rootTrack.pitchAnalysisAlgo.startsWith(
+                                        "external_resampler:",
+                                    )
                                         ? rootTrack.pitchAnalysisAlgo
                                         : "world_dll"
                                 }
                                 onValueChange={(v) => {
                                     if (!rootTrackId) return;
+                                    if (v === "__add_resampler") {
+                                        void (async () => {
+                                            const path =
+                                                await browseResamplerExe();
+                                            if (!path) return;
+                                            const name =
+                                                path
+                                                    .split(/[\\/]/)
+                                                    .pop()
+                                                    ?.replace(
+                                                        /\.exe$/i,
+                                                        "",
+                                                    ) ?? "Resampler";
+                                            const entry =
+                                                await addResampler(
+                                                    name,
+                                                    path,
+                                                );
+                                            if (entry) {
+                                                setResamplerList((prev) => [
+                                                    ...prev,
+                                                    entry,
+                                                ]);
+                                                dispatch(
+                                                    setTrackStateRemote({
+                                                        trackId:
+                                                            rootTrackId,
+                                                        pitchAnalysisAlgo: `external_resampler:${entry.id}`,
+                                                    }),
+                                                );
+                                            }
+                                        })();
+                                        return;
+                                    }
                                     dispatch(
                                         setTrackStateRemote({
                                             trackId: rootTrackId,
@@ -1068,8 +1117,26 @@ export const PianoRollPanel: React.FC = () => {
                                     <Select.Item value="none">
                                         {t("none")}
                                     </Select.Item>
+                                    {resamplerList.length > 0 && (
+                                        <Select.Separator />
+                                    )}
+                                    {resamplerList.map((rs) => (
+                                        <Select.Item
+                                            key={rs.id}
+                                            value={`external_resampler:${rs.id}`}
+                                            disabled={!rs.available}
+                                        >
+                                            {rs.displayName}
+                                            {!rs.available && " ⚠️"}
+                                        </Select.Item>
+                                    ))}
+                                    <Select.Separator />
+                                    <Select.Item value="__add_resampler">
+                                        + {t("add_resampler") ?? "添加 Resampler..."}
+                                    </Select.Item>
                                 </Select.Content>
                             </Select.Root>
+
                             {processorStaticParams.map((param) => {
                                 if (param.kind.type !== "static_enum")
                                     return null;
