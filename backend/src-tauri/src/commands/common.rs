@@ -14,7 +14,10 @@ pub(crate) struct PlaybackRenderingStateEvent {
     pub(crate) target: Option<String>,
 }
 
-pub(crate) fn guard_json_command(name: &str, f: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
+pub(crate) fn guard_json_command(
+    name: &str,
+    f: impl FnOnce() -> serde_json::Value,
+) -> serde_json::Value {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
@@ -74,7 +77,7 @@ pub(crate) fn render_timeline_to_wav(
             sample_rate: 44100,
             start_sec,
             end_sec,
-stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
             // 导出时使用最高质量：32-bit float + Export 预设。
             export_format: crate::mixdown::ExportFormat::Wav32f,

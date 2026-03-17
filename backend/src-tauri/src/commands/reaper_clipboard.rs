@@ -46,8 +46,8 @@ fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
     let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
     let pb_type = NSString::from_str("REAPERMedia");
 
-    let data = unsafe { pasteboard.dataForType(&pb_type) }
-        .ok_or_else(|| "clipboard_empty".to_string())?;
+    let data =
+        unsafe { pasteboard.dataForType(&pb_type) }.ok_or_else(|| "clipboard_empty".to_string())?;
 
     let len = data.length();
     if len == 0 {
@@ -169,10 +169,7 @@ fn read_midi_clipboard() -> Result<Vec<u8>, String> {
 
     let output = output.map_err(|e| {
         let tool = if is_wayland { "wl-paste" } else { "xclip" };
-        format!(
-            "midi_clipboard_read_failed: failed to run {}: {}",
-            tool, e
-        )
+        format!("midi_clipboard_read_failed: failed to run {}: {}", tool, e)
     })?;
 
     if !output.status.success() {
@@ -222,11 +219,8 @@ fn paste_midi_clipboard_inner(
     };
 
     // 合并所有轨道的音符
-    let mut all_notes: Vec<midi_import::MidiNoteEvent> = parse_result
-        .track_notes
-        .into_iter()
-        .flatten()
-        .collect();
+    let mut all_notes: Vec<midi_import::MidiNoteEvent> =
+        parse_result.track_notes.into_iter().flatten().collect();
     all_notes.sort_by(|a, b| {
         a.start_sec
             .partial_cmp(&b.start_sec)

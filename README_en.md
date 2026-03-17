@@ -48,7 +48,8 @@ Ensure you have the following tools installed:
 Install frontend dependencies:
 
 ```bash
-npm --prefix frontend install
+cd frontend
+npm install
 ```
 
 ## Quick Start

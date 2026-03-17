@@ -9,9 +9,6 @@ use super::common::ensure_temp_dir;
 
 // ===================== dialogs / io =====================
 
-
-
-
 pub(super) fn import_audio_bytes(
     state: State<'_, AppState>,
     file_name: String,
@@ -60,9 +57,6 @@ pub(super) fn import_audio_bytes(
     payload
 }
 
-
-
-
 pub(super) fn import_audio_item(
     state: State<'_, AppState>,
     audio_path: String,
@@ -97,9 +91,6 @@ pub(super) fn import_audio_item(
 
 // ===================== timeline CRUD =====================
 
-
-
-
 pub(super) fn add_track(
     state: State<'_, AppState>,
     name: Option<String>,
@@ -115,10 +106,10 @@ pub(super) fn add_track(
     payload
 }
 
-
-
-
-pub(super) fn remove_track(state: State<'_, AppState>, track_id: String) -> crate::models::TimelineStatePayload {
+pub(super) fn remove_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
     tl.remove_track(&track_id);
@@ -128,10 +119,10 @@ pub(super) fn remove_track(state: State<'_, AppState>, track_id: String) -> crat
     payload
 }
 
-
-
-
-pub(super) fn duplicate_track(state: State<'_, AppState>, track_id: String) -> crate::models::TimelineStatePayload {
+pub(super) fn duplicate_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
     tl.duplicate_track(&track_id);
@@ -140,13 +131,6 @@ pub(super) fn duplicate_track(state: State<'_, AppState>, track_id: String) -> c
     payload.project = Some(state.project_meta_payload());
     payload
 }
-
-
-
-
-
-
-
 
 pub(super) fn move_track(
     state: State<'_, AppState>,
@@ -163,9 +147,6 @@ pub(super) fn move_track(
     payload
 }
 
-
-
-
 pub(super) fn set_track_state(
     state: State<'_, AppState>,
     track_id: String,
@@ -181,22 +162,33 @@ pub(super) fn set_track_state(
     state.checkpoint_timeline(&tl);
     let algo = pitch_analysis_algo.as_deref().map(|s| match s {
         "world_dll" | "world" => crate::state::PitchAnalysisAlgo::WorldDll,
-        "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => crate::state::PitchAnalysisAlgo::NsfHifiganOnnx,
+        "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => {
+            crate::state::PitchAnalysisAlgo::NsfHifiganOnnx
+        }
         "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
         "none" => crate::state::PitchAnalysisAlgo::None,
         _ => crate::state::PitchAnalysisAlgo::Unknown,
     });
-    tl.set_track_state(&track_id, muted, solo, volume, compose_enabled, algo, color, name);
+    tl.set_track_state(
+        &track_id,
+        muted,
+        solo,
+        volume,
+        compose_enabled,
+        algo,
+        color,
+        name,
+    );
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     payload
 }
 
-
-
-
-pub(super) fn select_track(state: State<'_, AppState>, track_id: String) -> crate::models::TimelineStatePayload {
+pub(super) fn select_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     tl.select_track(&track_id);
     state.audio_engine.update_timeline(tl.clone());
@@ -204,9 +196,6 @@ pub(super) fn select_track(state: State<'_, AppState>, track_id: String) -> crat
     payload.project = Some(state.project_meta_payload());
     payload
 }
-
-
-
 
 pub(super) fn set_project_length(
     state: State<'_, AppState>,
@@ -220,9 +209,6 @@ pub(super) fn set_project_length(
     payload.project = Some(state.project_meta_payload());
     payload
 }
-
-
-
 
 pub(super) fn add_clip(
     state: State<'_, AppState>,
@@ -241,10 +227,10 @@ pub(super) fn add_clip(
     payload
 }
 
-
-
-
-pub(super) fn remove_clip(state: State<'_, AppState>, clip_id: String) -> crate::models::TimelineStatePayload {
+pub(super) fn remove_clip(
+    state: State<'_, AppState>,
+    clip_id: String,
+) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
     tl.remove_clip(&clip_id);
@@ -253,9 +239,6 @@ pub(super) fn remove_clip(state: State<'_, AppState>, clip_id: String) -> crate:
     payload.project = Some(state.project_meta_payload());
     payload
 }
-
-
-
 
 pub(super) fn move_clip(
     state: State<'_, AppState>,
@@ -323,9 +306,7 @@ pub(super) fn apply_clip_linked_params(
     payload
 }
 
-
 #[allow(clippy::too_many_arguments)]
-
 
 pub(super) fn set_clip_state(
     state: State<'_, AppState>,
@@ -389,9 +370,6 @@ pub(super) fn replace_clip_source(
     payload
 }
 
-
-
-
 pub(super) fn split_clip(
     state: State<'_, AppState>,
     clip_id: String,
@@ -406,9 +384,6 @@ pub(super) fn split_clip(
     payload
 }
 
-
-
-
 pub(super) fn glue_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
@@ -422,9 +397,6 @@ pub(super) fn glue_clips(
     payload
 }
 
-
-
-
 pub(super) fn select_clip(
     state: State<'_, AppState>,
     clip_id: Option<String>,
@@ -436,10 +408,10 @@ pub(super) fn select_clip(
     payload
 }
 
-
-
-
-pub(super) fn get_track_summary(state: State<'_, AppState>, track_id: Option<String>) -> serde_json::Value {
+pub(super) fn get_track_summary(
+    state: State<'_, AppState>,
+    track_id: Option<String>,
+) -> serde_json::Value {
     // Minimal placeholder summary; waveform is empty until audio pipeline is migrated.
     let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let tid = track_id

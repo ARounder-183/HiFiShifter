@@ -107,8 +107,12 @@ mod tests {
                 default_value,
             } => {
                 assert_eq!(*default_value, 0);
-                assert!(options.iter().any(|(label, value)| *label == "Off" && *value == 0));
-                assert!(options.iter().any(|(label, value)| *label == "On" && *value == 1));
+                assert!(options
+                    .iter()
+                    .any(|(label, value)| *label == "Off" && *value == 0));
+                assert!(options
+                    .iter()
+                    .any(|(label, value)| *label == "On" && *value == 1));
             }
             _ => panic!("breath_enabled should be a static enum"),
         }

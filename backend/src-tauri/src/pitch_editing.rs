@@ -13,8 +13,6 @@ fn pitch_edit_algo_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PitchEditAlgorithm {
     WorldVocoder,
@@ -266,7 +264,10 @@ fn root_pitch_edit_state<'a>(
     timeline: &'a TimelineState,
     root_track_id: &str,
 ) -> Option<(&'a crate::state::Track, &'a crate::state::TrackParamsState)> {
-    let track = timeline.tracks.iter().find(|track| track.id == root_track_id)?;
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == root_track_id)?;
     let entry = timeline.params_by_root_track.get(root_track_id)?;
     Some((track, entry))
 }
@@ -492,7 +493,9 @@ fn any_effective_pitch_change_in_range(
         let abs_time_sec = (tail as f64) * fp / 1000.0;
         let orig = clip_midi_at_time(frame_period_ms, clip_start_sec, clip_midi, abs_time_sec);
         if orig.is_finite() && orig > 0.0 {
-            if let Some(target) = edit_midi_at_time_or_none(frame_period_ms, pitch_edit, abs_time_sec) {
+            if let Some(target) =
+                edit_midi_at_time_or_none(frame_period_ms, pitch_edit, abs_time_sec)
+            {
                 if target.is_finite() && target > 0.0 && (target - orig).abs() > eps_semitones {
                     return true;
                 }
@@ -542,7 +545,11 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
     // v2 semantics: do nothing until the user actually modified the edit curve.
     // This avoids treating auto-synced `pitch_edit` (e.g. copied from pitch_orig) as an edit.
-    if !entry.pitch_edit_user_modified && !extra_processing && !tension_processing && !formant_processing {
+    if !entry.pitch_edit_user_modified
+        && !extra_processing
+        && !tension_processing
+        && !formant_processing
+    {
         return Ok(false);
     }
 
@@ -555,8 +562,9 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // - handles_time_stretch=false：输入 PCM 已由外部 Signalsmith Stretch 预拉伸，帧数 = 时间轴帧数
     let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
     let clip_playback_rate = (clip.playback_rate as f64).max(1e-6);
-    let processor_handles_stretch =
-        crate::renderer::get_processor(kind).capabilities().handles_time_stretch;
+    let processor_handles_stretch = crate::renderer::get_processor(kind)
+        .capabilities()
+        .handles_time_stretch;
 
     // Quick skip when user never set a target in this segment window.
     let seg_frames = pcm_stereo.len() / 2;
@@ -567,17 +575,21 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         seg_frames
     };
     // seg_end_sec 始终以时间轴坐标（输出帧）计，确保音高编辑范围检测与声码器上下文一致
-    let seg_end_sec =
-        seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
-    let has_pitch_user_edit = any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
+    let seg_end_sec = seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
+    let has_pitch_user_edit =
+        any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
     if !has_pitch_user_edit && !extra_processing && !tension_processing && !formant_processing {
         return Ok(false);
     }
 
     eprintln!(
         "[pitch_edit] clip_id={} algo={:?} seg=[{:.3},{:.3}) compose_enabled={} user_modified={}",
-        clip.id, algo, seg_start_sec, seg_end_sec,
-        track.compose_enabled, entry.pitch_edit_user_modified
+        clip.id,
+        algo,
+        seg_start_sec,
+        seg_end_sec,
+        track.compose_enabled,
+        entry.pitch_edit_user_modified
     );
 
     // vslib 使用自身内部分析（ANALYZE_OPTION_VOCAL_SHIFTER），不依赖 WORLD 音高轮廓；
@@ -730,7 +742,8 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     if processed.len() != expected_out_frames {
         return Err(format!(
             "pitch_edit: output length mismatch (got {}, expected {})",
-            processed.len(), expected_out_frames
+            processed.len(),
+            expected_out_frames
         ));
     }
 
@@ -747,8 +760,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
     Ok(true)
 }
-
-
 
 pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     let selected = timeline
@@ -847,7 +858,11 @@ pub fn does_clip_need_processor_render(
     // v2 semantics: only treat pitch edit as active after the user modified the edit curve.
     // Otherwise `pitch_edit` may be auto-synced to `pitch_orig` and contain non-zero MIDI values,
     // which should NOT trigger synthesis / prerender.
-    if !entry.pitch_edit_user_modified && !extra_processing && !tension_processing && !formant_processing {
+    if !entry.pitch_edit_user_modified
+        && !extra_processing
+        && !tension_processing
+        && !formant_processing
+    {
         return false;
     }
 
@@ -878,7 +893,9 @@ mod tests {
     ) -> TimelineState {
         let mut pitch_edit = vec![0.0f32; pitch_edit_len];
         for &t in edited_times_sec {
-            let i = ((t.max(0.0) * 1000.0) / frame_period_ms.max(0.1)).round().max(0.0) as usize;
+            let i = ((t.max(0.0) * 1000.0) / frame_period_ms.max(0.1))
+                .round()
+                .max(0.0) as usize;
             if i < pitch_edit.len() {
                 // any positive value counts as a user-set target
                 pitch_edit[i] = 60.0;

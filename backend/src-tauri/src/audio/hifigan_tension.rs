@@ -118,18 +118,16 @@ fn apply_tension_to_channel(
 
         fft.process(&mut spectrum);
 
-        let center_sec = clip_start_sec
-            + (offset + WINDOW_SIZE / 2) as f64 / sample_rate.max(1) as f64;
-        let tension = sample_curve_at_abs_sec(tension_curve, center_sec, frame_period_ms, 0.0) as f64;
+        let center_sec =
+            clip_start_sec + (offset + WINDOW_SIZE / 2) as f64 / sample_rate.max(1) as f64;
+        let tension =
+            sample_curve_at_abs_sec(tension_curve, center_sec, frame_period_ms, 0.0) as f64;
         let max_gain_db = (tension / 100.0) * MAX_TENSION_DB;
 
         if max_gain_db.abs() > 1e-4 {
-            if let Some(midi) = sample_target_midi_at_abs_sec(
-                pitch_orig,
-                pitch_edit,
-                center_sec,
-                frame_period_ms,
-            ) {
+            if let Some(midi) =
+                sample_target_midi_at_abs_sec(pitch_orig, pitch_edit, center_sec, frame_period_ms)
+            {
                 let freq_hz = tension_center_hz(midi);
                 let freq_bin = freq_hz * WINDOW_SIZE as f64 / sample_rate.max(1) as f64;
                 if freq_bin.is_finite() && freq_bin > 1e-3 {
@@ -171,11 +169,7 @@ fn apply_tension_to_channel(
 }
 
 fn apply_output_ceiling(samples: &mut [f32], ceiling: f32) {
-    let peak = samples
-        .iter()
-        .copied()
-        .map(f32::abs)
-        .fold(0.0f32, f32::max);
+    let peak = samples.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
     if peak <= ceiling || peak <= 1e-6 {
         return;
     }
@@ -242,10 +236,7 @@ pub fn apply_tension_to_stereo(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_output_ceiling, apply_tension_to_stereo, tension_center_hz,
-        OUTPUT_CEILING,
-    };
+    use super::{apply_output_ceiling, apply_tension_to_stereo, tension_center_hz, OUTPUT_CEILING};
 
     #[test]
     fn zero_tension_is_near_identity() {
@@ -284,11 +275,7 @@ mod tests {
         let mut samples = vec![0.25f32, -0.5, 1.4, -1.2, 0.7];
         apply_output_ceiling(&mut samples, OUTPUT_CEILING);
 
-        let peak = samples
-            .iter()
-            .copied()
-            .map(f32::abs)
-            .fold(0.0f32, f32::max);
+        let peak = samples.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
         assert!(peak <= OUTPUT_CEILING + 1e-6, "peak={peak}");
     }
 

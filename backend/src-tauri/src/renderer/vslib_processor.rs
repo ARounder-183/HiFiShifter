@@ -122,7 +122,11 @@ fn get_short_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 
     // 转换为以 null 结尾的 UTF-16 宽字符串
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     // 第一次调用：获取所需缓冲区长度
     let len = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
     if len == 0 {
@@ -135,7 +139,9 @@ fn get_short_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
         return None;
     }
     buf.truncate(written as usize);
-    Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf)))
+    Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &buf,
+    )))
 }
 
 /// 将单声道 f32 PCM 写入临时 WAV 文件（16-bit int），返回文件路径。
@@ -151,8 +157,7 @@ fn write_temp_wav_mono(pcm: &[f32], sample_rate: u32) -> Result<std::path::PathB
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     };
-    let mut w = WavWriter::create(&path, spec)
-        .map_err(|e| format!("create temp WAV: {e}"))?;
+    let mut w = WavWriter::create(&path, spec).map_err(|e| format!("create temp WAV: {e}"))?;
     for &s in pcm {
         w.write_sample((s.clamp(-1.0, 1.0) * 32767.0).round() as i16)
             .map_err(|e| format!("write WAV sample: {e}"))?;
@@ -175,11 +180,7 @@ impl Drop for TempFileGuard {
 /// 在 `curve` 中按绝对时间插值（curve[i] = i * frame_period_ms/1000 秒）。
 /// 返回 `None` 表示 curve 为空或未提供，调用方应使用默认值。
 #[cfg(feature = "vslib")]
-fn curve_at_abs_sec(
-    curve: Option<&Vec<f32>>,
-    abs_sec: f64,
-    frame_period_ms: f64,
-) -> Option<f32> {
+fn curve_at_abs_sec(curve: Option<&Vec<f32>>, abs_sec: f64, frame_period_ms: f64) -> Option<f32> {
     let c = curve?;
     if c.is_empty() {
         return None;
@@ -282,9 +283,9 @@ static VSLIB_PARAMS: &[ParamDescriptor] = &[
         group: "合成",
         kind: ParamKind::StaticEnum {
             options: &[
-                ("单音", 0),              // SYNTHMODE_M
-                ("单音+共振峰补正", 1),   // SYNTHMODE_MF（默认）
-                ("和音", 2),              // SYNTHMODE_P
+                ("单音", 0),            // SYNTHMODE_M
+                ("单音+共振峰补正", 1), // SYNTHMODE_MF（默认）
+                ("和音", 2),            // SYNTHMODE_P
             ],
             default_value: 1, // SYNTHMODE_MF
         },
@@ -365,7 +366,7 @@ impl ClipProcessor for VslibProcessor {
 
     fn capabilities(&self) -> ProcessorCapabilities {
         ProcessorCapabilities {
-handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signalsmith Stretch
+            handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signalsmith Stretch
             supports_formant: true,
             supports_breathiness: true,
         }
@@ -376,16 +377,14 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
     }
 
     fn process(&self, ctx: &ClipProcessContext<'_>) -> Result<Vec<f32>, String> {
-        use std::ffi::{c_int, CString};
         use crate::vslib::{
-            check, VsProject,
-            VslibAddItemEx, VslibSetItemInfo,
-            VslibGetCtrlPntInfoEx2, VslibSetCtrlPntInfoEx2,
-            VslibAddTimeCtrlPnt, VslibGetMixData,
-            VslibGetProjectInfo, VslibSetProjectInfo, VslibGetVersion,
-            VSCPINFOEX2, VSPRJINFO,
-            SYNTHMODE_MF, ANALYZE_OPTION_VOCAL_SHIFTER,
+            check, VsProject, VslibAddItemEx, VslibAddTimeCtrlPnt, VslibDeleteTimeCtrlPnt,
+            VslibGetCtrlPntInfoEx2, VslibGetMixData, VslibGetProjectInfo, VslibGetStretchEditSec,
+            VslibGetTimeCtrlPntNum, VslibGetVersion, VslibSetCtrlPntInfoEx2, VslibSetItemInfo,
+            VslibSetProjectInfo, ANALYZE_OPTION_VOCAL_SHIFTER, SYNTHMODE_MF, VSCPINFOEX2,
+            VSPRJINFO,
         };
+        use std::ffi::{c_int, CString};
 
         if ctx.mono_pcm.is_empty() {
             return Ok(vec![0.0f32; ctx.out_frames]);
@@ -421,8 +420,7 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
             .map_err(|_| "vslib: 临时 WAV 路径含非法字符（null byte）".to_string())?;
 
         // ── 2. 创建项目（RAII，drop 时自动 VslibDeleteProject）──────────────
-        let proj = VsProject::create()
-            .map_err(|e| format!("VslibCreateProject: {e}"))?;
+        let proj = VsProject::create().map_err(|e| format!("VslibCreateProject: {e}"))?;
 
         // ── 2b. 设置项目采样率（必须在 VslibAddItemEx 之前，否则返回 VSERR_FREQ=6）──
         //  vslib 项目默认 sampFreq=0，需要显式设置为 WAV 文件的采样率，
@@ -437,8 +435,7 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
             if debug {
                 eprintln!(
                     "[vslib] project_info: master_volume={:.3} samp_freq={}",
-                    prj_info.masterVolume,
-                    prj_info.sampFreq,
+                    prj_info.masterVolume, prj_info.sampFreq,
                 );
             }
         }
@@ -453,8 +450,8 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
                 proj.0,
                 c_path.as_ptr(),
                 &mut item_num,
-                36,  // nnOffset = C2 (MIDI 36, ~65 Hz)
-                60,  // nnRange  = 5 octaves → C2..C7
+                36, // nnOffset = C2 (MIDI 36, ~65 Hz)
+                60, // nnRange  = 5 octaves → C2..C7
                 ANALYZE_OPTION_VOCAL_SHIFTER,
             )
         })
@@ -503,8 +500,7 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
             .map_err(|e| format!("VslibSetItemInfo: {e}"))?;
         eprintln!(
             "[vslib] synth_mode_applied: item_num={} synth_mode={}",
-            item_num,
-            synth_mode,
+            item_num, synth_mode,
         );
 
         // ── 6. （已移除 VslibSetPitchArray）──────────────────────────────────
@@ -536,10 +532,8 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
             for pnt in 0..ctrl_pnt_num {
                 let at_abs = seg_start + (pnt as f64) * cp_interval_sec;
                 let mut cp2 = unsafe { std::mem::zeroed::<VSCPINFOEX2>() };
-                if check(unsafe {
-                    VslibGetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2)
-                })
-                .is_err()
+                if check(unsafe { VslibGetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2) })
+                    .is_err()
                 {
                     continue;
                 }
@@ -579,9 +573,7 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
                     cp2.breathiness = v.round() as c_int;
                 }
 
-                let _ = check(unsafe {
-                    VslibSetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2)
-                });
+                let _ = check(unsafe { VslibSetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2) });
 
                 if debug && sample_points.contains(&pnt) {
                     eprintln!(
@@ -614,18 +606,58 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
         if (ctx.playback_rate - 1.0).abs() > 1e-6 && sample_org > 0 {
             let sr = ctx.sample_rate.max(1) as f64;
             let source_ms = (sample_org as f64 * 1000.0 / sr).round() as c_int;
-            let time2 = (source_ms as f64 / ctx.playback_rate).round() as c_int;
+            let target_ms = (source_ms as f64 / ctx.playback_rate).round() as c_int;
             eprintln!(
-                "[vslib] time_stretch: clip_id={} sample_org={} source_ms={} time2={} rate={:.3}",
-                ctx.clip_id, sample_org, source_ms, time2, ctx.playback_rate
+                "[vslib] time_stretch: clip_id={} sample_org={} source_ms={} target_ms={} rate={:.3}",
+                ctx.clip_id, sample_org, source_ms, target_ms, ctx.playback_rate
             );
-            if source_ms > 0 && time2 > 0 {
-                if let Err(e) = check(unsafe {
-                    VslibAddTimeCtrlPnt(proj.0, item_num, source_ms, time2)
-                }) {
-                    eprintln!(
-                        "[vslib] WARNING: VslibAddTimeCtrlPnt({source_ms}, {time2}): {e} — time stretch skipped"
-                    );
+            if source_ms > 0 && target_ms > 0 {
+                let stretch_result = (|| -> Result<(), String> {
+                    let mut existing_points = 0;
+                    check(unsafe {
+                        VslibGetTimeCtrlPntNum(proj.0, item_num, &mut existing_points)
+                    })
+                    .map_err(|e| format!("VslibGetTimeCtrlPntNum: {e}"))?;
+
+                    for index in (0..existing_points).rev() {
+                        check(unsafe { VslibDeleteTimeCtrlPnt(proj.0, item_num, index) })
+                            .map_err(|e| format!("VslibDeleteTimeCtrlPnt({index}): {e}"))?;
+                    }
+
+                    // vslib's timing map needs both anchors; writing only the tail point falls back to source speed.
+                    check(unsafe { VslibAddTimeCtrlPnt(proj.0, item_num, 0, 0) })
+                        .map_err(|e| format!("VslibAddTimeCtrlPnt(0, 0): {e}"))?;
+                    check(unsafe {
+                        VslibAddTimeCtrlPnt(proj.0, item_num, source_ms, target_ms)
+                    })
+                    .map_err(|e| {
+                        format!("VslibAddTimeCtrlPnt({source_ms}, {target_ms}): {e}")
+                    })?;
+
+                    let mut stretched_end_sec = 0.0f64;
+                    if check(unsafe {
+                        VslibGetStretchEditSec(
+                            proj.0,
+                            item_num,
+                            source_ms as f64 / 1000.0,
+                            &mut stretched_end_sec,
+                        )
+                    })
+                    .is_ok()
+                    {
+                        eprintln!(
+                            "[vslib] time_stretch_confirmed: clip_id={} target_ms={} resolved_ms={:.1}",
+                            ctx.clip_id,
+                            target_ms,
+                            stretched_end_sec * 1000.0,
+                        );
+                    }
+
+                    Ok(())
+                })();
+
+                if let Err(e) = stretch_result {
+                    eprintln!("[vslib] WARNING: {e} - time stretch skipped");
                 }
             }
         }
@@ -635,11 +667,12 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
         //  与 VSITEMINFO.sampleOrg 单位相同，与输出声道数无关。
         //  catch_unwind 防护：vslib DLL 内部可能触发 SEH 异常（如 STATUS_ACCESS_VIOLATION），
         //  通过 catch_unwind 将其转为 Err 而非进程崩溃。
-        let mix_frames = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            proj.mix_sample()
-        }))
-        .map_err(|_| "vslib DLL 在 VslibGetMixSample 中发生内部崩溃 (caught panic)".to_string())?
-        .map_err(|e| format!("VslibGetMixSample: {e}"))?;
+        let mix_frames =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proj.mix_sample()))
+                .map_err(|_| {
+                    "vslib DLL 在 VslibGetMixSample 中发生内部崩溃 (caught panic)".to_string()
+                })?
+                .map_err(|e| format!("VslibGetMixSample: {e}"))?;
         if mix_frames <= 0 {
             return Err("VslibGetMixSample returned 0 frames".into());
         }
@@ -662,10 +695,10 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
                 VslibGetMixData(
                     proj.0,
                     buf_stereo.as_mut_ptr() as *mut std::ffi::c_void,
-                    16,          // bit depth
-                    2,           // channel=2（立体声，与 sample1.c 一致）
-                    0,           // start（帧索引）
-                    mix_frames,  // size = 帧数（每声道），vslib 内部 × channel → 总 i16 数
+                    16,         // bit depth
+                    2,          // channel=2（立体声，与 sample1.c 一致）
+                    0,          // start（帧索引）
+                    mix_frames, // size = 帧数（每声道），vslib 内部 × channel → 总 i16 数
                 )
             })
         }))
@@ -689,9 +722,7 @@ handles_time_stretch: true, // 使用 Timing 控制点，不需要外部 Signals
                 "[vslib] WARNING: left channel is silent while right channel has audio; downmix will use right channel"
             );
         } else if right_stats.nonzero == 0 && left_stats.nonzero > 0 {
-            eprintln!(
-                "[vslib] WARNING: right channel is silent while left channel has audio"
-            );
+            eprintln!("[vslib] WARNING: right channel is silent while left channel has audio");
         } else if left_stats.nonzero == 0 && right_stats.nonzero == 0 {
             eprintln!(
                 "[vslib] WARNING: mix output is fully silent despite successful VslibGetMixData"

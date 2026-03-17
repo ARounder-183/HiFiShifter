@@ -32,8 +32,8 @@ pub struct ReaperTempo {
 pub struct ReaperTrack {
     pub items: Vec<ReaperItem>,
     pub name: String,
-    pub vol_pan: Vec<f64>,     // [vol, pan, ...]
-    pub mute_solo: Vec<i32>,   // [mute, solo, ...]
+    pub vol_pan: Vec<f64>,   // [vol, pan, ...]
+    pub mute_solo: Vec<i32>, // [mute, solo, ...]
     pub iphase: bool,
     pub envelopes: Vec<ReaperEnvelope>,
     /// ISBUS 参数：[type, delta]，delta 决定下一条轨道的层级变化量。
@@ -114,9 +114,9 @@ impl ReaperItem {
 pub struct ReaperTake {
     pub selected: bool,
     pub name: String,
-    pub vol_pan: Vec<f64>,    // [vol, pan, gainTrim, ...]
+    pub vol_pan: Vec<f64>, // [vol, pan, gainTrim, ...]
     pub s_offs: f64,
-    pub play_rate: Vec<f64>,  // [rate, preserve, pitch, method, ...]
+    pub play_rate: Vec<f64>, // [rate, preserve, pitch, method, ...]
     pub chan_mode: i32,
     pub source: Option<ReaperSource>,
 }
@@ -207,8 +207,7 @@ pub fn stretch_segments_from_markers(markers: &[ReaperStretchMarker]) -> Vec<Rea
         if let Some((start_offset, last_marker)) = current_start {
             let offset_length = marker.offset - start_offset;
             if offset_length.abs() > 1e-12 {
-                let velocity_average =
-                    (marker.position - last_marker.position) / offset_length;
+                let velocity_average = (marker.position - last_marker.position) / offset_length;
                 let velocity_half = last_marker.velocity_change * velocity_average;
                 segments.push(ReaperStretchSegment {
                     offset_start: start_offset,
@@ -251,7 +250,14 @@ pub struct ReaperTempoEnvelope {
 // ─── 块解析器 ───
 
 const ENVELOPE_TYPES: &[&str] = &[
-    "ENVSEG", "VOLENV", "VOLENV2", "PANENV", "PANENV2", "MUTEENV", "TEMPOENVEX","PITCHENV",
+    "ENVSEG",
+    "VOLENV",
+    "VOLENV2",
+    "PANENV",
+    "PANENV2",
+    "MUTEENV",
+    "TEMPOENVEX",
+    "PITCHENV",
 ];
 
 #[derive(Debug)]
@@ -268,7 +274,9 @@ impl Block {
             return None;
         }
         let after = &trimmed[1..]; // skip '<'
-        let end = after.find(|c: char| c == ' ' || c == '\t').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| c == ' ' || c == '\t')
+            .unwrap_or(after.len());
         Some(after[..end].to_uppercase())
     }
 }
@@ -580,13 +588,20 @@ fn parse_data_block(block: &Block) -> ReaperData {
         }
 
         // TRACKSKIP
-        if child.lines.first().map(|l| l.starts_with("TRACKSKIP")).unwrap_or(false) {
+        if child
+            .lines
+            .first()
+            .map(|l| l.starts_with("TRACKSKIP"))
+            .unwrap_or(false)
+        {
             if let Some(t) = current_track.take() {
                 data.track_offsets.push(pending_offset);
                 data.tracks.push(t);
             }
             // 解析跳过的轨道数（TRACKSKIP N ...）
-            let skip_n = child.lines.first()
+            let skip_n = child
+                .lines
+                .first()
                 .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1);
@@ -672,8 +687,7 @@ fn parse_item_block(block: &Block) -> ReaperItem {
             }
             "TAKE" => {
                 current_take_is_default = false;
-                let sel = tokens.len() > 1
-                    && tokens[1].eq_ignore_ascii_case("SEL");
+                let sel = tokens.len() > 1 && tokens[1].eq_ignore_ascii_case("SEL");
                 item.takes.push(ReaperTake {
                     selected: sel,
                     ..ReaperTake::default()
@@ -804,9 +818,7 @@ fn parse_envelope_block(block: &Block) -> ReaperEnvelope {
 }
 
 fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
-    let mut env = ReaperTempoEnvelope {
-        points: Vec::new(),
-    };
+    let mut env = ReaperTempoEnvelope { points: Vec::new() };
 
     for line in &block.lines {
         let tokens = split_tokens(line);

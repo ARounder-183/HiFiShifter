@@ -11,8 +11,8 @@
 //! 预设链构造：[`world_chain()`]、[`hifigan_chain()`]
 
 use super::traits::{
-    ClipProcessContext, ClipProcessor, ParamDescriptor, ProcessorCapabilities,
-    RenderContext, Renderer,
+    ClipProcessContext, ClipProcessor, ParamDescriptor, ProcessorCapabilities, RenderContext,
+    Renderer,
 };
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
@@ -125,10 +125,7 @@ impl ClipProcessor for ProcessorChain {
         ProcessorCapabilities {
             handles_time_stretch: self.handles_time_stretch,
             supports_formant: false,
-            supports_breathiness: self
-                .stages
-                .iter()
-                .any(|stage| stage.id() == "nsf_hifigan"),
+            supports_breathiness: self.stages.iter().any(|stage| stage.id() == "nsf_hifigan"),
         }
     }
 
@@ -183,7 +180,7 @@ impl ProcessingStage for SignalsmithTimeStretchStage {
             1, // mono
             cc.sample_rate,
             out_frames,
-crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+            crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
         );
         Ok(stretched)
     }
@@ -224,7 +221,12 @@ impl ProcessingStage for WorldVocoderStage {
 /// Stage 2b：NSF-HiFiGAN ONNX 合成。
 pub struct HiFiGanStage;
 
-fn sample_curve_at_abs_sec(curve: Option<&Vec<f32>>, abs_sec: f64, frame_period_ms: f64, default_value: f32) -> f32 {
+fn sample_curve_at_abs_sec(
+    curve: Option<&Vec<f32>>,
+    abs_sec: f64,
+    frame_period_ms: f64,
+    default_value: f32,
+) -> f32 {
     let Some(curve) = curve else {
         return default_value;
     };
@@ -267,7 +269,8 @@ impl ProcessingStage for HiFiGanStage {
         let rate = cc.playback_rate;
         let needs_stretch = (rate - 1.0).abs() > 1e-6;
 
-        let breath_enabled = crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
+        let breath_enabled =
+            crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
         let formant_curve = cc.extra_curves.get("formant_shift_cents");
         if !breath_enabled {
             // ── 非 Breath 路径 ──────────────────────────────────────────────
@@ -284,10 +287,14 @@ impl ProcessingStage for HiFiGanStage {
             };
             if needs_stretch {
                 // mel 域时间拉伸 + HiFiGAN 推理
-                return crate::renderer::hifigan::HiFiGanRenderer
-                    .render_mel_stretch(&render_ctx, rate, formant_curve);
+                return crate::renderer::hifigan::HiFiGanRenderer.render_mel_stretch(
+                    &render_ctx,
+                    rate,
+                    formant_curve,
+                );
             } else {
-                return crate::renderer::hifigan::HiFiGanRenderer.render_with_formant(&render_ctx, formant_curve);
+                return crate::renderer::hifigan::HiFiGanRenderer
+                    .render_with_formant(&render_ctx, formant_curve);
             }
         }
 
@@ -296,11 +303,8 @@ impl ProcessingStage for HiFiGanStage {
             return Err("HNSEP is enabled but model is unavailable".to_string());
         }
 
-        let (harmonic, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
-            cc.clip_id,
-            &input_pcm,
-            cc.sample_rate,
-        )?;
+        let (harmonic, noise) =
+            crate::hnsep_onnx::infer_harmonic_noise_mono(cc.clip_id, &input_pcm, cc.sample_rate)?;
 
         // harmonic 走 mel stretch
         let processed_harmonic = if cc.clip_midi.is_empty() {
@@ -318,10 +322,14 @@ impl ProcessingStage for HiFiGanStage {
                 clip_id: cc.clip_id,
             };
             if needs_stretch {
-                crate::renderer::hifigan::HiFiGanRenderer
-                    .render_mel_stretch(&render_ctx, rate, formant_curve)?
+                crate::renderer::hifigan::HiFiGanRenderer.render_mel_stretch(
+                    &render_ctx,
+                    rate,
+                    formant_curve,
+                )?
             } else {
-                crate::renderer::hifigan::HiFiGanRenderer.render_with_formant(&render_ctx, formant_curve)?
+                crate::renderer::hifigan::HiFiGanRenderer
+                    .render_with_formant(&render_ctx, formant_curve)?
             }
         };
 
@@ -333,7 +341,7 @@ impl ProcessingStage for HiFiGanStage {
                 1,
                 cc.sample_rate,
                 out_frames,
-crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+                crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             )
         } else {
             noise
@@ -374,9 +382,7 @@ pub fn hifigan_chain() -> ProcessorChain {
     ProcessorChain {
         id: "nsf_hifigan".into(),
         display_name: "NSF-HiFiGAN".into(),
-        stages: vec![
-            Box::new(HiFiGanStage),
-        ],
+        stages: vec![Box::new(HiFiGanStage)],
         handles_time_stretch: true,
     }
 }

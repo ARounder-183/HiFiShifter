@@ -49,7 +49,8 @@ cd HifiShifter
 安装前端依赖：
 
 ```bash
-npm --prefix frontend install
+cd frontend
+npm install
 ```
 
 ## 快速开始

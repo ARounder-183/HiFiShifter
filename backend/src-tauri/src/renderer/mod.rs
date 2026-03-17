@@ -7,21 +7,21 @@
 //! `get_processor()` 返回统一的 `ClipProcessor` 实例，涵盖音高合成 +
 //! 时间拉伸 + 全部声码器参数曲线。
 
+pub(crate) mod chain;
+pub(crate) mod hifigan;
 mod traits;
 mod utils;
 pub(crate) mod world;
-pub(crate) mod hifigan;
-pub(crate) mod chain;
 
 #[cfg(feature = "vslib")]
 pub(crate) mod vslib_processor;
 
+pub use chain::{ProcessingStage, ProcessorChain, StageContext};
 pub use traits::{
-    Renderer, RenderContext, RendererCapabilities,
-    ClipProcessor, ClipProcessContext, ProcessorCapabilities, ParamDescriptor, ParamKind,
+    ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, ProcessorCapabilities,
+    RenderContext, Renderer, RendererCapabilities,
 };
-pub use utils::{edit_midi_at_time_or_none, clip_midi_at_time};
-pub use chain::{ProcessingStage, StageContext, ProcessorChain};
+pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 
 use crate::state::SynthPipelineKind;
 
@@ -64,36 +64,25 @@ pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
         SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
         SynthPipelineKind::NsfHifiganOnnx => Box::new(chain::hifigan_chain()),
         #[cfg(feature = "vslib")]
-        SynthPipelineKind::VocalShifterVslib => {
-            Box::new(vslib_processor::VslibProcessor)
-        }
+        SynthPipelineKind::VocalShifterVslib => Box::new(vslib_processor::VslibProcessor),
     }
 }
 
-pub fn get_param_descriptor(
-    kind: SynthPipelineKind,
-    param_id: &str,
-) -> Option<ParamDescriptor> {
+pub fn get_param_descriptor(kind: SynthPipelineKind, param_id: &str) -> Option<ParamDescriptor> {
     get_processor(kind)
         .param_descriptors()
         .into_iter()
         .find(|descriptor| descriptor.id == param_id)
 }
 
-pub fn automation_curve_default_value(
-    kind: SynthPipelineKind,
-    param_id: &str,
-) -> Option<f32> {
+pub fn automation_curve_default_value(kind: SynthPipelineKind, param_id: &str) -> Option<f32> {
     match get_param_descriptor(kind, param_id)?.kind {
         ParamKind::AutomationCurve { default_value, .. } => Some(default_value),
         _ => None,
     }
 }
 
-pub fn static_enum_default_value(
-    kind: SynthPipelineKind,
-    param_id: &str,
-) -> Option<i32> {
+pub fn static_enum_default_value(kind: SynthPipelineKind, param_id: &str) -> Option<i32> {
     match get_param_descriptor(kind, param_id)?.kind {
         ParamKind::StaticEnum { default_value, .. } => Some(default_value),
         _ => None,

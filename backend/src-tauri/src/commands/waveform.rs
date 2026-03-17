@@ -6,9 +6,6 @@ use super::common::guard_waveform_command;
 
 // ===================== waveform peaks =====================
 
-
-
-
 pub(super) fn get_waveform_peaks_segment(
     state: State<'_, AppState>,
     source_path: String,
@@ -33,9 +30,6 @@ pub(super) fn get_waveform_peaks_segment(
     waveform::segment_from_cached(peaks.as_ref(), start_sec, duration_sec, cols)
 }
 
-
-
-
 pub(super) fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
     let stats = state.clear_waveform_cache();
     let dir = {
@@ -55,9 +49,6 @@ pub(super) fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Va
 }
 
 // ===================== root mix waveform peaks =====================
-
-
-
 
 pub(super) fn get_root_mix_waveform_peaks_segment(
     state: State<'_, AppState>,
@@ -132,7 +123,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             end_sec: Some(start_sec + duration_sec.max(0.0)),
             // Peaks are used as a visual timing reference. Use Signalsmith Stretch so
             // stretched clips line up with the same timing as pitch analysis.
-stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
             // 实时预览使用默认质量（Wav16 + Realtime）。
             export_format: crate::mixdown::ExportFormat::Wav16,
@@ -197,9 +188,6 @@ stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
 }
 
 // ===================== track subtree mix waveform peaks =====================
-
-
-
 
 pub(super) fn get_track_mix_waveform_peaks_segment(
     state: State<'_, AppState>,
@@ -274,7 +262,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             end_sec: Some(start_sec + duration_sec.max(0.0)),
             // Peaks are used as a visual timing reference. Use Signalsmith Stretch so
             // stretched clips line up with the same timing as pitch analysis.
-stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
             // 实时预览使用默认质量（Wav16 + Realtime）。
             export_format: crate::mixdown::ExportFormat::Wav16,

@@ -32,14 +32,14 @@ pub const VSERR_MAX: c_int = 7;
 pub const VSERR_NOMEM: c_int = 8;
 
 // 合成模式
-pub const SYNTHMODE_M: c_int = 0;    // 单音
-pub const SYNTHMODE_MF: c_int = 1;   // 单音 + 共振峰补偿
-pub const SYNTHMODE_P: c_int = 2;    // 和音
+pub const SYNTHMODE_M: c_int = 0; // 单音
+pub const SYNTHMODE_MF: c_int = 1; // 单音 + 共振峰补偿
+pub const SYNTHMODE_P: c_int = 2; // 和音
 
 // 分析选项
 pub const ANALYZE_OPTION_SKIP_PIT_ANALYZE: c_uint = 0x00000001;
-pub const ANALYZE_OPTION_WORLD: c_uint = 0x00000000;           // WORLD 分析引擎
-pub const ANALYZE_OPTION_VOCAL_SHIFTER: c_uint = 0x00000002;   // VocalShifter 自有引擎
+pub const ANALYZE_OPTION_WORLD: c_uint = 0x00000000; // WORLD 分析引擎
+pub const ANALYZE_OPTION_VOCAL_SHIFTER: c_uint = 0x00000002; // VocalShifter 自有引擎
 
 //--------------------------------------------------------------
 // 句柄
@@ -64,11 +64,11 @@ pub struct VSPRJINFO {
 /// 轨道信息（基础）
 #[repr(C)]
 pub struct VSTRACKINFO {
-    pub volume: c_double,    // 音量倍数
-    pub pan: c_double,       // 声像 (-1.0 ~ 1.0)
-    pub invPhaseFlg: c_int,  // 反相标志
-    pub soloFlg: c_int,      // 独奏标志
-    pub muteFlg: c_int,      // 静音标志
+    pub volume: c_double,   // 音量倍数
+    pub pan: c_double,      // 声像 (-1.0 ~ 1.0)
+    pub invPhaseFlg: c_int, // 反相标志
+    pub soloFlg: c_int,     // 独奏标志
+    pub muteFlg: c_int,     // 静音标志
 }
 
 /// 轨道信息（扩展）
@@ -91,34 +91,34 @@ pub struct VSTRACKINFOEX {
 #[repr(C)]
 pub struct VSITEMINFO {
     pub fileName: [c_char; VSLIB_MAX_PATH],
-    pub sampFreq: c_int,     // 采样率 [Hz]
-    pub channel: c_int,      // 声道数
-    pub sampleOrg: c_int,    // 原始样本数
-    pub sampleEdit: c_int,   // 编辑后样本数
-    pub ctrlPntPs: c_int,    // 每秒控制点数
-    pub ctrlPntNum: c_int,   // 总控制点数
-    pub synthMode: c_int,    // 合成模式 (R/W)
-    pub trackNum: c_int,     // 轨道编号 (R/W)
-    pub offset: c_int,       // 偏移量 [sample] (R/W)
+    pub sampFreq: c_int,   // 采样率 [Hz]
+    pub channel: c_int,    // 声道数
+    pub sampleOrg: c_int,  // 原始样本数
+    pub sampleEdit: c_int, // 编辑后样本数
+    pub ctrlPntPs: c_int,  // 每秒控制点数
+    pub ctrlPntNum: c_int, // 总控制点数
+    pub synthMode: c_int,  // 合成模式 (R/W)
+    pub trackNum: c_int,   // 轨道编号 (R/W)
+    pub offset: c_int,     // 偏移量 [sample] (R/W)
 }
 
 /// 控制点信息（扩展）
 #[repr(C)]
 pub struct VSCPINFOEX {
-    pub dynOrg: c_double,    // 编辑前动态倍数（只读）
-    pub dynEdit: c_double,   // 编辑后动态倍数
-    pub volume: c_double,    // 音量倍数
-    pub pan: c_double,       // 声像 (-1.0 ~ 1.0)
-    pub spcDyn: c_double,    // 频谱动态（只读）
-    pub pitAna: c_int,       // 音高分析值 [cent]（只读）
-    pub pitOrg: c_int,       // 编辑前音高 [cent]
-    pub pitEdit: c_int,      // 编辑后目标音高 [cent]（核心写入字段）
-    pub formant: c_int,      // 共振峰偏移 [cent]
-    pub pitFlgOrg: c_int,    // 编辑前有声标志（只读）
-    pub pitFlgEdit: c_int,   // 编辑后有声标志
-    pub breathiness: c_int,  // 气声强度 (-10000 ~ 10000)
-    pub eq1: c_int,          // EQ1 (-10000 ~ 10000)
-    pub eq2: c_int,          // EQ2 (-10000 ~ 10000)
+    pub dynOrg: c_double,   // 编辑前动态倍数（只读）
+    pub dynEdit: c_double,  // 编辑后动态倍数
+    pub volume: c_double,   // 音量倍数
+    pub pan: c_double,      // 声像 (-1.0 ~ 1.0)
+    pub spcDyn: c_double,   // 频谱动态（只读）
+    pub pitAna: c_int,      // 音高分析值 [cent]（只读）
+    pub pitOrg: c_int,      // 编辑前音高 [cent]
+    pub pitEdit: c_int,     // 编辑后目标音高 [cent]（核心写入字段）
+    pub formant: c_int,     // 共振峰偏移 [cent]
+    pub pitFlgOrg: c_int,   // 编辑前有声标志（只读）
+    pub pitFlgEdit: c_int,  // 编辑后有声标志
+    pub breathiness: c_int, // 气声强度 (-10000 ~ 10000)
+    pub eq1: c_int,         // EQ1 (-10000 ~ 10000)
+    pub eq2: c_int,         // EQ2 (-10000 ~ 10000)
 }
 
 /// 控制点信息（扩展 v2，含 HEQ）
@@ -139,22 +139,22 @@ pub struct VSCPINFOEX2 {
     pub breathiness: c_int,
     pub eq1: c_int,
     pub eq2: c_int,
-    pub heq: c_int,       // 谐波 EQ (-10000 ~ 10000)
+    pub heq: c_int, // 谐波 EQ (-10000 ~ 10000)
     pub reserved2: [c_int; 6],
 }
 
 /// ASAnalyzer 分析参数
 #[repr(C)]
 pub struct AWDINFO {
-    pub wavdatasize: c_int,  // 数据大小 [样本]
-    pub wavsampleps: c_int,  // 采样率 [Hz]
-    pub wavbit: c_int,       // 位深 (8 或 16)
-    pub wavchannel: c_int,   // 声道数 (1 或 2)
-    pub nnoffset: c_int,     // 最低分析音高 [Note Number]
-    pub nnrange: c_int,      // 分析音域范围 [半音]
-    pub blockpn: c_int,      // 每半音的块数 (1-20)
-    pub dynsize: c_int,      // 音量检测区间 [样本]
-    pub targetch: c_int,     // 目标声道
+    pub wavdatasize: c_int, // 数据大小 [样本]
+    pub wavsampleps: c_int, // 采样率 [Hz]
+    pub wavbit: c_int,      // 位深 (8 或 16)
+    pub wavchannel: c_int,  // 声道数 (1 或 2)
+    pub nnoffset: c_int,    // 最低分析音高 [Note Number]
+    pub nnrange: c_int,     // 分析音域范围 [半音]
+    pub blockpn: c_int,     // 每半音的块数 (1-20)
+    pub dynsize: c_int,     // 音量检测区间 [样本]
+    pub targetch: c_int,    // 目标声道
 }
 
 pub fn vslib_error_name(code: c_int) -> &'static str {
@@ -246,17 +246,52 @@ extern "system" {
 
     // Timing 控制点（时间拉伸）
     pub fn VslibGetTimeCtrlPntNum(hVsprj: HVSPRJ, itemNum: c_int, num: *mut c_int) -> c_int;
-    pub fn VslibGetTimeCtrlPnt(hVsprj: HVSPRJ, itemNum: c_int, pntNum: c_int, time1: *mut c_int, time2: *mut c_int) -> c_int;
-    pub fn VslibSetTimeCtrlPnt(hVsprj: HVSPRJ, itemNum: c_int, pntNum: c_int, time1: c_int, time2: c_int) -> c_int;
-    pub fn VslibAddTimeCtrlPnt(hVsprj: HVSPRJ, itemNum: c_int, time1: c_int, time2: c_int) -> c_int;
+    pub fn VslibGetTimeCtrlPnt(
+        hVsprj: HVSPRJ,
+        itemNum: c_int,
+        pntNum: c_int,
+        time1: *mut c_int,
+        time2: *mut c_int,
+    ) -> c_int;
+    pub fn VslibSetTimeCtrlPnt(
+        hVsprj: HVSPRJ,
+        itemNum: c_int,
+        pntNum: c_int,
+        time1: c_int,
+        time2: c_int,
+    ) -> c_int;
+    pub fn VslibAddTimeCtrlPnt(hVsprj: HVSPRJ, itemNum: c_int, time1: c_int, time2: c_int)
+        -> c_int;
     pub fn VslibDeleteTimeCtrlPnt(hVsprj: HVSPRJ, itemNum: c_int, pntNum: c_int) -> c_int;
-    pub fn VslibGetStretchOrgSec(hVsprj: HVSPRJ, itemNum: c_int, time_edt: c_double, time_org: *mut c_double) -> c_int;
-    pub fn VslibGetStretchEditSec(hVsprj: HVSPRJ, itemNum: c_int, time_org: c_double, time_edt: *mut c_double) -> c_int;
+    pub fn VslibGetStretchOrgSec(
+        hVsprj: HVSPRJ,
+        itemNum: c_int,
+        time_edt: c_double,
+        time_org: *mut c_double,
+    ) -> c_int;
+    pub fn VslibGetStretchEditSec(
+        hVsprj: HVSPRJ,
+        itemNum: c_int,
+        time_org: c_double,
+        time_edt: *mut c_double,
+    ) -> c_int;
 
     // 混音输出
     pub fn VslibGetMixSample(hVsprj: HVSPRJ, mixSample: *mut c_int) -> c_int;
-    pub fn VslibGetMixData(hVsprj: HVSPRJ, waveData: *mut c_void, bit: c_int, channel: c_int, index: c_int, size: c_int) -> c_int;
-    pub fn VslibExportWaveFile(hVsprj: HVSPRJ, fileName: *const c_char, bit: c_int, channel: c_int) -> c_int;
+    pub fn VslibGetMixData(
+        hVsprj: HVSPRJ,
+        waveData: *mut c_void,
+        bit: c_int,
+        channel: c_int,
+        index: c_int,
+        size: c_int,
+    ) -> c_int;
+    pub fn VslibExportWaveFile(
+        hVsprj: HVSPRJ,
+        fileName: *const c_char,
+        bit: c_int,
+        channel: c_int,
+    ) -> c_int;
 
     // 单位换算
     pub fn VslibCent2Freq(cent: c_int) -> c_double;
@@ -326,7 +361,12 @@ impl VsProject {
         Ok(cp)
     }
 
-    pub fn set_ctrl_pnt_ex(&self, item_num: c_int, pnt: c_int, cp: &mut VSCPINFOEX) -> Result<(), VslibError> {
+    pub fn set_ctrl_pnt_ex(
+        &self,
+        item_num: c_int,
+        pnt: c_int,
+        cp: &mut VSCPINFOEX,
+    ) -> Result<(), VslibError> {
         check(unsafe { VslibSetCtrlPntInfoEx(self.0, item_num, pnt, cp) })
     }
 

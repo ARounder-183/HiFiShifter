@@ -4,9 +4,9 @@
     "version": "0.1.0-beta.6",
     "identifier": "com.arounder.hifishifter",
     "build": {
-        "beforeDevCommand": "npm --prefix ../../frontend run build",
+        "beforeDevCommand": "npm --prefix ../frontend run build",
         "frontendDist": "../../frontend/dist",
-        "beforeBuildCommand": "npm --prefix ../../frontend run build"
+        "beforeBuildCommand": "npm --prefix ../frontend run build"
     },
     "app": {
         "withGlobalTauri": true,

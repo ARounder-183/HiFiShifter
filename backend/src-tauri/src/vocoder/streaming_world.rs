@@ -10,10 +10,10 @@
 //! 实现低延迟、低内存占用的流式音高变换。
 
 use crate::world_vocoder::{
-    CheapTrickOption, D4COption, HarvestOption, WorldSynthesizerRaw,
-    CheapTrick, D4C, Harvest, InitializeCheapTrickOption, InitializeD4COption,
-    InitializeHarvestOption, GetFFTSizeForCheapTrick, GetSamplesForHarvest,
-    InitializeSynthesizer, AddParameters, DestroySynthesizer, IsLocked, Synthesis2,
+    AddParameters, CheapTrick, CheapTrickOption, D4COption, DestroySynthesizer,
+    GetFFTSizeForCheapTrick, GetSamplesForHarvest, Harvest, HarvestOption,
+    InitializeCheapTrickOption, InitializeD4COption, InitializeHarvestOption,
+    InitializeSynthesizer, IsLocked, Synthesis2, WorldSynthesizerRaw, D4C,
 };
 
 // ─── StreamingWorldAnalyzer ────────────────────────────────────────────────────
@@ -83,7 +83,11 @@ impl StreamingWorldAnalyzer {
     ) -> Self {
         let fs_i = fs as i32;
         // 先用默认选项获取 fft_size
-        let mut ct_opt = CheapTrickOption { q1: -0.15, f0_floor: f0_floor.max(20.0), fft_size: 0 };
+        let mut ct_opt = CheapTrickOption {
+            q1: -0.15,
+            f0_floor: f0_floor.max(20.0),
+            fft_size: 0,
+        };
         unsafe { InitializeCheapTrickOption(fs_i, &mut ct_opt) };
         ct_opt.f0_floor = f0_floor.max(20.0);
         let fft_size = unsafe { GetFFTSizeForCheapTrick(fs_i, &ct_opt) };
@@ -317,7 +321,13 @@ pub struct StreamingWorldSynthesizer {
     /// 元素：(f0, spectrogram, aperiodicity, sp_ptrs, ap_ptrs)
     /// 注意：sp_ptrs/ap_ptrs 是 WORLD 内部 synth->spectrogram[i] 所指向的指针数组，
     /// 必须与数据一起存活，否则 Synthesis2 解引用时会产生 ACCESS_VIOLATION。
-    pending_data: std::collections::VecDeque<(Vec<f64>, Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<*mut f64>, Vec<*mut f64>)>,
+    pending_data: std::collections::VecDeque<(
+        Vec<f64>,
+        Vec<Vec<f64>>,
+        Vec<Vec<f64>>,
+        Vec<*mut f64>,
+        Vec<*mut f64>,
+    )>,
     /// 环形缓冲区槽位数（用于判断何时可以安全释放旧数据）
     number_of_pointers: usize,
 }
@@ -335,9 +345,7 @@ impl StreamingWorldSynthesizer {
         number_of_pointers: usize,
     ) -> Self {
         // 零初始化，避免未定义行为
-        let mut inner: Box<WorldSynthesizerRaw> = unsafe {
-            Box::new(std::mem::zeroed())
-        };
+        let mut inner: Box<WorldSynthesizerRaw> = unsafe { Box::new(std::mem::zeroed()) };
 
         unsafe {
             InitializeSynthesizer(
@@ -381,7 +389,8 @@ impl StreamingWorldSynthesizer {
         }
         // 将数据移入内部存储，确保在 Synthesis2 消费前数据不被释放。
         // sp_ptrs/ap_ptrs 先用空 Vec 占位，后面填充。
-        self.pending_data.push_back((f0, spectrogram, aperiodicity, Vec::new(), Vec::new()));
+        self.pending_data
+            .push_back((f0, spectrogram, aperiodicity, Vec::new(), Vec::new()));
         let entry = self.pending_data.back_mut().unwrap();
 
         let f0_len = entry.0.len() as i32;
@@ -440,10 +449,8 @@ impl StreamingWorldSynthesizer {
                 break;
             }
 
-            let samples: Vec<f64> = unsafe {
-                std::slice::from_raw_parts(buffer_ptr, self.buffer_size)
-                    .to_vec()
-            };
+            let samples: Vec<f64> =
+                unsafe { std::slice::from_raw_parts(buffer_ptr, self.buffer_size).to_vec() };
             self.output_buf.extend_from_slice(&samples);
         }
 
@@ -521,7 +528,11 @@ mod tests {
         // 批量分析（参考值）
         let batch_f0 = {
             let x_len = signal.len() as i32;
-            let mut opt = HarvestOption { f0_floor, f0_ceil, frame_period: frame_period_ms };
+            let mut opt = HarvestOption {
+                f0_floor,
+                f0_ceil,
+                frame_period: frame_period_ms,
+            };
             unsafe { InitializeHarvestOption(&mut opt) };
             opt.f0_floor = f0_floor;
             opt.f0_ceil = f0_ceil;
@@ -531,15 +542,21 @@ mod tests {
             let mut tp = vec![0.0f64; n];
             let mut f0 = vec![0.0f64; n];
             unsafe {
-                Harvest(signal.as_ptr(), x_len, fs as i32, &opt, tp.as_mut_ptr(), f0.as_mut_ptr());
+                Harvest(
+                    signal.as_ptr(),
+                    x_len,
+                    fs as i32,
+                    &opt,
+                    tp.as_mut_ptr(),
+                    f0.as_mut_ptr(),
+                );
             }
             f0
         };
 
         // 流式分析
-        let mut analyzer = StreamingWorldAnalyzer::new(
-            fs, frame_period_ms, f0_floor, f0_ceil, 1.0, 0.05,
-        );
+        let mut analyzer =
+            StreamingWorldAnalyzer::new(fs, frame_period_ms, f0_floor, f0_ceil, 1.0, 0.05);
         let mut streaming_f0: Vec<f64> = Vec::new();
 
         // 分块送入（每次 4096 样本）
@@ -571,7 +588,9 @@ mod tests {
         assert!(
             diff < 5.0,
             "F0 均值误差过大：批量={:.2} Hz，流式={:.2} Hz，差值={:.2} Hz",
-            batch_mean, stream_mean, diff
+            batch_mean,
+            stream_mean,
+            diff
         );
     }
 }

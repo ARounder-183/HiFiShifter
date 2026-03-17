@@ -83,7 +83,10 @@ fn resolve_model_path() -> Result<PathBuf, String> {
         }
     }
 
-    Err("HNSEP ONNX model not found. Set HIFISHIFTER_HNSEP_ONNX or HIFISHIFTER_HNSEP_MODEL_DIR.".to_string())
+    Err(
+        "HNSEP ONNX model not found. Set HIFISHIFTER_HNSEP_ONNX or HIFISHIFTER_HNSEP_MODEL_DIR."
+            .to_string(),
+    )
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
@@ -145,15 +148,20 @@ pub fn probe_load() -> Result<String, String> {
     let mut session = build_session_with_ep(&onnx_path)?;
 
     let waveform = vec![0.0f32; HNSEP_MODEL_SR as usize / 10];
-    let waveform_tensor = Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
-        .map_err(|e| format!("build waveform tensor failed: {e}"))?;
+    let waveform_tensor =
+        Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
+            .map_err(|e| format!("build waveform tensor failed: {e}"))?;
     let outputs = session
         .run(ort::inputs![waveform_tensor])
         .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
     if outputs.len() < 2 {
         return Err("hnsep ort returned fewer than 2 outputs".to_string());
     }
-    Ok(format!("hnsep_onnx: OK\n  onnx: {}\n  sr={}", onnx_path.display(), HNSEP_MODEL_SR))
+    Ok(format!(
+        "hnsep_onnx: OK\n  onnx: {}\n  sr={}",
+        onnx_path.display(),
+        HNSEP_MODEL_SR
+    ))
 }
 
 fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
@@ -224,7 +232,10 @@ pub fn infer_harmonic_noise_mono(
             .lock()
             .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
         if let Some(entry) = cache.get(&cache_key) {
-            return Ok((entry.harmonic.as_ref().clone(), entry.noise.as_ref().clone()));
+            return Ok((
+                entry.harmonic.as_ref().clone(),
+                entry.noise.as_ref().clone(),
+            ));
         }
     }
 
@@ -234,8 +245,9 @@ pub fn infer_harmonic_noise_mono(
         linear_resample_mono(audio_mono, sample_rate, HNSEP_MODEL_SR)
     };
 
-    let waveform_tensor = Tensor::from_array(([1usize, model_audio.len()], model_audio.into_boxed_slice()))
-        .map_err(|e| format!("build hnsep waveform tensor failed: {e}"))?;
+    let waveform_tensor =
+        Tensor::from_array(([1usize, model_audio.len()], model_audio.into_boxed_slice()))
+            .map_err(|e| format!("build hnsep waveform tensor failed: {e}"))?;
 
     let session = get_or_init_shared_session()?;
     let (mut harmonic, mut noise): (Vec<f32>, Vec<f32>) = {

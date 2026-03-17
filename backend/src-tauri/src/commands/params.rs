@@ -37,17 +37,11 @@ fn resolve_extra_curve_frame_pair(
     (default_value, edit_value)
 }
 
-fn resolve_static_param_default_value(
-    kind: crate::state::SynthPipelineKind,
-    param: &str,
-) -> f64 {
+fn resolve_static_param_default_value(kind: crate::state::SynthPipelineKind, param: &str) -> f64 {
     crate::renderer::static_enum_default_value(kind, param)
         .map(|value| value as f64)
         .unwrap_or(0.0)
 }
-
-
-
 
 pub(super) fn get_param_frames(
     state: State<'_, AppState>,
@@ -104,8 +98,7 @@ pub(super) fn get_param_frames(
         (root, fp, entry, compose_enabled, pitch_algo)
     };
 
-    let pitch_edit_user_modified =
-        (param == "pitch").then_some(entry.pitch_edit_user_modified);
+    let pitch_edit_user_modified = (param == "pitch").then_some(entry.pitch_edit_user_modified);
 
     let pitch_edit_backend_available = if param == "pitch" {
         let algo = crate::pitch_editing::PitchEditAlgorithm::from_track_algo(&pitch_algo);
@@ -144,7 +137,9 @@ pub(super) fn get_param_frames(
 
     // Schedule pitch_orig analysis in background; return current cached curve immediately.
     let analysis_pending = if param == "pitch" {
-        Some(crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root))
+        Some(crate::pitch_analysis::maybe_schedule_pitch_orig(
+            &state, &root,
+        ))
     } else {
         None
     };
@@ -212,9 +207,6 @@ pub(super) fn get_param_frames(
     }
 }
 
-
-
-
 pub(super) fn set_param_frames(
     state: State<'_, AppState>,
     track_id: String,
@@ -248,7 +240,10 @@ pub(super) fn set_param_frames(
     let is_extra_curve = !matches!(param.as_str(), "pitch" | "tension");
     if is_extra_curve {
         // Ensure the curve vector exists and is long enough.
-        let curve = entry.extra_curves.entry(param.clone()).or_insert_with(Vec::new);
+        let curve = entry
+            .extra_curves
+            .entry(param.clone())
+            .or_insert_with(Vec::new);
         let needed = start_frame as usize + values.len();
         let default_value = resolve_extra_curve_default_value(kind, &param);
         if curve.len() < needed {
@@ -288,7 +283,11 @@ pub(super) fn set_param_frames(
             v
         } else {
             non_finite += 1;
-            if is_extra_curve { extra_curve_default } else { 0.0 }
+            if is_extra_curve {
+                extra_curve_default
+            } else {
+                0.0
+            }
         };
 
         match param.as_str() {
@@ -341,9 +340,6 @@ pub(super) fn set_param_frames(
 
     serde_json::json!({"ok": true})
 }
-
-
-
 
 pub(super) fn restore_param_frames(
     state: State<'_, AppState>,
@@ -509,10 +505,8 @@ mod tests {
 
     #[test]
     fn breath_gain_uses_processor_default_value() {
-        let value = resolve_extra_curve_default_value(
-            SynthPipelineKind::NsfHifiganOnnx,
-            "breath_gain",
-        );
+        let value =
+            resolve_extra_curve_default_value(SynthPipelineKind::NsfHifiganOnnx, "breath_gain");
         assert!((value - 1.0).abs() < 1e-6);
     }
 

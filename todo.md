@@ -1,8 +1,6 @@
-高优问题:
-- [ ] 前端波形用svg效率太低了，换成canvas，以及长波形卡顿问题需要优化
-
-低优问题
-- [ ] 对utau类重采样器做适配
-- [ ] 对大型组件模块的拆分重构
-- [ ] 支持VST插入
-- [ ] 变BPM
+if source_ms > 0 && target_ms > 0 {
+                if let Err(e) = check(unsafe {
+                    VslibAddTimeCtrlPnt(proj.0, item_num, source_ms, target_ms)
+                }) {
+                    eprintln!(
+                        "[vslib] WARNING: 

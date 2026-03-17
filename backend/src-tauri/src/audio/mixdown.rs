@@ -179,7 +179,11 @@ fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
     out
 }
 
-pub(crate) fn clip_duration_sec_from_wav(sample_rate: u32, channels: u16, pcm: &[f32]) -> Option<f64> {
+pub(crate) fn clip_duration_sec_from_wav(
+    sample_rate: u32,
+    channels: u16,
+    pcm: &[f32],
+) -> Option<f64> {
     let ch = channels as usize;
     if sample_rate == 0 || ch == 0 {
         return None;
@@ -421,14 +425,18 @@ pub fn render_mixdown_interleaved(
             .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
             .map(|t| {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::get_processor(kind).capabilities().handles_time_stretch
+                crate::renderer::get_processor(kind)
+                    .capabilities()
+                    .handles_time_stretch
             })
             .unwrap_or(false);
         let mut segment = segment;
         // 外部 SignalsmithStretch 拉伸的执行条件：
         //   !processor_handles_stretch → 处理器不内部拉伸（World/HiFiGAN chain 内有 TimeStretchStage，vslib 原生拉伸）
         //   !opts.apply_pitch_edit    → pitch edit 链不会运行，内部拉伸无法触发，需回退到外部拉伸
-        if (playback_rate - 1.0).abs() > 1e-6 && (!processor_handles_stretch || !opts.apply_pitch_edit) {
+        if (playback_rate - 1.0).abs() > 1e-6
+            && (!processor_handles_stretch || !opts.apply_pitch_edit)
+        {
             let seg_frames_in = segment.len() / 2;
             let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;
             segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
@@ -466,7 +474,8 @@ pub fn render_mixdown_interleaved(
             .and_then(|root| {
                 let entry = timeline.params_by_root_track.get(&root)?;
                 let track = timeline.tracks.iter().find(|t| t.id == root)?;
-                let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+                let kind =
+                    crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
                 let renderer_id = crate::renderer::get_renderer(kind).id();
                 if renderer_id == "nsf_hifigan_onnx" {
                     Some((
@@ -555,8 +564,6 @@ pub fn render_mixdown_interleaved(
             mix[oi + 1] += segment[si + 1] * g * vol;
         }
     }
-
-
 
     if debug {
         let mut max_abs = 0.0f32;

@@ -14,9 +14,13 @@ pub(super) fn paste_vocalshifter_clipboard(
     };
 
     match kind {
-        ClipboardFileKind::PitchData => {
-            paste_clb_pitch_data(state, &path, selection_start_frame, selection_max_frames, active_param.as_deref())
-        }
+        ClipboardFileKind::PitchData => paste_clb_pitch_data(
+            state,
+            &path,
+            selection_start_frame,
+            selection_max_frames,
+            active_param.as_deref(),
+        ),
         ClipboardFileKind::Project => paste_vsp_project(state, &path),
     }
 }
@@ -110,7 +114,13 @@ fn paste_clb_pitch_data(
             continue;
         }
         let raw_idx = idx_f.round() as isize;
-        let idx = match raw_idx.checked_add(offset_frames).and_then(|i| if i >= 0 { Some(i as usize) } else { None }) {
+        let idx = match raw_idx.checked_add(offset_frames).and_then(|i| {
+            if i >= 0 {
+                Some(i as usize)
+            } else {
+                None
+            }
+        }) {
             Some(v) => v,
             None => continue,
         };
@@ -272,10 +282,13 @@ fn paste_clb_vslib_param(
             continue;
         }
         let raw_idx = idx_f.round() as isize;
-        let idx = match raw_idx
-            .checked_add(offset_frames)
-            .and_then(|i| if i >= 0 { Some(i as usize) } else { None })
-        {
+        let idx = match raw_idx.checked_add(offset_frames).and_then(|i| {
+            if i >= 0 {
+                Some(i as usize)
+            } else {
+                None
+            }
+        }) {
             Some(v) => v,
             None => continue,
         };

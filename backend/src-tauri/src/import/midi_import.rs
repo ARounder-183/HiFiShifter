@@ -123,8 +123,7 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
             match event.kind {
                 TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)) => {
                     if track_name.is_empty() {
-                        track_name =
-                            String::from_utf8_lossy(name_bytes).into_owned();
+                        track_name = String::from_utf8_lossy(name_bytes).into_owned();
                     }
                 }
                 TrackEventKind::Midi { message, .. } => match message {
@@ -133,21 +132,15 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                         let velocity = vel.as_int();
                         if velocity == 0 {
                             // NoteOn with velocity 0 等同于 NoteOff
-                            if let Some((start_tick, start_vel)) =
-                                active_notes.remove(&note)
-                            {
+                            if let Some((start_tick, start_vel)) = active_notes.remove(&note) {
                                 let start_sec = tick_to_sec(
                                     start_tick,
                                     ticks_per_beat,
                                     &tempo_events,
                                     is_smpte,
                                 );
-                                let end_sec = tick_to_sec(
-                                    abs_tick,
-                                    ticks_per_beat,
-                                    &tempo_events,
-                                    is_smpte,
-                                );
+                                let end_sec =
+                                    tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
                                 notes.push(MidiNoteEvent {
                                     start_sec,
                                     end_sec,
@@ -157,21 +150,15 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                             }
                         } else {
                             // 如果已有同音高的音符在发声，先关闭它
-                            if let Some((start_tick, start_vel)) =
-                                active_notes.remove(&note)
-                            {
+                            if let Some((start_tick, start_vel)) = active_notes.remove(&note) {
                                 let start_sec = tick_to_sec(
                                     start_tick,
                                     ticks_per_beat,
                                     &tempo_events,
                                     is_smpte,
                                 );
-                                let end_sec = tick_to_sec(
-                                    abs_tick,
-                                    ticks_per_beat,
-                                    &tempo_events,
-                                    is_smpte,
-                                );
+                                let end_sec =
+                                    tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
                                 notes.push(MidiNoteEvent {
                                     start_sec,
                                     end_sec,
@@ -184,21 +171,11 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                     }
                     MidiMessage::NoteOff { key, .. } => {
                         let note = key.as_int();
-                        if let Some((start_tick, start_vel)) =
-                            active_notes.remove(&note)
-                        {
-                            let start_sec = tick_to_sec(
-                                start_tick,
-                                ticks_per_beat,
-                                &tempo_events,
-                                is_smpte,
-                            );
-                            let end_sec = tick_to_sec(
-                                abs_tick,
-                                ticks_per_beat,
-                                &tempo_events,
-                                is_smpte,
-                            );
+                        if let Some((start_tick, start_vel)) = active_notes.remove(&note) {
+                            let start_sec =
+                                tick_to_sec(start_tick, ticks_per_beat, &tempo_events, is_smpte);
+                            let end_sec =
+                                tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
                             notes.push(MidiNoteEvent {
                                 start_sec,
                                 end_sec,
@@ -215,10 +192,8 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
 
         // 关闭所有未结束的音符（在轨道末尾）
         for (note, (start_tick, velocity)) in active_notes {
-            let start_sec =
-                tick_to_sec(start_tick, ticks_per_beat, &tempo_events, is_smpte);
-            let end_sec =
-                tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
+            let start_sec = tick_to_sec(start_tick, ticks_per_beat, &tempo_events, is_smpte);
+            let end_sec = tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
             notes.push(MidiNoteEvent {
                 start_sec,
                 end_sec,
@@ -312,12 +287,7 @@ pub fn write_notes_to_pitch_edit(
 }
 
 /// 将 MIDI tick 转换为秒。
-fn tick_to_sec(
-    tick: u64,
-    ticks_per_beat: f64,
-    tempo_events: &[(u64, f64)],
-    is_smpte: bool,
-) -> f64 {
+fn tick_to_sec(tick: u64, ticks_per_beat: f64, tempo_events: &[(u64, f64)], is_smpte: bool) -> f64 {
     if is_smpte {
         // SMPTE: tick 直接对应秒
         return tick as f64 / ticks_per_beat;

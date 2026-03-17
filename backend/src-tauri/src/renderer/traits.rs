@@ -6,8 +6,8 @@
 //! 同时提供更高层的 [`ClipProcessor`] trait，统一封装全链路处理
 //! （音高合成 + 时间拉伸 + 所有声码器参数曲线）。
 
-use std::collections::HashMap;
 use crate::state::SynthPipelineKind;
+use std::collections::HashMap;
 
 // ─── 上下文 ────────────────────────────────────────────────────────────────────
 
@@ -126,7 +126,7 @@ pub struct ClipProcessContext<'a> {
 /// `ClipProcessor` 能力描述。
 #[derive(Debug, Clone, Default)]
 pub struct ProcessorCapabilities {
-/// 是否原生处理 `playback_rate`（= true 时 compat 层不再调 Signalsmith Stretch）。
+    /// 是否原生处理 `playback_rate`（= true 时 compat 层不再调 Signalsmith Stretch）。
     pub handles_time_stretch: bool,
     /// 是否支持逐帧共振峰偏移曲线（"formant_shift_cents"）。
     pub supports_formant: bool,

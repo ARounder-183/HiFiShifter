@@ -38,7 +38,11 @@ fn build_frontend() {
 
     println!("cargo:warning=[Frontend] 正在构建前端，请稍候...");
 
-    let npm_cmd = if cfg!(target_os = "windows") { "npm.cmd" } else { "npm" };
+    let npm_cmd = if cfg!(target_os = "windows") {
+        "npm.cmd"
+    } else {
+        "npm"
+    };
 
     let status = Command::new(npm_cmd)
         .arg("run")
@@ -118,7 +122,10 @@ fn build_world_static() {
     for file in &required_files {
         let file_path = world_src_path.join(file);
         if !file_path.exists() {
-            panic!("Required WORLD source file not found: {}", file_path.display());
+            panic!(
+                "Required WORLD source file not found: {}",
+                file_path.display()
+            );
         }
     }
 
@@ -188,7 +195,10 @@ fn build_signalsmith_stretch() {
         eprintln!("========================================");
         eprintln!("\nExpected location: {}", linear_dir);
         eprintln!("\nTo fix this, run:");
-        eprintln!("  git clone --depth 1 https://github.com/Signalsmith-Audio/linear.git {}", linear_dir);
+        eprintln!(
+            "  git clone --depth 1 https://github.com/Signalsmith-Audio/linear.git {}",
+            linear_dir
+        );
         eprintln!("========================================\n");
         panic!("Signalsmith Linear missing. See error message above for instructions.");
     }
@@ -278,9 +288,16 @@ fn build_vslib() {
             .expect("[vslib] unexpected OUT_DIR depth");
         let dll_dst = target_dir.join("vslib_x64.dll");
         if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
-            println!("cargo:warning=[vslib] could not copy DLL to {}: {}", dll_dst.display(), e);
+            println!(
+                "cargo:warning=[vslib] could not copy DLL to {}: {}",
+                dll_dst.display(),
+                e
+            );
         } else {
-            println!("cargo:warning=[vslib] copied vslib_x64.dll to {}", dll_dst.display());
+            println!(
+                "cargo:warning=[vslib] copied vslib_x64.dll to {}",
+                dll_dst.display()
+            );
         }
     }
 }

@@ -45,7 +45,7 @@ impl ProgressTracker {
         cache: &Arc<Mutex<crate::clip_pitch_cache::ClipPitchCache>>,
     ) -> Self {
         let bs = 60.0 / bpm.max(1e-6);
-        
+
         // Estimate cache hit rate (use current stats if available)
         let cache_miss_factor = {
             if let Ok(guard) = cache.lock() {
@@ -61,7 +61,7 @@ impl ProgressTracker {
                 1.0 // Fallback: assume worst case
             }
         };
-        
+
         let mut total = 0.0f64;
         for clip in clips {
             let duration_sec = clip.length_sec.max(0.0);
@@ -69,7 +69,7 @@ impl ProgressTracker {
                 total += duration_sec * cache_miss_factor;
             }
         }
-        
+
         Self {
             total_workload: total.max(1e-6), // Avoid division by zero
             completed_workload: AtomicU64::new(0),
@@ -79,7 +79,7 @@ impl ProgressTracker {
             current_clip_name: Mutex::new(None),
         }
     }
-    
+
     /// Report completion of a clip
     ///
     /// # Parameters
@@ -94,11 +94,12 @@ impl ProgressTracker {
         } else {
             clip_duration_sec
         };
-        
+
         let workload_u64 = (workload * 1000.0).round().max(0.0) as u64;
-        self.completed_workload.fetch_add(workload_u64, Ordering::Relaxed);
+        self.completed_workload
+            .fetch_add(workload_u64, Ordering::Relaxed);
         self.completed_clips.fetch_add(1, Ordering::Relaxed);
-        
+
         self.get_current_progress()
     }
 
@@ -118,14 +119,14 @@ impl ProgressTracker {
     pub fn get_completed_clips(&self) -> u32 {
         self.completed_clips.load(Ordering::Relaxed)
     }
-    
+
     /// Get current progress percentage
     pub fn get_current_progress(&self) -> f32 {
         let completed = self.completed_workload.load(Ordering::Relaxed) as f64 / 1000.0;
         let progress = (completed / self.total_workload).clamp(0.0, 1.0);
         progress as f32
     }
-    
+
     /// Estimate remaining time in seconds
     ///
     /// # Returns
@@ -136,19 +137,19 @@ impl ProgressTracker {
         if elapsed_sec < 0.1 {
             return None; // Too early to estimate
         }
-        
+
         let completed = self.completed_workload.load(Ordering::Relaxed) as f64 / 1000.0;
         if completed < 1e-6 {
             return None; // No progress yet
         }
-        
+
         let remaining = (self.total_workload - completed).max(0.0);
         let speed = completed / elapsed_sec; // workload per second
-        
+
         if speed < 1e-9 {
             return None; // Insufficient speed data
         }
-        
+
         Some(remaining / speed)
     }
 }
@@ -156,7 +157,7 @@ impl ProgressTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn create_test_clip(id: &str, length_sec: f64) -> Clip {
         Clip {
             id: id.to_string(),
@@ -178,7 +179,7 @@ mod tests {
             fade_out_sec: 0.0,
         }
     }
-    
+
     #[test]
     fn test_progress_tracker_weighted_calculation() {
         let clips = vec![
@@ -186,45 +187,41 @@ mod tests {
             create_test_clip("2", 4.0), // 4 sec
             create_test_clip("3", 2.0), // 2 sec
         ];
-        
-        let cache = Arc::new(Mutex::new(
-            crate::clip_pitch_cache::ClipPitchCache::new(10)
-        ));
-        
+
+        let cache = Arc::new(Mutex::new(crate::clip_pitch_cache::ClipPitchCache::new(10)));
+
         let tracker = ProgressTracker::new(&clips, 120.0, &cache);
-        
+
         // Total workload = 2 + 4 + 2 = 8 sec (all cache miss)
         assert!((tracker.total_workload - 8.0).abs() < 0.01);
-        
+
         // Report first clip complete (cache miss)
         let progress = tracker.report_clip_completed(2.0, false);
         assert!((progress - 0.25).abs() < 0.01); // 2/8 = 25%
-        
+
         // Report second clip complete (cache hit)
         let progress = tracker.report_clip_completed(4.0, true);
         // Completed = 2.0 + 0.04 = 2.04, progress = 2.04/8 = 25.5%
         assert!((progress - 0.255).abs() < 0.01);
-        
+
         // Report third clip complete (cache miss)
         let progress = tracker.report_clip_completed(2.0, false);
         // Completed = 2.04 + 2.0 = 4.04, progress = 4.04/8 = 50.5%
         assert!((progress - 0.505).abs() < 0.01);
     }
-    
+
     #[test]
     fn test_progress_tracker_concurrent_updates() {
         use std::thread;
-        
+
         let clips = vec![
             create_test_clip("1", 40.0), // 20 sec total workload
         ];
-        
-        let cache = Arc::new(Mutex::new(
-            crate::clip_pitch_cache::ClipPitchCache::new(10)
-        ));
-        
+
+        let cache = Arc::new(Mutex::new(crate::clip_pitch_cache::ClipPitchCache::new(10)));
+
         let tracker = Arc::new(ProgressTracker::new(&clips, 120.0, &cache));
-        
+
         // Simulate 10 threads each completing 2 seconds of work
         let handles: Vec<_> = (0..10)
             .map(|_| {
@@ -234,45 +231,47 @@ mod tests {
                 })
             })
             .collect();
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         // Total completed = 20 sec, should be 100%
         let final_progress = tracker.get_current_progress();
         assert!((final_progress - 1.0).abs() < 0.01);
     }
-    
+
     #[test]
     fn test_progress_tracker_eta_estimation() {
         let clips = vec![
             create_test_clip("1", 80.0), // 40 sec @ 120 BPM
         ];
-        
-        let cache = Arc::new(Mutex::new(
-            crate::clip_pitch_cache::ClipPitchCache::new(10)
-        ));
-        
+
+        let cache = Arc::new(Mutex::new(crate::clip_pitch_cache::ClipPitchCache::new(10)));
+
         let tracker = ProgressTracker::new(&clips, 120.0, &cache);
-        
+
         // Initially no ETA (not enough progress)
         assert!(tracker.estimate_eta().is_none());
-        
+
         // Simulate completing 10 sec of work
         tracker.report_clip_completed(10.0, false);
-        
+
         // Sleep to let some elapsed time accumulate for speed calculation
         std::thread::sleep(std::time::Duration::from_millis(50));
-        
+
         // ETA should exist and be positive
         // In fast test environments, speed can be very high (10 sec work / 0.01 sec elapsed = 1000x)
         // so ETA might be very small. We just verify it's calculated and reasonable.
         if let Some(eta) = tracker.estimate_eta() {
             // Just check it's positive and not infinite
-            assert!(eta > 0.0 && eta < 1000.0, "ETA {} out of expected range", eta);
+            assert!(
+                eta > 0.0 && eta < 1000.0,
+                "ETA {} out of expected range",
+                eta
+            );
         }
-        
+
         // Complete more work to get more stable ETA
         tracker.report_clip_completed(10.0, false);
         if let Some(eta) = tracker.estimate_eta() {

@@ -67,12 +67,30 @@ pub enum ClipboardFileKind {
 pub fn find_latest_clipboard_file() -> Option<(PathBuf, ClipboardFileKind)> {
     let base = std::env::temp_dir().join("vocalshifter_tmp");
     let candidates = [
-        (base.join("vocalshifter_tr.clb.vshp"), ClipboardFileKind::Project),
-        (base.join("vocalshifter_le_tr.clb.vshp"), ClipboardFileKind::Project),
-        (base.join("vocalshifter_tr.clb.vsp"), ClipboardFileKind::Project),
-        (base.join("vocalshifter_le_tr.clb.vsp"), ClipboardFileKind::Project),
-        (base.join("vocalshifter_id.clb"), ClipboardFileKind::PitchData),
-        (base.join("vocalshifter_le_id.clb"), ClipboardFileKind::PitchData),
+        (
+            base.join("vocalshifter_tr.clb.vshp"),
+            ClipboardFileKind::Project,
+        ),
+        (
+            base.join("vocalshifter_le_tr.clb.vshp"),
+            ClipboardFileKind::Project,
+        ),
+        (
+            base.join("vocalshifter_tr.clb.vsp"),
+            ClipboardFileKind::Project,
+        ),
+        (
+            base.join("vocalshifter_le_tr.clb.vsp"),
+            ClipboardFileKind::Project,
+        ),
+        (
+            base.join("vocalshifter_id.clb"),
+            ClipboardFileKind::PitchData,
+        ),
+        (
+            base.join("vocalshifter_le_id.clb"),
+            ClipboardFileKind::PitchData,
+        ),
     ];
 
     let mut best: Option<(PathBuf, ClipboardFileKind, SystemTime)> = None;
@@ -95,8 +113,7 @@ pub fn find_latest_clipboard_file() -> Option<(PathBuf, ClipboardFileKind)> {
 }
 
 pub fn parse_clipboard_file(path: &Path) -> Result<Vec<ClipboardPitchPoint>, String> {
-    let data = fs::read(path)
-        .map_err(|e| format!("io_error: {}", e))?;
+    let data = fs::read(path).map_err(|e| format!("io_error: {}", e))?;
 
     if data.len() % RECORD_SIZE != 0 {
         return Err(format!(
@@ -107,11 +124,7 @@ pub fn parse_clipboard_file(path: &Path) -> Result<Vec<ClipboardPitchPoint>, Str
     }
 
     let read_f64 = |rec: &[u8], offset: usize| -> f64 {
-        f64::from_le_bytes(
-            rec[offset..offset + 8]
-                .try_into()
-                .unwrap_or([0u8; 8]),
-        )
+        f64::from_le_bytes(rec[offset..offset + 8].try_into().unwrap_or([0u8; 8]))
     };
 
     let mut out = Vec::with_capacity(data.len() / RECORD_SIZE);
@@ -256,8 +269,14 @@ mod tests {
         let p1 = &points[1];
 
         // Check times.
-        assert!((p0.time_sec - time0).abs() < 1e-9, "Unexpected time for first point");
-        assert!((p1.time_sec - time1).abs() < 1e-9, "Unexpected time for second point");
+        assert!(
+            (p0.time_sec - time0).abs() < 1e-9,
+            "Unexpected time for first point"
+        );
+        assert!(
+            (p1.time_sec - time1).abs() < 1e-9,
+            "Unexpected time for second point"
+        );
 
         // Check disabled flags.
         assert_eq!(p0.disabled, false, "First point should be enabled");

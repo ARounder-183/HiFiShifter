@@ -184,6 +184,54 @@ fn env_f64(name: &str) -> Option<f64> {
         .and_then(|s| s.trim().parse::<f64>().ok())
 }
 
+fn world_min_analysis_samples(fs: i32, frame_period_ms: f64, f0_floor: f64) -> usize {
+    let min_sec = env_f64("HIFISHIFTER_WORLD_MIN_ANALYSIS_SEC").unwrap_or_else(|| {
+        (6.0 * frame_period_ms.max(0.1) / 1000.0)
+            .max(4.0 / f0_floor.max(1.0))
+            .max(0.18)
+    });
+    ((fs.max(1) as f64) * min_sec).ceil().max(1.0) as usize
+}
+
+fn mirrored_sample(input: &[f64], logical_index: isize) -> f64 {
+    if input.is_empty() {
+        return 0.0;
+    }
+    if input.len() == 1 {
+        return input[0];
+    }
+
+    let len = input.len() as isize;
+    let period = 2 * len - 2;
+    let mut idx = logical_index % period;
+    if idx < 0 {
+        idx += period;
+    }
+    let idx = if idx < len { idx } else { period - idx };
+    input[idx as usize]
+}
+
+fn pad_signal_reflect_to_len(input: &[f64], target_len: usize) -> (Vec<f64>, usize) {
+    if input.len() >= target_len || input.is_empty() {
+        return (input.to_vec(), 0);
+    }
+
+    let missing = target_len - input.len();
+    let pad_left = missing / 2;
+    let pad_right = missing - pad_left;
+    let mut out = Vec::with_capacity(target_len);
+
+    for i in 0..pad_left {
+        out.push(mirrored_sample(input, i as isize - pad_left as isize));
+    }
+    out.extend_from_slice(input);
+    for i in 0..pad_right {
+        out.push(mirrored_sample(input, input.len() as isize + i as isize));
+    }
+
+    (out, pad_left)
+}
+
 fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ceil: f64) {
     if f0.is_empty() {
         return;
@@ -449,8 +497,7 @@ fn vocode_one(
     unsafe { InitializeCheapTrickOption(fs, &mut ct_opt as *mut CheapTrickOption) };
     ct_opt.f0_floor = f0_floor.max(20.0);
 
-    let fft_size =
-        unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
+    let fft_size = unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
     if fft_size <= 0 {
         return Err("WORLD: invalid fft_size".to_string());
     }
@@ -618,12 +665,10 @@ fn vocode_one_streaming(
                 compute_f0_with_positions_dio_stonemask(x_f64, fs, fp, f0_floor, f0_ceil)
             })?
         }
-        WorldF0Method::Dio => compute_f0_with_positions_dio_stonemask(
-            x_f64, fs, fp, f0_floor, f0_ceil,
-        )
-        .or_else(|_e| {
-            compute_f0_with_positions_harvest(x_f64, fs, fp, f0_floor, f0_ceil)
-        })?,
+        WorldF0Method::Dio => {
+            compute_f0_with_positions_dio_stonemask(x_f64, fs, fp, f0_floor, f0_ceil)
+                .or_else(|_e| compute_f0_with_positions_harvest(x_f64, fs, fp, f0_floor, f0_ceil))?
+        }
     };
 
     cleanup_f0_inplace(&mut f0, fp, f0_floor, f0_ceil);
@@ -661,8 +706,7 @@ fn vocode_one_streaming(
     unsafe { InitializeCheapTrickOption(fs, &mut ct_opt as *mut CheapTrickOption) };
     ct_opt.f0_floor = f0_floor.max(20.0);
 
-    let fft_size =
-        unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
+    let fft_size = unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
     if fft_size <= 0 {
         return Err("WORLD: invalid fft_size".to_string());
     }
@@ -723,11 +767,19 @@ fn vocode_one_streaming(
         let _ = synth.pull_samples();
     }
 
-    let pushed = synth.push_frames(shifted_f0.clone(), spectrogram.clone(), aperiodicity.clone());
+    let pushed = synth.push_frames(
+        shifted_f0.clone(),
+        spectrogram.clone(),
+        aperiodicity.clone(),
+    );
     if !pushed {
         // 推入失败（缓冲区满），先取出再重试
         let _ = synth.pull_samples();
-        synth.push_frames(shifted_f0.clone(), spectrogram.clone(), aperiodicity.clone());
+        synth.push_frames(
+            shifted_f0.clone(),
+            spectrogram.clone(),
+            aperiodicity.clone(),
+        );
     }
 
     let y_f64_raw = synth.pull_samples();
@@ -902,19 +954,30 @@ where
         let abs_time_start_sec = start_sec + (pad_start as f64) / (sample_rate as f64);
 
         // 使用流式合成器处理当前块
-        let y_f64 = vocode_one_streaming(
-            &x_f64,
+        let analysis_min_len = world_min_analysis_samples(sr, frame_period_ms, f0_floor);
+        let (analysis_input, analysis_pad_left) =
+            pad_signal_reflect_to_len(&x_f64, analysis_min_len);
+        let analysis_pad_sec = analysis_pad_left as f64 / sample_rate as f64;
+        let original_abs_start_sec = abs_time_start_sec;
+        let original_abs_end_sec = abs_time_start_sec + (x_f64.len() as f64) / sample_rate as f64;
+        let analysis_abs_start_sec = abs_time_start_sec - analysis_pad_sec;
+
+        let mut y_f64 = vocode_one_streaming(
+            &analysis_input,
             sr,
             frame_period_ms,
             f0_floor,
             f0_ceil,
-            abs_time_start_sec,
-            &semitone_at_time,
+            analysis_abs_start_sec,
+            &|abs_t| semitone_at_time(abs_t.clamp(original_abs_start_sec, original_abs_end_sec)),
             &mut streaming_synth,
         )?;
 
-        if y_f64.len() != x_f64.len() {
+        if y_f64.len() != analysis_input.len() {
             return Err("WORLD: chunk output length mismatch".to_string());
+        }
+        if analysis_pad_left > 0 {
+            y_f64 = y_f64[analysis_pad_left..(analysis_pad_left + x_f64.len())].to_vec();
         }
 
         let central_start = chunk_start - pad_start;
@@ -943,4 +1006,27 @@ where
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mirrored_sample, pad_signal_reflect_to_len};
+
+    #[test]
+    fn mirrored_sample_reflects_past_edges() {
+        let input = [1.0, 2.0, 3.0];
+        assert_eq!(mirrored_sample(&input, -1), 2.0);
+        assert_eq!(mirrored_sample(&input, -2), 3.0);
+        assert_eq!(mirrored_sample(&input, 3), 2.0);
+        assert_eq!(mirrored_sample(&input, 4), 1.0);
+    }
+
+    #[test]
+    fn pad_signal_reflect_to_len_keeps_center_audio() {
+        let input = [10.0, 20.0, 30.0];
+        let (padded, pad_left) = pad_signal_reflect_to_len(&input, 7);
+        assert_eq!(pad_left, 2);
+        assert_eq!(padded, vec![30.0, 20.0, 10.0, 20.0, 30.0, 20.0, 10.0]);
+        assert_eq!(&padded[pad_left..(pad_left + input.len())], &input);
+    }
 }

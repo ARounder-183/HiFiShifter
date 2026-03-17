@@ -40,11 +40,8 @@ extern "C" {
         time_ratio: f64,
     ) -> c_int;
 
-    fn sstretch_flush(
-        state: SStretchState,
-        output_interleaved: *mut f32,
-        out_frames: u32,
-    ) -> c_int;
+    fn sstretch_flush(state: SStretchState, output_interleaved: *mut f32, out_frames: u32)
+        -> c_int;
 }
 
 // ── 公共 API ──────────────────────────────────────────────────────
@@ -356,7 +353,10 @@ pub fn try_time_stretch_interleaved_realtime(
             let block_out = if total_in > 0 {
                 let next_progress = ((in_cursor + block_in) as f64) / (total_in as f64);
                 let next_expected = (next_progress * total_out as f64).round() as usize;
-                next_expected.saturating_sub(out_produced).max(1).min(BLOCK * 4)
+                next_expected
+                    .saturating_sub(out_produced)
+                    .max(1)
+                    .min(BLOCK * 4)
             } else {
                 0
             };
@@ -371,8 +371,7 @@ pub fn try_time_stretch_interleaved_realtime(
                 let src_i = in_cursor + i;
                 if src_i < in_frames {
                     for ch in 0..channels {
-                        in_block[i * channels + ch] =
-                            input_interleaved[src_i * channels + ch];
+                        in_block[i * channels + ch] = input_interleaved[src_i * channels + ch];
                     }
                 }
                 // else: 保持 0（静音 flush）

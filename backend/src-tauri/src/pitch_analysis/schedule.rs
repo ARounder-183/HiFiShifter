@@ -5,8 +5,8 @@
 use crate::state::AppState;
 use tauri::Emitter;
 
-use super::{PitchOrigUpdatedEvent, build_root_pitch_key, resample_curve_linear};
 use super::analysis::build_pitch_job;
+use super::{build_root_pitch_key, resample_curve_linear, PitchOrigUpdatedEvent};
 
 fn assemble_pitch_orig_from_cache(
     tl: &crate::state::TimelineState,
@@ -14,7 +14,11 @@ fn assemble_pitch_orig_from_cache(
 ) -> Option<(Vec<f32>, bool)> {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
-    let bpm = if tl.bpm.is_finite() && tl.bpm > 0.0 { tl.bpm } else { 120.0 };
+    let bpm = if tl.bpm.is_finite() && tl.bpm > 0.0 {
+        tl.bpm
+    } else {
+        120.0
+    };
     let bs = 60.0 / bpm;
 
     // 收集属于?root track 的所?clip（保?tl.clips 原始顺序 = z-order?
@@ -39,13 +43,14 @@ fn assemble_pitch_orig_from_cache(
     // ?z-order 从低到高（tl.clips 顺序）写入，后面?clip 覆盖前面?
     for clip in &clips {
         let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-        let cached = match crate::pitch_clip::get_or_compute_clip_pitch_midi_global(tl, clip, &root, fp) {
-            Some(c) => c,
-            None => {
-                all_cache_hit = false;
-                continue;
-            }
-        };
+        let cached =
+            match crate::pitch_clip::get_or_compute_clip_pitch_midi_global(tl, clip, &root, fp) {
+                Some(c) => c,
+                None => {
+                    all_cache_hit = false;
+                    continue;
+                }
+            };
 
         // 计算 clip ?timeline 中的起始?
         let clip_start_sec = clip.start_sec.max(0.0);
@@ -201,4 +206,3 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
 
     false // 同步完成，不?pending
 }
-

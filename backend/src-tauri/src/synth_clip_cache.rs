@@ -9,13 +9,13 @@
 //! - `param_hash` 使用 FNV-1a 64-bit，覆盖 clip 时间参数 + pitch_edit 曲线片段
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use crate::pitch_editing::PitchCurvesSnapshot;
 
 // 导入 clip 渲染状态管理器
-use crate::clip_rendering_state::{ClipRenderingState, global_clip_rendering_state};
+use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 
 // ─── 缓存容量 ──────────────────────────────────────────────────────────────────
 
@@ -161,20 +161,25 @@ pub fn is_clip_rendered(clip_id: &str, param_hash: u64) -> bool {
         clip_id: clip_id.to_string(),
         param_hash,
     };
-    
+
     let mut cache = global_synth_clip_cache()
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-    
+
     cache.get(&key).is_some()
 }
 
 /// 设置 clip 渲染状态
-pub fn set_clip_rendering_state(clip_id: &str, state: ClipRenderingState, progress: f32, error: Option<String>) {
+pub fn set_clip_rendering_state(
+    clip_id: &str,
+    state: ClipRenderingState,
+    progress: f32,
+    error: Option<String>,
+) {
     let mut state_manager = global_clip_rendering_state()
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-    
+
     state_manager.set_state(clip_id, state, progress, error);
 }
 
@@ -183,7 +188,7 @@ pub fn get_clip_rendering_state(clip_id: &str) -> Option<ClipRenderingState> {
     let state_manager = global_clip_rendering_state()
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-    
+
     state_manager.get_state(clip_id).map(|info| info.state)
 }
 
@@ -192,7 +197,7 @@ pub fn is_clip_ready(clip_id: &str, param_hash: u64) -> bool {
     let state_manager = global_clip_rendering_state()
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-    
+
     state_manager.is_ready(clip_id) && is_clip_rendered(clip_id, param_hash)
 }
 
@@ -208,13 +213,13 @@ pub fn mark_clip_rendering_complete(clip_id: &str, param_hash: u64, entry: Synth
         clip_id: clip_id.to_string(),
         param_hash,
     };
-    
+
     let mut cache = global_synth_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    
+
     cache.insert(key, entry);
-    
+
     // 更新状态
     set_clip_rendering_state(clip_id, ClipRenderingState::Ready, 1.0, None);
 }
@@ -229,7 +234,7 @@ pub fn cleanup_timeout_rendering_tasks() -> Vec<String> {
     let mut state_manager = global_clip_rendering_state()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    
+
     state_manager.cleanup_timeouts()
 }
 
@@ -437,8 +442,10 @@ impl RenderedClipCache {
         let next = min_capacity.max(1);
         if next > self.capacity {
             self.capacity = next;
-            self.inner.reserve(self.capacity.saturating_sub(self.inner.len()));
-            self.order.reserve(self.capacity.saturating_sub(self.order.len()));
+            self.inner
+                .reserve(self.capacity.saturating_sub(self.inner.len()));
+            self.order
+                .reserve(self.capacity.saturating_sub(self.order.len()));
         }
     }
 }
@@ -451,14 +458,14 @@ static GLOBAL_RENDERED_CLIP_CACHE: OnceLock<Mutex<RenderedClipCache>> = OnceLock
 ///
 /// 首次调用时初始化，容量为 `rendered_clip_capacity()`。
 pub fn global_rendered_clip_cache() -> &'static Mutex<RenderedClipCache> {
-    GLOBAL_RENDERED_CLIP_CACHE.get_or_init(|| {
-        Mutex::new(RenderedClipCache::new(rendered_clip_capacity()))
-    })
+    GLOBAL_RENDERED_CLIP_CACHE
+        .get_or_init(|| Mutex::new(RenderedClipCache::new(rendered_clip_capacity())))
 }
 
 // ─── Pending Rendered Keys（渲染线程 → snapshot 的 cache_key 传递）──────────
 
-static PENDING_RENDERED_KEYS: OnceLock<Mutex<HashMap<String, RenderedClipCacheKey>>> = OnceLock::new();
+static PENDING_RENDERED_KEYS: OnceLock<Mutex<HashMap<String, RenderedClipCacheKey>>> =
+    OnceLock::new();
 
 /// 获取进程级全局 pending_rendered_keys。
 ///
@@ -522,7 +529,10 @@ pub fn compute_rendered_clip_hash(
 
     fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
         !(renderer_id == "nsf_hifigan_onnx"
-            && matches!(param_id, "breath_gain" | "hifigan_tension" | "hifigan_volume"))
+            && matches!(
+                param_id,
+                "breath_gain" | "hifigan_tension" | "hifigan_volume"
+            ))
     }
 
     macro_rules! mix_bytes {
@@ -622,8 +632,13 @@ pub fn compute_hifigan_tension_hash(
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
 
-    let (pitch_lo, pitch_hi) =
-        curve_slice_bounds(start_frame, end_frame, sr, frame_period_ms, pitch_orig.len());
+    let (pitch_lo, pitch_hi) = curve_slice_bounds(
+        start_frame,
+        end_frame,
+        sr,
+        frame_period_ms,
+        pitch_orig.len(),
+    );
     for &value in &pitch_orig[pitch_lo..pitch_hi] {
         mix_bytes!(&value.to_bits().to_le_bytes());
     }
@@ -730,8 +745,10 @@ impl TensionRenderedClipCache {
         let next = min_capacity.max(1);
         if next > self.capacity {
             self.capacity = next;
-            self.inner.reserve(self.capacity.saturating_sub(self.inner.len()));
-            self.order.reserve(self.capacity.saturating_sub(self.order.len()));
+            self.inner
+                .reserve(self.capacity.saturating_sub(self.inner.len()));
+            self.order
+                .reserve(self.capacity.saturating_sub(self.order.len()));
         }
     }
 }
@@ -741,7 +758,7 @@ static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCac
 
 pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
     GLOBAL_TENSION_RENDERED_CLIP_CACHE
-    .get_or_init(|| Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity())))
+        .get_or_init(|| Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity())))
 }
 
 #[cfg(test)]

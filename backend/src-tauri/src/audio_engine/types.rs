@@ -9,7 +9,7 @@ pub(crate) type AudioKey = (PathBuf, u32);
 pub(crate) struct StretchKey {
     pub(crate) path: PathBuf,
     pub(crate) out_rate: u32,
-    pub(crate) bpm_q: u32,  // 保留字段以兼容 Hash，固定为 0
+    pub(crate) bpm_q: u32, // 保留字段以兼容 Hash，固定为 0
     pub(crate) trim_start_q: i64,
     pub(crate) trim_end_q: i64,
     pub(crate) playback_rate_q: u32,

@@ -5,8 +5,7 @@
 use crate::audio_utils::try_read_audio_header_only;
 use crate::models::PitchRange;
 use crate::reaper_parser::{
-    self, ReaperData, ReaperEnvelope, ReaperItem, ReaperTrack,
-    stretch_segments_from_markers,
+    self, stretch_segments_from_markers, ReaperData, ReaperEnvelope, ReaperItem, ReaperTrack,
 };
 use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};
 use std::collections::BTreeMap;
@@ -85,7 +84,12 @@ pub fn import_reaper_clipboard(
     ordered_track_ids: &[String],
 ) -> Result<ReaperImportResult, String> {
     let reaper_data = reaper_parser::parse_clipboard_bytes(data)?;
-    convert_reaper_data_clipboard(reaper_data, playhead_sec, selected_track_idx, ordered_track_ids)
+    convert_reaper_data_clipboard(
+        reaper_data,
+        playhead_sec,
+        selected_track_idx,
+        ordered_track_ids,
+    )
 }
 
 /// 剪贴板导入逻辑：
@@ -103,7 +107,10 @@ fn convert_reaper_data_clipboard(
     } else {
         // 纯 Item（可能含 TRACKSKIP）：粘贴到现有轨道，偏移到光标
         convert_reaper_items_to_existing_tracks(
-            data, playhead_sec, selected_track_idx, ordered_track_ids,
+            data,
+            playhead_sec,
+            selected_track_idx,
+            ordered_track_ids,
         )
     }
 }
@@ -134,7 +141,9 @@ fn convert_reaper_items_to_existing_tracks(
     let mut next_order = ordered_track_ids.len() as i32;
 
     // 计算所有 item 中最小的 position，用于 offset 到 playhead
-    let min_position = data.tracks.iter()
+    let min_position = data
+        .tracks
+        .iter()
         .flat_map(|t| t.items.iter())
         .map(|item| item.position)
         .fold(f64::MAX, f64::min);
@@ -146,7 +155,11 @@ fn convert_reaper_items_to_existing_tracks(
 
     for (track_idx, reaper_track) in data.tracks.iter().enumerate() {
         // 查找此 Reaper track 对应的 HiFiShifter 轨道
-        let track_offset = data.track_offsets.get(track_idx).copied().unwrap_or(track_idx);
+        let track_offset = data
+            .track_offsets
+            .get(track_idx)
+            .copied()
+            .unwrap_or(track_idx);
         let target_track_idx = selected_track_idx + track_offset;
         let target_track_id = if target_track_idx < ordered_track_ids.len() {
             ordered_track_ids[target_track_idx].clone()
@@ -192,7 +205,8 @@ fn convert_reaper_items_to_existing_tracks(
     }
 
     // 构建待应用的 pitch 偏移数据
-    let project_end = clips.iter()
+    let project_end = clips
+        .iter()
         .map(|c| c.start_sec + c.length_sec)
         .fold(32.0_f64, f64::max);
     let frame_period_ms = FRAME_PERIOD * 1000.0;
@@ -370,8 +384,7 @@ fn convert_reaper_data(
             if points.is_empty() {
                 continue;
             }
-            let total_frames =
-                ((project_end * 1000.0 / frame_period_ms).ceil() as usize).max(1);
+            let total_frames = ((project_end * 1000.0 / frame_period_ms).ceil() as usize).max(1);
             let offset_frames = build_pitch_frames(points, total_frames);
 
             // 只在有非零偏移时才记录
@@ -552,7 +565,11 @@ fn process_item(
             clips.push(Clip {
                 id: clip_id.clone(),
                 track_id: track_id.to_string(),
-                name: if seg_count > 1 { format!("{} ({})", clip_name, seg_idx + 1) } else { clip_name },
+                name: if seg_count > 1 {
+                    format!("{} ({})", clip_name, seg_idx + 1)
+                } else {
+                    clip_name
+                },
                 start_sec: clip_start,
                 length_sec: clip_length,
                 color: clip_color(),
@@ -561,7 +578,10 @@ fn process_item(
                 duration_frames,
                 source_sample_rate: source_sr,
                 waveform_preview: None,
-                pitch_range: Some(PitchRange { min: -24.0, max: 24.0 }),
+                pitch_range: Some(PitchRange {
+                    min: -24.0,
+                    max: 24.0,
+                }),
                 gain: convert_volume(take_volume * gain_trim),
                 muted: item_muted,
                 source_start_sec: clip_src_start.max(0.0),
@@ -638,7 +658,10 @@ fn process_item(
             duration_frames,
             source_sample_rate: source_sr,
             waveform_preview: None,
-            pitch_range: Some(PitchRange { min: -24.0, max: 24.0 }),
+            pitch_range: Some(PitchRange {
+                min: -24.0,
+                max: 24.0,
+            }),
             gain: convert_volume(take_volume * gain_trim),
             muted: item_muted,
             source_start_sec: source_start.max(0.0),

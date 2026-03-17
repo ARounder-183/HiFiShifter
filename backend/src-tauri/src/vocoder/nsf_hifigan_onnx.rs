@@ -125,7 +125,10 @@ fn env_path(name: &str) -> Option<PathBuf> {
 fn default_model_dir_guess() -> Option<PathBuf> {
     // 开发环境：模型位于 CARGO_MANIFEST_DIR/resources/models/nsf_hifigan/
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let p = manifest.join("resources").join("models").join("nsf_hifigan");
+    let p = manifest
+        .join("resources")
+        .join("models")
+        .join("nsf_hifigan");
     if p.join("pc_nsf_hifigan.onnx").is_file() && p.join("config.json").is_file() {
         return Some(p);
     }
@@ -651,7 +654,7 @@ impl NsfHifiganOnnx {
             }
         }
 
-    // Mel projection.
+        // Mel projection.
         let n_freqs = self.cfg.n_fft / 2 + 1;
         if spec.len() != n_freqs {
             return Err(format!(
@@ -759,7 +762,14 @@ impl NsfHifiganOnnx {
             .collect();
         let has_formant_shift = formant_shifts.iter().any(|s| s.abs() >= 0.5);
         if has_formant_shift {
-            shift_mel_formant(&mut mel, self.cfg.num_mels, t, &formant_shifts, self.cfg.fmin, self.cfg.fmax);
+            shift_mel_formant(
+                &mut mel,
+                self.cfg.num_mels,
+                t,
+                &formant_shifts,
+                self.cfg.fmin,
+                self.cfg.fmax,
+            );
         }
 
         let mut f0 = vec![0.0f32; t];
@@ -912,7 +922,13 @@ pub fn infer_pitch_edit_mono(
             .as_mut()
             .map_err(|e| e.clone())?;
 
-        sess.infer_from_audio_and_midi(audio_mono, sample_rate, start_sec, midi_at_time, formant_shift_at_time)
+        sess.infer_from_audio_and_midi(
+            audio_mono,
+            sample_rate,
+            start_sec,
+            midi_at_time,
+            formant_shift_at_time,
+        )
     })
 }
 
@@ -951,7 +967,7 @@ pub struct OnnxDiagnosticInfo {
 pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
     let compiled = compiled();
     let ep_choice_val = ep_choice();
-    
+
     if !compiled {
         return OnnxDiagnosticInfo {
             compiled: false,
@@ -964,11 +980,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
     }
 
     let available = is_available();
-    let error = if !available {
-        model_load_error()
-    } else {
-        None
-    };
+    let error = if !available { model_load_error() } else { None };
 
     // Try to get ONNX runtime version and available providers
     let (onnx_version, providers) = if let Ok(()) = ensure_ort_init() {
@@ -1044,11 +1056,18 @@ pub fn infer_pitch_edit_chunked(
     let sr = sample_rate.max(1) as f64;
     let total_samples = mono_pcm.len();
     let chunk_samples = ((chunk_sec * sr).round() as usize).max(1);
-    let overlap_samples = ((overlap_sec * sr).round() as usize).min(chunk_samples.saturating_sub(1));
+    let overlap_samples =
+        ((overlap_sec * sr).round() as usize).min(chunk_samples.saturating_sub(1));
 
     // 单块情况：直接调用 infer_pitch_edit_mono，无额外开销
     if total_samples <= chunk_samples {
-        return infer_pitch_edit_mono(mono_pcm, sample_rate, start_sec, midi_at_time, formant_shift_at_time);
+        return infer_pitch_edit_mono(
+            mono_pcm,
+            sample_rate,
+            start_sec,
+            midi_at_time,
+            formant_shift_at_time,
+        );
     }
 
     // 多块情况：分块推理 + 等功率 crossfade 拼接
@@ -1080,9 +1099,11 @@ pub fn infer_pitch_edit_chunked(
         if let Some((prev_out, prev_start)) = prev_chunk_out.take() {
             // crossfade 区域：当前块的前 overlap_samples 与上一块的后 overlap_samples 混合
             // 等功率权重：w_curr = sin(t·π/2)，w_prev = cos(t·π/2)，满足 w²+w²=1
-            let xfade_len = overlap_samples.min(chunk_len).min(prev_out.len().saturating_sub(
-                chunk_start.saturating_sub(prev_start),
-            ));
+            let xfade_len = overlap_samples.min(chunk_len).min(
+                prev_out
+                    .len()
+                    .saturating_sub(chunk_start.saturating_sub(prev_start)),
+            );
 
             for i in 0..xfade_len {
                 let t = (i as f64 + 0.5) / (xfade_len as f64).max(1.0);
@@ -1323,7 +1344,14 @@ impl NsfHifiganOnnx {
             .collect();
         let has_formant_shift = formant_shifts.iter().any(|s| s.abs() >= 0.5);
         if has_formant_shift {
-            shift_mel_formant(&mut mel_stretched, self.cfg.num_mels, t_new, &formant_shifts, self.cfg.fmin, self.cfg.fmax);
+            shift_mel_formant(
+                &mut mel_stretched,
+                self.cfg.num_mels,
+                t_new,
+                &formant_shifts,
+                self.cfg.fmin,
+                self.cfg.fmax,
+            );
         }
 
         // 5. 构建 F0 [T_new]
@@ -1484,8 +1512,8 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
     // chunk_samples 基于源 PCM 长度（未拉伸）
     let chunk_samples = ((chunk_sec * sr * playback_rate).round() as usize).max(1);
     // overlap_samples 也基于源 PCM
-    let overlap_samples = ((overlap_sec * sr * playback_rate).round() as usize)
-        .min(chunk_samples.saturating_sub(1));
+    let overlap_samples =
+        ((overlap_sec * sr * playback_rate).round() as usize).min(chunk_samples.saturating_sub(1));
 
     // 拉伸后的总目标长度
     let target_total = ((total_samples as f64) / playback_rate).round().max(0.0) as usize;

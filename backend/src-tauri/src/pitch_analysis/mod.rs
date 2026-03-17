@@ -12,9 +12,8 @@ pub(crate) mod analysis;
 pub(crate) mod schedule;
 
 // 公开 API — 供 crate 内其他模块使用
-pub use schedule::maybe_schedule_pitch_orig;
 pub(crate) use analysis::{build_pitch_job, compute_pitch_curve};
-
+pub use schedule::maybe_schedule_pitch_orig;
 
 pub(crate) fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
@@ -206,7 +205,6 @@ pub(crate) fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> 
     out
 }
 
-
 // Task 3.6: PitchProgressPayload for frontend API
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -297,7 +295,8 @@ mod tests {
             source_end_sec: 2.0,
             playback_rate: 1.0,
             fade_in_sec: 0.0,
-            fade_out_sec: 0.0,        };
+            fade_out_sec: 0.0,
+        };
 
         let cache = Arc::new(Mutex::new(ClipPitchCache::new(10)));
         let result = analyze_clip_with_cache(
@@ -321,7 +320,7 @@ mod tests {
         let clips: Vec<Clip> = vec![];
         let tracks_gain = std::collections::HashMap::new();
         let cache = Arc::new(Mutex::new(ClipPitchCache::new(10)));
-        
+
         let result = compute_pitch_curve_parallel(
             &clips,
             &tracks_gain,
@@ -334,11 +333,11 @@ mod tests {
             None,
             false,
         );
-        
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
     }
-    
+
     #[test]
     fn test_compute_pitch_curve_parallel_all_invalid() {
         let clips = vec![
@@ -346,20 +345,20 @@ mod tests {
                 id: "clip1".to_string(),
                 track_id: "track1".to_string(),
                 name: "Invalid 1".to_string(),
-            start_sec: 0.0,
-            length_sec: 4.0,
-            color: "#ff0000".to_string(),
-            source_path: None,
-            duration_sec: None,
-            waveform_preview: None,
-            pitch_range: None,
-            gain: 1.0,
-            muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 4.0,
-            playback_rate: 1.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
+                start_sec: 0.0,
+                length_sec: 4.0,
+                color: "#ff0000".to_string(),
+                source_path: None,
+                duration_sec: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 4.0,
+                playback_rate: 1.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
             },
             Clip {
                 id: "clip2".to_string(),
@@ -381,12 +380,12 @@ mod tests {
                 fade_out_sec: 0.0,
             },
         ];
-        
+
         let mut tracks_gain = std::collections::HashMap::new();
         tracks_gain.insert("track1".to_string(), 1.0);
-        
+
         let cache = Arc::new(Mutex::new(ClipPitchCache::new(10)));
-        
+
         let result = compute_pitch_curve_parallel(
             &clips,
             &tracks_gain,
@@ -399,47 +398,43 @@ mod tests {
             None,
             false,
         );
-        
+
         // Should fail with critical failure (>50% failed)
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Critical failure"));
     }
-    
+
     #[test]
     fn test_compute_pitch_curve_parallel_with_tracker() {
         // Test that progress tracker integration doesn't cause crashes
-        let clips = vec![
-            Clip {
-                id: "clip1".to_string(),
-                track_id: "track1".to_string(),
-                name: "Test Clip".to_string(),
+        let clips = vec![Clip {
+            id: "clip1".to_string(),
+            track_id: "track1".to_string(),
+            name: "Test Clip".to_string(),
             start_sec: 0.0,
             length_sec: 4.0,
-                color: "#ff0000".to_string(),
-                source_path: Some("/nonexistent.wav".to_string()),
-                duration_sec: Some(2.0),
-                waveform_preview: None,
-                pitch_range: None,
-                gain: 1.0,
-                muted: false,
+            color: "#ff0000".to_string(),
+            source_path: Some("/nonexistent.wav".to_string()),
+            duration_sec: Some(2.0),
+            waveform_preview: None,
+            pitch_range: None,
+            gain: 1.0,
+            muted: false,
             source_start_sec: 0.0,
             source_end_sec: 2.0,
             playback_rate: 1.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
-            },
-        ];
-        
+        }];
+
         let mut tracks_gain = std::collections::HashMap::new();
         tracks_gain.insert("track1".to_string(), 1.0);
-        
+
         let cache = Arc::new(Mutex::new(ClipPitchCache::new(10)));
         let tracker = Arc::new(crate::pitch_progress::ProgressTracker::new(
-            &clips,
-            120.0,
-            &cache,
+            &clips, 120.0, &cache,
         ));
-        
+
         let result = compute_pitch_curve_parallel(
             &clips,
             &tracks_gain,
@@ -452,32 +447,32 @@ mod tests {
             Some(&tracker),
             false,
         );
-        
+
         // Should fail (nonexistent file) but not crash
         assert!(result.is_err());
-        
+
         // Progress should be updated (100% since clip completed, even with failure)
         let progress = tracker.get_current_progress();
         assert!(progress >= 0.0 && progress <= 1.0);
     }
-    
+
     #[test]
     fn test_compute_pitch_curve_parallel_mixed_algorithms() {
         // This test verifies that the WORLD/ONNX separation logic works correctly.
         // In a real scenario, WORLD clips would be processed serially and ONNX clips in parallel.
         // Here we just verify the function handles clips with different algorithms without crashing.
-        
+
         // Note: Since we're passing WorldDll as `algo` parameter, all clips will be treated as WORLD clips.
         // In the actual implementation, each clip would have its own algorithm field.
         // For now, this test verifies the separation logic doesn't break the flow.
-        
+
         let clips = vec![
             Clip {
                 id: "world1".to_string(),
                 track_id: "track1".to_string(),
                 name: "WORLD Clip 1".to_string(),
-            start_sec: 0.0,
-            length_sec: 4.0,
+                start_sec: 0.0,
+                length_sec: 4.0,
                 color: "#ff0000".to_string(),
                 source_path: Some("/nonexistent_world.wav".to_string()),
                 duration_sec: Some(2.0),
@@ -485,18 +480,18 @@ mod tests {
                 pitch_range: None,
                 gain: 1.0,
                 muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 2.0,
-            playback_rate: 1.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
+                source_start_sec: 0.0,
+                source_end_sec: 2.0,
+                playback_rate: 1.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
             },
             Clip {
                 id: "world2".to_string(),
                 track_id: "track1".to_string(),
                 name: "WORLD Clip 2".to_string(),
-            start_sec: 4.0,
-            length_sec: 4.0,
+                start_sec: 4.0,
+                length_sec: 4.0,
                 color: "#00ff00".to_string(),
                 source_path: Some("/nonexistent_world2.wav".to_string()),
                 duration_sec: Some(2.0),
@@ -504,19 +499,19 @@ mod tests {
                 pitch_range: None,
                 gain: 1.0,
                 muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 2.0,
-            playback_rate: 1.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
+                source_start_sec: 0.0,
+                source_end_sec: 2.0,
+                playback_rate: 1.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
             },
         ];
-        
+
         let mut tracks_gain = std::collections::HashMap::new();
         tracks_gain.insert("track1".to_string(), 1.0);
-        
+
         let cache = Arc::new(Mutex::new(ClipPitchCache::new(10)));
-        
+
         // Test with WORLD algorithm (all clips will be processed serially)
         let result = compute_pitch_curve_parallel(
             &clips,
@@ -530,10 +525,10 @@ mod tests {
             None,
             false,
         );
-        
+
         // Should fail (all clips will fail due to nonexistent files, 100% > 50%)
         assert!(result.is_err());
-        
+
         // Test with ONNX algorithm (all clips will be processed in parallel)
         let result_onnx = compute_pitch_curve_parallel(
             &clips,
@@ -547,27 +542,27 @@ mod tests {
             None,
             false,
         );
-        
+
         // Should also fail (all clips will fail, 100% > 50%)
         assert!(result_onnx.is_err());
     }
-    
+
     #[test]
     fn test_compare_snapshots_no_old_snapshot() {
         use std::collections::HashMap;
-        
+
         let mut new_clips = HashMap::new();
         new_clips.insert("clip1".to_string(), "key1".to_string());
         new_clips.insert("clip2".to_string(), "key2".to_string());
-        
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(None, &new_snapshot);
-        
+
         assert_eq!(comparison.added_clip_ids.len(), 2);
         assert!(comparison.added_clip_ids.contains(&"clip1".to_string()));
         assert!(comparison.added_clip_ids.contains(&"clip2".to_string()));
@@ -575,161 +570,161 @@ mod tests {
         assert_eq!(comparison.deleted_clip_ids.len(), 0);
         assert_eq!(comparison.unchanged_clip_ids.len(), 0);
     }
-    
+
     #[test]
     fn test_compare_snapshots_added_clips() {
         use std::collections::HashMap;
-        
+
         let mut old_clips = HashMap::new();
         old_clips.insert("clip1".to_string(), "key1".to_string());
-        
+
         let old_snapshot = crate::state::TimelineSnapshot {
             clips: old_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let mut new_clips = HashMap::new();
         new_clips.insert("clip1".to_string(), "key1".to_string());
         new_clips.insert("clip2".to_string(), "key2".to_string());
-        
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(Some(&old_snapshot), &new_snapshot);
-        
+
         assert_eq!(comparison.added_clip_ids, vec!["clip2".to_string()]);
         assert_eq!(comparison.modified_clip_ids.len(), 0);
         assert_eq!(comparison.deleted_clip_ids.len(), 0);
         assert_eq!(comparison.unchanged_clip_ids, vec!["clip1".to_string()]);
     }
-    
+
     #[test]
     fn test_compare_snapshots_modified_clips() {
         use std::collections::HashMap;
-        
+
         let mut old_clips = HashMap::new();
         old_clips.insert("clip1".to_string(), "key1".to_string());
         old_clips.insert("clip2".to_string(), "key2".to_string());
-        
+
         let old_snapshot = crate::state::TimelineSnapshot {
             clips: old_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let mut new_clips = HashMap::new();
         new_clips.insert("clip1".to_string(), "key1".to_string());
         new_clips.insert("clip2".to_string(), "key2_modified".to_string());
-        
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(Some(&old_snapshot), &new_snapshot);
-        
+
         assert_eq!(comparison.added_clip_ids.len(), 0);
         assert_eq!(comparison.modified_clip_ids, vec!["clip2".to_string()]);
         assert_eq!(comparison.deleted_clip_ids.len(), 0);
         assert_eq!(comparison.unchanged_clip_ids, vec!["clip1".to_string()]);
     }
-    
+
     #[test]
     fn test_compare_snapshots_deleted_clips() {
         use std::collections::HashMap;
-        
+
         let mut old_clips = HashMap::new();
         old_clips.insert("clip1".to_string(), "key1".to_string());
         old_clips.insert("clip2".to_string(), "key2".to_string());
-        
+
         let old_snapshot = crate::state::TimelineSnapshot {
             clips: old_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let mut new_clips = HashMap::new();
         new_clips.insert("clip1".to_string(), "key1".to_string());
-        
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(Some(&old_snapshot), &new_snapshot);
-        
+
         assert_eq!(comparison.added_clip_ids.len(), 0);
         assert_eq!(comparison.modified_clip_ids.len(), 0);
         assert_eq!(comparison.deleted_clip_ids, vec!["clip2".to_string()]);
         assert_eq!(comparison.unchanged_clip_ids, vec!["clip1".to_string()]);
     }
-    
+
     #[test]
     fn test_compare_snapshots_global_param_change() {
         use std::collections::HashMap;
-        
+
         let mut old_clips = HashMap::new();
         old_clips.insert("clip1".to_string(), "key1".to_string());
-        
+
         let old_snapshot = crate::state::TimelineSnapshot {
             clips: old_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let mut new_clips = HashMap::new();
         new_clips.insert("clip1".to_string(), "key1".to_string());
-        
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
-            bpm: 140.0,  // BPM changed
+            bpm: 140.0, // BPM changed
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(Some(&old_snapshot), &new_snapshot);
-        
+
         // Clip should be marked as modified due to BPM change
         assert_eq!(comparison.added_clip_ids.len(), 0);
         assert_eq!(comparison.modified_clip_ids, vec!["clip1".to_string()]);
         assert_eq!(comparison.deleted_clip_ids.len(), 0);
         assert_eq!(comparison.unchanged_clip_ids.len(), 0);
     }
-    
+
     #[test]
     fn test_compare_snapshots_mixed_changes() {
         use std::collections::HashMap;
-        
+
         let mut old_clips = HashMap::new();
         old_clips.insert("clip1".to_string(), "key1".to_string());
         old_clips.insert("clip2".to_string(), "key2".to_string());
         old_clips.insert("clip3".to_string(), "key3".to_string());
-        
+
         let old_snapshot = crate::state::TimelineSnapshot {
             clips: old_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let mut new_clips = HashMap::new();
-        new_clips.insert("clip1".to_string(), "key1".to_string());  // unchanged
-        new_clips.insert("clip2".to_string(), "key2_modified".to_string());  // modified
-        new_clips.insert("clip4".to_string(), "key4".to_string());  // added
-        // clip3 deleted
-        
+        new_clips.insert("clip1".to_string(), "key1".to_string()); // unchanged
+        new_clips.insert("clip2".to_string(), "key2_modified".to_string()); // modified
+        new_clips.insert("clip4".to_string(), "key4".to_string()); // added
+                                                                   // clip3 deleted
+
         let new_snapshot = crate::state::TimelineSnapshot {
             clips: new_clips,
             bpm: 120.0,
             frame_period_ms: 5.0,
         };
-        
+
         let comparison = compare_snapshots(Some(&old_snapshot), &new_snapshot);
-        
+
         assert_eq!(comparison.added_clip_ids, vec!["clip4".to_string()]);
         assert_eq!(comparison.modified_clip_ids, vec!["clip2".to_string()]);
         assert_eq!(comparison.deleted_clip_ids, vec!["clip3".to_string()]);

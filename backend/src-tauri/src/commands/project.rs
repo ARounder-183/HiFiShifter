@@ -27,9 +27,8 @@ fn normalize_beats_per_bar(raw: u32) -> u32 {
 
 fn normalize_grid_size(raw: &str) -> String {
     const VALID: [&str; 21] = [
-        "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/1d", "1/2d", "1/4d",
-        "1/8d", "1/16d", "1/32d", "1/64d", "1/1t", "1/2t", "1/4t", "1/8t", "1/16t", "1/32t",
-        "1/64t",
+        "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/1d", "1/2d", "1/4d", "1/8d",
+        "1/16d", "1/32d", "1/64d", "1/1t", "1/2t", "1/4t", "1/8t", "1/16t", "1/32t", "1/64t",
     ];
     if VALID.contains(&raw) {
         return raw.to_string();
@@ -101,17 +100,14 @@ pub(crate) fn save_project_to_path_inner(
     Ok(get_timeline_state_from_ref(state))
 }
 
-
-
-
 pub(super) fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMetaPayload {
     state.project_meta_payload()
 }
 
-
-
-
-pub(super) fn new_project(state: State<'_, AppState>, window: Window) -> crate::models::TimelineStatePayload {
+pub(super) fn new_project(
+    state: State<'_, AppState>,
+    window: Window,
+) -> crate::models::TimelineStatePayload {
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = crate::state::TimelineState::default();
@@ -133,9 +129,6 @@ pub(super) fn new_project(state: State<'_, AppState>, window: Window) -> crate::
     get_timeline_state(state)
 }
 
-
-
-
 pub(super) fn open_project_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp", "json"])
@@ -147,9 +140,6 @@ pub(super) fn open_project_dialog() -> serde_json::Value {
         }
     }
 }
-
-
-
 
 pub(super) fn open_project(
     state: State<'_, AppState>,
@@ -223,9 +213,6 @@ pub(super) fn open_project(
     payload
 }
 
-
-
-
 pub(super) fn save_project(state: State<'_, AppState>, window: Window) -> serde_json::Value {
     let existing_path = {
         let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -237,9 +224,6 @@ pub(super) fn save_project(state: State<'_, AppState>, window: Window) -> serde_
     // No path yet -> Save As
     save_project_as(state, window)
 }
-
-
-
 
 pub(super) fn save_project_as(state: State<'_, AppState>, window: Window) -> serde_json::Value {
     let default_name = {
@@ -260,7 +244,11 @@ pub(super) fn save_project_as(state: State<'_, AppState>, window: Window) -> ser
     }
 }
 
-fn save_project_to_path(state: State<'_, AppState>, window: Window, project_path: String) -> serde_json::Value {
+fn save_project_to_path(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+) -> serde_json::Value {
     match save_project_to_path_inner(state.inner(), &window, project_path.clone()) {
         Ok(timeline) => {
             serde_json::json!({"ok": true, "canceled": false, "path": project_path, "timeline": timeline })
@@ -268,9 +256,6 @@ fn save_project_to_path(state: State<'_, AppState>, window: Window, project_path
         Err(e) => serde_json::json!({"ok": false, "error": e}),
     }
 }
-
-
-
 
 pub(super) fn close_window(window: Window) -> serde_json::Value {
     let _ = window.close();

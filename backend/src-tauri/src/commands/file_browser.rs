@@ -32,12 +32,12 @@ pub struct AudioPreviewData {
 }
 
 /// 支持的音频扩展名（用于前端标记）
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a",
-];
+const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"];
 
 fn _is_audio_extension(ext: &str) -> bool {
-    AUDIO_EXTENSIONS.iter().any(|&e| e.eq_ignore_ascii_case(ext))
+    AUDIO_EXTENSIONS
+        .iter()
+        .any(|&e| e.eq_ignore_ascii_case(ext))
 }
 
 /// 列出指定目录下的文件和子目录
@@ -72,7 +72,9 @@ pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String>
                 .map(|e| e.to_lowercase())
         };
         let modified_time = metadata.modified().ok().and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs_f64())
         });
 
         entries.push(FileEntry {
@@ -144,7 +146,9 @@ fn collect_matching_files(dir: &Path, query: &str, results: &mut Vec<FileEntry>,
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase());
                 let modified_time = metadata.modified().ok().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs_f64())
                 });
                 results.push(FileEntry {
                     name,
@@ -242,8 +246,7 @@ pub(crate) fn read_audio_preview(
 
     let max = max_frames.unwrap_or(480_000) as usize;
 
-    let (sample_rate, channels, samples) =
-        crate::audio_utils::decode_audio_f32_interleaved(path)?;
+    let (sample_rate, channels, samples) = crate::audio_utils::decode_audio_f32_interleaved(path)?;
 
     let total_frames = samples.len() / channels.max(1) as usize;
     let frames_to_use = total_frames.min(max);

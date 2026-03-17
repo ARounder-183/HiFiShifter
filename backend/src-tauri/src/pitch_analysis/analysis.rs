@@ -1,4 +1,4 @@
-﻿// pitch_analysis::analysis — 核心分析流水线
+// pitch_analysis::analysis — 核心分析流水线
 // 包含：快照/diff、单 clip 分析、并行多 clip 分析、音高曲线合成。
 
 use crate::state::{AppState, Clip, PitchAnalysisAlgo, TimelineState};
@@ -7,9 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{
-    hz_to_midi, resample_curve_linear,
-    PitchJob, PitchOrigAnalysisProgressEvent, PitchOrigAnalysisStartedEvent,
-    build_root_pitch_key,
+    build_root_pitch_key, hz_to_midi, resample_curve_linear, PitchJob,
+    PitchOrigAnalysisProgressEvent, PitchOrigAnalysisStartedEvent,
 };
 
 fn build_root_mix_timeline(tl: &TimelineState, root_track_id: &str) -> TimelineState {
@@ -72,15 +71,14 @@ fn build_timeline_snapshot(
     algo: &PitchAnalysisAlgo,
 ) -> crate::state::TimelineSnapshot {
     use std::collections::HashMap;
-    
+
     let mut clip_keys = HashMap::new();
-    
+
     for clip in clips {
         if let Some(source_path) = &clip.source_path {
-            let (file_size, file_mtime) = crate::clip_pitch_cache::get_file_signature(
-                std::path::Path::new(source_path)
-            );
-            
+            let (file_size, file_mtime) =
+                crate::clip_pitch_cache::get_file_signature(std::path::Path::new(source_path));
+
             let key_data = crate::clip_pitch_cache::ClipCacheKey {
                 source_path: source_path.clone(),
                 file_size,
@@ -91,17 +89,18 @@ fn build_timeline_snapshot(
                     PitchAnalysisAlgo::VocalShifterVslib => "vslib",
                     PitchAnalysisAlgo::None => "none",
                     PitchAnalysisAlgo::Unknown => "unknown",
-                }.to_string(),
+                }
+                .to_string(),
                 f0_floor: crate::clip_pitch_cache::quantize_f64(f0_floor, 10.0),
                 f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
                 version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
             };
-            
+
             let cache_key = crate::clip_pitch_cache::generate_clip_cache_key(&key_data);
             clip_keys.insert(clip.id.clone(), cache_key);
         }
     }
-    
+
     crate::state::TimelineSnapshot {
         clips: clip_keys,
         bpm,
@@ -112,10 +111,10 @@ fn build_timeline_snapshot(
 /// Detected change types for incremental refresh
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClipChangeType {
-    Added,      // New clip in timeline
-    Modified,   // Existing clip with changed parameters
-    Deleted,    // Clip removed from timeline
-    Unchanged,  // Clip exists with same cache key
+    Added,     // New clip in timeline
+    Modified,  // Existing clip with changed parameters
+    Deleted,   // Clip removed from timeline
+    Unchanged, // Clip exists with same cache key
 }
 
 /// Result of comparing two timeline snapshots
@@ -146,7 +145,7 @@ fn compare_snapshots(
     new_snapshot: &crate::state::TimelineSnapshot,
 ) -> SnapshotComparison {
     use std::collections::HashSet;
-    
+
     // If no old snapshot exists, all clips are "added" (first analysis)
     let Some(old) = old_snapshot else {
         return SnapshotComparison {
@@ -156,19 +155,19 @@ fn compare_snapshots(
             unchanged_clip_ids: Vec::new(),
         };
     };
-    
+
     // Check for global parameter changes (BPM or frame period)
     let global_params_changed = (old.bpm - new_snapshot.bpm).abs() > 1e-6
         || (old.frame_period_ms - new_snapshot.frame_period_ms).abs() > 1e-6;
-    
+
     let old_ids: HashSet<&String> = old.clips.keys().collect();
     let new_ids: HashSet<&String> = new_snapshot.clips.keys().collect();
-    
+
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
     let mut unchanged = Vec::new();
-    
+
     // Detect added and modified clips
     for (clip_id, new_key) in &new_snapshot.clips {
         if let Some(old_key) = old.clips.get(clip_id) {
@@ -183,14 +182,14 @@ fn compare_snapshots(
             added.push(clip_id.clone());
         }
     }
-    
+
     // Detect deleted clips
     for clip_id in &old_ids {
         if !new_ids.contains(clip_id) {
             deleted.push((*clip_id).clone());
         }
     }
-    
+
     SnapshotComparison {
         added_clip_ids: added,
         modified_clip_ids: modified,
@@ -219,20 +218,20 @@ fn determine_clips_to_analyze<'a>(
     new_snapshot: &crate::state::TimelineSnapshot,
 ) -> (Vec<&'a Clip>, Vec<String>) {
     let comparison = compare_snapshots(old_snapshot, new_snapshot);
-    
+
     // Clips needing analysis: added + modified
     let mut need_analysis_ids: std::collections::HashSet<String> = comparison
         .added_clip_ids
         .into_iter()
         .chain(comparison.modified_clip_ids.into_iter())
         .collect();
-    
+
     // Filter clips that need analysis
     let clips_to_analyze: Vec<&Clip> = clips
         .iter()
         .filter(|clip| need_analysis_ids.contains(&clip.id))
         .collect();
-    
+
     (clips_to_analyze, comparison.unchanged_clip_ids)
 }
 
@@ -302,16 +301,13 @@ fn analyze_clip_with_cache(
 
     eprintln!(
         "[pitch:analyze] clip_id={} source={} duration_sec={:?} fp={:.1}ms algo={:?}",
-        clip.id,
-        source_path,
-        clip.duration_sec,
-        frame_period_ms,
-        algo,
+        clip.id, source_path, clip.duration_sec, frame_period_ms, algo,
     );
 
     // Generate cache key
-    let (file_size, file_mtime) = crate::clip_pitch_cache::get_file_signature(Path::new(source_path));
-    
+    let (file_size, file_mtime) =
+        crate::clip_pitch_cache::get_file_signature(Path::new(source_path));
+
     let algo_str = match algo {
         PitchAnalysisAlgo::WorldDll => "world_dll",
         PitchAnalysisAlgo::NsfHifiganOnnx => "nsf_hifigan_onnx",
@@ -319,7 +315,7 @@ fn analyze_clip_with_cache(
         PitchAnalysisAlgo::None => "none",
         PitchAnalysisAlgo::Unknown => "unknown",
     };
-    
+
     let key_data = crate::clip_pitch_cache::ClipCacheKey {
         source_path: source_path.clone(),
         file_size,
@@ -329,45 +325,56 @@ fn analyze_clip_with_cache(
         f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
         version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
     };
-    
+
     let cache_key = crate::clip_pitch_cache::generate_clip_cache_key(&key_data);
-    
+
     // Query cache
     {
-        let mut cache_guard = cache.lock().map_err(|e| format!("Cache lock error: {}", e))?;
+        let mut cache_guard = cache
+            .lock()
+            .map_err(|e| format!("Cache lock error: {}", e))?;
         if let Some(cached) = cache_guard.get(&cache_key) {
             if debug {
-                eprintln!("clip_pitch_cache: HIT for clip_id={} key={}", clip.id, &cache_key[..16]);
+                eprintln!(
+                    "clip_pitch_cache: HIT for clip_id={} key={}",
+                    clip.id,
+                    &cache_key[..16]
+                );
             }
             return Ok(cached);
         }
         if debug {
-            eprintln!("clip_pitch_cache: MISS for clip_id={} key={}", clip.id, &cache_key[..16]);
+            eprintln!(
+                "clip_pitch_cache: MISS for clip_id={} key={}",
+                clip.id,
+                &cache_key[..16]
+            );
         }
     }
-    
+
     // Cache miss - perform analysis
     let bs = 60.0 / bpm.max(1e-6);
-    
+
     // Decode audio
     let (in_rate, in_channels, pcm) =
         crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))
             .map_err(|e| format!("Failed to decode audio: {}", e))?;
-    
+
     let in_channels_usize = (in_channels as usize).max(1);
     let in_frames = pcm.len() / in_channels_usize;
     if in_frames < 2 {
         return Err("Audio too short".to_string());
     }
-    
+
     // 全量分析策略：分析完整源音频，trim/rate 在组装阶段处理
     // Resample 全量 PCM 到 44100 Hz
-    let segment = crate::mixdown::linear_resample_interleaved(&pcm, in_channels_usize, in_rate, 44100);
+    let segment =
+        crate::mixdown::linear_resample_interleaved(&pcm, in_channels_usize, in_rate, 44100);
     let seg_frames = segment.len() / in_channels_usize;
     if seg_frames < 2 {
         return Err("Resampled audio too short".to_string());
     }
-    
+
     // Convert to mono
     let mut mono_raw: Vec<f64> = Vec::with_capacity(seg_frames);
     for f in 0..seg_frames {
@@ -378,14 +385,14 @@ fn analyze_clip_with_cache(
         }
         mono_raw.push(sum / in_channels_usize as f64);
     }
-    
+
     // Preprocess: remove DC and normalize
     let mut mean = 0.0f64;
     for &v in &mono_raw {
         mean += v;
     }
     mean /= mono_raw.len().max(1) as f64;
-    
+
     let mut max_abs = 0.0f64;
     for &v in &mono_raw {
         let vv = v - mean;
@@ -399,13 +406,13 @@ fn analyze_clip_with_cache(
     } else {
         1.0
     };
-    
+
     let mut mono: Vec<f64> = Vec::with_capacity(mono_raw.len());
     for &v in &mono_raw {
         let vv = (v - mean) * scale;
         mono.push(vv.clamp(-1.0, 1.0));
     }
-    
+
     // Compute F0 using WORLD
     let fs_i32 = 44100i32;
     let prefer = std::env::var("HIFISHIFTER_WORLD_F0")
@@ -413,16 +420,10 @@ fn analyze_clip_with_cache(
         .as_deref()
         .map(|s| s.trim().to_ascii_lowercase())
         .unwrap_or_else(|| "harvest".to_string());
-    
+
     let f0_hz: Vec<f64> = {
         let try_harvest = || {
-            crate::world::compute_f0_hz_harvest(
-                &mono,
-                fs_i32,
-                frame_period_ms,
-                f0_floor,
-                f0_ceil,
-            )
+            crate::world::compute_f0_hz_harvest(&mono, fs_i32, frame_period_ms, f0_floor, f0_ceil)
         };
         let try_dio = || {
             crate::world::compute_f0_hz_dio_stonemask(
@@ -433,26 +434,26 @@ fn analyze_clip_with_cache(
                 f0_ceil,
             )
         };
-        
+
         let res = if prefer == "dio" {
             try_dio().or_else(|_| try_harvest())
         } else {
             try_harvest().or_else(|_| try_dio())
         };
-        
+
         res.map_err(|e| format!("F0 analysis failed: {}", e))?
     };
-    
+
     if f0_hz.len() < 2 {
         return Err("F0 analysis returned too few frames".to_string());
     }
-    
+
     // Convert Hz to MIDI
     let mut midi: Vec<f32> = Vec::with_capacity(f0_hz.len());
     for hz in f0_hz {
         midi.push(hz_to_midi(hz));
     }
-    
+
     if debug {
         eprintln!(
             "clip_pitch_cache: ANALYZED clip_id={} midi_len={} key={}",
@@ -461,14 +462,16 @@ fn analyze_clip_with_cache(
             &cache_key[..16]
         );
     }
-    
+
     // Store in cache
     let result = std::sync::Arc::new(midi);
     {
-        let mut cache_guard = cache.lock().map_err(|e| format!("Cache lock error: {}", e))?;
+        let mut cache_guard = cache
+            .lock()
+            .map_err(|e| format!("Cache lock error: {}", e))?;
         cache_guard.put(cache_key, std::sync::Arc::clone(&result));
     }
-    
+
     Ok(result)
 }
 
@@ -507,7 +510,7 @@ fn process_single_clip(
     let clip_start_sec = clip.start_sec.max(0.0);
     let clip_timeline_len_sec = clip.length_sec.max(0.0);
     let clip_end_sec = clip_start_sec + clip_timeline_len_sec;
-    
+
     let track_gain_value = tracks_gain.get(&clip.track_id).copied().unwrap_or(1.0);
 
     eprintln!(
@@ -516,7 +519,7 @@ fn process_single_clip(
         clip.source_start_sec, clip.source_end_sec,
         clip.playback_rate, track_gain_value,
     );
-    
+
     // Check if clip has valid source
     let Some(_source_path) = clip.source_path.as_ref() else {
         if debug {
@@ -524,12 +527,11 @@ fn process_single_clip(
         }
         return Err(format!("Clip {} has no source path", clip.id));
     };
-    
+
     // Check cache before analysis
     let was_cache_hit = {
-        let (file_size, file_mtime) = crate::clip_pitch_cache::get_file_signature(
-            std::path::Path::new(_source_path)
-        );
+        let (file_size, file_mtime) =
+            crate::clip_pitch_cache::get_file_signature(std::path::Path::new(_source_path));
         let key_data = crate::clip_pitch_cache::ClipCacheKey {
             source_path: _source_path.clone(),
             file_size,
@@ -540,20 +542,21 @@ fn process_single_clip(
                 PitchAnalysisAlgo::VocalShifterVslib => "vslib",
                 PitchAnalysisAlgo::None => "none",
                 PitchAnalysisAlgo::Unknown => "unknown",
-            }.to_string(),
+            }
+            .to_string(),
             f0_floor: crate::clip_pitch_cache::quantize_f64(f0_floor, 10.0),
             f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
             version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
         };
         let cache_key = crate::clip_pitch_cache::generate_clip_cache_key(&key_data);
-        
+
         if let Ok(mut guard) = cache.lock() {
             guard.get(&cache_key).is_some()
         } else {
             false
         }
     };
-    
+
     // Analyze clip (with caching)
     // 在分析开始前，通知 tracker 当前正在处理?clip
     if let Some(tracker) = tracker {
@@ -570,7 +573,7 @@ fn process_single_clip(
         cache,
         debug,
     );
-    
+
     // Update progress
     if let Some(tracker) = tracker {
         let progress = tracker.report_clip_completed(duration_sec, was_cache_hit);
@@ -585,7 +588,7 @@ fn process_single_clip(
             );
         }
     }
-    
+
     // Handle result
     match midi_result {
         Ok(full_midi) => {
@@ -596,7 +599,7 @@ fn process_single_clip(
             } else {
                 1.0
             };
-            
+
             let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
                 frame_period_ms,
@@ -605,11 +608,11 @@ fn process_single_clip(
                 playback_rate,
                 clip_timeline_len_sec,
             ));
-            
+
             // Calculate pre_silence_sec for clip placement
             let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
             let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
-            
+
             // Estimate clip_total_frames (from original audio)
             let clip_total_frames = if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0; // Assuming standard rate
@@ -618,7 +621,7 @@ fn process_single_clip(
                 // Fallback: use midi length as approximation
                 midi.len() * (frame_period_ms / 1000.0 * 44100.0) as usize
             };
-            
+
             Ok(ClipAnalysisResult {
                 clip_id: clip.id.clone(),
                 clip_start_sec,
@@ -673,18 +676,18 @@ fn compute_pitch_curve_parallel(
     debug: bool,
 ) -> Result<Vec<ClipAnalysisResult>, String> {
     use rayon::prelude::*;
-    
+
     if clips.is_empty() {
         return Ok(Vec::new());
     }
-    
+
     let bs = 60.0 / bpm.max(1e-6);
-    
+
     // Separate clips by algorithm: WORLD requires serial processing due to world_dll_mutex
     let (world_clips, onnx_clips): (Vec<&Clip>, Vec<&Clip>) = clips
         .iter()
         .partition(|_clip| matches!(algo, PitchAnalysisAlgo::WorldDll));
-    
+
     if debug {
         eprintln!(
             "compute_pitch_curve_parallel: {} total clips ({} WORLD, {} ONNX/other)",
@@ -693,15 +696,18 @@ fn compute_pitch_curve_parallel(
             onnx_clips.len()
         );
     }
-    
+
     let mut all_results: Vec<Result<ClipAnalysisResult, String>> = Vec::new();
-    
+
     // Process ONNX clips in parallel (no locking constraints)
     if !onnx_clips.is_empty() {
         if debug {
-            eprintln!("  Processing {} ONNX clips in parallel...", onnx_clips.len());
+            eprintln!(
+                "  Processing {} ONNX clips in parallel...",
+                onnx_clips.len()
+            );
         }
-        
+
         // Sort by workload descending for better load balancing
         let mut onnx_sorted: Vec<(&Clip, f64)> = onnx_clips
             .iter()
@@ -710,9 +716,9 @@ fn compute_pitch_curve_parallel(
                 (*clip, duration_sec)
             })
             .collect();
-        
+
         onnx_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         let onnx_results: Vec<Result<ClipAnalysisResult, String>> = onnx_sorted
             .par_iter()
             .map(|(clip, duration_sec)| {
@@ -732,16 +738,16 @@ fn compute_pitch_curve_parallel(
                 )
             })
             .collect();
-        
+
         all_results.extend(onnx_results);
     }
-    
+
     // Process WORLD clips serially (due to world_dll_mutex)
     if !world_clips.is_empty() {
         if debug {
             eprintln!("  Processing {} WORLD clips serially...", world_clips.len());
         }
-        
+
         // Sort by workload descending (not as critical for serial, but consistent)
         let mut world_sorted: Vec<(&Clip, f64)> = world_clips
             .iter()
@@ -749,9 +755,9 @@ fn compute_pitch_curve_parallel(
                 let duration_sec = clip.length_sec.max(0.0);
                 (*clip, duration_sec)
             })
-            .collect();        
+            .collect();
         world_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         for (clip, duration_sec) in world_sorted {
             let result = process_single_clip(
                 &clip,
@@ -770,18 +776,18 @@ fn compute_pitch_curve_parallel(
             all_results.push(result);
         }
     }
-    
+
     // Separate successes and failures
     let mut successes = Vec::new();
     let mut failures = Vec::new();
-    
+
     for result in all_results {
         match result {
             Ok(clip_result) => successes.push(clip_result),
             Err(e) => failures.push(e),
         }
     }
-    
+
     if debug {
         eprintln!(
             "compute_pitch_curve_parallel: {} successes, {} failures",
@@ -789,7 +795,7 @@ fn compute_pitch_curve_parallel(
             failures.len()
         );
     }
-    
+
     // Check failure rate
     let total = successes.len() + failures.len();
     if total > 0 {
@@ -804,7 +810,7 @@ fn compute_pitch_curve_parallel(
             ));
         }
     }
-    
+
     // Return partial results (even if some clips failed, as long as <50% failed)
     if !failures.is_empty() && debug {
         eprintln!(
@@ -813,7 +819,7 @@ fn compute_pitch_curve_parallel(
             successes.len()
         );
     }
-    
+
     Ok(successes)
 }
 
@@ -857,31 +863,22 @@ fn compute_pitch_curve_with_incremental_refresh(
     debug: bool,
 ) -> Result<(Vec<ClipAnalysisResult>, crate::state::TimelineSnapshot), String> {
     let cache = &state.clip_pitch_cache;
-    
+
     // Task 9.1: Query previous snapshot
     let old_snapshot = if let Ok(snapshot_map) = state.pitch_timeline_snapshot.lock() {
         snapshot_map.get(root_track_id).cloned()
     } else {
         None
     };
-    
+
     // Task 9.2: Generate current snapshot
-    let new_snapshot = build_timeline_snapshot(
-        clips,
-        bpm,
-        frame_period_ms,
-        f0_floor,
-        f0_ceil,
-        algo,
-    );
-    
+    let new_snapshot =
+        build_timeline_snapshot(clips, bpm, frame_period_ms, f0_floor, f0_ceil, algo);
+
     // Task 9.3: Compare snapshots to identify changes
-    let (clips_to_analyze, unchanged_clip_ids) = determine_clips_to_analyze(
-        clips,
-        old_snapshot.as_ref(),
-        &new_snapshot,
-    );
-    
+    let (clips_to_analyze, unchanged_clip_ids) =
+        determine_clips_to_analyze(clips, old_snapshot.as_ref(), &new_snapshot);
+
     if debug {
         eprintln!(
             "Incremental refresh: {} clips need analysis, {} unchanged (cached)",
@@ -889,20 +886,26 @@ fn compute_pitch_curve_with_incremental_refresh(
             unchanged_clip_ids.len()
         );
     }
-    
+
     let mut all_results = Vec::new();
-    
+
     // Task 9.4: Analyze only changed clips in parallel
     if !clips_to_analyze.is_empty() {
         // Create progress tracker for changed clips only
         let tracker = std::sync::Arc::new(crate::pitch_progress::ProgressTracker::new(
-            &clips_to_analyze.iter().map(|c| (*c).clone()).collect::<Vec<_>>(),
+            &clips_to_analyze
+                .iter()
+                .map(|c| (*c).clone())
+                .collect::<Vec<_>>(),
             bpm,
             cache,
         ));
-        
+
         let analyzed_results = compute_pitch_curve_parallel(
-            &clips_to_analyze.iter().map(|c| (*c).clone()).collect::<Vec<_>>(),
+            &clips_to_analyze
+                .iter()
+                .map(|c| (*c).clone())
+                .collect::<Vec<_>>(),
             tracks_gain,
             bpm,
             frame_period_ms,
@@ -913,17 +916,17 @@ fn compute_pitch_curve_with_incremental_refresh(
             Some(&tracker),
             debug,
         )?;
-        
+
         all_results.extend(analyzed_results);
     }
-    
+
     // Task 9.5: Load unchanged clips from cache
     let bs = 60.0 / bpm.max(1e-6);
     for clip_id in &unchanged_clip_ids {
         let Some(clip) = clips.iter().find(|c| &c.id == clip_id) else {
             continue;
         };
-        
+
         // Try to load from cache
         let cache_result = analyze_clip_with_cache(
             clip,
@@ -935,14 +938,14 @@ fn compute_pitch_curve_with_incremental_refresh(
             cache,
             debug,
         );
-        
+
         if let Ok(full_midi) = cache_result {
-    let clip_start_sec = clip.start_sec.max(0.0);
-    let clip_timeline_len_sec = clip.length_sec.max(0.0);
+            let clip_start_sec = clip.start_sec.max(0.0);
+            let clip_timeline_len_sec = clip.length_sec.max(0.0);
             let clip_end_sec = clip_start_sec + clip_timeline_len_sec;
-            
+
             let track_gain_value = tracks_gain.get(&clip.track_id).copied().unwrap_or(1.0);
-            
+
             let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
             let playback_rate = if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
                 clip.playback_rate as f64
@@ -950,7 +953,7 @@ fn compute_pitch_curve_with_incremental_refresh(
                 1.0
             };
             let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
-            
+
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
             let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
@@ -960,14 +963,14 @@ fn compute_pitch_curve_with_incremental_refresh(
                 playback_rate,
                 clip_timeline_len_sec,
             ));
-            
+
             let clip_total_frames = if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0;
                 (dur * in_rate).round().max(0.0) as usize
             } else {
                 midi.len() * (frame_period_ms / 1000.0 * 44100.0) as usize
             };
-            
+
             all_results.push(ClipAnalysisResult {
                 clip_id: clip.id.clone(),
                 clip_start_sec,
@@ -980,7 +983,7 @@ fn compute_pitch_curve_with_incremental_refresh(
             });
         }
     }
-    
+
     // Task 9.6: Results are already merged in all_results
     if debug {
         eprintln!(
@@ -990,7 +993,7 @@ fn compute_pitch_curve_with_incremental_refresh(
             unchanged_clip_ids.len()
         );
     }
-    
+
     // Task 9.7: Update snapshot (will be done in caller)
     Ok((all_results, new_snapshot))
 }
@@ -1022,7 +1025,6 @@ fn clip_weight_at_frame(
     if gain <= 0.0 {
         return 0.0;
     }
-
 
     let fade_in_frames = (clip.fade_in_sec.max(0.0) * sample_rate as f64)
         .round()
@@ -1089,17 +1091,25 @@ fn fuse_clip_pitches_optimized(
     if clip_results.is_empty() {
         return vec![0.0; target_frames];
     }
-    
+
     let mut out = vec![0.0f32; target_frames];
-    
+
     // Task 10.1-10.2: Build coverage table
     let mut coverage: Vec<Option<Vec<usize>>> = vec![None; target_frames];
-    
-    for (clip_idx, result) in clip_results.iter().enumerate() {
-        let start_frame = ((result.clip_start_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
-        let end_frame = ((result.clip_end_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
 
-        let nonzero = result.midi.iter().filter(|&&v| v.is_finite() && v > 0.0).count();
+    for (clip_idx, result) in clip_results.iter().enumerate() {
+        let start_frame = ((result.clip_start_sec * 1000.0) / frame_period_ms)
+            .round()
+            .max(0.0) as usize;
+        let end_frame = ((result.clip_end_sec * 1000.0) / frame_period_ms)
+            .round()
+            .max(0.0) as usize;
+
+        let nonzero = result
+            .midi
+            .iter()
+            .filter(|&&v| v.is_finite() && v > 0.0)
+            .count();
         eprintln!(
             "[pitch:fuse] clip[{}] id={} start={:.3}s end={:.3}s pre_silence={:.3}s midi_len={} nonzero={} start_frame={} end_frame={}",
             clip_idx, result.clip_id,
@@ -1108,12 +1118,12 @@ fn fuse_clip_pitches_optimized(
             result.midi.len(), nonzero,
             start_frame, end_frame,
         );
-        
+
         for frame in start_frame..end_frame.min(target_frames) {
             coverage[frame].get_or_insert_with(Vec::new).push(clip_idx);
         }
     }
-    
+
     {
         let covered_frames = coverage.iter().filter(|c| c.is_some()).count();
         eprintln!(
@@ -1125,26 +1135,26 @@ fn fuse_clip_pitches_optimized(
             (covered_frames as f64 / target_frames.max(1) as f64) * 100.0
         );
     }
-    
+
     // Task 10.3-10.7: Optimized fusion loop with coverage table
     let mut last_winner: Option<String> = None;
     let hysteresis_ratio: f32 = 1.10;
-    
+
     for (frame_idx, out_v) in out.iter_mut().enumerate() {
         let abs_time_sec = (frame_idx as f64) * frame_period_ms / 1000.0;
-        
+
         // Task 10.4: Fast-path for empty frames
         let Some(active_clips) = &coverage[frame_idx] else {
             *out_v = 0.0;
             continue;
         };
-        
+
         // Task 10.5: Fast-path for single-clip frames
         if active_clips.len() == 1 {
             let result = &clip_results[active_clips[0]];
             let local_sec = abs_time_sec - result.clip_start_sec;
             let local_frame = ((local_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
-            
+
             if let Some(&pitch) = result.midi.get(local_frame) {
                 if pitch.is_finite() && pitch > 0.0 {
                     *out_v = pitch;
@@ -1152,36 +1162,36 @@ fn fuse_clip_pitches_optimized(
                     continue;
                 }
             }
-            
+
             *out_v = 0.0;
             continue;
         }
-        
+
         // Task 10.6: Multi-clip overlap - full winner-take-most
         let mut best_id: Option<&str> = None;
         let mut best_weight: f32 = 0.0;
         let mut best_pitch: f32 = 0.0;
-        
+
         for &clip_idx in active_clips {
             let result = &clip_results[clip_idx];
-            
+
             // Get pitch value
             let local_sec = abs_time_sec - result.clip_start_sec;
             let local_frame = ((local_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
             let p = result.midi.get(local_frame).copied().unwrap_or(0.0);
-            
+
             if !(p.is_finite() && p > 0.0) {
                 continue;
             }
-            
+
             // Find matching clip for weight calculation
             let Some(clip) = clips.iter().find(|c| c.id == result.clip_id) else {
                 continue;
             };
-            
+
             // Calculate weight with fade semantics
             let local_in_clip_frames = ((local_sec * 44100.0).round().max(0.0)) as usize;
-            
+
             let w = clip_weight_at_frame(
                 clip,
                 bpm,
@@ -1192,32 +1202,36 @@ fn fuse_clip_pitches_optimized(
                 local_in_clip_frames,
                 result.track_gain_value,
             );
-            
+
             if w <= 0.0 {
                 continue;
             }
-            
+
             if w > best_weight {
                 best_weight = w;
                 best_id = Some(result.clip_id.as_str());
                 best_pitch = p;
             }
         }
-        
+
         // Task 10.7: Apply hysteresis
         if let Some(prev_id) = last_winner.as_deref() {
             if let Some(best_id_now) = best_id {
                 if prev_id != best_id_now {
                     // Recompute previous winner's weight
                     if let Some(result) = clip_results.iter().find(|r| r.clip_id == prev_id) {
-                        if abs_time_sec >= result.clip_start_sec && abs_time_sec < result.clip_end_sec {
+                        if abs_time_sec >= result.clip_start_sec
+                            && abs_time_sec < result.clip_end_sec
+                        {
                             let local_sec = abs_time_sec - result.clip_start_sec;
-                            let local_frame = ((local_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
+                            let local_frame =
+                                ((local_sec * 1000.0) / frame_period_ms).round().max(0.0) as usize;
                             let prev_pitch = result.midi.get(local_frame).copied().unwrap_or(0.0);
-                            
+
                             if prev_pitch > 0.0 {
                                 if let Some(clip) = clips.iter().find(|c| c.id == prev_id) {
-                                    let local_in_clip_frames = ((local_sec * 44100.0).round().max(0.0)) as usize;
+                                    let local_in_clip_frames =
+                                        ((local_sec * 44100.0).round().max(0.0)) as usize;
                                     let prev_weight = clip_weight_at_frame(
                                         clip,
                                         bpm,
@@ -1228,9 +1242,11 @@ fn fuse_clip_pitches_optimized(
                                         local_in_clip_frames,
                                         result.track_gain_value,
                                     );
-                                    
+
                                     // Stick with previous if new winner isn't significantly better
-                                    if prev_weight > 0.0 && best_weight < prev_weight * hysteresis_ratio {
+                                    if prev_weight > 0.0
+                                        && best_weight < prev_weight * hysteresis_ratio
+                                    {
                                         *out_v = prev_pitch;
                                         continue;
                                     }
@@ -1241,7 +1257,7 @@ fn fuse_clip_pitches_optimized(
                 }
             }
         }
-        
+
         // Commit winner
         if best_weight > 0.0 {
             *out_v = best_pitch;
@@ -1255,17 +1271,18 @@ fn fuse_clip_pitches_optimized(
         let nonzero = out.iter().filter(|&&v| v.is_finite() && v > 0.0).count();
         eprintln!(
             "[pitch:fuse] result: {}/{} frames ({:.1}%) have pitch",
-            nonzero, out.len(),
+            nonzero,
+            out.len(),
             (nonzero as f64 / out.len().max(1) as f64) * 100.0
         );
     }
-    
+
     out
 }
 
 pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f32)) -> Vec<f32> {
     use std::sync::Arc;
-    
+
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
 
     on_progress(0.02);
@@ -1357,8 +1374,8 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         };
 
         // Timeline placement.
-    let clip_start_sec = clip.start_sec.max(0.0);
-    let clip_timeline_len_sec = clip.length_sec.max(0.0);
+        let clip_start_sec = clip.start_sec.max(0.0);
+        let clip_timeline_len_sec = clip.length_sec.max(0.0);
         if !(clip_timeline_len_sec.is_finite() && clip_timeline_len_sec > 0.0) {
             continue;
         }
@@ -1498,7 +1515,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
         // Time-align: analysis output is on the segment timeline. We need it in clip timeline time.
         // For now, resample to the clip's timeline length in frames.
-        
+
         // DEBUG: Check for time alignment issues that cause pitch curve speed mismatch
         let actual_audio_sec = seg_frames as f64 / 44100.0;
         let clip_frames_from_timeline = ((clip_timeline_len_sec * 1000.0) / frame_period_tl_ms)
@@ -1508,7 +1525,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
             .round()
             .max(1.0) as usize;
         let ratio = actual_audio_sec / clip_timeline_len_sec.max(1e-9);
-        
+
         // ?playback_rate != 1 时，actual_audio_sec ?clip_timeline_len_sec 不同是正常的
         // （actual_audio_sec ?clip_timeline_len_sec × playback_rate），不应被当作错?
         if debug {
@@ -1527,11 +1544,11 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
                 midi.len(),
             );
         }
-        
+
         // 始终使用 timeline 帧数：源时域?F0 曲线需?resample ?timeline 时域
         // 这样 pitch_orig 中每帧对应的就是 timeline 上的 frame_period 步进
         let clip_frames = clip_frames_from_timeline;
-        
+
         let midi = resample_curve_linear(&midi, clip_frames);
 
         let tg = track_gain.get(&clip.track_id).copied().unwrap_or(1.0);
@@ -1589,4 +1606,3 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
     out
 }
-

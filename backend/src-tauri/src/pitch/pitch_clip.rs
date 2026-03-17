@@ -1,8 +1,8 @@
 use crate::state::{Clip, TimelineState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 // ── 全局 clip pitch 分析进度状态 ─────────────────────────────────────────────
@@ -188,7 +188,9 @@ fn file_sig(path: &Path) -> (u64, u64) {
 
     // 先查缓存
     {
-        let cache = global_file_sig_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let cache = global_file_sig_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get(&path_buf) {
             if entry.fetched_at.elapsed().as_secs() < TTL_SECS {
                 return entry.sig;
@@ -201,8 +203,16 @@ fn file_sig(path: &Path) -> (u64, u64) {
         Ok(m) => m,
         Err(_) => {
             // 文件不存在，缓存 (0,0) 并返回
-            let mut cache = global_file_sig_cache().lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(path_buf, FileSigEntry { sig: (0, 0), fetched_at: Instant::now() });
+            let mut cache = global_file_sig_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.insert(
+                path_buf,
+                FileSigEntry {
+                    sig: (0, 0),
+                    fetched_at: Instant::now(),
+                },
+            );
             return (0, 0);
         }
     };
@@ -215,8 +225,16 @@ fn file_sig(path: &Path) -> (u64, u64) {
         .unwrap_or(0);
     let sig = (len, mtime_ms);
 
-    let mut cache = global_file_sig_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.insert(path_buf, FileSigEntry { sig, fetched_at: Instant::now() });
+    let mut cache = global_file_sig_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.insert(
+        path_buf,
+        FileSigEntry {
+            sig,
+            fetched_at: Instant::now(),
+        },
+    );
     sig
 }
 
@@ -365,16 +383,19 @@ pub fn schedule_clip_pitch_jobs(
     app_handle: Option<&tauri::AppHandle>,
     out_rate: u32,
 ) {
-    eprintln!("[pitch_clip] schedule_clip_pitch_jobs called, clips={}, app_handle={}",
-        tl.clips.len(), app_handle.is_some());
+    eprintln!(
+        "[pitch_clip] schedule_clip_pitch_jobs called, clips={}, app_handle={}",
+        tl.clips.len(),
+        app_handle.is_some()
+    );
 
     if !crate::world::is_available() {
         eprintln!("[pitch_clip] WORLD not available, skipping");
         return;
     }
 
-    use tauri::Emitter;
     use crate::pitch_analysis::PitchOrigAnalysisProgressEvent;
+    use tauri::Emitter;
 
     // 收集需要计算的 clip 快照（避免持锁期间做耗时操作）
     let frame_period_ms = 5.0f64;
@@ -399,7 +420,10 @@ pub fn schedule_clip_pitch_jobs(
             }
         };
         if !file_exists_cached(Path::new(source_path)) {
-            eprintln!("[pitch_clip] clip '{}' skipped: file not found: {}", clip.id, source_path);
+            eprintln!(
+                "[pitch_clip] clip '{}' skipped: file not found: {}",
+                clip.id, source_path
+            );
             continue;
         }
 
@@ -413,13 +437,21 @@ pub fn schedule_clip_pitch_jobs(
                 .map(|t| t.compose_enabled)
                 .unwrap_or(false);
             if !compose_enabled {
-                eprintln!("[pitch_clip] clip '{}' skipped: compose_enabled=false for root '{}'", clip.id, root_id);
+                eprintln!(
+                    "[pitch_clip] clip '{}' skipped: compose_enabled=false for root '{}'",
+                    clip.id, root_id
+                );
                 continue;
             }
         }
 
         // 尝试构建 key
-        let ck = match build_clip_pitch_key(tl, clip, &tl.resolve_root_track_id(&clip.track_id).unwrap_or_default(), frame_period_ms) {
+        let ck = match build_clip_pitch_key(
+            tl,
+            clip,
+            &tl.resolve_root_track_id(&clip.track_id).unwrap_or_default(),
+            frame_period_ms,
+        ) {
             Some(k) => k,
             None => continue,
         };
@@ -428,10 +460,16 @@ pub fn schedule_clip_pitch_jobs(
         {
             let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
             if cache.contains_key(&ck.key) {
-                eprintln!("[pitch_clip] clip '{}' ({}) cache HIT (shared key), skipping", clip.name, clip.id);
+                eprintln!(
+                    "[pitch_clip] clip '{}' ({}) cache HIT (shared key), skipping",
+                    clip.name, clip.id
+                );
                 continue;
             }
-            eprintln!("[pitch_clip] clip '{}' ({}) cache MISS, will analyze", clip.name, clip.id);
+            eprintln!(
+                "[pitch_clip] clip '{}' ({}) cache MISS, will analyze",
+                clip.name, clip.id
+            );
         }
 
         // inflight 去重：以内容哈希为 key，相同源文件只允许一个分析任务
@@ -439,7 +477,10 @@ pub fn schedule_clip_pitch_jobs(
         let should_spawn = {
             let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
             if set.contains(&inflight_key) {
-                eprintln!("[pitch_clip] clip '{}' ({}) already inflight, skipping", clip.name, clip.id);
+                eprintln!(
+                    "[pitch_clip] clip '{}' ({}) already inflight, skipping",
+                    clip.name, clip.id
+                );
                 false
             } else {
                 set.insert(inflight_key.clone());
@@ -474,10 +515,14 @@ pub fn schedule_clip_pitch_jobs(
 
     // 发送分析开始事件
     if let Some(app) = app_handle {
-        let root_track_id = pending_jobs.first()
+        let root_track_id = pending_jobs
+            .first()
             .map(|j| j.root_track_id.clone())
             .unwrap_or_default();
-        eprintln!("[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'", root_track_id);
+        eprintln!(
+            "[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'",
+            root_track_id
+        );
         let r1 = app.emit(
             "pitch_orig_analysis_started",
             crate::pitch_analysis::PitchOrigAnalysisStartedEvent {
@@ -485,10 +530,16 @@ pub fn schedule_clip_pitch_jobs(
                 key: String::new(),
             },
         );
-        eprintln!("[pitch_clip] pitch_orig_analysis_started emit result: {:?}", r1);
+        eprintln!(
+            "[pitch_clip] pitch_orig_analysis_started emit result: {:?}",
+            r1
+        );
         // 发送初始进度（0%，显示第一个 clip 名称）
         let first_clip_name = pending_jobs.first().map(|j| j.clip.name.clone());
-        eprintln!("[pitch_clip] emitting initial progress 0/{}, first_clip={:?}", total, first_clip_name);
+        eprintln!(
+            "[pitch_clip] emitting initial progress 0/{}, first_clip={:?}",
+            total, first_clip_name
+        );
         let r2 = app.emit(
             "pitch_orig_analysis_progress",
             PitchOrigAnalysisProgressEvent {
@@ -511,25 +562,33 @@ pub fn schedule_clip_pitch_jobs(
 
         std::thread::spawn(move || {
             // 通知进度：开始分析此 clip
-            eprintln!("[pitch_clip] thread: starting analysis for clip '{}'", job.clip.name);
+            eprintln!(
+                "[pitch_clip] thread: starting analysis for clip '{}'",
+                job.clip.name
+            );
             global_batch_state().set_current(Some(job.clip.name.clone()));
 
-            let midi = compute_clip_pitch_midi(
-                &tl_clone,
-                &job.clip,
-                &job.root_track_id,
-                frame_period_ms,
-            );
+            let midi =
+                compute_clip_pitch_midi(&tl_clone, &job.clip, &job.root_track_id, frame_period_ms);
 
             // 完成一个 clip，更新进度
             let completed = global_batch_state().complete_one();
             global_batch_state().set_current(None);
-            eprintln!("[pitch_clip] thread: clip '{}' analysis done, midi={}, completed={}/{}",
-                job.clip.name, midi.is_some(), completed, total);
+            eprintln!(
+                "[pitch_clip] thread: clip '{}' analysis done, midi={}, completed={}/{}",
+                job.clip.name,
+                midi.is_some(),
+                completed,
+                total
+            );
 
             // 发送进度事件
             if let Some(app) = &app_handle_clone {
-                let progress = if total == 0 { 1.0 } else { completed as f32 / total as f32 };
+                let progress = if total == 0 {
+                    1.0
+                } else {
+                    completed as f32 / total as f32
+                };
                 let r = app.emit(
                     "pitch_orig_analysis_progress",
                     PitchOrigAnalysisProgressEvent {
@@ -540,7 +599,10 @@ pub fn schedule_clip_pitch_jobs(
                         total_clips: total,
                     },
                 );
-                eprintln!("[pitch_clip] thread: progress emit {}/{} result: {:?}", completed, total, r);
+                eprintln!(
+                    "[pitch_clip] thread: progress emit {}/{} result: {:?}",
+                    completed, total, r
+                );
             } else {
                 eprintln!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
             }
@@ -559,15 +621,22 @@ pub fn schedule_clip_pitch_jobs(
                 store_clip_pitch_cache(cached);
                 // 通知引擎缓存已就绪，触发 snapshot rebuild。
                 // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
-                let sharing_clip_ids: Vec<String> = tl_clone.clips.iter()
+                let sharing_clip_ids: Vec<String> = tl_clone
+                    .clips
+                    .iter()
                     .filter_map(|c| {
-                        let root = tl_clone.resolve_root_track_id(&c.track_id).unwrap_or_default();
+                        let root = tl_clone
+                            .resolve_root_track_id(&c.track_id)
+                            .unwrap_or_default();
                         build_clip_pitch_key(&tl_clone, c, &root, frame_period_ms)
                             .filter(|other_ck| other_ck.key == job.ck.key)
                             .map(|_| c.id.clone())
                     })
                     .collect();
-                eprintln!("[pitch_clip] thread: notifying {} clip(s) sharing content key", sharing_clip_ids.len());
+                eprintln!(
+                    "[pitch_clip] thread: notifying {} clip(s) sharing content key",
+                    sharing_clip_ids.len()
+                );
                 for cid in sharing_clip_ids {
                     let _ = tx.send(crate::audio_engine::types::EngineCommand::ClipPitchReady {
                         clip_id: cid,
@@ -577,7 +646,10 @@ pub fn schedule_clip_pitch_jobs(
 
             // 所有 clip 完成后，重置全局进度状态
             if completed >= total {
-                eprintln!("[pitch_clip] thread: all {} clips done, resetting batch state", total);
+                eprintln!(
+                    "[pitch_clip] thread: all {} clips done, resetting batch state",
+                    total
+                );
                 global_batch_state().reset(0);
             }
         });
@@ -769,8 +841,11 @@ pub fn trim_and_resample_midi(
         eprintln!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
              start_frame={} end_frame={} → empty",
-            source_start_sec, source_end_sec, full_midi.len(),
-            src_start_frame, src_end_frame,
+            source_start_sec,
+            source_end_sec,
+            full_midi.len(),
+            src_start_frame,
+            src_end_frame,
         );
         return Vec::new();
     }
@@ -778,9 +853,7 @@ pub fn trim_and_resample_midi(
     let trimmed = &full_midi[src_start_frame..src_end_frame];
 
     // 按 1/playback_rate 重采样到 clip timeline 长度
-    let target_frames = ((clip_timeline_len_sec * 1000.0) / fp)
-        .round()
-        .max(1.0) as usize;
+    let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，
     // 避免前端 sourceEndSec 超出源文件实际时长导致曲线被不合理拉伸。
@@ -788,7 +861,8 @@ pub fn trim_and_resample_midi(
     let target_frames = if rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
         eprintln!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
-            target_frames, trimmed.len(),
+            target_frames,
+            trimmed.len(),
         );
         trimmed.len()
     } else {
@@ -798,9 +872,14 @@ pub fn trim_and_resample_midi(
     eprintln!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
          full_midi_len={} trimmed=[{}..{}]={} → target_frames={}",
-        source_start_sec, source_end_sec, playback_rate,
-        clip_timeline_len_sec, full_midi.len(),
-        src_start_frame, src_end_frame, trimmed.len(),
+        source_start_sec,
+        source_end_sec,
+        playback_rate,
+        clip_timeline_len_sec,
+        full_midi.len(),
+        src_start_frame,
+        src_end_frame,
+        trimmed.len(),
         target_frames,
     );
 
@@ -812,7 +891,9 @@ pub fn trim_and_resample_midi(
 /// 下次 `schedule_clip_pitch_jobs` 时会重新提交检测任务。
 pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-    let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else { return };
+    let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else {
+        return;
+    };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.remove(&ck.key);
 }
@@ -822,7 +903,9 @@ pub fn invalidate_clip_pitch_cache(tl: &TimelineState, clip: &Clip) {
 /// schedule_clip_pitch_jobs 不会因为残留的 inflight 标记而跳过该 clip。
 pub fn clear_clip_inflight(tl: &TimelineState, clip: &Clip) {
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-    let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else { return };
+    let Some(ck) = build_clip_pitch_key(tl, clip, &root, 5.0) else {
+        return;
+    };
     let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
     set.remove(&ck.key);
 }

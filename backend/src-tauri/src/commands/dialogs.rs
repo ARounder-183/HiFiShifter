@@ -1,6 +1,3 @@
-
-
-
 pub(super) fn open_audio_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
         .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "m4a"])
@@ -30,9 +27,6 @@ pub(super) fn open_audio_dialog_multi() -> serde_json::Value {
         }
     }
 }
-
-
-
 
 pub(super) fn pick_output_path() -> serde_json::Value {
     let picked = rfd::FileDialog::new()

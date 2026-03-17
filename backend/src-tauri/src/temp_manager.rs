@@ -107,11 +107,7 @@ fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
                 removed += 1;
             }
             Err(e) => {
-                eprintln!(
-                    "[temp_manager] 清理失败: {} — {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("[temp_manager] 清理失败: {} — {}", path.display(), e);
             }
         }
     }

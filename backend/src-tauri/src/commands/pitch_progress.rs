@@ -18,8 +18,10 @@ pub(super) fn get_pitch_analysis_progress(
     }
 
     // 回退到旧的 pitch_analysis_progress（单 clip 路径）
-    let progress = state.pitch_analysis_progress.read()
+    let progress = state
+        .pitch_analysis_progress
+        .read()
         .map_err(|e| format!("Failed to read progress: {}", e))?;
-    
+
     Ok(progress.as_ref().map(|p| PitchProgressPayload::from(p)))
 }

@@ -1,8 +1,8 @@
 //! 基于 WORLD 声码器的渲染器实现。
 
-use crate::state::SynthPipelineKind;
-use super::traits::{Renderer, RenderContext, RendererCapabilities};
+use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
+use crate::state::SynthPipelineKind;
 
 /// 基于 WORLD 声码器的渲染器。
 pub struct WorldRenderer;
@@ -49,7 +49,11 @@ impl Renderer for WorldRenderer {
                     None => orig,
                 };
                 let shift = (target - orig).clamp(-24.0, 24.0);
-                if shift.is_finite() { shift } else { 0.0 }
+                if shift.is_finite() {
+                    shift
+                } else {
+                    0.0
+                }
             },
         )
     }

@@ -31,15 +31,27 @@ pub fn edit_midi_at_time_or_none(
     let e0 = pitch_edit.get(i0).copied().unwrap_or(0.0) as f64;
     let e1 = pitch_edit.get(i1).copied().unwrap_or(0.0) as f64;
 
-    let e0 = if e0.is_finite() && e0 > 0.0 { Some(e0) } else { None };
-    let e1 = if e1.is_finite() && e1 > 0.0 { Some(e1) } else { None };
+    let e0 = if e0.is_finite() && e0 > 0.0 {
+        Some(e0)
+    } else {
+        None
+    };
+    let e1 = if e1.is_finite() && e1 > 0.0 {
+        Some(e1)
+    } else {
+        None
+    };
 
     match (e0, e1) {
         (None, None) => None,
         (Some(v), None) | (None, Some(v)) => Some(v),
         (Some(a), Some(b)) => {
             let v = a + (b - a) * frac;
-            if v.is_finite() && v > 0.0 { Some(v) } else { None }
+            if v.is_finite() && v > 0.0 {
+                Some(v)
+            } else {
+                None
+            }
         }
     }
 }
@@ -76,10 +88,20 @@ pub fn clip_midi_at_time(
 
     let mut a = if a.is_finite() && a > 0.0 { a } else { 0.0 };
     let mut b = if b.is_finite() && b > 0.0 { b } else { 0.0 };
-    if a <= 0.0 && b > 0.0 { a = b; }
-    if b <= 0.0 && a > 0.0 { b = a; }
-    if a <= 0.0 || b <= 0.0 { return 0.0; }
+    if a <= 0.0 && b > 0.0 {
+        a = b;
+    }
+    if b <= 0.0 && a > 0.0 {
+        b = a;
+    }
+    if a <= 0.0 || b <= 0.0 {
+        return 0.0;
+    }
 
     let v = a + (b - a) * frac;
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }

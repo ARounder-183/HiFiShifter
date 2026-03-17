@@ -9,9 +9,9 @@
 //! 两条链路切换时无需重新分析，直接复用已有的 `clip_midi`。
 //! 若 `clip_midi` 为空（Harvest 尚未完成），则跳过推理并返回原始 PCM。
 
-use crate::state::SynthPipelineKind;
-use super::traits::{Renderer, RenderContext, RendererCapabilities};
+use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
+use crate::state::SynthPipelineKind;
 
 /// 基于 NSF-HiFiGAN ONNX 的渲染器。
 pub struct HiFiGanRenderer;
@@ -81,7 +81,7 @@ impl HiFiGanRenderer {
         let seg_end_frame = (ctx.seg_end_sec * sr as f64).round().max(0.0) as u64;
         let curves_snapshot = crate::pitch_editing::PitchCurvesSnapshot {
             frame_period_ms: fp,
-            pitch_orig: vec![],  // 离线路径不需要 pitch_orig 参与 hash
+            pitch_orig: vec![], // 离线路径不需要 pitch_orig 参与 hash
             pitch_edit: pitch_edit.to_vec(),
         };
         let mut extra_curves = std::collections::HashMap::new();
@@ -128,11 +128,17 @@ impl HiFiGanRenderer {
         // 构造共振峰偏移回调
         let formant_curve_owned: Option<Vec<f32>> = formant_shift_curve.cloned();
         let formant_shift_fn = move |abs_time_sec: f64| -> f32 {
-            let Some(ref curve) = formant_curve_owned else { return 0.0 };
-            if curve.is_empty() { return 0.0; }
+            let Some(ref curve) = formant_curve_owned else {
+                return 0.0;
+            };
+            if curve.is_empty() {
+                return 0.0;
+            }
             let fp_local = fp.max(0.1);
             let idx_f = (abs_time_sec.max(0.0) * 1000.0) / fp_local;
-            if !idx_f.is_finite() { return 0.0; }
+            if !idx_f.is_finite() {
+                return 0.0;
+            }
             let i0 = idx_f.floor().max(0.0) as usize;
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
@@ -156,7 +162,11 @@ impl HiFiGanRenderer {
                     Some(v) => v,
                     None => orig,
                 };
-                if target.is_finite() && target > 0.0 { target } else { 0.0 }
+                if target.is_finite() && target > 0.0 {
+                    target
+                } else {
+                    0.0
+                }
             },
             formant_shift_fn,
             chunk_sec,
@@ -219,11 +229,17 @@ impl HiFiGanRenderer {
         // 构造共振峰偏移回调
         let formant_curve_owned: Option<Vec<f32>> = formant_shift_curve.cloned();
         let formant_shift_fn = move |abs_time_sec: f64| -> f32 {
-            let Some(ref curve) = formant_curve_owned else { return 0.0 };
-            if curve.is_empty() { return 0.0; }
+            let Some(ref curve) = formant_curve_owned else {
+                return 0.0;
+            };
+            if curve.is_empty() {
+                return 0.0;
+            }
             let fp_local = fp.max(0.1);
             let idx_f = (abs_time_sec.max(0.0) * 1000.0) / fp_local;
-            if !idx_f.is_finite() { return 0.0; }
+            if !idx_f.is_finite() {
+                return 0.0;
+            }
             let i0 = idx_f.floor().max(0.0) as usize;
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
@@ -246,7 +262,11 @@ impl HiFiGanRenderer {
                     Some(v) => v,
                     None => orig,
                 };
-                if target.is_finite() && target > 0.0 { target } else { 0.0 }
+                if target.is_finite() && target > 0.0 {
+                    target
+                } else {
+                    0.0
+                }
             },
             formant_shift_fn,
             chunk_sec,

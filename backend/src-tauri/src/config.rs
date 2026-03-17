@@ -1,6 +1,6 @@
+use crate::project::CustomScale;
 use std::fs;
 use std::path::Path;
-use crate::project::CustomScale;
 
 /// UI 设置（持久化到 app_config.json）
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

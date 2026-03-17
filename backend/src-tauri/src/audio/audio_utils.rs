@@ -144,8 +144,8 @@ fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<
 
 pub struct WavInfo {
     pub sample_rate: u32,
-    pub total_frames: u64,      // 精确的frame总数
-    pub duration_sec: f64,       // 兼容性保留，从frames计算
+    pub total_frames: u64, // 精确的frame总数
+    pub duration_sec: f64, // 兼容性保留，从frames计算
     pub waveform_preview: Vec<f32>,
 }
 
@@ -198,7 +198,12 @@ fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
     let format = probed.format;
     let track = format.default_track()?;
@@ -270,8 +275,12 @@ fn compute_minmax_peaks_hound(
         ($ch_min:expr, $ch_max:expr) => {{
             let cmin = $ch_min;
             let cmax = $ch_max;
-            if cmin < acc_min { acc_min = cmin; }
-            if cmax > acc_max { acc_max = cmax; }
+            if cmin < acc_min {
+                acc_min = cmin;
+            }
+            if cmax > acc_max {
+                acc_max = cmax;
+            }
             frame_count += 1;
             if frame_count >= hop {
                 min.push(if acc_min.is_finite() { acc_min } else { 0.0 });
@@ -297,8 +306,12 @@ fn compute_minmax_peaks_hound(
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
                         let v = x as f32 / i16::MAX as f32;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -317,8 +330,12 @@ fn compute_minmax_peaks_hound(
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
                         let v = x as f32 / denom;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -336,8 +353,12 @@ fn compute_minmax_peaks_hound(
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
                         let v = x as f32 / i32::MAX as f32;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -354,8 +375,12 @@ fn compute_minmax_peaks_hound(
                     let mut ch_min = f32::INFINITY;
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
-                        if x < ch_min { ch_min = x; }
-                        if x > ch_max { ch_max = x; }
+                        if x < ch_min {
+                            ch_min = x;
+                        }
+                        if x > ch_max {
+                            ch_max = x;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -457,8 +482,12 @@ fn compute_minmax_peaks_symphonia(
             let mut ch_max = f32::NEG_INFINITY;
             for ch in 0..channels {
                 let v = samples.get(base + ch).copied().unwrap_or(0.0);
-                if v < ch_min { ch_min = v; }
-                if v > ch_max { ch_max = v; }
+                if v < ch_min {
+                    ch_min = v;
+                }
+                if v > ch_max {
+                    ch_max = v;
+                }
             }
 
             if ch_min < acc_min {

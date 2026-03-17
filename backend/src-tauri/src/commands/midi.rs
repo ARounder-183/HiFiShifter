@@ -24,11 +24,9 @@ fn validate_midi_import_target(track: &Track) -> Result<(), &'static str> {
 }
 
 #[cfg(test)]
-fn required_project_length(
-    notes: &[midi_import::MidiNoteEvent],
-    offset_sec: f64,
-) -> Option<f64> {
-    notes.iter()
+fn required_project_length(notes: &[midi_import::MidiNoteEvent], offset_sec: f64) -> Option<f64> {
+    notes
+        .iter()
         .filter_map(|note| {
             let end_sec = note.end_sec + offset_sec;
             (end_sec.is_finite() && end_sec > 0.0).then_some(end_sec)
@@ -62,11 +60,8 @@ pub(super) fn get_midi_tracks(midi_path: String) -> serde_json::Value {
     match midi_import::parse_midi_file(path, None) {
         Ok(result) => {
             // 只返回有音符的轨道
-            let tracks_with_notes: Vec<&MidiTrackInfo> = result
-                .tracks
-                .iter()
-                .filter(|t| t.note_count > 0)
-                .collect();
+            let tracks_with_notes: Vec<&MidiTrackInfo> =
+                result.tracks.iter().filter(|t| t.note_count > 0).collect();
 
             midi_log(format!(
                 "get_midi_tracks: parsed tracks_total={} tracks_with_notes={}",
@@ -141,11 +136,8 @@ pub(super) fn import_midi_to_pitch(
         }
         None => {
             // 合并所有轨道的音符（与 paste_midi_clipboard_inner 一致）
-            let mut all_notes: Vec<midi_import::MidiNoteEvent> = parse_result
-                .track_notes
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut all_notes: Vec<midi_import::MidiNoteEvent> =
+                parse_result.track_notes.into_iter().flatten().collect();
             all_notes.sort_by(|a, b| {
                 a.start_sec
                     .partial_cmp(&b.start_sec)
@@ -190,7 +182,9 @@ pub(super) fn import_midi_to_pitch(
     };
 
     if let Err(error) = validate_midi_import_target(root_track) {
-        midi_log(format!("import_midi_to_pitch: validation_failed error={error}"));
+        midi_log(format!(
+            "import_midi_to_pitch: validation_failed error={error}"
+        ));
         return serde_json::json!({"ok": false, "error": error});
     }
 
@@ -211,7 +205,10 @@ pub(super) fn import_midi_to_pitch(
     let touched = if let Some(sel_start) = selection_start_frame {
         // 以选区起始帧对应秒作为目标偏移，所有音符整体平移使第一个音符对齐该偏移
         let offset_sec = (sel_start as f64 * frame_period_ms_raw) / 1000.0;
-        let first_start = notes.iter().map(|n| n.start_sec).fold(f64::INFINITY, f64::min);
+        let first_start = notes
+            .iter()
+            .map(|n| n.start_sec)
+            .fold(f64::INFINITY, f64::min);
         let align_offset = offset_sec - first_start;
         let max_frame = sel_start + selection_max_frames.unwrap_or(usize::MAX - sel_start);
         let clamp_len = max_frame.min(entry.pitch_edit.len());
@@ -227,7 +224,10 @@ pub(super) fn import_midi_to_pitch(
         )
     } else {
         // 以光标位置为目标偏移，所有音符整体平移使第一个音符对齐该偏移
-        let first_start = notes.iter().map(|n| n.start_sec).fold(f64::INFINITY, f64::min);
+        let first_start = notes
+            .iter()
+            .map(|n| n.start_sec)
+            .fold(f64::INFINITY, f64::min);
         let align_offset = playhead_sec - first_start;
         midi_log(format!(
             "import_midi_to_pitch: playhead mode offset_sec={:.3} align_offset={:.3}",
@@ -245,7 +245,8 @@ pub(super) fn import_midi_to_pitch(
         entry.pitch_edit_user_modified = true;
         midi_log(format!(
             "import_midi_to_pitch: success frames_touched={} notes_imported={}",
-            touched, notes.len()
+            touched,
+            notes.len()
         ));
     } else {
         midi_log(format!(
@@ -288,13 +289,19 @@ mod tests {
     #[test]
     fn validate_midi_import_target_requires_compose() {
         let track = make_track(false, PitchAnalysisAlgo::WorldDll);
-        assert_eq!(validate_midi_import_target(&track), Err("pitch_requires_compose"));
+        assert_eq!(
+            validate_midi_import_target(&track),
+            Err("pitch_requires_compose")
+        );
     }
 
     #[test]
     fn validate_midi_import_target_requires_algorithm() {
         let track = make_track(true, PitchAnalysisAlgo::None);
-        assert_eq!(validate_midi_import_target(&track), Err("pitch_requires_algo"));
+        assert_eq!(
+            validate_midi_import_target(&track),
+            Err("pitch_requires_algo")
+        );
     }
 
     #[test]
