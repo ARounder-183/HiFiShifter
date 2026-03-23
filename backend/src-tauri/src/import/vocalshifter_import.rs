@@ -608,6 +608,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     compose_enabled: false,
                     pitch_analysis_algo: algo,
                     color: TRACK_COLORS[hs_tracks.len() % TRACK_COLORS.len()].to_string(),
+                    #[cfg(feature = "vst")]
+                    vst_chain: Default::default(),
                 });
                 track_algo_map.insert((idx, is_world, synth_mode), id);
                 track_order += 1;
@@ -634,6 +636,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 compose_enabled: false,
                 pitch_analysis_algo: algo,
                 color: TRACK_COLORS[hs_tracks.len() % TRACK_COLORS.len()].to_string(),
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             });
             // 单一算法，映射精确的 (is_world, synth_mode) 对
             track_algo_map.insert((idx, is_world, synth_mode), id);
@@ -658,6 +662,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     compose_enabled: false,
                     pitch_analysis_algo: PitchAnalysisAlgo::default(),
                     color: TRACK_COLORS[hs_tracks.len() % TRACK_COLORS.len()].to_string(),
+                    #[cfg(feature = "vst")]
+                    vst_chain: Default::default(),
                 });
                 track_algo_map.insert((idx, false, 1), id);
                 track_order += 1;
@@ -1373,6 +1379,8 @@ pub fn import_vsp_clipboard(
                 compose_enabled: false,
                 pitch_analysis_algo: algo,
                 color: TRACK_COLORS[color_idx].to_string(),
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             });
             created_track_ids.insert(target_track_idx, tid.clone());
             next_order += 1;
@@ -1825,6 +1833,8 @@ fn import_vsp_clipboard_selected_tracks(
                     compose_enabled: false,
                     pitch_analysis_algo: algo,
                     color: TRACK_COLORS[color_idx].to_string(),
+                    #[cfg(feature = "vst")]
+                    vst_chain: Default::default(),
                 });
                 vsp_to_hs_track.insert((vsp_idx as i32, is_world, synth_mode), id);
                 track_order += 1;
@@ -1849,6 +1859,8 @@ fn import_vsp_clipboard_selected_tracks(
                 compose_enabled: false,
                 pitch_analysis_algo: algo,
                 color: TRACK_COLORS[color_idx].to_string(),
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             });
             vsp_to_hs_track.insert((vsp_idx as i32, is_world, _synth_mode), id);
             track_order += 1;

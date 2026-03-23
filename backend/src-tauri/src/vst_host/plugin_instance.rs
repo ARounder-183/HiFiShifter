@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::VstFormat;
+#[cfg(feature = "vst")]
+use vst2::plugin::Plugin;
 
 // ─── VST2 Host 回调 ────────────────────────────────────────────────────────
 
@@ -94,34 +96,36 @@ impl VstPluginInstance {
 
         match &mut self.backend {
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst2 { plugin, .. } => {
+                    VstPluginBackend::Vst2 { plugin, .. } => {
                 let num_samples = outputs.first().map(|ch| ch.len()).unwrap_or(0);
                 if num_samples == 0 {
                     return;
                 }
 
                 // 准备缓冲区
-                let mut input_bufs: Vec<Vec<f32>> = inputs.to_vec();
-                let mut output_bufs: Vec<Vec<f32>> = outputs
-                    .iter()
-                    .map(|ch| vec![0.0f32; ch.len()])
-                    .collect();
 
-                let mut in_ptrs: Vec<*mut f32> =
-                    input_bufs.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
-                let mut out_ptrs: Vec<*mut f32> =
-                    output_bufs.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
+                        let mut input_bufs: Vec<Vec<f32>> = inputs.to_vec();
+                        let mut output_bufs: Vec<Vec<f32>> = outputs
+                            .iter()
+                            .map(|ch| vec![0.0f32; ch.len()])
+                            .collect();
 
-                let buffer = unsafe {
-                    vst2::buffer::AudioBuffer::from_raw(
-                        input_bufs.len(),
-                        output_bufs.len(),
-                        in_ptrs.as_mut_ptr(),
-                        out_ptrs.as_mut_ptr(),
-                        num_samples,
-                    )
-                };
-                plugin.process(&buffer);
+                        // vst::buffer::from_raw expects input pointers as *const *const f32
+                        let mut in_ptrs_const: Vec<*const f32> =
+                            input_bufs.iter().map(|ch| ch.as_ptr()).collect();
+                        let mut out_ptrs: Vec<*mut f32> =
+                            output_bufs.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
+
+                        let mut buffer = unsafe {
+                            vst2::buffer::AudioBuffer::from_raw(
+                                input_bufs.len(),
+                                output_bufs.len(),
+                                in_ptrs_const.as_ptr(),
+                                out_ptrs.as_mut_ptr(),
+                                num_samples,
+                            )
+                        };
+                        plugin.process(&mut buffer);
 
                 // 复制输出
                 for (out_ch, buf) in outputs.iter_mut().zip(output_bufs.iter()) {
@@ -184,16 +188,18 @@ impl VstPluginInstance {
     }
 
     /// 获取插件 chunk 数据（预设序列化）。
-    pub fn get_chunk(&self) -> Option<String> {
-        match &self.backend {
+    pub fn get_chunk(&mut self) -> Option<String> {
+        match &mut self.backend {
             #[cfg(feature = "vst")]
             VstPluginBackend::Vst2 { plugin, .. } => {
                 // vst crate 0.4 使用 get_bank_data 返回 Vec<u8>
                 let data = plugin.get_parameter_object().get_bank_data();
-                data.map(|bytes| {
+                if data.is_empty() {
+                    None
+                } else {
                     use base64::Engine;
-                    base64::engine::general_purpose::STANDARD.encode(&bytes)
-                })
+                    Some(base64::engine::general_purpose::STANDARD.encode(&data))
+                }
             }
             #[cfg(feature = "vst")]
             VstPluginBackend::Vst3 { instance } => {
@@ -233,14 +239,17 @@ impl VstPluginInstance {
     }
 
     /// 获取参数快照。
-    pub fn get_params_snapshot(&self) -> HashMap<u32, f32> {
+    pub fn get_params_snapshot(&mut self) -> HashMap<u32, f32> {
         let mut params = HashMap::new();
-        match &self.backend {
+        match &mut self.backend {
             #[cfg(feature = "vst")]
             VstPluginBackend::Vst2 { plugin, .. } => {
                 let info = plugin.get_info();
+                // Use parameter object to retrieve parameter values
+                let po = plugin.get_parameter_object();
                 for i in 0..info.parameters {
-                    params.insert(i as u32, plugin.get_parameter(i));
+                    let v = po.get_parameter(i);
+                    params.insert(i as u32, v);
                 }
             }
             #[cfg(feature = "vst")]
@@ -257,11 +266,11 @@ impl VstPluginInstance {
     ///
     /// VST2 插件尝试从 editor 获取实际尺寸，没有 editor 或获取失败时返回默认值。
     /// VST3 插件通过 IEditController::createView → IPlugView::getSize 获取。
-    pub fn editor_size(&self) -> (u32, u32) {
-        match &self.backend {
+    pub fn editor_size(&mut self) -> (u32, u32) {
+        match &mut self.backend {
             #[cfg(feature = "vst")]
             VstPluginBackend::Vst2 { plugin, .. } => {
-                if let Some(editor) = plugin.get_editor() {
+                if let Some(mut editor) = plugin.get_editor() {
                     let (w, h) = editor.size();
                     if w > 0 && h > 0 {
                         return (w as u32, h as u32);

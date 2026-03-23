@@ -431,41 +431,44 @@ pub fn scan_plugins_async(registry: std::sync::Arc<VstPluginRegistry>) {
     }
 
     let reg = registry.clone();
-    std::thread::Builder::new()
-        .name("vst-plugin-scan".to_string())
-        .spawn(move || {
-            eprintln!("[vst_host::scanner] Background scan started...");
+    let builder = std::thread::Builder::new().name("vst-plugin-scan".to_string());
+    match builder.spawn(move || {
+        eprintln!("[vst_host::scanner] Background scan started...");
 
-            let custom_paths = reg
-                .custom_scan_paths
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
+        let custom_paths = reg
+            .custom_scan_paths
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-            let result = scan_all_plugins(&custom_paths);
-            let count = result.len();
+        let result = scan_all_plugins(&custom_paths);
+        let count = result.len();
 
-            let mut descs = reg
-                .descriptors
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            *descs = result;
-            drop(descs);
+        let mut descs = reg
+            .descriptors
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *descs = result;
+        drop(descs);
 
-            reg.scan_in_progress
-                .store(false, Ordering::SeqCst);
+        reg.scan_in_progress
+            .store(false, Ordering::SeqCst);
 
-            eprintln!(
-                "[vst_host::scanner] Background scan complete: {} plugins found",
-                count
-            );
-        })
-        .unwrap_or_else(|e| {
+        eprintln!(
+            "[vst_host::scanner] Background scan complete: {} plugins found",
+            count
+        );
+    }) {
+        Ok(_handle) => {
+            // spawn succeeded; thread is running (handle will be detached when dropped)
+        }
+        Err(e) => {
             eprintln!("[vst_host::scanner] Failed to spawn scan thread: {}", e);
             registry
                 .scan_in_progress
                 .store(false, std::sync::atomic::Ordering::SeqCst);
-        });
+        }
+    }
 }
 
 /// 同步扫描并更新注册表（用于需要立即获取结果的场景）。

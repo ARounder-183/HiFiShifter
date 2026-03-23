@@ -2718,7 +2718,7 @@ const sessionSlice = createSlice({
                 }
             })
 
-            .addCase(vstAddToChainRemote.fulfilled, (state, action) => {
+            .addCase(vstAddToChainRemote.fulfilled, (_state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
                     trackId?: string;
@@ -2728,7 +2728,7 @@ const sessionSlice = createSlice({
                 void payload;
             })
 
-            .addCase(vstRemoveFromChainRemote.fulfilled, (state, action) => {
+            .addCase(vstRemoveFromChainRemote.fulfilled, (_state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
                     trackId?: string;
@@ -2736,7 +2736,7 @@ const sessionSlice = createSlice({
                 void payload;
             })
 
-            .addCase(vstSetBypassRemote.fulfilled, (state, action) => {
+            .addCase(vstSetBypassRemote.fulfilled, (_state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
                     trackId?: string;
@@ -2744,7 +2744,7 @@ const sessionSlice = createSlice({
                 void payload;
             })
 
-            .addCase(vstReorderChainRemote.fulfilled, (state, action) => {
+            .addCase(vstReorderChainRemote.fulfilled, (_state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
                     trackId?: string;
@@ -2762,7 +2762,7 @@ const sessionSlice = createSlice({
                 }
             })
 
-            .addCase(vstRemoveScanPathRemote.fulfilled, (state, action) => {
+            .addCase(vstRemoveScanPathRemote.fulfilled, (_state, action) => {
                 const payload = action.payload as { ok?: boolean };
                 void payload;
                 // 列表会由组件侧 dispatch vstListScanPathsRemote 刷新

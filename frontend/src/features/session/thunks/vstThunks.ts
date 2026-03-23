@@ -5,7 +5,7 @@
 
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
-import type { SessionState } from "../sessionSlice";
+
 
 /** 触发 VST 插件全量扫描 */
 export const vstScanPluginsRemote = createAsyncThunk(

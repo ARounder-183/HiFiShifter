@@ -116,7 +116,6 @@ export function useClipDrag(deps: {
         copyDragKb,
         autoCrossfadeEnabled,
         onCtrlClick,
-        rowHeight,
     } = deps;
     void gridSnapEnabled;
 

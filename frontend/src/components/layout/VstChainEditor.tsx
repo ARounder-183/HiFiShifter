@@ -195,7 +195,7 @@ export function VstChainEditor({
                                     </Flex>
 
                                     {/* 操作按钮 */}
-                                    <Flex gap="1" align="center" shrink="0">
+                                    <Flex gap="1" align="center" flexShrink="0">
                                         {/* 上移 */}
                                         <Tooltip content={tAny("vst_reorder_hint")}>
                                             <IconButton

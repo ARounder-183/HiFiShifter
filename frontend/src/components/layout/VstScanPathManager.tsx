@@ -22,7 +22,7 @@ import {
     vstAddScanPathRemote,
     vstRemoveScanPathRemote,
 } from "../../features/session/sessionSlice";
-import { open as tauriOpen } from "@tauri-apps/api/dialog";
+import { fileBrowserApi } from "../../services/api/fileBrowser";
 
 interface Props {
     open: boolean;
@@ -47,17 +47,29 @@ export function VstScanPathManager({ open, onOpenChange }: Props) {
 
     const handleAdd = useCallback(async () => {
         try {
-            const selected = await tauriOpen({
-                directory: true,
-                multiple: false,
-                title: tAny("vst_scan_path_select_folder"),
-            });
-            if (selected && typeof selected === "string") {
-                await dispatch(vstAddScanPathRemote(selected));
+            // Use the file browser API which calls the backend `pick_directory` command
+            // to open the native system folder dialog (same as project import).
+            const res = await fileBrowserApi.pickDirectory();
+            // backend returns { ok: true, canceled: bool, path?: string }
+            // eslint-disable-next-line no-console
+            console.debug("VST: pickDirectory result:", res);
+            if (res && res.ok && !res.canceled && typeof res.path === "string") {
+                await dispatch(vstAddScanPathRemote(res.path));
                 void dispatch(vstListScanPathsRemote());
             }
-        } catch {
-            // 用户取消选择，静默忽略
+        } catch (e: any) {
+            // log diagnostic and show simple alert
+            // eslint-disable-next-line no-console
+            console.error("VST 扫描路径选择失败:", e);
+            try {
+                // eslint-disable-next-line no-alert
+                alert(
+                    tAny("vst_scan_path_select_failed") ||
+                        "无法打开文件夹选择对话框，请在 Tauri 环境下运行。",
+                );
+            } catch {
+                // ignore
+            }
         }
     }, [dispatch, tAny]);
 
@@ -78,6 +90,11 @@ export function VstScanPathManager({ open, onOpenChange }: Props) {
                 <Dialog.Title>
                     {tAny("vst_scan_path_manager_title")}
                 </Dialog.Title>
+
+                <Dialog.Description>
+                    {tAny("vst_scan_path_manager_description") ||
+                        "管理自定义 VST 插件扫描路径，添加或移除文件夹。"}
+                </Dialog.Description>
 
                 <Flex direction="column" gap="3" mt="3">
                     {/* 路径列表 */}

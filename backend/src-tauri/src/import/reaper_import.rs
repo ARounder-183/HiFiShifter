@@ -183,6 +183,8 @@ fn convert_reaper_items_to_existing_tracks(
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
                 color: TRACK_COLORS[color_idx].to_string(),
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             });
             created_track_ids.insert(target_track_idx, tid.clone());
             next_order += 1;
@@ -345,6 +347,8 @@ fn convert_reaper_data(
             compose_enabled: false,
             pitch_analysis_algo: PitchAnalysisAlgo::default(),
             color: TRACK_COLORS[hs_tracks.len() % TRACK_COLORS.len()].to_string(),
+            #[cfg(feature = "vst")]
+            vst_chain: Default::default(),
         });
 
         let mut track_pitch_accum: Vec<PitchFrameAccumulator> = Vec::new();

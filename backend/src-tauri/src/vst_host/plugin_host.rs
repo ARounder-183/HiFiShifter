@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use super::plugin_instance::{VstPluginBackend, VstPluginInstance};
 use super::VstFormat;
+#[cfg(feature = "vst")]
+use vst2::plugin::Plugin;
 
 // ─── VST2 加载 ──────────────────────────────────────────────────────────────
 

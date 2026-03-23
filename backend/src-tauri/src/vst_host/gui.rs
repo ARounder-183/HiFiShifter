@@ -70,7 +70,7 @@ pub fn open_editor_window(
     on_close: Option<OnEditorCloseCallback>,
 ) -> Result<VstEditorWindow, String> {
     // 获取编辑器推荐尺寸
-    let inst = instance.lock().unwrap_or_else(|e| e.into_inner());
+    let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
     let (width, height) = inst.editor_size();
     drop(inst);
 
@@ -258,7 +258,7 @@ fn open_editor_window_win32(
 
     let instance_clone = Arc::clone(instance);
     let title_owned = title.to_string();
-    let (tx, rx) = mpsc::channel::<Result<*mut std::ffi::c_void, String>>();
+    let (tx, rx) = mpsc::channel::<Result<usize, String>>();
 
     // on_close 回调需要 move 到线程中
     let on_close_cell = std::cell::Cell::new(on_close);
@@ -384,8 +384,8 @@ fn open_editor_window_win32(
                     }
                 }
 
-                // 通知调用方窗口已创建
-                let _ = tx.send(Ok(hwnd));
+                // 通知调用方窗口已创建（发送 usize 指针以满足 Send）
+                let _ = tx.send(Ok(hwnd as usize));
 
                 // ── 设置 idle timer（约 33ms = ~30 Hz） ──
                 SetTimer(hwnd, 1, 33, std::ptr::null());
@@ -417,7 +417,7 @@ fn open_editor_window_win32(
 
                 // 在关闭 editor 之前，提取当前 chunk 数据用于回写
                 let chunk_data = {
-                    let inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
                     inst.get_chunk()
                 };
 
@@ -456,7 +456,8 @@ fn open_editor_window_win32(
         .recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| "Timeout waiting for editor window creation".to_string())?;
 
-    let hwnd = hwnd_result?;
+    let hwnd_usize = hwnd_result?;
+    let hwnd = hwnd_usize as *mut std::ffi::c_void;
 
     eprintln!(
         "[vst_host::gui] Editor window created: {} ({}x{}) HWND={:?}",
