@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Box, Popover, Text, TextField, Flex, IconButton } from "@radix-ui/themes";
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
@@ -32,9 +32,8 @@ const TempoFlag: React.FC<{
     point: TempoPoint;
     leftPx: number;
     isFirst: boolean;
-    onEdit: (id: string) => void;
     onDelete: (id: string) => void;
-}> = React.memo(({ point, leftPx, isFirst, onEdit, onDelete }) => {
+}> = React.memo(({ point, leftPx, isFirst, onDelete }) => {
     const [open, setOpen] = useState(false);
     const [bpmText, setBpmText] = useState(String(Math.round(point.bpm)));
     const [numText, setNumText] = useState(String(point.numerator));
@@ -176,7 +175,7 @@ export const TempoTrack: React.FC<TempoTrackProps> = ({
     pxPerSec,
     scrollLeft,
     viewportWidth,
-    contentWidth,
+    contentWidth: _contentWidth,
     contentRef,
 }) => {
     const dispatch = useAppDispatch();
@@ -233,9 +232,7 @@ export const TempoTrack: React.FC<TempoTrackProps> = ({
         [dispatch, pxPerSec, scrollLeft, tempoMap],
     );
 
-    const handleEdit = useCallback((_id: string) => {
-        // Edit is handled by TempoFlag popover
-    }, []);
+    
 
     const handleDelete = useCallback(
         (id: string) => {
@@ -270,7 +267,6 @@ export const TempoTrack: React.FC<TempoTrackProps> = ({
                         point={point}
                         leftPx={leftPx}
                         isFirst={isFirst}
-                        onEdit={handleEdit}
                         onDelete={handleDelete}
                     />
                 ))}

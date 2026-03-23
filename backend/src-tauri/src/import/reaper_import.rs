@@ -250,6 +250,7 @@ fn convert_reaper_items_to_existing_tracks(
         project_sec: project_end,
         params_by_root_track,
         next_track_order: next_order,
+        tempo_map: None,
     };
 
     Ok(ReaperImportResult {
@@ -420,6 +421,7 @@ fn convert_reaper_data(
         project_sec: project_end,
         params_by_root_track,
         next_track_order: track_order,
+        tempo_map: None,
     };
 
     Ok(ReaperImportResult {

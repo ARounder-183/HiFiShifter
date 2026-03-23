@@ -1028,6 +1028,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         project_sec: project_end,
         params_by_root_track,
         next_track_order: track_order,
+        tempo_map: None,
     };
 
     Ok(VspImportResult {
@@ -1698,6 +1699,7 @@ pub fn import_vsp_clipboard(
         project_sec: project_end,
         params_by_root_track,
         next_track_order: next_order,
+        tempo_map: None,
     };
 
     Ok(VspImportResult {
@@ -2190,6 +2192,7 @@ fn import_vsp_clipboard_selected_tracks(
         project_sec: project_end,
         params_by_root_track,
         next_track_order: track_order,
+        tempo_map: None,
     };
 
     Ok(VspImportResult {

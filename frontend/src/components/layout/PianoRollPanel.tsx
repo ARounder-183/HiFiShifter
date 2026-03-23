@@ -2354,10 +2354,10 @@ export const PianoRollPanel: React.FC = () => {
     const timeRulerBars = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         const totalBeats = Math.max(1, Math.ceil(s.projectSec / secPerBeat));
-        const result: Array<{ beat: number; label: string }> = [];
+        const result: Array<{ sec: number; label: string }> = [];
         let barIndex = 1;
         for (let beat = 0; beat <= totalBeats; beat += beatsPerBar) {
-            result.push({ beat, label: `${barIndex}.1` });
+            result.push({ sec: beat * secPerBeat, label: `${barIndex}.1` });
             barIndex += 1;
         }
         return result;

@@ -298,6 +298,7 @@ impl Default for TimelineState {
 
             params_by_root_track: BTreeMap::new(),
             next_track_order: 1,
+            tempo_map: None,
         }
     }
 }

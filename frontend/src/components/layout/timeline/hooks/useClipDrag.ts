@@ -116,9 +116,10 @@ export function useClipDrag(deps: {
         copyDragKb,
         autoCrossfadeEnabled,
         onCtrlClick,
-        rowHeight,
+        rowHeight: _rowHeight,
     } = deps;
-    void gridSnapEnabled;
+        void gridSnapEnabled;
+        void _rowHeight;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);

@@ -5,14 +5,12 @@ type TimeRulerBar = { sec: number; label: string };
 
 const TimeRulerMarks = React.memo(function TimeRulerMarks({
   bars,
-  secPerBeat,
   pxPerSec,
   boundaryLeft,
   scrollLeft,
   viewportWidth,
 }: {
   bars: TimeRulerBar[];
-  secPerBeat: number;
   pxPerSec: number;
   boundaryLeft: number;
   scrollLeft: number;
@@ -123,7 +121,7 @@ export const TimeRuler: React.FC<{
   bars,
   pxPerBeat: _pxPerBeat,
   pxPerSec,
-  secPerBeat,
+  secPerBeat: _secPerBeat,
   viewportWidth,
   playheadSec,
   onMouseDown,
@@ -131,6 +129,7 @@ export const TimeRuler: React.FC<{
 }) => {
   // 统一用 sec 坐标系：beat 位置 = beat * secPerBeat * pxPerSec
   void _pxPerBeat;
+  void _secPerBeat;
   const boundaryLeft = contentWidth - 1;
 
   // If the parent passes a ref, it may be doing imperative scroll syncing
@@ -167,7 +166,6 @@ export const TimeRuler: React.FC<{
       >
         <TimeRulerMarks
           bars={bars}
-          secPerBeat={secPerBeat}
           pxPerSec={pxPerSec}
           boundaryLeft={boundaryLeft}
           scrollLeft={scrollLeft}

@@ -60,7 +60,6 @@ import {
     seekPlayhead,
     stopAudioPlayback,
     syncPlaybackState,
-    syncTempoMap,
     updateTransportBpm,
 } from "./thunks/transportThunks";
 
@@ -91,7 +90,6 @@ import {
     createDefaultTempoMap,
     fromBackendTempoMap,
     secondsToTicks,
-    getTempoAtTicks,
     computeNewPlaybackRate,
 } from "../../utils/tempoMap";
 import {
