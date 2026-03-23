@@ -51,8 +51,7 @@ export function VstChainEditor({
     const tAny = t as (key: string) => string;
 
     const chain = useAppSelector(
-        (state: RootState) =>
-            state.session.vstChainByTrack[trackId] ?? [],
+        (state: RootState) => state.session.vstChainByTrack[trackId] ?? [],
     );
 
     const [browserOpen, setBrowserOpen] = useState(false);
@@ -74,9 +73,7 @@ export function VstChainEditor({
 
     const handleBypass = useCallback(
         async (index: number, bypassed: boolean) => {
-            await dispatch(
-                vstSetBypassRemote({ trackId, index, bypassed }),
-            );
+            await dispatch(vstSetBypassRemote({ trackId, index, bypassed }));
             void dispatch(vstGetTrackChainRemote(trackId));
         },
         [dispatch, trackId],
@@ -135,11 +132,7 @@ export function VstChainEditor({
                     <Flex direction="column" gap="2" mt="3">
                         {/* FX 链列表 */}
                         {chain.length === 0 ? (
-                            <Flex
-                                align="center"
-                                justify="center"
-                                py="5"
-                            >
+                            <Flex align="center" justify="center" py="5">
                                 <Text size="2" color="gray">
                                     {tAny("vst_empty_chain")}
                                 </Text>
@@ -197,7 +190,9 @@ export function VstChainEditor({
                                     {/* 操作按钮 */}
                                     <Flex gap="1" align="center" flexShrink="0">
                                         {/* 上移 */}
-                                        <Tooltip content={tAny("vst_reorder_hint")}>
+                                        <Tooltip
+                                            content={tAny("vst_reorder_hint")}
+                                        >
                                             <IconButton
                                                 size="1"
                                                 variant="ghost"
@@ -214,7 +209,9 @@ export function VstChainEditor({
                                         </Tooltip>
 
                                         {/* 下移 */}
-                                        <Tooltip content={tAny("vst_reorder_hint")}>
+                                        <Tooltip
+                                            content={tAny("vst_reorder_hint")}
+                                        >
                                             <IconButton
                                                 size="1"
                                                 variant="ghost"
@@ -273,9 +270,7 @@ export function VstChainEditor({
                                                 variant="ghost"
                                                 color="gray"
                                                 onClick={() =>
-                                                    handleOpenEditor(
-                                                        slot.index,
-                                                    )
+                                                    handleOpenEditor(slot.index)
                                                 }
                                             >
                                                 <GearIcon />
@@ -284,9 +279,7 @@ export function VstChainEditor({
 
                                         {/* 移除 */}
                                         <Tooltip
-                                            content={tAny(
-                                                "vst_remove_plugin",
-                                            )}
+                                            content={tAny("vst_remove_plugin")}
                                         >
                                             <IconButton
                                                 size="1"

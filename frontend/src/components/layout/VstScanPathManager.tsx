@@ -53,7 +53,12 @@ export function VstScanPathManager({ open, onOpenChange }: Props) {
             // backend returns { ok: true, canceled: bool, path?: string }
             // eslint-disable-next-line no-console
             console.debug("VST: pickDirectory result:", res);
-            if (res && res.ok && !res.canceled && typeof res.path === "string") {
+            if (
+                res &&
+                res.ok &&
+                !res.canceled &&
+                typeof res.path === "string"
+            ) {
                 await dispatch(vstAddScanPathRemote(res.path));
                 void dispatch(vstListScanPathsRemote());
             }
@@ -105,11 +110,7 @@ export function VstScanPathManager({ open, onOpenChange }: Props) {
                         }}
                     >
                         {scanPaths.length === 0 ? (
-                            <Flex
-                                align="center"
-                                justify="center"
-                                py="5"
-                            >
+                            <Flex align="center" justify="center" py="5">
                                 <Text size="2" color="gray">
                                     {tAny("vst_no_scan_paths")}
                                 </Text>

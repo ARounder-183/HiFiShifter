@@ -6,7 +6,6 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 
-
 /** 触发 VST 插件全量扫描 */
 export const vstScanPluginsRemote = createAsyncThunk(
     "session/vstScanPluginsRemote",
@@ -34,11 +33,7 @@ export const vstGetTrackChainRemote = createAsyncThunk(
 /** 向轨道 FX 链添加插件 */
 export const vstAddToChainRemote = createAsyncThunk(
     "session/vstAddToChainRemote",
-    async (payload: {
-        trackId: string;
-        pluginUid: string;
-        index?: number;
-    }) => {
+    async (payload: { trackId: string; pluginUid: string; index?: number }) => {
         const result = await webApi.vstAddToChain(
             payload.trackId,
             payload.pluginUid,
@@ -63,11 +58,7 @@ export const vstRemoveFromChainRemote = createAsyncThunk(
 /** 设置 FX 链中某个插件的 bypass 状态 */
 export const vstSetBypassRemote = createAsyncThunk(
     "session/vstSetBypassRemote",
-    async (payload: {
-        trackId: string;
-        index: number;
-        bypassed: boolean;
-    }) => {
+    async (payload: { trackId: string; index: number; bypassed: boolean }) => {
         const result = await webApi.vstSetBypass(
             payload.trackId,
             payload.index,
