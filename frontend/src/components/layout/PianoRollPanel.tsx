@@ -1324,18 +1324,16 @@ export const PianoRollPanel: React.FC = () => {
                 if (isNoneBinding(kb)) return noModifierPressed;
                 return isModifierActive(kb, e as any);
             };
-            const horizontalScrollRequested = isWheelBindingRequested(
-                scrollHorizontalKb,
-            );
+            const horizontalScrollRequested =
+                isWheelBindingRequested(scrollHorizontalKb);
             const pianoVerticalScrollRequested = isWheelBindingRequested(
                 pianoKeysVerticalScrollKb,
             );
             const pianoVerticalZoomRequested = isWheelBindingRequested(
                 pianoKeysVerticalZoomKb,
             );
-            const horizontalZoomRequested = isWheelBindingRequested(
-                horizontalZoomKb,
-            );
+            const horizontalZoomRequested =
+                isWheelBindingRequested(horizontalZoomKb);
 
             const bounds = el.getBoundingClientRect();
             const h = Math.max(1, bounds.height);
@@ -1356,7 +1354,9 @@ export const PianoRollPanel: React.FC = () => {
                 e.preventDefault();
                 const scroller = scrollerRef.current;
                 if (!scroller) return;
-                scroller.scrollLeft += horizontalScrollRequested ? e.deltaY : e.deltaX;
+                scroller.scrollLeft += horizontalScrollRequested
+                    ? e.deltaY
+                    : e.deltaX;
                 syncScrollLeft(scroller);
                 return;
             }
@@ -3321,7 +3321,8 @@ export const PianoRollPanel: React.FC = () => {
                                         interactions.onCanvasPointerDown
                                     }
                                 />
-                                {s.showParamValuePopup && paramValuePreview && (
+                                {s.showParamValuePopup &&
+                                    paramValuePreview &&
                                     (() => {
                                         const rect =
                                             canvasRef.current?.getBoundingClientRect();
@@ -3336,7 +3337,8 @@ export const PianoRollPanel: React.FC = () => {
                                                     top:
                                                         paramValuePreview.clientY -
                                                         rect.top,
-                                                    transform: "translate(0, -100%)",
+                                                    transform:
+                                                        "translate(0, -100%)",
                                                     whiteSpace: "nowrap",
                                                 }}
                                             >
@@ -3345,8 +3347,7 @@ export const PianoRollPanel: React.FC = () => {
                                                 )}
                                             </div>
                                         );
-                                    })()
-                                )}
+                                    })()}
                             </div>
                         </div>
                     </div>

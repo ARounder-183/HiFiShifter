@@ -118,8 +118,8 @@ export function useClipDrag(deps: {
         onCtrlClick,
         rowHeight: _rowHeight,
     } = deps;
-        void gridSnapEnabled;
-        void _rowHeight;
+    void gridSnapEnabled;
+    void _rowHeight;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);
@@ -349,7 +349,8 @@ export function useClipDrag(deps: {
             // ── 轴锁定：垂直跨轨道拖拽时，水平偏移小于阈值则冻结水平位移 ──
             const HORIZONTAL_LOCK_THRESHOLD = 30; // px
             const horizontalPx = Math.abs(ev.clientX - drag.startClientX);
-            const isTrackChanging = drag.lastTrackOffset !== 0 ||
+            const isTrackChanging =
+                drag.lastTrackOffset !== 0 ||
                 (hoveredTrackId == null && drag.allowDropToNewTrack);
             if (isTrackChanging && horizontalPx < HORIZONTAL_LOCK_THRESHOLD) {
                 deltaBeat = 0;

@@ -355,15 +355,12 @@ function normalizeClipColor(color: string | undefined): ClipColor {
  * For each clip in `movedIds`, detect overlaps with same-track clips and set
  * fade in/out to the overlap duration.
  */
-function applyAutoCrossfadeInReducer(
-    state: SessionState,
-    movedIds: string[],
-) {
+function applyAutoCrossfadeInReducer(state: SessionState, movedIds: string[]) {
     if (!state.autoCrossfadeEnabled || movedIds.length === 0) return;
 
     const trackClipsMap: Record<string, ClipInfo[]> = {};
-    const clipMap: Record<string, ClipInfo> = {}; 
-    
+    const clipMap: Record<string, ClipInfo> = {};
+
     // 一次性建立轨道分组和全局 ID 索引，时间复杂度 O(N)
     for (const clip of state.clips) {
         clipMap[clip.id] = clip;
@@ -376,7 +373,7 @@ function applyAutoCrossfadeInReducer(
 
     for (const id of movedIds) {
         // O(1) 直接获取，消除多余的 find 遍历
-        const clip = clipMap[id]; 
+        const clip = clipMap[id];
         if (!clip) continue;
         const clipStart = Number(clip.startSec);
         const clipEnd = clipStart + Number(clip.lengthSec);
@@ -394,11 +391,23 @@ function applyAutoCrossfadeInReducer(
             if (overlap <= 0.001) continue;
 
             if (clipStart <= otherStart) {
-                fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, overlap));
-                fadeInOverlaps.set(other.id, Math.max(fadeInOverlaps.get(other.id) ?? 0, overlap));
+                fadeOutOverlaps.set(
+                    id,
+                    Math.max(fadeOutOverlaps.get(id) ?? 0, overlap),
+                );
+                fadeInOverlaps.set(
+                    other.id,
+                    Math.max(fadeInOverlaps.get(other.id) ?? 0, overlap),
+                );
             } else {
-                fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
-                fadeOutOverlaps.set(other.id, Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap));
+                fadeInOverlaps.set(
+                    id,
+                    Math.max(fadeInOverlaps.get(id) ?? 0, overlap),
+                );
+                fadeOutOverlaps.set(
+                    other.id,
+                    Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap),
+                );
             }
         }
     }
@@ -408,10 +417,10 @@ function applyAutoCrossfadeInReducer(
         ...fadeOutOverlaps.keys(),
         ...movedIds,
     ]);
-    
+
     for (const clipId of allClipIds) {
         // O(1) 直接获取，消除多余的 find 遍历
-        const clip = clipMap[clipId]; 
+        const clip = clipMap[clipId];
         if (!clip) continue;
 
         const hasOverlapIn = fadeInOverlaps.has(clipId);
@@ -557,9 +566,27 @@ function applyTimelineState(
         );
         const nextGridSize = (
             [
-                "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64",
-                "1/1d", "1/2d", "1/4d", "1/8d", "1/16d", "1/32d", "1/64d",
-                "1/1t", "1/2t", "1/4t", "1/8t", "1/16t", "1/32t", "1/64t",
+                "1/1",
+                "1/2",
+                "1/4",
+                "1/8",
+                "1/16",
+                "1/32",
+                "1/64",
+                "1/1d",
+                "1/2d",
+                "1/4d",
+                "1/8d",
+                "1/16d",
+                "1/32d",
+                "1/64d",
+                "1/1t",
+                "1/2t",
+                "1/4t",
+                "1/8t",
+                "1/16t",
+                "1/32t",
+                "1/64t",
             ] as const
         ).includes(nextGridSizeRaw as any)
             ? (nextGridSizeRaw as GridSize)
@@ -885,13 +912,17 @@ const sessionSlice = createSlice({
          * 在交互期间，连续操作类 thunk 的 fulfilled handler 会跳过 applyTimelineState()。
          */
         beginInteraction(state) {
-            state._interactionLockCount = Math.max(0, state._interactionLockCount) + 1;
+            state._interactionLockCount =
+                Math.max(0, state._interactionLockCount) + 1;
         },
         /**
          * 标记连续交互结束。计数器归零后恢复正常的后端状态同步。
          */
         endInteraction(state) {
-            state._interactionLockCount = Math.max(0, state._interactionLockCount - 1);
+            state._interactionLockCount = Math.max(
+                0,
+                state._interactionLockCount - 1,
+            );
         },
         /** 乐观更新轨道名称（立即反映到 UI，不等后端响应） */
         setTrackName(
@@ -972,7 +1003,9 @@ const sessionSlice = createSlice({
             const pt = action.payload;
             const points = state.tempoMap.points;
             // Insert in sorted order
-            let idx = points.findIndex((p) => p.positionTicks > pt.positionTicks);
+            let idx = points.findIndex(
+                (p) => p.positionTicks > pt.positionTicks,
+            );
             if (idx === -1) idx = points.length;
             points.splice(idx, 0, pt);
         },
@@ -986,7 +1019,8 @@ const sessionSlice = createSlice({
                 positionTicks?: number;
             }>,
         ) {
-            const { id, bpm, numerator, denominator, positionTicks } = action.payload;
+            const { id, bpm, numerator, denominator, positionTicks } =
+                action.payload;
             const pt = state.tempoMap.points.find((p) => p.id === id);
             if (!pt) return;
 
@@ -995,9 +1029,14 @@ const sessionSlice = createSlice({
             if (bpm != null) pt.bpm = clamp(bpm, 10, 300);
             if (numerator != null) pt.numerator = clamp(numerator, 1, 32);
             if (denominator != null) pt.denominator = denominator;
-            if (positionTicks != null && state.tempoMap.points.indexOf(pt) !== 0) {
+            if (
+                positionTicks != null &&
+                state.tempoMap.points.indexOf(pt) !== 0
+            ) {
                 pt.positionTicks = Math.max(0, positionTicks);
-                state.tempoMap.points.sort((a, b) => a.positionTicks - b.positionTicks);
+                state.tempoMap.points.sort(
+                    (a, b) => a.positionTicks - b.positionTicks,
+                );
             }
 
             // Adjust playback_rate for clips in the affected region
@@ -1009,10 +1048,20 @@ const sessionSlice = createSlice({
                         : Infinity;
 
                 for (const clip of state.clips) {
-                    const clipTicks = secondsToTicks(clip.startSec, state.tempoMap);
-                    if (clipTicks >= pt.positionTicks && clipTicks < nextPtTicks) {
+                    const clipTicks = secondsToTicks(
+                        clip.startSec,
+                        state.tempoMap,
+                    );
+                    if (
+                        clipTicks >= pt.positionTicks &&
+                        clipTicks < nextPtTicks
+                    ) {
                         clip.playbackRate = clamp(
-                            computeNewPlaybackRate(oldBpm, pt.bpm, clip.playbackRate),
+                            computeNewPlaybackRate(
+                                oldBpm,
+                                pt.bpm,
+                                clip.playbackRate,
+                            ),
                             0.1,
                             10,
                         );
@@ -1027,7 +1076,9 @@ const sessionSlice = createSlice({
             }
         },
         removeTempoPoint(state, action: PayloadAction<string>) {
-            const idx = state.tempoMap.points.findIndex((p) => p.id === action.payload);
+            const idx = state.tempoMap.points.findIndex(
+                (p) => p.id === action.payload,
+            );
             // Can't remove the first point (position 0)
             if (idx > 0) {
                 state.tempoMap.points.splice(idx, 1);
@@ -1054,10 +1105,7 @@ const sessionSlice = createSlice({
         setPitchSnapToleranceCents(state, action: PayloadAction<number>) {
             state.pitchSnapToleranceCents = clamp(action.payload, 0, 1000);
         },
-        setScaleHighlightMode(
-            state,
-            action: PayloadAction<"always" | "off">,
-        ) {
+        setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
         },
         upsertCustomScalePreset(
@@ -1137,7 +1185,11 @@ const sessionSlice = createSlice({
             }
         },
         setEdgeSmoothnessPercent(state, action: PayloadAction<number>) {
-            state.edgeSmoothnessPercent = clamp(Number(action.payload) || 0, 0, 100);
+            state.edgeSmoothnessPercent = clamp(
+                Number(action.payload) || 0,
+                0,
+                100,
+            );
         },
         setplayheadSec(state, action: PayloadAction<number>) {
             state.playheadSec = Math.max(0, action.payload);
@@ -1172,7 +1224,10 @@ const sessionSlice = createSlice({
                 ensureClipAutomation(state, action.payload);
             }
         },
-        setSelectedClipPreservingTrack(state, action: PayloadAction<string | null>) {
+        setSelectedClipPreservingTrack(
+            state,
+            action: PayloadAction<string | null>,
+        ) {
             state.selectedClipId = action.payload;
             state.selectedPointId = null;
             if (action.payload) {
@@ -1542,7 +1597,9 @@ const sessionSlice = createSlice({
                         playbackDurationSec: state.runtime.playbackDurationSec,
                     };
                     if (payload.timeline) {
-                        applyTimelineState(state, payload.timeline, { force: true });
+                        applyTimelineState(state, payload.timeline, {
+                            force: true,
+                        });
                     }
                     state.status = "Runtime updated";
                 } else {
@@ -1612,7 +1669,8 @@ const sessionSlice = createSlice({
                         (s as any).showParamValuePopup,
                     );
                 if (s.scaleHighlightMode != null)
-                    state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
+                    state.scaleHighlightMode =
+                        s.scaleHighlightMode === "always" ? "always" : "off";
                 if ((s as any).lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(
                         (s as any).lockParamLines,
@@ -1625,7 +1683,10 @@ const sessionSlice = createSlice({
                     }
                 }
                 const selectDir = (s as any).selectDragDirection;
-                if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
+                if (
+                    selectDir != null &&
+                    ["free", "x-only", "y-only"].includes(selectDir)
+                ) {
                     state.selectDragDirection = selectDir as DragDirection;
                 }
                 const drawDir = (s as any).drawDragDirection;
@@ -1633,8 +1694,12 @@ const sessionSlice = createSlice({
                     state.drawDragDirection = drawDir as DrawDragDirection;
                 }
                 const lineVibratoDir = (s as any).lineVibratoDragDirection;
-                if (lineVibratoDir != null && ["free", "x-only"].includes(lineVibratoDir)) {
-                    state.lineVibratoDragDirection = lineVibratoDir as DrawDragDirection;
+                if (
+                    lineVibratoDir != null &&
+                    ["free", "x-only"].includes(lineVibratoDir)
+                ) {
+                    state.lineVibratoDragDirection =
+                        lineVibratoDir as DrawDragDirection;
                 }
                 const smoothness =
                     (s as any).smoothnessPercent ??
@@ -1647,10 +1712,13 @@ const sessionSlice = createSlice({
                     );
                 }
                 if (Array.isArray((s as any).customScalePresets)) {
-                    state.customScalePresets = (s as any).customScalePresets
-                        .map((preset: unknown) =>
-                            sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
-                        );
+                    state.customScalePresets = (
+                        s as any
+                    ).customScalePresets.map((preset: unknown) =>
+                        sanitizeCustomScalePreset(
+                            preset as Partial<CustomScalePreset>,
+                        ),
+                    );
                 }
             })
 
@@ -1696,7 +1764,9 @@ const sessionSlice = createSlice({
                 if (payload.ok && payload.audio?.path) {
                     state.audioPath = payload.audio.path;
                     if (payload.timeline) {
-                        applyTimelineState(state, payload.timeline, { force: true });
+                        applyTimelineState(state, payload.timeline, {
+                            force: true,
+                        });
                     } else {
                         upsertImportedClip(state, payload.audio.path, {
                             durationSec: payload.audio.duration_sec,
@@ -1729,7 +1799,9 @@ const sessionSlice = createSlice({
                 if (payload.path) {
                     state.audioPath = payload.path;
                     if (payload.imported?.ok) {
-                        applyTimelineState(state, payload.imported, { force: true });
+                        applyTimelineState(state, payload.imported, {
+                            force: true,
+                        });
                     }
                 }
                 state.status = payload.imported?.ok
@@ -1751,7 +1823,9 @@ const sessionSlice = createSlice({
                 if (payload.path) {
                     state.audioPath = payload.path;
                     if (payload.imported?.ok) {
-                        applyTimelineState(state, payload.imported, { force: true });
+                        applyTimelineState(state, payload.imported, {
+                            force: true,
+                        });
                     }
                 }
                 state.status = payload.imported?.ok
@@ -1778,7 +1852,9 @@ const sessionSlice = createSlice({
                     payload.imported &&
                     (payload.imported as any).tracks
                 ) {
-                    applyTimelineState(state, payload.imported as any, { force: true });
+                    applyTimelineState(state, payload.imported as any, {
+                        force: true,
+                    });
                     // Apply auto-crossfade for newly imported clips
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -1805,7 +1881,9 @@ const sessionSlice = createSlice({
                     payload.imported &&
                     (payload.imported as any).tracks
                 ) {
-                    applyTimelineState(state, payload.imported as any, { force: true });
+                    applyTimelineState(state, payload.imported as any, {
+                        force: true,
+                    });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                     }
@@ -1816,50 +1894,84 @@ const sessionSlice = createSlice({
             .addCase(importMultipleAudioAtPosition.pending, (state) =>
                 setPending(state, "Importing multiple audio files..."),
             )
-            .addCase(importMultipleAudioAtPosition.fulfilled, (state, action) => {
-                state.busy = false;
-                state.lastResult = action.payload;
-                const payload = action.payload as {
-                    ok?: boolean;
-                    imported?: TimelineState;
-                    newClipIds?: string[];
-                };
-                const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineState(state, payload.imported as any, { force: true });
-                    if (payload.newClipIds && payload.newClipIds.length > 0) {
-                        applyAutoCrossfadeInReducer(state, payload.newClipIds);
+            .addCase(
+                importMultipleAudioAtPosition.fulfilled,
+                (state, action) => {
+                    state.busy = false;
+                    state.lastResult = action.payload;
+                    const payload = action.payload as {
+                        ok?: boolean;
+                        imported?: TimelineState;
+                        newClipIds?: string[];
+                    };
+                    const ok = Boolean(payload.ok);
+                    state.status = ok ? "Import done" : "Import failed";
+                    if (
+                        ok &&
+                        payload.imported &&
+                        (payload.imported as any).tracks
+                    ) {
+                        applyTimelineState(state, payload.imported as any, {
+                            force: true,
+                        });
+                        if (
+                            payload.newClipIds &&
+                            payload.newClipIds.length > 0
+                        ) {
+                            applyAutoCrossfadeInReducer(
+                                state,
+                                payload.newClipIds,
+                            );
+                        }
                     }
-                }
-            })
+                },
+            )
             .addCase(importMultipleAudioAtPosition.rejected, setRejected)
 
             .addCase(importMultipleAudioFilesAtPosition.pending, (state) =>
                 setPending(state, "Importing multiple audio files..."),
             )
-            .addCase(importMultipleAudioFilesAtPosition.fulfilled, (state, action) => {
-                state.busy = false;
-                state.lastResult = action.payload;
-                const payload = action.payload as {
-                    ok?: boolean;
-                    imported?: TimelineState;
-                    newClipIds?: string[];
-                };
-                const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineState(state, payload.imported as any, { force: true });
-                    if (payload.newClipIds && payload.newClipIds.length > 0) {
-                        applyAutoCrossfadeInReducer(state, payload.newClipIds);
+            .addCase(
+                importMultipleAudioFilesAtPosition.fulfilled,
+                (state, action) => {
+                    state.busy = false;
+                    state.lastResult = action.payload;
+                    const payload = action.payload as {
+                        ok?: boolean;
+                        imported?: TimelineState;
+                        newClipIds?: string[];
+                    };
+                    const ok = Boolean(payload.ok);
+                    state.status = ok ? "Import done" : "Import failed";
+                    if (
+                        ok &&
+                        payload.imported &&
+                        (payload.imported as any).tracks
+                    ) {
+                        applyTimelineState(state, payload.imported as any, {
+                            force: true,
+                        });
+                        if (
+                            payload.newClipIds &&
+                            payload.newClipIds.length > 0
+                        ) {
+                            applyAutoCrossfadeInReducer(
+                                state,
+                                payload.newClipIds,
+                            );
+                        }
+                        // select all imported clips
+                        if (
+                            payload.newClipIds &&
+                            payload.newClipIds.length > 0
+                        ) {
+                            state.multiSelectedClipIds = payload.newClipIds;
+                            state.selectedClipId =
+                                payload.newClipIds[0] ?? null;
+                        }
                     }
-                    // select all imported clips
-                    if (payload.newClipIds && payload.newClipIds.length > 0) {
-                        state.multiSelectedClipIds = payload.newClipIds;
-                        state.selectedClipId = payload.newClipIds[0] ?? null;
-                    }
-                }
-            })
+                },
+            )
             .addCase(importMultipleAudioFilesAtPosition.rejected, setRejected)
 
             .addCase(pickOutputPath.pending, (state) =>
@@ -1979,7 +2091,9 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as any;
                 if (payload?.timeline) {
-                    applyTimelineState(state, payload.timeline, { force: true });
+                    applyTimelineState(state, payload.timeline, {
+                        force: true,
+                    });
                 }
                 const skippedFiles = payload?.skippedFiles;
                 state.reaperSkippedFilesDialog =
@@ -2162,7 +2276,9 @@ const sessionSlice = createSlice({
                     state.status = "Open canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, { force: true });
+                applyTimelineState(state, (payload as any).timeline, {
+                    force: true,
+                });
                 state.status = "Project opened";
             })
             .addCase(openProjectFromDialog.rejected, (state, action) => {
@@ -2206,7 +2322,9 @@ const sessionSlice = createSlice({
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, { force: true });
+                applyTimelineState(state, (payload as any).timeline, {
+                    force: true,
+                });
                 const skippedFiles = (payload as any).skippedFiles;
                 state.vocalShifterSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0
@@ -2240,7 +2358,9 @@ const sessionSlice = createSlice({
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, { force: true });
+                applyTimelineState(state, (payload as any).timeline, {
+                    force: true,
+                });
                 const skippedFiles = (payload as any).skippedFiles;
                 state.reaperSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0
@@ -2283,7 +2403,9 @@ const sessionSlice = createSlice({
                 }
 
                 if (payload?.ok && payload?.tracks && payload?.clips) {
-                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    applyTimelineState(state, payload as TimelineState, {
+                        force: true,
+                    });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
                     state.clipPitchCurves = currentClipPitchCurves;
@@ -2326,7 +2448,9 @@ const sessionSlice = createSlice({
                 }
 
                 if (payload?.ok && payload?.tracks && payload?.clips) {
-                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    applyTimelineState(state, payload as TimelineState, {
+                        force: true,
+                    });
                     state.playheadSec = currentPlayheadSec;
                     state.paramsEpoch = currentParamsEpoch;
                     state.clipPitchCurves = currentClipPitchCurves;
@@ -2362,14 +2486,18 @@ const sessionSlice = createSlice({
                 }
                 const next = payload.project?.base_scale;
                 if (next && (SCALE_KEYS as readonly string[]).includes(next)) {
-                    state.project.baseScale = next as typeof state.project.baseScale;
+                    state.project.baseScale =
+                        next as typeof state.project.baseScale;
                 }
                 if (typeof payload.project?.use_custom_scale === "boolean") {
-                    state.project.useCustomScale = payload.project.use_custom_scale;
+                    state.project.useCustomScale =
+                        payload.project.use_custom_scale;
                 }
                 if (payload.project?.custom_scale != null) {
                     state.project.customScale = payload.project.custom_scale
-                        ? sanitizeCustomScalePreset(payload.project.custom_scale)
+                        ? sanitizeCustomScalePreset(
+                              payload.project.custom_scale,
+                          )
                         : null;
                 }
                 if (typeof payload.project?.dirty === "boolean") {
@@ -2392,11 +2520,14 @@ const sessionSlice = createSlice({
                 };
                 if (!payload.ok) return;
                 if (typeof payload.project?.use_custom_scale === "boolean") {
-                    state.project.useCustomScale = payload.project.use_custom_scale;
+                    state.project.useCustomScale =
+                        payload.project.use_custom_scale;
                 }
                 if (payload.project?.custom_scale != null) {
                     state.project.customScale = payload.project.custom_scale
-                        ? sanitizeCustomScalePreset(payload.project.custom_scale)
+                        ? sanitizeCustomScalePreset(
+                              payload.project.custom_scale,
+                          )
                         : null;
                 }
                 if (typeof payload.project?.dirty === "boolean") {
@@ -2428,9 +2559,27 @@ const sessionSlice = createSlice({
                     );
                     const valid = (
                         [
-                            "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64",
-                            "1/1d", "1/2d", "1/4d", "1/8d", "1/16d", "1/32d", "1/64d",
-                            "1/1t", "1/2t", "1/4t", "1/8t", "1/16t", "1/32t", "1/64t",
+                            "1/1",
+                            "1/2",
+                            "1/4",
+                            "1/8",
+                            "1/16",
+                            "1/32",
+                            "1/64",
+                            "1/1d",
+                            "1/2d",
+                            "1/4d",
+                            "1/8d",
+                            "1/16d",
+                            "1/32d",
+                            "1/64d",
+                            "1/1t",
+                            "1/2t",
+                            "1/4t",
+                            "1/8t",
+                            "1/16t",
+                            "1/32t",
+                            "1/64t",
                         ] as const
                     ).includes(gridRaw as any);
                     const grid = (valid ? gridRaw : "1/4") as GridSize;
@@ -2585,7 +2734,9 @@ const sessionSlice = createSlice({
                 }
                 state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 300);
                 if (payload.tracks && payload.clips) {
-                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    applyTimelineState(state, payload as TimelineState, {
+                        force: true,
+                    });
                 }
             })
 
@@ -2605,7 +2756,9 @@ const sessionSlice = createSlice({
                     state.playbackAnchorSec = state.playheadSec;
                 }
                 if (payload.tracks && payload.clips) {
-                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    applyTimelineState(state, payload as TimelineState, {
+                        force: true,
+                    });
                 }
             })
 

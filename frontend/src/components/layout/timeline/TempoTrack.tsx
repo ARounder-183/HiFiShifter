@@ -1,5 +1,12 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Box, Popover, Text, TextField, Flex, IconButton } from "@radix-ui/themes";
+import {
+    Box,
+    Popover,
+    Text,
+    TextField,
+    Flex,
+    IconButton,
+} from "@radix-ui/themes";
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import type { RootState } from "../../../app/store";
@@ -94,7 +101,9 @@ const TempoFlag: React.FC<{
                             opacity: 0.9,
                         }}
                     >
-                        <span className="font-semibold">{Math.round(point.bpm)}</span>
+                        <span className="font-semibold">
+                            {Math.round(point.bpm)}
+                        </span>
                         <span className="ml-0.5 opacity-80">
                             {point.numerator}/{point.denominator}
                         </span>
@@ -125,13 +134,15 @@ const TempoFlag: React.FC<{
             >
                 <Flex direction="column" gap="2" style={{ minWidth: 160 }}>
                     <Flex align="center" gap="2">
-                        <Text size="1" style={{ width: 36 }}>BPM</Text>
+                        <Text size="1" style={{ width: 36 }}>
+                            BPM
+                        </Text>
                         <TextField.Root
                             size="1"
                             value={bpmText}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setBpmText(e.target.value)
-                            }
+                            onChange={(
+                                e: React.ChangeEvent<HTMLInputElement>,
+                            ) => setBpmText(e.target.value)}
                             onKeyDown={(e: React.KeyboardEvent) => {
                                 if (e.key === "Enter") commitEdit();
                             }}
@@ -139,13 +150,15 @@ const TempoFlag: React.FC<{
                         />
                     </Flex>
                     <Flex align="center" gap="2">
-                        <Text size="1" style={{ width: 36 }}>{t("tempo_time_signature" as any)}</Text>
+                        <Text size="1" style={{ width: 36 }}>
+                            {t("tempo_time_signature" as any)}
+                        </Text>
                         <TextField.Root
                             size="1"
                             value={numText}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setNumText(e.target.value)
-                            }
+                            onChange={(
+                                e: React.ChangeEvent<HTMLInputElement>,
+                            ) => setNumText(e.target.value)}
                             onKeyDown={(e: React.KeyboardEvent) => {
                                 if (e.key === "Enter") commitEdit();
                             }}
@@ -155,9 +168,9 @@ const TempoFlag: React.FC<{
                         <TextField.Root
                             size="1"
                             value={denText}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setDenText(e.target.value)
-                            }
+                            onChange={(
+                                e: React.ChangeEvent<HTMLInputElement>,
+                            ) => setDenText(e.target.value)}
                             onKeyDown={(e: React.KeyboardEvent) => {
                                 if (e.key === "Enter") commitEdit();
                             }}
@@ -179,13 +192,19 @@ export const TempoTrack: React.FC<TempoTrackProps> = ({
     contentRef,
 }) => {
     const dispatch = useAppDispatch();
-    const tempoMap = useAppSelector((state: RootState) => state.session.tempoMap);
+    const tempoMap = useAppSelector(
+        (state: RootState) => state.session.tempoMap,
+    );
 
     const useManualTransform = contentRef != null;
 
     // Compute visible flags
     const visibleFlags = useMemo(() => {
-        const result: Array<{ point: TempoPoint; leftPx: number; isFirst: boolean }> = [];
+        const result: Array<{
+            point: TempoPoint;
+            leftPx: number;
+            isFirst: boolean;
+        }> = [];
         const bufferPx = 200;
         const leftBound = scrollLeft - bufferPx;
         const rightBound = scrollLeft + viewportWidth + bufferPx;
@@ -231,8 +250,6 @@ export const TempoTrack: React.FC<TempoTrackProps> = ({
         },
         [dispatch, pxPerSec, scrollLeft, tempoMap],
     );
-
-    
 
     const handleDelete = useCallback(
         (id: string) => {
