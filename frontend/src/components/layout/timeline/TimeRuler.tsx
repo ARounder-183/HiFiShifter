@@ -1,7 +1,7 @@
 import React from "react";
 import { Box } from "@radix-ui/themes";
 
-type TimeRulerBar = { beat: number; label: string };
+type TimeRulerBar = { sec: number; label: string };
 
 const TimeRulerMarks = React.memo(function TimeRulerMarks({
   bars,
@@ -27,38 +27,37 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
       return bars;
     }
 
-    const beatPx = Math.max(1e-9, secPerBeat * pxPerSec);
     const bufferPx = Math.max(240, viewportWidth * 0.5);
     const leftPx = Math.max(0, scrollLeft - bufferPx);
     const rightPx = scrollLeft + viewportWidth + bufferPx;
 
-    const leftBeat = leftPx / beatPx;
-    const rightBeat = rightPx / beatPx;
+    const leftSec = leftPx / pxPerSec;
+    const rightSec = rightPx / pxPerSec;
 
-    // bars 已按 beat 升序，使用二分裁剪可视区，避免每次全量过滤。
+    // bars are sorted by sec, use binary search for culling
     const lowerBound = (target: number) => {
       let lo = 0;
       let hi = bars.length;
       while (lo < hi) {
         const mid = (lo + hi) >> 1;
-        if (bars[mid].beat < target) lo = mid + 1;
+        if (bars[mid].sec < target) lo = mid + 1;
         else hi = mid;
       }
       return lo;
     };
 
-    const start = Math.max(0, lowerBound(leftBeat) - 1);
-    const end = Math.min(bars.length, lowerBound(rightBeat + 1) + 1);
+    const start = Math.max(0, lowerBound(leftSec) - 1);
+    const end = Math.min(bars.length, lowerBound(rightSec + 1) + 1);
     return bars.slice(start, end);
-  }, [bars, secPerBeat, pxPerSec, scrollLeft, viewportWidth]);
+  }, [bars, pxPerSec, scrollLeft, viewportWidth]);
 
     return (
         <>
             {visibleBars.map((m) => (
                 <div
-                    key={m.beat}
+                    key={m.sec}
                     className="absolute top-0 bottom-0 text-[10px] text-qt-text-muted pt-1"
-                    style={{ left: m.beat * secPerBeat * pxPerSec }}
+                    style={{ left: m.sec * pxPerSec }}
                 >
                     <div className="pl-1 border-l border-qt-border h-2">
                         {m.label}

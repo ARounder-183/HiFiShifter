@@ -2,6 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 
 import type { SessionState } from "../sessionSlice";
+import { toBackendTempoMap } from "../../../utils/tempoMap";
 
 export const fetchTimeline = createAsyncThunk(
     "session/fetchTimeline",
@@ -40,8 +41,33 @@ export const seekPlayhead = createAsyncThunk(
 
 export const updateTransportBpm = createAsyncThunk(
     "session/updateTransportBpm",
-    async (bpm: number) => {
+    async (bpm: number, { getState }) => {
+        const state = getState() as { session: SessionState };
+        const tempoMap = state.session.tempoMap;
+        // Sync tempo map if it has multiple points
+        if (tempoMap.points.length > 1) {
+            return webApi.setTransport({
+                bpm,
+                tempoMap: toBackendTempoMap(tempoMap),
+            });
+        }
         return webApi.setTransport({ bpm });
+    },
+);
+
+/**
+ * Sync the current tempo map to the backend (without changing BPM).
+ * Call this after adding/editing/removing tempo points.
+ */
+export const syncTempoMap = createAsyncThunk(
+    "session/syncTempoMap",
+    async (_, { getState }) => {
+        const state = getState() as { session: SessionState };
+        const tempoMap = state.session.tempoMap;
+        return webApi.setTransport({
+            bpm: state.session.bpm,
+            tempoMap: toBackendTempoMap(tempoMap),
+        });
     },
 );
 

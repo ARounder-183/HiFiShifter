@@ -77,6 +77,19 @@ export interface ProjectMeta {
     grid_size?: string;
 }
 
+export interface BackendTempoPoint {
+    id: string;
+    position_ticks: number;
+    bpm: number;
+    numerator: number;
+    denominator: number;
+}
+
+export interface BackendTempoMap {
+    ticks_per_beat: number;
+    points: BackendTempoPoint[];
+}
+
 export interface TimelineState {
     tracks: TimelineTrack[];
     clips: TimelineClip[];
@@ -88,6 +101,7 @@ export interface TimelineState {
     project?: ProjectMeta;
     missing_files?: string[];
     skipped_files?: string[];
+    tempo_map?: BackendTempoMap | null;
 }
 
 export interface TimelineResult {
@@ -102,6 +116,7 @@ export interface TimelineResult {
     project?: ProjectMeta;
     missing_files?: string[];
     skipped_files?: string[];
+    tempo_map?: BackendTempoMap | null;
 }
 
 export interface TrackSummaryResult {

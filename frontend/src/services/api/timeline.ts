@@ -15,11 +15,25 @@ export const timelineApi = {
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),
 
     // Transport
-    setTransport: (payload: { playheadSec?: number; bpm?: number }) =>
+    setTransport: (payload: {
+        playheadSec?: number;
+        bpm?: number;
+        tempoMap?: {
+            ticks_per_beat: number;
+            points: Array<{
+                id: string;
+                position_ticks: number;
+                bpm: number;
+                numerator: number;
+                denominator: number;
+            }>;
+        };
+    }) =>
         invoke<{ ok: boolean; playhead_sec?: number; bpm?: number }>(
             "set_transport",
             payload.playheadSec,
             payload.bpm,
+            payload.tempoMap,
         ),
 
     setProjectLength: (projectSec: number) =>

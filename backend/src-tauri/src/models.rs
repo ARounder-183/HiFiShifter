@@ -1,4 +1,5 @@
 use crate::project::CustomScale;
+use crate::state::TempoMapData;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +89,9 @@ pub struct TimelineStatePayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_files: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tempo_map: Option<TempoMapData>,
 }
 
 #[derive(Debug, Clone, Serialize)]

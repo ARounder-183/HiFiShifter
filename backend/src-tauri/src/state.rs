@@ -201,6 +201,21 @@ pub struct RuntimeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempoPointData {
+    pub id: String,
+    pub position_ticks: u64,
+    pub bpm: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempoMapData {
+    pub ticks_per_beat: u32,
+    pub points: Vec<TempoPointData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineState {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
@@ -214,6 +229,10 @@ pub struct TimelineState {
     pub params_by_root_track: BTreeMap<String, TrackParamsState>,
 
     pub next_track_order: i32,
+
+    /// Variable tempo map (optional). When None, the global `bpm` is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo_map: Option<TempoMapData>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1206,6 +1225,7 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map.clone(),
         }
     }
 

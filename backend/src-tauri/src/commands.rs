@@ -86,8 +86,9 @@ pub fn set_transport(
     state: State<'_, AppState>,
     playhead_sec: Option<f64>,
     bpm: Option<f64>,
+    tempo_map: Option<crate::state::TempoMapData>,
 ) -> serde_json::Value {
-    core::set_transport(state, playhead_sec, bpm)
+    core::set_transport(state, playhead_sec, bpm, tempo_map)
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn undo_timeline(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {

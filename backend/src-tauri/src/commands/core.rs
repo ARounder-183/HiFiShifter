@@ -68,6 +68,7 @@ pub(super) fn set_transport(
     state: State<'_, AppState>,
     playhead_sec: Option<f64>,
     bpm: Option<f64>,
+    tempo_map: Option<crate::state::TempoMapData>,
 ) -> serde_json::Value {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         eprintln!(
@@ -86,6 +87,10 @@ pub(super) fn set_transport(
             state.checkpoint_timeline(&tl);
             tl.bpm = v;
         }
+    }
+    // Update tempo map if provided
+    if let Some(tm) = tempo_map {
+        tl.tempo_map = Some(tm);
     }
 
     // Keep realtime engine transport aligned.

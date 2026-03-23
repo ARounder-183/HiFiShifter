@@ -60,6 +60,7 @@ import {
     seekPlayhead,
     stopAudioPlayback,
     syncPlaybackState,
+    syncTempoMap,
     updateTransportBpm,
 } from "./thunks/transportThunks";
 
@@ -85,6 +86,14 @@ import {
 import { SCALE_KEYS } from "../../utils/musicalScales";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import type { TempoMap } from "../../utils/tempoMap";
+import {
+    createDefaultTempoMap,
+    fromBackendTempoMap,
+    secondsToTicks,
+    getTempoAtTicks,
+    computeNewPlaybackRate,
+} from "../../utils/tempoMap";
 import {
     importAudioAtPosition,
     importAudioFileAtPosition,
@@ -128,6 +137,11 @@ export interface SessionState {
     beats: number;
     projectSec: number;
     grid: GridSize;
+
+    /** Tempo Map (variable BPM + time signature) */
+    tempoMap: TempoMap;
+    /** Whether the tempo track lane is visible */
+    tempoTrackVisible: boolean;
 
     /** 自动交叉淡入淡出 */
     autoCrossfadeEnabled: boolean;
@@ -496,6 +510,19 @@ function applyTimelineState(
         Number(timeline.project_sec ?? state.projectSec),
     );
 
+    // Restore tempo map from backend (if present)
+    const rawTempoMap = (timeline as any).tempo_map;
+    if (rawTempoMap) {
+        state.tempoMap = fromBackendTempoMap(
+            rawTempoMap,
+            state.bpm,
+            state.beats,
+        );
+    } else {
+        // No tempo map from backend – sync first point with global bpm/beats
+        state.tempoMap = createDefaultTempoMap(state.bpm, state.beats);
+    }
+
     const project = (timeline as any).project as
         | {
               name?: string;
@@ -679,6 +706,9 @@ const initialState: SessionState = {
     projectSec: 30, // 默认 30 秒工程边界
     grid: "1/4",
 
+    tempoMap: createDefaultTempoMap(120, 4),
+    tempoTrackVisible: false,
+
     autoCrossfadeEnabled: true,
     gridSnapEnabled: true,
     pitchSnapEnabled: false,
@@ -789,6 +819,7 @@ export {
     seekPlayhead,
     updateTransportBpm,
     syncPlaybackState,
+    syncTempoMap,
     playOriginal,
     stopAudioPlayback,
 } from "./thunks/transportThunks";
@@ -897,13 +928,112 @@ const sessionSlice = createSlice({
             state.selectedPointId = null;
         },
         setBpm(state, action: PayloadAction<number>) {
-            state.bpm = clamp(action.payload, 10, 300);
+            const newBpm = clamp(action.payload, 10, 300);
+            state.bpm = newBpm;
+            // Keep first tempo point in sync with global BPM
+            if (state.tempoMap.points.length > 0) {
+                state.tempoMap.points[0].bpm = newBpm;
+            }
         },
         setBeats(state, action: PayloadAction<number>) {
-            state.beats = clamp(action.payload, 1, 32);
+            const newBeats = clamp(action.payload, 1, 32);
+            state.beats = newBeats;
+            // Keep first tempo point in sync with global beats
+            if (state.tempoMap.points.length > 0) {
+                state.tempoMap.points[0].numerator = newBeats;
+            }
         },
         setGrid(state, action: PayloadAction<GridSize>) {
             state.grid = action.payload;
+        },
+        // ── Tempo Map reducers ─────────────────────────────────
+        setTempoTrackVisible(state, action: PayloadAction<boolean>) {
+            state.tempoTrackVisible = action.payload;
+        },
+        toggleTempoTrackVisible(state) {
+            state.tempoTrackVisible = !state.tempoTrackVisible;
+        },
+        setTempoMap(state, action: PayloadAction<TempoMap>) {
+            state.tempoMap = action.payload;
+            // Keep global bpm in sync with first point
+            if (action.payload.points.length > 0) {
+                state.bpm = action.payload.points[0].bpm;
+                state.beats = action.payload.points[0].numerator;
+            }
+        },
+        addTempoPoint(
+            state,
+            action: PayloadAction<{
+                id: string;
+                positionTicks: number;
+                bpm: number;
+                numerator: number;
+                denominator: number;
+            }>,
+        ) {
+            const pt = action.payload;
+            const points = state.tempoMap.points;
+            // Insert in sorted order
+            let idx = points.findIndex((p) => p.positionTicks > pt.positionTicks);
+            if (idx === -1) idx = points.length;
+            points.splice(idx, 0, pt);
+        },
+        updateTempoPoint(
+            state,
+            action: PayloadAction<{
+                id: string;
+                bpm?: number;
+                numerator?: number;
+                denominator?: number;
+                positionTicks?: number;
+            }>,
+        ) {
+            const { id, bpm, numerator, denominator, positionTicks } = action.payload;
+            const pt = state.tempoMap.points.find((p) => p.id === id);
+            if (!pt) return;
+
+            const oldBpm = pt.bpm;
+
+            if (bpm != null) pt.bpm = clamp(bpm, 10, 300);
+            if (numerator != null) pt.numerator = clamp(numerator, 1, 32);
+            if (denominator != null) pt.denominator = denominator;
+            if (positionTicks != null && state.tempoMap.points.indexOf(pt) !== 0) {
+                pt.positionTicks = Math.max(0, positionTicks);
+                state.tempoMap.points.sort((a, b) => a.positionTicks - b.positionTicks);
+            }
+
+            // Adjust playback_rate for clips in the affected region
+            if (bpm != null && bpm !== oldBpm) {
+                const ptIdx = state.tempoMap.points.indexOf(pt);
+                const nextPtTicks =
+                    ptIdx + 1 < state.tempoMap.points.length
+                        ? state.tempoMap.points[ptIdx + 1].positionTicks
+                        : Infinity;
+
+                for (const clip of state.clips) {
+                    const clipTicks = secondsToTicks(clip.startSec, state.tempoMap);
+                    if (clipTicks >= pt.positionTicks && clipTicks < nextPtTicks) {
+                        clip.playbackRate = clamp(
+                            computeNewPlaybackRate(oldBpm, pt.bpm, clip.playbackRate),
+                            0.1,
+                            10,
+                        );
+                    }
+                }
+            }
+
+            // Keep global bpm in sync with first point
+            if (state.tempoMap.points[0]) {
+                state.bpm = state.tempoMap.points[0].bpm;
+                state.beats = state.tempoMap.points[0].numerator;
+            }
+        },
+        removeTempoPoint(state, action: PayloadAction<string>) {
+            const idx = state.tempoMap.points.findIndex((p) => p.id === action.payload);
+            // Can't remove the first point (position 0)
+            if (idx > 0) {
+                state.tempoMap.points.splice(idx, 1);
+            }
         },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
@@ -2558,6 +2688,12 @@ export const {
     setBpm,
     setBeats,
     setGrid,
+    setTempoTrackVisible,
+    toggleTempoTrackVisible,
+    setTempoMap,
+    addTempoPoint,
+    updateTempoPoint,
+    removeTempoPoint,
     toggleAutoCrossfade,
     toggleGridSnap,
     togglePitchSnap,

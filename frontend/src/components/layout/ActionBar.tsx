@@ -24,6 +24,7 @@ import {
     stopAudioPlayback,
     setBpm,
     updateTransportBpm,
+    syncTempoMap,
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
     toggleGridSnap,
@@ -33,9 +34,17 @@ import {
     persistUiSettings,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
+    toggleTempoTrackVisible,
+    addTempoPoint,
+    updateTempoPoint,
 } from "../../features/session/sessionSlice";
 import { SCALE_KEYS, SCALE_LABELS } from "../../utils/musicalScales";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
+import {
+    secondsToTicks,
+    getTempoAtTicks,
+    createTempoPointId,
+} from "../../utils/tempoMap";
 
 export function ActionBar() {
     const dispatch = useAppDispatch();
@@ -69,8 +78,35 @@ export function ActionBar() {
             setBpmText(String(Math.round(s.bpm || 120)));
             return;
         }
-        dispatch(setBpm(next));
-        void dispatch(updateTransportBpm(next));
+
+        if (s.tempoTrackVisible && s.tempoMap.points.length > 0) {
+            // Tempo track mode: add/update tempo point at current cursor position
+            const ticks = secondsToTicks(s.playheadSec, s.tempoMap);
+            const existingPt = s.tempoMap.points.find(
+                (p) => Math.abs(p.positionTicks - ticks) < s.tempoMap.ticksPerBeat / 4,
+            );
+            if (existingPt) {
+                dispatch(updateTempoPoint({ id: existingPt.id, bpm: next }));
+            } else {
+                // Add new point at playhead position
+                const prevPt = getTempoAtTicks(ticks, s.tempoMap);
+                dispatch(
+                    addTempoPoint({
+                        id: createTempoPointId(),
+                        positionTicks: Math.round(ticks),
+                        bpm: Math.max(10, Math.min(300, next)),
+                        numerator: prevPt.numerator,
+                        denominator: prevPt.denominator,
+                    }),
+                );
+            }
+            // Sync tempo map to backend
+            void dispatch(syncTempoMap());
+        } else {
+            // Global BPM mode (original behavior)
+            dispatch(setBpm(next));
+            void dispatch(updateTransportBpm(next));
+        }
         setBpmText(String(Math.round(next)));
     }
 
@@ -114,6 +150,24 @@ export function ActionBar() {
                         backgroundColor: "var(--qt-base)",
                     }}
                 />
+                <IconButton
+                    size="1"
+                    variant={s.tempoTrackVisible ? "solid" : "ghost"}
+                    title="Tempo Track"
+                    onClick={() => dispatch(toggleTempoTrackVisible())}
+                    style={{
+                        fontSize: 10,
+                        minWidth: 20,
+                        fontWeight: 600,
+                    }}
+                >
+                    T
+                </IconButton>
+                {s.tempoTrackVisible && s.tempoMap.points.length > 1 && (
+                    <Text size="1" className="text-qt-text-muted" style={{ opacity: 0.7 }}>
+                        ♪
+                    </Text>
+                )}
                 <Text size="1" className="text-qt-text-muted">
                     {t("beats_per_bar")}:
                 </Text>

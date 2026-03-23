@@ -62,6 +62,7 @@ import {
     TrackAreaContextMenu,
     TimelineScrollArea,
     TimeRuler,
+    TempoTrack,
     TrackLane,
     TrackList,
     useTimelineSelectionRect,
@@ -69,6 +70,10 @@ import {
     gridStepBeats,
     hasFileDrag,
 } from "./timeline";
+import {
+    generateBars as generateTempoBars,
+    snapSecToGrid,
+} from "../../utils/tempoMap";
 
 export const TimelinePanel: React.FC = () => {
     const dispatch = useAppDispatch();
@@ -776,9 +781,31 @@ export const TimelinePanel: React.FC = () => {
     const contentHeight = (s.tracks.length + dropExtraRows) * rowHeight;
 
     const bars = useMemo(() => {
+        const tempoMap = s.tempoMap;
+        const hasMultiTempo = tempoMap.points.length > 1;
+
+        if (hasMultiTempo) {
+            // Variable tempo: use tempo map to generate bars with sec positions
+            const visStartSec =
+                Number.isFinite(viewportWidth) && viewportWidth > 0
+                    ? Math.max(0, scrollLeft / pxPerSec - 5)
+                    : 0;
+            const visEndSec =
+                Number.isFinite(viewportWidth) && viewportWidth > 0
+                    ? (scrollLeft + viewportWidth) / pxPerSec + 5
+                    : dynamicProjectSec;
+
+            return generateTempoBars(
+                dynamicProjectSec,
+                tempoMap,
+                visStartSec,
+                visEndSec,
+            );
+        }
+
+        // Single tempo: use fast constant-BPM path (original logic)
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         const secPerBeatLocal = 60 / Math.max(1, s.bpm);
-        // totalBeats 必须用秒/每拍换算，确保覆盖整个 projectSec 范围
         const totalBeats = Math.max(
             1,
             Math.ceil(dynamicProjectSec / secPerBeatLocal),
@@ -807,17 +834,21 @@ export const TimelinePanel: React.FC = () => {
             );
         }
 
-        const result: Array<{ beat: number; label: string }> = [];
+        const result: Array<{ sec: number; label: string }> = [];
         for (let barIndex = startBarIndex; barIndex <= endBarIndex; barIndex += 1) {
             const beat = barIndex * beatsPerBar;
             if (beat > totalBeats) break;
-            result.push({ beat, label: `${barIndex + 1}.1` });
+            result.push({
+                sec: beat * secPerBeatLocal,
+                label: `${barIndex + 1}.1`,
+            });
         }
         return result;
     }, [
         s.beats,
         dynamicProjectSec,
         s.bpm,
+        s.tempoMap,
         viewportWidth,
         pxPerSec,
         scrollLeft,
@@ -1164,6 +1195,9 @@ export const TimelinePanel: React.FC = () => {
     /** 将秒数 snap 到最近的 beat 对齐位置（seconds-based） */
     function snapSec(sec: number) {
         const stepBeats = gridStepBeats(s.grid);
+        if (s.tempoMap.points.length > 1) {
+            return snapSecToGrid(sec, s.tempoMap, stepBeats);
+        }
         const stepSec = stepBeats * (60 / Math.max(1, s.bpm));
         return Math.round(sec / stepSec) * stepSec;
     }
@@ -1849,6 +1883,16 @@ export const TimelinePanel: React.FC = () => {
                         });
                     }}
                 />
+
+                {/* Tempo Track (variable BPM) */}
+                {s.tempoTrackVisible && (
+                    <TempoTrack
+                        pxPerSec={pxPerSec}
+                        scrollLeft={scrollLeft}
+                        viewportWidth={viewportWidth}
+                        contentWidth={contentWidth}
+                    />
+                )}
 
                 {/* Tracks Area */}
                 <TimelineScrollArea

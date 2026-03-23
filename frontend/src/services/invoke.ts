@@ -137,6 +137,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             const o: Record<string, unknown> = {};
             if (args[0] !== undefined) o.playheadSec = args[0];
             if (args[1] !== undefined) o.bpm = args[1];
+            if (args[2] !== undefined) o.tempoMap = args[2];
             return o;
         }
 
