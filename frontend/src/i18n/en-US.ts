@@ -575,6 +575,7 @@ export const enUS = {
     vst_reorder_hint: "Drag to reorder effects",
     vst_search_placeholder: "Search plugins...",
     vst_scan_path_manager_title: "VST Scan Path Manager",
+    vst3_experimental_warning: "VST3 support is fully implemented, including audio processing, state save/restore, and editor GUI.",
     vst_remove_scan_path: "Remove Path",
     vst_no_scan_paths: "No custom scan paths added yet.",
     vst_scan_path_select_folder: "Select VST Plugin Folder",

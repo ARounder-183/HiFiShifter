@@ -144,20 +144,31 @@ pub(super) fn vst_get_track_chain(
             .plugins
             .iter()
             .enumerate()
-            .map(|(i, p)| VstChainSlotPayload {
-                index: i,
-                plugin_uid: p.plugin_uid.clone(),
-                plugin_name: p.plugin_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string(),
-                plugin_path: p.plugin_path.to_string_lossy().to_string(),
-                format: match p.format {
-                    crate::vst_host::VstFormat::Vst2 => "vst2".to_string(),
-                    crate::vst_host::VstFormat::Vst3 => "vst3".to_string(),
-                },
-                bypassed: p.bypassed,
+            .map(|(i, p)| {
+                // 优先从注册表获取插件真实名称，回退到文件名推断
+                let plugin_name = state
+                    .vst_registry
+                    .find_descriptor(&p.plugin_uid)
+                    .map(|d| d.name)
+                    .unwrap_or_else(|| {
+                        p.plugin_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    });
+
+                VstChainSlotPayload {
+                    index: i,
+                    plugin_uid: p.plugin_uid.clone(),
+                    plugin_name,
+                    plugin_path: p.plugin_path.to_string_lossy().to_string(),
+                    format: match p.format {
+                        crate::vst_host::VstFormat::Vst2 => "vst2".to_string(),
+                        crate::vst_host::VstFormat::Vst3 => "vst3".to_string(),
+                    },
+                    bypassed: p.bypassed,
+                }
             })
             .collect();
 
@@ -391,12 +402,17 @@ pub(super) fn vst_open_editor(
                     });
                 }
 
+                // 从音频引擎获取实际采样率（避免硬编码 44100）
+                let engine_sr = state.audio_engine.sample_rate_hz();
+                let sample_rate = if engine_sr > 0 { engine_sr } else { 44100 };
+                let block_size: usize = 512;
+
                 let load_result = match plugin_state.format {
                     crate::vst_host::VstFormat::Vst2 => {
-                        plugin_host::load_vst2(path, 44100.0, 512)
+                        plugin_host::load_vst2(path, sample_rate as f32, block_size as i64)
                     }
                     crate::vst_host::VstFormat::Vst3 => {
-                        plugin_host::load_vst3(path, 44100.0, 512)
+                        plugin_host::load_vst3(path, sample_rate as f64, block_size as i32)
                     }
                 };
 
@@ -433,8 +449,63 @@ pub(super) fn vst_open_editor(
         };
         let window_title = format!("{} - Track {}", plugin_name, track_id);
 
+        // 构建编辑器关闭回调：将插件 chunk 数据回写到 timeline
+        let track_id_owned = track_id.to_string();
+        let plugin_index = index;
+        // 通过 AppHandle 在回调中安全获取 AppState 引用
+        let app_handle = state.app_handle.get().cloned();
+        let on_close: gui::OnEditorCloseCallback = Box::new(move |chunk_data| {
+            use tauri::Manager;
+
+            eprintln!(
+                "[vst::on_close] Saving chunk for track '{}' index {} — chunk={}",
+                track_id_owned,
+                plugin_index,
+                if chunk_data.is_some() { "present" } else { "none" }
+            );
+
+            let Some(handle) = app_handle else {
+                eprintln!("[vst::on_close] AppHandle not available, cannot save chunk");
+                return;
+            };
+
+            let app_state = handle.state::<crate::state::AppState>();
+
+            let snapshot = {
+                let mut tl = app_state
+                    .timeline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let Some(track) = tl.tracks.iter_mut().find(|t| t.id == track_id_owned)
+                else {
+                    eprintln!(
+                        "[vst::on_close] Track '{}' not found, cannot save chunk",
+                        track_id_owned
+                    );
+                    return;
+                };
+
+                if let Some(ps) = track.vst_chain.plugins.get_mut(plugin_index) {
+                    ps.chunk_data = chunk_data;
+                } else {
+                    eprintln!(
+                        "[vst::on_close] Plugin index {} out of range for track '{}'",
+                        plugin_index, track_id_owned
+                    );
+                    return;
+                }
+
+                let snap = tl.clone();
+                app_state.checkpoint_timeline(&snap);
+                snap
+            };
+
+            app_state.audio_engine.update_timeline(snapshot);
+            eprintln!("[vst::on_close] Timeline updated with saved chunk");
+        });
+
         // 创建编辑器窗口
-        match gui::open_editor_window(&instance, &window_title) {
+        match gui::open_editor_window(&instance, &window_title, Some(on_close)) {
             Ok(window) => {
                 eprintln!(
                     "[vst::open_editor] Editor opened for {}[{}]: {}",
@@ -555,6 +626,8 @@ pub(super) fn vst_remove_scan_path(
 }
 
 /// 获取 VST 功能是否可用。
+///
+/// 包含各格式的支持状态信息，前端可据此显示实验性提示。
 pub(super) fn vst_get_status() -> serde_json::Value {
     #[cfg(feature = "vst")]
     {
@@ -562,6 +635,10 @@ pub(super) fn vst_get_status() -> serde_json::Value {
             "ok": true,
             "available": true,
             "formats": ["vst2", "vst3"],
+            "formatStatus": {
+                "vst2": { "status": "stable", "label": "VST2" },
+                "vst3": { "status": "stable", "label": "VST3" },
+            },
         })
     }
 
@@ -571,6 +648,7 @@ pub(super) fn vst_get_status() -> serde_json::Value {
             "ok": true,
             "available": false,
             "formats": [],
+            "formatStatus": {},
         })
     }
 }

@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use super::plugin_instance::{VstPluginBackend, VstPluginInstance};
 
+/// 编辑器窗口关闭时的回调类型。
+/// 参数为插件实例导出的 chunk 数据（base64），None 表示无法获取。
+pub type OnEditorCloseCallback = Box<dyn FnOnce(Option<String>) + Send + 'static>;
+
 /// VST 编辑器窗口句柄。
 pub struct VstEditorWindow {
     /// 窗口标题。
@@ -55,10 +59,15 @@ impl Default for VstEditorWindow {
 ///
 /// 在 Windows 上创建一个 Win32 窗口，将插件编辑器嵌入其中。
 /// 窗口运行在独立线程的消息循环中，关闭窗口后线程自动退出。
+///
+/// `on_close` 回调在窗口关闭时被调用（窗口线程中），
+/// 携带插件当前的 chunk 数据（base64），用于回写到 timeline。
+///
 /// 返回创建的窗口信息，失败时返回错误。
 pub fn open_editor_window(
     instance: &Arc<Mutex<VstPluginInstance>>,
     title: &str,
+    on_close: Option<OnEditorCloseCallback>,
 ) -> Result<VstEditorWindow, String> {
     // 获取编辑器推荐尺寸
     let inst = instance.lock().unwrap_or_else(|e| e.into_inner());
@@ -67,12 +76,12 @@ pub fn open_editor_window(
 
     #[cfg(target_os = "windows")]
     {
-        open_editor_window_win32(instance, title, width, height)
+        open_editor_window_win32(instance, title, width, height, on_close)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (instance, title, width, height);
+        let _ = (instance, title, width, height, on_close);
         Err("VST editor windows are currently only supported on Windows".to_string())
     }
 }
@@ -241,6 +250,7 @@ fn open_editor_window_win32(
     title: &str,
     width: u32,
     height: u32,
+    on_close: Option<OnEditorCloseCallback>,
 ) -> Result<VstEditorWindow, String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -249,6 +259,13 @@ fn open_editor_window_win32(
     let instance_clone = Arc::clone(instance);
     let title_owned = title.to_string();
     let (tx, rx) = mpsc::channel::<Result<*mut std::ffi::c_void, String>>();
+
+    // on_close 回调需要 move 到线程中
+    let on_close_cell = std::cell::Cell::new(on_close);
+    // SAFETY: Cell<Option<Box<dyn FnOnce + Send>>> 通过线程 move 传递是安全的
+    struct SendCell(std::cell::Cell<Option<OnEditorCloseCallback>>);
+    unsafe impl Send for SendCell {}
+    let on_close_wrapper = SendCell(on_close_cell);
 
     let thread_handle = std::thread::Builder::new()
         .name(format!("vst-editor-{}", title))
@@ -346,10 +363,21 @@ fn open_editor_window_win32(
                             }
                         }
                         #[cfg(feature = "vst")]
-                        VstPluginBackend::Vst3 { .. } => {
-                            eprintln!(
-                                "[vst_host::gui] VST3 editor attach not yet implemented"
-                            );
+                        VstPluginBackend::Vst3 { instance } => {
+                            match instance.attach_editor(hwnd) {
+                                Ok(()) => {
+                                    eprintln!(
+                                        "[vst_host::gui] VST3 editor attached to HWND {:?}",
+                                        hwnd
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[vst_host::gui] VST3 editor attach failed: {}",
+                                        e
+                                    );
+                                }
+                            }
                         }
                         #[cfg(not(feature = "vst"))]
                         VstPluginBackend::Stub => {}
@@ -387,6 +415,12 @@ fn open_editor_window_win32(
                 // 消息循环结束，窗口已被关闭
                 eprintln!("[vst_host::gui] Editor window thread exiting: {}", title_owned);
 
+                // 在关闭 editor 之前，提取当前 chunk 数据用于回写
+                let chunk_data = {
+                    let inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    inst.get_chunk()
+                };
+
                 // 关闭 VST editor
                 {
                     let mut inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
@@ -397,8 +431,21 @@ fn open_editor_window_win32(
                                 editor.close();
                             }
                         }
+                        #[cfg(feature = "vst")]
+                        VstPluginBackend::Vst3 { instance } => {
+                            instance.detach_editor();
+                        }
                         _ => {}
                     }
+                }
+
+                // 调用 on_close 回调，将 chunk 数据回写到 timeline
+                if let Some(callback) = on_close_wrapper.0.take() {
+                    eprintln!(
+                        "[vst_host::gui] Invoking on_close callback with chunk={}",
+                        if chunk_data.is_some() { "present" } else { "none" }
+                    );
+                    callback(chunk_data);
                 }
             }
         })
@@ -429,6 +476,7 @@ fn open_editor_window_win32(
 /// 关闭 VST 编辑器窗口。
 ///
 /// 向窗口发送 WM_CLOSE 消息，触发窗口销毁和线程退出。
+/// 发送前检查 HWND 是否仍有效（IsWindow），避免向已销毁的窗口发送消息。
 pub fn close_editor_window(window: &mut VstEditorWindow) {
     if !window.is_open {
         return;
@@ -437,9 +485,10 @@ pub fn close_editor_window(window: &mut VstEditorWindow) {
     #[cfg(target_os = "windows")]
     {
         if let Some(hwnd) = window.hwnd.take() {
-            // 向窗口线程发送关闭消息
+            // 向窗口线程发送关闭消息（先检查 HWND 有效性）
             unsafe {
                 extern "system" {
+                    fn IsWindow(hWnd: *mut std::ffi::c_void) -> i32;
                     fn PostMessageW(
                         hWnd: *mut std::ffi::c_void,
                         Msg: u32,
@@ -447,7 +496,14 @@ pub fn close_editor_window(window: &mut VstEditorWindow) {
                         lParam: isize,
                     ) -> i32;
                 }
-                PostMessageW(hwnd, win32::WM_CLOSE, 0, 0);
+                if IsWindow(hwnd) != 0 {
+                    PostMessageW(hwnd, win32::WM_CLOSE, 0, 0);
+                } else {
+                    eprintln!(
+                        "[vst_host::gui] HWND {:?} is no longer valid, skipping PostMessage",
+                        hwnd
+                    );
+                }
             }
         }
 

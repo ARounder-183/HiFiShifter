@@ -574,6 +574,7 @@ export const koKR = {
     vst_reorder_hint: "드래그하여 순서 변경",
     vst_search_placeholder: "플러그인 검색...",
     vst_scan_path_manager_title: "VST 스캔 경로 관리",
+    vst3_experimental_warning: "VST3 지원이 완전히 구현되었습니다: 오디오 처리, 상태 저장/복원, 에디터 GUI를 포함합니다.",
     vst_remove_scan_path: "경로 제거",
     vst_no_scan_paths: "사용자 정의 스캔 경로가 아직 추가되지 않았습니다.",
     vst_scan_path_select_folder: "VST 플러그인 폴더 선택",

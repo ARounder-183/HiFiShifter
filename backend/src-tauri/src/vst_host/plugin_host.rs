@@ -67,7 +67,13 @@ pub fn load_vst2(
 
 /// 加载 VST3 插件（`.vst3` 模块）。
 ///
-/// 使用 `libloading` 加载共享库，通过 COM 接口初始化。
+/// 使用 `vst3` crate 的类型安全 COM 接口完成完整初始化：
+/// 1. 加载 DLL → GetPluginFactory → IPluginFactory
+/// 2. getClassInfo → 找到音频处理器组件
+/// 3. createInstance → IComponent
+/// 4. IComponent::initialize → IAudioProcessor::setupProcessing
+/// 5. IComponent::setActive(true) → IAudioProcessor::setProcessing(true)
+/// 6. 尝试获取 IEditController（参数管理和 GUI）
 pub fn load_vst3(
     path: &Path,
     sample_rate: f64,
@@ -77,40 +83,30 @@ pub fn load_vst3(
     {
         let module_path = resolve_vst3_module_path(path)?;
 
-        let lib = unsafe { libloading::Library::new(&module_path) }
-            .map_err(|e| format!("VST3 load library failed: {}", e))?;
+        let (vst3_instance, plugin_name, plugin_vendor, num_inputs, num_outputs) =
+            super::vst3_com::Vst3Instance::load(&module_path, sample_rate, block_size)?;
 
-        type GetFactoryFn = unsafe extern "system" fn() -> *mut std::ffi::c_void;
-        let get_factory: libloading::Symbol<GetFactoryFn> = unsafe {
-            lib.get(b"GetPluginFactory\0")
-                .map_err(|e| format!("VST3 GetPluginFactory not found: {}", e))?
-        };
-
-        let factory_ptr = unsafe { get_factory() };
-        if factory_ptr.is_null() {
-            return Err("VST3 GetPluginFactory returned null".to_string());
-        }
-
-        let instance = VstPluginInstance {
-            name: path
-                .file_stem()
+        let name = if plugin_name.is_empty() {
+            path.file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Unknown VST3")
-                .to_string(),
-            vendor: String::new(),
+                .to_string()
+        } else {
+            plugin_name
+        };
+
+        let instance = VstPluginInstance {
+            name,
+            vendor: plugin_vendor,
             format: VstFormat::Vst3,
             path: path.to_path_buf(),
             sample_rate: sample_rate as f32,
             block_size: block_size as usize,
-            num_inputs: 2,
-            num_outputs: 2,
+            num_inputs,
+            num_outputs,
             bypassed: false,
             backend: VstPluginBackend::Vst3 {
-                _lib: lib,
-                factory_ptr,
-                component_ptr: std::ptr::null_mut(),
-                processor_ptr: std::ptr::null_mut(),
-                initialized: false,
+                instance: vst3_instance,
             },
         };
 
@@ -125,8 +121,11 @@ pub fn load_vst3(
 }
 
 /// 解析 `.vst3` bundle 内部的实际共享库路径。
+///
+/// 对 Windows/macOS/Linux 不同的 bundle 结构进行路径解析。
+/// 如果输入路径本身是文件（单文件 .vst3），直接返回。
 #[cfg(feature = "vst")]
-fn resolve_vst3_module_path(bundle_path: &Path) -> Result<std::path::PathBuf, String> {
+pub(super) fn resolve_vst3_module_path(bundle_path: &Path) -> Result<std::path::PathBuf, String> {
     if bundle_path.is_file() {
         return Ok(bundle_path.to_path_buf());
     }

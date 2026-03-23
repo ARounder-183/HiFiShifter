@@ -183,11 +183,13 @@ export function VstChainEditor({
                                                 variant="soft"
                                                 color={
                                                     slot.format === "vst3"
-                                                        ? "blue"
+                                                        ? "orange"
                                                         : "gray"
                                                 }
                                             >
-                                                {slot.format.toUpperCase()}
+                                                {slot.format === "vst3"
+                                                    ? `${slot.format.toUpperCase()} ⚠`
+                                                    : slot.format.toUpperCase()}
                                             </Badge>
                                         </Flex>
                                     </Flex>

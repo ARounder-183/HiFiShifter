@@ -559,6 +559,7 @@ export const zhTW = {
     vst_reorder_hint: "拖曳以重新排列效果器",
     vst_search_placeholder: "搜尋外掛...",
     vst_scan_path_manager_title: "VST 掃描路徑管理",
+    vst3_experimental_warning: "VST3 支援已完整實現，包括音訊處理、狀態儲存/還原和編輯器 GUI。",
     vst_remove_scan_path: "移除路徑",
     vst_no_scan_paths: "尚未新增自訂掃描路徑。",
     vst_scan_path_select_folder: "選擇 VST 外掛資料夾",

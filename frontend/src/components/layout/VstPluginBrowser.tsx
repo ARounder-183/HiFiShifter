@@ -178,12 +178,7 @@ export function VstPluginBrowser({ open, onOpenChange, trackId }: Props) {
                                                     <Badge
                                                         size="1"
                                                         variant="soft"
-                                                        color={
-                                                            plugin.format ===
-                                                            "vst3"
-                                                                ? "blue"
-                                                                : "gray"
-                                                        }
+                                                        color="gray"
                                                     >
                                                         {plugin.format.toUpperCase()}
                                                     </Badge>

@@ -4,7 +4,7 @@
 //! 发现 VST2 `.dll` 和 VST3 `.vst3` 插件并提取元数据。
 //!
 //! VST2 扫描时会尝试短暂加载 DLL 获取真实元数据（名称/厂商/通道数等），
-//! 加载失败则回退到文件名推断。VST3 暂时只做文件发现。
+//! 加载失败则回退到文件名推断。VST3 扫描同样通过 COM 接口提取元数据。
 
 use std::path::{Path, PathBuf};
 
@@ -176,11 +176,59 @@ fn probe_vst2_metadata(path: &Path) -> Option<VstPluginDescriptor> {
     }
 }
 
+/// 最大递归扫描深度，防止在深层目录树中耗费过多时间。
+const MAX_SCAN_DEPTH: u32 = 3;
+
+/// 尝试通过 COM 接口从 VST3 插件提取真实元数据。
+///
+/// 加载 DLL → 获取 IPluginFactory → 读取类信息 → 释放。
+/// 失败时返回 None，调用方回退到文件名推断。
+#[cfg(feature = "vst")]
+fn probe_vst3_metadata(path: &Path) -> Option<VstPluginDescriptor> {
+    use super::plugin_host;
+
+    // 解析 bundle 路径为实际 DLL 路径
+    let module_path = match plugin_host::resolve_vst3_module_path(path) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+
+    let probe = super::vst3_com::probe_vst3_metadata(&module_path)?;
+
+    let uid = generate_uid(path);
+    let name = if probe.name.is_empty() {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    } else {
+        probe.name
+    };
+
+    Some(VstPluginDescriptor {
+        uid,
+        name,
+        vendor: probe.vendor,
+        format: VstFormat::Vst3,
+        path: path.to_path_buf(),
+        category: probe.category,
+        is_instrument: probe.is_instrument,
+        version: String::new(),
+        num_inputs: probe.num_inputs,
+        num_outputs: probe.num_outputs,
+    })
+}
+
 /// 扫描指定目录中的 VST2 插件。
 ///
 /// 对每个发现的 `.dll`/`.vst`/`.so` 文件，尝试加载获取真实元数据。
 /// 加载失败时回退到文件名推断，确保扫描不会因单个插件而中断。
+/// `depth` 参数控制递归深度，超过 `MAX_SCAN_DEPTH` 时停止递归。
 fn scan_vst2_directory(dir: &Path) -> Vec<VstPluginDescriptor> {
+    scan_vst2_directory_impl(dir, 0)
+}
+
+fn scan_vst2_directory_impl(dir: &Path, depth: u32) -> Vec<VstPluginDescriptor> {
     let mut results = Vec::new();
 
     if !dir.exists() || !dir.is_dir() {
@@ -196,8 +244,10 @@ fn scan_vst2_directory(dir: &Path) -> Vec<VstPluginDescriptor> {
         let path = entry.path();
 
         if path.is_dir() {
-            // 递归搜索子目录（最多 2 层）
-            results.extend(scan_vst2_directory(&path));
+            // 递归搜索子目录（受深度限制）
+            if depth < MAX_SCAN_DEPTH {
+                results.extend(scan_vst2_directory_impl(&path, depth + 1));
+            }
             continue;
         }
 
@@ -255,6 +305,10 @@ fn scan_vst2_directory(dir: &Path) -> Vec<VstPluginDescriptor> {
 
 /// 扫描指定目录中的 VST3 插件。
 fn scan_vst3_directory(dir: &Path) -> Vec<VstPluginDescriptor> {
+    scan_vst3_directory_impl(dir, 0)
+}
+
+fn scan_vst3_directory_impl(dir: &Path, depth: u32) -> Vec<VstPluginDescriptor> {
     let mut results = Vec::new();
 
     if !dir.exists() || !dir.is_dir() {
@@ -276,13 +330,23 @@ fn scan_vst3_directory(dir: &Path) -> Vec<VstPluginDescriptor> {
             .unwrap_or(false);
 
         if !is_vst3 {
-            if path.is_dir() {
-                // 递归搜索子目录
-                results.extend(scan_vst3_directory(&path));
+            if path.is_dir() && depth < MAX_SCAN_DEPTH {
+                // 递归搜索子目录（受深度限制）
+                results.extend(scan_vst3_directory_impl(&path, depth + 1));
             }
             continue;
         }
 
+        // 尝试通过 COM 接口提取真实元数据
+        #[cfg(feature = "vst")]
+        {
+            if let Some(desc) = probe_vst3_metadata(&path) {
+                results.push(desc);
+                continue;
+            }
+        }
+
+        // 回退：仅使用文件名信息
         let uid = generate_uid(&path);
         let name = path
             .file_stem()

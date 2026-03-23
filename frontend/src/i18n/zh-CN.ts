@@ -558,6 +558,7 @@ export const zhCN = {
     vst_reorder_hint: "拖拽以重新排序效果器",
     vst_search_placeholder: "搜索插件...",
     vst_scan_path_manager_title: "VST 扫描路径管理",
+    vst3_experimental_warning: "VST3 支持已完整实现，包括音频处理、状态保存/恢复和编辑器 GUI。",
     vst_remove_scan_path: "移除路径",
     vst_no_scan_paths: "尚未添加自定义扫描路径。",
     vst_scan_path_select_folder: "选择 VST 插件文件夹",

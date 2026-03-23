@@ -580,6 +580,7 @@ export const jaJP = {
     vst_reorder_hint: "ドラッグして並び替え",
     vst_search_placeholder: "プラグインを検索...",
     vst_scan_path_manager_title: "VST スキャンパス管理",
+    vst3_experimental_warning: "VST3 サポートは完全に実装されました：オーディオ処理、ステート保存/復元、エディタGUIを含みます。",
     vst_remove_scan_path: "パスを削除",
     vst_no_scan_paths: "カスタムスキャンパスはまだ追加されていません。",
     vst_scan_path_select_folder: "VST プラグインフォルダを選択",

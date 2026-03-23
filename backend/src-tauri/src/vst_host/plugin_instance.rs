@@ -36,14 +36,11 @@ pub enum VstPluginBackend {
         _host: std::sync::Arc<std::sync::Mutex<SimpleVst2Host>>,
     },
 
-    /// VST3 后端（使用 `libloading` 直接 FFI）。
+    /// VST3 后端（使用 `vst3` crate 提供的类型安全 COM 接口）。
     #[cfg(feature = "vst")]
     Vst3 {
-        _lib: libloading::Library,
-        factory_ptr: *mut std::ffi::c_void,
-        component_ptr: *mut std::ffi::c_void,
-        processor_ptr: *mut std::ffi::c_void,
-        initialized: bool,
+        /// VST3 COM 接口实例，封装了 IComponent、IAudioProcessor、IEditController 等。
+        instance: super::vst3_com::Vst3Instance,
     },
 
     /// 桩后端（VST feature 未启用时使用）。
@@ -134,12 +131,8 @@ impl VstPluginInstance {
             }
 
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => {
-                // VST3 处理：暂时 passthrough
-                for (out_ch, in_ch) in outputs.iter_mut().zip(inputs.iter()) {
-                    let len = out_ch.len().min(in_ch.len());
-                    out_ch[..len].copy_from_slice(&in_ch[..len]);
-                }
+            VstPluginBackend::Vst3 { instance } => {
+                instance.process(inputs, outputs);
             }
 
             #[cfg(not(feature = "vst"))]
@@ -163,7 +156,9 @@ impl VstPluginInstance {
                 plugin.resume();
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => {}
+            VstPluginBackend::Vst3 { instance } => {
+                instance.reconfigure(sample_rate as f64, instance.configured_block_size);
+            }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => {}
         }
@@ -180,7 +175,9 @@ impl VstPluginInstance {
                 plugin.resume();
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => {}
+            VstPluginBackend::Vst3 { instance } => {
+                instance.reconfigure(instance.configured_sample_rate, block_size as i32);
+            }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => {}
         }
@@ -199,7 +196,12 @@ impl VstPluginInstance {
                 })
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => None,
+            VstPluginBackend::Vst3 { instance } => {
+                instance.get_state().map(|bytes| {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                })
+            }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => None,
         }
@@ -219,8 +221,8 @@ impl VstPluginInstance {
                 Ok(())
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => {
-                Err("VST3 chunk restore not implemented yet".to_string())
+            VstPluginBackend::Vst3 { instance } => {
+                instance.set_state(&data)
             }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => {
@@ -242,7 +244,9 @@ impl VstPluginInstance {
                 }
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => {}
+            VstPluginBackend::Vst3 { instance } => {
+                params = instance.get_params_snapshot();
+            }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => {}
         }
@@ -252,6 +256,7 @@ impl VstPluginInstance {
     /// 获取编辑器窗口推荐尺寸。
     ///
     /// VST2 插件尝试从 editor 获取实际尺寸，没有 editor 或获取失败时返回默认值。
+    /// VST3 插件通过 IEditController::createView → IPlugView::getSize 获取。
     pub fn editor_size(&self) -> (u32, u32) {
         match &self.backend {
             #[cfg(feature = "vst")]
@@ -265,7 +270,7 @@ impl VstPluginInstance {
                 (800, 600)
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 { .. } => (800, 600),
+            VstPluginBackend::Vst3 { instance } => instance.editor_size(),
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => (800, 600),
         }
@@ -280,12 +285,9 @@ impl Drop for VstPluginInstance {
                 plugin.suspend();
             }
             #[cfg(feature = "vst")]
-            VstPluginBackend::Vst3 {
-                initialized, ..
-            } => {
-                if *initialized {
-                    *initialized = false;
-                }
+            VstPluginBackend::Vst3 { .. } => {
+                // Vst3Instance 的 Drop 实现会自动调用
+                // setProcessing(false) → setActive(false) → terminate
             }
             #[cfg(not(feature = "vst"))]
             VstPluginBackend::Stub => {}

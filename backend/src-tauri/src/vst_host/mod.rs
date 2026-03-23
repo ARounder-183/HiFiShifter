@@ -15,6 +15,8 @@ pub mod plugin_host;
 pub mod plugin_instance;
 pub mod scanner;
 pub mod stage;
+#[cfg(feature = "vst")]
+pub mod vst3_com;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
