@@ -11,8 +11,13 @@ use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsSta
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// HiFiShifter 支持的音频格式扩展名
-const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "m4a"];
+/// HiFiShifter 支持的音频格式扩展名（原生 + ffmpeg fallback + 视频提取）
+const SUPPORTED_AUDIO_EXTS: &[&str] = &[
+    "wav", "flac", "mp3", "ogg", "m4a", "aac", "aif", "aiff",
+    "wma", "ape", "tak", "tta", "dff", "dsf", "opus", "mka", "webm",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "ts", "m4v",
+    "mpg", "mpeg", "3gp", "vob", "rm", "rmvb",
+];
 
 /// 帧周期（秒）
 const FRAME_PERIOD: f64 = 0.005;

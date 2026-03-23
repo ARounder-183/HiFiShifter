@@ -31,8 +31,13 @@ pub struct AudioPreviewData {
     pub pcm_base64: String,
 }
 
-/// 支持的音频扩展名（用于前端标记）
-const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"];
+/// 支持的音频扩展名（用于前端标记，含原生 + ffmpeg fallback + 视频提取格式）
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a",
+    "wma", "ape", "tak", "tta", "dff", "dsf", "opus", "mka", "webm",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "ts", "m4v",
+    "mpg", "mpeg", "3gp", "vob", "rm", "rmvb",
+];
 
 fn _is_audio_extension(ext: &str) -> bool {
     AUDIO_EXTENSIONS

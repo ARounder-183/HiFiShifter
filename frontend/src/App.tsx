@@ -8,6 +8,7 @@ import { useAppDispatch, useAppSelector } from "./app/hooks";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeFfmpegNotFoundDialog,
     fetchTimeline,
     refreshRuntime,
     loadUiSettings,
@@ -123,6 +124,9 @@ function AppInner() {
     );
     const reaperSkippedFilesDialog = useAppSelector(
         (state) => state.session.reaperSkippedFilesDialog,
+    );
+    const ffmpegNotFoundDialog = useAppSelector(
+        (state) => state.session.ffmpegNotFoundDialog,
     );
 
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1277,6 +1281,42 @@ function AppInner() {
                         <Button
                             onClick={() =>
                                 dispatch(closeReaperSkippedFilesDialog())
+                            }
+                        >
+                            {"OK"}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            <Dialog.Root
+                open={ffmpegNotFoundDialog}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        dispatch(closeFfmpegNotFoundDialog());
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="520px">
+                    <Dialog.Title>{t("ffmpeg_not_found_title")}</Dialog.Title>
+                    <Dialog.Description>
+                        {t("ffmpeg_not_found_desc")}
+                    </Dialog.Description>
+                    <div className="mt-2 text-xs text-qt-text-secondary">
+                        {t("ffmpeg_not_found_install_hint")}
+                    </div>
+                    <Flex justify="between" align="center" mt="3">
+                        <a
+                            href="https://ffmpeg.org/download.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-qt-highlight hover:underline"
+                        >
+                            {t("ffmpeg_not_found_link")} ↗
+                        </a>
+                        <Button
+                            onClick={() =>
+                                dispatch(closeFfmpegNotFoundDialog())
                             }
                         >
                             {"OK"}

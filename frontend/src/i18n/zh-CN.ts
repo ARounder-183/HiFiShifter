@@ -536,4 +536,13 @@ export const zhCN = {
     drag_direction_x_only: "仅 X",
     drag_direction_y_only: "仅 Y",
     drag_direction: "拖动方向",
+
+
+    // FFmpeg 未找到对话框
+    ffmpeg_not_found_title: "未找到 FFmpeg",
+    ffmpeg_not_found_desc:
+        "该音频格式需要 FFmpeg 进行解码，但系统中未检测到 FFmpeg。",
+    ffmpeg_not_found_install_hint:
+        "请安装 FFmpeg 并确保其位于系统 PATH 环境变量中。",
+    ffmpeg_not_found_link: "下载 FFmpeg",
 } as const;

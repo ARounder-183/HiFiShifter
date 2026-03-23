@@ -1,6 +1,9 @@
+//! 文件对话框命令，用于打开/保存文件选择器。
+
 pub(super) fn open_audio_dialog() -> serde_json::Value {
+    let exts = crate::ffmpeg_utils::all_supported_extensions();
     let picked = rfd::FileDialog::new()
-        .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "m4a"])
+        .add_filter("Audio / Video", &exts)
         .pick_file();
 
     match picked {
@@ -12,8 +15,9 @@ pub(super) fn open_audio_dialog() -> serde_json::Value {
 }
 
 pub(super) fn open_audio_dialog_multi() -> serde_json::Value {
+    let exts = crate::ffmpeg_utils::all_supported_extensions();
     let picked = rfd::FileDialog::new()
-        .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "m4a"])
+        .add_filter("Audio / Video", &exts)
         .pick_files();
 
     match picked {

@@ -1206,6 +1206,7 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            error: None,
         }
     }
 

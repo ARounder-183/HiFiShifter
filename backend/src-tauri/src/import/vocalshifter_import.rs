@@ -44,8 +44,13 @@ fn segment_overlap_sec(left_timeline_sec: f64, right_timeline_sec: f64) -> f64 {
         .min(SEGMENT_OVERLAP_MAX_SEC * 0.5)
 }
 
-/// HiFiShifter 支持的音频格式扩展名
-const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "m4a"];
+/// HiFiShifter 支持的音频格式扩展名（原生 + ffmpeg fallback + 视频提取）
+const SUPPORTED_AUDIO_EXTS: &[&str] = &[
+    "wav", "flac", "mp3", "ogg", "m4a", "aac", "aif", "aiff",
+    "wma", "ape", "tak", "tta", "dff", "dsf", "opus", "mka", "webm",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "ts", "m4v",
+    "mpg", "mpeg", "3gp", "vob", "rm", "rmvb",
+];
 
 const FILE_HEADER_SIZE: usize = 16;
 const MAGIC: [u8; 4] = [0x56, 0x53, 0x50, 0x44]; // "VSPD"

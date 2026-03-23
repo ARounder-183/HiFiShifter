@@ -552,4 +552,13 @@ export const koKR = {
     drag_direction_x_only: "X 축만",
     drag_direction_y_only: "Y 축만",
     drag_direction: "드래그 방향",
+
+
+    // FFmpeg를 찾을 수 없음 다이얼로그
+    ffmpeg_not_found_title: "FFmpeg를 찾을 수 없음",
+    ffmpeg_not_found_desc:
+        "이 오디오 형식을 디코딩하려면 FFmpeg가 필요하지만 시스템에서 FFmpeg를 찾을 수 없습니다.",
+    ffmpeg_not_found_install_hint:
+        "FFmpeg를 설치하고 시스템 PATH에 포함되어 있는지 확인하세요.",
+    ffmpeg_not_found_link: "FFmpeg 다운로드",
 } as const;

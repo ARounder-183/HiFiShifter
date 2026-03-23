@@ -242,6 +242,7 @@ export interface SessionState {
     lastResult?: unknown;
     vocalShifterSkippedFilesDialog: string[] | null;
     reaperSkippedFilesDialog: string[] | null;
+    ffmpegNotFoundDialog: boolean;
 
     /**
      * 交互锁计数器：当用户正在进行连续操作（拖动、滑动等）时 > 0。
@@ -766,6 +767,7 @@ const initialState: SessionState = {
     status: "Ready",
     vocalShifterSkippedFilesDialog: null,
     reaperSkippedFilesDialog: null,
+    ffmpegNotFoundDialog: false,
     _interactionLockCount: 0,
 };
 
@@ -1031,6 +1033,9 @@ const sessionSlice = createSlice({
         },
         closeReaperSkippedFilesDialog(state) {
             state.reaperSkippedFilesDialog = null;
+        },
+        closeFfmpegNotFoundDialog(state) {
+            state.ffmpegNotFoundDialog = false;
         },
         setSelectedClip(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
@@ -1380,10 +1385,20 @@ const sessionSlice = createSlice({
         };
         const setRejected = (
             state: SessionState,
-            action: { error?: { message?: string } },
+            action: { payload?: unknown; error?: { message?: string } },
         ) => {
             state.busy = false;
-            state.error = action.error?.message ?? "Request failed";
+            // 检测结构化 FFMPEG_NOT_FOUND 错误
+            const payload = action.payload as { code?: string; message?: string } | undefined;
+            if (payload && typeof payload === "object" && payload.code === "FFMPEG_NOT_FOUND") {
+                state.ffmpegNotFoundDialog = true;
+                state.error = undefined;
+                state.status = "Failed";
+                return;
+            }
+            state.error =
+                (typeof action.payload === "string" ? action.payload : undefined) ??
+                action.error?.message ?? "Request failed";
             state.status = "Failed";
         };
 
@@ -2578,6 +2593,7 @@ export const {
     setPitchShift,
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeFfmpegNotFoundDialog,
     setPitchSnapToleranceCents,
     setScaleHighlightMode,
     upsertCustomScalePreset,

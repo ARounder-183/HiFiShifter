@@ -537,4 +537,13 @@ export const zhTW = {
     drag_direction_x_only: "僅 X",
     drag_direction_y_only: "僅 Y",
     drag_direction: "拖曳方向",
+
+
+    // FFmpeg 未找到對話框
+    ffmpeg_not_found_title: "未找到 FFmpeg",
+    ffmpeg_not_found_desc:
+        "該音頻格式需要 FFmpeg 進行解碼，但系統中未偵測到 FFmpeg。",
+    ffmpeg_not_found_install_hint:
+        "請安裝 FFmpeg 並確保其位於系統 PATH 環境變數中。",
+    ffmpeg_not_found_link: "下載 FFmpeg",
 } as const;

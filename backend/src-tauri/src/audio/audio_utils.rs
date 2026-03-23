@@ -17,7 +17,28 @@ pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>),
         }
     }
 
-    decode_audio_f32_interleaved_symphonia(path)
+    // 先尝试 symphonia 解码
+    match decode_audio_f32_interleaved_symphonia(path) {
+        Ok(v) => return Ok(v),
+        Err(symphonia_err) => {
+            // symphonia 失败 → 尝试 ffmpeg fallback
+            if crate::ffmpeg_utils::needs_ffmpeg(path) || !crate::ffmpeg_utils::is_native_audio(path) {
+                return decode_via_ffmpeg_fallback(path).map_err(|e| {
+                    format!("symphonia: {}; ffmpeg fallback: {}", symphonia_err, e)
+                });
+            }
+            return Err(symphonia_err);
+        }
+    }
+}
+
+/// 通过 ffmpeg 转码为临时 WAV 后再用 hound 解码，完成后立即删除临时文件。
+fn decode_via_ffmpeg_fallback(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
+    let temp_wav = crate::ffmpeg_utils::transcode_to_temp_wav(path)?;
+    let result = decode_wav_f32_interleaved_hound(&temp_wav);
+    // 无论解码成功与否，立即删除临时 WAV 文件
+    let _ = std::fs::remove_file(&temp_wav);
+    result
 }
 
 fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
@@ -169,7 +190,12 @@ pub fn try_read_wav_info(path: &Path, preview_points: usize) -> Option<WavInfo> 
     }
 
     // Fall back to Symphonia for non-WAV (or WAV variants hound can't decode).
-    try_read_audio_info_symphonia(path, preview_points)
+    if let Some(info) = try_read_audio_info_symphonia(path, preview_points) {
+        return Some(info);
+    }
+
+    // 最后尝试 ffmpeg fallback：转码为临时 WAV 后读取信息
+    try_read_wav_info_via_ffmpeg(path, preview_points)
 }
 
 /// 快速只读 sample_rate / total_frames / duration_sec，不生成 waveform_preview。
@@ -188,7 +214,12 @@ pub fn try_read_audio_header_only(path: &Path) -> Option<WavInfo> {
             return Some(info);
         }
     }
-    try_read_duration_symphonia(path)
+    if let Some(info) = try_read_duration_symphonia(path) {
+        return Some(info);
+    }
+
+    // ffmpeg fallback：转码为临时 WAV 后只读 header
+    try_read_wav_info_via_ffmpeg(path, 0)
 }
 
 fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
@@ -248,7 +279,20 @@ pub fn compute_minmax_peaks(
             return Ok(peaks);
         }
     }
-    compute_minmax_peaks_symphonia(path, hop)
+
+    // 先尝试 symphonia
+    match compute_minmax_peaks_symphonia(path, hop) {
+        Ok(peaks) => return Ok(peaks),
+        Err(symphonia_err) => {
+            // ffmpeg fallback：转码为临时 WAV 后计算 peaks
+            if crate::ffmpeg_utils::needs_ffmpeg(path) || !crate::ffmpeg_utils::is_native_audio(path) {
+                return compute_minmax_peaks_via_ffmpeg(path, hop).map_err(|e| {
+                    format!("symphonia: {}; ffmpeg fallback: {}", symphonia_err, e)
+                });
+            }
+            return Err(symphonia_err);
+        }
+    }
 }
 
 fn compute_minmax_peaks_hound(
@@ -783,4 +827,28 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
         duration_sec,
         waveform_preview: preview,
     })
+}
+
+// ─── FFmpeg fallback 辅助函数 ───
+
+/// 通过 ffmpeg 转码为临时 WAV 后读取音频信息，完成后删除临时文件。
+fn try_read_wav_info_via_ffmpeg(path: &Path, preview_points: usize) -> Option<WavInfo> {
+    if !crate::ffmpeg_utils::needs_ffmpeg(path) && crate::ffmpeg_utils::is_native_audio(path) {
+        return None;
+    }
+    let temp_wav = crate::ffmpeg_utils::transcode_to_temp_wav(path).ok()?;
+    let result = try_read_wav_info_hound(&temp_wav, preview_points);
+    let _ = std::fs::remove_file(&temp_wav);
+    result
+}
+
+/// 通过 ffmpeg 转码为临时 WAV 后计算 minmax peaks，完成后删除临时文件。
+fn compute_minmax_peaks_via_ffmpeg(
+    path: &Path,
+    hop: usize,
+) -> Result<crate::waveform::CachedPeaks, String> {
+    let temp_wav = crate::ffmpeg_utils::transcode_to_temp_wav(path)?;
+    let result = compute_minmax_peaks_hound(&temp_wav, hop);
+    let _ = std::fs::remove_file(&temp_wav);
+    result
 }

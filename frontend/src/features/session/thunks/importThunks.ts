@@ -114,8 +114,13 @@ export const importAudioFromPath = createAsyncThunk(
         dispatch(setAudioPathAction(audioPath));
         const imported = await webApi.importAudioItem(audioPath);
         if (!(imported as { ok?: boolean }).ok) {
+            const errPayload = imported as { error?: { code?: string; message?: string } };
+            const code = errPayload.error?.code;
+            if (code === "FFMPEG_NOT_FOUND") {
+                return rejectWithValue({ code, message: errPayload.error?.message });
+            }
             return rejectWithValue(
-                (imported as { error?: { message?: string } }).error?.message ??
+                errPayload.error?.message ??
                     "import_audio_item_failed",
             );
         }
@@ -177,8 +182,13 @@ export const importAudioAtPosition = createAsyncThunk(
                 payload.startSec,
             );
             if (!(imported as { ok?: boolean }).ok) {
+                const errPayload = imported as { error?: { code?: string; message?: string } };
+                const code = errPayload.error?.code;
+                if (code === "FFMPEG_NOT_FOUND") {
+                    return rejectWithValue({ code, message: errPayload.error?.message });
+                }
                 return rejectWithValue(
-                    (imported as { error?: { message?: string } }).error?.message ??
+                    errPayload.error?.message ??
                         "import_audio_item_failed",
                 );
             }
@@ -262,8 +272,13 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 payload.startSec,
             );
             if (!(imported as { ok?: boolean }).ok) {
+                const errPayload = imported as { error?: { code?: string; message?: string } };
+                const code = errPayload.error?.code;
+                if (code === "FFMPEG_NOT_FOUND") {
+                    return rejectWithValue({ code, message: errPayload.error?.message });
+                }
                 return rejectWithValue(
-                    (imported as { error?: { message?: string } }).error?.message ??
+                    errPayload.error?.message ??
                         "import_audio_bytes_failed",
                 );
             }

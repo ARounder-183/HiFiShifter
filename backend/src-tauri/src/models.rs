@@ -88,6 +88,18 @@ pub struct TimelineStatePayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_files: Option<Vec<String>>,
+
+    /// 导入失败时的错误信息（如 FFMPEG_NOT_FOUND）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TimelineErrorPayload>,
+}
+
+/// 导入操作失败时的结构化错误信息
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TimelineErrorPayload {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

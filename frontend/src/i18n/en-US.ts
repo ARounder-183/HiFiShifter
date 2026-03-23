@@ -553,4 +553,13 @@ export const enUS = {
     drag_direction_x_only: "X Only",
     drag_direction_y_only: "Y Only",
     drag_direction: "Drag Direction",
+
+
+    // FFmpeg not found dialog
+    ffmpeg_not_found_title: "FFmpeg Not Found",
+    ffmpeg_not_found_desc:
+        "This audio format requires FFmpeg to decode, but FFmpeg was not found on your system.",
+    ffmpeg_not_found_install_hint:
+        "Please install FFmpeg and make sure it is available in your system PATH.",
+    ffmpeg_not_found_link: "Download FFmpeg",
 } as const;

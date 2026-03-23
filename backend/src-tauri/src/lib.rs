@@ -1,6 +1,8 @@
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
+#[path = "audio/ffmpeg_utils.rs"]
+mod ffmpeg_utils;
 #[path = "pitch/clip_pitch_cache.rs"]
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]

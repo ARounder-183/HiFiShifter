@@ -25,6 +25,21 @@ pub(super) fn import_audio_bytes(
             start_sec
         );
     }
+
+    // 检测是否需要 ffmpeg 转码，且 ffmpeg 不可用
+    let file_path = Path::new(&file_name);
+    if crate::ffmpeg_utils::needs_ffmpeg(file_path) && !crate::ffmpeg_utils::is_ffmpeg_available() {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut payload = tl.to_payload();
+        payload.ok = false;
+        payload.error = Some(crate::models::TimelineErrorPayload {
+            code: crate::ffmpeg_utils::FFMPEG_NOT_FOUND.to_string(),
+            message: "FFmpeg is required to decode this audio format but was not found on your system.".to_string(),
+        });
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
+
     let engine = base64::engine::general_purpose::STANDARD;
     let bytes = engine.decode(base64_data.as_bytes()).unwrap_or_default();
 
@@ -69,6 +84,21 @@ pub(super) fn import_audio_item(
             audio_path, track_id, start_sec
         );
     }
+
+    // 检测是否需要 ffmpeg 转码，且 ffmpeg 不可用
+    let path = std::path::Path::new(&audio_path);
+    if crate::ffmpeg_utils::needs_ffmpeg(path) && !crate::ffmpeg_utils::is_ffmpeg_available() {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut payload = tl.to_payload();
+        payload.ok = false;
+        payload.error = Some(crate::models::TimelineErrorPayload {
+            code: crate::ffmpeg_utils::FFMPEG_NOT_FOUND.to_string(),
+            message: "FFmpeg is required to decode this audio format but was not found on your system.".to_string(),
+        });
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
+
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.audio_loaded = true;

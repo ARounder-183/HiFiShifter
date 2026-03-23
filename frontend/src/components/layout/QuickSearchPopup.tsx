@@ -26,7 +26,7 @@ import {
     QUICK_SEARCH_POPUP_WIDTH,
 } from "./quickSearchPosition";
 
-/** 支持的音频扩展名 */
+/** 支持的音频/视频扩展名（包含原生、ffmpeg fallback 和视频提取格式） */
 const AUDIO_EXTENSIONS = new Set([
     "wav",
     "mp3",
@@ -36,6 +36,29 @@ const AUDIO_EXTENSIONS = new Set([
     "aif",
     "aiff",
     "m4a",
+    "wma",
+    "ape",
+    "tak",
+    "tta",
+    "dff",
+    "dsf",
+    "opus",
+    "mka",
+    "webm",
+    "mp4",
+    "mkv",
+    "avi",
+    "mov",
+    "wmv",
+    "flv",
+    "ts",
+    "m4v",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "vob",
+    "rm",
+    "rmvb",
 ]);
 
 function isAudioFile(entry: FileEntry): boolean {

@@ -558,4 +558,13 @@ export const jaJP = {
     drag_direction_x_only: "X方向のみ",
     drag_direction_y_only: "Y方向のみ",
     drag_direction: "ドラッグ方向",
+
+
+    // FFmpeg が見つからない ダイアログ
+    ffmpeg_not_found_title: "FFmpeg が見つかりません",
+    ffmpeg_not_found_desc:
+        "このオーディオ形式のデコードには FFmpeg が必要ですが、システムに FFmpeg が見つかりませんでした。",
+    ffmpeg_not_found_install_hint:
+        "FFmpeg をインストールし、システムの PATH に含まれていることを確認してください。",
+    ffmpeg_not_found_link: "FFmpeg をダウンロード",
 } as const;
