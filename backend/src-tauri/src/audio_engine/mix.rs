@@ -1,3 +1,7 @@
+// 实时音频混音引擎核心。
+// 在 cpal 音频回调线程中运行，负责将 EngineSnapshot 中的 clips 混音为立体声输出。
+// 当存在 per-track VST FX 链时，按轨道分组混音后逐轨道应用 VST 处理。
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -6,6 +10,9 @@ use arc_swap::ArcSwap;
 use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
+
+#[cfg(feature = "vst")]
+use std::collections::HashMap;
 
 const SNAPSHOT_XFADE_FRAMES: usize = 256;
 
@@ -173,6 +180,244 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
     }
 }
 
+// ─── per-track VST 混音 ─────────────────────────────────────────────────────
+
+/// 按轨道分组混音 + 逐轨道应用 VST FX 链，结果写入 scratch。
+///
+/// 工作流程：
+/// 1. 收集所有含 VST 链的轨道 ID
+/// 2. 对有 VST 链的轨道：逐轨道混音 → VST 处理 → 累加到 scratch
+/// 3. 对无 VST 链的轨道：直接混音到 scratch（与原始路径一致）
+///
+/// VST 插件实例使用 `try_lock` 非阻塞获取锁：
+/// - 成功：正常处理音频
+/// - 失败：跳过 VST 处理，直接使用干信号（避免音频回调卡顿）
+#[cfg(feature = "vst")]
+pub(crate) fn mix_snapshot_clips_with_vst(
+    frames: usize,
+    snap: &EngineSnapshot,
+    pos0: u64,
+    pos1: u64,
+    scratch: &mut [f32],
+) {
+    // 如果没有任何 VST stages，走快速路径
+    if snap.vst_stages.is_empty() {
+        mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch);
+        return;
+    }
+
+    // 按轨道分组 clips
+    let mut clips_by_track: HashMap<&str, Vec<&EngineClip>> = HashMap::new();
+    for clip in snap.clips.iter() {
+        clips_by_track
+            .entry(clip.track_id.as_str())
+            .or_default()
+            .push(clip);
+    }
+
+    let buf_len = frames * 2; // stereo interleaved
+
+    for (track_id, clips) in &clips_by_track {
+        let has_vst = snap.vst_stages.contains_key(*track_id);
+
+        if has_vst {
+            // 分配轨道临时缓冲区
+            let mut track_buf = vec![0.0f32; buf_len];
+
+            // 混音该轨道的所有 clips 到临时缓冲区
+            for clip in clips {
+                mix_single_clip_into_buffer(clip, pos0, pos1, &mut track_buf);
+            }
+
+            // 应用 VST FX 链（try_lock 非阻塞）
+            if let Some(stages) = snap.vst_stages.get(*track_id) {
+                apply_vst_chain_to_buffer_trylock(
+                    &stages.instances,
+                    &mut track_buf,
+                    frames,
+                    snap.sample_rate,
+                );
+            }
+
+            // 累加到最终 scratch
+            for (s, &t) in scratch.iter_mut().zip(track_buf.iter()) {
+                *s += t;
+            }
+        } else {
+            // 无 VST 链：直接混入 scratch
+            for clip in clips {
+                mix_single_clip_into_buffer(clip, pos0, pos1, scratch);
+            }
+        }
+    }
+}
+
+/// 将单个 clip 混入 buffer（与 mix_snapshot_clips_into_scratch 中的单 clip 逻辑一致）。
+fn mix_single_clip_into_buffer(
+    clip: &EngineClip,
+    pos0: u64,
+    pos1: u64,
+    buffer: &mut [f32],
+) {
+    let clip_start = clip.start_frame;
+    let clip_end = clip.start_frame.saturating_add(clip.length_frames);
+    if clip_end <= pos0 || clip_start >= pos1 {
+        return;
+    }
+
+    let overlap_start = clip_start.max(pos0);
+    let overlap_end = clip_end.min(pos1);
+    if overlap_end <= overlap_start {
+        return;
+    }
+
+    let out_off = (overlap_start - pos0) as usize;
+    let clip_off = overlap_start - clip_start;
+    let mix_frames = (overlap_end - overlap_start) as usize;
+
+    for f in 0..mix_frames {
+        let local = clip_off + f as u64;
+
+        let local_i64 = if local > i64::MAX as u64 {
+            continue;
+        } else {
+            local as i64
+        };
+        let local_adj_i64 = local_i64.saturating_add(clip.local_src_offset_frames);
+        if local_adj_i64 < 0 {
+            continue;
+        }
+        let local_adj = local_adj_i64 as f64;
+
+        let mut g = clip.gain;
+        if clip.fade_in_frames > 0 && local < clip.fade_in_frames {
+            g *= (local as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0);
+        }
+        if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
+            let remain = clip.length_frames.saturating_sub(local);
+            g *= (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0);
+        }
+        if g <= 0.0 {
+            continue;
+        }
+
+        let Some((l, r)) = sample_clip_pcm(clip, local, local_adj) else {
+            continue;
+        };
+
+        let oi = (out_off + f) * 2;
+        buffer[oi] += l * g;
+        buffer[oi + 1] += r * g;
+    }
+}
+
+/// 对立体声交错缓冲区应用 VST 插件链（非阻塞 try_lock）。
+///
+/// 对每个插件实例：
+/// - `try_lock` 成功 → 正常处理音频
+/// - `try_lock` 失败 → 跳过该插件（pass-through），避免实时线程卡顿
+#[cfg(feature = "vst")]
+fn apply_vst_chain_to_buffer_trylock(
+    instances: &[Arc<std::sync::Mutex<crate::vst_host::plugin_instance::VstPluginInstance>>],
+    buffer: &mut [f32],
+    frames: usize,
+    sample_rate: u32,
+) {
+    for instance_arc in instances {
+        // 非阻塞尝试获取锁
+        let mut inst = match instance_arc.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // 锁被占用（可能 GUI 线程在操作），跳过此插件
+                continue;
+            }
+        };
+
+        if inst.bypassed {
+            continue;
+        }
+
+        // 确保采样率正确
+        let sr = sample_rate as f32;
+        if (inst.sample_rate - sr).abs() > 1.0 {
+            inst.set_sample_rate(sr);
+        }
+
+        let block_size = inst.block_size.max(64);
+        let num_inputs = inst.num_inputs.max(1) as usize;
+        let num_outputs = inst.num_outputs.max(1) as usize;
+
+        // 从 interleaved stereo 拆分为 per-channel buffers
+        let mut input_left = Vec::with_capacity(frames);
+        let mut input_right = Vec::with_capacity(frames);
+        for f in 0..frames {
+            input_left.push(buffer[f * 2]);
+            input_right.push(buffer[f * 2 + 1]);
+        }
+
+        // 适配插件输入通道数
+        let mut input_channels: Vec<Vec<f32>> = Vec::with_capacity(num_inputs);
+        if num_inputs >= 2 {
+            input_channels.push(input_left);
+            input_channels.push(input_right);
+            for _ in 2..num_inputs {
+                input_channels.push(vec![0.0f32; frames]);
+            }
+        } else {
+            // 单声道输入：混合 L/R
+            let mono: Vec<f32> = (0..frames)
+                .map(|f| (buffer[f * 2] + buffer[f * 2 + 1]) * 0.5)
+                .collect();
+            input_channels.push(mono);
+        }
+
+        // 准备输出通道
+        let mut output_channels: Vec<Vec<f32>> = (0..num_outputs)
+            .map(|_| vec![0.0f32; frames])
+            .collect();
+
+        // 分块处理
+        let mut offset = 0;
+        while offset < frames {
+            let chunk_len = (frames - offset).min(block_size);
+
+            let input_chunks: Vec<Vec<f32>> = input_channels
+                .iter()
+                .map(|ch| ch[offset..offset + chunk_len].to_vec())
+                .collect();
+
+            let mut output_chunks: Vec<Vec<f32>> = (0..num_outputs)
+                .map(|_| vec![0.0f32; chunk_len])
+                .collect();
+
+            inst.process(&input_chunks, &mut output_chunks);
+
+            for (ch_idx, chunk) in output_chunks.iter().enumerate() {
+                if ch_idx < output_channels.len() {
+                    output_channels[ch_idx][offset..offset + chunk_len]
+                        .copy_from_slice(&chunk[..chunk_len]);
+                }
+            }
+
+            offset += chunk_len;
+        }
+
+        // 将处理后的音频写回 interleaved buffer
+        if num_outputs >= 2 {
+            for f in 0..frames {
+                buffer[f * 2] = output_channels[0][f];
+                buffer[f * 2 + 1] = output_channels[1][f];
+            }
+        } else if num_outputs == 1 {
+            // 单声道输出 → 复制到双声道
+            for f in 0..frames {
+                buffer[f * 2] = output_channels[0][f];
+                buffer[f * 2 + 1] = output_channels[0][f];
+            }
+        }
+    }
+}
+
 fn snapshot_has_pending_clip(snap: &EngineSnapshot, pos0: u64, pos1: u64) -> bool {
     snap.clips.iter().any(|clip| {
         if !clip.needs_synthesis || clip.rendered_pcm.is_some() {
@@ -195,6 +440,15 @@ fn render_snapshot_window(
 
     if snapshot_has_pending_clip(snap, pos0, pos1) {
         return false;
+    }
+
+    // 当 VST feature 启用且存在 VST stages 时，使用 per-track VST 混音路径
+    #[cfg(feature = "vst")]
+    {
+        if !snap.vst_stages.is_empty() {
+            mix_snapshot_clips_with_vst(frames, snap, pos0, pos1, scratch.as_mut_slice());
+            return true;
+        }
     }
 
     mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch.as_mut_slice());

@@ -65,6 +65,8 @@ mod vocalshifter_import;
 #[cfg(feature = "vslib")]
 #[path = "vocoder/vslib.rs"]
 mod vslib;
+#[cfg(feature = "vst")]
+mod vst_host;
 #[path = "audio/waveform.rs"]
 mod waveform;
 #[path = "audio/waveform_disk_cache.rs"]
@@ -145,7 +147,25 @@ pub fn run() {
                     let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
                     p.recent = recent;
                 }
-                let _ = state.config_dir.set(cfg_dir);
+                let _ = state.config_dir.set(cfg_dir.clone());
+
+                // 从配置文件恢复 VST 自定义扫描路径
+                #[cfg(feature = "vst")]
+                {
+                    let saved_paths = crate::vst_host::scanner::load_custom_scan_paths(&cfg_dir);
+                    if !saved_paths.is_empty() {
+                        let mut custom = state
+                            .vst_registry
+                            .custom_scan_paths
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        *custom = saved_paths;
+                        eprintln!(
+                            "[vst_host] Restored {} custom scan paths from config",
+                            custom.len()
+                        );
+                    }
+                }
             }
 
             // 启动时清理上次遗留的临时文件（后台线程，不阻塞启动）
@@ -240,10 +260,24 @@ pub fn run() {
             commands::get_midi_tracks,
             commands::import_midi_to_pitch,
             commands::get_ui_settings,
-            commands::save_ui_settings // TODO: 异步音高刷新命令暂时禁用，等待基础设施完成
-                                       // commands::start_pitch_refresh_task,
-                                       // commands::get_pitch_refresh_status,
-                                       // commands::cancel_pitch_task
+            commands::save_ui_settings,
+            // VST 插件宿主命令
+            commands::vst_scan_plugins,
+            commands::vst_list_plugins,
+            commands::vst_get_track_chain,
+            commands::vst_add_to_chain,
+            commands::vst_remove_from_chain,
+            commands::vst_set_bypass,
+            commands::vst_reorder_chain,
+            commands::vst_open_editor,
+            commands::vst_add_scan_path,
+            commands::vst_list_scan_paths,
+            commands::vst_remove_scan_path,
+            commands::vst_get_status
+            // TODO: 异步音高刷新命令暂时禁用，等待基础设施完成
+            // commands::start_pitch_refresh_task,
+            // commands::get_pitch_refresh_status,
+            // commands::cancel_pitch_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

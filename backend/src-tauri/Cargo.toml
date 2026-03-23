@@ -48,6 +48,11 @@ rustfft = "6"
 num-complex = "0.4"
 ndarray = { version = "0.16", optional = true }
 
+# VST plugin host dependencies (optional, behind "vst" feature)
+vst2 = { package = "vst", version = "0.4", optional = true }
+raw-window-handle = { version = "0.5", optional = true }
+libloading = { version = "0.8", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
 
@@ -57,9 +62,10 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 objc2 = "0.6"
 
 [features]
-default = ["onnx", "vslib"]
+default = ["onnx", "vslib", "vst"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
+vst = ["dep:vst2", "dep:raw-window-handle", "dep:libloading"]
 
 # Linux / Windows
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]

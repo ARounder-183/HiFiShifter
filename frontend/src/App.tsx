@@ -26,6 +26,8 @@ import {
     setToolMode,
     checkpointHistory,
     addTrackRemote,
+    vstGetStatusRemote,
+    vstListPluginsRemote,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
@@ -648,6 +650,10 @@ function AppInner() {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
+        // 检查 VST 宿主功能是否可用，并预加载已有的插件列表
+        void dispatch(vstGetStatusRemote()).then(() => {
+            void dispatch(vstListPluginsRemote());
+        });
     }, [dispatch]);
 
     useEffect(() => {

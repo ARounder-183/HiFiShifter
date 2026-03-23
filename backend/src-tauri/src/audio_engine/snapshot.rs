@@ -8,6 +8,9 @@ use super::io::{get_resampled_stereo_cached, is_audio_path};
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
 use super::util::{clamp01, quantize_i64, quantize_u32};
 
+#[cfg(feature = "vst")]
+use super::types::{VstStagesMap, VstTrackStages};
+
 pub(crate) fn compute_track_gains<'a>(tracks: &'a [Track]) -> HashMap<&'a str, (f32, bool, bool)> {
     let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
     let any_solo = tracks.iter().any(|t| t.solo);
@@ -646,11 +649,18 @@ pub(crate) fn build_snapshot(
         }
     }
 
+    // ── 构建 per-track VST stages ────────────────────────────────────────────
+    #[cfg(feature = "vst")]
+    let vst_stages = build_vst_stages_map(timeline, out_rate);
+
     EngineSnapshot {
         bpm,
         sample_rate: out_rate,
         duration_frames,
         clips: Arc::new(clips_out),
+
+        #[cfg(feature = "vst")]
+        vst_stages: Arc::new(vst_stages),
     }
 }
 
@@ -699,5 +709,124 @@ pub(crate) fn build_snapshot_for_file(
             volume_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }]),
+
+        #[cfg(feature = "vst")]
+        vst_stages: Arc::new(HashMap::new()),
     }
+}
+
+// ─── VST per-track stages 构建 ──────────────────────────────────────────────
+
+/// 为 timeline 中每条含 VST FX 链的轨道构建插件实例映射。
+///
+/// 只加载非旁通（non-bypassed）的插件。返回的 `VstStagesMap` 会被嵌入
+/// `EngineSnapshot`，在实时 audio callback 中通过 `try_lock` 使用。
+///
+/// TODO: 当前每次 snapshot rebuild 都会重新加载插件实例。
+/// 未来应从 `VstPluginRegistry.instances` 中复用已有实例，
+/// 避免不必要的磁盘 I/O 和状态重载开销。
+/// 当前 `chunk_data` 保证了预设状态的持久化，所以功能上是正确的。
+#[cfg(feature = "vst")]
+fn build_vst_stages_map(
+    timeline: &TimelineState,
+    sample_rate: u32,
+) -> VstStagesMap {
+    let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+    let mut map: VstStagesMap = HashMap::new();
+    let block_size: usize = 512; // 默认块大小
+
+    for track in &timeline.tracks {
+        if track.vst_chain.plugins.is_empty() {
+            continue;
+        }
+
+        let mut instances = Vec::new();
+
+        for plugin_state in &track.vst_chain.plugins {
+            if plugin_state.bypassed {
+                continue;
+            }
+
+            let path = &plugin_state.plugin_path;
+            if !path.exists() {
+                if debug {
+                    eprintln!(
+                        "[snapshot::vst] Plugin not found, skipping: {}",
+                        path.display()
+                    );
+                }
+                continue;
+            }
+
+            let instance_result = match plugin_state.format {
+                crate::vst_host::VstFormat::Vst2 => {
+                    crate::vst_host::plugin_host::load_vst2(
+                        path,
+                        sample_rate as f32,
+                        block_size as i64,
+                    )
+                }
+                crate::vst_host::VstFormat::Vst3 => {
+                    crate::vst_host::plugin_host::load_vst3(
+                        path,
+                        sample_rate as f64,
+                        block_size as i32,
+                    )
+                }
+            };
+
+            match instance_result {
+                Ok(instance) => {
+                    // 恢复插件状态（chunk data）
+                    if let Some(ref chunk) = plugin_state.chunk_data {
+                        let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Err(e) = inst.set_chunk(chunk) {
+                            if debug {
+                                eprintln!(
+                                    "[snapshot::vst] Failed to restore chunk for '{}': {}",
+                                    plugin_state.plugin_uid, e
+                                );
+                            }
+                        }
+                    }
+
+                    if debug {
+                        let name = instance
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .name
+                            .clone();
+                        eprintln!(
+                            "[snapshot::vst] Loaded plugin '{}' for track '{}'",
+                            name, track.id
+                        );
+                    }
+
+                    instances.push(instance);
+                }
+                Err(e) => {
+                    if debug {
+                        eprintln!(
+                            "[snapshot::vst] Failed to load plugin '{}': {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        if !instances.is_empty() {
+            map.insert(track.id.clone(), VstTrackStages { instances });
+        }
+    }
+
+    if debug && !map.is_empty() {
+        eprintln!(
+            "[snapshot::vst] Built VST stages for {} tracks",
+            map.len()
+        );
+    }
+
+    map
 }

@@ -98,6 +98,20 @@ import {
     removeSelectedClipRemote,
     setTrackStateRemote,
 } from "./thunks/trackThunks";
+
+import {
+    vstScanPluginsRemote,
+    vstListPluginsRemote,
+    vstGetTrackChainRemote,
+    vstAddToChainRemote,
+    vstRemoveFromChainRemote,
+    vstSetBypassRemote,
+    vstReorderChainRemote,
+    vstGetStatusRemote,
+    vstListScanPathsRemote,
+    vstRemoveScanPathRemote,
+} from "./thunks/vstThunks";
+
 import { markProjectDirty } from "./sessionDirtyState";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 
@@ -118,6 +132,26 @@ export type {
 
 type ClipColor = ClipInfo["color"];
 type WaveformPreview = number[] | { l: number[]; r: number[] };
+
+/** VST 插件描述（Redux-friendly slim 版本） */
+export interface VstPluginInfoSlim {
+    uid: string;
+    name: string;
+    vendor: string;
+    format: "vst2" | "vst3";
+    path: string;
+    category: string;
+    isInstrument: boolean;
+}
+
+/** FX 链槽位（Redux-friendly slim 版本） */
+export interface VstChainSlotSlim {
+    index: number;
+    pluginUid: string;
+    pluginName: string;
+    format: "vst2" | "vst3";
+    bypassed: boolean;
+}
 
 export interface SessionState {
     toolMode: ToolMode;
@@ -235,6 +269,17 @@ export interface SessionState {
         beatsPerBar: number;
         gridSize: GridSize;
     };
+
+    /** VST 插件宿主功能是否可用（由后端 feature flag 决定） */
+    vstAvailable: boolean;
+    /** 已扫描的 VST 插件列表 */
+    vstPlugins: VstPluginInfoSlim[];
+    /** 是否正在扫描 VST 插件 */
+    vstScanning: boolean;
+    /** 各轨道的 FX 链视图，key 为 trackId */
+    vstChainByTrack: Record<string, VstChainSlotSlim[]>;
+    /** 用户自定义的 VST 扫描路径列表 */
+    vstScanPaths: string[];
 
     busy: boolean;
     status: string;
@@ -762,6 +807,12 @@ const initialState: SessionState = {
         gridSize: "1/4",
     },
 
+    vstAvailable: false,
+    vstPlugins: [],
+    vstScanning: false,
+    vstChainByTrack: {},
+    vstScanPaths: [],
+
     busy: false,
     status: "Ready",
     vocalShifterSkippedFilesDialog: null,
@@ -846,6 +897,21 @@ export {
     importMultipleAudioAtPosition,
     importMultipleAudioFilesAtPosition,
 } from "./thunks/importThunks";
+
+export {
+    vstScanPluginsRemote,
+    vstListPluginsRemote,
+    vstGetTrackChainRemote,
+    vstAddToChainRemote,
+    vstRemoveFromChainRemote,
+    vstSetBypassRemote,
+    vstReorderChainRemote,
+    vstOpenEditorRemote,
+    vstAddScanPathRemote,
+    vstGetStatusRemote,
+    vstListScanPathsRemote,
+    vstRemoveScanPathRemote,
+} from "./thunks/vstThunks";
 
 const sessionSlice = createSlice({
     name: "session",
@@ -2544,6 +2610,162 @@ const sessionSlice = createSlice({
                     waveformPreview: payload.waveform_preview,
                     pitchRange: payload.pitch_range,
                 };
+            })
+
+            // ─── VST plugin host ────────────────────────────────────────
+
+            .addCase(vstGetStatusRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    available?: boolean;
+                };
+                if (payload.ok) {
+                    state.vstAvailable = Boolean(payload.available);
+                }
+            })
+
+            .addCase(vstScanPluginsRemote.pending, (state) => {
+                state.vstScanning = true;
+            })
+            .addCase(vstScanPluginsRemote.fulfilled, (state, action) => {
+                state.vstScanning = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    plugins?: Array<{
+                        uid: string;
+                        name: string;
+                        vendor: string;
+                        format: "vst2" | "vst3";
+                        path: string;
+                        category: string;
+                        is_instrument?: boolean;
+                        isInstrument?: boolean;
+                    }>;
+                };
+                if (payload.ok && Array.isArray(payload.plugins)) {
+                    state.vstPlugins = payload.plugins.map((p) => ({
+                        uid: p.uid,
+                        name: p.name,
+                        vendor: p.vendor,
+                        format: p.format,
+                        path: p.path,
+                        category: p.category,
+                        isInstrument: Boolean(
+                            p.isInstrument ?? p.is_instrument,
+                        ),
+                    }));
+                }
+            })
+            .addCase(vstScanPluginsRemote.rejected, (state) => {
+                state.vstScanning = false;
+            })
+
+            .addCase(vstListPluginsRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    plugins?: Array<{
+                        uid: string;
+                        name: string;
+                        vendor: string;
+                        format: "vst2" | "vst3";
+                        path: string;
+                        category: string;
+                        is_instrument?: boolean;
+                        isInstrument?: boolean;
+                    }>;
+                };
+                if (payload.ok && Array.isArray(payload.plugins)) {
+                    state.vstPlugins = payload.plugins.map((p) => ({
+                        uid: p.uid,
+                        name: p.name,
+                        vendor: p.vendor,
+                        format: p.format,
+                        path: p.path,
+                        category: p.category,
+                        isInstrument: Boolean(
+                            p.isInstrument ?? p.is_instrument,
+                        ),
+                    }));
+                }
+            })
+
+            .addCase(vstGetTrackChainRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    trackId?: string;
+                    track_id?: string;
+                    slots?: Array<{
+                        index: number;
+                        plugin_uid?: string;
+                        pluginUid?: string;
+                        plugin_name?: string;
+                        pluginName?: string;
+                        format: "vst2" | "vst3";
+                        bypassed: boolean;
+                    }>;
+                };
+                const trackId = payload.trackId ?? payload.track_id;
+                if (payload.ok && trackId && Array.isArray(payload.slots)) {
+                    state.vstChainByTrack[trackId] = payload.slots.map(
+                        (s) => ({
+                            index: s.index,
+                            pluginUid: s.pluginUid ?? s.plugin_uid ?? "",
+                            pluginName: s.pluginName ?? s.plugin_name ?? "",
+                            format: s.format,
+                            bypassed: Boolean(s.bypassed),
+                        }),
+                    );
+                }
+            })
+
+            .addCase(vstAddToChainRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    trackId?: string;
+                };
+                // After adding a plugin, the chain needs to be refreshed.
+                // This is handled by the component dispatching vstGetTrackChainRemote.
+                void payload;
+            })
+
+            .addCase(vstRemoveFromChainRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    trackId?: string;
+                };
+                void payload;
+            })
+
+            .addCase(vstSetBypassRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    trackId?: string;
+                };
+                void payload;
+            })
+
+            .addCase(vstReorderChainRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    trackId?: string;
+                };
+                void payload;
+            })
+
+            .addCase(vstListScanPathsRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    paths?: string[];
+                };
+                if (payload.ok && Array.isArray(payload.paths)) {
+                    state.vstScanPaths = payload.paths;
+                }
+            })
+
+            .addCase(vstRemoveScanPathRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean };
+                void payload;
+                // 列表会由组件侧 dispatch vstListScanPathsRemote 刷新
             });
     },
 });

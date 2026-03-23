@@ -426,6 +426,45 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "end_undo_group":
             return undefined;
 
+        // ─── VST 插件宿主命令 ───────────────────────────────────────
+        case "vst_scan_plugins":
+            return undefined;
+
+        case "vst_list_plugins":
+            return undefined;
+
+        case "vst_get_track_chain":
+            return { trackId: args[0] };
+
+        case "vst_add_to_chain":
+            return {
+                trackId: args[0],
+                pluginUid: args[1],
+                ...(args[2] !== undefined ? { index: args[2] } : {}),
+            };
+
+        case "vst_remove_from_chain":
+            return { trackId: args[0], index: args[1] };
+
+        case "vst_set_bypass":
+            return { trackId: args[0], index: args[1], bypassed: args[2] };
+
+        case "vst_reorder_chain":
+            return {
+                trackId: args[0],
+                fromIndex: args[1],
+                toIndex: args[2],
+            };
+
+        case "vst_open_editor":
+            return { trackId: args[0], index: args[1] };
+
+        case "vst_add_scan_path":
+            return { path: args[0] };
+
+        case "vst_get_status":
+            return undefined;
+
         default:
             return { __unwired: true };
     }

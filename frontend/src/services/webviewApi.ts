@@ -19,7 +19,7 @@ import type {
     WaveformPeaksSegmentPayload,
 } from "../types/api";
 
-import { coreApi, paramsApi, projectApi, timelineApi, waveformApi } from "./api";
+import { coreApi, paramsApi, projectApi, timelineApi, waveformApi, vstApi } from "./api";
 
 export const webApi = {
     // Core
@@ -106,6 +106,20 @@ export const webApi = {
 
     setTransport: timelineApi.setTransport,
     setProjectLength: timelineApi.setProjectLength,
+
+    // VST plugin host
+    vstScanPlugins: vstApi.scanPlugins,
+    vstListPlugins: vstApi.listPlugins,
+    vstGetTrackChain: vstApi.getTrackChain,
+    vstAddToChain: vstApi.addToChain,
+    vstRemoveFromChain: vstApi.removeFromChain,
+    vstSetBypass: vstApi.setBypass,
+    vstReorderChain: vstApi.reorderChain,
+    vstOpenEditor: vstApi.openEditor,
+    vstAddScanPath: vstApi.addScanPath,
+    vstListScanPaths: vstApi.listScanPaths,
+    vstRemoveScanPath: vstApi.removeScanPath,
+    vstGetStatus: vstApi.getStatus,
 
 };
 

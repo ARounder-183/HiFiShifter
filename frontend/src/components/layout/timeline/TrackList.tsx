@@ -9,6 +9,7 @@ import { Flex, Box, Text, IconButton, Slider, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import type { TrackInfo } from "../../../features/session/sessionTypes";
 import type { MessageKey } from "../../../i18n/messages";
+import { VstChainEditor } from "../VstChainEditor";
 
 /** 轨道颜色调色板（与后端 add_track 预设一致） */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
@@ -45,6 +46,8 @@ export const TrackList: React.FC<{
   onAlgoChange?: (trackId: string, algo: string) => void;
   onTrackNameChange?: (trackId: string, name: string) => void;
   onDuplicateTrack?: (trackId: string) => void;
+  /** VST 宿主功能是否可用 */
+  vstAvailable?: boolean;
   /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚动 */
   listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
 }> = ({
@@ -66,6 +69,7 @@ export const TrackList: React.FC<{
   onAlgoChange,
   onTrackNameChange,
   onDuplicateTrack,
+  vstAvailable,
   listScrollRef,
 }) => {
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -103,6 +107,12 @@ export const TrackList: React.FC<{
     trackId: string;
   } | null>(null);
   const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // VST FX 链编辑器弹出状态
+  const [vstEditorTrack, setVstEditorTrack] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   // 自动修正菜单溢出屏幕
   useLayoutEffect(() => {
@@ -723,6 +733,27 @@ export const TrackList: React.FC<{
                     >
                       S
                     </IconButton>
+                    {vstAvailable ? (
+                      <IconButton
+                        size="1"
+                        variant="ghost"
+                        color="violet"
+                        title={t("vst_fx" as MessageKey)}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setVstEditorTrack({ id: track.id, name: track.name });
+                        }}
+                        style={{
+                          fontWeight: 700,
+                          fontSize: 9,
+                          width: 20,
+                          height: 20,
+                        }}
+                      >
+                        FX
+                      </IconButton>
+                    ) : null}
                     {isRoot && composeEnabled && onAlgoChange ? (
                       <div onPointerDown={(e) => e.stopPropagation()}>
                         <Select.Root
@@ -821,6 +852,18 @@ export const TrackList: React.FC<{
             {t("ctx_delete")}
           </button>
         </div>
+      )}
+
+      {/* VST FX 链编辑器 */}
+      {vstEditorTrack && (
+        <VstChainEditor
+          open={!!vstEditorTrack}
+          onOpenChange={(open) => {
+            if (!open) setVstEditorTrack(null);
+          }}
+          trackId={vstEditorTrack.id}
+          trackName={vstEditorTrack.name}
+        />
       )}
     </Flex>
   );

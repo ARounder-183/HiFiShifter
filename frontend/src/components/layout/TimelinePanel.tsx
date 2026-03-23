@@ -1816,6 +1816,7 @@ export const TimelinePanel: React.FC = () => {
                 onDuplicateTrack={(trackId) => {
                     dispatch(duplicateTrackRemote(trackId));
                 }}
+                vstAvailable={s.vstAvailable}
             />
 
             {/* Timeline View (Right) */}

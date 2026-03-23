@@ -47,6 +47,8 @@ mod ui_settings;
 mod vocalshifter;
 #[path = "commands/vocalshifter_clipboard.rs"]
 mod vocalshifter_clipboard;
+#[path = "commands/vst.rs"]
+mod vst;
 #[path = "commands/waveform.rs"]
 mod waveform;
 // TODO: 异步音高刷新功能未完成，缺少必要的状态管理和依赖
@@ -784,6 +786,91 @@ pub fn save_ui_settings(
     settings: crate::config::UiSettings,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
+}
+
+// ===================== vst =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_scan_plugins(state: State<'_, AppState>) -> serde_json::Value {
+    vst::vst_scan_plugins(state.inner())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_list_plugins(state: State<'_, AppState>) -> serde_json::Value {
+    vst::vst_list_plugins(state.inner())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_get_track_chain(state: State<'_, AppState>, track_id: String) -> serde_json::Value {
+    vst::vst_get_track_chain(state.inner(), &track_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_add_to_chain(
+    state: State<'_, AppState>,
+    track_id: String,
+    plugin_uid: String,
+    index: Option<usize>,
+) -> serde_json::Value {
+    vst::vst_add_to_chain(state.inner(), &track_id, &plugin_uid, index)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_remove_from_chain(
+    state: State<'_, AppState>,
+    track_id: String,
+    index: usize,
+) -> serde_json::Value {
+    vst::vst_remove_from_chain(state.inner(), &track_id, index)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_set_bypass(
+    state: State<'_, AppState>,
+    track_id: String,
+    index: usize,
+    bypassed: bool,
+) -> serde_json::Value {
+    vst::vst_set_bypass(state.inner(), &track_id, index, bypassed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_reorder_chain(
+    state: State<'_, AppState>,
+    track_id: String,
+    from_index: usize,
+    to_index: usize,
+) -> serde_json::Value {
+    vst::vst_reorder_chain(state.inner(), &track_id, from_index, to_index)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_open_editor(
+    state: State<'_, AppState>,
+    track_id: String,
+    index: usize,
+) -> serde_json::Value {
+    vst::vst_open_editor(state.inner(), &track_id, index)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_add_scan_path(state: State<'_, AppState>, path: String) -> serde_json::Value {
+    vst::vst_add_scan_path(state.inner(), &path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_list_scan_paths(state: State<'_, AppState>) -> serde_json::Value {
+    vst::vst_list_scan_paths(state.inner())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_remove_scan_path(state: State<'_, AppState>, path: String) -> serde_json::Value {
+    vst::vst_remove_scan_path(state.inner(), &path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn vst_get_status() -> serde_json::Value {
+    vst::vst_get_status()
 }
 
 // ===================== pitch_refresh_async (暂时禁用) =====================

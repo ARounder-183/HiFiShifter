@@ -1,3 +1,7 @@
+// EngineSnapshot / EngineClip 等音频引擎核心数据类型定义。
+// 用于实时播放（mix.rs）和快照构建（snapshot.rs）。
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -95,13 +99,44 @@ pub(crate) struct EngineClip {
     pub(crate) needs_synthesis: bool,
 }
 
+// ─── per-track VST FX stages（实时路径用） ────────────────────────────────────
+
+/// 单条轨道的 VST 插件实例列表（已加载、按信号流顺序排列）。
+/// 在 snapshot 构建阶段创建，在实时 audio callback 中使用 `try_lock` 非阻塞处理。
+#[cfg(feature = "vst")]
+pub(crate) struct VstTrackStages {
+    /// 按信号流顺序排列的 VST 插件实例。
+    pub(crate) instances: Vec<Arc<std::sync::Mutex<crate::vst_host::plugin_instance::VstPluginInstance>>>,
+}
+
+/// 所有轨道的 VST stages 映射 (track_id → stages)。
+#[cfg(feature = "vst")]
+pub(crate) type VstStagesMap = HashMap<String, VstTrackStages>;
+
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct EngineSnapshot {
     pub(crate) bpm: f64,
     pub(crate) sample_rate: u32,
     pub(crate) duration_frames: u64,
     pub(crate) clips: Arc<Vec<EngineClip>>,
+
+    /// Per-track VST FX stages（实时处理用）。
+    /// 仅在 `vst` feature 启用时有值。
+    #[cfg(feature = "vst")]
+    pub(crate) vst_stages: Arc<VstStagesMap>,
+}
+
+// 手动实现 Debug（VstTrackStages 不 derive Debug）
+impl std::fmt::Debug for EngineSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineSnapshot")
+            .field("bpm", &self.bpm)
+            .field("sample_rate", &self.sample_rate)
+            .field("duration_frames", &self.duration_frames)
+            .field("clips_count", &self.clips.len())
+            .finish()
+    }
 }
 
 impl EngineSnapshot {
@@ -111,6 +146,9 @@ impl EngineSnapshot {
             sample_rate,
             duration_frames: 0,
             clips: Arc::new(vec![]),
+
+            #[cfg(feature = "vst")]
+            vst_stages: Arc::new(HashMap::new()),
         }
     }
 }

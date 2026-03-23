@@ -130,6 +130,11 @@ pub struct Track {
     /// 轨道主题色，hex 字符串，如 "#4f8ef7"
     #[serde(default)]
     pub color: String,
+
+    /// 轨道的 VST FX 链配置（Insert 效果器链）。
+    #[cfg(feature = "vst")]
+    #[serde(default)]
+    pub vst_chain: crate::vst_host::VstChainConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +274,9 @@ impl Default for TimelineState {
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
                 color: String::new(),
+
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             }],
             clips: vec![],
             selected_track_id: Some(track_id),
@@ -741,6 +749,11 @@ pub struct AppState {
 
     pub audio_engine: AudioEngine,
 
+    /// VST 插件注册表（扫描结果 + 运行时实例管理）。
+    /// 使用 Arc 封装以支持在后台扫描线程中安全引用。
+    #[cfg(feature = "vst")]
+    pub vst_registry: Arc<crate::vst_host::VstPluginRegistry>,
+
     /// App config directory for persisting recent projects etc.
     pub config_dir: OnceLock<std::path::PathBuf>,
 }
@@ -774,6 +787,10 @@ impl Default for AppState {
             pitch_timeline_snapshot: Mutex::new(HashMap::new()),
 
             audio_engine: AudioEngine::new(),
+
+            #[cfg(feature = "vst")]
+            vst_registry: Arc::new(crate::vst_host::VstPluginRegistry::new()),
+
             config_dir: OnceLock::new(),
         }
     }
@@ -1245,6 +1262,9 @@ impl TimelineState {
             compose_enabled: false,
             pitch_analysis_algo: PitchAnalysisAlgo::default(),
             color,
+
+            #[cfg(feature = "vst")]
+            vst_chain: Default::default(),
         };
         self.tracks.push(track);
 
@@ -1535,6 +1555,9 @@ impl TimelineState {
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
                 color: String::new(),
+
+                #[cfg(feature = "vst")]
+                vst_chain: Default::default(),
             });
             self.next_track_order += 1;
         }

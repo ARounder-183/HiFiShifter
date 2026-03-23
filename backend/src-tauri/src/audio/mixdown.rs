@@ -1,3 +1,7 @@
+// 离线音频渲染（mixdown）模块。
+// 负责将 TimelineState 渲染为最终的立体声 WAV 文件或 PCM 缓冲区。
+// 当轨道含有 VST FX 链时，按轨道分组混音后逐轨道应用 VST 处理。
+
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -300,6 +304,21 @@ pub fn render_mixdown_interleaved(
         }
     }
 
+    // ── VST per-track 缓冲区（仅在含 VST 链的轨道使用）─────────────────────
+    #[cfg(feature = "vst")]
+    let vst_track_ids: HashSet<String> = timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.vst_chain.plugins.is_empty() && audible_tracks.contains(&t.id))
+        .map(|t| t.id.clone())
+        .collect();
+
+    #[cfg(feature = "vst")]
+    let mut vst_track_buffers: HashMap<String, Vec<f32>> = vst_track_ids
+        .iter()
+        .map(|id| (id.clone(), vec![0.0f32; out_frames * out_channels as usize]))
+        .collect();
+
     for clip in &timeline.clips {
         if clip.muted {
             continue;
@@ -575,6 +594,51 @@ pub fn render_mixdown_interleaved(
 
             mix[oi] += segment[si] * final_g;
             mix[oi + 1] += segment[si + 1] * final_g;
+
+            // VST 轨道：额外累加到 per-track 缓冲区
+            #[cfg(feature = "vst")]
+            if let Some(track_buf) = vst_track_buffers.get_mut(&clip.track_id) {
+                track_buf[oi] += segment[si] * final_g;
+                track_buf[oi + 1] += segment[si + 1] * final_g;
+            }
+        }
+    }
+
+    // ── VST per-track 后处理 ─────────────────────────────────────────────────
+    // 对每条含 VST 链的轨道：
+    // 1. 取 per-track 干信号缓冲区
+    // 2. 应用 VST 插件链处理
+    // 3. 从 mix 中减去干信号，加上湿信号（替换）
+    #[cfg(feature = "vst")]
+    {
+        for track in &timeline.tracks {
+            if !vst_track_ids.contains(&track.id) {
+                continue;
+            }
+            let Some(dry_buf) = vst_track_buffers.get(&track.id) else {
+                continue;
+            };
+
+            // 加载 VST 插件并处理
+            let wet_buf = apply_vst_chain_offline(
+                &track.vst_chain,
+                dry_buf,
+                out_frames,
+                out_rate,
+            );
+
+            // 替换 mix 中该轨道的贡献：mix = mix - dry + wet
+            for i in 0..mix.len() {
+                mix[i] = mix[i] - dry_buf[i] + wet_buf[i];
+            }
+
+            if debug {
+                eprintln!(
+                    "mixdown: VST processed track '{}' with {} plugins",
+                    track.id,
+                    track.vst_chain.plugins.iter().filter(|p| !p.bypassed).count()
+                );
+            }
         }
     }
 
@@ -601,4 +665,174 @@ pub fn render_mixdown_interleaved(
     }
 
     Ok((out_rate, out_channels, duration_sec, mix))
+}
+
+// ─── 离线 VST 链处理 ────────────────────────────────────────────────────────
+
+/// 对立体声交错缓冲区应用轨道的 VST FX 链（离线/阻塞模式）。
+///
+/// 与实时路径不同，离线渲染使用 `lock()`（阻塞获取锁），
+/// 因为不在音频回调线程中，不会导致音频卡顿。
+///
+/// 返回处理后的立体声交错缓冲区。
+#[cfg(feature = "vst")]
+fn apply_vst_chain_offline(
+    chain_config: &crate::vst_host::VstChainConfig,
+    input: &[f32],
+    frames: usize,
+    sample_rate: u32,
+) -> Vec<f32> {
+    let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+    let block_size: usize = 1024; // 离线渲染使用更大的块减少开销
+    let mut buffer = input.to_vec();
+
+    for plugin_state in &chain_config.plugins {
+        if plugin_state.bypassed {
+            continue;
+        }
+
+        let path = &plugin_state.plugin_path;
+        if !path.exists() {
+            if debug {
+                eprintln!(
+                    "[mixdown::vst] Plugin not found, skipping: {}",
+                    path.display()
+                );
+            }
+            continue;
+        }
+
+        // 加载插件实例
+        let instance_result = match plugin_state.format {
+            crate::vst_host::VstFormat::Vst2 => {
+                crate::vst_host::plugin_host::load_vst2(
+                    path,
+                    sample_rate as f32,
+                    block_size as i64,
+                )
+            }
+            crate::vst_host::VstFormat::Vst3 => {
+                crate::vst_host::plugin_host::load_vst3(
+                    path,
+                    sample_rate as f64,
+                    block_size as i32,
+                )
+            }
+        };
+
+        let instance = match instance_result {
+            Ok(inst) => inst,
+            Err(e) => {
+                if debug {
+                    eprintln!(
+                        "[mixdown::vst] Failed to load plugin '{}': {}",
+                        path.display(),
+                        e
+                    );
+                }
+                continue;
+            }
+        };
+
+        // 恢复插件状态
+        if let Some(ref chunk) = plugin_state.chunk_data {
+            let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = inst.set_chunk(chunk) {
+                if debug {
+                    eprintln!(
+                        "[mixdown::vst] Failed to restore chunk for '{}': {}",
+                        plugin_state.plugin_uid, e
+                    );
+                }
+            }
+        }
+
+        // 处理音频
+        let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
+
+        let sr = sample_rate as f32;
+        if (inst.sample_rate - sr).abs() > 1.0 {
+            inst.set_sample_rate(sr);
+        }
+
+        let num_inputs = inst.num_inputs.max(1) as usize;
+        let num_outputs = inst.num_outputs.max(1) as usize;
+        let actual_block_size = inst.block_size.max(64);
+
+        // 从 interleaved stereo 拆分为 per-channel
+        let mut input_left = Vec::with_capacity(frames);
+        let mut input_right = Vec::with_capacity(frames);
+        for f in 0..frames {
+            input_left.push(buffer[f * 2]);
+            input_right.push(buffer[f * 2 + 1]);
+        }
+
+        // 适配输入通道数
+        let mut input_channels: Vec<Vec<f32>> = Vec::with_capacity(num_inputs);
+        if num_inputs >= 2 {
+            input_channels.push(input_left);
+            input_channels.push(input_right);
+            for _ in 2..num_inputs {
+                input_channels.push(vec![0.0f32; frames]);
+            }
+        } else {
+            let mono: Vec<f32> = (0..frames)
+                .map(|f| (buffer[f * 2] + buffer[f * 2 + 1]) * 0.5)
+                .collect();
+            input_channels.push(mono);
+        }
+
+        // 输出通道
+        let mut output_channels: Vec<Vec<f32>> = (0..num_outputs)
+            .map(|_| vec![0.0f32; frames])
+            .collect();
+
+        // 分块处理
+        let mut offset = 0;
+        while offset < frames {
+            let chunk_len = (frames - offset).min(actual_block_size);
+
+            let input_chunks: Vec<Vec<f32>> = input_channels
+                .iter()
+                .map(|ch| ch[offset..offset + chunk_len].to_vec())
+                .collect();
+
+            let mut output_chunks: Vec<Vec<f32>> = (0..num_outputs)
+                .map(|_| vec![0.0f32; chunk_len])
+                .collect();
+
+            inst.process(&input_chunks, &mut output_chunks);
+
+            for (ch_idx, chunk) in output_chunks.iter().enumerate() {
+                if ch_idx < output_channels.len() {
+                    output_channels[ch_idx][offset..offset + chunk_len]
+                        .copy_from_slice(&chunk[..chunk_len]);
+                }
+            }
+
+            offset += chunk_len;
+        }
+
+        // 写回 interleaved buffer
+        if num_outputs >= 2 {
+            for f in 0..frames {
+                buffer[f * 2] = output_channels[0][f];
+                buffer[f * 2 + 1] = output_channels[1][f];
+            }
+        } else if num_outputs == 1 {
+            for f in 0..frames {
+                buffer[f * 2] = output_channels[0][f];
+                buffer[f * 2 + 1] = output_channels[0][f];
+            }
+        }
+
+        if debug {
+            eprintln!(
+                "[mixdown::vst] Processed plugin '{}' ({}ch→{}ch, {} frames)",
+                inst.name, num_inputs, num_outputs, frames
+            );
+        }
+    }
+
+    buffer
 }
