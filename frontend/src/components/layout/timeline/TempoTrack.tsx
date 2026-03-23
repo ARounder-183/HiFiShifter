@@ -3,6 +3,7 @@ import { Box, Popover, Text, TextField, Flex, IconButton } from "@radix-ui/theme
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import type { RootState } from "../../../app/store";
+import { useI18n } from "../../../i18n/I18nProvider";
 import {
     addTempoPoint,
     updateTempoPoint,
@@ -40,6 +41,7 @@ const TempoFlag: React.FC<{
     const [denText, setDenText] = useState(String(point.denominator));
 
     const dispatch = useAppDispatch();
+    const { t } = useI18n();
 
     const commitEdit = useCallback(() => {
         const bpm = Number(bpmText);
@@ -138,7 +140,7 @@ const TempoFlag: React.FC<{
                         />
                     </Flex>
                     <Flex align="center" gap="2">
-                        <Text size="1" style={{ width: 36 }}>拍号</Text>
+                        <Text size="1" style={{ width: 36 }}>{t("tempo_time_signature" as any)}</Text>
                         <TextField.Root
                             size="1"
                             value={numText}

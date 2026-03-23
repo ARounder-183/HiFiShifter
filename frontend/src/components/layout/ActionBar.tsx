@@ -153,7 +153,7 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.tempoTrackVisible ? "solid" : "ghost"}
-                    title="Tempo Track"
+                    title={t("tempo_track" as any)}
                     onClick={() => dispatch(toggleTempoTrackVisible())}
                     style={{
                         fontSize: 10,
@@ -200,9 +200,36 @@ export function ActionBar() {
                             backgroundColor: "var(--qt-base)",
                         }}
                     />
-                    <Text size="1" className="text-qt-text-muted">
-                        / 4
-                    </Text>
+                    <Text size="1" className="text-qt-text-muted">/</Text>
+                    <TextField.Root
+                        size="1"
+                        type="number"
+                        value={String(
+                            (() => {
+                                const ticks = secondsToTicks(s.playheadSec, s.tempoMap);
+                                return getTempoAtTicks(ticks, s.tempoMap).denominator;
+                            })()
+                        )}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                            const raw = e.target.value.trim();
+                            const parsed = Number(raw);
+                            if (!Number.isFinite(parsed)) return;
+                            const den = Math.round(parsed);
+                            if (![1, 2, 4, 8, 16, 32].includes(den)) return;
+                            const ticks = secondsToTicks(s.playheadSec, s.tempoMap);
+                            const pt = getTempoAtTicks(ticks, s.tempoMap);
+                            const target = s.tempoMap.points.find((p) => p.id === pt.id);
+                            if (target) {
+                                dispatch(updateTempoPoint({ id: target.id, denominator: den }));
+                                void dispatch(syncTempoMap());
+                            }
+                        }}
+                        style={{
+                            width: 36,
+                            textAlign: "center",
+                            backgroundColor: "var(--qt-base)",
+                        }}
+                    />
                 </Flex>
 
                 <Text size="1" className="text-qt-text-muted">

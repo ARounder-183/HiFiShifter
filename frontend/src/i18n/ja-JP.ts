@@ -557,4 +557,11 @@ export const jaJP = {
     drag_direction_x_only: "X方向のみ",
     drag_direction_y_only: "Y方向のみ",
     drag_direction: "ドラッグ方向",
+
+    // Tempo Map
+    tempo_track: "テンポトラック",
+    tempo_bpm: "BPM",
+    tempo_time_signature: "拍子",
+    tempo_add_point: "テンポポイントを追加",
+    tempo_delete_point: "テンポポイントを削除",
 } as const;

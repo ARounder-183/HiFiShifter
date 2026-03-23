@@ -552,4 +552,11 @@ export const enUS = {
     drag_direction_x_only: "X Only",
     drag_direction_y_only: "Y Only",
     drag_direction: "Drag Direction",
+
+    // Tempo Map
+    tempo_track: "Tempo Track",
+    tempo_bpm: "BPM",
+    tempo_time_signature: "Time Sig",
+    tempo_add_point: "Add Tempo Point",
+    tempo_delete_point: "Delete Tempo Point",
 } as const;

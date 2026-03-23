@@ -535,4 +535,11 @@ export const zhCN = {
     drag_direction_x_only: "仅 X",
     drag_direction_y_only: "仅 Y",
     drag_direction: "拖动方向",
+
+    // Tempo Map
+    tempo_track: "速度轨",
+    tempo_bpm: "BPM",
+    tempo_time_signature: "拍号",
+    tempo_add_point: "添加速度点",
+    tempo_delete_point: "删除速度点",
 } as const;

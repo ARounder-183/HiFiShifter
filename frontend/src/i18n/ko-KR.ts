@@ -551,4 +551,11 @@ export const koKR = {
     drag_direction_x_only: "X 축만",
     drag_direction_y_only: "Y 축만",
     drag_direction: "드래그 방향",
+
+    // Tempo Map
+    tempo_track: "템포 트랙",
+    tempo_bpm: "BPM",
+    tempo_time_signature: "박자",
+    tempo_add_point: "템포 포인트 추가",
+    tempo_delete_point: "템포 포인트 삭제",
 } as const;
