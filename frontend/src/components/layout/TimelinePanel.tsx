@@ -2229,6 +2229,8 @@ export const TimelinePanel: React.FC = () => {
                             pxPerBeat={pxPerBeat}
                             grid={s.grid}
                             beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                            tempoMap={s.tempoMap}
+                            pxPerSec={pxPerSec}
                         />
 
                         {clipDropNewTrack ? (

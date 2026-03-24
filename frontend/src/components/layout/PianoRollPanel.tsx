@@ -67,6 +67,9 @@ import {
     clamp,
     gridStepBeats,
 } from "./timeline";
+import {
+    generateBars as generateTempoBars,
+} from "../../utils/tempoMap";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
@@ -2352,6 +2355,19 @@ export const PianoRollPanel: React.FC = () => {
         currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
 
     const timeRulerBars = useMemo(() => {
+        const tempoMap = s.tempoMap;
+        // Multi-tempo: use tempoMap-aware bar generation
+        if (tempoMap.points.length > 1) {
+            const visStartSec = scrollLeft / Math.max(1e-9, pxPerSec);
+            const visEndSec = visStartSec + viewSize.w / Math.max(1e-9, pxPerSec);
+            return generateTempoBars(
+                s.projectSec,
+                tempoMap,
+                visStartSec,
+                visEndSec,
+            );
+        }
+        // Single tempo: fast constant-BPM path
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         const totalBeats = Math.max(1, Math.ceil(s.projectSec / secPerBeat));
         const result: Array<{ sec: number; label: string }> = [];
@@ -2361,7 +2377,7 @@ export const PianoRollPanel: React.FC = () => {
             barIndex += 1;
         }
         return result;
-    }, [s.beats, s.projectSec, secPerBeat]);
+    }, [s.beats, s.projectSec, secPerBeat, s.tempoMap, scrollLeft, pxPerSec, viewSize.w]);
 
     return (
         <Flex
@@ -3305,6 +3321,8 @@ export const PianoRollPanel: React.FC = () => {
                                     )}
                                     layerRef={gridLayerRef}
                                     boundaryRef={gridBoundaryRef}
+                                    tempoMap={s.tempoMap}
+                                    pxPerSec={pxPerSec}
                                 />
 
                                 <canvas

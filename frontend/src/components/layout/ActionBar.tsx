@@ -43,6 +43,7 @@ import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import {
     secondsToTicks,
     getTempoAtTicks,
+    getTempoAtSec,
     createTempoPointId,
 } from "../../utils/tempoMap";
 
@@ -64,18 +65,27 @@ export function ActionBar() {
     );
     const bpmDirtyRef = useRef(false);
 
+    // Compute the BPM at the current playhead position for multi-tempo display
+    const currentBpm = (() => {
+        if (s.tempoTrackVisible && s.tempoMap.points.length > 1) {
+            const pt = getTempoAtSec(s.playheadSec, s.tempoMap);
+            return pt.bpm;
+        }
+        return s.bpm;
+    })();
+
     useEffect(() => {
         if (!bpmDirtyRef.current) {
-            setBpmText(String(Math.round(s.bpm || 120)));
+            setBpmText(String(Math.round(currentBpm || 120)));
         }
-    }, [s.bpm]);
+    }, [currentBpm]);
 
     function commitBpm(nextText?: string) {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
         bpmDirtyRef.current = false;
         if (!Number.isFinite(next)) {
-            setBpmText(String(Math.round(s.bpm || 120)));
+            setBpmText(String(Math.round(currentBpm || 120)));
             return;
         }
 
@@ -140,7 +150,7 @@ export function ActionBar() {
                         } else if (e.key === "Escape") {
                             e.preventDefault();
                             bpmDirtyRef.current = false;
-                            setBpmText(String(Math.round(s.bpm || 120)));
+                            setBpmText(String(Math.round(currentBpm || 120)));
                             (e.currentTarget as HTMLInputElement).blur();
                         }
                     }}
@@ -176,9 +186,15 @@ export function ActionBar() {
                         size="1"
                         type="number"
                         value={
-                            Number.isFinite(s.beats)
-                                ? Math.round(s.beats).toString()
-                                : "4"
+                            (() => {
+                                if (s.tempoTrackVisible && s.tempoMap.points.length > 1) {
+                                    const pt = getTempoAtSec(s.playheadSec, s.tempoMap);
+                                    return Math.round(pt.numerator).toString();
+                                }
+                                return Number.isFinite(s.beats)
+                                    ? Math.round(s.beats).toString()
+                                    : "4";
+                            })()
                         }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                             const raw = e.target.value.trim();
