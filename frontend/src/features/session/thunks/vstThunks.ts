@@ -93,6 +93,14 @@ export const vstOpenEditorRemote = createAsyncThunk(
     },
 );
 
+/** 关闭 VST 插件编辑器 GUI 窗口 */
+export const vstCloseEditorRemote = createAsyncThunk(
+    "session/vstCloseEditorRemote",
+    async (payload: { trackId: string; index: number }) => {
+        return webApi.vstCloseEditor(payload.trackId, payload.index);
+    },
+);
+
 /** 添加自定义 VST 扫描路径 */
 export const vstAddScanPathRemote = createAsyncThunk(
     "session/vstAddScanPathRemote",

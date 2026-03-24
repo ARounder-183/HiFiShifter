@@ -103,6 +103,8 @@ pub struct VstPluginRegistry {
     pub descriptors: RwLock<Vec<VstPluginDescriptor>>,
     /// 活跃的插件实例池（key = 实例 ID）。
     pub instances: Mutex<HashMap<String, Arc<Mutex<plugin_instance::VstPluginInstance>>>>,
+    /// 打开的编辑器窗口（key = 实例 ID）。
+    pub editor_windows: Mutex<HashMap<String, gui::VstEditorWindow>>,
     /// 自定义 VST 扫描路径（用户配置）。
     pub custom_scan_paths: RwLock<Vec<PathBuf>>,
     /// 扫描状态。
@@ -114,6 +116,7 @@ impl Default for VstPluginRegistry {
         Self {
             descriptors: RwLock::new(Vec::new()),
             instances: Mutex::new(HashMap::new()),
+            editor_windows: Mutex::new(HashMap::new()),
             custom_scan_paths: RwLock::new(Vec::new()),
             scan_in_progress: std::sync::atomic::AtomicBool::new(false),
         }

@@ -204,6 +204,7 @@ pub(crate) fn build_snapshot(
     out_rate: u32,
     cache: &Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
+    #[cfg(feature = "vst")] vst_registry: Option<&std::sync::Arc<crate::vst_host::VstPluginRegistry>>,
 ) -> EngineSnapshot {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let bpm = if timeline.bpm.is_finite() && timeline.bpm > 0.0 {
@@ -651,7 +652,7 @@ pub(crate) fn build_snapshot(
 
     // ── 构建 per-track VST stages ────────────────────────────────────────────
     #[cfg(feature = "vst")]
-    let vst_stages = build_vst_stages_map(timeline, out_rate);
+    let vst_stages = build_vst_stages_map(timeline, out_rate, vst_registry);
 
     EngineSnapshot {
         bpm,
@@ -722,14 +723,14 @@ pub(crate) fn build_snapshot_for_file(
 /// 只加载非旁通（non-bypassed）的插件。返回的 `VstStagesMap` 会被嵌入
 /// `EngineSnapshot`，在实时 audio callback 中通过 `try_lock` 使用。
 ///
-/// TODO: 当前每次 snapshot rebuild 都会重新加载插件实例。
-/// 未来应从 `VstPluginRegistry.instances` 中复用已有实例，
-/// 避免不必要的磁盘 I/O 和状态重载开销。
-/// 当前 `chunk_data` 保证了预设状态的持久化，所以功能上是正确的。
+/// 优先从 `VstPluginRegistry.instances` 中复用已有实例，
+/// 只在找不到时才从磁盘加载新实例并存入注册表。
+/// `chunk_data` 保证了预设状态的持久化，所以功能上是正确的。
 #[cfg(feature = "vst")]
 fn build_vst_stages_map(
     timeline: &TimelineState,
     sample_rate: u32,
+    vst_registry: Option<&std::sync::Arc<crate::vst_host::VstPluginRegistry>>,
 ) -> VstStagesMap {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let mut map: VstStagesMap = HashMap::new();
@@ -742,7 +743,7 @@ fn build_vst_stages_map(
 
         let mut instances = Vec::new();
 
-        for plugin_state in &track.vst_chain.plugins {
+        for (idx, plugin_state) in track.vst_chain.plugins.iter().enumerate() {
             if plugin_state.bypassed {
                 continue;
             }
@@ -758,6 +759,41 @@ fn build_vst_stages_map(
                 continue;
             }
 
+            // 生成实例 ID（与 vst_open_editor 中保持一致的 key 格式）
+            let instance_id = format!("{}:{}:{}", track.id, idx, plugin_state.plugin_uid);
+
+            // 优先从 VstPluginRegistry.instances 中复用已有实例
+            let existing_instance = vst_registry.and_then(|reg| {
+                let instances_guard = reg.instances.lock().unwrap_or_else(|e| e.into_inner());
+                instances_guard.get(&instance_id).cloned()
+            });
+
+            if let Some(instance) = existing_instance {
+                if debug {
+                    let name = instance
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .name
+                        .clone();
+                    eprintln!(
+                        "[snapshot::vst] Reusing cached instance '{}' for track '{}' (id={})",
+                        name, track.id, instance_id
+                    );
+                }
+
+                // 确保实例使用正确的采样率
+                {
+                    let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
+                    if (inst.sample_rate - sample_rate as f32).abs() > 1.0 {
+                        inst.set_sample_rate(sample_rate as f32);
+                    }
+                }
+
+                instances.push(instance);
+                continue;
+            }
+
+            // 注册表中没有，从磁盘加载新实例
             let instance_result = match plugin_state.format {
                 crate::vst_host::VstFormat::Vst2 => {
                     crate::vst_host::plugin_host::load_vst2(
@@ -797,9 +833,15 @@ fn build_vst_stages_map(
                             .name
                             .clone();
                         eprintln!(
-                            "[snapshot::vst] Loaded plugin '{}' for track '{}'",
-                            name, track.id
+                            "[snapshot::vst] Loaded NEW plugin '{}' for track '{}' (id={})",
+                            name, track.id, instance_id
                         );
+                    }
+
+                    // 存入注册表以便后续复用
+                    if let Some(reg) = vst_registry {
+                        let mut instances_guard = reg.instances.lock().unwrap_or_else(|e| e.into_inner());
+                        instances_guard.insert(instance_id, instance.clone());
                     }
 
                     instances.push(instance);

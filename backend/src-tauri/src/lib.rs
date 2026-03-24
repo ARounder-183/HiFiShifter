@@ -270,6 +270,7 @@ pub fn run() {
             commands::vst_set_bypass,
             commands::vst_reorder_chain,
             commands::vst_open_editor,
+            commands::vst_close_editor,
             commands::vst_add_scan_path,
             commands::vst_list_scan_paths,
             commands::vst_remove_scan_path,

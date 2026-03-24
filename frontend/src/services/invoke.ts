@@ -459,6 +459,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "vst_open_editor":
             return { trackId: args[0], index: args[1] };
 
+        case "vst_close_editor":
+            return { trackId: args[0], index: args[1] };
+
         case "vst_add_scan_path":
             return { path: args[0] };
 

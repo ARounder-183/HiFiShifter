@@ -854,6 +854,15 @@ pub fn vst_open_editor(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn vst_close_editor(
+    state: State<'_, AppState>,
+    track_id: String,
+    index: usize,
+) -> serde_json::Value {
+    vst::vst_close_editor(state.inner(), &track_id, index)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn vst_add_scan_path(state: State<'_, AppState>, path: String) -> serde_json::Value {
     vst::vst_add_scan_path(state.inner(), &path)
 }

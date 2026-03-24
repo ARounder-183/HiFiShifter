@@ -116,6 +116,7 @@ export const webApi = {
     vstSetBypass: vstApi.setBypass,
     vstReorderChain: vstApi.reorderChain,
     vstOpenEditor: vstApi.openEditor,
+    vstCloseEditor: vstApi.closeEditor,
     vstAddScanPath: vstApi.addScanPath,
     vstListScanPaths: vstApi.listScanPaths,
     vstRemoveScanPath: vstApi.removeScanPath,

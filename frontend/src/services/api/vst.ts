@@ -110,6 +110,14 @@ export const vstApi = {
             index,
         ),
 
+    /** 关闭 VST 插件编辑器窗口 */
+    closeEditor: (trackId: string, index: number) =>
+        invoke<{ ok: boolean; error?: string }>(
+            "vst_close_editor",
+            trackId,
+            index,
+        ),
+
     /** 添加自定义 VST 扫描路径 */
     addScanPath: (path: string) =>
         invoke<{ ok: boolean; error?: string }>("vst_add_scan_path", path),

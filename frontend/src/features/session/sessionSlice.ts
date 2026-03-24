@@ -941,6 +941,7 @@ export {
     vstSetBypassRemote,
     vstReorderChainRemote,
     vstOpenEditorRemote,
+    vstCloseEditorRemote,
     vstAddScanPathRemote,
     vstGetStatusRemote,
     vstListScanPathsRemote,

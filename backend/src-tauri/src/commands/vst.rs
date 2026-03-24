@@ -512,11 +512,24 @@ pub(super) fn vst_open_editor(
                     "[vst::open_editor] Editor opened for {}[{}]: {}",
                     track_id, index, plugin_name
                 );
+                let width = window.width;
+                let height = window.height;
+
+                // 将编辑器窗口句柄存入 registry，以便后续通过 close_editor 关闭
+                {
+                    let mut editor_windows = state
+                        .vst_registry
+                        .editor_windows
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    editor_windows.insert(instance_id, window);
+                }
+
                 serde_json::json!({
                     "ok": true,
                     "pluginName": plugin_name,
-                    "width": window.width,
-                    "height": window.height,
+                    "width": width,
+                    "height": height,
                 })
             }
             Err(e) => {
@@ -525,6 +538,66 @@ pub(super) fn vst_open_editor(
                     "error": format!("Failed to open editor window: {}", e)
                 })
             }
+        }
+    }
+
+    #[cfg(not(feature = "vst"))]
+    {
+        let _ = (state, track_id, index);
+        serde_json::json!({ "ok": false, "error": "VST feature is not enabled" })
+    }
+}
+
+/// 关闭 VST 插件编辑器窗口。
+///
+/// 根据 track_id 和 index 找到对应的插件实例 ID，
+/// 然后通过 `gui::close_editor_window()` 发送关闭消息。
+/// 编辑器窗口关闭时会自动保存 chunk 数据到 timeline。
+pub(super) fn vst_close_editor(
+    state: &AppState,
+    track_id: &str,
+    index: usize,
+) -> serde_json::Value {
+    #[cfg(feature = "vst")]
+    {
+        use crate::vst_host::gui;
+
+        // 从 timeline 获取目标插件的 UID 以构建实例 ID
+        let plugin_uid = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(track) = tl.tracks.iter().find(|t| t.id == track_id) else {
+                return serde_json::json!({ "ok": false, "error": "Track not found" });
+            };
+            let Some(ps) = track.vst_chain.plugins.get(index) else {
+                return serde_json::json!({ "ok": false, "error": "Plugin index out of range" });
+            };
+            ps.plugin_uid.clone()
+        };
+
+        let instance_id = format!("{}:{}:{}", track_id, index, plugin_uid);
+
+        // 从 registry 的 editor_windows 中取出并关闭
+        let mut editor_window = {
+            let mut editor_windows = state
+                .vst_registry
+                .editor_windows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            editor_windows.remove(&instance_id)
+        };
+
+        if let Some(ref mut window) = editor_window {
+            gui::close_editor_window(window);
+            eprintln!(
+                "[vst::close_editor] Editor closed for {}[{}]",
+                track_id, index
+            );
+            serde_json::json!({ "ok": true })
+        } else {
+            serde_json::json!({
+                "ok": false,
+                "error": format!("No editor window is open for {}", instance_id)
+            })
         }
     }
 

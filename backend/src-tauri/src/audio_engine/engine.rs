@@ -566,6 +566,19 @@ struct EngineWorkerState<'a> {
 
 // ─── 命令处理函数 ─────────────────────────────────────────────────────────────
 
+/// 从 app_handle 中获取 VST 插件注册表的 Arc 引用。
+/// 用于在 snapshot 构建时复用已有的 VST 插件实例，避免每次从磁盘重新加载。
+#[cfg(feature = "vst")]
+fn vst_registry_from_handle(
+    app_handle: &Option<tauri::AppHandle>,
+) -> Option<std::sync::Arc<crate::vst_host::VstPluginRegistry>> {
+    use tauri::Manager;
+    app_handle.as_ref().map(|handle| {
+        let state = handle.state::<crate::state::AppState>();
+        state.vst_registry.clone()
+    })
+}
+
 fn handle_stop(s: &mut EngineWorkerState) {
     s.is_playing.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -786,7 +799,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
     }
 
-    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    let snap = build_snapshot(
+        &tl, s.sr, s.cache, s.stretch_cache,
+        #[cfg(feature = "vst")]
+        vst_registry_from_handle(&s.app_handle).as_ref(),
+    );
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
     s.snapshot.store(Arc::new(snap));
@@ -825,7 +842,11 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
     }
 
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl, s.sr, s.cache, s.stretch_cache,
+            #[cfg(feature = "vst")]
+            vst_registry_from_handle(&s.app_handle).as_ref(),
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
@@ -866,7 +887,11 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
 
     debug_eprintln!("[engine] Building snapshot...");
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl, s.sr, s.cache, s.stretch_cache,
+            #[cfg(feature = "vst")]
+            vst_registry_from_handle(&s.app_handle).as_ref(),
+        );
         debug_eprintln!(
             "[engine] Snapshot built successfully, duration_frames={}",
             snap.duration_frames
@@ -882,7 +907,11 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
     // A decoded/resampled buffer became available.
     // Rebuild the snapshot so missing clips can be attached.
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        let snap = build_snapshot(
+            tl, s.sr, s.cache, s.stretch_cache,
+            #[cfg(feature = "vst")]
+            vst_registry_from_handle(&s.app_handle).as_ref(),
+        );
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
