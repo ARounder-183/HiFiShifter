@@ -17,7 +17,7 @@ import {
     removeTempoPoint,
     syncTempoMap,
 } from "../../../features/session/sessionSlice";
-import type { TempoPoint, TempoMap } from "../../../utils/tempoMap";
+import type { TempoPoint } from "../../../utils/tempoMap";
 import {
     ticksToSeconds,
     secondsToTicks,
