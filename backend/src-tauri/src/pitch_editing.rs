@@ -132,6 +132,7 @@ fn pitch_edit_backend_available_for_track(track: &crate::state::Track) -> bool {
         PitchEditAlgorithm::NsfHifiganOnnx => crate::nsf_hifigan_onnx::is_available(),
         #[cfg(feature = "vslib")]
         PitchEditAlgorithm::VocalShifterVslib => true,
+        PitchEditAlgorithm::ExternalResampler(_) => true,
         PitchEditAlgorithm::Bypass => true,
     }
 }
@@ -904,7 +905,7 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(&algo, entry, clip);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)

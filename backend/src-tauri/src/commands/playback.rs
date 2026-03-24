@@ -707,14 +707,14 @@ fn render_single_clip(
 
     let render_variant = |clip_variant: &crate::state::Clip| {
         let mut rendered = segment.clone();
-        match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+            match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
             timeline,
             clip_variant,
             clip_start_sec,
             seg_start_sec,
             out_rate,
             &mut rendered,
-            resampler_registry.as_ref(),
+            resampler_registry,
         ) {
             Ok(true) => {
                 if debug {
@@ -773,10 +773,10 @@ fn render_single_clip(
         let clip_root = timeline.resolve_root_track_id(&clip.track_id);
         let entry = clip_root.as_ref().and_then(|root| timeline.params_by_root_track.get(root));
         let track = clip_root.as_ref().and_then(|root| timeline.tracks.iter().find(|t| &t.id == root));
-        match (entry, track) {
+                match (entry, track) {
             (Some(entry), Some(track)) => {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-                let renderer_id = crate::renderer::get_renderer(kind).id();
+                let renderer_id = crate::renderer::get_renderer(&kind).id();
                 let start_frame = (clip.start_sec.max(0.0) * out_rate as f64).round() as u64;
                 let end_frame = start_frame + (clip.length_sec.max(0.0) * out_rate as f64).round().max(1.0) as u64;
                 let source_path = clip.source_path.as_deref().unwrap_or("");

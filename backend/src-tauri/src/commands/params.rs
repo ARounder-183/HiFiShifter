@@ -114,6 +114,7 @@ pub(super) fn get_param_frames(
             }
             #[cfg(feature = "vslib")]
             crate::pitch_editing::PitchEditAlgorithm::VocalShifterVslib => true,
+            crate::pitch_editing::PitchEditAlgorithm::ExternalResampler(_) => true,
             crate::pitch_editing::PitchEditAlgorithm::Bypass => true,
         };
         Some(available)

@@ -525,7 +525,7 @@ impl TimelineState {
             .unwrap_or_else(|| entry.extra_curves.keys().cloned().collect());
         for key in keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, &key).unwrap_or(0.0);
+                crate::renderer::automation_curve_default_value(&kind, &key).unwrap_or(0.0);
             let curve = entry
                 .extra_curves
                 .entry(key)
@@ -604,7 +604,7 @@ impl TimelineState {
         }
         for key in &all_keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::automation_curve_default_value(&kind, key).unwrap_or(0.0);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())
@@ -613,7 +613,7 @@ impl TimelineState {
         }
         for (key, values) in &linked_params.extra_curves {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::automation_curve_default_value(&kind, key).unwrap_or(0.0);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())

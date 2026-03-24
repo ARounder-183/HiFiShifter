@@ -493,7 +493,7 @@ pub fn render_mixdown_interleaved(
                 let track = timeline.tracks.iter().find(|t| t.id == root)?;
                 let kind =
                     crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-                let renderer_id = crate::renderer::get_renderer(kind).id();
+                let renderer_id = crate::renderer::get_renderer(&kind).id();
                 if renderer_id == "nsf_hifigan_onnx" {
                     Some((
                         entry.extra_curves.get("hifigan_volume"),
