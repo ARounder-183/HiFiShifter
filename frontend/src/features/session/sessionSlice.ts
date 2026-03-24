@@ -276,6 +276,12 @@ export interface SessionState {
     vstPlugins: VstPluginInfoSlim[];
     /** 是否正在扫描 VST 插件 */
     vstScanning: boolean;
+    /** VST 扫描进度信息（后端 vst_scan_progress 事件推送） */
+    vstScanProgress: {
+        current: number;
+        total: number;
+        currentDir: string;
+    } | null;
     /** 各轨道的 FX 链视图，key 为 trackId */
     vstChainByTrack: Record<string, VstChainSlotSlim[]>;
     /** 用户自定义的 VST 扫描路径列表 */
@@ -837,6 +843,7 @@ const initialState: SessionState = {
     vstAvailable: false,
     vstPlugins: [],
     vstScanning: false,
+    vstScanProgress: null,
     vstChainByTrack: {},
     vstScanPaths: [],
 
@@ -1453,6 +1460,56 @@ const sessionSlice = createSlice({
         /** 移除某个 clip 的音高曲线（clip 被删除时清理�?*/
         removeClipPitchData(state, action: PayloadAction<string>) {
             delete state.clipPitchCurves[action.payload];
+        },
+        /** 后端 vst_scan_progress 事件推送扫描进度时调用 */
+        vstScanProgressFromEvent(
+            state,
+            action: PayloadAction<{
+                current?: number;
+                total?: number;
+                currentDir?: string;
+            }>,
+        ) {
+            const { current, total, currentDir } = action.payload;
+            state.vstScanProgress = {
+                current: typeof current === "number" ? current : 0,
+                total: typeof total === "number" ? total : 0,
+                currentDir: typeof currentDir === "string" ? currentDir : "",
+            };
+        },
+        /** 后端 vst_scan_complete 事件推送扫描结果时调用 */
+        vstScanCompleteFromEvent(
+            state,
+            action: PayloadAction<{
+                ok?: boolean;
+                plugins?: Array<{
+                    uid: string;
+                    name: string;
+                    vendor: string;
+                    format: "vst2" | "vst3";
+                    path: string;
+                    category: string;
+                    isInstrument?: boolean;
+                    is_instrument?: boolean;
+                }>;
+            }>,
+        ) {
+            state.vstScanning = false;
+            state.vstScanProgress = null;
+            const payload = action.payload;
+            if (payload.ok && Array.isArray(payload.plugins)) {
+                state.vstPlugins = payload.plugins.map((p) => ({
+                    uid: p.uid,
+                    name: p.name,
+                    vendor: p.vendor,
+                    format: p.format,
+                    path: p.path,
+                    category: p.category,
+                    isInstrument: Boolean(
+                        p.isInstrument ?? p.is_instrument,
+                    ),
+                }));
+            }
         },
         undo(state) {
             const snapshot = state.historyPast.pop();
@@ -2759,11 +2816,12 @@ const sessionSlice = createSlice({
 
             .addCase(vstScanPluginsRemote.pending, (state) => {
                 state.vstScanning = true;
+                state.vstScanProgress = null;
             })
             .addCase(vstScanPluginsRemote.fulfilled, (state, action) => {
-                state.vstScanning = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    scanning?: boolean;
                     plugins?: Array<{
                         uid: string;
                         name: string;
@@ -2775,6 +2833,11 @@ const sessionSlice = createSlice({
                         isInstrument?: boolean;
                     }>;
                 };
+                // 如果后台扫描仍在运行，保持 vstScanning = true，
+                // 等 vst_scan_complete 事件到达时再置为 false。
+                if (!payload.scanning) {
+                    state.vstScanning = false;
+                }
                 if (payload.ok && Array.isArray(payload.plugins)) {
                     state.vstPlugins = payload.plugins.map((p) => ({
                         uid: p.uid,
@@ -2791,6 +2854,7 @@ const sessionSlice = createSlice({
             })
             .addCase(vstScanPluginsRemote.rejected, (state) => {
                 state.vstScanning = false;
+                state.vstScanProgress = null;
             })
 
             .addCase(vstListPluginsRemote.fulfilled, (state, action) => {
@@ -2959,6 +3023,8 @@ export const {
     removeAutomationPoint,
     setClipPitchData,
     removeClipPitchData,
+    vstScanProgressFromEvent,
+    vstScanCompleteFromEvent,
     undo,
     redo,
 } = sessionSlice.actions;

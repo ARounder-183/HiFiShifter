@@ -46,6 +46,9 @@ export function VstPluginBrowser({ open, onOpenChange, trackId }: Props) {
     const scanning = useAppSelector(
         (state: RootState) => state.session.vstScanning,
     );
+    const scanProgress = useAppSelector(
+        (state: RootState) => state.session.vstScanProgress,
+    );
 
     const [search, setSearch] = useState("");
     const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
@@ -129,6 +132,50 @@ export function VstPluginBrowser({ open, onOpenChange, trackId }: Props) {
                                 : tAny("vst_scan_plugins")}
                         </Button>
                     </Flex>
+
+                    {/* 扫描进度条 */}
+                    {scanning && (
+                        <Flex direction="column" gap="1">
+                            <Flex justify="between" align="center">
+                                <Text size="1" color="gray" className="truncate min-w-0">
+                                    {tAny("vst_scanning")}
+                                    {scanProgress?.currentDir
+                                        ? ` — ${scanProgress.currentDir}`
+                                        : ""}
+                                </Text>
+                                {scanProgress && scanProgress.total > 0 && (
+                                    <Text size="1" color="gray" className="shrink-0 ml-2">
+                                        {scanProgress.current}/{scanProgress.total}
+                                    </Text>
+                                )}
+                            </Flex>
+                            <div className="relative h-1.5 w-full overflow-hidden rounded-full"
+                                style={{ background: "var(--gray-a4)" }}
+                            >
+                                {scanProgress && scanProgress.total > 0 ? (
+                                    <div
+                                        className="absolute left-0 top-0 h-full rounded-full transition-all duration-300"
+                                        style={{
+                                            width: `${Math.min(100, (scanProgress.current / scanProgress.total) * 100)}%`,
+                                            background: "var(--accent-9)",
+                                        }}
+                                    />
+                                ) : (
+                                    <div
+                                        className="absolute left-0 top-0 h-full w-1/3 rounded-full animate-[vst-scan-indeterminate_1.5s_ease-in-out_infinite]"
+                                        style={{ background: "var(--accent-9)" }}
+                                    />
+                                )}
+                            </div>
+                            <style>{`
+                                @keyframes vst-scan-indeterminate {
+                                    0% { transform: translateX(-100%); }
+                                    50% { transform: translateX(200%); }
+                                    100% { transform: translateX(-100%); }
+                                }
+                            `}</style>
+                        </Flex>
+                    )}
 
                     {/* 插件列表 */}
                     <ScrollArea

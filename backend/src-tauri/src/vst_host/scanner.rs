@@ -380,26 +380,70 @@ fn generate_uid(path: &Path) -> String {
 
 // ─── 公共 API ──────────────────────────────────────────────────────────────
 
+/// 扫描进度回调类型。
+///
+/// 参数：`(current_step, total_steps, current_dir_display)`
+pub type ScanProgressCallback = Box<dyn Fn(usize, usize, &str) + Send>;
+
 /// 执行完整的 VST 插件扫描。
 ///
 /// 搜索系统默认路径和注册表中的自定义路径，
 /// 返回扫描到的所有插件描述符列表。
 pub fn scan_all_plugins(custom_paths: &[PathBuf]) -> Vec<VstPluginDescriptor> {
+    scan_all_plugins_with_progress(custom_paths, None)
+}
+
+/// 执行完整的 VST 插件扫描（带进度回调）。
+///
+/// 每扫描完一个目录会调用 `on_progress` 回调报告进度。
+/// 搜索系统默认路径和注册表中的自定义路径，
+/// 返回扫描到的所有插件描述符列表。
+pub fn scan_all_plugins_with_progress(
+    custom_paths: &[PathBuf],
+    on_progress: Option<ScanProgressCallback>,
+) -> Vec<VstPluginDescriptor> {
     let mut all = Vec::new();
 
+    // 收集所有待扫描的目录及其类型
+    let vst2_dirs = default_vst2_paths();
+    let vst3_dirs = default_vst3_paths();
+    // 自定义路径会同时扫描 VST2 和 VST3，算作两个步骤
+    let total_steps = vst2_dirs.len() + vst3_dirs.len() + custom_paths.len() * 2;
+    let mut current_step: usize = 0;
+
+    // 报告进度的辅助闭包
+    let report = |step: usize, dir: &Path| {
+        if let Some(ref cb) = on_progress {
+            let display = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_else(|| dir.to_str().unwrap_or("..."));
+            cb(step, total_steps, display);
+        }
+    };
+
     // VST2 目录
-    for dir in default_vst2_paths() {
-        all.extend(scan_vst2_directory(&dir));
+    for dir in &vst2_dirs {
+        current_step += 1;
+        report(current_step, dir);
+        all.extend(scan_vst2_directory(dir));
     }
 
     // VST3 目录
-    for dir in default_vst3_paths() {
-        all.extend(scan_vst3_directory(&dir));
+    for dir in &vst3_dirs {
+        current_step += 1;
+        report(current_step, dir);
+        all.extend(scan_vst3_directory(dir));
     }
 
     // 自定义路径（同时搜索 VST2 和 VST3）
     for dir in custom_paths {
+        current_step += 1;
+        report(current_step, dir);
         all.extend(scan_vst2_directory(dir));
+
+        current_step += 1;
+        report(current_step, dir);
         all.extend(scan_vst3_directory(dir));
     }
 
@@ -416,9 +460,13 @@ pub fn scan_all_plugins(custom_paths: &[PathBuf]) -> Vec<VstPluginDescriptor> {
 /// 在后台线程中异步执行插件扫描，并更新注册表。
 ///
 /// 使用 `std::thread::spawn` 在独立线程中执行扫描，不阻塞 Tauri 命令线程。
-/// 扫描完成后通过 `scan_in_progress` 原子标志通知调用方。
+/// 扫描完成后通过 `scan_in_progress` 原子标志通知调用方，
+/// 并通过 `app_handle.emit("vst_scan_complete", ...)` 向前端推送扫描结果。
 /// 如果已有扫描任务在运行，本次调用将被忽略。
-pub fn scan_plugins_async(registry: std::sync::Arc<VstPluginRegistry>) {
+pub fn scan_plugins_async(
+    registry: std::sync::Arc<VstPluginRegistry>,
+    app_handle: Option<tauri::AppHandle>,
+) {
     use std::sync::atomic::Ordering;
 
     if registry
@@ -441,14 +489,34 @@ pub fn scan_plugins_async(registry: std::sync::Arc<VstPluginRegistry>) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
-        let result = scan_all_plugins(&custom_paths);
+        // 构建进度回调：每扫完一个目录向前端推送进度事件
+        let progress_handle = app_handle.clone();
+        let on_progress: Option<ScanProgressCallback> = if progress_handle.is_some() {
+            Some(Box::new(move |current: usize, total: usize, dir_name: &str| {
+                if let Some(ref handle) = progress_handle {
+                    use tauri::Emitter;
+                    let _ = handle.emit(
+                        "vst_scan_progress",
+                        serde_json::json!({
+                            "current": current,
+                            "total": total,
+                            "currentDir": dir_name,
+                        }),
+                    );
+                }
+            }))
+        } else {
+            None
+        };
+
+        let result = scan_all_plugins_with_progress(&custom_paths, on_progress);
         let count = result.len();
 
         let mut descs = reg
             .descriptors
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        *descs = result;
+        *descs = result.clone();
         drop(descs);
 
         reg.scan_in_progress
@@ -458,6 +526,39 @@ pub fn scan_plugins_async(registry: std::sync::Arc<VstPluginRegistry>) {
             "[vst_host::scanner] Background scan complete: {} plugins found",
             count
         );
+
+        // 向前端推送扫描完成事件，携带完整插件列表
+        if let Some(ref handle) = app_handle {
+            use tauri::Emitter;
+
+            let plugins: Vec<serde_json::Value> = result
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "uid": d.uid,
+                        "name": d.name,
+                        "vendor": d.vendor,
+                        "format": match d.format {
+                            VstFormat::Vst2 => "vst2",
+                            VstFormat::Vst3 => "vst3",
+                        },
+                        "path": d.path.to_string_lossy(),
+                        "category": d.category,
+                        "isInstrument": d.is_instrument,
+                        "numInputs": d.num_inputs,
+                        "numOutputs": d.num_outputs,
+                    })
+                })
+                .collect();
+
+            let _ = handle.emit(
+                "vst_scan_complete",
+                serde_json::json!({
+                    "ok": true,
+                    "plugins": plugins,
+                }),
+            );
+        }
     }) {
         Ok(_handle) => {
             // spawn succeeded; thread is running (handle will be detached when dropped)

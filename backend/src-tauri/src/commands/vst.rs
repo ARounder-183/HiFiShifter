@@ -38,14 +38,15 @@ pub struct VstChainSlotPayload {
 /// 触发 VST 插件扫描并返回当前已知的扫描结果。
 ///
 /// 扫描在后台线程中异步执行，本命令立即返回当前注册表中的结果。
-/// 前端可在收到返回后定时轮询 `vst_list_plugins` 获取更新后的列表。
+/// 后台扫描完成后通过 `vst_scan_complete` 事件推送完整插件列表。
 pub(super) fn vst_scan_plugins(state: &AppState) -> serde_json::Value {
     #[cfg(feature = "vst")]
     {
         let registry = state.vst_registry.clone();
-        crate::vst_host::scanner::scan_plugins_async(registry);
+        let app_handle = state.app_handle.get().cloned();
+        crate::vst_host::scanner::scan_plugins_async(registry, app_handle);
 
-        // 返回当前已有的结果（后台扫描完成后前端可再次查询）
+        // 返回当前已有的结果（后台扫描完成后前端通过事件获取更新）
         let descs = state.vst_registry.list_all();
         let plugins: Vec<VstPluginInfoPayload> = descs
             .into_iter()

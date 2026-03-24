@@ -28,6 +28,8 @@ import {
     addTrackRemote,
     vstGetStatusRemote,
     vstListPluginsRemote,
+    vstScanCompleteFromEvent,
+    vstScanProgressFromEvent,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
@@ -654,6 +656,62 @@ function AppInner() {
         void dispatch(vstGetStatusRemote()).then(() => {
             void dispatch(vstListPluginsRemote());
         });
+    }, [dispatch]);
+
+    // 监听后端 vst_scan_progress / vst_scan_complete 事件
+    useEffect(() => {
+        let disposed = false;
+        let unlistenComplete: null | (() => void) = null;
+        let unlistenProgress: null | (() => void) = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+
+                unlistenProgress = await mod.listen(
+                    "vst_scan_progress",
+                    (event: any) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            current?: number;
+                            total?: number;
+                            currentDir?: string;
+                        };
+                        dispatch(vstScanProgressFromEvent(payload));
+                    },
+                );
+
+                unlistenComplete = await mod.listen(
+                    "vst_scan_complete",
+                    (event: any) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            ok?: boolean;
+                            plugins?: Array<{
+                                uid: string;
+                                name: string;
+                                vendor: string;
+                                format: "vst2" | "vst3";
+                                path: string;
+                                category: string;
+                                isInstrument?: boolean;
+                                is_instrument?: boolean;
+                            }>;
+                        };
+                        dispatch(vstScanCompleteFromEvent(payload));
+                    },
+                );
+            } catch {
+                // 非 Tauri 环境忽略
+            }
+        }
+        void setup();
+
+        return () => {
+            disposed = true;
+            if (unlistenProgress) unlistenProgress();
+            if (unlistenComplete) unlistenComplete();
+        };
     }, [dispatch]);
 
     useEffect(() => {
