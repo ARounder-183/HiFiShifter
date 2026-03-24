@@ -12,6 +12,7 @@ export const setTrackStateRemote = createAsyncThunk(
         composeEnabled?: boolean;
         pitchAnalysisAlgo?: string;
         color?: string;
+        name?: string;
     }) => {
         return webApi.setTrackState(payload);
     },

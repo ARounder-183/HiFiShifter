@@ -1,8 +1,15 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import {
     Flex,
     Text,
     IconButton,
+    Select,
     Slider,
     TextField,
     ScrollArea,
@@ -27,6 +34,10 @@ import {
     setSearchQuery,
     setVisible,
     searchFilesRecursive,
+    toggleRegex,
+    setSortMode,
+    toggleAudioOnly,
+    type SortMode,
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import type { FileEntry } from "../../services/api/fileBrowser";
@@ -100,6 +111,7 @@ function AudioIcon({ className }: { className?: string }) {
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
+    const tAny = t as (key: string) => string;
     const fb = useAppSelector((state: RootState) => state.fileBrowser);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -126,7 +138,63 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 根据搜索模式决定展示配表
     const isSearchMode = fb.searchQuery.trim().length > 0;
-    const displayEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
+    const rawEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
+    const trimmedSearchQuery = fb.searchQuery.trim();
+
+    const hasRegexError = useMemo(() => {
+        if (!isSearchMode || !fb.regexEnabled || !trimmedSearchQuery) {
+            return false;
+        }
+        try {
+            // Validate regex and let UI display an explicit error.
+            void new RegExp(trimmedSearchQuery, "i");
+            return false;
+        } catch {
+            return true;
+        }
+    }, [isSearchMode, fb.regexEnabled, trimmedSearchQuery]);
+
+    // 客户端正则过滤（仅在搜索模式且 regexEnabled 时）
+    const regexFilteredEntries = useMemo(() => {
+        if (!isSearchMode || !fb.regexEnabled || !trimmedSearchQuery) {
+            return rawEntries;
+        }
+        try {
+            const re = new RegExp(trimmedSearchQuery, "i");
+            return rawEntries.filter((e) => re.test(e.name));
+        } catch {
+            return [];
+        }
+    }, [rawEntries, fb.regexEnabled, trimmedSearchQuery, isSearchMode]);
+
+    // 音频过滤
+    const audioFilteredEntries = useMemo(() => {
+        if (!fb.audioOnly) return regexFilteredEntries;
+        return regexFilteredEntries.filter(
+            (e) => e.isDir || isAudioFile(e),
+        );
+    }, [regexFilteredEntries, fb.audioOnly]);
+
+    // 排序
+    const displayEntries = useMemo(() => {
+        const sorted = [...audioFilteredEntries];
+        switch (fb.sortMode) {
+            case "name":
+                sorted.sort((a, b) => a.name.localeCompare(b.name));
+                break;
+            case "date":
+                sorted.sort(
+                    (a, b) => (b.modifiedTime ?? 0) - (a.modifiedTime ?? 0),
+                );
+                break;
+            case "size":
+                sorted.sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
+                break;
+        }
+        // 目录始终排在前面
+        sorted.sort((a, b) => (a.isDir === b.isDir ? 0 : a.isDir ? -1 : 1));
+        return sorted;
+    }, [audioFilteredEntries, fb.sortMode]);
 
     // 计算展示相对路径（搜索模式下显示文件所在目录）
     function getRelativeDirHint(fullPath: string): string {
@@ -194,32 +262,72 @@ export const FileBrowserPanel: React.FC = () => {
         [dispatch],
     );
 
-    // 点击音频文件 → 预览播放/停止
-    const handleClickAudio = useCallback(
-        (entry: FileEntry) => {
-            if (fb.previewingFile === entry.path) {
-                // 停止播放
-                audioPreview.stop();
-                dispatch(setPreviewingFile(null));
-            } else {
-                // 开始播放
-                dispatch(setPreviewingFile(entry.path));
-                void audioPreview.play(entry.path, () => {
-                    // 播放结束回调
-                    dispatch(setPreviewingFile(null));
-                });
-            }
-        },
-        [dispatch, fb.previewingFile],
+    // ── 多选状态 ───────────────────────────────────────────────────────────
+    const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+    const lastClickedIndexRef = useRef<number>(-1);
+
+    // 获取仅音频的列表用于 shift-range 选择
+    const audioEntries = useMemo(
+        () => displayEntries.filter(isAudioFile),
+        [displayEntries],
     );
+
+    const handleClickAudio = useCallback(
+        (entry: FileEntry, ev?: React.MouseEvent) => {
+            const idx = audioEntries.findIndex((e) => e.path === entry.path);
+
+            if (ev?.ctrlKey || ev?.metaKey) {
+                // Ctrl+click: toggle selection
+                setSelectedPaths((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(entry.path)) next.delete(entry.path);
+                    else next.add(entry.path);
+                    return next;
+                });
+                lastClickedIndexRef.current = idx;
+                return;
+            }
+
+            if (ev?.shiftKey && lastClickedIndexRef.current >= 0) {
+                // Shift+click: range selection
+                const start = Math.min(lastClickedIndexRef.current, idx);
+                const end = Math.max(lastClickedIndexRef.current, idx);
+                setSelectedPaths((prev) => {
+                    const next = new Set(prev);
+                    for (let i = start; i <= end; i++) {
+                        next.add(audioEntries[i].path);
+                    }
+                    return next;
+                });
+                return;
+            }
+
+            // Normal click: clear selection, preview
+            setSelectedPaths(new Set());
+            lastClickedIndexRef.current = idx;
+            dispatch(setPreviewingFile(entry.path));
+            void audioPreview.play(entry.path, () => {
+                dispatch(setPreviewingFile(null));
+            });
+        },
+        [dispatch, audioEntries],
+    );
+
+    // Clear selection when directory changes
+    useEffect(() => {
+        setSelectedPaths(new Set());
+        lastClickedIndexRef.current = -1;
+    }, [fb.currentPath]);
 
     // 拖拽开始 — 使用自定义 pointer 事件实现，替代 HTML5 drag API
     const [dragState, setDragState] = useState<{
         filePath: string;
         fileName: string;
+        allFilePaths: string[];
         startX: number;
         startY: number;
         active: boolean; // 超过阈值后才真正激活拖拽
+        isRightDrag: boolean; // 右键拖拽标记
     } | null>(null);
     const dragStateRef = useRef(dragState);
     dragStateRef.current = dragState;
@@ -231,18 +339,24 @@ export const FileBrowserPanel: React.FC = () => {
 
     const handlePointerDownForDrag = useCallback(
         (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => {
-            // 仅左键
-            if (e.button !== 0) return;
+            // 允许左键(0)和右键(2)拖拽
+            if (e.button !== 0 && e.button !== 2) return;
+            // Collect all selected paths (include current entry)
+            const paths = selectedPaths.size > 0 && selectedPaths.has(entry.path)
+                ? Array.from(selectedPaths)
+                : [entry.path];
             // 不拦截 pointer，让 click 事件仍能触发预览
             setDragState({
                 filePath: entry.path,
                 fileName: entry.name,
+                allFilePaths: paths,
                 startX: e.clientX,
                 startY: e.clientY,
                 active: false,
+                isRightDrag: e.button === 2,
             });
         },
-        [],
+        [selectedPaths],
     );
 
     useEffect(() => {
@@ -266,33 +380,52 @@ export const FileBrowserPanel: React.FC = () => {
                             type: "start",
                             filePath: ds.filePath,
                             fileName: ds.fileName,
+                            filePaths: ds.allFilePaths,
                             clientX: e.clientX,
                             clientY: e.clientY,
+                            isRightDrag: ds.isRightDrag,
                         },
                     }),
                 );
                 // 异步获取音频时长，获取后通知 TimelinePanel 更新 ghost 宽度
-                import("../../services/api/fileBrowser").then(({ fileBrowserApi }) => {
-                    fileBrowserApi.getAudioFileInfo(ds.filePath).then((info) => {
-                        if (info && dragStateRef.current?.filePath === ds.filePath) {
-                            window.dispatchEvent(
-                                new CustomEvent("hifi-file-drag", {
-                                    detail: {
-                                        type: "duration",
-                                        filePath: ds.filePath,
-                                        durationSec: info.durationSec,
-                                    },
-                                }),
-                            );
-                        }
-                    }).catch(() => { /* 获取失败则保持默认宽度 */ });
-                });
+                import("../../services/api/fileBrowser").then(
+                    ({ fileBrowserApi }) => {
+                        fileBrowserApi
+                            .getAudioFileInfo(ds.filePath)
+                            .then((info) => {
+                                if (
+                                    info &&
+                                    dragStateRef.current?.filePath ===
+                                        ds.filePath
+                                ) {
+                                    window.dispatchEvent(
+                                        new CustomEvent("hifi-file-drag", {
+                                            detail: {
+                                                type: "duration",
+                                                filePath: ds.filePath,
+                                                durationSec: info.durationSec,
+                                            },
+                                        }),
+                                    );
+                                }
+                            })
+                            .catch(() => {
+                                /* 获取失败则保持默认宽度 */
+                            });
+                    },
+                );
             }
 
             // 更新 ghost 位置（clamp 到窗口可视范围内，鼠标超出界面时 ghost 停在边缘）
             if (ghostRef.current) {
-                const clampedX = Math.max(0, Math.min(e.clientX + 12, window.innerWidth - 100));
-                const clampedY = Math.max(0, Math.min(e.clientY + 12, window.innerHeight - 30));
+                const clampedX = Math.max(
+                    0,
+                    Math.min(e.clientX + 12, window.innerWidth - 100),
+                );
+                const clampedY = Math.max(
+                    0,
+                    Math.min(e.clientY + 12, window.innerHeight - 30),
+                );
                 ghostRef.current.style.left = `${clampedX}px`;
                 ghostRef.current.style.top = `${clampedY}px`;
             }
@@ -304,8 +437,10 @@ export const FileBrowserPanel: React.FC = () => {
                         type: "move",
                         filePath: dragStateRef.current!.filePath,
                         fileName: dragStateRef.current!.fileName,
+                        filePaths: dragStateRef.current!.allFilePaths,
                         clientX: e.clientX,
                         clientY: e.clientY,
+                        isRightDrag: dragStateRef.current!.isRightDrag,
                     },
                 }),
             );
@@ -321,8 +456,10 @@ export const FileBrowserPanel: React.FC = () => {
                             type: "drop",
                             filePath: ds.filePath,
                             fileName: ds.fileName,
+                            filePaths: ds.allFilePaths,
                             clientX: e.clientX,
                             clientY: e.clientY,
+                            isRightDrag: ds.isRightDrag,
                         },
                     }),
                 );
@@ -330,11 +467,20 @@ export const FileBrowserPanel: React.FC = () => {
             setDragState(null);
         }
 
+        // 右键拖拽时抑制浏览器原生右键菜单
+        function onContextMenu(e: MouseEvent) {
+            if (dragStateRef.current?.isRightDrag) {
+                e.preventDefault();
+            }
+        }
+
         window.addEventListener("pointermove", onPointerMove);
         window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("contextmenu", onContextMenu, true);
         return () => {
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", onPointerUp);
+            window.removeEventListener("contextmenu", onContextMenu, true);
         };
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -398,11 +544,14 @@ export const FileBrowserPanel: React.FC = () => {
                         if (debounceRef.current)
                             clearTimeout(debounceRef.current);
                         if (q.trim() && fb.currentPath) {
+                            const backendQuery = fb.regexEnabled
+                                ? ""
+                                : q.trim();
                             debounceRef.current = setTimeout(() => {
                                 void dispatch(
                                     searchFilesRecursive({
                                         dirPath: fb.currentPath,
-                                        query: q.trim(),
+                                        query: backendQuery,
                                     }),
                                 );
                             }, 300);
@@ -427,6 +576,84 @@ export const FileBrowserPanel: React.FC = () => {
                         </TextField.Slot>
                     )}
                 </TextField.Root>
+
+                {/* 正则切换 + 排序 */}
+                <Flex align="center" gap="1" mt="1">
+                    <IconButton
+                        size="1"
+                        variant={fb.regexEnabled ? "solid" : "ghost"}
+                        color="gray"
+                        title={tAny("fb_regex")}
+                        onClick={() => {
+                            const nextRegexEnabled = !fb.regexEnabled;
+                            dispatch(toggleRegex());
+
+                            if (debounceRef.current) {
+                                clearTimeout(debounceRef.current);
+                            }
+
+                            if (trimmedSearchQuery && fb.currentPath) {
+                                void dispatch(
+                                    searchFilesRecursive({
+                                        dirPath: fb.currentPath,
+                                        query: nextRegexEnabled
+                                            ? ""
+                                            : trimmedSearchQuery,
+                                    }),
+                                );
+                            }
+                        }}
+                        style={{
+                            fontFamily: "monospace",
+                            fontSize: 10,
+                            width: 22,
+                            height: 22,
+                        }}
+                    >
+                        .*
+                    </IconButton>
+                    <IconButton
+                        size="1"
+                        variant={fb.audioOnly ? "solid" : "ghost"}
+                        color="gray"
+                        title={tAny("fb_audio_only")}
+                        onClick={() => dispatch(toggleAudioOnly())}
+                        style={{
+                            width: 22,
+                            height: 22,
+                        }}
+                    >
+                        <AudioIcon />
+                    </IconButton>
+                    <Select.Root
+                        value={fb.sortMode}
+                        size="1"
+                        onValueChange={(v) =>
+                            dispatch(setSortMode(v as SortMode))
+                        }
+                    >
+                        <Select.Trigger
+                            style={{ fontSize: 11, height: 22, flex: 1 }}
+                        />
+                        <Select.Content>
+                            <Select.Item value="name">
+                                {tAny("fb_sort_name")}
+                            </Select.Item>
+                            <Select.Item value="date">
+                                {tAny("fb_sort_date")}
+                            </Select.Item>
+                            <Select.Item value="size">
+                                {tAny("fb_sort_size")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </Flex>
+
+                {hasRegexError && (
+                    <Text size="1" color="red" mt="1">
+                        {tAny("fb_regex_error")}
+                    </Text>
+                )}
             </div>
 
             {/* 路径栏 */}
@@ -512,12 +739,13 @@ export const FileBrowserPanel: React.FC = () => {
                                 key={entry.path}
                                 entry={entry}
                                 isPlaying={fb.previewingFile === entry.path}
+                                isSelected={selectedPaths.has(entry.path)}
                                 onDoubleClickDir={handleEnterDir}
                                 onClickAudio={handleClickAudio}
                                 onPointerDownForDrag={handlePointerDownForDrag}
                                 isDragging={
                                     dragState?.active === true &&
-                                    dragState.filePath === entry.path
+                                    dragState.allFilePaths.includes(entry.path)
                                 }
                                 pathHint={
                                     isSearchMode
@@ -581,7 +809,9 @@ export const FileBrowserPanel: React.FC = () => {
                         boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
                     }}
                 >
-                    🎵 {dragState.fileName}
+                    🎵 {dragState.allFilePaths.length > 1
+                        ? `${dragState.fileName} (+${dragState.allFilePaths.length - 1})`
+                        : dragState.fileName}
                 </div>
             )}
         </Flex>
@@ -595,8 +825,9 @@ export const FileBrowserPanel: React.FC = () => {
 interface FileEntryRowProps {
     entry: FileEntry;
     isPlaying: boolean;
+    isSelected?: boolean;
     onDoubleClickDir: (dirPath: string) => void;
-    onClickAudio: (entry: FileEntry) => void;
+    onClickAudio: (entry: FileEntry, ev?: React.MouseEvent) => void;
     onPointerDownForDrag: (
         e: React.PointerEvent<HTMLDivElement>,
         entry: FileEntry,
@@ -609,6 +840,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
     ({
         entry,
         isPlaying,
+        isSelected,
         onDoubleClickDir,
         onClickAudio,
         onPointerDownForDrag,
@@ -622,7 +854,9 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                 className={[
                     "flex items-center gap-1.5 px-2 py-[3px] cursor-default",
                     "hover:bg-[color-mix(in_oklab,var(--qt-highlight)_12%,transparent)]",
-                    isPlaying
+                    isSelected
+                        ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
+                        : isPlaying
                         ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                         : "",
                     isDragging ? "opacity-50" : "",
@@ -636,7 +870,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                 onDoubleClick={
                     entry.isDir ? () => onDoubleClickDir(entry.path) : undefined
                 }
-                onClick={isAudio ? () => onClickAudio(entry) : undefined}
+                onClick={isAudio ? (ev: React.MouseEvent) => onClickAudio(entry, ev) : undefined}
             >
                 {/* 图标 */}
                 <span className="shrink-0 w-[14px] flex items-center justify-center">

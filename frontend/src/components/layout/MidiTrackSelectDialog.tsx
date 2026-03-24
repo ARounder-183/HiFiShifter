@@ -24,8 +24,10 @@ interface MidiTrackSelectDialogProps {
     onOpenChange: (open: boolean) => void;
     /** MIDI 文件路径（由文件对话框选定） */
     midiPath: string | null;
-    /** 导入到时间线的起始偏移，默认使用当前播放头 */
-    offsetSec?: number;
+    /** 选区起始帧（与 paste_reaper_clipboard 一致） */
+    selectionStartFrame?: number;
+    /** 选区最大帧数（与 paste_reaper_clipboard 一致） */
+    selectionMaxFrames?: number;
     /** 导入完成后的回调 */
     onImported?: (result: {
         notes_imported: number;
@@ -62,7 +64,8 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     open,
     onOpenChange,
     midiPath,
-    offsetSec,
+    selectionStartFrame,
+    selectionMaxFrames,
     onImported,
 }) => {
     const { t } = useI18n();
@@ -127,13 +130,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
             console.info("[midi_import_ui] import:start", {
                 midiPath,
                 trackIndex,
-                offsetSec,
+                selectionStartFrame,
+                selectionMaxFrames,
                 selectedTrack,
             });
             const res = await paramsApi.importMidiToPitch(
                 midiPath,
                 trackIndex,
-                offsetSec,
+                selectionStartFrame,
+                selectionMaxFrames,
             );
             console.info("[midi_import_ui] import:response", res);
             if (res.ok) {
@@ -161,7 +166,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         } finally {
             setImporting(false);
         }
-    }, [midiPath, offsetSec, selectedTrack, onImported, onOpenChange, tAny]);
+    }, [midiPath, selectionStartFrame, selectionMaxFrames, selectedTrack, onImported, onOpenChange, tAny]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>

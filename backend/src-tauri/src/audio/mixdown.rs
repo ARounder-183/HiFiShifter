@@ -1,3 +1,9 @@
+//! 混音渲染模块。
+//!
+//! 将 timeline 中所有 track/clip 按时间对齐并混缩为单段连续音频，
+//! 支持多格式导出（16-bit / 24-bit / 32-bit float WAV）以及
+//! 时间拉伸、音高编辑等后处理流程的集成。
+
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -59,6 +65,32 @@ fn clamp11(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
 }
 
+/// 在 mixdown 中采样自动化曲线（与 mix.rs 中的 sample_automation_curve 逻辑一致）。
+fn sample_automation_curve_at_sec(
+    curve: Option<&Vec<f32>>,
+    abs_sec: f64,
+    frame_period_ms: f64,
+    default_value: f32,
+) -> f32 {
+    let Some(curve) = curve else {
+        return default_value;
+    };
+    if curve.is_empty() {
+        return default_value;
+    }
+    let fp = frame_period_ms.max(0.1);
+    let idx_f = (abs_sec.max(0.0) * 1000.0) / fp;
+    if !idx_f.is_finite() {
+        return default_value;
+    }
+    let i0 = idx_f as usize; // 直接用 usize 截断正浮点数，省去 floor
+    let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
+    let frac = (idx_f - i0 as f64) as f32; // fraction 在 [0, 1) 内，无需 clamp
+    let a = curve.get(i0).copied().unwrap_or(default_value);
+    let b = curve.get(i1).copied().unwrap_or(a);
+    a + (b - a) * frac
+}
+
 pub(crate) fn linear_resample_interleaved(
     input: &[f32],
     channels: usize,
@@ -83,15 +115,20 @@ pub(crate) fn linear_resample_interleaved(
 
     for of in 0..out_frames {
         let t_in = (of as f64) / ratio;
-        let i0 = t_in.floor() as isize;
+        let mut i0 = t_in as usize; //  向下取整
         let frac = (t_in - (i0 as f64)) as f32;
-        let i0 = i0.clamp(0, (in_frames - 1) as isize) as usize;
+        i0 = i0.min(in_frames - 1); //  限制上限即可
         let i1 = (i0 + 1).min(in_frames - 1);
 
+        // 提取乘法基址到声道循环外部
+        let base0 = i0 * channels;
+        let base1 = i1 * channels;
+        let out_base = of * channels;
+
         for ch in 0..channels {
-            let a = input[i0 * channels + ch];
-            let b = input[i1 * channels + ch];
-            out[of * channels + ch] = a + (b - a) * frac;
+            let a = input[base0 + ch];
+            let b = input[base1 + ch];
+            out[out_base + ch] = a + (b - a) * frac;
         }
     }
 
@@ -142,18 +179,25 @@ fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
             }
         }
 
-        // If any solo exists, only soloed lineages are audible.
+        // Solo overrides mute: when a track (or its ancestor) is soloed,
+        // its own mute flag is ignored so that solo always wins.
+        let effective_muted = if any_solo && soloed { false } else { muted };
+
         if any_solo {
-            out.insert(t.id.clone(), (gain, muted, soloed));
+            out.insert(t.id.clone(), (gain, effective_muted, soloed));
         } else {
-            out.insert(t.id.clone(), (gain, muted, true));
+            out.insert(t.id.clone(), (gain, effective_muted, true));
         }
     }
 
     out
 }
 
-pub(crate) fn clip_duration_sec_from_wav(sample_rate: u32, channels: u16, pcm: &[f32]) -> Option<f64> {
+pub(crate) fn clip_duration_sec_from_wav(
+    sample_rate: u32,
+    channels: u16,
+    pcm: &[f32],
+) -> Option<f64> {
     let ch = channels as usize;
     if sample_rate == 0 || ch == 0 {
         return None;
@@ -169,9 +213,10 @@ pub fn render_mixdown_wav(
     timeline: &TimelineState,
     output_path: &Path,
     opts: MixdownOptions,
+    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<MixdownResult, String> {
     let (out_rate, out_channels, duration_sec, mix) =
-        render_mixdown_interleaved(timeline, opts.clone())?;
+        render_mixdown_interleaved(timeline, opts.clone(), resampler_registry)?;
 
     // 根据 export_format 选择 WavSpec。
     let spec = match opts.export_format {
@@ -230,6 +275,7 @@ pub fn render_mixdown_wav(
 pub fn render_mixdown_interleaved(
     timeline: &TimelineState,
     opts: MixdownOptions,
+    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<(u32, u16, f64, Vec<f32>), String> {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
 
@@ -395,14 +441,18 @@ pub fn render_mixdown_interleaved(
             .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
             .map(|t| {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::get_processor(kind).capabilities().handles_time_stretch
+                crate::renderer::get_processor(kind)
+                    .capabilities()
+                    .handles_time_stretch
             })
             .unwrap_or(false);
         let mut segment = segment;
-        // 外部 RubberBand 拉伸的执行条件：
-        //   !processor_handles_stretch → 处理器不内部拉伸（World/HiFiGAN chain 内有 RubberBandStage，vslib 原生拉伸）
+        // 外部 SignalsmithStretch 拉伸的执行条件：
+        //   !processor_handles_stretch → 处理器不内部拉伸（World/HiFiGAN chain 内有 TimeStretchStage，vslib 原生拉伸）
         //   !opts.apply_pitch_edit    → pitch edit 链不会运行，内部拉伸无法触发，需回退到外部拉伸
-        if (playback_rate - 1.0).abs() > 1e-6 && (!processor_handles_stretch || !opts.apply_pitch_edit) {
+        if (playback_rate - 1.0).abs() > 1e-6
+            && (!processor_handles_stretch || !opts.apply_pitch_edit)
+        {
             let seg_frames_in = segment.len() / 2;
             let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;
             segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
@@ -410,32 +460,50 @@ pub fn render_mixdown_interleaved(
 
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
-            let seg_frames = segment.len() / 2;
-            if seg_frames >= 16 {
-                let seg_start_sec = clip_start_sec + pre_silence_sec;
-                let mut seg = segment;
-                let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
-                    timeline,
-                    clip,
-                    clip_start_sec,
-                    seg_start_sec,
-                    out_rate,
-                    &mut seg,
-                );
-                match applied {
-                    Ok(true) => {
-                        segment = seg;
-                    }
-                    Ok(false) => {
-                        segment = seg;
-                    }
-                    Err(e) => {
-                        eprintln!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
-                        segment = seg;
-                    }
+            let seg_start_sec = clip_start_sec + pre_silence_sec;
+            let mut seg = segment;
+            let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+                timeline,
+                clip,
+                clip_start_sec,
+                seg_start_sec,
+                out_rate,
+                &mut seg,
+                resampler_registry,
+            );
+            match applied {
+                Ok(true) => {
+                    segment = seg;
+                }
+                Ok(false) => {
+                    segment = seg;
+                }
+                Err(e) => {
+                    eprintln!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
+                    segment = seg;
                 }
             }
         }
+
+        // 提取 hifigan_volume 曲线（与 snapshot.rs 中的逻辑对应）
+        let (volume_curve, volume_curve_frame_period_ms) = timeline
+            .resolve_root_track_id(&clip.track_id)
+            .and_then(|root| {
+                let entry = timeline.params_by_root_track.get(&root)?;
+                let track = timeline.tracks.iter().find(|t| t.id == root)?;
+                let kind =
+                    crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+                let renderer_id = crate::renderer::get_renderer(kind).id();
+                if renderer_id == "nsf_hifigan_onnx" {
+                    Some((
+                        entry.extra_curves.get("hifigan_volume"),
+                        entry.frame_period_ms.max(0.1),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((None, 5.0));
 
         // Apply fades (linear) and gain (timeline-referenced).
         let fade_in_frames = (clip.fade_in_sec.max(0.0) * out_rate as f64)
@@ -478,6 +546,7 @@ pub fn render_mixdown_interleaved(
 
         clips_mixed = clips_mixed.saturating_add(1);
 
+        let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
         for f in 0..max_frames_to_mix {
             let oi = (out_offset_frames + f) * 2;
             let si = (seg_offset_frames + f) * 2;
@@ -500,12 +569,23 @@ pub fn render_mixdown_interleaved(
                 continue;
             }
 
-            mix[oi] += segment[si] * g;
-            mix[oi + 1] += segment[si + 1] * g;
+            // 只有真存在曲线时才计算
+            let mut final_g = g;
+            if has_volume_curve {
+                let abs_sec = clip_start_sec + (local_in_clip as f64 / out_rate as f64);
+                let vol = sample_automation_curve_at_sec(
+                    volume_curve,
+                    abs_sec,
+                    volume_curve_frame_period_ms,
+                    1.0,
+                );
+                final_g *= vol;
+            }
+
+            mix[oi] += segment[si] * final_g;
+            mix[oi + 1] += segment[si + 1] * final_g;
         }
     }
-
-
 
     if debug {
         let mut max_abs = 0.0f32;

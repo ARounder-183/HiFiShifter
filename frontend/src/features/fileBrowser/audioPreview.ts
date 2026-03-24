@@ -29,16 +29,9 @@ class AudioPreviewEngine {
     }
 
     /**
-     * 播放指定文件的预览。
-     * 如果当前正在播放同一文件，则停止播放。
+     * 播放指定文件的预览，始终从头开始。
      */
     async play(filePath: string, onEnd?: () => void): Promise<void> {
-        // 如果正在播放同一文件，toggle 停止
-        if (this.currentFile === filePath && this.source) {
-            this.stop();
-            return;
-        }
-
         this.stop();
         this.onEndCallback = onEnd ?? null;
         const { ctx, gain } = this.ensureContext();
@@ -119,11 +112,7 @@ class AudioPreviewEngine {
         const floats = new Float32Array(bytes.buffer);
         const channels = Math.max(1, data.channels);
         const frames = Math.floor(floats.length / channels);
-        const audioBuffer = ctx.createBuffer(
-            channels,
-            frames,
-            data.sampleRate,
-        );
+        const audioBuffer = ctx.createBuffer(channels, frames, data.sampleRate);
 
         // 反交错到各声道
         for (let ch = 0; ch < channels; ch++) {

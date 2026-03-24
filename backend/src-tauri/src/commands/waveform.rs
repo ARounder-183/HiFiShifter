@@ -1,40 +1,16 @@
+//! 波形数据命令模块。
+//!
+//! 提供波形缓存管理、clip/timeline 波形数据计算等 Tauri 命令实现，
+//! 用于前端波形可视化组件的数据源。
+
 use crate::state::AppState;
 use crate::waveform;
 use tauri::State;
 
 use super::common::guard_waveform_command;
 
-// ===================== waveform peaks =====================
-
-
-
-
-pub(super) fn get_waveform_peaks_segment(
-    state: State<'_, AppState>,
-    source_path: String,
-    start_sec: f64,
-    duration_sec: f64,
-    columns: usize,
-) -> waveform::WaveformPeaksSegmentPayload {
-    let hop = 256usize;
-    let cols = columns.clamp(16, 8192);
-
-    let peaks = match state.get_or_compute_waveform_peaks(&source_path, hop) {
-        Ok(p) => p,
-        Err(_) => {
-            return waveform::WaveformPeaksSegmentPayload {
-                ok: false,
-                min: vec![],
-                max: vec![],
-            }
-        }
-    };
-
-    waveform::segment_from_cached(peaks.as_ref(), start_sec, duration_sec, cols)
-}
-
-
-
+const WAVEFORM_COLUMNS_MIN: usize = 16;
+const WAVEFORM_COLUMNS_MAX: usize = 65_536;
 
 pub(super) fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
     let stats = state.clear_waveform_cache();
@@ -55,9 +31,6 @@ pub(super) fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Va
 }
 
 // ===================== root mix waveform peaks =====================
-
-
-
 
 pub(super) fn get_root_mix_waveform_peaks_segment(
     state: State<'_, AppState>,
@@ -125,22 +98,21 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             c.muted = false;
         }
 
-        let cols = columns.clamp(16, 8192);
+        let cols = columns.clamp(WAVEFORM_COLUMNS_MIN, WAVEFORM_COLUMNS_MAX);
         let opts = crate::mixdown::MixdownOptions {
             sample_rate: 44100,
             start_sec,
             end_sec: Some(start_sec + duration_sec.max(0.0)),
-            // Peaks are used as a visual timing reference. Prefer RubberBand so
+            // Peaks are used as a visual timing reference. Use Signalsmith Stretch so
             // stretched clips line up with the same timing as pitch analysis.
-            // (Falls back to LinearResample if RubberBand is unavailable.)
-            stretch: crate::time_stretch::StretchAlgorithm::RubberBand,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
-            // 实时预览使用默认质量（Wav16 + Realtime）。
+            // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
             export_format: crate::mixdown::ExportFormat::Wav16,
             quality_preset: crate::mixdown::QualityPreset::Realtime,
         };
 
-        let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
+        let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts, None) {
             Ok(v) => v,
             Err(_) => {
                 return waveform::WaveformPeaksSegmentPayload {
@@ -198,9 +170,6 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
 }
 
 // ===================== track subtree mix waveform peaks =====================
-
-
-
 
 pub(super) fn get_track_mix_waveform_peaks_segment(
     state: State<'_, AppState>,
@@ -268,22 +237,21 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             c.muted = false;
         }
 
-        let cols = columns.clamp(16, 8192);
+        let cols = columns.clamp(WAVEFORM_COLUMNS_MIN, WAVEFORM_COLUMNS_MAX);
         let opts = crate::mixdown::MixdownOptions {
             sample_rate: 44100,
             start_sec,
             end_sec: Some(start_sec + duration_sec.max(0.0)),
-            // Peaks are used as a visual timing reference. Prefer RubberBand so
+            // Peaks are used as a visual timing reference. Use Signalsmith Stretch so
             // stretched clips line up with the same timing as pitch analysis.
-            // (Falls back to LinearResample if RubberBand is unavailable.)
-            stretch: crate::time_stretch::StretchAlgorithm::RubberBand,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
-            // 实时预览使用默认质量（Wav16 + Realtime）。
+            // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
             export_format: crate::mixdown::ExportFormat::Wav16,
             quality_preset: crate::mixdown::QualityPreset::Realtime,
         };
 
-        let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
+        let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts, None) {
             Ok(v) => v,
             Err(_) => {
                 return waveform::WaveformPeaksSegmentPayload {
@@ -338,4 +306,37 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             max: out_max,
         }
     })
+}
+
+// ===================== v2 mipmap 浜岃繘鍒朵紶杈?=====================
+
+/// 鑾峰彇鎸囧畾绾у埆鐨勬尝褰?mipmap 鏁版嵁锛堜簩杩涘埗鏍煎紡锛?
+///
+/// 杩斿洖 Vec<u8>锛孴auri 浼氫紶杈撲负 number[]锛圝S 渚ч渶杞?ArrayBuffer锛夛紝
+/// 鍓嶇閫氳繃 DataView + Float32Array 鐩存帴璇诲彇銆?
+///
+/// 浜岃繘鍒跺崗璁細[Header 20B] [min f32[]] [max f32[]]
+pub(super) fn get_waveform_mipmap_binary(
+    state: State<'_, AppState>,
+    source_path: String,
+    level: u8,
+) -> Vec<u8> {
+    let level = (level as usize).min(2);
+    match state.get_or_compute_waveform_peaks_v2(&source_path) {
+        Ok(data) => data.to_binary_level(level),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 棰勫姞杞芥墍鏈夌骇鍒殑 mipmap 鏁版嵁锛堥煶棰戝姞杞芥椂璋冪敤锛?
+///
+/// 瑙﹀彂 mipmap 璁＄畻骞剁紦瀛樺埌鍐呭瓨 + 纾佺洏锛岄伩鍏嶉娆℃覆鏌撴椂鐨勫欢杩熴€?
+pub(super) fn preload_waveform_mipmap(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> serde_json::Value {
+    match state.get_or_compute_waveform_peaks_v2(&source_path) {
+        Ok(_) => serde_json::json!({"ok": true}),
+        Err(e) => serde_json::json!({"ok": false, "error": e}),
+    }
 }

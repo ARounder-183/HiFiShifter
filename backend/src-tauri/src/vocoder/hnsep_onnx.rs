@@ -14,7 +14,17 @@ static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 const HNSEP_MODEL_SR: u32 = 44_100;
-const HNSEP_CACHE_CAPACITY: usize = 32;
+/// HNSEP 分离缓存默认容量（可通过环境变量 HIFISHIFTER_HNSEP_CACHE_CAPACITY 覆盖）。
+const HNSEP_CACHE_CAPACITY_DEFAULT: usize = 128;
+
+/// 读取环境变量或使用默认值获取 HNSEP 缓存初始容量。
+fn hnsep_cache_initial_capacity() -> usize {
+    std::env::var("HIFISHIFTER_HNSEP_CACHE_CAPACITY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(HNSEP_CACHE_CAPACITY_DEFAULT)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrtExecutionProviderChoice {
@@ -83,7 +93,10 @@ fn resolve_model_path() -> Result<PathBuf, String> {
         }
     }
 
-    Err("HNSEP ONNX model not found. Set HIFISHIFTER_HNSEP_ONNX or HIFISHIFTER_HNSEP_MODEL_DIR.".to_string())
+    Err(
+        "HNSEP ONNX model not found. Set HIFISHIFTER_HNSEP_ONNX or HIFISHIFTER_HNSEP_MODEL_DIR."
+            .to_string(),
+    )
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
@@ -145,15 +158,20 @@ pub fn probe_load() -> Result<String, String> {
     let mut session = build_session_with_ep(&onnx_path)?;
 
     let waveform = vec![0.0f32; HNSEP_MODEL_SR as usize / 10];
-    let waveform_tensor = Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
-        .map_err(|e| format!("build waveform tensor failed: {e}"))?;
+    let waveform_tensor =
+        Tensor::from_array(([1usize, waveform.len()], waveform.into_boxed_slice()))
+            .map_err(|e| format!("build waveform tensor failed: {e}"))?;
     let outputs = session
         .run(ort::inputs![waveform_tensor])
         .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
     if outputs.len() < 2 {
         return Err("hnsep ort returned fewer than 2 outputs".to_string());
     }
-    Ok(format!("hnsep_onnx: OK\n  onnx: {}\n  sr={}", onnx_path.display(), HNSEP_MODEL_SR))
+    Ok(format!(
+        "hnsep_onnx: OK\n  onnx: {}\n  sr={}",
+        onnx_path.display(),
+        HNSEP_MODEL_SR
+    ))
 }
 
 fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
@@ -189,10 +207,30 @@ static HNSEP_CACHE: OnceLock<Mutex<LruCache<u64, HnsepCacheEntry>>> = OnceLock::
 
 fn global_cache() -> &'static Mutex<LruCache<u64, HnsepCacheEntry>> {
     HNSEP_CACHE.get_or_init(|| {
+        let cap = hnsep_cache_initial_capacity();
+        eprintln!("[hnsep] LRU cache initialized with capacity={cap}");
         Mutex::new(LruCache::new(
-            NonZeroUsize::new(HNSEP_CACHE_CAPACITY).expect("HNSEP cache capacity must be non-zero"),
+            NonZeroUsize::new(cap).expect("HNSEP cache capacity must be non-zero"),
         ))
     })
+}
+
+/// 确保 HNSEP 分离缓存容量不小于给定值（仅增不减）。
+///
+/// 渲染线程可在开始批量渲染前调用此函数，根据轨道上的 clip 数量动态扩容，
+/// 避免在大量切片场景下因 LRU 容量不足导致缓存驱逐和重复推理。
+pub fn ensure_cache_capacity(min_capacity: usize) {
+    let next = min_capacity.max(1);
+    let mut cache = global_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let current_cap = cache.cap().get();
+    if next > current_cap {
+        cache.resize(NonZeroUsize::new(next).unwrap());
+        eprintln!(
+            "[hnsep] LRU cache resized: {current_cap} -> {next}"
+        );
+    }
 }
 
 fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_mono: &[f32]) -> u64 {
@@ -224,7 +262,10 @@ pub fn infer_harmonic_noise_mono(
             .lock()
             .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
         if let Some(entry) = cache.get(&cache_key) {
-            return Ok((entry.harmonic.as_ref().clone(), entry.noise.as_ref().clone()));
+            return Ok((
+                entry.harmonic.as_ref().clone(),
+                entry.noise.as_ref().clone(),
+            ));
         }
     }
 
@@ -234,8 +275,9 @@ pub fn infer_harmonic_noise_mono(
         linear_resample_mono(audio_mono, sample_rate, HNSEP_MODEL_SR)
     };
 
-    let waveform_tensor = Tensor::from_array(([1usize, model_audio.len()], model_audio.into_boxed_slice()))
-        .map_err(|e| format!("build hnsep waveform tensor failed: {e}"))?;
+    let waveform_tensor =
+        Tensor::from_array(([1usize, model_audio.len()], model_audio.into_boxed_slice()))
+            .map_err(|e| format!("build hnsep waveform tensor failed: {e}"))?;
 
     let session = get_or_init_shared_session()?;
     let (mut harmonic, mut noise): (Vec<f32>, Vec<f32>) = {

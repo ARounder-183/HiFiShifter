@@ -1,130 +1,53 @@
+/**
+ * ClipItem 组件
+ *
+ * 时间轴上单个音频 Clip 的渲染组件，负责：
+ * - 淡入/淡出可视化和交互手柄
+ * - Clip 的选中、拖拽、右键菜单等交互逻辑
+ * - 支持 trim/stretch 编辑手柄
+ *
+ * 波形渲染由 WaveformTrackCanvas（轨道级 Canvas）统一负责，
+ * ClipItem 仅提供 DOM 交互层。
+ */
 import React from "react";
 
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
-import { clamp } from "./math";
-import { fadeInAreaPath, fadeOutAreaPath, fadeCurveGain } from "./paths";
-import type { FadeCurveType } from "./paths";
-import { sliceWaveformSamples } from "./clipWaveform";
+import { fadeInAreaPath, fadeOutAreaPath } from "./paths";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import { ClipHeader } from "./clip/ClipHeader";
-import { useClipWaveformPeaks } from "./clip/useClipWaveformPeaks";
-import { renderWaveformSvg } from "../../../utils/waveformRenderer";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
-import { getWaveformColors } from "../../../theme/waveformColors";
+
 
 type WaveformPreview = number[] | { l: number[]; r: number[] };
 
-/**
- * 对波形peaks数据应用淡入淡出增益曲线
- *
- * @param min - 最小值数�?
- * @param max - 最大值数�?
- * @param ampScale - 振幅缩放系数
- * @param lengthSec - Clip长度（秒）
- * @param fadeInSec - 淡入长度（秒）
- * @param fadeOutSec - 淡出长度（秒） * @param fadeInCurve - 淡入曲线类型
- * @param fadeOutCurve - 淡出曲线类型
- * @returns 应用淡入淡出后的 min/max 数组
- */
-function applyFadeGainToPeaks(
-    min: number[],
-    max: number[],
-    ampScale: number,
-    lengthSec: number,
-    fadeInSec: number,
-    fadeOutSec: number,
-    fadeInCurve: FadeCurveType,
-    fadeOutCurve: FadeCurveType,
-    // 可见窗口在 lengthSec 坐标系中的起止位置（秒）。
-    // peaks.ok 路径：= sourceStartSec/pr 与 sourceEndSec/pr（覆盖完整文件时用于偏移 fade）。
-    // fallback 路径：均为默认值 0 / -1（-1 表示使用 lengthSec），无需偏移。
-    windowStartSec = 0,
-    windowEndSec = -1,
-): { min: number[]; max: number[] } {
-    const srcN = Math.min(min.length, max.length);
-    if (srcN === 0) return { min: [], max: [] };
-
-    const safeLenBeats = Math.max(1e-9, Number(lengthSec) || 0);
-    const safeFadeIn = Math.max(0, Number(fadeInSec) || 0);
-    const safeFadeOut = Math.max(0, Number(fadeOutSec) || 0);
-    const safeWinStart = Math.max(0, windowStartSec);
-    const safeWinEnd =
-        windowEndSec >= 0 ? Math.min(safeLenBeats, windowEndSec) : safeLenBeats;
-
-    const resultMin = new Array<number>(srcN);
-    const resultMax = new Array<number>(srcN);
-
-    for (let i = 0; i < srcN; i++) {
-        const t = i / Math.max(1, srcN - 1);
-        const beatAt = t * safeLenBeats;
-
-        let mul = ampScale;
-        if (safeFadeIn > 1e-9) {
-            mul *= fadeCurveGain(
-                clamp((beatAt - safeWinStart) / safeFadeIn, 0, 1),
-                fadeInCurve,
-            );
-        }
-        if (safeFadeOut > 1e-9) {
-            mul *= fadeCurveGain(
-                clamp((safeWinEnd - beatAt) / safeFadeOut, 0, 1),
-                fadeOutCurve,
-            );
-        }
-
-        resultMin[i] = (min[i] ?? 0) * mul;
-        resultMax[i] = (max[i] ?? 0) * mul;
-    }
-
-    return { min: resultMin, max: resultMax };
-}
-
-function minMaxEnvelopeFromSamples(
-    samples: number[],
-    columns: number,
-): {
-    min: number[];
-    max: number[];
-} {
-    const srcN = samples.length;
-    const n = Math.max(1, Math.floor(columns));
-    const outMin: number[] = new Array(n);
-    const outMax: number[] = new Array(n);
-    if (srcN <= 0) {
-        outMin.fill(0);
-        outMax.fill(0);
-        return { min: outMin, max: outMax };
-    }
-
-    // Partition samples into N buckets and take min/max in each bucket.
-    for (let x = 0; x < n; x += 1) {
-        const s0 = Math.floor((x * srcN) / n);
-        const s1 = Math.floor(((x + 1) * srcN) / n);
-        const start = clamp(s0, 0, srcN - 1);
-        const end = clamp(Math.max(s1, start + 1), 0, srcN);
-
-        let mn = Number.POSITIVE_INFINITY;
-        let mx = Number.NEGATIVE_INFINITY;
-        for (let i = start; i < end; i += 1) {
-            const v = Number(samples[i] ?? 0);
-            if (v < mn) mn = v;
-            if (v > mx) mx = v;
-        }
-        if (!Number.isFinite(mn) || !Number.isFinite(mx)) {
-            const v = Number(samples[start] ?? 0);
-            mn = v;
-            mx = v;
-        }
-        outMin[x] = mn;
-        outMax[x] = mx;
-    }
-
-    return { min: outMin, max: outMax };
-}
-
-export const ClipItem: React.FC<{
+export const ClipItem = React.memo(function ClipItem({
+    clip,
+    rowHeight,
+    pxPerSec,
+    waveform: _waveform,
+    altPressed = false,
+    selected,
+    isInMultiSelectedSet,
+    multiSelectedCount,
+    viewportStartSec: _viewportStartSec,
+    viewportEndSec: _viewportEndSec,
+    ensureSelected,
+    selectClipRemote,
+    openContextMenu,
+    seekFromClientX,
+    startClipDrag,
+    startEditDrag,
+    toggleClipMuted,
+    toggleMultiSelect: _toggleMultiSelect,
+    onShiftRangeSelect,
+    clearContextMenu,
+    triggerRename,
+    onRenameCommit,
+    onRenameDone,
+    onGainCommit,
+    trackColor,
+}: {
     clip: ClipInfo;
     rowHeight: number;
     pxPerSec: number;
@@ -133,14 +56,17 @@ export const ClipItem: React.FC<{
     selected: boolean;
     isInMultiSelectedSet: boolean;
     multiSelectedCount: number;
+    /** 可视区开始时间（秒） */
+    viewportStartSec?: number;
+    /** 可视区结束时间（秒） */
+    viewportEndSec?: number;
 
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
     openContextMenu: (clipId: string, clientX: number, clientY: number) => void;
 
-    /** 轨道主题色，用于 Clip 背景色和选中边框�?*/
+    /** 轨道主题色，用于 Clip 背景色和选中边框 */
     trackColor?: string;
-
     seekFromClientX: (clientX: number, commit: boolean) => void;
     startClipDrag: (
         e: React.PointerEvent<HTMLDivElement>,
@@ -163,6 +89,8 @@ export const ClipItem: React.FC<{
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键多选切换 */
     toggleMultiSelect: (clipId: string) => void;
+    /** Shift+点击范围选择（跨轨按包围矩形选中） */
+    onShiftRangeSelect: (clipId: string) => void;
 
     clearContextMenu: () => void;
 
@@ -171,36 +99,8 @@ export const ClipItem: React.FC<{
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
     onGainCommit?: (clipId: string, db: number) => void;
-}> = ({
-    clip,
-    rowHeight,
-    pxPerSec,
-    waveform,
-    altPressed = false,
-    selected,
-    isInMultiSelectedSet,
-    multiSelectedCount,
-    ensureSelected,
-    selectClipRemote,
-    openContextMenu,
-    seekFromClientX,
-    startClipDrag,
-    startEditDrag,
-    toggleClipMuted,
-    toggleMultiSelect: _toggleMultiSelect,
-    clearContextMenu,
-    triggerRename,
-    onRenameCommit,
-    onRenameDone,
-    onGainCommit,
-    trackColor,
-}) => {
+}) {
     const { t } = useI18n();
-    const { mode: themeMode } = useAppTheme();
-    const waveformColors = React.useMemo(
-        () => getWaveformColors(themeMode),
-        [themeMode],
-    );
 
     const left = Math.max(0, clip.startSec * pxPerSec);
     const width = Math.max(1, clip.lengthSec * pxPerSec);
@@ -209,241 +109,103 @@ export const ClipItem: React.FC<{
         rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
     );
 
-    // source 可用窗口长度（秒）：sourceEnd 减去两端裁剪量。
-    // 此值不随 trim/stretch/BPM 变化，用于固定 sliceWaveformSamples 的输出密度，
-    // 确保 trim 拖动时波形不缩放（只改变切片起止点），stretch 时由 SVG 自动拉伸。
-    const sourceStartRaw = Number(clip.sourceStartSec ?? 0) || 0;
-    const sourceStart = Math.max(0, sourceStartRaw);
-    const sourceEnd = Number(clip.sourceEndSec ?? 0) || 0;
-    const effectiveEnd = sourceEnd;
-    const sourceAvailSec = Math.max(0, effectiveEnd - sourceStart);
-
     const showRepeatMarker = false;
     const repeatMarkerX = 0;
 
-    const waveformAmpScale = clip.muted
-        ? 0
-        : clamp(Number(clip.gain ?? 1), 0, 4);
 
-    // Map full-scale audio (|v|�?) to the band boundary. Keep gain applied.
-    const waveformVisualAmpScale = waveformAmpScale;
 
-    const hasWaveformPreview = waveform != null;
+    const startDeferredFadeEditDrag = React.useCallback(
+        (
+            e: React.PointerEvent<HTMLDivElement>,
+            type: "fade_in" | "fade_out",
+        ) => {
+            e.preventDefault();
+            e.stopPropagation();
+            clearContextMenu();
 
-    const peaks = useClipWaveformPeaks({
-        clip,
-        widthPx: width,
-        altPressed,
-        hasWaveformPreview,
-    });
+            if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
+                ensureSelected(clip.id);
+            }
+            selectClipRemote(clip.id);
 
-    const stereo =
-        waveform &&
-        typeof waveform === "object" &&
-        !Array.isArray(waveform) &&
-        "l" in waveform &&
-        "r" in waveform;
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const pointerId = e.pointerId;
+            const targetEl = e.currentTarget as HTMLElement;
+            let dragStarted = false;
 
-    const clipForWaveform = React.useMemo(
-        () => ({
-            sourceStartSec: clip.sourceStartSec,
-            sourceEndSec: clip.sourceEndSec,
-            // 传入 source 可用窗口长度（秒）作为 desiredLen，
-            // 使输出采样密度固定，trim 时不缩放波形，stretch 时由 SVG 自动拉伸。
-            lengthSec: sourceAvailSec,
-            durationSec: clip.durationSec,
-        }),
+            const onMove = (ev: PointerEvent) => {
+                if (ev.pointerId !== pointerId || dragStarted) return;
+                const dx = ev.clientX - startX;
+                const dy = ev.clientY - startY;
+                if (dx * dx + dy * dy < 9) return;
+                dragStarted = true;
+                startEditDrag(
+                    {
+                        button: 0,
+                        pointerId,
+                        currentTarget: targetEl,
+                    } as unknown as React.PointerEvent,
+                    clip.id,
+                    type,
+                );
+            };
+
+            const onEnd = (ev: PointerEvent) => {
+                if (ev.pointerId !== pointerId) return;
+                window.removeEventListener("pointermove", onMove, true);
+                window.removeEventListener("pointerup", onEnd, true);
+                window.removeEventListener("pointercancel", onEnd, true);
+                if (!dragStarted) {
+                    seekFromClientX(ev.clientX, true);
+                }
+            };
+
+            window.addEventListener("pointermove", onMove, true);
+            window.addEventListener("pointerup", onEnd, true);
+            window.addEventListener("pointercancel", onEnd, true);
+        },
         [
-            clip.sourceStartSec,
-            clip.sourceEndSec,
-            sourceAvailSec,
-            clip.durationSec,
+            clearContextMenu,
+            clip.id,
+            ensureSelected,
+            isInMultiSelectedSet,
+            multiSelectedCount,
+            seekFromClientX,
+            selectClipRemote,
+            startEditDrag,
         ],
     );
 
-    const waveformSvg = React.useMemo(() => {
-        const quantizeCols = (raw: number) =>
-            clamp(
-                Math.round(clamp(Math.floor(raw), 16, 8192) / 64) * 64,
-                16,
-                8192,
-            );
-
-        const renderCols = peaks?.ok
-            ? clamp(Math.floor(peaks.columns), 16, 8192)
-            : quantizeCols(width);
-
-        const w = renderCols;
-        const totalH = 24;
-        // 单 band 全高布局，波形顶满 clip body
-        const centerY = totalH / 2;
-        const halfH = totalH / 2; // 波形占满整个 viewBox 高度
-
-        // 使用 peaks.cycleLenSecTimeline（稳定值）作为 fade 增益的映射基准，
-        // 而非 clip.lengthSec（trim 拖动时持续变化导致波形拉伸）。
-        // 对于 fallback 的 waveform preview 路径，仍使用 sourceAvailSec。
-        const lenBeats = peaks?.ok
-            ? peaks.cycleLenSecTimeline || Number(clip.lengthSec ?? 0) || 0
-            : Number(clip.lengthSec ?? 0) || 0;
-        const fadeIn = Number(clip.fadeInSec ?? 0) || 0;
-        const fadeOut = Number(clip.fadeOutSec ?? 0) || 0;
-        const fadeInCurve: FadeCurveType = clip.fadeInCurve ?? "sine";
-        const fadeOutCurve: FadeCurveType = clip.fadeOutCurve ?? "sine";
-
-        // 统一样式：从主题配置读取波形颜色
-        const fill = waveformColors.fill;
-        const stroke = waveformColors.stroke;
-        // preview 状态用降低 opacity 表示加载中，不使用虚�?
-        const waveformOpacity = peaks?.isPreview ? 0.6 : 1.0;
-
-        let wMin: number[] | null = null;
-        let wMax: number[] | null = null;
-
-        if (
-            peaks &&
-            peaks.ok &&
-            peaks.min.length >= 2 &&
-            peaks.max.length >= 2
-        ) {
-            wMin = peaks.min;
-            wMax = peaks.max;
-        } else if (stereo) {
-            const wf = waveform as { l: number[]; r: number[] };
-            const leftSamples = sliceWaveformSamples(
-                wf.l ?? [],
-                clipForWaveform,
-            );
-            const rightSamples = sliceWaveformSamples(
-                wf.r ?? [],
-                clipForWaveform,
-            );
-            const leftEnv = minMaxEnvelopeFromSamples(leftSamples, w);
-            const rightEnv = minMaxEnvelopeFromSamples(rightSamples, w);
-            // 合并 L/R：取两个声道的 max 极值
-            // waveform_preview 是绝对值数据（0~1），需要镜像为对称的 min/max
-            const n = Math.min(leftEnv.max.length, rightEnv.max.length);
-            wMax = new Array(n);
-            wMin = new Array(n);
-            for (let i = 0; i < n; i++) {
-                const peak = Math.max(leftEnv.max[i], rightEnv.max[i]);
-                wMax[i] = peak;
-                wMin[i] = -peak;
-            }
-        } else if (Array.isArray(waveform) && waveform.length > 0) {
-            const mono = sliceWaveformSamples(waveform, clipForWaveform);
-            if (mono.length < 2) return null;
-            const env = minMaxEnvelopeFromSamples(mono, w);
-            // waveform_preview 是绝对值数据（0~1），需要镜像为对称的 min/max
-            wMax = env.max;
-            wMin = env.max.map((v) => -v);
-        } else {
-            return null;
-        }
-
-        // 应用淡入淡出效果到波形数据。
-        // peaks.ok 路径：peaks 覆盖完整 source 文件（0 → durationSec），
-        // fade 需相对于 clip 可见窗口（sourceStartSec/pr → sourceEndSec/pr）定位，
-        // 否则 trim 后 fade 渐变会落在被 overflow-hidden 裁掉的不可见区域。
-        const pr = Math.max(1e-6, Number(clip.playbackRate ?? 1) || 1);
-        const fadeWindowStartSec = peaks?.ok
-            ? Math.max(0, Number(clip.sourceStartSec ?? 0) || 0) / pr
-            : 0;
-        const rawSourceEnd = Number(clip.sourceEndSec ?? 0) || 0;
-        const fadeWindowEndSec =
-            peaks?.ok && rawSourceEnd > 0 ? rawSourceEnd / pr : -1;
-        const faded = applyFadeGainToPeaks(
-            wMin,
-            wMax,
-            waveformVisualAmpScale,
-            lenBeats,
-            fadeIn,
-            fadeOut,
-            fadeInCurve,
-            fadeOutCurve,
-            fadeWindowStartSec,
-            fadeWindowEndSec,
-        );
-
-        // 使用共享渲染函数生成 SVG 路径（单 band 全高）
-        const pathD = renderWaveformSvg(
-            {
-                min: faded.min,
-                max: faded.max,
-                timestamps: [], // 空数组表示使用均匀分布
-                stride: 1,
-            },
-            {
-                width: w,
-                height: totalH,
-                centerY,
-                halfHeight: halfH,
-                amplitudeScale: 1.0, // 振幅已在 applyFadeGainToPeaks 中处理
-            },
-        );
-        // 波形 SVG 固定宽度 = source 可用窗口的 timeline 像素宽度。
-        // trim 拖动时此值不变，外层 overflow-hidden 裁掉超出部分，波形不拉伸。
-        const svgFixedWidthPx = peaks?.ok
-            ? peaks.cycleLenSecTimeline * pxPerSec
-            : width;
-
-        if (!pathD) return null;
-        return (
-            <svg
-                viewBox={`0 0 ${w} ${totalH}`}
-                preserveAspectRatio="none"
-                style={{
-                    width: svgFixedWidthPx,
-                    height: "100%",
-                    opacity: waveformOpacity,
-                    flexShrink: 0,
-                }}
-            >
-                <path
-                    d={pathD}
-                    fill={fill}
-                    stroke={stroke}
-                    strokeWidth="1"
-                    vectorEffect="non-scaling-stroke"
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                />
-            </svg>
-        );
-    }, [
-        clipForWaveform,
-        clip.fadeInSec,
-        clip.fadeOutSec,
-        clip.fadeInCurve,
-        clip.fadeOutCurve,
-        clip.lengthSec,
-        clip.playbackRate,
-        clip.sourceStartSec,
-        clip.sourceEndSec,
-        peaks,
-        pxPerSec,
-        width,
-        stereo,
-        waveform,
-        waveformAmpScale,
-        waveformVisualAmpScale,
-    ]);
-
     return (
         <div
+            data-hs-clip-item="1"
             className={`absolute cursor-pointer overflow-visible group ${clip.muted ? "opacity-60 grayscale" : "opacity-95"}`}
             style={{
                 left,
                 width,
                 top: 0,
                 height: rowHeight - CLIP_BODY_PADDING_Y,
+                // 选中或 hover 时提升 z-index，确保 fade 手柄不被相邻 clip 遮挡
+                zIndex: selected ? 2 : undefined,
+            }}
+            onMouseEnter={(e) => {
+                (e.currentTarget as HTMLElement).style.zIndex = "2";
+            }}
+            onMouseLeave={(e) => {
+                (e.currentTarget as HTMLElement).style.zIndex = selected
+                    ? "2"
+                    : "";
             }}
             onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if (!isInMultiSelectedSet) {
+                const keepExistingMultiSelection =
+                    multiSelectedCount > 0 && isInMultiSelectedSet;
+                if (!keepExistingMultiSelection) {
                     ensureSelected(clip.id);
+                    selectClipRemote(clip.id);
                 }
-                selectClipRemote(clip.id);
                 openContextMenu(clip.id, e.clientX, e.clientY);
             }}
             onPointerDown={(e) => {
@@ -454,6 +216,9 @@ export const ClipItem: React.FC<{
                     e.altKey ||
                     e.nativeEvent.getModifierState?.("Alt"),
                 );
+
+                // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
+                const doShiftRangeSelect = e.shiftKey && !alt && !e.ctrlKey && !e.metaKey;
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
@@ -474,7 +239,10 @@ export const ClipItem: React.FC<{
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onUp, true);
                     window.removeEventListener("pointercancel", onUp, true);
-                    if (!moved && allowSeek) {
+                    // Shift+点击且未移动时执行范围选择
+                    if (doShiftRangeSelect && !moved) {
+                        onShiftRangeSelect(clip.id);
+                    } else if (!moved && allowSeek) {
                         seekFromClientX(ev.clientX, true);
                     }
                 }
@@ -502,6 +270,7 @@ export const ClipItem: React.FC<{
                 isInMultiSelectedSet={isInMultiSelectedSet}
                 ensureSelected={ensureSelected}
                 selectClipRemote={selectClipRemote}
+                seekFromClientX={seekFromClientX}
                 startEditDrag={startEditDrag}
             />
 
@@ -522,11 +291,10 @@ export const ClipItem: React.FC<{
 
             {/* Body block (does not fill the entire track row; leaves header lane above) */}
             <div
-                className={`absolute left-0 right-0 bottom-0 rounded-sm shadow-sm overflow-visible border transition-colors ${
-                    selected
+                className={`absolute left-0 right-0 bottom-0 rounded-sm shadow-sm overflow-visible border transition-colors ${selected
                         ? "border-white/90"
                         : "border-transparent group-hover:border-white/30"
-                }`}
+                    }`}
                 style={{
                     top: CLIP_HEADER_HEIGHT,
                     backgroundColor: trackColor
@@ -539,35 +307,19 @@ export const ClipItem: React.FC<{
                     {/* Fade 角落 handle：始终存在，位于 body 左上�?右上角，用于�?0 开始拖拽出渐变 */}
                     {/* left-[10px]：避开左侧 edge handle 的 10px 宽度，确保两者不重叠 */}
                     <div
-                        className="absolute left-[10px] top-0 w-[20px] h-[20px] z-[55]"                        style={{ cursor: "nwse-resize" }}
+                        className="absolute left-[10px] top-0 w-[20px] h-[20px] z-[55]"
+                        style={{ cursor: "nwse-resize" }}
                         onPointerDown={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (
-                                multiSelectedCount === 0 ||
-                                !isInMultiSelectedSet
-                            ) {
-                                ensureSelected(clip.id);
-                            }
-                            selectClipRemote(clip.id);
-                            startEditDrag(e, clip.id, "fade_in");
+                            startDeferredFadeEditDrag(e, "fade_in");
                         }}
                         title={t("fade_in")}
                     />
                     {/* right-[10px]：避开右侧 edge handle 的 10px 宽度，确保两者不重叠 */}
                     <div
-                        className="absolute right-[10px] top-0 w-[20px] h-[20px] z-[55]"                        style={{ cursor: "nesw-resize" }}
+                        className="absolute right-[10px] top-0 w-[20px] h-[20px] z-[55]"
+                        style={{ cursor: "nesw-resize" }}
                         onPointerDown={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (
-                                multiSelectedCount === 0 ||
-                                !isInMultiSelectedSet
-                            ) {
-                                ensureSelected(clip.id);
-                            }
-                            selectClipRemote(clip.id);
-                            startEditDrag(e, clip.id, "fade_out");
+                            startDeferredFadeEditDrag(e, "fade_out");
                         }}
                         title={t("fade_out")}
                     />
@@ -583,16 +335,7 @@ export const ClipItem: React.FC<{
                                 ),
                             }}
                             onPointerDown={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                if (
-                                    multiSelectedCount === 0 ||
-                                    !isInMultiSelectedSet
-                                ) {
-                                    ensureSelected(clip.id);
-                                }
-                                selectClipRemote(clip.id);
-                                startEditDrag(e, clip.id, "fade_in");
+                                startDeferredFadeEditDrag(e, "fade_in");
                             }}
                             title={t("fade_in")}
                         >
@@ -617,16 +360,7 @@ export const ClipItem: React.FC<{
                                 ),
                             }}
                             onPointerDown={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                if (
-                                    multiSelectedCount === 0 ||
-                                    !isInMultiSelectedSet
-                                ) {
-                                    ensureSelected(clip.id);
-                                }
-                                selectClipRemote(clip.id);
-                                startEditDrag(e, clip.id, "fade_out");
+                                startDeferredFadeEditDrag(e, "fade_out");
                             }}
                             title={t("fade_out")}
                         >
@@ -721,35 +455,9 @@ export const ClipItem: React.FC<{
                         ) : null}
                     </div>
 
-                    <div className="absolute inset-0 opacity-80 overflow-hidden">
-                        {/* 内层容器：通过负 marginLeft 将 trimStart 对应位置的波形对齐到容器左边缘。
-                            peaks 数据覆盖整个 source 文件（0 → durationSec），SVG 固定宽度 = durationSec/pr*pxPerSec，
-                            外层 overflow-hidden 裁掉左侧 trim 和右侧超出部分。 */}
-                        <div
-                            style={{
-                                height: "100%",
-                                marginLeft: peaks?.ok
-                                    ? -(
-                                          Math.max(
-                                              0,
-                                              Number(
-                                                  clip.sourceStartSec ?? 0,
-                                              ) || 0,
-                                          ) /
-                                          Math.max(
-                                              1e-6,
-                                              Number(clip.playbackRate ?? 1) ||
-                                                  1,
-                                          )
-                                      ) * pxPerSec
-                                    : 0,
-                            }}
-                        >
-                            {waveformSvg}
-                        </div>
-                    </div>
+                    {/* 波形由 WaveformTrackCanvas（轨道级 Canvas）统一渲染，此处不再包含波形内容 */}
                 </div>
             </div>
         </div>
     );
-};
+});

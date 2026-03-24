@@ -11,3 +11,4 @@
 /third_party/world/build_world_dll/_build_*/
 
 # Third-party source code (static linking - embedded as source code in the repo)
+# Note: rubberband-static/ has been removed (replaced by signalsmith-stretch)

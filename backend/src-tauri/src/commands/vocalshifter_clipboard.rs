@@ -3,19 +3,38 @@ use crate::vocalshifter_clipboard::ClipboardFileKind;
 
 use super::core::get_timeline_state_from_ref;
 
-pub(super) fn paste_vocalshifter_clipboard(state: &AppState) -> serde_json::Value {
+pub(super) fn paste_vocalshifter_clipboard(
+    state: &AppState,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
+    active_param: Option<String>,
+) -> serde_json::Value {
     let Some((path, kind)) = crate::vocalshifter_clipboard::find_latest_clipboard_file() else {
         return serde_json::json!({"ok": false, "error": "clipboard_not_found"});
     };
 
     match kind {
-        ClipboardFileKind::PitchData => paste_clb_pitch_data(state, &path),
+        ClipboardFileKind::PitchData => paste_clb_pitch_data(
+            state,
+            &path,
+            selection_start_frame,
+            selection_max_frames,
+            active_param.as_deref(),
+        ),
         ClipboardFileKind::Project => paste_vsp_project(state, &path),
     }
 }
 
 /// 粘贴 .clb 音高线数据到当前选中轨道的 pitch_edit。
-fn paste_clb_pitch_data(state: &AppState, path: &std::path::Path) -> serde_json::Value {
+/// 若提供了 selection_start_frame / selection_max_frames，则将剪贴板数据对齐到选区起始帧，
+/// 超出选区范围的数据不粘贴。
+fn paste_clb_pitch_data(
+    state: &AppState,
+    path: &std::path::Path,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
+    active_param: Option<&str>,
+) -> serde_json::Value {
     let points = match crate::vocalshifter_clipboard::parse_clipboard_file(path) {
         Ok(v) => v,
         Err(e) => {
@@ -41,6 +60,22 @@ fn paste_clb_pitch_data(state: &AppState, path: &std::path::Path) -> serde_json:
 
     state.checkpoint_timeline(&tl);
 
+    let param_name = active_param.unwrap_or("pitch");
+
+    // 非 pitch 参数：委托给 vslib 参数粘贴逻辑
+    if param_name != "pitch" {
+        return paste_clb_vslib_param(
+            state,
+            &mut tl,
+            &root_track_id,
+            &points,
+            param_name,
+            selection_start_frame,
+            selection_max_frames,
+            frame_period_ms,
+        );
+    }
+
     let Some(entry) = tl.params_by_root_track.get_mut(&root_track_id) else {
         return serde_json::json!({"ok": false, "error": "params_missing"});
     };
@@ -48,6 +83,27 @@ fn paste_clb_pitch_data(state: &AppState, path: &std::path::Path) -> serde_json:
     // 先把剪贴板点映射到时间线帧索引，并按帧去重（同一帧保留最后一个点）。
     let mut frame_points: std::collections::BTreeMap<usize, (bool, f32)> =
         std::collections::BTreeMap::new();
+
+    // 若有选区约束，计算剪贴板数据中最小时间作为偏移基准
+    let (offset_frames, max_frame_bound) = if let Some(sel_start) = selection_start_frame {
+        // 找到剪贴板中最小的 time_sec 作为基准
+        let min_time = points
+            .iter()
+            .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
+            .map(|p| p.time_sec)
+            .fold(f64::MAX, f64::min);
+        let min_frame = if min_time < f64::MAX {
+            ((min_time * 1000.0) / frame_period_ms).round() as isize
+        } else {
+            0
+        };
+        // 偏移量 = 选区起始帧 - 剪贴板最小帧
+        let offset = sel_start as isize - min_frame;
+        let bound = selection_max_frames.map(|n| sel_start + n);
+        (offset, bound)
+    } else {
+        (0isize, None)
+    };
 
     for point in points {
         if !(point.time_sec.is_finite() && point.time_sec >= 0.0) {
@@ -57,7 +113,23 @@ fn paste_clb_pitch_data(state: &AppState, path: &std::path::Path) -> serde_json:
         if !(idx_f.is_finite() && idx_f >= 0.0) {
             continue;
         }
-        let idx = idx_f.round() as usize;
+        let raw_idx = idx_f.round() as isize;
+        let idx = match raw_idx.checked_add(offset_frames).and_then(|i| {
+            if i >= 0 {
+                Some(i as usize)
+            } else {
+                None
+            }
+        }) {
+            Some(v) => v,
+            None => continue,
+        };
+        // 超出选区范围的帧不粘贴
+        if let Some(bound) = max_frame_bound {
+            if idx >= bound {
+                continue;
+            }
+        }
         if idx >= entry.pitch_edit.len() {
             continue;
         }
@@ -111,6 +183,164 @@ fn paste_clb_pitch_data(state: &AppState, path: &std::path::Path) -> serde_json:
 
     if touched > 0 || filled > 0 {
         entry.pitch_edit_user_modified = true;
+    }
+
+    state.audio_engine.update_timeline(tl.clone());
+
+    serde_json::json!({
+        "ok": true,
+        "updated": touched,
+        "filled": filled,
+    })
+}
+
+/// 粘贴 .clb 非 pitch 参数到当前选中轨道的 extra_curves。
+/// 当轨道算法为 VocalShifterVslib 或 NsfHifiganOnnx（且参数为 `formant_shift_cents`）时生效。
+fn paste_clb_vslib_param(
+    state: &AppState,
+    tl: &mut crate::state::TimelineState,
+    root_track_id: &str,
+    points: &[crate::vocalshifter_clipboard::ClipboardPitchPoint],
+    param_name: &str,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
+    frame_period_ms: f64,
+) -> serde_json::Value {
+    use crate::state::PitchAnalysisAlgo;
+
+    // 检查轨道算法：vslib 支持所有参数，nsf-hifigan 仅支持 formant_shift_cents
+    let track_algo = tl
+        .tracks
+        .iter()
+        .find(|t| t.id == root_track_id)
+        .map(|t| &t.pitch_analysis_algo);
+
+    let is_supported = match param_name {
+        "formant_shift_cents" => matches!(
+            track_algo,
+            Some(PitchAnalysisAlgo::VocalShifterVslib) | Some(PitchAnalysisAlgo::NsfHifiganOnnx)
+        ),
+        _ => matches!(track_algo, Some(PitchAnalysisAlgo::VocalShifterVslib)),
+    };
+
+    if !is_supported {
+        return serde_json::json!({"ok": false, "error": "param_not_applicable"});
+    }
+
+    let entry = match tl.params_by_root_track.get_mut(root_track_id) {
+        Some(e) => e,
+        None => return serde_json::json!({"ok": false, "error": "params_missing"}),
+    };
+
+    let total_frames = entry.pitch_edit.len();
+
+    // 参数默认值
+    let default_val = match param_name {
+        "volume" | "dyn_edit" | "dyn_orig" => 1.0f32,
+        _ => 0.0f32,
+    };
+
+    // 确保 extra_curves 含有该参数曲线
+    let curve = entry
+        .extra_curves
+        .entry(param_name.to_string())
+        .or_insert_with(|| vec![default_val; total_frames]);
+
+    if curve.len() < total_frames {
+        curve.resize(total_frames, default_val);
+    }
+
+    // 帧偏移计算
+    let (offset_frames, max_frame_bound) = if let Some(sel_start) = selection_start_frame {
+        let min_time = points
+            .iter()
+            .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
+            .map(|p| p.time_sec)
+            .fold(f64::MAX, f64::min);
+        let min_frame = if min_time < f64::MAX {
+            ((min_time * 1000.0) / frame_period_ms).round() as isize
+        } else {
+            0
+        };
+        let offset = sel_start as isize - min_frame;
+        let bound = selection_max_frames.map(|n| sel_start + n);
+        (offset, bound)
+    } else {
+        (0isize, None)
+    };
+
+    // 映射剪贴板点到帧
+    let mut frame_values: std::collections::BTreeMap<usize, f32> =
+        std::collections::BTreeMap::new();
+
+    for point in points {
+        if !(point.time_sec.is_finite() && point.time_sec >= 0.0) {
+            continue;
+        }
+        let idx_f = (point.time_sec * 1000.0) / frame_period_ms;
+        if !(idx_f.is_finite() && idx_f >= 0.0) {
+            continue;
+        }
+        let raw_idx = idx_f.round() as isize;
+        let idx = match raw_idx.checked_add(offset_frames).and_then(|i| {
+            if i >= 0 {
+                Some(i as usize)
+            } else {
+                None
+            }
+        }) {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some(bound) = max_frame_bound {
+            if idx >= bound {
+                continue;
+            }
+        }
+        if idx >= total_frames {
+            continue;
+        }
+
+        let val = match param_name {
+            "formant_shift_cents" => {
+                // FRM 已经是相对音分偏移，默认值为 0
+                // 当点被 disabled 时，不应应用音高/共振峰偏移 -> 跳过
+                if point.disabled {
+                    continue;
+                }
+                point.formant_cents as f32
+            }
+            "volume" => point.volume as f32,
+            "pan" => point.pan as f32,
+            "dyn_edit" => point.dyn_edit as f32,
+            "breathiness" => point.breathiness as f32,
+            _ => continue,
+        };
+        frame_values.insert(idx, val);
+    }
+
+    // 写入锚点 + 线性插值填充
+    let ordered: Vec<(usize, f32)> = frame_values.iter().map(|(&i, &v)| (i, v)).collect();
+    let mut touched = 0usize;
+    let mut filled = 0usize;
+
+    for &(idx, val) in &ordered {
+        curve[idx] = val;
+        touched += 1;
+    }
+
+    for win in ordered.windows(2) {
+        let (idx_a, val_a) = win[0];
+        let (idx_b, val_b) = win[1];
+        if idx_b <= idx_a + 1 {
+            continue;
+        }
+        let span = (idx_b - idx_a) as f32;
+        for idx in (idx_a + 1)..idx_b {
+            let t = (idx - idx_a) as f32 / span;
+            curve[idx] = val_a + (val_b - val_a) * t;
+            filled += 1;
+        }
     }
 
     state.audio_engine.update_timeline(tl.clone());
@@ -204,6 +434,29 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                         }
                     }
                     existing.pitch_edit_user_modified = true;
+                }
+                // 合并 extra_curves：按帧覆写非默认值（与 pitch 合并方式一致）
+                for (key, new_curve) in &new_params.extra_curves {
+                    let default_val = match key.as_str() {
+                        "formant_shift_cents" | "pan" | "breathiness" => 0.0f32,
+                        _ => 1.0f32, // volume, dyn_orig, dyn_edit
+                    };
+                    let existing_curve = existing
+                        .extra_curves
+                        .entry(key.clone())
+                        .or_insert_with(|| vec![default_val; new_curve.len()]);
+                    if existing_curve.len() < new_curve.len() {
+                        existing_curve.resize(new_curve.len(), default_val);
+                    }
+                    for (i, &v) in new_curve.iter().enumerate() {
+                        if (v - default_val).abs() > 1e-6 && i < existing_curve.len() {
+                            existing_curve[i] = v;
+                        }
+                    }
+                }
+                // 合并 extra_params（覆盖已有值）
+                for (key, &val) in &new_params.extra_params {
+                    existing.extra_params.insert(key.clone(), val);
                 }
             } else {
                 tl.params_by_root_track

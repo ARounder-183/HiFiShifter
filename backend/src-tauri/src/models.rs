@@ -1,3 +1,4 @@
+use crate::project::CustomScale;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,12 @@ pub struct ProjectMetaPayload {
     pub path: Option<String>,
     pub dirty: bool,
     pub recent: Vec<String>,
+    pub base_scale: String,
+    pub use_custom_scale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_scale: Option<CustomScale>,
+    pub beats_per_bar: u32,
+    pub grid_size: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +85,9 @@ pub struct TimelineStatePayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectMetaPayload>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

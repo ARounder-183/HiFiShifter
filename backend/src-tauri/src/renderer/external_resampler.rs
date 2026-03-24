@@ -108,6 +108,157 @@ fn resampler_temp_dir() -> PathBuf {
     dir
 }
 
+/// 为 UTAU resampler 生成 `.frq` 文件（频率分析数据）。
+///
+/// 大多数 UTAU resampler（tn_fnds、Moresampler、TIPS 等）期望输入 WAV 旁存在
+/// 同名的 `{wav_path}_frq` 文件，包含预计算的基频分析。
+///
+/// `.frq` 文件格式（UTAU FREQ0003）：
+/// - 8 字节 magic: "FREQ0003"
+/// - i32 LE: 采样率（Hz）
+/// - i32 LE: 帧周期（采样数，通常 256）
+/// - i32 LE: 平均频率（Hz，四舍五入整数）
+/// - 16 字节: 空白预留
+/// - i32 LE: 数据帧数
+/// - 每帧: f64 LE 频率（Hz）+ f64 LE 振幅
+///
+/// `pitch_orig`: 源音频的原始音高曲线（全局绝对帧索引，MIDI 值），
+///   用于告诉 resampler 输入 WAV 的真实基频。
+/// `clip_start_sec`: clip 在时间轴上的起点（秒），用于将 pitch_orig 对齐到 PCM。
+fn generate_frq_file(
+    wav_path: &Path,
+    pcm: &[f32],
+    sample_rate: u32,
+    pitch_orig: &[f32],
+    frame_period_ms: f64,
+    clip_start_sec: f64,
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+
+    // frq 文件路径：{wav_path}_frq（UTAU 标准命名）
+    let frq_path = PathBuf::from(format!("{}_frq", wav_path.display()));
+
+    // frq 帧周期（采样数）。UTAU 标准默认 256 采样/帧。
+    let hop_samples: i32 = 256;
+    let hop_sec = hop_samples as f64 / sample_rate.max(1) as f64;
+
+    // 计算帧数
+    let total_samples = pcm.len();
+    let num_frames = if total_samples > 0 {
+        ((total_samples as f64) / hop_samples as f64).ceil() as usize
+    } else {
+        0
+    };
+
+    // 从 pitch_orig（原始音高）曲线提取每帧频率和振幅。
+    // pitch_orig 是全局绝对帧索引，需要加上 clip_start_sec 偏移来定位正确区间。
+    let mut freqs = Vec::with_capacity(num_frames);
+    let mut amps = Vec::with_capacity(num_frames);
+
+    let inv_fp = 1000.0 / frame_period_ms.max(0.1);
+    let _pcm_duration_sec = total_samples as f64 / sample_rate.max(1) as f64;
+
+    for i in 0..num_frames {
+        let time_sec = i as f64 * hop_sec;
+
+        // 从 pitch_orig 曲线插值获取当前时间的 MIDI 值。
+        // time_sec 是相对于 clip PCM 的本地时间，加上 clip_start_sec 得到全局时间，
+        // 再换算到 pitch_orig 的帧索引。
+        let global_time_sec = clip_start_sec + time_sec;
+        let pitch_idx_f = global_time_sec * inv_fp;
+        let midi_val = if pitch_orig.is_empty() {
+            0.0f32
+        } else {
+            let i0 = pitch_idx_f.floor() as usize;
+            let i1 = (i0 + 1).min(pitch_orig.len().saturating_sub(1));
+            let frac = (pitch_idx_f - i0 as f64) as f32;
+            let v0 = pitch_orig.get(i0).copied().unwrap_or(0.0);
+            let v1 = pitch_orig.get(i1).copied().unwrap_or(0.0);
+            if v0 > 0.0 && v0.is_finite() && v1 > 0.0 && v1.is_finite() {
+                v0 + (v1 - v0) * frac
+            } else if v0 > 0.0 && v0.is_finite() {
+                v0
+            } else if v1 > 0.0 && v1.is_finite() {
+                v1
+            } else {
+                0.0
+            }
+        };
+
+        // MIDI → Hz
+        let freq = if midi_val > 0.0 && midi_val.is_finite() {
+            440.0 * 2.0f64.powf((midi_val as f64 - 69.0) / 12.0)
+        } else {
+            0.0 // 无声帧
+        };
+
+        // 计算该帧的 RMS 振幅
+        let sample_start = (i * hop_samples as usize).min(total_samples);
+        let sample_end = ((i + 1) * hop_samples as usize).min(total_samples);
+        let amp = if sample_end > sample_start {
+            let sum_sq: f64 = pcm[sample_start..sample_end]
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum();
+            (sum_sq / (sample_end - sample_start) as f64).sqrt()
+        } else {
+            0.0
+        };
+
+        freqs.push(freq);
+        amps.push(amp);
+    }
+
+    // 计算平均频率（仅统计有声帧）
+    let voiced_freqs: Vec<f64> = freqs.iter().copied().filter(|&f| f > 0.0).collect();
+    let avg_freq = if voiced_freqs.is_empty() {
+        0i32
+    } else {
+        (voiced_freqs.iter().sum::<f64>() / voiced_freqs.len() as f64).round() as i32
+    };
+
+    // 写入 frq 文件
+    let mut file = std::fs::File::create(&frq_path)
+        .map_err(|e| format!("创建 frq 文件失败: {e}"))?;
+
+    // Header: "FREQ0003"
+    file.write_all(b"FREQ0003")
+        .map_err(|e| format!("写入 frq header 失败: {e}"))?;
+
+    // 采样率 (i32 LE)
+    file.write_all(&(sample_rate as i32).to_le_bytes())
+        .map_err(|e| format!("写入 frq 采样率失败: {e}"))?;
+
+    // 帧周期（采样数, i32 LE）
+    file.write_all(&hop_samples.to_le_bytes())
+        .map_err(|e| format!("写入 frq 帧周期失败: {e}"))?;
+
+    // 平均频率 (i32 LE)
+    file.write_all(&avg_freq.to_le_bytes())
+        .map_err(|e| format!("写入 frq 平均频率失败: {e}"))?;
+
+    // 16 字节空白预留
+    file.write_all(&[0u8; 16])
+        .map_err(|e| format!("写入 frq 预留字段失败: {e}"))?;
+
+    // 帧数 (i32 LE)
+    file.write_all(&(num_frames as i32).to_le_bytes())
+        .map_err(|e| format!("写入 frq 帧数失败: {e}"))?;
+
+    // 每帧: f64 频率 + f64 振幅
+    for i in 0..num_frames {
+        file.write_all(&freqs[i].to_le_bytes())
+            .map_err(|e| format!("写入 frq 频率帧失败: {e}"))?;
+        file.write_all(&amps[i].to_le_bytes())
+            .map_err(|e| format!("写入 frq 振幅帧失败: {e}"))?;
+    }
+
+    file.flush()
+        .map_err(|e| format!("flush frq 文件失败: {e}"))?;
+
+    Ok(frq_path)
+}
+
 /// 将单声道 f32 PCM 写入临时 WAV 文件（16-bit int），返回文件路径。
 fn write_temp_wav_mono(pcm: &[f32], sample_rate: u32) -> Result<PathBuf, String> {
     let temp_dir = resampler_temp_dir();
@@ -335,6 +486,20 @@ impl ClipProcessor for ExternalResamplerProcessor {
         let input_wav = write_temp_wav_mono(ctx.mono_pcm, ctx.sample_rate)?;
         let _input_guard = TempFileGuard(input_wav.clone());
 
+        // ── 1b. 生成 frq 文件（基频分析数据）─────────────────────────────
+        // 大多数 UTAU resampler 期望输入 WAV 旁存在同名 frq 文件。
+        // 使用 pitch_orig（源音频原始音高）而非 pitch_edit（用户编辑后的目标音高），
+        // 因为 frq 的作用是告诉 resampler「输入 WAV 的原始基频是什么」。
+        let frq_path = generate_frq_file(
+            &input_wav,
+            ctx.mono_pcm,
+            ctx.sample_rate,
+            ctx.pitch_orig,
+            ctx.frame_period_ms,
+            ctx.clip_start_sec,
+        )?;
+        let _frq_guard = TempFileGuard(frq_path);
+
         // ── 2. 准备输出路径 ──────────────────────────────────────────────────
         let uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
         let output_wav = resampler_temp_dir().join(format!("hs_resampler_out_{uuid}.wav"));
@@ -351,13 +516,31 @@ impl ClipProcessor for ExternalResamplerProcessor {
             ctx.playback_rate,
         );
 
-        // ── 3. 计算目标音高（pitch_edit 中位数）──────────────────────────────
-        let target_midi = median_pitch(ctx.pitch_edit);
+        // ── 3. 裁剪 pitch_edit 到 clip 局部区间 ─────────────────────────
+        // pitch_edit 是全局绝对帧索引的完整曲线（帧 0 对应时间轴 0 秒），
+        // 但 resampler 只处理当前 clip 的局部区间。
+        // 需要根据 clip_start_sec 和 PCM 时长计算帧范围，只取对应区间。
+        let inv_fp = 1000.0 / ctx.frame_period_ms.max(0.1);
+        let clip_start_frame = (ctx.clip_start_sec * inv_fp).round().max(0.0) as usize;
+        let clip_duration_sec = ctx.mono_pcm.len() as f64 / ctx.sample_rate.max(1) as f64;
+        let clip_end_frame = ((ctx.clip_start_sec + clip_duration_sec) * inv_fp)
+            .ceil()
+            .max(0.0) as usize;
+        let clip_end_frame = clip_end_frame.min(ctx.pitch_edit.len());
+        let clip_start_frame = clip_start_frame.min(clip_end_frame);
+
+        let local_pitch_edit: &[f32] = if clip_start_frame < clip_end_frame {
+            &ctx.pitch_edit[clip_start_frame..clip_end_frame]
+        } else {
+            &[]
+        };
+
+        // ── 4. 计算目标音高（局部 pitch_edit 中位数）─────────────────────
+        let target_midi = median_pitch(local_pitch_edit);
         let pitch_str = midi_to_utau_pitch(target_midi);
 
-        // ── 4. 计算 pitchbend（逐帧 cent 偏移 → Base64）──────────────────
-        let cent_offsets: Vec<i16> = ctx
-            .pitch_edit
+        // ── 5. 计算 pitchbend（逐帧 cent 偏移 → Base64）──────────────────
+        let cent_offsets: Vec<i16> = local_pitch_edit
             .iter()
             .map(|&midi| {
                 if midi > 0.0 && midi.is_finite() {
@@ -371,15 +554,15 @@ impl ClipProcessor for ExternalResamplerProcessor {
             .collect();
 
         // 重采样到 UTAU 帧率
-        let bpm = 120.0; // 默认 BPM（从 ctx 取不到，使用安全默认值）
+        let bpm = if ctx.bpm.is_finite() && ctx.bpm > 0.0 { ctx.bpm } else { 120.0 };
         let resampled = resample_pitchbend(&cent_offsets, ctx.frame_period_ms, bpm);
         let pitchbend_b64 = encode_pitchbend(&resampled);
 
-        // ── 5. 计算输出长度（考虑 playback_rate）──────────────────────────
+        // ── 6. 计算输出长度（考虑 playback_rate）──────────────────────────
         let source_ms = ctx.mono_pcm.len() as f64 / ctx.sample_rate.max(1) as f64 * 1000.0;
         let length_ms = source_ms / ctx.playback_rate.max(1e-6);
 
-        // ── 6. 从 extra_params 获取参数，从 extra_curves 获取平均值 ────────
+        // ── 7. 从 extra_params 获取参数，从 extra_curves 获取平均值 ────────
         let velocity = ctx
             .extra_curves
             .get("resampler_velocity")
@@ -419,7 +602,7 @@ impl ClipProcessor for ExternalResamplerProcessor {
             })
             .unwrap_or(100.0) as i32;
 
-        // ── 6b. 从 extra_curves 获取用户自定义 flag 参数值，拼接 flags 字符串 ──
+        // ── 7b. 从 extra_curves 获取用户自定义 flag 参数值，拼接 flags 字符串 ──
         //
         // 对于每个 FlagParam（如 B/g/t），从 extra_curves["resampler_flag_{key}"] 取平均值，
         // 以整数拼进 flags 字符串。如果曲线不存在或为空，使用 default_value。
@@ -447,11 +630,11 @@ impl ClipProcessor for ExternalResamplerProcessor {
         }
 
         eprintln!(
-            "[resampler] args: pitch={} velocity={} flags=\"{}\" length_ms={:.1} volume={} mod={} pitchbend_len={}",
-            pitch_str, velocity, flags, length_ms, volume, modulation, resampled.len()
+            "[resampler] args: pitch={} velocity={} flags=\"{}\" length_ms={:.1} volume={} mod={} pitchbend_len={} local_pitch_frames={}",
+            pitch_str, velocity, flags, length_ms, volume, modulation, resampled.len(), local_pitch_edit.len()
         );
 
-        // ── 7. 构造命令行参数并调用 ────────────────────────────────────────
+        // ── 8. 构造命令行参数并调用 ────────────────────────────────────────
         let tempo_str = format!("!{:.0}", bpm);
 
         let mut cmd = Command::new(&self.entry.exe_path);
@@ -515,7 +698,7 @@ impl ClipProcessor for ExternalResamplerProcessor {
             ));
         }
 
-        // ── 8. 读回 output.wav → Vec<f32> ──────────────────────────────────
+        // ── 9. 读回 output.wav → Vec<f32> ──────────────────────────────────
         if !output_wav.exists() {
             return Err(format!(
                 "Resampler \"{}\" 执行成功但未生成输出文件: {}\n\
@@ -534,7 +717,7 @@ impl ClipProcessor for ExternalResamplerProcessor {
             pcm.iter().fold(0.0f32, |m, &v| m.max(v.abs())),
         );
 
-        // ── 9. 对齐到 ctx.out_frames ──────────────────────────────────────
+        // ── 10. 对齐到 ctx.out_frames ──────────────────────────────────────
         let mut out = vec![0.0f32; ctx.out_frames];
         let copy_len = pcm.len().min(ctx.out_frames);
         out[..copy_len].copy_from_slice(&pcm[..copy_len]);

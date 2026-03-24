@@ -7,22 +7,22 @@
 //! `get_processor()` 返回统一的 `ClipProcessor` 实例，涵盖音高合成 +
 //! 时间拉伸 + 全部声码器参数曲线。
 
+pub(crate) mod chain;
+pub(crate) mod hifigan;
 mod traits;
 mod utils;
 pub(crate) mod world;
-pub(crate) mod hifigan;
-pub(crate) mod chain;
 pub(crate) mod external_resampler;
 
 #[cfg(feature = "vslib")]
 pub(crate) mod vslib_processor;
 
+pub use chain::{ProcessingStage, ProcessorChain, StageContext};
 pub use traits::{
-    Renderer, RenderContext, RendererCapabilities,
-    ClipProcessor, ClipProcessContext, ProcessorCapabilities, ParamDescriptor, ParamKind,
+    ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, ProcessorCapabilities,
+    RenderContext, Renderer, RendererCapabilities,
 };
-pub use utils::{edit_midi_at_time_or_none, clip_midi_at_time};
-pub use chain::{ProcessingStage, StageContext, ProcessorChain};
+pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 
 use crate::state::SynthPipelineKind;
 
@@ -71,7 +71,7 @@ pub fn all_renderers() -> Vec<&'static dyn Renderer> {
 
 /// 根据 [`SynthPipelineKind`] 创建对应的 [`ClipProcessor`] 实例（Box 分配）。
 ///
-/// 对于 World / HiFiGAN，返回对应的 [`ProcessorChain`]（含 RubberBand + 声码器 Stage）。
+/// 对于 World / HiFiGAN，返回对应的 [`ProcessorChain`]（含 Signalsmith Stretch + 声码器 Stage）。
 /// 对于 vslib，返回 [`VslibProcessor`]（需 `feature = "vslib"`）。
 /// 对于外部 resampler，需要从 AppState 的 registry 中查找 entry。
 pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {

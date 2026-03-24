@@ -107,7 +107,10 @@ fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| e.to_string())?;
 
-    let mut out: Vec<f32> = Vec::new();
+    // 预分配内存，避免 Vec 动态扩容
+    let estimated_frames = track.codec_params.n_frames.unwrap_or(0) as usize;
+    let mut out: Vec<f32> = Vec::with_capacity(estimated_frames * channels);
+    let mut sbuf_opt: Option<symphonia::core::audio::SampleBuffer<f32>> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -122,19 +125,22 @@ fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<
             Err(e) => return Err(e.to_string()),
         };
 
-        // Some containers/codecs may not populate codec_params.sample_rate.
-        // Fall back to the actual decoded spec.
         if sample_rate == 0 {
             sample_rate = decoded.spec().rate;
         }
 
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
+        // 复用缓冲区，正确比较总样本数 (Samples = Frames * Channels)
+        let required_samples = decoded.capacity() * decoded.spec().channels.count();
+        if sbuf_opt.is_none() || sbuf_opt.as_ref().unwrap().capacity() < required_samples {
+            sbuf_opt = Some(symphonia::core::audio::SampleBuffer::<f32>::new(
+                decoded.capacity() as u64,
+                *decoded.spec(),
+            ));
+        }
+        let sbuf = sbuf_opt.as_mut().unwrap();
         sbuf.copy_interleaved_ref(decoded);
         out.extend_from_slice(sbuf.samples());
     }
-
     Ok((
         if sample_rate == 0 { 44100 } else { sample_rate },
         channels as u16,
@@ -144,8 +150,8 @@ fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<
 
 pub struct WavInfo {
     pub sample_rate: u32,
-    pub total_frames: u64,      // 精确的frame总数
-    pub duration_sec: f64,       // 兼容性保留，从frames计算
+    pub total_frames: u64, // 精确的frame总数
+    pub duration_sec: f64, // 兼容性保留，从frames计算
     pub waveform_preview: Vec<f32>,
 }
 
@@ -198,7 +204,12 @@ fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
         hint.with_extension(ext);
     }
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
     let format = probed.format;
     let track = format.default_track()?;
@@ -246,7 +257,7 @@ fn compute_minmax_peaks_hound(
 ) -> Result<crate::waveform::CachedPeaks, String> {
     use hound::{SampleFormat, WavReader};
 
-    let reader = WavReader::open(path).map_err(|e| e.to_string())?;
+    let mut reader = WavReader::open(path).map_err(|e| e.to_string())?;
     let spec = reader.spec();
     if spec.sample_rate == 0 || spec.channels == 0 {
         return Err("invalid wav spec".to_string());
@@ -262,16 +273,17 @@ fn compute_minmax_peaks_hound(
     let mut acc_max = f32::NEG_INFINITY;
     let mut frame_count = 0usize;
 
-    // Reopen for samples iterator.
-    let mut reader = WavReader::open(path).map_err(|e| e.to_string())?;
-
     // 宏：将一帧的各声道极值 (ch_min, ch_max) 合入累积器，到达 hop 时输出一个 peak
     macro_rules! flush_frame {
         ($ch_min:expr, $ch_max:expr) => {{
             let cmin = $ch_min;
             let cmax = $ch_max;
-            if cmin < acc_min { acc_min = cmin; }
-            if cmax > acc_max { acc_max = cmax; }
+            if cmin < acc_min {
+                acc_min = cmin;
+            }
+            if cmax > acc_max {
+                acc_max = cmax;
+            }
             frame_count += 1;
             if frame_count >= hop {
                 min.push(if acc_min.is_finite() { acc_min } else { 0.0 });
@@ -285,6 +297,7 @@ fn compute_minmax_peaks_hound(
 
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {
+            let scale = 1.0 / (i16::MAX as f32);
             let mut buf = vec![0i16; channels];
             let mut i = 0usize;
             for s in reader.samples::<i16>() {
@@ -296,16 +309,20 @@ fn compute_minmax_peaks_hound(
                     let mut ch_min = f32::INFINITY;
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
-                        let v = x as f32 / i16::MAX as f32;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        let v = x as f32 * scale;
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
             }
         }
         (SampleFormat::Int, 24) => {
-            let denom = (1u32 << 23) as f32;
+            let scale = 1.0 / ((1u32 << 23) as f32);
             let mut buf = vec![0i32; channels];
             let mut i = 0usize;
             for s in reader.samples::<i32>() {
@@ -316,15 +333,20 @@ fn compute_minmax_peaks_hound(
                     let mut ch_min = f32::INFINITY;
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
-                        let v = x as f32 / denom;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        let v = x as f32 * scale;
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
             }
         }
         (SampleFormat::Int, 32) => {
+            let scale = 1.0 / (i32::MAX as f32);
             let mut buf = vec![0i32; channels];
             let mut i = 0usize;
             for s in reader.samples::<i32>() {
@@ -335,9 +357,13 @@ fn compute_minmax_peaks_hound(
                     let mut ch_min = f32::INFINITY;
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
-                        let v = x as f32 / i32::MAX as f32;
-                        if v < ch_min { ch_min = v; }
-                        if v > ch_max { ch_max = v; }
+                        let v = x as f32 * scale;
+                        if v < ch_min {
+                            ch_min = v;
+                        }
+                        if v > ch_max {
+                            ch_max = v;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -354,8 +380,12 @@ fn compute_minmax_peaks_hound(
                     let mut ch_min = f32::INFINITY;
                     let mut ch_max = f32::NEG_INFINITY;
                     for &x in &buf {
-                        if x < ch_min { ch_min = x; }
-                        if x > ch_max { ch_max = x; }
+                        if x < ch_min {
+                            ch_min = x;
+                        }
+                        if x > ch_max {
+                            ch_max = x;
+                        }
                     }
                     flush_frame!(ch_min, ch_max);
                 }
@@ -427,6 +457,7 @@ fn compute_minmax_peaks_symphonia(
     let mut acc_max = f32::NEG_INFINITY;
     let mut frame_count = 0usize;
     let mut total_frames: u64 = 0;
+    let mut sbuf_opt: Option<symphonia::core::audio::SampleBuffer<f32>> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -441,9 +472,15 @@ fn compute_minmax_peaks_symphonia(
             Err(e) => return Err(e.to_string()),
         };
 
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
+        // 复用缓冲区，正确比较总样本数 (Samples = Frames * Channels)
+        let required_samples = decoded.capacity() * decoded.spec().channels.count();
+        if sbuf_opt.is_none() || sbuf_opt.as_ref().unwrap().capacity() < required_samples {
+            sbuf_opt = Some(symphonia::core::audio::SampleBuffer::<f32>::new(
+                decoded.capacity() as u64,
+                *decoded.spec(),
+            ));
+        }
+        let sbuf = sbuf_opt.as_mut().unwrap();
         sbuf.copy_interleaved_ref(decoded);
         let samples = sbuf.samples();
 
@@ -457,8 +494,12 @@ fn compute_minmax_peaks_symphonia(
             let mut ch_max = f32::NEG_INFINITY;
             for ch in 0..channels {
                 let v = samples.get(base + ch).copied().unwrap_or(0.0);
-                if v < ch_min { ch_min = v; }
-                if v > ch_max { ch_max = v; }
+                if v < ch_min {
+                    ch_min = v;
+                }
+                if v > ch_max {
+                    ch_max = v;
+                }
             }
 
             if ch_min < acc_min {
@@ -495,7 +536,7 @@ fn compute_minmax_peaks_symphonia(
 fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo> {
     use hound::{SampleFormat, WavReader};
 
-    let reader = WavReader::open(path).ok()?;
+    let mut reader = WavReader::open(path).ok()?;
     let spec = reader.spec();
     if spec.sample_rate == 0 || spec.channels == 0 {
         return None;
@@ -519,7 +560,6 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
     }
 
     // Reset reader by reopening (hound doesn't support seek on all readers reliably).
-    let mut reader = WavReader::open(path).ok()?;
     let step = (total_samples / preview_len).max(1);
 
     let mut idx = 0usize;
@@ -543,8 +583,9 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
 
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {
+            let scale = 1.0 / (i16::MAX as f32);
             for s in reader.samples::<i16>() {
-                let v = s.ok()? as f32 / i16::MAX as f32;
+                let v = s.ok()? as f32 * scale;
                 if !push_abs(v) {
                     break;
                 }
@@ -553,17 +594,18 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
         (SampleFormat::Int, 24) => {
             // hound returns 24-bit PCM as sign-extended i32 in range [-2^23, 2^23-1].
             // Normalizing by i32::MAX would scale by ~1/256 and make waveform/audio nearly silent.
-            let denom = (1u32 << 23) as f32;
+            let scale = 1.0 / ((1u32 << 23) as f32);
             for s in reader.samples::<i32>() {
-                let v = s.ok()? as f32 / denom;
+                let v = s.ok()? as f32 * scale;
                 if !push_abs(v) {
                     break;
                 }
             }
         }
         (SampleFormat::Int, 32) => {
+            let scale = 1.0 / (i32::MAX as f32);
             for s in reader.samples::<i32>() {
-                let v = s.ok()? as f32 / i32::MAX as f32;
+                let v = s.ok()? as f32 * scale;
                 if !push_abs(v) {
                     break;
                 }
@@ -641,9 +683,9 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
         Some((format, decoder, sr, ch))
     }
 
-    let (mut format1, mut decoder1, sample_rate, channels) = open(path)?;
+    let (mut format1, _decoder1, sample_rate, channels) = open(path)?;
 
-    // Pass 1: count total frames.
+    // Pass 1: count total frames
     let mut total_frames: u64 = 0;
     loop {
         let packet = match format1.next_packet() {
@@ -651,13 +693,7 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
             Err(Error::IoError(_)) => break,
             Err(_) => return None,
         };
-        let decoded = match decoder1.decode(&packet) {
-            Ok(d) => d,
-            Err(Error::DecodeError(_)) => continue,
-            Err(Error::IoError(_)) => break,
-            Err(_) => return None,
-        };
-        total_frames = total_frames.saturating_add(decoded.frames() as u64);
+        total_frames = total_frames.saturating_add(packet.dur);
     }
 
     let duration_sec = if sample_rate > 0 {
@@ -684,6 +720,7 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
     let mut idx = 0usize;
     let mut current_max = 0.0f32;
     let mut count_frames: u64 = 0;
+    let mut sbuf_opt: Option<symphonia::core::audio::SampleBuffer<f32>> = None;
 
     loop {
         let packet = match format2.next_packet() {
@@ -698,10 +735,15 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
             Err(_) => break,
         };
 
-        // Convert to f32 interleaved and accumulate max(|sample|) per window.
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
+        // 复用缓冲区，正确比较总样本数 (Samples = Frames * Channels)
+        let required_samples = decoded.capacity() * decoded.spec().channels.count();
+        if sbuf_opt.is_none() || sbuf_opt.as_ref().unwrap().capacity() < required_samples {
+            sbuf_opt = Some(symphonia::core::audio::SampleBuffer::<f32>::new(
+                decoded.capacity() as u64,
+                *decoded.spec(),
+            ));
+        }
+        let sbuf = sbuf_opt.as_mut().unwrap();
         sbuf.copy_interleaved_ref(decoded);
         let samples = sbuf.samples();
 

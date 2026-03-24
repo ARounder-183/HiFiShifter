@@ -2,6 +2,40 @@ use crate::state::{SynthPipelineKind, TimelineState};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CustomScale {
+    pub id: String,
+    pub name: String,
+    pub notes: Vec<u8>,
+}
+
+impl CustomScale {
+    pub fn normalized(&self) -> Self {
+        let mut unique = std::collections::BTreeSet::new();
+        for n in &self.notes {
+            unique.insert(n % 12);
+        }
+        let mut notes: Vec<u8> = unique.into_iter().collect();
+        if notes.is_empty() {
+            notes = vec![0, 2, 4, 5, 7, 9, 11];
+        }
+        Self {
+            id: if self.id.trim().is_empty() {
+                "custom".to_string()
+            } else {
+                self.id.trim().to_string()
+            },
+            name: if self.name.trim().is_empty() {
+                "Custom Scale".to_string()
+            } else {
+                self.name.trim().to_string()
+            },
+            notes,
+        }
+    }
+}
+
 // ─── 媒体注册表 ────────────────────────────────────────────────────────────────
 
 /// 工程媒体文件注册表条目，用于追踪音频文件的路径和完整性。
@@ -35,6 +69,16 @@ pub struct ProjectFile {
     pub version: u32,
     pub name: String,
     pub timeline: TimelineState,
+    #[serde(default = "default_base_scale")]
+    pub base_scale: String,
+    #[serde(default = "default_beats_per_bar")]
+    pub beats_per_bar: u32,
+    #[serde(default = "default_grid_size")]
+    pub grid_size: String,
+    #[serde(default)]
+    pub use_custom_scale: bool,
+    #[serde(default)]
+    pub custom_scale: Option<CustomScale>,
     /// 媒体文件注册表（v2 新增，旧工程反序列化时默认为空）。
     #[serde(default)]
     pub media_registry: Vec<MediaEntry>,
@@ -44,15 +88,38 @@ pub struct ProjectFile {
 }
 
 impl ProjectFile {
-    pub fn new(name: String, timeline: TimelineState) -> Self {
+    pub fn new(
+        name: String,
+        timeline: TimelineState,
+        base_scale: String,
+        beats_per_bar: u32,
+        grid_size: String,
+    ) -> Self {
         Self {
             version: 2,
             name,
             timeline,
+            base_scale,
+            beats_per_bar,
+            grid_size,
+            use_custom_scale: false,
+            custom_scale: None,
             media_registry: Vec::new(),
             synth_config: SynthConfig::default(),
         }
     }
+}
+
+fn default_base_scale() -> String {
+    "C".to_string()
+}
+
+fn default_beats_per_bar() -> u32 {
+    4
+}
+
+fn default_grid_size() -> String {
+    "1/4".to_string()
 }
 
 // ─── 序列化 / 反序列化 ─────────────────────────────────────────────────────────

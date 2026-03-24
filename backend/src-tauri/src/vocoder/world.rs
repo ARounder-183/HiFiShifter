@@ -84,12 +84,12 @@ pub fn compute_f0_hz_harvest(
         return Ok(vec![]);
     }
 
-    let mut option = HarvestOption {
-        f0_floor: 71.0,
-        f0_ceil: 800.0,
-        frame_period: fp,
+    // 在栈上开辟空间，由 C 库负责初始化
+    let mut option = unsafe {
+        let mut opt = std::mem::MaybeUninit::uninit();
+        InitializeHarvestOption(opt.as_mut_ptr());
+        opt.assume_init()
     };
-    unsafe { InitializeHarvestOption(&mut option as *mut HarvestOption) };
     option.frame_period = fp;
     if f0_floor.is_finite() && f0_floor > 0.0 {
         option.f0_floor = f0_floor;
@@ -98,8 +98,12 @@ pub fn compute_f0_hz_harvest(
         option.f0_ceil = f0_ceil;
     }
 
-    let mut temporal_positions = vec![0.0f64; samples as usize];
-    let mut f0 = vec![0.0f64; samples as usize];
+    let mut temporal_positions = Vec::with_capacity(samples as usize);
+    let mut f0 = Vec::with_capacity(samples as usize);
+    unsafe {
+        temporal_positions.set_len(samples as usize);
+        f0.set_len(samples as usize);
+    }
 
     unsafe {
         Harvest(
@@ -143,15 +147,11 @@ pub fn compute_f0_hz_dio_stonemask(
         return Ok(vec![]);
     }
 
-    let mut option = DioOption {
-        f0_floor: 71.0,
-        f0_ceil: 800.0,
-        channels_in_octave: 2.0,
-        frame_period: fp,
-        speed: 1,
-        allowed_range: 0.1,
+    let mut option = unsafe {
+        let mut opt = std::mem::MaybeUninit::uninit();
+        InitializeDioOption(opt.as_mut_ptr());
+        opt.assume_init()
     };
-    unsafe { InitializeDioOption(&mut option as *mut DioOption) };
     option.frame_period = fp;
     if f0_floor.is_finite() && f0_floor > 0.0 {
         option.f0_floor = f0_floor;
@@ -160,8 +160,12 @@ pub fn compute_f0_hz_dio_stonemask(
         option.f0_ceil = f0_ceil;
     }
 
-    let mut temporal_positions = vec![0.0f64; samples as usize];
-    let mut f0 = vec![0.0f64; samples as usize];
+    let mut temporal_positions = Vec::with_capacity(samples as usize);
+    let mut f0 = Vec::with_capacity(samples as usize);
+    unsafe {
+        temporal_positions.set_len(samples as usize);
+        f0.set_len(samples as usize);
+    }
 
     unsafe {
         Dio(
@@ -174,7 +178,10 @@ pub fn compute_f0_hz_dio_stonemask(
         );
     }
 
-    let mut refined = vec![0.0f64; samples as usize];
+    let mut refined = Vec::with_capacity(samples as usize);
+    unsafe {
+        refined.set_len(samples as usize);
+    }
     unsafe {
         StoneMask(
             x.as_ptr(),

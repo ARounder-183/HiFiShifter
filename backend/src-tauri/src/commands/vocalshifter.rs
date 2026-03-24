@@ -80,6 +80,11 @@ pub(super) fn import_vocalshifter_project(
         let max_existing_order = tl.tracks.iter().map(|t| t.order).max().unwrap_or(-1);
         let mut order_offset = max_existing_order + 1;
 
+        // 应用工程 BPM（如果现有工程为空或导入文件自带 BPM 非默认值则采用）
+        if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
+            tl.bpm = result.timeline.bpm;
+        }
+
         // 合并轨道（调整 order 使其排在现有轨道之后）
         for mut track in result.timeline.tracks {
             track.order = order_offset;
@@ -111,7 +116,8 @@ pub(super) fn import_vocalshifter_project(
 
     // 更新工程元信息
     {
-        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        let p = &mut *state.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.beats_per_bar = result.beats_per_bar.clamp(1, 32);
         update_window_title(window, &p.name, p.dirty);
     }
 

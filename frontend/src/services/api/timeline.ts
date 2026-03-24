@@ -1,4 +1,5 @@
 import type { TimelineResult, TrackSummaryResult } from "../../types/api";
+import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
 
@@ -6,6 +7,10 @@ export const timelineApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: () => invoke<TimelineResult>("undo_timeline"),
     redoTimeline: () => invoke<TimelineResult>("redo_timeline"),
+
+    // Undo grouping: all commands between begin/end share a single undo entry
+    beginUndoGroup: () => invoke<TimelineResult>("begin_undo_group"),
+    endUndoGroup: () => invoke<{ ok: boolean }>("end_undo_group"),
 
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),
 
@@ -65,6 +70,9 @@ export const timelineApi = {
     removeTrack: (trackId: string) =>
         invoke<TimelineResult>("remove_track", trackId),
 
+    duplicateTrack: (trackId: string) =>
+        invoke<TimelineResult>("duplicate_track", trackId),
+
     moveTrack: (payload: {
         trackId: string;
         targetIndex: number;
@@ -85,6 +93,7 @@ export const timelineApi = {
         composeEnabled?: boolean;
         pitchAnalysisAlgo?: string;
         color?: string;
+        name?: string;
     }) =>
         invoke<TimelineResult>(
             "set_track_state",
@@ -95,6 +104,7 @@ export const timelineApi = {
             payload.composeEnabled,
             payload.pitchAnalysisAlgo,
             payload.color,
+            payload.name,
         ),
 
     selectTrack: (trackId: string) =>
@@ -120,14 +130,51 @@ export const timelineApi = {
             payload.sourcePath,
         ),
 
-    removeClip: (clipId: string) => invoke<TimelineResult>("remove_clip", clipId),
+    removeClip: (clipId: string) =>
+        invoke<TimelineResult>("remove_clip", clipId),
 
-    moveClip: (payload: { clipId: string; startSec: number; trackId?: string }) =>
+    moveClip: (payload: {
+        clipId: string;
+        startSec: number;
+        trackId?: string;
+        moveLinkedParams?: boolean;
+    }) =>
         invoke<TimelineResult>(
             "move_clip",
             payload.clipId,
             payload.startSec,
             payload.trackId,
+            payload.moveLinkedParams,
+        ),
+
+    moveClips: (payload: {
+        moves: Array<{
+            clipId: string;
+            startSec: number;
+            trackId?: string;
+        }>;
+        moveLinkedParams?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "move_clips",
+            payload.moves,
+            payload.moveLinkedParams,
+        ),
+
+    getClipLinkedParams: (clipId: string) =>
+        invoke<{ ok: boolean; linkedParams?: LinkedParamCurves }>(
+            "get_clip_linked_params",
+            clipId,
+        ),
+
+    applyClipLinkedParams: (payload: {
+        clipId: string;
+        linkedParams: LinkedParamCurves;
+    }) =>
+        invoke<TimelineResult>(
+            "apply_clip_linked_params",
+            payload.clipId,
+            payload.linkedParams,
         ),
 
     setClipState: (payload: {
@@ -162,6 +209,18 @@ export const timelineApi = {
             payload.fadeInCurve,
             payload.fadeOutCurve,
             payload.color,
+        ),
+
+    replaceClipSource: (payload: {
+        clipIds: string[];
+        newSourcePath: string;
+        replaceSameSource?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "replace_clip_source",
+            payload.clipIds,
+            payload.newSourcePath,
+            payload.replaceSameSource,
         ),
 
     splitClip: (clipId: string, splitSec: number) =>

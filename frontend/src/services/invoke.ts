@@ -168,6 +168,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "remove_track":
             return { trackId: args[0] };
 
+        case "duplicate_track":
+            return { trackId: args[0] };
+
         case "move_track":
             return {
                 trackId: args[0],
@@ -184,6 +187,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 composeEnabled: args[4],
                 pitchAnalysisAlgo: args[5],
                 color: args[6],
+                name: args[7],
             };
 
         case "select_track":
@@ -212,6 +216,22 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 clipId: args[0],
                 startSec: args[1],
                 trackId: (args[2] ?? null) as unknown,
+                moveLinkedParams: args[3],
+            };
+
+        case "move_clips":
+            return {
+                moves: args[0],
+                moveLinkedParams: args[1],
+            };
+
+        case "get_clip_linked_params":
+            return { clipId: args[0] };
+
+        case "apply_clip_linked_params":
+            return {
+                clipId: args[0],
+                linkedParams: args[1],
             };
 
         case "set_clip_state":
@@ -230,6 +250,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 fadeInCurve: args[11],
                 fadeOutCurve: args[12],
                 color: args[13],
+            };
+
+        case "replace_clip_source":
+            return {
+                clipIds: args[0],
+                newSourcePath: args[1],
+                replaceSameSource: args[2],
             };
 
         case "split_clip":
@@ -262,6 +289,15 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "open_project":
             return { projectPath: args[0] };
 
+        case "set_project_base_scale":
+            return { baseScale: args[0] };
+
+        case "set_project_custom_scale":
+            return { customScale: args[0] };
+
+        case "set_project_timeline_settings":
+            return { beatsPerBar: args[0], gridSize: args[1] };
+
         case "import_vocalshifter_project":
             return { vspPath: args[0] };
 
@@ -269,18 +305,34 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { rppPath: args[0] };
 
         case "paste_vocalshifter_clipboard":
-            return {};
+            return {
+                ...(args[0] !== undefined
+                    ? { selectionStartFrame: args[0] }
+                    : {}),
+                ...(args[1] !== undefined
+                    ? { selectionMaxFrames: args[1] }
+                    : {}),
+                ...(args[2] !== undefined ? { activeParam: args[2] } : {}),
+            };
+
+        case "paste_reaper_clipboard":
+            return {
+                ...(args[0] !== undefined
+                    ? { selectionStartFrame: args[0] }
+                    : {}),
+                ...(args[1] !== undefined
+                    ? { selectionMaxFrames: args[1] }
+                    : {}),
+            };
 
         case "open_midi_dialog":
             return {};
 
-        case "get_waveform_peaks_segment":
-            return {
-                sourcePath: args[0],
-                startSec: args[1],
-                durationSec: args[2],
-                columns: args[3],
-            };
+        case "get_waveform_mipmap_binary":
+            return { sourcePath: args[0], level: args[1] };
+
+        case "preload_waveform_mipmap":
+            return { sourcePath: args[0] };
 
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
@@ -357,7 +409,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return {
                 midiPath: args[0],
                 ...(args[1] !== undefined ? { trackIndex: args[1] } : {}),
-                ...(args[2] !== undefined ? { offsetSec: args[2] } : {}),
+                ...(args[2] !== undefined
+                    ? { selectionStartFrame: args[2] }
+                    : {}),
+                ...(args[3] !== undefined
+                    ? { selectionMaxFrames: args[3] }
+                    : {}),
             };
 
         // ─── resampler registry ────────────────────────────────────
@@ -389,6 +446,15 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
 
         case "browse_resampler_exe":
             return {};
+
+        case "save_ui_settings":
+            return args[0] as Record<string, unknown>;
+
+        case "begin_undo_group":
+            return undefined;
+
+        case "end_undo_group":
+            return undefined;
 
         default:
             return { __unwired: true };

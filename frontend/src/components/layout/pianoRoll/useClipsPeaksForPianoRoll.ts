@@ -1,15 +1,15 @@
 /**
- * Piano Roll Per-Clip 波形 Peaks Hook
+ * Piano Roll Per-Clip 波形 Peaks Hook (Mipmap 优化版)
  *
- * �?Piano Roll 背景波形提供 per-clip �?peaks 数据�?
- * 替代原来对整�?track �?mix 后取波形的方式�?
- * 每个可见 clip 独立获取 peaks，按时间位置叠加绘制�?
+ * 使用 Mipmap 多级缓存机制，根据缩放级别自动选择最佳峰值分辨率
+ * 替代原来对单个track mix后取波形的方式
+ * 每个可见 clip 独立获取 peaks，按时间位置叠加绘制
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ClipInfo } from "../../../features/session/sessionTypes";
-import { waveformApi } from "../../../services/api";
+import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
 import { lruGet, lruSet } from "./peaksCache";
+import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 /** 单个 clip 的 peaks 数据条目 */
 /** 单个 clip 的 peaks 数据条目 */
@@ -26,6 +26,16 @@ export interface ClipPeaksEntry {
     sourceDurationSec: number;
     /** 播放速率 */
     playbackRate: number;
+    /** clip 增益（线性值，0~4） */
+    gain: number;
+    /** 淡入时长（秒） */
+    fadeInSec: number;
+    /** 淡出时长（秒） */
+    fadeOutSec: number;
+    /** 淡入曲线类型 */
+    fadeInCurve: FadeCurveType;
+    /** 淡出曲线类型 */
+    fadeOutCurve: FadeCurveType;
     peaks: {
         min: number[];
         max: number[];
@@ -45,7 +55,7 @@ type CachedEntry = {
     t: number;
 };
 
-// 模块级缓存，�?hook 实例共享
+// 模块级缓存，各hook实例共享
 const clipPeaksCache = new Map<string, CachedEntry>();
 const clipPeaksInflight = new Map<string, Promise<CachedEntry | null>>();
 const CLIP_PEAKS_CACHE_LIMIT = 128;
@@ -56,15 +66,34 @@ function qsec(x: number, step = 0.005): number {
     return Math.round(x / step) * step;
 }
 
-/** �?clip 信息转换�?peaks 请求参数 */
+/**
+ * 计算目标samplesPerPixel，用于选择Mipmap级别
+ * @param clipLengthSec clip长度（秒）
+ * @param pxWidth clip在canvas上的像素宽度
+ * @param sourceSampleRate 源文件采样率
+ * @returns samplesPerPixel 每个像素对应的采样点数
+ */
+function calculateSamplesPerPixel(
+    clipLengthSec: number,
+    pxWidth: number,
+    sourceSampleRate: number,
+): number {
+    if (!Number.isFinite(clipLengthSec) || clipLengthSec <= 0 || pxWidth <= 0) {
+        return 256; // 默认值对应Mipmap Level 0/1边界
+    }
+    const totalSamples = clipLengthSec * sourceSampleRate;
+    return totalSamples / pxWidth;
+}
+
+/** 从clip信息构建peaks请求参数 (Mipmap优化版) */
 function buildClipPeaksRequest(
     clip: ClipInfo,
-    widthPx: number,
+    pxWidth?: number,
 ): {
     sourcePath: string;
     startSec: number;
     durSec: number;
-    columns: number;
+    samplesPerPixel: number;
     cacheKey: string;
 } | null {
     const sourcePath = clip.sourcePath;
@@ -72,12 +101,14 @@ function buildClipPeaksRequest(
 
     // 优先使用精确的frame计算
     let durationSec: number;
+    let sourceSampleRate = 44100; // 默认采样率
     if (
         clip.durationFrames &&
         clip.sourceSampleRate &&
         clip.sourceSampleRate > 0
     ) {
         durationSec = clip.durationFrames / clip.sourceSampleRate;
+        sourceSampleRate = clip.sourceSampleRate;
     } else {
         durationSec = Number(clip.durationSec ?? 0);
     }
@@ -88,44 +119,57 @@ function buildClipPeaksRequest(
     if (lengthSec <= 1e-9) return null;
 
     // 固定请求整个 source 文件的 peaks，不依赖 trim 值
-    // 这样 trim 拖动不会导致 peaks 重新请求或波形变化
     const startSecQ = 0;
     const durSecQ = Math.max(0.005, qsec(durationSec));
 
-    // columns �?64 量化，与 ClipItem 保持一�?
-    const rawCols = Math.max(16, Math.min(8192, Math.floor(widthPx)));
-    const columns = Math.max(16, Math.min(8192, Math.round(rawCols / 64) * 64));
+    // 计算samplesPerPixel用于选择Mipmap级别
+    // 如果提供了像素宽度，则使用实际宽度计算；否则使用默认中等值
+    const samplesPerPixel = pxWidth && pxWidth > 0
+        ? calculateSamplesPerPixel(durSecQ, pxWidth, sourceSampleRate)
+        : 512; // 默认中等精度
 
-    const cacheKey = `${sourcePath}|${startSecQ.toFixed(3)}|${durSecQ.toFixed(3)}|${columns}`;
+    // 缓存键包含 samplesPerPixel 的量化值，减少重复请求
+    const sppQuantized = Math.round(samplesPerPixel / 50) * 50;
+    const cacheKey = `${sourcePath}|${startSecQ.toFixed(3)}|${durSecQ.toFixed(3)}|spp${sppQuantized}`;
 
     return {
         sourcePath,
         startSec: startSecQ,
         durSec: durSecQ,
-        columns,
+        samplesPerPixel,
         cacheKey,
     };
 }
 
 /**
- * �?Piano Roll 获取当前 track 下所有可�?clip �?peaks 数据
+ * Piano Roll 获取当前 track 下所有可见 clip 的 peaks 数据 (Mipmap 优化版)
+ *
+ * 特性：
+ * 1. 使用 Mipmap 多级缓存，根据缩放级别自动选择最佳峰值分辨率
+ * 2. Level 0 (div ~128): 放大显示，高精度
+ * 3. Level 1 (div ~512): 中等缩放，平衡性能
+ * 4. Level 2 (div ~2048): 小缩放，适合概览
+ * 5. Level 3 (div ~8192): 全景视图，最低精度
  *
  * @param args.clips - 当前 track 下的所有 clip
  * @param args.visibleStartSec - 可见区域起始时间（秒）
  * @param args.visibleEndSec - 可见区域结束时间（秒）
+ * @param args.pxPerSec - 像素/秒比例，用于计算 samplesPerPixel 选择 Mipmap 级别
  * @returns ClipPeaksEntry 数组，每个 entry 对应一个可见 clip
  */
 export function useClipsPeaksForPianoRoll(args: {
     clips: ClipInfo[];
     visibleStartSec: number;
     visibleEndSec: number;
+    pxPerSec?: number;
 }): ClipPeaksEntry[] {
-    const { clips, visibleStartSec, visibleEndSec } = args;
+    const { clips, visibleStartSec, visibleEndSec, pxPerSec } = args;
     const [peaksMap, setPeaksMap] = useState<Map<string, CachedEntry>>(
         new Map(),
     );
     const requestIdRef = useRef(0);
     const mountedRef = useRef(true);
+    const lastLevelByPathRef = useRef<Record<string, 0 | 1 | 2>>({});
 
     useEffect(() => {
         mountedRef.current = true;
@@ -139,6 +183,8 @@ export function useClipsPeaksForPianoRoll(args: {
      * trim 拖动只改变 lengthSec，不改变 sourcePath/trimStart/trimEnd/playbackRate。
      * 因此 cacheKey 不变，不会触发重新请求。
      * useMemo 确保只在依赖真正变化时才重新计算，避免每次 render 都调用 buildClipPeaksRequest。
+     * 
+     * Mipmap优化：缓存键包含 pxPerSec 的量化值，确保缩放时选择合适的 Mipmap 级别
      */
     const peaksRequestKeys = useMemo(
         () =>
@@ -150,13 +196,21 @@ export function useClipsPeaksForPianoRoll(args: {
                     );
                 })
                 .map((clip) => {
-                    const req = buildClipPeaksRequest(clip, 1024);
-                    return req ? `${clip.id}:${req.cacheKey}` : null;
+                    // 估算 clip 在屏幕上的像素宽度
+                    const clipWidthPx = pxPerSec ? clip.lengthSec * pxPerSec : undefined;
+                    const req = buildClipPeaksRequest(clip, clipWidthPx);
+                    if (!req) return null;
+                    const previousLevel = lastLevelByPathRef.current[req.sourcePath];
+                    const level = waveformMipmapStore.selectLevelStable(
+                        req.samplesPerPixel,
+                        previousLevel,
+                    );
+                    return `${clip.id}:${req.sourcePath}|${req.startSec.toFixed(3)}|${req.durSec.toFixed(3)}|lvl${level}`;
                 })
                 .filter(Boolean)
                 .join(","),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [clips, visibleStartSec, visibleEndSec],
+        [clips, visibleStartSec, visibleEndSec, pxPerSec],
     );
 
     useEffect(() => {
@@ -180,66 +234,108 @@ export function useClipsPeaksForPianoRoll(args: {
         const toFetch: Array<{
             clip: ClipInfo;
             req: NonNullable<ReturnType<typeof buildClipPeaksRequest>>;
+            columns: number;
+            level: 0 | 1 | 2;
+            cacheKey: string;
         }> = [];
 
         for (const clip of visibleClips) {
-            // 使用固定列数�?024）请�?peaks，与 lengthSec 解耦，避免 trim 时重复请�?
-            const req = buildClipPeaksRequest(clip, 1024);
+            // 列数按 clip 时长自适应，长 clip 提升精度，同时保持请求上限。
+            const clipWidthPx = pxPerSec ? clip.lengthSec * pxPerSec : undefined;
+            const req = buildClipPeaksRequest(clip, clipWidthPx);
             if (!req) continue;
+            const previousLevel = lastLevelByPathRef.current[req.sourcePath];
+            const level = waveformMipmapStore.selectLevelStable(
+                req.samplesPerPixel,
+                previousLevel,
+            );
+            lastLevelByPathRef.current[req.sourcePath] = level;
+            const cacheKey =
+                `${req.sourcePath}|${req.startSec.toFixed(3)}|${req.durSec.toFixed(3)}|lvl${level}`;
 
-            const cached = lruGet(clipPeaksCache, req.cacheKey);
+            // 计算 columns：基于 clip 像素宽度，确保波形清晰
+            const columns = clipWidthPx ? Math.max(16, Math.round(clipWidthPx * 2)) : 256;
+
+            const cached = lruGet(clipPeaksCache, cacheKey);
             if (cached) {
                 initialMap.set(clip.id, cached);
             } else {
-                toFetch.push({ clip, req });
+                const bestEffort = waveformMipmapStore.getBestSlice(
+                    req.sourcePath,
+                    level,
+                    req.startSec,
+                    req.durSec,
+                );
+                if (bestEffort) {
+                    const entry: CachedEntry = {
+                        min: Array.from(bestEffort.min),
+                        max: Array.from(bestEffort.max),
+                        startSec: req.startSec,
+                        durSec: req.durSec,
+                        t: Date.now(),
+                    };
+                    lruSet(
+                        clipPeaksCache,
+                        cacheKey,
+                        entry,
+                        CLIP_PEAKS_CACHE_LIMIT,
+                    );
+                    initialMap.set(clip.id, entry);
+                } else {
+                    toFetch.push({ clip, req, columns, level, cacheKey });
+                }
             }
         }
 
-        if (initialMap.size > 0) {
-            setPeaksMap(new Map(initialMap));
-        }
+        setPeaksMap((prev) => {
+            const next = new Map<string, CachedEntry>();
+            for (const clip of visibleClips) {
+                const entry = initialMap.get(clip.id) ?? prev.get(clip.id);
+                if (entry) {
+                    next.set(clip.id, entry);
+                }
+            }
+            return next;
+        });
 
         if (toFetch.length === 0) return;
 
-        // 异步获取未缓存的 clip peaks
+        // 异步获取未缓存的 clip peaks (Mipmap优化版)
         void (async () => {
             const results = await Promise.allSettled(
-                toFetch.map(async ({ clip, req }) => {
-                    // inflight 去重
-                    let p = clipPeaksInflight.get(req.cacheKey);
+                toFetch.map(async ({ clip, req, level, cacheKey }) => {
+                    // 使用 waveformMipmapStore（三级整文件缓存）获取峰值数据
+                    const inflightKey = `${req.sourcePath}|${level}`;
+                    let p = clipPeaksInflight.get(inflightKey);
                     if (!p) {
-                        p = waveformApi
-                            .getWaveformPeaksSegment(
+                        p = (async () => {
+                            // 确保数据已预加载（preload 内部会去重并等待正在进行的加载）
+                            await waveformMipmapStore.preload(req.sourcePath);
+                            const slice = waveformMipmapStore.getSlice(
                                 req.sourcePath,
+                                level,
                                 req.startSec,
                                 req.durSec,
-                                req.columns,
-                            )
-                            .then((res) => {
-                                if (!res?.ok) return null;
-                                const entry: CachedEntry = {
-                                    min: (res.min ?? []).map(
-                                        (v) => Number(v) || 0,
-                                    ),
-                                    max: (res.max ?? []).map(
-                                        (v) => Number(v) || 0,
-                                    ),
-                                    startSec: req.startSec,
-                                    durSec: req.durSec,
-                                    t: performance.now(),
-                                };
-                                lruSet(
-                                    clipPeaksCache,
-                                    req.cacheKey,
-                                    entry,
-                                    CLIP_PEAKS_CACHE_LIMIT,
-                                );
-                                return entry;
-                            })
-                            .finally(() => {
-                                clipPeaksInflight.delete(req.cacheKey);
-                            });
-                        clipPeaksInflight.set(req.cacheKey, p);
+                            );
+                            if (!slice) return null;
+                            const entry: CachedEntry = {
+                                min: Array.from(slice.min),
+                                max: Array.from(slice.max),
+                                startSec: req.startSec,
+                                durSec: req.durSec,
+                                t: Date.now(),
+                            };
+                            lruSet(
+                                clipPeaksCache,
+                                cacheKey,
+                                entry,
+                                CLIP_PEAKS_CACHE_LIMIT,
+                            );
+                            return entry;
+                        })().finally(() => {
+                            clipPeaksInflight.delete(inflightKey);
+                        });
+                        clipPeaksInflight.set(inflightKey, p);
                     }
 
                     const entry = await p;
@@ -267,7 +363,7 @@ export function useClipsPeaksForPianoRoll(args: {
             });
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [peaksRequestKeys, visibleStartSec, visibleEndSec]);
+    }, [peaksRequestKeys, visibleStartSec, visibleEndSec, pxPerSec]);
 
     // 构建返回值：过滤可见 clip，附加 peaks 数据。
     // useMemo 确保只在 peaksMap 或可见 clips 真正变化时才返回新数组引用，
@@ -312,6 +408,11 @@ export function useClipsPeaksForPianoRoll(args: {
                 sourceDurationSec:
                     sourceDurationSec > 0 ? sourceDurationSec : 0,
                 playbackRate: pr,
+                gain: clip.gain ?? 1,
+                fadeInSec: clip.fadeInSec ?? 0,
+                fadeOutSec: clip.fadeOutSec ?? 0,
+                fadeInCurve: clip.fadeInCurve ?? "linear",
+                fadeOutCurve: clip.fadeOutCurve ?? "linear",
                 peaks: entry
                     ? {
                           min: entry.min,

@@ -35,9 +35,7 @@ pub(super) fn clear_cache(_state: State<'_, AppState>) -> Result<u64, String> {
                         for entry in entries.flatten() {
                             let path = entry.path();
                             if path.is_file() {
-                                let size = std::fs::metadata(&path)
-                                    .map(|m| m.len())
-                                    .unwrap_or(0);
+                                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                                 if std::fs::remove_file(&path).is_ok() {
                                     total_bytes += size;
                                 }

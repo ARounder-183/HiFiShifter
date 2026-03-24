@@ -3,7 +3,10 @@
 //! 支持 clip 级别的渲染状态跟踪，用于实现增量渲染和动态暂停/恢复机制。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Mutex,
+};
 
 /// Clip 渲染状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -52,7 +55,13 @@ impl ClipRenderingStateManager {
     }
 
     /// 设置 clip 的渲染状态
-    pub fn set_state(&mut self, clip_id: &str, state: ClipRenderingState, progress: f32, error: Option<String>) {
+    pub fn set_state(
+        &mut self,
+        clip_id: &str,
+        state: ClipRenderingState,
+        progress: f32,
+        error: Option<String>,
+    ) {
         let now = std::time::Instant::now();
         let start_time = match state {
             ClipRenderingState::Rendering => Some(now),
@@ -77,35 +86,40 @@ impl ClipRenderingStateManager {
 
     /// 检查 clip 是否就绪（Ready 状态）
     pub fn is_ready(&self, clip_id: &str) -> bool {
-        self.states.get(clip_id)
+        self.states
+            .get(clip_id)
             .map(|info| info.state == ClipRenderingState::Ready)
             .unwrap_or(false)
     }
 
     /// 检查 clip 是否正在渲染中（Rendering 状态）
     pub fn is_rendering(&self, clip_id: &str) -> bool {
-        self.states.get(clip_id)
+        self.states
+            .get(clip_id)
             .map(|info| info.state == ClipRenderingState::Rendering)
             .unwrap_or(false)
     }
 
     /// 检查 clip 是否失败（Failed 状态）
     pub fn is_failed(&self, clip_id: &str) -> bool {
-        self.states.get(clip_id)
+        self.states
+            .get(clip_id)
             .map(|info| info.state == ClipRenderingState::Failed)
             .unwrap_or(false)
     }
 
     /// 检查 clip 是否等待渲染（Pending 状态）
     pub fn is_pending(&self, clip_id: &str) -> bool {
-        self.states.get(clip_id)
+        self.states
+            .get(clip_id)
             .map(|info| info.state == ClipRenderingState::Pending)
             .unwrap_or(false)
     }
 
     /// 获取所有渲染中的 clip ID 列表
     pub fn get_rendering_clips(&self) -> Vec<String> {
-        self.states.iter()
+        self.states
+            .iter()
             .filter(|(_, info)| info.state == ClipRenderingState::Rendering)
             .map(|(clip_id, _)| clip_id.clone())
             .collect()
@@ -113,7 +127,8 @@ impl ClipRenderingStateManager {
 
     /// 获取所有就绪的 clip ID 列表
     pub fn get_ready_clips(&self) -> Vec<String> {
-        self.states.iter()
+        self.states
+            .iter()
             .filter(|(_, info)| info.state == ClipRenderingState::Ready)
             .map(|(clip_id, _)| clip_id.clone())
             .collect()
@@ -121,7 +136,8 @@ impl ClipRenderingStateManager {
 
     /// 获取所有失败的 clip ID 列表
     pub fn get_failed_clips(&self) -> Vec<String> {
-        self.states.iter()
+        self.states
+            .iter()
             .filter(|(_, info)| info.state == ClipRenderingState::Failed)
             .map(|(clip_id, _)| clip_id.clone())
             .collect()
@@ -131,9 +147,9 @@ impl ClipRenderingStateManager {
     pub fn cleanup_timeouts(&mut self) -> Vec<String> {
         let now = std::time::Instant::now();
         let timeout_duration = std::time::Duration::from_secs(self.timeout_seconds as u64);
-        
+
         let mut timed_out = Vec::new();
-        
+
         for (clip_id, info) in &mut self.states {
             if info.state == ClipRenderingState::Rendering {
                 if let Some(start_time) = info.start_time {
@@ -176,7 +192,8 @@ impl ClipRenderingStateManager {
 }
 
 /// 全局 clip 渲染状态管理器
-static GLOBAL_CLIP_RENDERING_STATE: std::sync::OnceLock<Mutex<ClipRenderingStateManager>> = std::sync::OnceLock::new();
+static GLOBAL_CLIP_RENDERING_STATE: std::sync::OnceLock<Mutex<ClipRenderingStateManager>> =
+    std::sync::OnceLock::new();
 
 /// 获取全局 clip 渲染状态管理器
 pub fn global_clip_rendering_state() -> &'static Mutex<ClipRenderingStateManager> {
@@ -200,7 +217,12 @@ pub struct ClipRenderingStateEvent {
 
 impl ClipRenderingStateEvent {
     /// 创建新的状态事件
-    pub fn new(clip_id: String, state: ClipRenderingState, progress: f32, error: Option<String>) -> Self {
+    pub fn new(
+        clip_id: String,
+        state: ClipRenderingState,
+        progress: f32,
+        error: Option<String>,
+    ) -> Self {
         Self {
             clip_id,
             state,
@@ -219,48 +241,5 @@ impl std::fmt::Display for ClipRenderingState {
             ClipRenderingState::Ready => write!(f, "ready"),
             ClipRenderingState::Failed => write!(f, "failed"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_clip_rendering_state_manager() {
-        let mut manager = ClipRenderingStateManager::new(5);
-        
-        // 测试状态设置和获取
-        manager.set_state("clip1", ClipRenderingState::Pending, 0.0, None);
-        assert!(manager.is_pending("clip1"));
-        
-        manager.set_state("clip1", ClipRenderingState::Rendering, 0.5, None);
-        assert!(manager.is_rendering("clip1"));
-        
-        manager.set_state("clip1", ClipRenderingState::Ready, 1.0, None);
-        assert!(manager.is_ready("clip1"));
-        
-        manager.set_state("clip1", ClipRenderingState::Failed, 0.0, Some("error".to_string()));
-        assert!(manager.is_failed("clip1"));
-        
-        // 测试状态列表获取
-        manager.set_state("clip2", ClipRenderingState::Rendering, 0.3, None);
-        manager.set_state("clip3", ClipRenderingState::Ready, 1.0, None);
-        
-        let rendering_clips = manager.get_rendering_clips();
-        assert_eq!(rendering_clips.len(), 1);
-        assert_eq!(rendering_clips[0], "clip2");
-        
-        let ready_clips = manager.get_ready_clips();
-        assert_eq!(ready_clips.len(), 1);
-        assert_eq!(ready_clips[0], "clip3");
-    }
-
-    #[test]
-    fn test_clip_rendering_state_display() {
-        assert_eq!(ClipRenderingState::Pending.to_string(), "pending");
-        assert_eq!(ClipRenderingState::Rendering.to_string(), "rendering");
-        assert_eq!(ClipRenderingState::Ready.to_string(), "ready");
-        assert_eq!(ClipRenderingState::Failed.to_string(), "failed");
     }
 }

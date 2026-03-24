@@ -1,0 +1,34 @@
+name: 🐞 Bug 反馈
+description: 发现程序运行不正常？请告诉我们。
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽可能详细地填写以下信息。
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 告诉我们如何重现这个 Bug。
+      placeholder: |
+        1. 进入首页
+        2. 点击...
+        3. 看到报错...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本
+      placeholder: v1.0.2
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重程度
+      options:
+        - 崩溃（完全打不开）
+        - 功能受损
+        - 视觉瑕疵
+    validations:
+      required: true

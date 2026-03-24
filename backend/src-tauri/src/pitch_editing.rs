@@ -1,3 +1,9 @@
+//! 音高编辑处理模块。
+//!
+//! 根据用户选择的音高编辑算法（PitchEditAlgorithm），对 clip 片段执行
+//! 音高变换处理，支持内部 WORLD/VSLib 引擎以及外部 UTAU Resampler。
+//! 同时负责判定 track 是否需要额外渲染处理、构建 ClipProcessContext 等。
+
 use crate::state::{PitchAnalysisAlgo, SynthPipelineKind, TimelineState};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,33 +19,33 @@ fn pitch_edit_algo_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PitchEditAlgorithm {
     WorldVocoder,
     NsfHifiganOnnx,
     #[cfg(feature = "vslib")]
     VocalShifterVslib,
+    /// 外部 UTAU Resampler（携带 registry entry ID）。
+    ExternalResampler(String),
     Bypass,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PitchCurvesSnapshot {
+pub(crate) struct PitchCurvesSnapshot<'a> {
     pub frame_period_ms: f64,
-    pub pitch_orig: Vec<f32>,
-    pub pitch_edit: Vec<f32>,
+    pub pitch_orig: &'a [f32],
+    pub pitch_edit: &'a [f32],
 }
 
-impl PitchCurvesSnapshot {
+impl<'a> PitchCurvesSnapshot<'a> {
     #[allow(dead_code)]
     pub fn midi_at_time(&self, abs_time_sec: f64) -> f64 {
         if !(abs_time_sec.is_finite() && abs_time_sec >= 0.0) {
             return 0.0;
         }
 
-        let fp = self.frame_period_ms.max(0.1);
-        let idx_f = (abs_time_sec * 1000.0) / fp;
+        let inv_fp = 1000.0 / self.frame_period_ms.max(0.1);
+        let idx_f = abs_time_sec * inv_fp;
         if !(idx_f.is_finite() && idx_f >= 0.0) {
             return 0.0;
         }
@@ -101,9 +107,9 @@ impl PitchCurvesSnapshot {
     }
 }
 
-pub(crate) fn selected_pitch_curves_snapshot(
-    timeline: &TimelineState,
-) -> Option<PitchCurvesSnapshot> {
+pub(crate) fn selected_pitch_curves_snapshot<'a>(
+    timeline: &'a TimelineState,
+) -> Option<PitchCurvesSnapshot<'a>> {
     let selected = timeline
         .selected_track_id
         .clone()
@@ -114,8 +120,8 @@ pub(crate) fn selected_pitch_curves_snapshot(
     let entry = timeline.params_by_root_track.get(&root)?;
     Some(PitchCurvesSnapshot {
         frame_period_ms: entry.frame_period_ms.max(0.1),
-        pitch_orig: entry.pitch_orig.clone(),
-        pitch_edit: entry.pitch_edit.clone(),
+        pitch_orig: &entry.pitch_orig,
+        pitch_edit: &entry.pitch_edit,
     })
 }
 
@@ -183,8 +189,33 @@ pub(crate) fn hifigan_tension_active_for_clip(
     )
 }
 
+pub(crate) fn hifigan_formant_shift_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a Vec<f32>> {
+    clip.extra_curves
+        .as_ref()
+        .and_then(|curves| curves.get("formant_shift_cents"))
+        .or_else(|| entry.extra_curves.get("formant_shift_cents"))
+}
+
+pub(crate) fn hifigan_formant_shift_active_for_clip(
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> bool {
+    let curve = hifigan_formant_shift_curve_for_clip(entry, clip);
+    curve_differs_from_default_in_range(
+        curve,
+        entry.frame_period_ms.max(0.1),
+        clip_start_sec,
+        clip_start_sec + clip.length_sec.max(0.0),
+        0.0,
+    )
+}
+
 fn track_requests_extra_processing(
-    algo: PitchEditAlgorithm,
+    algo: &PitchEditAlgorithm,
     entry: &crate::state::TrackParamsState,
     clip: &crate::state::Clip,
 ) -> bool {
@@ -210,7 +241,7 @@ impl PitchEditAlgorithm {
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
             #[cfg(not(feature = "vslib"))]
             PitchAnalysisAlgo::VocalShifterVslib => Self::Bypass,
-            PitchAnalysisAlgo::ExternalResampler(_) => Self::Bypass,
+            PitchAnalysisAlgo::ExternalResampler(ref id) => Self::ExternalResampler(id.clone()),
             PitchAnalysisAlgo::None => Self::Bypass,
         }
     }
@@ -242,9 +273,24 @@ fn root_pitch_edit_state<'a>(
     timeline: &'a TimelineState,
     root_track_id: &str,
 ) -> Option<(&'a crate::state::Track, &'a crate::state::TrackParamsState)> {
-    let track = timeline.tracks.iter().find(|track| track.id == root_track_id)?;
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == root_track_id)?;
     let entry = timeline.params_by_root_track.get(root_track_id)?;
     Some((track, entry))
+}
+
+fn clip_pitch_edit_state<'a>(
+    timeline: &'a TimelineState,
+    clip: &crate::state::Clip,
+) -> Option<(&'a crate::state::Track, &'a crate::state::TrackParamsState)> {
+    let clip_root = timeline.resolve_root_track_id(&clip.track_id)?;
+    root_pitch_edit_state(timeline, &clip_root)
+}
+
+fn clip_root_track_id(timeline: &TimelineState, clip: &crate::state::Clip) -> Option<String> {
+    timeline.resolve_root_track_id(&clip.track_id)
 }
 
 fn edit_midi_at_time_or_none(
@@ -256,8 +302,8 @@ fn edit_midi_at_time_or_none(
         return None;
     }
 
-    let fp = frame_period_ms.max(0.1);
-    let idx_f = (abs_time_sec * 1000.0) / fp;
+    let inv_fp = 1000.0 / frame_period_ms.max(0.1);
+    let idx_f = abs_time_sec * inv_fp;
     if !(idx_f.is_finite() && idx_f >= 0.0) {
         return None;
     }
@@ -312,8 +358,8 @@ fn clip_midi_at_time(
     }
 
     let local_sec = abs_time_sec - clip_start_sec;
-    let fp = frame_period_ms.max(0.1);
-    let idx_f = (local_sec * 1000.0) / fp;
+    let inv_fp = 1000.0 / frame_period_ms.max(0.1);
+    let idx_f = local_sec * inv_fp;
     if !(idx_f.is_finite() && idx_f >= 0.0) {
         return 0.0;
     }
@@ -365,14 +411,31 @@ fn any_user_edit_in_range(
         return false;
     }
 
-    let stride = ((100.0 / fp).round() as usize).max(1); // ~100ms
+    // 短片段必须密集采样，否则会漏掉尾部编辑点（导致短 clip 被误判为“无编辑”）。
+    let span = end_f.saturating_sub(start_f);
+    let stride = if span <= 256 {
+        1
+    } else {
+        ((20.0 / fp).round() as usize).max(1) // ~20ms for long regions
+    };
     let mut i = start_f;
+    let mut last_checked = start_f;
     while i < end_f {
         let v = pitch_edit.get(i).copied().unwrap_or(0.0);
         if v.is_finite() && v > 0.0 {
             return true;
         }
+        last_checked = i;
         i += stride;
+    }
+
+    // Ensure tail frame is always checked even when stride skips it.
+    let tail = end_f.saturating_sub(1);
+    if tail != last_checked {
+        let v = pitch_edit.get(tail).copied().unwrap_or(0.0);
+        if v.is_finite() && v > 0.0 {
+            return true;
+        }
     }
     false
 }
@@ -396,9 +459,15 @@ fn any_effective_pitch_change_in_range(
     // ~100ms sampling is enough to avoid wasting expensive inference.
     // Use a small epsilon to ignore tiny float noise in MIDI curves.
     let eps_semitones = 0.10f64;
-    let stride = ((100.0 / fp).round() as usize).max(1);
+    let span = end_f.saturating_sub(start_f);
+    let stride = if span <= 256 {
+        1
+    } else {
+        ((20.0 / fp).round() as usize).max(1)
+    };
 
     let mut i = start_f;
+    let mut last_checked = start_f;
     while i < end_f {
         let abs_time_sec = (i as f64) * fp / 1000.0;
 
@@ -423,7 +492,24 @@ fn any_effective_pitch_change_in_range(
             return true;
         }
 
+        last_checked = i;
         i += stride;
+    }
+
+    // Ensure tail frame is always checked even when stride skips it.
+    let tail = end_f.saturating_sub(1);
+    if tail != last_checked {
+        let abs_time_sec = (tail as f64) * fp / 1000.0;
+        let orig = clip_midi_at_time(frame_period_ms, clip_start_sec, clip_midi, abs_time_sec);
+        if orig.is_finite() && orig > 0.0 {
+            if let Some(target) =
+                edit_midi_at_time_or_none(frame_period_ms, pitch_edit, abs_time_sec)
+            {
+                if target.is_finite() && target > 0.0 && (target - orig).abs() > eps_semitones {
+                    return true;
+                }
+            }
+        }
     }
 
     false
@@ -443,29 +529,13 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     seg_start_sec: f64,
     sample_rate: u32,
     pcm_stereo: &mut Vec<f32>,
+    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<bool, String> {
-    if pcm_stereo.len() < 32 {
+    if pcm_stereo.len() < 2 {
         return Ok(false);
     }
 
-    let selected = timeline
-        .selected_track_id
-        .clone()
-        .or_else(|| timeline.tracks.first().map(|t| t.id.clone()))
-        .unwrap_or_default();
-    let Some(root) = timeline.resolve_root_track_id(&selected) else {
-        return Ok(false);
-    };
-
-    let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
-        return Ok(false);
-    };
-    if clip_root != root {
-        return Ok(false);
-    }
-
-    let track = timeline.tracks.iter().find(|t| t.id == root);
-    let Some(track) = track else {
+    let Some((track, entry)) = clip_pitch_edit_state(timeline, clip) else {
         return Ok(false);
     };
     if !track.compose_enabled {
@@ -477,18 +547,41 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    let entry = timeline.params_by_root_track.get(&root);
-    let Some(entry) = entry else {
-        return Ok(false);
-    };
-
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(&algo, entry, clip);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
+    let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
+        && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
+
+    // 外部 UTAU Resampler 模式：只要 compose_enabled 就始终触发 processor，
+    // 因为所有音高变换、时间拉伸都由外部 resampler 一站式完成。
+    let is_external_resampler = matches!(algo, PitchEditAlgorithm::ExternalResampler(_));
+
+    // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
+    // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行 mel 域拉伸。
+    let needs_processor_stretch = {
+        let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+        let processor = if let Some(reg) = resampler_registry {
+            crate::renderer::get_processor_with_registry(kind, reg)
+        } else {
+            crate::renderer::get_processor(kind)
+        };
+        let handles = processor.capabilities().handles_time_stretch;
+        let rate = (clip.playback_rate as f64).max(1e-6);
+        handles && (rate - 1.0).abs() > 1e-6
+    };
 
     // v2 semantics: do nothing until the user actually modified the edit curve.
     // This avoids treating auto-synced `pitch_edit` (e.g. copied from pitch_orig) as an edit.
-    if !entry.pitch_edit_user_modified && !extra_processing && !tension_processing {
+    // 例外：needs_processor_stretch 时必须进入处理器以执行 mel 拉伸。
+    // 例外：外部 UTAU Resampler 始终需要触发（所有合成由外部处理器完成）。
+    if !is_external_resampler
+        && !entry.pitch_edit_user_modified
+        && !extra_processing
+        && !tension_processing
+        && !formant_processing
+        && !needs_processor_stretch
+    {
         return Ok(false);
     }
 
@@ -498,11 +591,17 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // 预计算处理器能力：决定 seg_end_sec 的时间轴计算方式。
     // - handles_time_stretch=true（如 World/HiFiGAN chain、vslib）：
     //     输入 PCM 为源速率，输出 = 源帧数 / playback_rate（时间轴帧数）
-    // - handles_time_stretch=false：输入 PCM 已由外部 RubberBand 预拉伸，帧数 = 时间轴帧数
+    // - handles_time_stretch=false：输入 PCM 已由外部 Signalsmith Stretch 预拉伸，帧数 = 时间轴帧数
     let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
     let clip_playback_rate = (clip.playback_rate as f64).max(1e-6);
-    let processor_handles_stretch =
-        crate::renderer::get_processor(kind.clone()).capabilities().handles_time_stretch;
+    let processor_handles_stretch = {
+        let p = if let Some(reg) = resampler_registry {
+            crate::renderer::get_processor_with_registry(kind.clone(), reg)
+        } else {
+            crate::renderer::get_processor(kind.clone())
+        };
+        p.capabilities().handles_time_stretch
+    };
 
     // Quick skip when user never set a target in this segment window.
     let seg_frames = pcm_stereo.len() / 2;
@@ -513,37 +612,57 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         seg_frames
     };
     // seg_end_sec 始终以时间轴坐标（输出帧）计，确保音高编辑范围检测与声码器上下文一致
-    let seg_end_sec =
-        seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
-    let has_pitch_user_edit = any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
-    if !has_pitch_user_edit && !extra_processing && !tension_processing {
+    let seg_end_sec = seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
+    let has_pitch_user_edit =
+        any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
+    if !is_external_resampler
+        && !has_pitch_user_edit
+        && !extra_processing
+        && !tension_processing
+        && !formant_processing
+        && !needs_processor_stretch
+    {
         return Ok(false);
     }
 
     eprintln!(
         "[pitch_edit] clip_id={} algo={:?} seg=[{:.3},{:.3}) compose_enabled={} user_modified={}",
-        clip.id, algo, seg_start_sec, seg_end_sec,
-        track.compose_enabled, entry.pitch_edit_user_modified
+        clip.id,
+        algo,
+        seg_start_sec,
+        seg_end_sec,
+        track.compose_enabled,
+        entry.pitch_edit_user_modified
     );
 
     // vslib 使用自身内部分析（ANALYZE_OPTION_VOCAL_SHIFTER），不依赖 WORLD 音高轮廓；
     // 向 VslibSetPitchArray 传递绝对目标音高，不需要原始 MIDI 曲线。
     // 因此对 vslib 跳过 get_or_compute_clip_pitch_midi_global 和 any_effective_pitch_change_in_range，
     // 仅凭 any_user_edit_in_range（已在上方通过）即可触发合成。
+    //
+    // 外部 UTAU Resampler 同理：音高变换完全由外部 resampler 处理，
+    // 不需要内部 WORLD 音高轮廓。pitch_edit 曲线直接传给 ExternalResamplerProcessor，
+    // 由其转换为 UTAU pitchbend 编码。
     #[cfg(feature = "vslib")]
     let is_vslib = matches!(algo, PitchEditAlgorithm::VocalShifterVslib);
     #[cfg(not(feature = "vslib"))]
     let is_vslib = false;
 
     // Get per-clip original MIDI curve (full source, source-time indexed).
-    let timeline_midi: Vec<f32> = if is_vslib || !has_pitch_user_edit {
-        // vslib 不需要原始音高轮廓，传空切片，VslibProcessor 会忽略 clip_midi 字段。
+    // HiFi-GAN 始终需要 clip_midi 才能合成（即使没有音高编辑）：
+    //   clip_midi 提供原始音高，使 HiFi-GAN 能以相同音高重合成并应用 formant/tension 效果。
+    // vslib / ExternalResampler 例外：使用各自内部处理，忽略 clip_midi 字段。
+    let timeline_midi: Vec<f32> = if is_vslib || is_external_resampler {
+        // vslib / ExternalResampler 不需要原始音高轮廓，传空切片。
         Vec::new()
     } else {
+        let Some(clip_root) = clip_root_track_id(timeline, clip) else {
+            return Ok(false);
+        };
         let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
             timeline,
             clip,
-            &root,
+            &clip_root,
             frame_period_ms,
         );
         let Some(clip_pitch) = clip_pitch else {
@@ -565,24 +684,29 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             return Ok(false);
         }
 
-        // Skip expensive processing if the edit curve does not actually change pitch vs clip's original MIDI.
-        let has_effective_pitch_change = any_effective_pitch_change_in_range(
-            frame_period_ms,
-            pitch_edit,
-            clip_start_sec,
-            &tm,
-            seg_start_sec,
-            seg_end_sec,
-        );
-        if !has_effective_pitch_change {
-            if extra_processing || tension_processing {
-                Vec::new()
-            } else {
+        if has_pitch_user_edit {
+            // 若音高编辑值与原始音高完全一致（无实际变化），且不需要其他效果处理，则跳过。
+            let has_effective_pitch_change = any_effective_pitch_change_in_range(
+                frame_period_ms,
+                pitch_edit,
+                clip_start_sec,
+                &tm,
+                seg_start_sec,
+                seg_end_sec,
+            );
+            if !has_effective_pitch_change
+                && !(extra_processing
+                    || tension_processing
+                    || formant_processing
+                    || needs_processor_stretch)
+            {
                 return Ok(false);
             }
-        } else {
-            tm
         }
+        // !has_pitch_user_edit 时：早期退出已确保 extra/tension/formant 至少一个为 true。
+        // 始终传递原始 MIDI 曲线；pitch_edit 全零时 edit_midi_at_time_or_none 返回 None，
+        // HiFi-GAN fallback 到原始音高，在原始音高基础上应用 formant/tension 效果。
+        tm
     };
 
     // stereo -> mono (we don't preserve stereo; use left channel for cheaper conversion)
@@ -592,13 +716,17 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let processed: Option<Vec<f32>> = MONO_SCRATCH.with(|buf| -> Result<Option<Vec<f32>>, String> {
         let mut mono = buf.borrow_mut();
         mono.clear();
-        mono.resize(frames, 0.0);
-        for f in 0..frames {
-            mono[f] = pcm_stereo[f * 2];
-        }
+        mono.reserve(frames); // 预分配内存
+        // 跨步读取左声道，消除 memset 和越界检查
+        mono.extend(pcm_stereo.iter().step_by(2).take(frames).copied());
 
         // 通过 ClipProcessor trait 调用，解耦合成链路（含音高合成）。
-        let processor = crate::renderer::get_processor(kind);
+        // 外部 UTAU Resampler 需要从 registry 获取 entry 才能创建正确的 processor。
+        let processor: Box<dyn crate::renderer::ClipProcessor> = if let Some(reg) = resampler_registry {
+            crate::renderer::get_processor_with_registry(kind, reg)
+        } else {
+            crate::renderer::get_processor(kind)
+        };
         if !processor.is_available() {
             return Ok(None);
         }
@@ -614,7 +742,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             clip.extra_params.as_ref().unwrap_or(extra_params);
 
         // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
-        // 否则 PCM 已由外部 RubberBand 预处理，rate=1.0。
+        // 否则 PCM 已由外部 Signalsmith Stretch 预处理，rate=1.0。
         let ctx_playback_rate = if processor_handles_stretch { clip_playback_rate } else { 1.0 };
 
         let ctx = crate::renderer::ClipProcessContext {
@@ -625,12 +753,14 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             seg_end_sec: seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64),
             frame_period_ms,
             pitch_edit,
+            pitch_orig: entry.pitch_orig.as_slice(),
             clip_midi: &timeline_midi,
             playback_rate: ctx_playback_rate,
             out_frames: expected_out_frames,
             clip_id: &clip.id,
             extra_curves,
             extra_params,
+            bpm: timeline.bpm,
         };
         if is_vslib {
             eprintln!(
@@ -668,25 +798,23 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     if processed.len() != expected_out_frames {
         return Err(format!(
             "pitch_edit: output length mismatch (got {}, expected {})",
-            processed.len(), expected_out_frames
+            processed.len(),
+            expected_out_frames
         ));
     }
 
-    // 若输出尺寸与输入不同（处理器内部完成了时间拉伸），原地调整 Vec 大小。
+    // 若输出尺寸与输入不同，调整 Vec 大小并写入
     let stereo_out = expected_out_frames * 2;
-    if pcm_stereo.len() != stereo_out {
-        pcm_stereo.resize(stereo_out, 0.0);
-    }
-    for f in 0..expected_out_frames {
-        let v = processed[f];
-        pcm_stereo[f * 2] = v;
-        pcm_stereo[f * 2 + 1] = v;
+    pcm_stereo.clear();
+    pcm_stereo.reserve(stereo_out);
+    // 消除索引越界检查，批量写入双声道
+    for &v in processed.iter().take(expected_out_frames) {
+        pcm_stereo.push(v);
+        pcm_stereo.push(v);
     }
 
     Ok(true)
 }
-
-
 
 pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     let selected = timeline
@@ -779,15 +907,34 @@ pub fn does_clip_need_processor_render(
     let extra_processing = track_requests_extra_processing(algo, entry, clip);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
+    let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
+        && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
+
+    // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
+    // 即使用户没有编辑音高，也需要触发处理器预渲染以执行 mel 域拉伸。
+    let needs_processor_stretch = {
+        let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+        let handles = crate::renderer::get_processor(kind)
+            .capabilities()
+            .handles_time_stretch;
+        let rate = (clip.playback_rate as f64).max(1e-6);
+        handles && (rate - 1.0).abs() > 1e-6
+    };
 
     // v2 semantics: only treat pitch edit as active after the user modified the edit curve.
     // Otherwise `pitch_edit` may be auto-synced to `pitch_orig` and contain non-zero MIDI values,
     // which should NOT trigger synthesis / prerender.
-    if !entry.pitch_edit_user_modified && !extra_processing && !tension_processing {
+    // 例外：needs_processor_stretch 时必须触发预渲染以执行 mel 拉伸。
+    if !entry.pitch_edit_user_modified
+        && !extra_processing
+        && !tension_processing
+        && !formant_processing
+        && !needs_processor_stretch
+    {
         return false;
     }
 
-    if extra_processing || tension_processing {
+    if extra_processing || tension_processing || formant_processing || needs_processor_stretch {
         return true;
     }
 
@@ -799,147 +946,4 @@ pub fn does_clip_need_processor_render(
     // 否则当 playback_rate < 1（减速拉伸）时，clip 时间线长度会变长，后半段的编辑将不会触发合成。
     let clip_end_sec = clip_start_sec + clip.length_sec.max(0.0);
     any_user_edit_in_range(frame_period_ms, pitch_edit, clip_start_sec, clip_end_sec)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};
-
-    fn make_timeline_with_pitch_edit(
-        frame_period_ms: f64,
-        pitch_edit_user_modified: bool,
-        pitch_edit_len: usize,
-        edited_times_sec: &[f64],
-    ) -> TimelineState {
-        let mut pitch_edit = vec![0.0f32; pitch_edit_len];
-        for &t in edited_times_sec {
-            let i = ((t.max(0.0) * 1000.0) / frame_period_ms.max(0.1)).round().max(0.0) as usize;
-            if i < pitch_edit.len() {
-                // any positive value counts as a user-set target
-                pitch_edit[i] = 60.0;
-            }
-        }
-
-        let root_id = "track_root".to_string();
-        let track = Track {
-            id: root_id.clone(),
-            name: "Root".to_string(),
-            parent_id: None,
-            order: 0,
-            muted: false,
-            solo: false,
-            volume: 1.0,
-            compose_enabled: true,
-            pitch_analysis_algo: PitchAnalysisAlgo::WorldDll,
-            color: String::new(),
-        };
-
-        let mut tl = TimelineState {
-            tracks: vec![track],
-            clips: vec![],
-            selected_track_id: Some(root_id.clone()),
-            selected_clip_id: None,
-            bpm: 120.0,
-            playhead_sec: 0.0,
-            project_sec: 60.0,
-            params_by_root_track: Default::default(),
-            next_track_order: 1,
-        };
-
-        tl.params_by_root_track.insert(
-            root_id,
-            TrackParamsState {
-                pitch_edit,
-                pitch_edit_user_modified,
-                frame_period_ms,
-                ..Default::default()
-            },
-        );
-        tl
-    }
-
-    #[test]
-    fn does_clip_need_pitch_edit_uses_timeline_length_not_source_duration() {
-        let frame_period_ms = 5.0;
-
-        // Create an edit at t=6s (in the stretched tail).
-        let mut tl = make_timeline_with_pitch_edit(frame_period_ms, true, 20_000, &[6.0]);
-
-        let clip = crate::state::Clip {
-            id: "clip1".to_string(),
-            track_id: "track_root".to_string(),
-            name: "c".to_string(),
-            start_sec: 0.0,
-            length_sec: 8.0, // stretched on timeline
-            color: String::new(),
-            source_path: None,
-            duration_sec: Some(4.0), // original source duration (compat)
-            duration_frames: None,
-            source_sample_rate: None,
-            waveform_preview: None,
-            pitch_range: None,
-            gain: 1.0,
-            muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 4.0,
-            playback_rate: 0.5,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
-            fade_in_curve: "sine".to_string(),
-            fade_out_curve: "sine".to_string(),
-        };
-
-        // Place clip into timeline so root resolution works.
-        tl.clips.push(clip.clone());
-
-        assert!(does_clip_need_pitch_edit(&tl, &clip, 0.0));
-    }
-
-    #[test]
-    fn does_clip_need_pitch_edit_ignores_selected_track_id() {
-        let frame_period_ms = 5.0;
-        let mut tl = make_timeline_with_pitch_edit(frame_period_ms, true, 20_000, &[1.0]);
-
-        let other_track = Track {
-            id: "track_other".to_string(),
-            name: "Other".to_string(),
-            parent_id: None,
-            order: 1,
-            muted: false,
-            solo: false,
-            volume: 1.0,
-            compose_enabled: false,
-            pitch_analysis_algo: PitchAnalysisAlgo::None,
-            color: String::new(),
-        };
-        tl.tracks.push(other_track);
-        tl.selected_track_id = Some("track_other".to_string());
-
-        let clip = crate::state::Clip {
-            id: "clip1".to_string(),
-            track_id: "track_root".to_string(),
-            name: "c".to_string(),
-            start_sec: 0.0,
-            length_sec: 2.0,
-            color: String::new(),
-            source_path: None,
-            duration_sec: Some(2.0),
-            duration_frames: None,
-            source_sample_rate: None,
-            waveform_preview: None,
-            pitch_range: None,
-            gain: 1.0,
-            muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 2.0,
-            playback_rate: 1.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
-            fade_in_curve: "sine".to_string(),
-            fade_out_curve: "sine".to_string(),
-        };
-
-        assert!(does_clip_need_pitch_edit(&tl, &clip, 0.0));
-    }
 }

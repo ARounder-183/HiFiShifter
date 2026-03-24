@@ -73,19 +73,29 @@ export const paramsApi = {
             checkpoint,
         ),
 
-    pasteVocalShifterClipboard: () =>
+    pasteVocalShifterClipboard: (
+        selectionStartFrame?: number,
+        selectionMaxFrames?: number,
+        activeParam?: string,
+    ) =>
         invoke<{ ok: boolean; error?: string; updated?: number }>(
             "paste_vocalshifter_clipboard",
+            selectionStartFrame,
+            selectionMaxFrames,
+            activeParam,
         ),
 
-    pasteReaperClipboard: () =>
+    pasteReaperClipboard: (
+        selectionStartFrame?: number,
+        selectionMaxFrames?: number,
+    ) =>
         invoke<
             TimelineResult & {
                 ok: boolean;
                 error?: string;
                 skipped_files?: string[];
             }
-        >("paste_reaper_clipboard"),
+        >("paste_reaper_clipboard", selectionStartFrame, selectionMaxFrames),
 
     getProcessorParams: (algo: string) =>
         invoke<ProcessorParamDescriptor[]>("get_processor_params", algo),
@@ -106,12 +116,13 @@ export const paramsApi = {
     importMidiToPitch: (
         midiPath: string,
         trackIndex?: number,
-        offsetSec?: number,
+        selectionStartFrame?: number,
+        selectionMaxFrames?: number,
     ) =>
         invoke<{
             ok: boolean;
             error?: string;
             notes_imported?: number;
             frames_touched?: number;
-        }>("import_midi_to_pitch", midiPath, trackIndex, offsetSec),
+        }>("import_midi_to_pitch", midiPath, trackIndex, selectionStartFrame, selectionMaxFrames),
 };

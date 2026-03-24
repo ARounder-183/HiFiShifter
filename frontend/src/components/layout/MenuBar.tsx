@@ -1,10 +1,9 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import {
-    importAudioFromDialog,
     exportAudio,
     exportSeparated,
     openReaperFromDialog,
@@ -16,21 +15,36 @@ import {
     clearWaveformCacheRemote,
     undoRemote,
     redoRemote,
-    pasteVocalShifterClipboard,
-    pasteReaperClipboard,
     saveProjectRemote,
     saveProjectAsRemote,
 } from "../../features/session/sessionSlice";
+import {
+    importAudioFromDialog,
+    importMultipleAudioAtPosition,
+} from "../../features/session/thunks/importThunks";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
     selectMergedKeybindings,
     formatKeybinding,
+    isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
 import { KeybindingsDialog } from "./KeybindingsDialog";
 import { ResamplerManagerDialog } from "./ResamplerManagerDialog";
+import {
+    TransposeCentsDialog,
+    TransposeDegreesDialog,
+    SetPitchDialog,
+    AverageDialog,
+    SmoothDialog,
+    VibratoDialog,
+    QuantizeDialog,
+    MeanQuantizeDialog,
+} from "../editDialogs/EditDialogs";
+import { SCALE_LABELS } from "../../utils/musicalScales";
+// import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
     onNewProject: () => void;
@@ -46,6 +60,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     onExit,
 }) => {
     const { t, setLocale } = useI18n();
+    const tAny = t as (key: string) => string;
     const dispatch = useAppDispatch();
     const s = useAppSelector((state: RootState) => state.session);
     const theme = useAppTheme();
@@ -53,21 +68,98 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [rsDialogOpen, setRsDialogOpen] = useState(false);
 
-    /** 获取某个操作的快捷键显示文本 */
+    // Edit dialog states
+    const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
+    const [transposeDegreesOpen, setTransposeDegreesOpen] = useState(false);
+    const [setPitchOpen, setSetPitchOpen] = useState(false);
+    const [averageOpen, setAverageOpen] = useState(false);
+    const [smoothOpen, setSmoothOpen] = useState(false);
+    const [vibratoOpen, setVibratoOpen] = useState(false);
+    const [vibratoParamRange, setVibratoParamRange] = useState<{ min: number; max: number } | undefined>(undefined);
+    const [quantizeOpen, setQuantizeOpen] = useState(false);
+    const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
+    const [menuImportMode, setMenuImportMode] = useState<{
+        audioPaths: string[];
+        trackId: string | null;
+        startSec: number;
+    } | null>(null);
+
+    const isPitchParam = s.editParam === "pitch";
+    const projectScaleLabel =
+        s.project.useCustomScale && s.project.customScale
+            ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
+            : `${tAny("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
+
+    const resolveScaleToken = (scaleValue: string) =>
+        scaleValue === "__project__" ? "__project__" : scaleValue;
+
+    // Listen for context menu → open dialog requests
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const dialog = (e as CustomEvent).detail?.dialog as string;
+            switch (dialog) {
+                case "transposeCents": setTransposeCentsOpen(true); break;
+                case "transposeDegrees": setTransposeDegreesOpen(true); break;
+                case "setPitch": setSetPitchOpen(true); break;
+                case "average": setAverageOpen(true); break;
+                case "smooth": setSmoothOpen(true); break;
+                case "addVibrato": setVibratoParamRange((e as CustomEvent).detail?.paramRange); setVibratoOpen(true); break;
+                case "quantize": setQuantizeOpen(true); break;
+                case "meanQuantize": setMeanQuantizeOpen(true); break;
+            }
+        };
+        window.addEventListener("hifi:openEditDialog", handler);
+        return () => window.removeEventListener("hifi:openEditDialog", handler);
+    }, []);
+
+    /** 获取某个操作的快捷键显示文本（"None" 绑定时返回空字符串，不显示） */
     function shortcutLabel(actionId: ActionId): string {
-        return formatKeybinding(keybindings[actionId]);
+        const kb = keybindings[actionId];
+        if (!kb || isNoneBinding(kb)) return "";
+        return formatKeybinding(kb, "");
     }
 
-    async function handleExport() {
-        const outputPath = s.outputPath?.trim();
-        if (!outputPath) {
-            const picked = await dispatch(pickOutputPath()).unwrap();
-            if (picked.ok && !picked.canceled && picked.path) {
-                await dispatch(exportAudio(picked.path));
+    /** 派发编辑操作事件给 PianoRollPanel */
+    const dispatchEditOp = useCallback((op: string, data?: Record<string, unknown>) => {
+        window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op, ...data } }));
+    }, []);
+
+    const handleImportAudioFromMenu = useCallback(async () => {
+        try {
+            const res = await dispatch(importAudioFromDialog()).unwrap() as {
+                canceled?: boolean;
+                requiresModeChoice?: boolean;
+                audioPaths?: string[];
+                trackId?: string | null;
+                startSec?: number;
+            };
+            if (res?.canceled || !res?.requiresModeChoice) {
+                return;
             }
+            if (!Array.isArray(res.audioPaths) || res.audioPaths.length <= 1) {
+                return;
+            }
+            setMenuImportMode({
+                audioPaths: res.audioPaths,
+                trackId: res.trackId ?? s.selectedTrackId ?? null,
+                startSec: typeof res.startSec === "number"
+                    ? res.startSec
+                    : (s.playheadSec ?? 0),
+            });
+        } catch {
+            // Error state is already handled by session thunk reducers.
+        }
+    }, [dispatch, s.playheadSec, s.selectedTrackId]);
+
+    async function handleExport() {
+        // 每次导出必定弹窗询问路径
+        const picked = await dispatch(pickOutputPath()).unwrap();
+        // 如果用户取消了选择，直接返回
+        if (!picked.ok || picked.canceled || !picked.path) {
             return;
         }
-        await dispatch(exportAudio(outputPath));
+        // 拿到最新路径后，派发导出命令
+        await dispatch(exportAudio(picked.path));
     }
 
     async function handleExportSeparated() {
@@ -149,9 +241,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
 
                     <DropdownMenu.Item
-                        onSelect={() => dispatch(importAudioFromDialog())}
+                        onSelect={() => {
+                            void handleImportAudioFromMenu();
+                        }}
                     >
-                        {t("menu_import_audio")}{" "}
+                        {t("menu_import_audio")} {" "}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => void dispatch(openReaperFromDialog())}
@@ -208,24 +302,120 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item>
-                        {t("menu_select_all")}{" "}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
+                        {tAny("menu_copy")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            Ctrl+A
+                            {shortcutLabel("pianoRoll.copy")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
+                        {tAny("menu_cut")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("clip.cut")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
+                        {tAny("menu_paste")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("pianoRoll.paste")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
+                        {tAny("menu_select_all")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.selectAll")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
+                        {tAny("menu_deselect")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.deselect")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("initialize")}>
+                        {tAny("menu_initialize")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.initialize")}
+                        </div>
+                    </DropdownMenu.Item>
+
+                    {isPitchParam && (
+                        <>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item onSelect={() => setTransposeCentsOpen(true)}>
+                                {tAny("menu_transpose_cents")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.transposeCents")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item onSelect={() => setTransposeDegreesOpen(true)}>
+                                {tAny("menu_transpose_degrees")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.transposeDegrees")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
+                                {tAny("menu_set_pitch")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.setPitch")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </>
+                    )}
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => setAverageOpen(true)}>
+                        {tAny("menu_average")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.average")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setSmoothOpen(true)}>
+                        {tAny("menu_smooth")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.smooth")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setVibratoOpen(true)}>
+                        {tAny("menu_add_vibrato")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.addVibrato")}
+                        </div>
+                    </DropdownMenu.Item>
+                    {isPitchParam && (
+                        <>
+                            <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
+                                {tAny("menu_quantize")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.quantize")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
+                                {tAny("menu_mean_quantize")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("edit.meanQuantize")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </>
+                    )}
+
+                    <DropdownMenu.Separator />
                     <DropdownMenu.Item
-                        onSelect={() => void dispatch(pasteReaperClipboard())}
+                        onSelect={() => dispatchEditOp("pasteReaper")}
                     >
                         {t("menu_paste_reaper_clipboard")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.pasteReaper")}
+                        </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        onSelect={() =>
-                            void dispatch(pasteVocalShifterClipboard())
-                        }
+                        onSelect={() => dispatchEditOp("pasteVocalShifter")}
                     >
                         {t("menu_paste_vocalshifter_clipboard")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.pasteVocalShifter")}
+                        </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setRsDialogOpen(true)}>
@@ -294,7 +484,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_help")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item>{t("menu_about")}</DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={async () => {
+                        const { openUrl } = await import("@tauri-apps/plugin-opener");
+                        openUrl("https://github.com/ARounder-183/HiFiShifter");
+                    }}>{t("menu_about")}</DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -313,6 +506,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         <DropdownMenu.Item onSelect={() => setLocale("zh-CN")}>
                             {t("lang_zh")}
                         </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => setLocale("zh-TW")}>
+                            {t("lang_zh_tw")}
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => setLocale("ja-JP")}>
+                            {t("lang_ja")}
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => setLocale("ko-KR")}>
+                            {t("lang_ko")}
+                        </DropdownMenu.Item>
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
             </Flex>
@@ -326,6 +528,159 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <ResamplerManagerDialog
                 open={rsDialogOpen}
                 onOpenChange={setRsDialogOpen}
+            />
+
+            {/* 菜单导入模式选择（多文件） */}
+            {menuImportMode && (
+                <div
+                    className="fixed inset-0 z-[9999] bg-black/35 flex items-center justify-center"
+                    onClick={() => setMenuImportMode(null)}
+                >
+                    <div
+                        className="w-[380px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-md shadow-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="px-4 py-3 border-b border-qt-border">
+                            <div className="text-sm font-medium text-qt-text">
+                                {tAny("import_dialog_title") || t("menu_import_audio")}
+                            </div>
+                            <div className="mt-1 text-xs text-qt-text-muted">
+                                {menuImportMode.audioPaths.length} file(s) selected
+                            </div>
+                        </div>
+
+                        <div className="px-3 py-3 flex flex-col gap-2">
+                            <button
+                                className="w-full text-left px-3 py-2 rounded text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = menuImportMode;
+                                    setMenuImportMode(null);
+                                    void dispatch(importMultipleAudioAtPosition({
+                                        audioPaths: m.audioPaths,
+                                        mode: "across-time",
+                                        trackId: m.trackId,
+                                        startSec: m.startSec,
+                                    }));
+                                }}
+                            >
+                                {t("import_across_time")}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-2 rounded text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = menuImportMode;
+                                    setMenuImportMode(null);
+                                    void dispatch(importMultipleAudioAtPosition({
+                                        audioPaths: m.audioPaths,
+                                        mode: "across-tracks",
+                                        trackId: m.trackId,
+                                        startSec: m.startSec,
+                                    }));
+                                }}
+                            >
+                                {t("import_across_tracks")}
+                            </button>
+                        </div>
+
+                        <div className="px-3 py-2 border-t border-qt-border flex justify-end">
+                            <button
+                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded"
+                                onClick={() => setMenuImportMode(null)}
+                            >
+                                {tAny("cancel") || "Cancel"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit operation dialogs */}
+            <TransposeCentsDialog
+                open={transposeCentsOpen}
+                onOpenChange={setTransposeCentsOpen}
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(cents, edgeSmoothnessPercent) =>
+                    dispatchEditOp("transposeCents", {
+                        cents,
+                        edgeSmoothnessPercent,
+                    })
+                }
+            />
+            <TransposeDegreesDialog
+                open={transposeDegreesOpen}
+                onOpenChange={setTransposeDegreesOpen}
+                defaultScale={s.project.baseScale}
+                defaultUseProjectScale={true}
+                projectScaleLabel={projectScaleLabel}
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(degrees, scaleValue, edgeSmoothnessPercent) =>
+                    dispatchEditOp("transposeDegrees", {
+                        degrees,
+                        scale: resolveScaleToken(scaleValue),
+                        edgeSmoothnessPercent,
+                    })
+                }
+            />
+            <SetPitchDialog
+                open={setPitchOpen}
+                onOpenChange={setSetPitchOpen}
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(midiNote, edgeSmoothnessPercent) =>
+                    dispatchEditOp("setPitch", {
+                        midiNote,
+                        edgeSmoothnessPercent,
+                    })
+                }
+            />
+            <AverageDialog
+                open={averageOpen}
+                onOpenChange={setAverageOpen}
+                onConfirm={(strength) => {
+                    dispatchEditOp("average", { strength });
+                }}
+            />
+            <SmoothDialog
+                open={smoothOpen}
+                onOpenChange={setSmoothOpen}
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(strength) => dispatchEditOp("smooth", { strength })}
+            />
+            <VibratoDialog
+                open={vibratoOpen}
+                onOpenChange={setVibratoOpen}
+                editParam={s.editParam}
+                paramRange={vibratoParamRange}
+                onConfirm={(amplitude, rate, attack, release, phase) => dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })}
+            />
+            <QuantizeDialog
+                open={quantizeOpen}
+                onOpenChange={setQuantizeOpen}
+                defaultScale={s.project.baseScale}
+                defaultUseProjectScale={true}
+                projectScaleLabel={projectScaleLabel}
+                defaultToleranceCents={s.pitchSnapToleranceCents}
+                onConfirm={(unit, scaleValue, toleranceCents) =>
+                    dispatchEditOp("quantize", {
+                        unit,
+                        scale: resolveScaleToken(scaleValue),
+                        toleranceCents,
+                    })
+                }
+            />
+            <MeanQuantizeDialog
+                open={meanQuantizeOpen}
+                onOpenChange={setMeanQuantizeOpen}
+                defaultScale={s.project.baseScale}
+                defaultUseProjectScale={true}
+                projectScaleLabel={projectScaleLabel}
+                defaultToleranceCents={s.pitchSnapToleranceCents}
+                onConfirm={(unit, scaleValue, toleranceCents) =>
+                    dispatchEditOp("meanQuantize", {
+                        unit,
+                        scale: resolveScaleToken(scaleValue),
+                        toleranceCents,
+                    })
+                }
             />
         </Flex>
     );

@@ -1,3 +1,8 @@
+//! 命令层公共工具与辅助函数。
+//!
+//! 包含各 Tauri 命令模块共享的 guard 包装、临时文件管理、
+//! timeline 渲染入口（render_timeline_to_wav）以及 JSON 命令通用响应格式。
+
 use crate::state::AppState;
 use crate::waveform;
 use serde::Serialize;
@@ -14,7 +19,10 @@ pub(crate) struct PlaybackRenderingStateEvent {
     pub(crate) target: Option<String>,
 }
 
-pub(crate) fn guard_json_command(name: &str, f: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
+pub(crate) fn guard_json_command(
+    name: &str,
+    f: impl FnOnce() -> serde_json::Value,
+) -> serde_json::Value {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
@@ -67,6 +75,11 @@ pub(crate) fn render_timeline_to_wav(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let registry = state
+        .resampler_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     crate::mixdown::render_mixdown_wav(
         &timeline,
         output_path,
@@ -74,11 +87,12 @@ pub(crate) fn render_timeline_to_wav(
             sample_rate: 44100,
             start_sec,
             end_sec,
-            stretch: crate::time_stretch::StretchAlgorithm::RubberBand,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
             // 导出时使用最高质量：32-bit float + Export 预设。
             export_format: crate::mixdown::ExportFormat::Wav32f,
             quality_preset: crate::mixdown::QualityPreset::Export,
         },
+        Some(&registry),
     )
 }

@@ -12,23 +12,29 @@ export const fetchTimeline = createAsyncThunk(
 
 export const stopAudioPlayback = createAsyncThunk(
     "session/stopAudioPlayback",
-    async () => {
-        return webApi.stopAudio();
+    async (options: { restoreAnchor?: boolean } | void, { getState }) => {
+        const restoreAnchor = Boolean((options as { restoreAnchor?: boolean } | undefined)?.restoreAnchor);
+        const state = getState() as { session: SessionState };
+        const wasPlaying = Boolean(state.session.runtime.isPlaying);
+        const anchorSec = state.session.playbackAnchorSec;
+        const result = await webApi.stopAudio();
+        // Only restore when this stop action actually interrupted active playback.
+        if (
+            restoreAnchor &&
+            wasPlaying &&
+            anchorSec !== undefined &&
+            anchorSec !== null
+        ) {
+            await webApi.setTransport({ playheadSec: anchorSec });
+        }
+        return { ...result, restoreAnchor, wasPlaying, anchorSec };
     },
 );
 
 export const seekPlayhead = createAsyncThunk(
     "session/seekPlayhead",
-    async (beat: number, { getState, dispatch }) => {
-        const state = getState() as { session: SessionState };
-        if (state.session.runtime.isPlaying) {
-            try {
-                await dispatch(stopAudioPlayback()).unwrap();
-            } catch {
-                // Best-effort: still seek even if stopping fails.
-            }
-        }
-        return webApi.setTransport({ playheadSec: beat });
+    async (sec: number) => {
+        return webApi.setTransport({ playheadSec: sec });
     },
 );
 
@@ -50,14 +56,14 @@ export const playOriginal = createAsyncThunk(
     "session/playOriginal",
     async (_, { getState }) => {
         const state = getState() as { session: SessionState };
-        const anchorBeat = state.session.playheadSec;
+        const anchorSec = state.session.playheadSec;
         // Ensure backend transport is in sync before starting playback.
-        await webApi.setTransport({ playheadSec: anchorBeat });
+        await webApi.setTransport({ playheadSec: anchorSec });
         const result = await webApi.playOriginal(0);
         return {
             ...result,
             clipId: null,
-            anchorBeat,
+            anchorSec,
         };
     },
 );

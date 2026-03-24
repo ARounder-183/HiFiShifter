@@ -1,6 +1,6 @@
 [package]
 name = "HiFiShifter"
-version = "1.0.1"
+version = "0.1.0-beta.6"
 description = "A high-quality audio shifter"
 authors = ["ARounder"]
 edition = "2021"
@@ -44,10 +44,6 @@ lru = "0.12"
 encoding_rs = "0.8"
 midly = "0.5"
 
-# ONNX inference + feature extraction helpers
-# Use prebuilt ONNX Runtime binaries (downloaded at build time) to avoid relying on a system-installed onnxruntime.dll.
-# CUDA: enable the CUDA EP (cu12 runtime). If CUDA is unavailable at runtime, the app falls back to CPU.
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "cuda"] }
 rustfft = "6"
 num-complex = "0.4"
 ndarray = { version = "0.16", optional = true }
@@ -58,8 +54,22 @@ clipboard-win = "5"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+objc2 = "0.6"
 
 [features]
 default = ["onnx", "vslib"]
-onnx = ["dep:ort", "dep:ndarray"]
+onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
+
+# Linux / Windows
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+
+# macOS Apple Silicon (arm64)
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+
+# macOS Intel (x86_64)
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ort-tract = { version = "0.3.0+0.22", optional = true }

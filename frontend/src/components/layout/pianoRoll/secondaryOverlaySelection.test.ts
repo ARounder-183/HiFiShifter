@@ -1,16 +1,8 @@
 import {
-    getActiveSecondaryParamId,
+    getVisibleSecondaryParamIds,
     resolveSecondaryOverlayValues,
     toggleSecondaryParamVisibility,
 } from "./secondaryOverlaySelection.js";
-
-function assertEqual<T>(actual: T, expected: T): void {
-    if (actual !== expected) {
-        throw new Error(
-            `Expected ${String(expected)}, received ${String(actual)}`,
-        );
-    }
-}
 
 function assertDeepEqual<T>(actual: T, expected: T): void {
     const actualJson = JSON.stringify(actual);
@@ -29,6 +21,7 @@ assertDeepEqual(toggleSecondaryParamVisibility({}, "tension"), {
 assertDeepEqual(
     toggleSecondaryParamVisibility({ tension: true }, "breathiness"),
     {
+        tension: true,
         breathiness: true,
     },
 );
@@ -38,40 +31,49 @@ assertDeepEqual(
     {},
 );
 
-assertEqual(
-    getActiveSecondaryParamId({
+assertDeepEqual(
+    getVisibleSecondaryParamIds({
         editParam: "pitch",
         processorParamIds,
         secondaryParamVisible: { energy: true },
     }),
-    "energy",
+    ["energy"],
 );
 
-assertEqual(
-    getActiveSecondaryParamId({
+assertDeepEqual(
+    getVisibleSecondaryParamIds({
         editParam: "tension",
         processorParamIds,
         secondaryParamVisible: { breathiness: true },
     }),
-    "breathiness",
+    ["breathiness"],
 );
 
-assertEqual(
-    getActiveSecondaryParamId({
+assertDeepEqual(
+    getVisibleSecondaryParamIds({
         editParam: "tension",
         processorParamIds,
         secondaryParamVisible: { pitch: true },
     }),
-    "pitch",
+    ["pitch"],
 );
 
-assertEqual(
-    getActiveSecondaryParamId({
+assertDeepEqual(
+    getVisibleSecondaryParamIds({
         editParam: "breathiness",
         processorParamIds,
         secondaryParamVisible: { breathiness: true },
     }),
-    null,
+    [],
+);
+
+assertDeepEqual(
+    getVisibleSecondaryParamIds({
+        editParam: "pitch",
+        processorParamIds,
+        secondaryParamVisible: { tension: true, energy: true },
+    }),
+    ["tension", "energy"],
 );
 
 assertDeepEqual(

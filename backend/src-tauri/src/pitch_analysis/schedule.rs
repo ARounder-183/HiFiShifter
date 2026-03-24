@@ -5,8 +5,8 @@
 use crate::state::AppState;
 use tauri::Emitter;
 
-use super::{PitchOrigUpdatedEvent, build_root_pitch_key, resample_curve_linear};
 use super::analysis::build_pitch_job;
+use super::{build_root_pitch_key, PitchOrigUpdatedEvent};
 
 fn assemble_pitch_orig_from_cache(
     tl: &crate::state::TimelineState,
@@ -14,8 +14,12 @@ fn assemble_pitch_orig_from_cache(
 ) -> Option<(Vec<f32>, bool)> {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
-    let bpm = if tl.bpm.is_finite() && tl.bpm > 0.0 { tl.bpm } else { 120.0 };
-    let bs = 60.0 / bpm;
+    let bpm = if tl.bpm.is_finite() && tl.bpm > 0.0 {
+        tl.bpm
+    } else {
+        120.0
+    };
+    let _bs = 60.0 / bpm;
 
     // 收集属于?root track 的所?clip（保?tl.clips 原始顺序 = z-order?
     let clips: Vec<&crate::state::Clip> = tl
@@ -39,13 +43,14 @@ fn assemble_pitch_orig_from_cache(
     // ?z-order 从低到高（tl.clips 顺序）写入，后面?clip 覆盖前面?
     for clip in &clips {
         let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
-        let cached = match crate::pitch_clip::get_or_compute_clip_pitch_midi_global(tl, clip, &root, fp) {
-            Some(c) => c,
-            None => {
-                all_cache_hit = false;
-                continue;
-            }
-        };
+        let cached =
+            match crate::pitch_clip::get_or_compute_clip_pitch_midi_global(tl, clip, &root, fp) {
+                Some(c) => c,
+                None => {
+                    all_cache_hit = false;
+                    continue;
+                }
+            };
 
         // 计算 clip ?timeline 中的起始?
         let clip_start_sec = clip.start_sec.max(0.0);
@@ -62,26 +67,27 @@ fn assemble_pitch_orig_from_cache(
         let clip_len_frames = ((clip_len_sec * 1000.0) / fp).round().max(0.0) as usize;
 
         if is_full_source {
-            // rate==1：从 source_start_sec 处偏移截取，直接写入
-            let src_offset = {
-                let source_start_sec = clip.source_start_sec.max(0.0);
-                ((source_start_sec * 1000.0) / fp).round().max(0.0) as usize
-            };
-            for local_i in 0..clip_len_frames {
-                let src_i = src_offset + local_i;
-                let global_i = clip_start_frame + local_i;
-                if global_i >= target_frames {
-                    break;
-                }
-                let pitch = cached.midi.get(src_i).copied().unwrap_or(0.0);
-                if pitch.is_finite() && pitch > 0.0 {
-                    out[global_i] = pitch;
-                } else {
-                    out[global_i] = 0.0;
+            let src_offset = ((clip.source_start_sec.max(0.0) * 1000.0) / fp)
+                .round()
+                .max(0.0) as usize;
+
+            // 预计算切片安全边界，消除内部循环的所有越界检查、if 判断和解包
+            let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
+            let read_len = write_len.min(cached.midi.len().saturating_sub(src_offset));
+
+            if read_len > 0 {
+                let dst_slice = &mut out[clip_start_frame..clip_start_frame + read_len];
+                let src_slice = &cached.midi[src_offset..src_offset + read_len];
+
+                for (dst, &pitch) in dst_slice.iter_mut().zip(src_slice.iter()) {
+                    *dst = if pitch.is_finite() && pitch > 0.0 {
+                        pitch
+                    } else {
+                        0.0
+                    };
                 }
             }
         } else {
-            // rate!=1：从全量曲线中截?source range 区间 ?resample ?clip timeline 长度
             let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
             let resampled = crate::pitch_clip::trim_and_resample_midi(
                 &cached.midi,
@@ -91,16 +97,21 @@ fn assemble_pitch_orig_from_cache(
                 pr_valid,
                 clip_len_sec,
             );
-            for local_i in 0..clip_len_frames {
-                let global_i = clip_start_frame + local_i;
-                if global_i >= target_frames {
-                    break;
-                }
-                let pitch = resampled.get(local_i).copied().unwrap_or(0.0);
-                if pitch.is_finite() && pitch > 0.0 {
-                    out[global_i] = pitch;
-                } else {
-                    out[global_i] = 0.0;
+
+            // 预计算边界并进行迭代覆盖
+            let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
+            let read_len = write_len.min(resampled.len());
+
+            if read_len > 0 {
+                let dst_slice = &mut out[clip_start_frame..clip_start_frame + read_len];
+                let src_slice = &resampled[..read_len];
+
+                for (dst, &pitch) in dst_slice.iter_mut().zip(src_slice.iter()) {
+                    *dst = if pitch.is_finite() && pitch > 0.0 {
+                        pitch
+                    } else {
+                        0.0
+                    };
                 }
             }
         }
@@ -153,11 +164,10 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                         // 确保 pitch_edit 长度与 pitch_orig 一致
                         if entry.pitch_edit.len() < entry.pitch_orig.len() {
                             let old_len = entry.pitch_edit.len();
-                            entry.pitch_edit.resize(entry.pitch_orig.len(), 0.0);
-                            // 新增区间以 pitch_orig 作为 baseline，避免 baseline 变为 0
-                            for i in old_len..entry.pitch_orig.len() {
-                                entry.pitch_edit[i] = entry.pitch_orig[i];
-                            }
+                            // 单次 memcpy 直接拷入，消灭 memset 和 越界检查
+                            entry
+                                .pitch_edit
+                                .extend_from_slice(&entry.pitch_orig[old_len..]);
                         }
                         for i in 0..len {
                             if offsets[i].abs() > 1e-6 && entry.pitch_orig[i].abs() > 1e-6 {
@@ -166,7 +176,8 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                         }
                         entry.pitch_edit_user_modified = true;
                     } else if !entry.pitch_edit_user_modified {
-                        entry.pitch_edit = entry.pitch_orig.clone();
+                        // 复用已有内存，避免昂贵的重新分配
+                        entry.pitch_edit.clone_from(&entry.pitch_orig);
                     }
                     should_emit = true;
                     emit_root_track_id = job.root_track_id.clone();
@@ -177,7 +188,8 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
                         entry.pitch_orig = curve;
                         entry.pitch_orig_key = None;
                         if !entry.pitch_edit_user_modified {
-                            entry.pitch_edit = entry.pitch_orig.clone();
+                            // 复用已有内存，避免昂贵的重新分配
+                            entry.pitch_edit.clone_from(&entry.pitch_orig);
                         }
                         should_emit = true;
                         emit_root_track_id = job.root_track_id.clone();
@@ -201,4 +213,3 @@ pub fn maybe_schedule_pitch_orig(state: &AppState, root_track_id: &str) -> bool 
 
     false // 同步完成，不?pending
 }
-

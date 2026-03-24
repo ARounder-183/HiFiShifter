@@ -5,23 +5,21 @@
 			"label": "cargo-check-backend-lib",
 			"type": "shell",
 			"command": "cargo",
-			"args": [
-				"check",
-				"--lib",
-				"-q"
-			],
+			"args": ["check", "--lib", "-q"],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
 			"isBackground": false,
 			"group": "build"
 		},
 		{
 			"label": "cargo-check-backend-lib-tauri",
 			"type": "shell",
-			"command": "powershell",
-			"args": [
-				"-NoProfile",
-				"-Command",
-				"Set-Location 'e:\\Code\\HifiShifter\\backend\\src-tauri'; cargo check --lib -q"
-			],
+			"command": "cargo",
+			"args": ["check", "--lib", "-q"],
+			"options": {
+				"cwd": "${workspaceFolder}/backend/src-tauri"
+			},
 			"isBackground": false,
 			"group": "build"
 		}

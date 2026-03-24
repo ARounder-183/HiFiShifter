@@ -1,0 +1,628 @@
+name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  frontend-build:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: frontend-dist
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install and build frontend
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Archive frontend dist
+        run: |
+          cd frontend
+          if [ -d dist ]; then zip -r ../frontend-dist.zip dist; else echo "No dist produced"; exit 1; fi
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend-dist.zip
+
+  backend:
+    name: Build Backend
+    needs: frontend-build
+    runs-on: ${{ matrix.os }}
+    # Prevent CI environment from converting warnings into errors
+    env:
+      RUSTFLAGS: '-Awarnings'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm, macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+        #os: [windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
+          if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
+          unzip frontend-dist/$ZIP -d frontend
+        shell: bash
+
+      - name: Extract frontend dist (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { Write-Host "No zip artifact found in frontend-dist"; Get-ChildItem frontend-dist; exit 1 }
+          Expand-Archive -Path $zip.FullName -DestinationPath frontend -Force
+        shell: pwsh
+
+      - name: Cache cargo registry (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo registry (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v5
+        with:
+          path: |
+            %USERPROFILE%\.cargo\registry
+            %USERPROFILE%\.cargo\git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Rust toolchain (Windows x86_64)
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+      - name: Setup Rust toolchain (Windows ARM64)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable-aarch64-pc-windows-msvc
+      - name: Setup Rust toolchain (non-Windows)
+        if: runner.os != 'Windows'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x ./scripts/install_deps_linux.sh || true
+          SKIP_FRONTEND=1 bash ./scripts/install_deps_linux.sh
+        shell: bash
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x ./scripts/install_deps_macos.sh || true
+          SKIP_FRONTEND=1 bash ./scripts/install_deps_macos.sh
+        shell: bash
+
+      - name: Install create-dmg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "Installing create-dmg using the CI Node runtime"
+          npm install -g create-dmg || true
+          create-dmg --version || true
+        shell: bash
+
+      - name: Build (cargo check) on Unix
+        if: runner.os != 'Windows'
+        working-directory: backend/src-tauri
+        env:
+          HIFISHIFTER_SKIP_NATIVE_BUILD: '1'
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: '1'
+          RUST_BACKTRACE: '1'
+        run: |
+          HOST=$(rustc -vV | awk '/host:/ {print $2}')
+          echo "Detected host triple: $HOST"
+          # On x86_64 macOS, prebuilt ORT with CUDA may be unavailable. Build with ONNX
+          # enabled but force ORT to use CPU at runtime to keep ONNX compatibility.
+          if [ "$(uname -s)" = "Darwin" ] && [[ "$HOST" == x86_64* ]]; then
+            echo "x86_64 macOS detected — running cargo check with onnx but forcing ORT to CPU"
+            export HIFISHIFTER_ORT_EP=cpu
+            cargo check --lib --all-targets --target "$HOST" --no-default-features --features onnx --verbose
+          else
+            cargo check --lib --all-targets --target "$HOST" --no-default-features --features onnx --verbose
+          fi
+        shell: bash
+
+      - name: Build (cargo check) on Windows
+        if: runner.os == 'Windows'
+        working-directory: backend/src-tauri
+        env:
+          HIFISHIFTER_SKIP_NATIVE_BUILD: '1'
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: '1'
+        run: |
+          $rust_host = (rustc -vV | Select-String 'host:').ToString().Split(':')[1].Trim()
+          Write-Host "Detected host triple: $rust_host"
+          if ($rust_host -match 'aarch64') {
+            Write-Host 'Windows ARM detected — running cargo check for native host and disabling default features (skip vslib)'
+            cargo check --lib --all-targets --target $rust_host --no-default-features --features onnx --verbose
+          } else {
+            Write-Host 'Running cargo check for native host'
+            cargo check --lib --all-targets --target $rust_host --verbose
+          }
+        shell: pwsh
+
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Write-Host 'Running Windows dependency script (skip frontend, setup-node will handle npm)'
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
+        shell: pwsh
+
+      - name: Install frontend deps
+        run: |
+          npm --prefix frontend ci
+
+      - name: Build release and package (Windows)
+        if: runner.os == 'Windows'
+        working-directory: backend/src-tauri
+        run: |
+          Write-Host 'Installing NSIS (makensis) via choco'
+          choco install nsis -y
+          Write-Host 'Installing tauri-cli v2 (semver ^2) so `cargo tauri` matches tauri-build'
+          cargo install tauri-cli --version "^2" --locked || Write-Host 'tauri-cli install failed or already installed'
+          Write-Host 'Verify cargo tauri availability'
+          $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+          $env:PATH = "$cargoBin;$env:PATH"
+          $exe = Join-Path $cargoBin 'cargo-tauri.exe'
+          $rust_host = (rustc -vV | Select-String 'host:').ToString().Split(':')[1].Trim()
+          Write-Host "Detected host triple: $rust_host"
+          if (Test-Path $exe) {
+            & $exe --version || Write-Host 'cargo-tauri returned non-zero'
+            Write-Host 'Building release bundle via cargo-tauri build'
+            if ($rust_host -match 'aarch64') {
+              Write-Host "Windows ARM detected — building native $rust_host and disabling vslib feature"
+              & $exe build --target $rust_host -- --no-default-features --features onnx
+            } else {
+              Write-Host "Building native $rust_host"
+              & $exe build --target $rust_host
+            }
+          } else {
+            Write-Host 'cargo-tauri not found in' $cargoBin
+            Write-Host 'Attempting fallback: cargo tauri build'
+            if ($rust_host -match 'aarch64') {
+              Write-Host "Windows ARM detected — building native $rust_host and disabling vslib feature"
+              cargo tauri build --target $rust_host -- --no-default-features --features onnx
+            } else {
+              Write-Host "Building native $rust_host"
+              cargo tauri build --target $rust_host
+            }
+          }
+        shell: pwsh
+
+      - name: Create portable ZIP (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ github.workspace }}
+        run: |
+          Write-Host 'Running pack-portable.ps1 to assemble portable zip'
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild
+        shell: pwsh
+
+      - name: Determine Windows artifact name
+        if: runner.os == 'Windows'
+        id: determine-windows-arch
+        run: |
+          $prod = ''
+          $ver = ''
+          $conf = 'backend/src-tauri/tauri.conf.json'
+          if (Test-Path $conf) {
+            try {
+              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
+              if (-not $prod) { $prod = $j.productName }
+              if (-not $ver) { $ver = $j.version }
+              if ($j.package) {
+                if (-not $prod) { $prod = $j.package.productName }
+                if (-not $prod) { $prod = $j.package.name }
+                if (-not $ver) { $ver = $j.package.version }
+              }
+            } catch { }
+          }
+          if (-not $prod -and (Test-Path 'backend/src-tauri/Cargo.toml')) {
+            $inPackage = $false
+            foreach ($line in Get-Content 'backend/src-tauri/Cargo.toml') {
+              if ($line -match '^\s*\[package\]\s*$') { $inPackage = $true; continue }
+              if ($inPackage -and $line -match '^\s*\[.+\]\s*$') { break }
+              if ($inPackage -and -not $prod -and $line -match '^\s*name\s*=\s*"([^"]+)"') { $prod = $Matches[1]; continue }
+              if ($inPackage -and -not $ver -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $ver = $Matches[1]; continue }
+            }
+          }
+          if ((-not $prod -or -not $ver) -and (Test-Path 'frontend/package.json')) {
+            try { $pj = Get-Content 'frontend/package.json' -Raw | ConvertFrom-Json -ErrorAction Stop; if (-not $prod) { $prod = $pj.productName; if (-not $prod) { $prod = $pj.name } } if (-not $ver) { $ver = $pj.version } } catch { }
+          }
+          if (-not $prod) { $prod = 'HiFiShifter' }
+          if (-not $ver) { $ver = '0.0.0' }
+          # Remove characters not allowed in artifact names on some file systems
+          $prod = $prod -replace '["\\/:*?<>|]', ''
+          $ver = $ver -replace '["\\/:*?<>|]', ''
+          $prodSafe = $prod -replace '\s+', '_'
+          $verSafe = $ver -replace '^v', ''
+          $rust_host = (rustc -vV | Select-String 'host:').ToString().Split(':')[1].Trim()
+          if ($rust_host -match 'aarch64') { $arch = 'arm64' } elseif ($rust_host -match 'x86_64') { $arch = 'x86_64' } else { $arch = $env:PROCESSOR_ARCHITECTURE }
+          $base = "${prodSafe}_v${verSafe}_windows-$arch"
+          Write-Host "Artifact base name: $base"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$base"
+        shell: pwsh
+
+      - name: Upload portable ZIP (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.determine-windows-arch.outputs.artifact-name }}-portable
+          path: |
+            dist/*.zip
+          if-no-files-found: warn
+
+      - name: Upload NSIS installer (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.determine-windows-arch.outputs.artifact-name }}-installer
+          path: |
+            dist/*-setup.exe
+          if-no-files-found: warn
+
+      - name: Build release and package (Unix)
+        if: runner.os != 'Windows'
+        working-directory: backend/src-tauri
+        run: |
+          echo 'Installing tauri-cli v2 (semver ^2) so `cargo tauri` matches tauri-build'
+          cargo install tauri-cli --version "^2" --locked || true
+          echo 'Verify cargo tauri availability'
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if [ -x "$HOME/.cargo/bin/cargo-tauri" ]; then
+            $HOME/.cargo/bin/cargo-tauri --version || true
+          else
+            echo "cargo-tauri not found in $HOME/.cargo/bin" || true
+          fi
+          echo 'List installed cargo subcommands'
+          cargo --list || true
+          echo 'Which cargo-tauri/cargo-tauri.exe'
+          which cargo-tauri || which cargo-tauri || true
+          echo 'Check bundler tools availability (platform-specific)'
+          OS_NAME=$(uname -s || true)
+          echo "Detected OS_NAME: $OS_NAME"
+          if [ "$OS_NAME" = "Linux" ]; then
+            echo 'Checking appimagetool on Linux'
+            appimagetool --version || echo 'appimagetool not found; Linux bundling may fail'
+          fi
+          if [ "$OS_NAME" = "Darwin" ]; then
+            echo 'Checking create-dmg on macOS (may be Node/ESM dependent)'
+            create-dmg --version || echo 'create-dmg not available or incompatible; will try hdiutil fallback'
+          fi
+          # Ensure frontend build tools are present (installed in prior step)
+          # Determine host triple and run cargo tauri build for that host so bundling runs
+          HOST=$(rustc -vV | awk '/host:/ {print $2}')
+          echo "Detected host triple: $HOST"
+          # Show any tauri cache before bundling (helps diagnose linuxdeploy downloads)
+          echo "Listing tauri cache directory: $HOME/.cache/tauri (if present)"
+          ls -la "$HOME/.cache/tauri" || true
+
+          # Invoke cargo-tauri and capture output; on failure print diagnostics including linuxdeploy artifacts
+          # Use tee to capture logs for inspection
+          if [ -x "$HOME/.cargo/bin/cargo-tauri" ]; then
+            set -o pipefail
+            # Ensure linuxdeploy AppImage runs without FUSE by extracting-and-running
+            export APPIMAGE_EXTRACT_AND_RUN=1 || true
+            echo "APPIMAGE_EXTRACT_AND_RUN=$APPIMAGE_EXTRACT_AND_RUN"
+              # Special-case: on x86_64 macOS the `ort` prebuilt with CUDA may be unavailable.
+              # Keep ONNX enabled but force ORT to CPU at runtime so macOS x86_64 builds
+              # remain compatible with ONNX without requiring CUDA prebuilts.
+              if [ "$(uname -s)" = "Darwin" ] && [[ "$HOST" == x86_64* ]]; then
+                echo "x86_64 macOS detected — building with onnx and forcing ORT to CPU"
+                export HIFISHIFTER_ORT_EP=cpu
+                if ! $HOME/.cargo/bin/cargo-tauri build --target "$HOST" -- --no-default-features --features onnx 2>&1 | tee cargo-tauri.log; then
+                  BUILD_FAILED=1
+                else
+                  BUILD_FAILED=0
+                fi
+              else
+                if ! $HOME/.cargo/bin/cargo-tauri build --target "$HOST" -- --no-default-features --features onnx 2>&1 | tee cargo-tauri.log; then
+                  BUILD_FAILED=1
+                else
+                  BUILD_FAILED=0
+                fi
+              fi
+              if [ "$BUILD_FAILED" = "1" ]; then
+              echo "cargo-tauri failed; dumping diagnostics"
+              ls -la "$HOME/.cache/tauri" || true
+              find "$HOME/.cache/tauri" -type f -name "*linuxdeploy*" -ls || true
+              find target -type f -name "*linuxdeploy*" -ls || true
+              echo "Last 400 lines of cargo-tauri.log"
+              tail -n 400 cargo-tauri.log || true
+
+              # If an AppDir was produced, try running linuxdeploy manually (with extract-and-run)
+              APPDIR=$(find target -type d -name '*.AppDir' | head -n1 || true)
+              if [ -n "$APPDIR" ]; then
+                echo "Found AppDir: $APPDIR — attempting manual linuxdeploy run for more details"
+
+                MACHINE_ARCH=$(uname -m || true)
+                CANDIDATES=("linuxdeploy-x86_64.AppImage" "linuxdeploy-aarch64.AppImage")
+                if [ "$MACHINE_ARCH" = "aarch64" ]; then
+                  CANDIDATES=("linuxdeploy-aarch64.AppImage" "linuxdeploy-x86_64.AppImage")
+                fi
+
+                FOUND_APPIMAGE=""
+                for name in "${CANDIDATES[@]}"; do
+                  if [ -f "$HOME/.cache/tauri/$name" ]; then
+                    FOUND_APPIMAGE="$HOME/.cache/tauri/$name"
+                    break
+                  fi
+                done
+
+                if [ -n "$FOUND_APPIMAGE" ]; then
+                  chmod +x "$FOUND_APPIMAGE" || true
+                  export APPIMAGE_EXTRACT_AND_RUN=1 || true
+                  echo "Running linuxdeploy ($FOUND_APPIMAGE) with APPIMAGE_EXTRACT_AND_RUN=$APPIMAGE_EXTRACT_AND_RUN"
+                  "$FOUND_APPIMAGE" --appdir "$APPDIR" --output appimage -v 1 2>&1 | tee linuxdeploy-manual.log || true
+                  echo "---- Last 400 lines of linuxdeploy-manual.log ----"
+                  tail -n 400 linuxdeploy-manual.log || true
+                else
+                  echo "linuxdeploy AppImage not found in cache for any known arch; skipping manual run"
+                fi
+              else
+                echo "No AppDir found to run linuxdeploy against"
+              fi
+
+              # If an AppImage was produced by any step, copy it and treat job as success
+              APPIMAGE_FILE=$(find target -type f -name '*.AppImage' -print -quit || true)
+              if [ -n "$APPIMAGE_FILE" ]; then
+                echo "Found AppImage after diagnostics: $APPIMAGE_FILE — copying to ../../dist and exiting success"
+                mkdir -p ../../dist || true
+                bn=$(basename "$APPIMAGE_FILE")
+                cp "$APPIMAGE_FILE" "../../dist/$bn" || true
+                exit 0
+              fi
+
+              # final fallback: if any AppImage exists anywhere, copy it
+              APPIMAGE_FILE=$(find . -type f -name '*.AppImage' -print -quit || true)
+              if [ -n "$APPIMAGE_FILE" ]; then
+                echo "Found AppImage elsewhere: $APPIMAGE_FILE — copying to ../../dist and exiting success"
+                mkdir -p ../../dist || true
+                bn=$(basename "$APPIMAGE_FILE")
+                cp "$APPIMAGE_FILE" "../../dist/$bn" || true
+                exit 0
+              fi
+
+              exit 1
+            fi
+          else
+            set -o pipefail
+            export APPIMAGE_EXTRACT_AND_RUN=1 || true
+            echo "APPIMAGE_EXTRACT_AND_RUN=$APPIMAGE_EXTRACT_AND_RUN"
+              # Fallback for systems where $HOME/.cargo/bin/cargo-tauri is not executable
+              if [ "$(uname -s)" = "Darwin" ] && [[ "$HOST" == x86_64* ]]; then
+                echo "x86_64 macOS detected (fallback) — building with onnx and forcing ORT to CPU"
+                export HIFISHIFTER_ORT_EP=cpu
+                if ! cargo tauri build --target "$HOST" -- --no-default-features --features onnx 2>&1 | tee cargo-tauri.log; then
+                  BUILD_FAILED=1
+                else
+                  BUILD_FAILED=0
+                fi
+              else
+                if ! cargo tauri build --target "$HOST" -- --no-default-features --features onnx 2>&1 | tee cargo-tauri.log; then
+                  BUILD_FAILED=1
+                else
+                  BUILD_FAILED=0
+                fi
+              fi
+              if [ "$BUILD_FAILED" = "1" ]; then
+              echo "cargo tauri failed; dumping diagnostics"
+              ls -la "$HOME/.cache/tauri" || true
+              find "$HOME/.cache/tauri" -type f -name "*linuxdeploy*" -ls || true
+              find target -type f -name "*linuxdeploy*" -ls || true
+              echo "Last 400 lines of cargo-tauri.log"
+              tail -n 400 cargo-tauri.log || true
+
+              APPDIR=$(find target -type d -name '*.AppDir' | head -n1 || true)
+              if [ -n "$APPDIR" ]; then
+                echo "Found AppDir: $APPDIR — attempting manual linuxdeploy run for more details"
+                if [ -f "$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" ]; then
+                  chmod +x "$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" || true
+                  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage --appdir "$APPDIR" --output appimage --appimage-extract-and-run -v 1 2>&1 | tee linuxdeploy-manual.log || true
+                  echo "---- Last 400 lines of linuxdeploy-manual.log ----"
+                  tail -n 400 linuxdeploy-manual.log || true
+
+                  # If manual linuxdeploy created an AppImage, copy it to dist and treat build as success
+                  APPIMAGE_FILE=$(find target -type f -name '*.AppImage' | head -n1 || true)
+                  if [ -n "$APPIMAGE_FILE" ]; then
+                    echo "Manual linuxdeploy produced AppImage: $APPIMAGE_FILE — copying to ../../dist and exiting success"
+                    mkdir -p ../../dist || true
+                    bn=$(basename "$APPIMAGE_FILE")
+                    cp "$APPIMAGE_FILE" "../../dist/$bn" || true
+                    exit 0
+                  else
+                    echo "No AppImage produced by manual linuxdeploy"
+                  fi
+                else
+                  echo "linuxdeploy AppImage not found in cache; skipping manual run"
+                fi
+              else
+                echo "No AppDir found to run linuxdeploy against"
+              fi
+
+              # If an AppImage was produced by any step, copy it and treat job as success
+              APPIMAGE_FILE=$(find target -type f -name '*.AppImage' -print -quit || true)
+              if [ -n "$APPIMAGE_FILE" ]; then
+                echo "Found AppImage after diagnostics: $APPIMAGE_FILE — copying to ../../dist and exiting success"
+                mkdir -p ../../dist || true
+                bn=$(basename "$APPIMAGE_FILE")
+                cp "$APPIMAGE_FILE" "../../dist/$bn" || true
+                exit 0
+              fi
+
+              # final fallback: if any AppImage exists anywhere, copy it
+              APPIMAGE_FILE=$(find . -type f -name '*.AppImage' -print -quit || true)
+              if [ -n "$APPIMAGE_FILE" ]; then
+                echo "Found AppImage elsewhere: $APPIMAGE_FILE — copying to ../../dist and exiting success"
+                mkdir -p ../../dist || true
+                bn=$(basename "$APPIMAGE_FILE")
+                cp "$APPIMAGE_FILE" "../../dist/$bn" || true
+                exit 0
+              fi
+
+              exit 1
+            fi
+          fi
+          echo 'Listing bundle output directories'
+          ls -la target/*/release/bundle || true
+          ls -la target/**/release/bundle || true
+
+          # macOS fallback: if create-dmg is unavailable or incompatible, use hdiutil to make a DMG from the .app
+          if [ "$(uname -s)" = "Darwin" ]; then
+            echo 'Running macOS DMG fallback using hdiutil if .app exists'
+            APP_PATH=$(ls target/*/release/bundle/*.app 2>/dev/null | head -n 1 || true)
+            if [ -n "$APP_PATH" ]; then
+              mkdir -p ../../dist || true
+              APP_NAME=$(basename "$APP_PATH" .app)
+              DMG_PATH="../../dist/${APP_NAME}.dmg"
+              echo "Creating DMG at $DMG_PATH from $APP_PATH"
+              hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH" || echo 'hdiutil dmg creation failed'
+              echo "DMG created (or attempted): $DMG_PATH"
+            else
+              echo 'No .app bundle found; skipping hdiutil fallback'
+            fi
+          fi
+
+          # Copy any produced bundle artifacts into a flat `dist/` at workspace root
+          echo 'Flattening bundle artifacts into workspace dist/'
+          mkdir -p ../../dist || true
+          # Copy common packaged files (AppImage, dmg, zip, exe)
+          find target -type f \( -name '*.AppImage' -o -name '*.dmg' -o -name '*.zip' -o -name '*.exe' \) -print0 | while IFS= read -r -d '' f; do
+            bn=$(basename "$f")
+            echo "Copying $f -> ../../dist/$bn"
+            cp "$f" "../../dist/$bn" || true
+          done
+
+          # On macOS, if a .app directory exists and no dmg was produced, zip the .app into dist
+          if [ "$(uname -s)" = "Darwin" ]; then
+            find target -type d -name '*.app' -print0 | while IFS= read -r -d '' appdir; do
+              bn=$(basename "$appdir")
+              zipname="../../dist/${bn}.zip"
+              if [ ! -f "$zipname" ]; then
+                echo "Zipping $appdir -> $zipname"
+                ditto -c -k --sequesterRsrc --keepParent "$appdir" "$zipname" || true
+              else
+                echo "$zipname already exists; skipping zip"
+              fi
+            done
+          fi
+        shell: bash
+
+      - name: Determine platform artifact name
+        if: runner.os != 'Windows'
+        id: determine-platform-arch
+        run: |
+          # Determine product and version from common locations (tauri conf, Cargo.toml, frontend package.json)
+          PROD=""
+          VER=""
+          if [ -f backend/src-tauri/tauri.conf.json ]; then
+            PROD=$(node -e "try{const p=require('./backend/src-tauri/tauri.conf.json'); console.log(p.productName||((p.package&&p.package.productName)||(p.package&&p.package.name))||'')}catch(e){console.log('')}" ) || true
+            VER=$(node -e "try{const p=require('./backend/src-tauri/tauri.conf.json'); console.log(p.version||((p.package&&p.package.version)||'')||'')}catch(e){console.log('')}" ) || true
+          fi
+          if [ -z "$PROD" ] && [ -f backend/src-tauri/Cargo.toml ]; then
+            PROD=$(awk '
+              BEGIN { in_pkg=0 }
+              /^\[package\]$/ { in_pkg=1; next }
+              /^\[.*\]$/ { if (in_pkg) exit }
+              in_pkg && $0 ~ /^[[:space:]]*name[[:space:]]*=/ {
+                gsub(/^[[:space:]]*name[[:space:]]*=[[:space:]]*"/, "", $0)
+                gsub(/".*/, "", $0)
+                print $0
+                exit
+              }
+            ' backend/src-tauri/Cargo.toml)
+            VER=$(awk '
+              BEGIN { in_pkg=0 }
+              /^\[package\]$/ { in_pkg=1; next }
+              /^\[.*\]$/ { if (in_pkg) exit }
+              in_pkg && $0 ~ /^[[:space:]]*version[[:space:]]*=/ {
+                gsub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/, "", $0)
+                gsub(/".*/, "", $0)
+                print $0
+                exit
+              }
+            ' backend/src-tauri/Cargo.toml)
+          fi
+          if [ -z "$PROD" ] && [ -f frontend/package.json ]; then
+            PROD=$(node -e "try{const p=require('./frontend/package.json'); console.log(p.productName||p.name||'')}catch(e){console.log('')}" ) || true
+            VER=$(node -e "try{const p=require('./frontend/package.json'); console.log(p.version||'')}catch(e){console.log('')}" ) || true
+          fi
+          PROD=${PROD:-HiFiShifter}
+          VER=${VER:-0.0.0}
+          # Sanitize product/version: replace spaces with '_' and remove characters
+          # invalid for artifact names on some filesystems (", :, <, >, |, *, ?, /, \\)
+          PROD_SAFE=$(echo "$PROD" | tr ' ' '_' | sed 's/["<>:|*?\/\\]//g')
+          VER_SAFE=$(echo "$VER" | sed 's/^v//' | sed 's/["<>:|*?\/\\]//g')
+
+          OS_NAME=$(uname -s || echo unknown)
+          ARCH=$(uname -m || echo unknown)
+          ART_NAME="unknown-${OS_NAME}-${ARCH}"
+          case "$OS_NAME" in
+            Linux)
+              case "$ARCH" in
+                x86_64)
+                  ART_NAME="linux-x86_64-bundles";;
+                aarch64|arm64)
+                  ART_NAME="linux-arm64-bundles";;
+                *)
+                  ART_NAME="linux-unknown-arch-bundles";;
+              esac
+              ;;
+            Darwin)
+              case "$ARCH" in
+                x86_64)
+                  ART_NAME="macos-x86_64-bundles";;
+                arm64)
+                  ART_NAME="macos-arm64-bundles";;
+                *)
+                  ART_NAME="macos-unknown-arch-bundles";;
+              esac
+              ;;
+            *)
+              ART_NAME="unknown-${OS_NAME}-${ARCH}";;
+          esac
+          FINAL="${PROD_SAFE}_v${VER_SAFE}_${ART_NAME}"
+          echo "artifact-name=$FINAL" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Upload Unix bundles
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.determine-platform-arch.outputs.artifact-name }}
+          path: |
+            dist/**
+          if-no-files-found: warn

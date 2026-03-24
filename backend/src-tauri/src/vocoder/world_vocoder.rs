@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 // Direct FFI bindings to statically-linked WORLD library
 
 #[repr(C)]
@@ -153,16 +154,19 @@ enum WorldF0Method {
 }
 
 fn world_f0_method() -> WorldF0Method {
-    match std::env::var("HIFISHIFTER_WORLD_F0")
-        .ok()
-        .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("dio") => WorldF0Method::Dio,
-        Some("harvest") => WorldF0Method::Harvest,
-        _ => WorldF0Method::Harvest,
-    }
+    static METHOD: OnceLock<WorldF0Method> = OnceLock::new();
+    *METHOD.get_or_init(|| {
+        match std::env::var("HIFISHIFTER_WORLD_F0")
+            .ok()
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("dio") => WorldF0Method::Dio,
+            Some("harvest") => WorldF0Method::Harvest,
+            _ => WorldF0Method::Harvest,
+        }
+    })
 }
 
 pub fn is_available() -> bool {
@@ -184,6 +188,100 @@ fn env_f64(name: &str) -> Option<f64> {
         .and_then(|s| s.trim().parse::<f64>().ok())
 }
 
+const WORLD_DRY_SILENCE_RMS: f64 = 0.003;
+
+fn blend_unvoiced_regions_with_silence_gate(
+    out: &mut [f64],
+    dry: &[f64],
+    voiced: &[bool],
+    fp: f64,
+    fs: i32,
+) {
+    static SILENCE_RMS: OnceLock<f64> = OnceLock::new();
+    let silence_rms = *SILENCE_RMS.get_or_init(|| {
+        env_f64("HIFISHIFTER_WORLD_DRY_SILENCE_RMS")
+            .unwrap_or(WORLD_DRY_SILENCE_RMS)
+            .max(0.0)
+    });
+    blend_unvoiced_regions_with_silence_gate_impl(out, dry, voiced, fp, fs, silence_rms);
+}
+
+fn blend_unvoiced_regions_with_silence_gate_impl(
+    out: &mut [f64],
+    dry: &[f64],
+    voiced: &[bool],
+    fp: f64,
+    fs: i32,
+    silence_rms: f64,
+) {
+    if out.is_empty() || dry.is_empty() || voiced.is_empty() {
+        return;
+    }
+
+    let fade_ms = 10.0f64;
+    let fade_samples = ((fade_ms / 1000.0) * (fs.max(1) as f64)).round().max(0.0) as usize;
+    let frame_samples = ((fp.max(0.1) / 1000.0) * (fs.max(1) as f64))
+        .round()
+        .max(1.0) as usize;
+
+    let mut dry_allowed = vec![false; voiced.len()];
+    for (fi, allowed) in dry_allowed.iter_mut().enumerate() {
+        if voiced[fi] {
+            continue;
+        }
+        let start = fi.saturating_mul(frame_samples).min(dry.len());
+        let end = ((fi + 1).saturating_mul(frame_samples)).min(dry.len());
+        if start >= end {
+            continue;
+        }
+        let mut energy = 0.0f64;
+        for &sample in &dry[start..end] {
+            energy += sample * sample;
+        }
+        let rms = (energy / (end - start) as f64).sqrt();
+        *allowed = rms >= silence_rms;
+    }
+
+    let mut w_prev = 0.0f64;
+    let mut ramp_left = 0usize;
+    let mut ramp_from = 0.0f64;
+    let mut ramp_to = 0.0f64;
+
+    for si in 0..out.len().min(dry.len()) {
+        let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
+        let fi = (t_ms / fp.max(0.1)).floor().max(0.0) as usize;
+        let target_w = if fi < voiced.len() && voiced[fi] {
+            1.0f64
+        } else if fi < dry_allowed.len() && dry_allowed[fi] {
+            0.0f64
+        } else {
+            1.0f64
+        };
+
+        if ramp_left == 0 && (target_w - w_prev).abs() > 1e-9 && fade_samples > 0 {
+            ramp_left = fade_samples;
+            ramp_from = w_prev;
+            ramp_to = target_w;
+        }
+
+        let w = if ramp_left > 0 {
+            let k = (fade_samples - ramp_left) as f64 / (fade_samples as f64);
+            ramp_left = ramp_left.saturating_sub(1);
+            ramp_from + (ramp_to - ramp_from) * k.clamp(0.0, 1.0)
+        } else {
+            target_w
+        };
+
+        if ramp_left == 0 {
+            w_prev = target_w;
+        }
+
+        let wet = out[si];
+        let dry_sample = dry[si];
+        out[si] = wet * w + dry_sample * (1.0 - w);
+    }
+}
+
 fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ceil: f64) {
     if f0.is_empty() {
         return;
@@ -203,7 +301,8 @@ fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ce
     // 2) Fill short unvoiced gaps inside voiced regions.
     // This reduces analysis/synthesis instability ("gargling") when f0 flickers to 0 for a few frames.
     // Default: 15ms; set HIFISHIFTER_WORLD_F0_GAP_MS=0 to disable.
-    let gap_ms = env_f64("HIFISHIFTER_WORLD_F0_GAP_MS").unwrap_or(15.0);
+    static GAP_MS: OnceLock<f64> = OnceLock::new();
+    let gap_ms = *GAP_MS.get_or_init(|| env_f64("HIFISHIFTER_WORLD_F0_GAP_MS").unwrap_or(15.0));
     if gap_ms <= 0.0 {
         return;
     }
@@ -449,8 +548,7 @@ fn vocode_one(
     unsafe { InitializeCheapTrickOption(fs, &mut ct_opt as *mut CheapTrickOption) };
     ct_opt.f0_floor = f0_floor.max(20.0);
 
-    let fft_size =
-        unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
+    let fft_size = unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
     if fft_size <= 0 {
         return Err("WORLD: invalid fft_size".to_string());
     }
@@ -459,8 +557,11 @@ fn vocode_one(
     let spec_bins = (fft_size as usize / 2) + 1;
 
     // Allocate spectrogram and aperiodicity as 2D arrays.
-    let mut spectrogram: Vec<Vec<f64>> = vec![vec![0.0f64; spec_bins]; f0.len()];
-    let mut sp_ptrs: Vec<*mut f64> = spectrogram.iter_mut().map(|row| row.as_mut_ptr()).collect();
+    let mut spectrogram = vec![0.0f64; f0.len() * spec_bins];
+    let mut sp_ptrs: Vec<*mut f64> = spectrogram
+        .chunks_exact_mut(spec_bins)
+        .map(|row| row.as_mut_ptr())
+        .collect();
 
     unsafe {
         CheapTrick(
@@ -481,9 +582,9 @@ fn vocode_one(
     let mut d4c_opt = D4COption { threshold: 0.85 };
     unsafe { InitializeD4COption(&mut d4c_opt as *mut D4COption) };
 
-    let mut aperiodicity: Vec<Vec<f64>> = vec![vec![0.0f64; spec_bins]; f0.len()];
+    let mut aperiodicity = vec![0.0f64; f0.len() * spec_bins];
     let mut ap_ptrs: Vec<*mut f64> = aperiodicity
-        .iter_mut()
+        .chunks_exact_mut(spec_bins)
         .map(|row| row.as_mut_ptr())
         .collect();
 
@@ -512,13 +613,11 @@ fn vocode_one(
     let mut y = vec![0.0f64; x_f64.len()];
 
     unsafe {
-        let sp_const: Vec<*const f64> = sp_ptrs.iter().map(|&p| p as *const f64).collect();
-        let ap_const: Vec<*const f64> = ap_ptrs.iter().map(|&p| p as *const f64).collect();
         Synthesis(
             shifted_f0.as_ptr(),
             f0_len_i32,
-            sp_const.as_ptr(),
-            ap_const.as_ptr(),
+            sp_ptrs.as_ptr() as *const *const f64,
+            ap_ptrs.as_ptr() as *const *const f64,
             fft_size,
             fp,
             fs,
@@ -531,9 +630,6 @@ fn vocode_one(
     // This significantly reduces the typical "sand/noise" artifacts after pitch edits,
     // especially on fricatives/breath sounds where WORLD vocoding is brittle.
     // NOTE: This is not a low-pass on the control curve; it is voiced/unvoiced gating.
-    let fade_ms = 10.0f64;
-    let fade_samples = ((fade_ms / 1000.0) * (fs.max(1) as f64)).round().max(0.0) as usize;
-
     let mut out = y;
     if !voiced.is_empty() {
         let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
@@ -547,46 +643,7 @@ fn vocode_one(
                 fp
             );
         }
-
-        let mut w_prev = 0.0f64;
-        let mut ramp_left = 0usize;
-        let mut ramp_from = 0.0f64;
-        let mut ramp_to = 0.0f64;
-
-        for si in 0..out.len() {
-            // Map sample time -> frame index.
-            let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
-            let fi = (t_ms / fp).floor().max(0.0) as usize;
-            let target_w = if fi < voiced.len() && voiced[fi] {
-                1.0f64
-            } else {
-                0.0f64
-            };
-
-            // Start a new ramp when target changes.
-            if ramp_left == 0 && (target_w - w_prev).abs() > 1e-9 && fade_samples > 0 {
-                ramp_left = fade_samples;
-                ramp_from = w_prev;
-                ramp_to = target_w;
-            }
-
-            let w = if ramp_left > 0 {
-                let k = (fade_samples - ramp_left) as f64 / (fade_samples as f64);
-                ramp_left = ramp_left.saturating_sub(1);
-                ramp_from + (ramp_to - ramp_from) * k.clamp(0.0, 1.0)
-            } else {
-                target_w
-            };
-
-            // Overwrite state only when we're not in-ramp.
-            if ramp_left == 0 {
-                w_prev = target_w;
-            }
-
-            let dry = x_f64[si];
-            let wet = out[si];
-            out[si] = wet * w + dry * (1.0 - w);
-        }
+        blend_unvoiced_regions_with_silence_gate(&mut out, x_f64, &voiced, fp, fs);
     }
 
     Ok(out)
@@ -618,12 +675,10 @@ fn vocode_one_streaming(
                 compute_f0_with_positions_dio_stonemask(x_f64, fs, fp, f0_floor, f0_ceil)
             })?
         }
-        WorldF0Method::Dio => compute_f0_with_positions_dio_stonemask(
-            x_f64, fs, fp, f0_floor, f0_ceil,
-        )
-        .or_else(|_e| {
-            compute_f0_with_positions_harvest(x_f64, fs, fp, f0_floor, f0_ceil)
-        })?,
+        WorldF0Method::Dio => {
+            compute_f0_with_positions_dio_stonemask(x_f64, fs, fp, f0_floor, f0_ceil)
+                .or_else(|_e| compute_f0_with_positions_harvest(x_f64, fs, fp, f0_floor, f0_ceil))?
+        }
     };
 
     cleanup_f0_inplace(&mut f0, fp, f0_floor, f0_ceil);
@@ -661,8 +716,7 @@ fn vocode_one_streaming(
     unsafe { InitializeCheapTrickOption(fs, &mut ct_opt as *mut CheapTrickOption) };
     ct_opt.f0_floor = f0_floor.max(20.0);
 
-    let fft_size =
-        unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
+    let fft_size = unsafe { GetFFTSizeForCheapTrick(fs, &ct_opt as *const CheapTrickOption) };
     if fft_size <= 0 {
         return Err("WORLD: invalid fft_size".to_string());
     }
@@ -670,8 +724,11 @@ fn vocode_one_streaming(
 
     let spec_bins = (fft_size as usize / 2) + 1;
 
-    let mut spectrogram: Vec<Vec<f64>> = vec![vec![0.0f64; spec_bins]; f0.len()];
-    let mut sp_ptrs: Vec<*mut f64> = spectrogram.iter_mut().map(|row| row.as_mut_ptr()).collect();
+    let mut spectrogram = vec![0.0f64; f0.len() * spec_bins];
+    let mut sp_ptrs: Vec<*mut f64> = spectrogram
+        .chunks_exact_mut(spec_bins)
+        .map(|row| row.as_mut_ptr())
+        .collect();
 
     unsafe {
         CheapTrick(
@@ -693,9 +750,9 @@ fn vocode_one_streaming(
     let mut d4c_opt = D4COption { threshold: 0.85 };
     unsafe { InitializeD4COption(&mut d4c_opt as *mut D4COption) };
 
-    let mut aperiodicity: Vec<Vec<f64>> = vec![vec![0.0f64; spec_bins]; f0.len()];
+    let mut aperiodicity = vec![0.0f64; f0.len() * spec_bins];
     let mut ap_ptrs: Vec<*mut f64> = aperiodicity
-        .iter_mut()
+        .chunks_exact_mut(spec_bins)
         .map(|row| row.as_mut_ptr())
         .collect();
 
@@ -723,11 +780,19 @@ fn vocode_one_streaming(
         let _ = synth.pull_samples();
     }
 
-    let pushed = synth.push_frames(shifted_f0.clone(), spectrogram.clone(), aperiodicity.clone());
+    let pushed = synth.push_frames(
+        shifted_f0.clone(),
+        spectrogram.clone(),
+        aperiodicity.clone(),
+    );
     if !pushed {
         // 推入失败（缓冲区满），先取出再重试
         let _ = synth.pull_samples();
-        synth.push_frames(shifted_f0.clone(), spectrogram.clone(), aperiodicity.clone());
+        synth.push_frames(
+            shifted_f0.clone(),
+            spectrogram.clone(),
+            aperiodicity.clone(),
+        );
     }
 
     let y_f64_raw = synth.pull_samples();
@@ -744,13 +809,11 @@ fn vocode_one_streaming(
             .map_err(|_| "WORLD: output too long".to_string())?;
         let mut y = vec![0.0f64; x_f64.len()];
         unsafe {
-            let sp_const: Vec<*const f64> = sp_ptrs.iter().map(|&p| p as *const f64).collect();
-            let ap_const: Vec<*const f64> = ap_ptrs.iter().map(|&p| p as *const f64).collect();
             Synthesis(
                 shifted_f0.as_ptr(),
                 f0_len_i32,
-                sp_const.as_ptr(),
-                ap_const.as_ptr(),
+                sp_ptrs.as_ptr() as *const *const f64,
+                ap_ptrs.as_ptr() as *const *const f64,
                 fft_size,
                 fp,
                 fs,
@@ -762,47 +825,9 @@ fn vocode_one_streaming(
     };
 
     // voiced/unvoiced 混合（与 vocode_one 相同逻辑）
-    let fade_ms = 10.0f64;
-    let fade_samples = ((fade_ms / 1000.0) * (fs.max(1) as f64)).round().max(0.0) as usize;
-
     let mut out = y_f64;
     if !voiced.is_empty() {
-        let mut w_prev = 0.0f64;
-        let mut ramp_left = 0usize;
-        let mut ramp_from = 0.0f64;
-        let mut ramp_to = 0.0f64;
-
-        for si in 0..out.len() {
-            let t_ms = (si as f64) * 1000.0 / (fs.max(1) as f64);
-            let fi = (t_ms / fp).floor().max(0.0) as usize;
-            let target_w = if fi < voiced.len() && voiced[fi] {
-                1.0f64
-            } else {
-                0.0f64
-            };
-
-            if ramp_left == 0 && (target_w - w_prev).abs() > 1e-9 && fade_samples > 0 {
-                ramp_left = fade_samples;
-                ramp_from = w_prev;
-                ramp_to = target_w;
-            }
-
-            let w = if ramp_left > 0 {
-                let k = (fade_samples - ramp_left) as f64 / (fade_samples as f64);
-                ramp_left = ramp_left.saturating_sub(1);
-                ramp_from + (ramp_to - ramp_from) * k.clamp(0.0, 1.0)
-            } else {
-                target_w
-            };
-
-            if ramp_left == 0 {
-                w_prev = target_w;
-            }
-
-            let dry = x_f64[si];
-            let wet = out[si];
-            out[si] = wet * w + dry * (1.0 - w);
-        }
+        blend_unvoiced_regions_with_silence_gate(&mut out, x_f64, &voiced, fp, fs);
     }
 
     Ok(out)
@@ -864,6 +889,9 @@ where
 
     let mut out = vec![0.0f32; total_frames];
 
+    // 预先在循环外部分配好内存池，避免在 Chunk 循环中疯狂申请堆内存
+    let mut x_f64 = Vec::with_capacity(chunk_len + overlap_len * 2);
+
     let mut pos = 0usize;
     while pos < total_frames {
         let chunk_start = pos;
@@ -873,7 +901,8 @@ where
         let pad_end = (chunk_end + overlap_len).min(total_frames);
 
         let x = &mono_pcm[pad_start..pad_end];
-        let mut x_f64 = Vec::with_capacity(x.len());
+        x_f64.clear(); // 清空上次的脏数据，但复用分配好的物理内存容量
+
         let mut mean = 0.0f64;
         for &v in x {
             mean += v as f64;

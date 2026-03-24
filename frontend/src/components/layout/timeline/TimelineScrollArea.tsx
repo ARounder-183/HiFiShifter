@@ -7,6 +7,12 @@ import {
     MIN_ROW_HEIGHT,
 } from "./constants";
 import { clamp } from "./math";
+import {
+    isNoneBinding,
+    isModifierActive,
+} from "../../../features/keybindings/keybindingsSlice";
+import type { Keybinding } from "../../../features/keybindings/types";
+import { getWheelGestureAxis } from "../wheelGesture";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
@@ -18,6 +24,11 @@ export const TimelineScrollArea: React.FC<
         rowHeight: number;
         setRowHeight: React.Dispatch<React.SetStateAction<number>>;
         setScrollLeft: React.Dispatch<React.SetStateAction<number>>;
+        scrollHorizontalKb?: Keybinding;
+        scrollVerticalKb?: Keybinding;
+        horizontalZoomKb?: Keybinding;
+        playheadSec?: number;
+        playheadZoomEnabled?: boolean;
     }
 > = ({
     scrollRef,
@@ -30,9 +41,21 @@ export const TimelineScrollArea: React.FC<
     setScrollLeft,
     onScroll,
     onWheel,
+    scrollHorizontalKb,
+    scrollVerticalKb,
+    horizontalZoomKb,
+    playheadSec,
+    playheadZoomEnabled,
     ...divProps
 }) => {
     const lastScrollLeftRef = useRef<number | null>(null);
+    const pxPerSecRef = useRef(pxPerSec);
+    const zoomRafRef = useRef<number | null>(null);
+    const zoomPendingRef = useRef<{
+        pointerX: number;
+        secAtPointer: number;
+        nextPxPerSec: number;
+    } | null>(null);
 
     // zoom 中心点以秒为基准
     const pendingZoomRef = useRef<{
@@ -40,6 +63,10 @@ export const TimelineScrollArea: React.FC<
         secAtPointer: number;
         nextPxPerSec: number;
     } | null>(null);
+
+    useEffect(() => {
+        pxPerSecRef.current = pxPerSec;
+    }, [pxPerSec]);
 
     function syncScrollLeft(scroller: HTMLDivElement) {
         const next = scroller.scrollLeft;
@@ -63,6 +90,15 @@ export const TimelineScrollArea: React.FC<
         return () => {};
     }, []);
 
+    useEffect(() => {
+        return () => {
+            if (zoomRafRef.current != null) {
+                cancelAnimationFrame(zoomRafRef.current);
+                zoomRafRef.current = null;
+            }
+        };
+    }, []);
+
     useLayoutEffect(() => {
         // Apply pending cursor-centered zoom scrollLeft after pxPerSec has updated
         const scroller = scrollRef.current;
@@ -72,12 +108,11 @@ export const TimelineScrollArea: React.FC<
 
         pendingZoomRef.current = null;
         const { secAtPointer, pointerX } = pending;
-        const secPerBeat = 60 / Math.max(1, bpm);
-        const pxPerBeat = pxPerSec * secPerBeat;
-        const totalBeats = Math.max(8, Math.ceil(projectSec));
+        // 直接使用 projectSec * pxPerSec 计算 maxScroll，避免依赖 DOM scrollWidth 的更新时序
+        // DOM 的 scrollWidth 在 useLayoutEffect 执行时可能还未更新到新值
         const maxScroll = Math.max(
             0,
-            Math.ceil(totalBeats * pxPerBeat) - scroller.clientWidth,
+            projectSec * pxPerSec - scroller.clientWidth,
         );
         const nextScrollLeft = Math.min(
             maxScroll,
@@ -101,6 +136,37 @@ export const TimelineScrollArea: React.FC<
 
         const handler: EventListener = (evt) => {
             const e = evt as globalThis.WheelEvent;
+            const wheelAxis = getWheelGestureAxis(e);
+            const noModifierPressed =
+                !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+            const isWheelBindingRequested = (kb?: Keybinding) => {
+                if (!kb) return false;
+                if (isNoneBinding(kb)) return noModifierPressed;
+                return isModifierActive(kb, e);
+            };
+            const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
+
+            // Scroll modifier: convert wheel to horizontal scroll
+            if (isWheelBindingRequested(scrollHorizontalKb)) {
+                e.preventDefault();
+                scroller.scrollLeft += e.deltaY;
+                syncScrollLeft(scroller);
+                return;
+            }
+
+            // Scroll modifier: convert wheel to vertical scroll
+            if (isWheelBindingRequested(scrollVerticalKb)) {
+                e.preventDefault();
+                scroller.scrollTop += e.deltaY;
+                return;
+            }
+
+            if (!horizontalZoomRequested && wheelAxis === "horizontal") {
+                e.preventDefault();
+                scroller.scrollLeft += e.deltaX;
+                syncScrollLeft(scroller);
+                return;
+            }
 
             // Ctrl + wheel: vertical zoom (track height)
             if (e.ctrlKey) {
@@ -116,28 +182,58 @@ export const TimelineScrollArea: React.FC<
             }
 
             // Wheel: horizontal zoom (time scale)
+            if (!horizontalZoomRequested) {
+                return;
+            }
             e.preventDefault();
             const dir = e.deltaY < 0 ? 1 : -1;
             const factor = dir > 0 ? 1.1 : 0.9;
             const bounds = scroller.getBoundingClientRect();
-            const pointerX = e.clientX - bounds.left;
 
+            // Playhead-based zoom: use playhead as anchor instead of pointer
+            let anchorX: number;
+            let anchorSec: number;
+            if (playheadZoomEnabled && playheadSec != null) {
+                anchorSec = playheadSec;
+                anchorX = anchorSec * pxPerSec - scroller.scrollLeft;
+                // 如果 playhead 在可视区域外，先将其居中，再以其为锚点缩放
+                if (anchorX < 0 || anchorX > bounds.width) {
+                    const centeredScrollLeft =
+                        anchorSec * pxPerSec - bounds.width / 2;
+                    scroller.scrollLeft = Math.max(0, centeredScrollLeft);
+                    anchorX = anchorSec * pxPerSec - scroller.scrollLeft;
+                }
+            } else {
+                anchorX = e.clientX - bounds.left;
+                anchorSec =
+                    (anchorX + scroller.scrollLeft) / Math.max(1e-9, pxPerSec);
+            }
+
+            const basePxPerSec =
+                zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
             const next = clamp(
-                pxPerSec * factor,
+                basePxPerSec * factor,
                 MIN_PX_PER_SEC,
                 MAX_PX_PER_SEC,
             );
-            if (Math.abs(next - pxPerSec) < 1e-9) return;
+            if (Math.abs(next - basePxPerSec) < 1e-9) return;
 
-            // 以秒为基准计算光标下的时间点
-            const secAtPointer =
-                (pointerX + scroller.scrollLeft) / Math.max(1e-9, pxPerSec);
-            pendingZoomRef.current = {
-                pointerX,
-                secAtPointer,
+            zoomPendingRef.current = {
+                pointerX: anchorX,
+                secAtPointer: anchorSec,
                 nextPxPerSec: next,
             };
-            setPxPerSec(next);
+
+            if (zoomRafRef.current == null) {
+                zoomRafRef.current = requestAnimationFrame(() => {
+                    zoomRafRef.current = null;
+                    const pending = zoomPendingRef.current;
+                    if (!pending) return;
+                    zoomPendingRef.current = null;
+                    pendingZoomRef.current = pending;
+                    setPxPerSec(pending.nextPxPerSec);
+                });
+            }
         };
 
         scroller.addEventListener("wheel", handler, {
@@ -146,7 +242,17 @@ export const TimelineScrollArea: React.FC<
         return () => {
             scroller.removeEventListener("wheel", handler);
         };
-    }, [pxPerSec, scrollRef, setPxPerSec, setRowHeight]);
+    }, [
+        pxPerSec,
+        scrollRef,
+        setPxPerSec,
+        setRowHeight,
+        scrollHorizontalKb,
+        scrollVerticalKb,
+        horizontalZoomKb,
+        playheadSec,
+        playheadZoomEnabled,
+    ]);
 
     return (
         <div

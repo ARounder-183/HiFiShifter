@@ -9,7 +9,7 @@ use super::types::ResampledStereo;
 
 /// 启动 stretch_stream 后台 worker。
 ///
-/// Worker 使用 RubberBand 实时拉伸器将 `src` 中 `[src_start, src_end)` 范围的 PCM
+/// Worker 使用 Signalsmith Stretch 实时拉伸器将 `src` 中 `[src_start, src_end)` 范围的 PCM
 /// 以 `playback_rate` 速率写入 `ring`，供音频回调低延迟读取。
 ///
 /// # 参数
@@ -43,23 +43,33 @@ pub(crate) fn spawn_stretch_stream(
     my_epoch: u64,
 ) {
     let ring_for_thread = ring;
-    let local0 = position_frames.load(Ordering::Relaxed).saturating_sub(start_frame);
+    let local0 = position_frames
+        .load(Ordering::Relaxed)
+        .saturating_sub(start_frame);
 
     thread::spawn(move || {
         let pr = playback_rate;
         let time_ratio = 1.0 / pr.max(1e-6);
-        eprintln!("[StretchStream] Starting worker: playback_rate={:.3}, time_ratio={:.6}", pr, time_ratio);
-        eprintln!("[StretchStream] Interpretation: playback_rate={:.3}x means audio plays {:.3}x faster", pr, pr);
-        eprintln!("[StretchStream] Rubberband time_ratio={:.6} means stretched duration is {:.6}x original", time_ratio, time_ratio);
-        let mut rb = match crate::rubberband::RubberBandRealtimeStretcher::new(
-            out_rate, 2, time_ratio,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[StretchStream ERROR] Failed to create RubberBand: {}", e);
-                return;
-            },
-        };
+        eprintln!(
+            "[StretchStream] Starting worker: playback_rate={:.3}, time_ratio={:.6}",
+            pr, time_ratio
+        );
+        eprintln!(
+            "[StretchStream] Interpretation: playback_rate={:.3}x means audio plays {:.3}x faster",
+            pr, pr
+        );
+        eprintln!("[StretchStream] Signalsmith time_ratio={:.6} means stretched duration is {:.6}x original", time_ratio, time_ratio);
+        let mut rb =
+            match crate::sstretch::SignalsmithRealtimeStretcher::new(out_rate, 2, time_ratio) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[StretchStream ERROR] Failed to create SignalsmithStretch: {}",
+                        e
+                    );
+                    return;
+                }
+            };
 
         let src_pcm = src.pcm.as_slice();
         let src_total = src.frames as u64;
@@ -120,26 +130,39 @@ pub(crate) fn spawn_stretch_stream(
 
             // Fill an input block from the source window.
             let mut want_in = 1024usize;
+
             if !repeat {
-                if in_cursor >= src_end {
+                // 非循环模式
+                if in_cursor >= src_end || in_cursor >= src_total {
                     std::thread::sleep(std::time::Duration::from_millis(4));
                     continue;
                 }
-                let remain = src_end.saturating_sub(in_cursor) as usize;
+                let remain = src_end
+                    .saturating_sub(in_cursor)
+                    .min(src_total.saturating_sub(in_cursor)) as usize;
                 want_in = want_in.min(remain.max(1));
-            }
 
-            for i in 0..want_in {
-                let src_f = if repeat {
-                    let loop_len = src_end.saturating_sub(src_start).max(1);
-                    let within = (in_cursor.saturating_sub(src_start) + i as u64) % loop_len;
-                    (src_start + within).min(src_total.saturating_sub(1))
-                } else {
-                    (in_cursor + i as u64).min(src_total.saturating_sub(1))
-                };
-                let si = (src_f as usize) * 2;
-                in_block[i * 2] = src_pcm.get(si).copied().unwrap_or(0.0);
-                in_block[i * 2 + 1] = src_pcm.get(si + 1).copied().unwrap_or(0.0);
+                // 直接使用底层内存拷贝 (memcpy)，完成数据填充
+                let start_idx = (in_cursor as usize) * 2;
+                let end_idx = start_idx + want_in * 2;
+                in_block[..want_in * 2].copy_from_slice(&src_pcm[start_idx..end_idx]);
+            } else {
+                // 循环模式
+                // 将循环不变量全部提到 for 循环外部，避免重复计算
+                let loop_len = src_end.saturating_sub(src_start).max(1);
+                let cursor_offset = in_cursor.saturating_sub(src_start);
+                let max_safe_idx = src_total.saturating_sub(1);
+
+                for i in 0..want_in {
+                    let within = (cursor_offset + i as u64) % loop_len;
+                    let src_f = (src_start + within).min(max_safe_idx);
+                    let si = (src_f as usize) * 2;
+
+                    // 上面已经用 max_safe_idx 锁死了上限，这里不可能越界。
+                    // 放弃 .get().copied().unwrap_or(0.0)，直接裸索引
+                    in_block[i * 2] = src_pcm[si];
+                    in_block[i * 2 + 1] = src_pcm[si + 1];
+                }
             }
 
             let _ = rb.process_interleaved(&in_block[..want_in * 2], false);

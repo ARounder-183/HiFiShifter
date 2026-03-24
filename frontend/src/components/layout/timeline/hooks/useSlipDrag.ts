@@ -5,6 +5,8 @@ import {
     checkpointHistory,
     setClipStateRemote,
     setClipSourceRange,
+    beginInteraction,
+    endInteraction,
 } from "../../../../features/session/sessionSlice";
 
 export type SlipDragState = {
@@ -54,6 +56,7 @@ export function useSlipDrag(deps: {
         if (!scroller) return;
 
         dispatch(checkpointHistory());
+        dispatch(beginInteraction());
 
         const bounds = scroller.getBoundingClientRect();
         const beatAtPointer = beatFromClientX(e.clientX, bounds, scroller.scrollLeft);
@@ -139,6 +142,9 @@ export function useSlipDrag(deps: {
             const drag = slipDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             slipDragRef.current = null;
+
+            // 先释放交互锁，再发最终持久化请求
+            dispatch(endInteraction());
 
             const session = sessionRef.current;
             for (const id of drag.clipIds) {

@@ -5,6 +5,8 @@ import {
 } from "@reduxjs/toolkit";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 
+export type SortMode = "name" | "date" | "size";
+
 interface FileBrowserState {
     visible: boolean;
     currentPath: string;
@@ -16,9 +18,13 @@ interface FileBrowserState {
     searchQuery: string; // 搜索过滤关键词
     searchResults: FileEntry[] | null; // null = 非搜索模式
     searchLoading: boolean;
+    regexEnabled: boolean;
+    sortMode: SortMode;
+    audioOnly: boolean; // 仅显示音频文件
 }
 
 const STORAGE_KEY = "hifishifter.fileBrowser.lastPath";
+const AUDIO_ONLY_KEY = "hifishifter.fileBrowser.audioOnly";
 
 function getInitialPath(): string {
     return localStorage.getItem(STORAGE_KEY) || "";
@@ -35,6 +41,9 @@ const initialState: FileBrowserState = {
     searchQuery: "",
     searchResults: null,
     searchLoading: false,
+    regexEnabled: false,
+    sortMode: "name" as SortMode,
+    audioOnly: localStorage.getItem(AUDIO_ONLY_KEY) === "true",
 };
 
 export const loadDirectory = createAsyncThunk(
@@ -94,6 +103,16 @@ const fileBrowserSlice = createSlice({
                 state.searchLoading = false;
             }
         },
+        toggleRegex(state) {
+            state.regexEnabled = !state.regexEnabled;
+        },
+        setSortMode(state, action: PayloadAction<SortMode>) {
+            state.sortMode = action.payload;
+        },
+        toggleAudioOnly(state) {
+            state.audioOnly = !state.audioOnly;
+            localStorage.setItem(AUDIO_ONLY_KEY, String(state.audioOnly));
+        },
     },
     extraReducers: (builder) => {
         builder
@@ -131,6 +150,9 @@ export const {
     setPreviewVolume,
     setPreviewingFile,
     setSearchQuery,
+    toggleRegex,
+    setSortMode,
+    toggleAudioOnly,
 } = fileBrowserSlice.actions;
 
 export default fileBrowserSlice.reducer;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -10,7 +10,7 @@ const paramFramePeriodCache = new Map<string, number>();
 
 export function usePianoRollData(args: {
     editParam: ParamName;
-    secondaryParamId: ParamName | null;
+    secondaryParamIds: ParamName[];
     pitchEnabled: boolean;
     paramsEpoch: number;
     rootTrackId: string | null;
@@ -23,13 +23,13 @@ export function usePianoRollData(args: {
     scrollLeftRef: React.MutableRefObject<number>;
     pxPerBeatRef: React.MutableRefObject<number>;
     invalidate: () => void;
-    /** 外部通知当前是否正在进行 live 编辑（pointer down 期间�?true）�?
-     *  �?true 时，pitch_orig_updated 触发的曲线刷新会被推迟到 pointer-up 后执行�?*/
+    /** 澶栭儴閫氱煡褰撳墠鏄惁姝ｅ湪杩涜 live 缂栬緫锛坧ointer down 鏈熼棿锟?true锛夛拷?
+     *  锟?true 鏃讹紝pitch_orig_updated 瑙﹀彂鐨勬洸绾垮埛鏂颁細琚帹杩熷埌 pointer-up 鍚庢墽琛岋拷?*/
     liveEditActiveRef?: React.MutableRefObject<boolean>;
 }) {
     const {
         editParam,
-        secondaryParamId,
+        secondaryParamIds,
         pitchEnabled,
         paramsEpoch,
         rootTrackId,
@@ -45,17 +45,18 @@ export function usePianoRollData(args: {
         liveEditActiveRef: externalLiveEditActiveRef,
     } = args;
 
-    // 内部 fallback：若外部未传�?liveEditActiveRef，则使用内部 ref（始终为 false）�?
+    // 鍐呴儴 fallback锛氳嫢澶栭儴鏈紶锟?liveEditActiveRef锛屽垯浣跨敤鍐呴儴 ref锛堝缁堜负 false锛夛拷?
     const internalLiveEditActiveRef = useRef(false);
     const liveEditActiveRef =
         externalLiveEditActiveRef ?? internalLiveEditActiveRef;
 
-    // �?pitch_orig_updated 到达时若正在编辑，将刷新推迟�?pointer-up 后执行�?
+    // 锟?pitch_orig_updated 鍒拌揪鏃惰嫢姝ｅ湪缂栬緫锛屽皢鍒锋柊鎺ㄨ繜锟?pointer-up 鍚庢墽琛岋拷?
     const pendingPitchUpdatedRefreshRef = useRef(false);
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
-    // 副参数曲线（�?edit，用于叠加显示）
-    const [secondaryParamView, setSecondaryParamView] =
-        useState<ParamViewSegment | null>(null);
+    // 鍓弬鏁版洸绾匡紙锟?edit锛岀敤浜庡彔鍔犳樉绀猴級
+    const [secondaryParamViews, setSecondaryParamViews] = useState<
+        Partial<Record<ParamName, ParamViewSegment>>
+    >({});
     const secondaryFetchReqIdRef = useRef(0);
 
     const [pitchEditUserModified, setPitchEditUserModified] = useState<
@@ -91,18 +92,18 @@ export function usePianoRollData(args: {
     const lastAppliedForceParamFetchTokenRef = useRef(0);
 
     // Force parameter refresh when the session state changes meaningfully (undo/redo/timeline edits).
-    // 同时清除旧曲线数据，避免旧数据在新数据到达前短暂显示（也修复初次导入后曲线不显示的问题）�?
+    // 鍚屾椂娓呴櫎鏃ф洸绾挎暟鎹紝閬垮厤鏃ф暟鎹湪鏂版暟鎹埌杈惧墠鐭殏鏄剧ず锛堜篃淇鍒濇瀵煎叆鍚庢洸绾夸笉鏄剧ず鐨勯棶棰橈級锟?
     useEffect(() => {
         if (!rootTrackId) return;
         setParamView(null);
-        setSecondaryParamView(null);
+        setSecondaryParamViews({});
         setForceParamFetchToken((x) => x + 1);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [paramsEpoch, rootTrackId]);
 
-    // 监听 pitch_orig_updated 事件，触发曲线刷新�?
-    // 注意：分析进度状态（started/progress）由全局 PitchAnalysisProvider 统一管理�?
-    // 此处只负责在分析完成后刷�?PianoRoll 曲线数据�?
+    // 鐩戝惉 pitch_orig_updated 浜嬩欢锛岃Е鍙戞洸绾垮埛鏂帮拷?
+    // 娉ㄦ剰锛氬垎鏋愯繘搴︾姸鎬侊紙started/progress锛夌敱鍏ㄥ眬 PitchAnalysisProvider 缁熶竴绠＄悊锟?
+    // 姝ゅ鍙礋璐ｅ湪鍒嗘瀽瀹屾垚鍚庡埛锟?PianoRoll 鏇茬嚎鏁版嵁锟?
     useEffect(() => {
         let disposed = false;
         let unlistenUpdated: null | (() => void) = null;
@@ -127,8 +128,8 @@ export function usePianoRollData(args: {
                         )
                             return;
 
-                        // 若用户正在绘制曲线（pointer down），推迟曲线刷新�?pointer-up 后，
-                        // 避免后端分析结果覆盖用户正在绘制�?liveEditOverride 内容�?
+                        // 鑻ョ敤鎴锋鍦ㄧ粯鍒舵洸绾匡紙pointer down锛夛紝鎺ㄨ繜鏇茬嚎鍒锋柊锟?pointer-up 鍚庯紝
+                        // 閬垮厤鍚庣鍒嗘瀽缁撴灉瑕嗙洊鐢ㄦ埛姝ｅ湪缁樺埗锟?liveEditOverride 鍐呭锟?
                         if (liveEditActiveRef.current) {
                             pendingPitchUpdatedRefreshRef.current = true;
                         } else {
@@ -158,10 +159,22 @@ export function usePianoRollData(args: {
         setPitchEditBackendAvailable(null);
     }, [editParam, pitchEnabled]);
 
-    // �?editParam 切换时，清除副参数缓�?
+    // 锟?editParam 鍒囨崲鏃讹紝娓呴櫎鍓弬鏁扮紦锟?
     useEffect(() => {
-        setSecondaryParamView(null);
-    }, [editParam, rootTrackId, secondaryParamId]);
+        setSecondaryParamViews({});
+    }, [editParam, rootTrackId]);
+
+    useEffect(() => {
+        setSecondaryParamViews((prev) => {
+            const next: Partial<Record<ParamName, ParamViewSegment>> = {};
+            for (const paramId of secondaryParamIds) {
+                if (prev[paramId]) {
+                    next[paramId] = prev[paramId];
+                }
+            }
+            return next;
+        });
+    }, [secondaryParamIds]);
 
     function computeVisibleRequest() {
         const debug =
@@ -265,35 +278,37 @@ export function usePianoRollData(args: {
         // Version 2: Fixed coordinate calculation to use unquantized time
         const paramKey = `v2|${trackId}|${editParam}|${startFrame}|${frameCount}|${stride}`;
 
-        const secondaryParam: ParamName | null = secondaryParamId;
-        const secondaryFpKey = secondaryParam
-            ? `${trackId}|${secondaryParam}`
-            : null;
-        const secondaryCachedFp = secondaryFpKey
-            ? paramFramePeriodCache.get(secondaryFpKey)
-            : undefined;
-        const secondaryFpMs = Number(secondaryCachedFp ?? 5) || 5;
-        const secondaryStartFrame = secondaryParam
-            ? Math.max(0, timeToFrame(covParamStartSec, secondaryFpMs))
-            : 0;
-        const secondaryFrameCount = secondaryParam
-            ? clamp(
-                  Math.max(
-                      1,
-                      timeToFrame(
-                          covParamStartSec + covParamDurSec,
-                          secondaryFpMs,
-                      ) -
-                          secondaryStartFrame +
-                          1,
-                  ),
-                  1,
-                  200_000,
-              )
-            : 0;
-        const secondaryParamKey = secondaryParam
-            ? `v2|${trackId}|${secondaryParam}|${secondaryStartFrame}|${secondaryFrameCount}|${stride}`
-            : null;
+        const secondaryRequests = secondaryParamIds.map((secondaryParam) => {
+            const secondaryFpKey = `${trackId}|${secondaryParam}`;
+            const secondaryCachedFp = paramFramePeriodCache.get(secondaryFpKey);
+            const secondaryFpMs = Number(secondaryCachedFp ?? 5) || 5;
+            const secondaryStartFrame = Math.max(
+                0,
+                timeToFrame(covParamStartSec, secondaryFpMs),
+            );
+            const secondaryFrameCount = clamp(
+                Math.max(
+                    1,
+                    timeToFrame(
+                        covParamStartSec + covParamDurSec,
+                        secondaryFpMs,
+                    ) -
+                        secondaryStartFrame +
+                        1,
+                ),
+                1,
+                200_000,
+            );
+            const secondaryParamKey = `v2|${trackId}|${secondaryParam}|${secondaryStartFrame}|${secondaryFrameCount}|${stride}`;
+            return {
+                secondaryParam,
+                secondaryFpKey,
+                secondaryFpMs,
+                secondaryStartFrame,
+                secondaryFrameCount,
+                secondaryParamKey,
+            };
+        });
 
         return {
             debug,
@@ -306,12 +321,7 @@ export function usePianoRollData(args: {
             fpMs,
             fpKey,
             forceParamFetchToken,
-            secondaryParam,
-            secondaryFpKey,
-            secondaryFpMs,
-            secondaryStartFrame,
-            secondaryFrameCount,
-            secondaryParamKey,
+            secondaryRequests,
         };
     }
 
@@ -344,50 +354,75 @@ export function usePianoRollData(args: {
             lastAppliedForceParamFetchTokenRef.current;
         const shouldFetchParam = !paramCoversVisible || forceParam;
 
-        // 副参数异步加载（独立请求，不影响主参数刷新逻辑�?
+        // 鍓弬鏁板紓姝ュ姞杞斤紙鐙珛璇锋眰锛屼笉褰卞搷涓诲弬鏁板埛鏂伴€昏緫锟?
         void (async () => {
-            if (
-                !req.secondaryParam ||
-                !req.secondaryFpKey ||
-                !req.secondaryParamKey
-            )
-                return;
+            if (req.secondaryRequests.length === 0) return;
             const secReqId = ++secondaryFetchReqIdRef.current;
-            // pitch 副参数需�?pitchEnabled（若 editParam �?tension，pitch 作为副参数时检查）
-            const secondaryPitchEnabled =
-                req.secondaryParam !== "pitch" ||
-                (() => {
-                    // 复用外部 pitchEnabled 逻辑：只�?rootTrack 允许 pitch 分析即可
-                    return pitchEnabled || editParam === "pitch";
-                })();
-            if (!secondaryPitchEnabled && req.secondaryParam === "pitch")
-                return;
             try {
-                const res = await paramsApi.getParamFrames(
-                    req.trackId,
-                    req.secondaryParam,
-                    req.secondaryStartFrame,
-                    req.secondaryFrameCount,
-                    stride,
+                const responses = await Promise.all(
+                    req.secondaryRequests.map(async (secondaryReq) => {
+                        const secondaryPitchEnabled =
+                            secondaryReq.secondaryParam !== "pitch" ||
+                            pitchEnabled ||
+                            editParam === "pitch";
+                        if (
+                            !secondaryPitchEnabled &&
+                            secondaryReq.secondaryParam === "pitch"
+                        ) {
+                            return null;
+                        }
+                        const res = await paramsApi.getParamFrames(
+                            req.trackId,
+                            secondaryReq.secondaryParam,
+                            secondaryReq.secondaryStartFrame,
+                            secondaryReq.secondaryFrameCount,
+                            stride,
+                        );
+                        if (!res?.ok) return null;
+                        const payload = res as ParamFramesPayload;
+                        const fpRes =
+                            Number(
+                                payload.frame_period_ms ??
+                                    secondaryReq.secondaryFpMs,
+                            ) || secondaryReq.secondaryFpMs;
+                        paramFramePeriodCache.set(
+                            secondaryReq.secondaryFpKey,
+                            fpRes,
+                        );
+                        return [
+                            secondaryReq.secondaryParam,
+                            {
+                                key: secondaryReq.secondaryParamKey,
+                                framePeriodMs: fpRes,
+                                startFrame:
+                                    Number(
+                                        payload.start_frame ??
+                                            secondaryReq.secondaryStartFrame,
+                                    ) || secondaryReq.secondaryStartFrame,
+                                stride,
+                                referenceKind:
+                                    payload.reference_kind ?? "source_curve",
+                                orig: (payload.orig ?? []).map(
+                                    (v) => Number(v) || 0,
+                                ),
+                                edit: (payload.edit ?? []).map(
+                                    (v) => Number(v) || 0,
+                                ),
+                            } as ParamViewSegment,
+                        ] as const;
+                    }),
                 );
                 if (secondaryFetchReqIdRef.current !== secReqId) return;
-                if (!res?.ok) return;
-                const payload = res as ParamFramesPayload;
-                const fpRes =
-                    Number(payload.frame_period_ms ?? req.secondaryFpMs) ||
-                    req.secondaryFpMs;
-                paramFramePeriodCache.set(req.secondaryFpKey, fpRes);
-                setSecondaryParamView({
-                    key: req.secondaryParamKey,
-                    framePeriodMs: fpRes,
-                    startFrame:
-                        Number(
-                            payload.start_frame ?? req.secondaryStartFrame,
-                        ) || req.secondaryStartFrame,
-                    stride,
-                    referenceKind: payload.reference_kind ?? "source_curve",
-                    orig: (payload.orig ?? []).map((v) => Number(v) || 0),
-                    edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                setSecondaryParamViews((prev) => {
+                    const next = { ...prev };
+                    for (const secondaryReq of req.secondaryRequests) {
+                        delete next[secondaryReq.secondaryParam];
+                    }
+                    for (const entry of responses) {
+                        if (!entry) continue;
+                        next[entry[0]] = entry[1];
+                    }
+                    return next;
                 });
                 invalidate();
             } catch {
@@ -548,19 +583,9 @@ export function usePianoRollData(args: {
         setIsRefreshing(true);
         const reqId = ++fetchReqIdRef.current;
         const shouldFetchParam = !(editParam === "pitch" && !pitchEnabled);
-        const secondaryPitchOk =
-            !req.secondaryParam ||
-            req.secondaryParam !== "pitch" ||
-            pitchEnabled ||
-            editParam === "pitch";
-        const hasSecondaryRequest = Boolean(
-            req.secondaryParam && req.secondaryFpKey && req.secondaryParamKey,
-        );
-        const shouldFetchSecondary = hasSecondaryRequest && secondaryPitchOk;
-        const secondaryParam = shouldFetchSecondary ? req.secondaryParam : null;
         try {
             beginLoading();
-            const [paramRes, secondaryRes] = await Promise.all([
+            const [paramRes, secondaryResults] = await Promise.all([
                 shouldFetchParam
                     ? paramsApi.getParamFrames(
                           trackId,
@@ -570,15 +595,59 @@ export function usePianoRollData(args: {
                           stride,
                       )
                     : Promise.resolve(null),
-                secondaryParam
-                    ? paramsApi.getParamFrames(
-                          trackId,
-                          secondaryParam,
-                          req.secondaryStartFrame,
-                          req.secondaryFrameCount,
-                          stride,
-                      )
-                    : Promise.resolve(null),
+                Promise.all(
+                    req.secondaryRequests.map(async (secondaryReq) => {
+                        const secondaryPitchEnabled =
+                            secondaryReq.secondaryParam !== "pitch" ||
+                            pitchEnabled ||
+                            editParam === "pitch";
+                        if (
+                            !secondaryPitchEnabled &&
+                            secondaryReq.secondaryParam === "pitch"
+                        ) {
+                            return null;
+                        }
+                        const res = await paramsApi.getParamFrames(
+                            trackId,
+                            secondaryReq.secondaryParam,
+                            secondaryReq.secondaryStartFrame,
+                            secondaryReq.secondaryFrameCount,
+                            stride,
+                        );
+                        if (!res?.ok) return null;
+                        const secPayload = res as ParamFramesPayload;
+                        const secFpRes =
+                            Number(
+                                secPayload.frame_period_ms ??
+                                    secondaryReq.secondaryFpMs,
+                            ) || secondaryReq.secondaryFpMs;
+                        paramFramePeriodCache.set(
+                            secondaryReq.secondaryFpKey,
+                            secFpRes,
+                        );
+                        return [
+                            secondaryReq.secondaryParam,
+                            {
+                                key: secondaryReq.secondaryParamKey,
+                                framePeriodMs: secFpRes,
+                                startFrame:
+                                    Number(
+                                        secPayload.start_frame ??
+                                            secondaryReq.secondaryStartFrame,
+                                    ) || secondaryReq.secondaryStartFrame,
+                                stride,
+                                referenceKind:
+                                    secPayload.reference_kind ?? "source_curve",
+                                orig: (secPayload.orig ?? []).map(
+                                    (v) => Number(v) || 0,
+                                ),
+                                edit: (secPayload.edit ?? []).map(
+                                    (v) => Number(v) || 0,
+                                ),
+                            } as ParamViewSegment,
+                        ] as const;
+                    }),
+                ),
             ]);
 
             if (fetchReqIdRef.current !== reqId) return;
@@ -618,7 +687,6 @@ export function usePianoRollData(args: {
                     }
                 }
             } else if (shouldFetchParam && debug) {
-                // eslint-disable-next-line no-console
                 console.debug("[PianoRollData] refreshNow paramFrames not ok", {
                     trackId,
                     editParam,
@@ -627,30 +695,17 @@ export function usePianoRollData(args: {
                 });
             }
 
-            if (
-                secondaryParam &&
-                req.secondaryFpKey &&
-                req.secondaryParamKey &&
-                secondaryRes?.ok
-            ) {
-                const secPayload = secondaryRes as ParamFramesPayload;
-                const secFpRes =
-                    Number(secPayload.frame_period_ms ?? req.secondaryFpMs) ||
-                    req.secondaryFpMs;
-                paramFramePeriodCache.set(req.secondaryFpKey, secFpRes);
-                setSecondaryParamView({
-                    key: req.secondaryParamKey,
-                    framePeriodMs: secFpRes,
-                    startFrame:
-                        Number(
-                            secPayload.start_frame ?? req.secondaryStartFrame,
-                        ) || req.secondaryStartFrame,
-                    stride,
-                    referenceKind: secPayload.reference_kind ?? "source_curve",
-                    orig: (secPayload.orig ?? []).map((v) => Number(v) || 0),
-                    edit: (secPayload.edit ?? []).map((v) => Number(v) || 0),
-                });
-            }
+            setSecondaryParamViews((prev) => {
+                const next = { ...prev };
+                for (const secondaryReq of req.secondaryRequests) {
+                    delete next[secondaryReq.secondaryParam];
+                }
+                for (const entry of secondaryResults) {
+                    if (!entry) continue;
+                    next[entry[0]] = entry[1];
+                }
+                return next;
+            });
         } finally {
             setIsRefreshing(false);
             endLoading();
@@ -662,22 +717,8 @@ export function usePianoRollData(args: {
         const req = computeVisibleRequest();
         if (!req) return;
 
-        if (
-            !req.secondaryParam ||
-            !req.secondaryFpKey ||
-            !req.secondaryParamKey
-        ) {
-            setSecondaryParamView(null);
-            invalidate();
-            return;
-        }
-
-        const secondaryPitchEnabled =
-            req.secondaryParam !== "pitch" ||
-            pitchEnabled ||
-            editParam === "pitch";
-        if (!secondaryPitchEnabled && req.secondaryParam === "pitch") {
-            setSecondaryParamView(null);
+        if (req.secondaryRequests.length === 0) {
+            setSecondaryParamViews({});
             invalidate();
             return;
         }
@@ -685,31 +726,71 @@ export function usePianoRollData(args: {
         const secReqId = ++secondaryFetchReqIdRef.current;
         beginLoading();
         try {
-            const res = await paramsApi.getParamFrames(
-                req.trackId,
-                req.secondaryParam,
-                req.secondaryStartFrame,
-                req.secondaryFrameCount,
-                req.stride,
+            const responses = await Promise.all(
+                req.secondaryRequests.map(async (secondaryReq) => {
+                    const secondaryPitchEnabled =
+                        secondaryReq.secondaryParam !== "pitch" ||
+                        pitchEnabled ||
+                        editParam === "pitch";
+                    if (
+                        !secondaryPitchEnabled &&
+                        secondaryReq.secondaryParam === "pitch"
+                    ) {
+                        return null;
+                    }
+                    const res = await paramsApi.getParamFrames(
+                        req.trackId,
+                        secondaryReq.secondaryParam,
+                        secondaryReq.secondaryStartFrame,
+                        secondaryReq.secondaryFrameCount,
+                        req.stride,
+                    );
+                    if (!res?.ok) return null;
+
+                    const payload = res as ParamFramesPayload;
+                    const fpRes =
+                        Number(
+                            payload.frame_period_ms ??
+                                secondaryReq.secondaryFpMs,
+                        ) || secondaryReq.secondaryFpMs;
+                    paramFramePeriodCache.set(
+                        secondaryReq.secondaryFpKey,
+                        fpRes,
+                    );
+                    return [
+                        secondaryReq.secondaryParam,
+                        {
+                            key: secondaryReq.secondaryParamKey,
+                            framePeriodMs: fpRes,
+                            startFrame:
+                                Number(
+                                    payload.start_frame ??
+                                        secondaryReq.secondaryStartFrame,
+                                ) || secondaryReq.secondaryStartFrame,
+                            stride: req.stride,
+                            referenceKind:
+                                payload.reference_kind ?? "source_curve",
+                            orig: (payload.orig ?? []).map(
+                                (v) => Number(v) || 0,
+                            ),
+                            edit: (payload.edit ?? []).map(
+                                (v) => Number(v) || 0,
+                            ),
+                        } as ParamViewSegment,
+                    ] as const;
+                }),
             );
             if (secondaryFetchReqIdRef.current !== secReqId) return;
-            if (!res?.ok) return;
-
-            const payload = res as ParamFramesPayload;
-            const fpRes =
-                Number(payload.frame_period_ms ?? req.secondaryFpMs) ||
-                req.secondaryFpMs;
-            paramFramePeriodCache.set(req.secondaryFpKey, fpRes);
-            setSecondaryParamView({
-                key: req.secondaryParamKey,
-                framePeriodMs: fpRes,
-                startFrame:
-                    Number(payload.start_frame ?? req.secondaryStartFrame) ||
-                    req.secondaryStartFrame,
-                stride: req.stride,
-                referenceKind: payload.reference_kind ?? "source_curve",
-                orig: (payload.orig ?? []).map((v) => Number(v) || 0),
-                edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+            setSecondaryParamViews((prev) => {
+                const next = { ...prev };
+                for (const secondaryReq of req.secondaryRequests) {
+                    delete next[secondaryReq.secondaryParam];
+                }
+                for (const entry of responses) {
+                    if (!entry) continue;
+                    next[entry[0]] = entry[1];
+                }
+                return next;
             });
             invalidate();
         } finally {
@@ -740,7 +821,7 @@ export function usePianoRollData(args: {
         rootTrackId,
         selectedTrackId,
         editParam,
-        secondaryParamId,
+        secondaryParamIds,
         scrollLeft,
         pxPerBeat,
         secPerBeat,
@@ -750,8 +831,8 @@ export function usePianoRollData(args: {
     ]);
 
     /**
-     * 由外部（PianoRollPanel）在 pointer-up 时调用，通知 live 编辑已结束�?
-     * 若此前有被推迟的 pitch_orig_updated 刷新，此时立即触发�?
+     * 鐢卞閮紙PianoRollPanel锛夊湪 pointer-up 鏃惰皟鐢紝閫氱煡 live 缂栬緫宸茬粨鏉燂拷?
+     * 鑻ユ鍓嶆湁琚帹杩熺殑 pitch_orig_updated 鍒锋柊锛屾鏃剁珛鍗宠Е鍙戯拷?
      */
     function notifyLiveEditEnded() {
         if (pendingPitchUpdatedRefreshRef.current) {
@@ -764,8 +845,14 @@ export function usePianoRollData(args: {
     return {
         paramView,
         setParamView,
-        secondaryParamView,
-        bumpRefreshToken: () => setRefreshToken((x) => x + 1),
+        secondaryParamViews,
+        bumpRefreshToken: () => {
+            setRefreshToken((x) => x + 1);
+            // Also bump forceParamFetchToken so refreshVisible() bypasses the
+            // "paramCoversVisible" cache check and actually re-fetches data
+            // from the backend after edit operations.
+            setForceParamFetchToken((x) => x + 1);
+        },
         refreshNow,
         refreshSecondaryNow,
         notifyLiveEditEnded,

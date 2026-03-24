@@ -27,6 +27,7 @@ export const webApi = {
     getRuntimeInfo: coreApi.getRuntimeInfo,
     getPlaybackState: coreApi.getPlaybackState,
     openAudioDialog: coreApi.openAudioDialog,
+    openAudioDialogMultiple: coreApi.openAudioDialogMultiple,
     pickOutputPath: coreApi.pickOutputPath,
     closeWindow: coreApi.closeWindow,
 
@@ -46,6 +47,8 @@ export const webApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: timelineApi.undoTimeline,
     redoTimeline: timelineApi.redoTimeline,
+    beginUndoGroup: timelineApi.beginUndoGroup,
+    endUndoGroup: timelineApi.endUndoGroup,
 
     // Project
     getProjectMeta: projectApi.getProjectMeta,
@@ -54,6 +57,9 @@ export const webApi = {
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
     saveProjectAs: projectApi.saveProjectAs,
+    setProjectBaseScale: projectApi.setProjectBaseScale,
+    setProjectCustomScale: projectApi.setProjectCustomScale,
+    setProjectTimelineSettings: projectApi.setProjectTimelineSettings,
 
     openVocalShifterDialog: projectApi.openVocalShifterDialog,
     importVocalShifterProject: projectApi.importVocalShifterProject,
@@ -61,8 +67,7 @@ export const webApi = {
     openReaperDialog: projectApi.openReaperDialog,
     importReaperProject: projectApi.importReaperProject,
 
-    // Waveform peaks
-    getWaveformPeaksSegment: waveformApi.getWaveformPeaksSegment,
+    // Waveform peaks (Mix)
     getRootMixWaveformPeaksSegment: waveformApi.getRootMixWaveformPeaksSegment,
     getTrackMixWaveformPeaksSegment: waveformApi.getTrackMixWaveformPeaksSegment,
 
@@ -81,6 +86,7 @@ export const webApi = {
     addTrack: timelineApi.addTrack,
     addTrackNested: timelineApi.addTrackNested,
     removeTrack: timelineApi.removeTrack,
+    duplicateTrack: timelineApi.duplicateTrack,
     moveTrack: timelineApi.moveTrack,
     setTrackState: timelineApi.setTrackState,
     selectTrack: timelineApi.selectTrack,
@@ -89,7 +95,11 @@ export const webApi = {
     addClip: timelineApi.addClip,
     removeClip: timelineApi.removeClip,
     moveClip: timelineApi.moveClip,
+    moveClips: timelineApi.moveClips,
+    getClipLinkedParams: timelineApi.getClipLinkedParams,
+    applyClipLinkedParams: timelineApi.applyClipLinkedParams,
     setClipState: timelineApi.setClipState,
+    replaceClipSource: timelineApi.replaceClipSource,
     splitClip: timelineApi.splitClip,
     glueClips: timelineApi.glueClips,
     selectClip: timelineApi.selectClip,

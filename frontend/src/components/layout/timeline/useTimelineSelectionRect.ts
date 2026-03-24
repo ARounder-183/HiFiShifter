@@ -3,6 +3,13 @@ import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
 
+export function shouldStartTimelineSelectionRect(button: number): boolean {
+    // Only start selection for right-click (button === 2).
+    // Allow right-click drag anywhere on the timeline (including
+    // clip elements) to initiate the selection rect.
+    return button === 2;
+}
+
 export function useTimelineSelectionRect(params: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
     sessionRef: React.RefObject<SessionState>;
@@ -39,7 +46,7 @@ export function useTimelineSelectionRect(params: {
     } | null>(null);
 
     function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
-        if (e.button !== 2) return;
+        if (!shouldStartTimelineSelectionRect(e.button)) return;
         const el = e.currentTarget as HTMLDivElement;
         const bounds = el.getBoundingClientRect();
         const x = e.clientX - bounds.left + el.scrollLeft;

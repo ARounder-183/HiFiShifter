@@ -9,7 +9,7 @@ pub(crate) type AudioKey = (PathBuf, u32);
 pub(crate) struct StretchKey {
     pub(crate) path: PathBuf,
     pub(crate) out_rate: u32,
-    pub(crate) bpm_q: u32,  // 保留字段以兼容 Hash，固定为 0
+    pub(crate) bpm_q: u32, // 保留字段以兼容 Hash，固定为 0
     pub(crate) trim_start_q: i64,
     pub(crate) trim_end_q: i64,
     pub(crate) playback_rate_q: u32,
@@ -84,6 +84,10 @@ pub(crate) struct EngineClip {
     pub(crate) breath_noise_pcm: Option<Arc<Vec<f32>>>,
     pub(crate) breath_curve: Option<Arc<Vec<f32>>>,
     pub(crate) breath_curve_frame_period_ms: f64,
+
+    /// 可选的 volume 曲线；存在时在 audio callback / mixdown 中逐帧乘到最终输出上。
+    pub(crate) volume_curve: Option<Arc<Vec<f32>>>,
+    pub(crate) volume_curve_frame_period_ms: f64,
 
     /// 该 clip 是否需要 pitch 合成。
     /// - true：需要合成；若 rendered_pcm 为 None，则静音等待渲染完成。

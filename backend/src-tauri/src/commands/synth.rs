@@ -1,3 +1,8 @@
+//! 合成与音频处理命令模块。
+//!
+//! 提供模型加载、音频合成（synthesize）、导出混音 WAV 等 Tauri 命令实现，
+//! 是前端「合成」「导出」操作的后端入口。
+
 use crate::audio_utils::try_read_wav_info;
 use crate::models::{ProcessAudioPayload, SynthesizePayload};
 use crate::state::AppState;
@@ -9,9 +14,6 @@ use super::common::{new_temp_wav_path, render_timeline_to_wav};
 
 // ===================== model / processing / synthesis =====================
 
-
-
-
 pub(super) fn load_default_model(state: State<'_, AppState>) -> crate::models::ModelConfigPayload {
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -20,10 +22,10 @@ pub(super) fn load_default_model(state: State<'_, AppState>) -> crate::models::M
     state.model_config_ok()
 }
 
-
-
-
-pub(super) fn load_model(state: State<'_, AppState>, model_dir: String) -> crate::models::ModelConfigPayload {
+pub(super) fn load_model(
+    state: State<'_, AppState>,
+    model_dir: String,
+) -> crate::models::ModelConfigPayload {
     let _ = model_dir;
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -32,15 +34,9 @@ pub(super) fn load_model(state: State<'_, AppState>, model_dir: String) -> crate
     state.model_config_ok()
 }
 
-
-
-
 pub(super) fn set_pitch_shift(semitones: f64) -> serde_json::Value {
     serde_json::json!({"ok": true, "pitch_shift": semitones, "frames": 0})
 }
-
-
-
 
 pub(super) fn process_audio(state: State<'_, AppState>, audio_path: String) -> ProcessAudioPayload {
     let path = Path::new(&audio_path);
@@ -80,9 +76,6 @@ pub(super) fn process_audio(state: State<'_, AppState>, audio_path: String) -> P
         timeline: None,
     }
 }
-
-
-
 
 pub(super) fn synthesize(state: State<'_, AppState>) -> SynthesizePayload {
     // 删除上一次的 synth 临时文件，避免磁盘泄漏
@@ -135,62 +128,64 @@ pub(super) fn synthesize(state: State<'_, AppState>) -> SynthesizePayload {
     }
 }
 
-
-
-
-pub(super) fn save_synthesized(state: State<'_, AppState>, output_path: String) -> serde_json::Value {
+pub(super) fn save_synthesized(
+    state: State<'_, AppState>,
+    output_path: String,
+) -> serde_json::Value {
     let out_path = Path::new(&output_path);
 
-    let synthesized_path = {
-        state
-            .runtime
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .synthesized_wav_path
-            .clone()
+    // 1. 获取当前最新的时间轴状态
+    let timeline = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let registry = state
+        .resampler_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    // 2. 构造与分轨导出完全一致的高质量渲染选项
+    let opts = crate::mixdown::MixdownOptions {
+        sample_rate: 44100,
+        start_sec: 0.0,
+        end_sec: None,
+        stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+        apply_pitch_edit: true,
+        export_format: crate::mixdown::ExportFormat::Wav32f,
+        quality_preset: crate::mixdown::QualityPreset::Export,
     };
 
-    let mix = if let Some(p) = synthesized_path {
-        // Best-effort copy the already rendered synth.
-        match fs::copy(&p, out_path) {
-            Ok(_) => try_read_wav_info(out_path, 0),
-            Err(e) => {
-                eprintln!("save_synthesized: copy failed: {e}");
-                None
-            }
-        }
-    } else {
-        // No cached synth; render directly to output.
-        match render_timeline_to_wav(&state, out_path, 0.0, None) {
-            Ok(_) => try_read_wav_info(out_path, 0),
-            Err(e) => {
-                eprintln!("save_synthesized: render failed: {e}");
-                None
-            }
-        }
-    };
+    // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
+    match crate::mixdown::render_mixdown_wav(&timeline, out_path, opts, Some(&registry)) {
+        Ok(result) => {
+            let num_samples = (result.duration_sec * result.sample_rate as f64)
+                .round()
+                .max(0.0) as u32;
 
-    match mix {
-        Some(info) => serde_json::json!({
-            "ok": true,
-            "path": output_path,
-            "sample_rate": info.sample_rate,
-            "num_samples": (info.duration_sec * info.sample_rate as f64).round().max(0.0) as u32
-        }),
-        None => serde_json::json!({
-            "ok": false,
-            "path": output_path
-        }),
+            serde_json::json!({
+                "ok": true,
+                "path": output_path,
+                "sample_rate": result.sample_rate,
+                "num_samples": num_samples
+            })
+        }
+        Err(e) => {
+            eprintln!("save_synthesized: render failed: {e}");
+            serde_json::json!({
+                "ok": false,
+                "path": output_path,
+                "error": e
+            })
+        }
     }
 }
-
-
-
 
 /// 按 root track 分轨导出音频到指定目录。
 ///
 /// 每个 root track（`parent_id == None` 的轨道）以及它的所有子轨道的音频
-/// 会被混缩成一个独立的 WAV 文件，文件名为 `{track_name}.wav`。
+/// 会被混缩成一个独立的 WAV 文件，文件名为 `{TrackIndex}_{TrackName}.wav`。
 pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> serde_json::Value {
     let out_dir = Path::new(&output_dir);
     if !out_dir.exists() {
@@ -202,6 +197,11 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
 
     let timeline = state
         .timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let registry = state
+        .resampler_registry
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -218,7 +218,10 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
     }
 
     // 收集某个 root 下所有后代 track id（包括自身）
-    fn collect_descendants(tracks: &[crate::state::Track], root_id: &str) -> std::collections::HashSet<String> {
+    fn collect_descendants(
+        tracks: &[crate::state::Track],
+        root_id: &str,
+    ) -> std::collections::HashSet<String> {
         let mut set = std::collections::HashSet::new();
         set.insert(root_id.to_string());
         let mut queue = vec![root_id.to_string()];
@@ -246,41 +249,57 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
     }
 
     let mut results = Vec::new();
+    let export_roots: Vec<&crate::state::Track> =
+        root_tracks.iter().copied().filter(|t| !t.muted).collect();
 
-    for root in &root_tracks {
-        // muted 的根轨道不导出
-        if root.muted {
-            continue;
+    let index_width = {
+        let count = export_roots.len();
+        if count <= 1 {
+            1
+        } else {
+            (count - 1).to_string().len()
         }
+    };
 
+    for (track_idx, root) in export_roots.iter().enumerate() {
         let included = collect_descendants(&timeline.tracks, &root.id);
 
         // 构建子 timeline：仅保留该 root 分支下的、未 mute 的 tracks 和对应 clips
         let mut sub_tl = timeline.clone();
-        sub_tl.tracks.retain(|t| included.contains(&t.id) && !t.muted);
+        sub_tl
+            .tracks
+            .retain(|t| included.contains(&t.id) && !t.muted);
         let active_track_ids: std::collections::HashSet<&str> =
             sub_tl.tracks.iter().map(|t| t.id.as_str()).collect();
-        sub_tl.clips.retain(|c| active_track_ids.contains(c.track_id.as_str()));
+        sub_tl
+            .clips
+            .retain(|c| active_track_ids.contains(c.track_id.as_str()));
 
         let safe_name = sanitize_filename(&root.name);
-        let file_name = if safe_name.is_empty() {
-            format!("track_{}.wav", root.id)
+        let normalized_name = if safe_name.is_empty() {
+            format!("track_{}", root.id)
         } else {
-            format!("{}.wav", safe_name)
+            safe_name
         };
+        let file_name = format!(
+            "{:0width$}_{}.wav",
+            track_idx,
+            normalized_name,
+            width = index_width,
+        );
         let out_path = out_dir.join(&file_name);
 
         let opts = crate::mixdown::MixdownOptions {
             sample_rate: 44100,
             start_sec: 0.0,
             end_sec: None,
-            stretch: crate::time_stretch::StretchAlgorithm::RubberBand,
+            stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
             apply_pitch_edit: true,
             export_format: crate::mixdown::ExportFormat::Wav32f,
             quality_preset: crate::mixdown::QualityPreset::Export,
         };
 
-        match crate::mixdown::render_mixdown_wav(&sub_tl, &out_path, opts) {
+        match crate::mixdown::render_mixdown_wav(&sub_tl, &out_path, opts, Some(&registry)) {
             Ok(result) => {
                 let num_samples = (result.duration_sec * result.sample_rate as f64)
                     .round()
@@ -295,7 +314,10 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
                 }));
             }
             Err(e) => {
-                eprintln!("save_separated: render failed for track '{}': {e}", root.name);
+                eprintln!(
+                    "save_separated: render failed for track '{}': {e}",
+                    root.name
+                );
                 results.push(serde_json::json!({
                     "track_id": root.id,
                     "name": root.name,

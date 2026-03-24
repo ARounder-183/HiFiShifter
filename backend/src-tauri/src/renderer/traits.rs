@@ -6,8 +6,8 @@
 //! 同时提供更高层的 [`ClipProcessor`] trait，统一封装全链路处理
 //! （音高合成 + 时间拉伸 + 所有声码器参数曲线）。
 
-use std::collections::HashMap;
 use crate::state::SynthPipelineKind;
+use std::collections::HashMap;
 
 // ─── 上下文 ────────────────────────────────────────────────────────────────────
 
@@ -105,6 +105,8 @@ pub struct ClipProcessContext<'a> {
     pub frame_period_ms: f64,
     /// 每帧绝对 MIDI 音高（cent），由音高编辑层输出。
     pub pitch_edit: &'a [f32],
+    /// 每帧原始 MIDI 音高（全局绝对帧索引），用于 frq 生成等场景。
+    pub pitch_orig: &'a [f32],
     /// 每帧 Clip 原始 MIDI 音高（cent），用于计算相对偏移。
     pub clip_midi: &'a [f32],
     /// 回放速率（时间拉伸比例）；1.0 = 不拉伸。
@@ -119,6 +121,8 @@ pub struct ClipProcessContext<'a> {
     /// 声码器专属静态参数（`StaticEnum` 类型参数，枚举整数值以 f64 存储）。
     /// key = `ParamDescriptor::id`。
     pub extra_params: &'a HashMap<String, f64>,
+    /// 项目 BPM（用于 UTAU pitchbend 帧率等计算）。
+    pub bpm: f64,
 }
 
 // ─── ProcessorCapabilities ────────────────────────────────────────────────────
@@ -126,7 +130,7 @@ pub struct ClipProcessContext<'a> {
 /// `ClipProcessor` 能力描述。
 #[derive(Debug, Clone, Default)]
 pub struct ProcessorCapabilities {
-    /// 是否原生处理 `playback_rate`（= true 时 compat 层不再调 RubberBand）。
+    /// 是否原生处理 `playback_rate`（= true 时 compat 层不再调 Signalsmith Stretch）。
     pub handles_time_stretch: bool,
     /// 是否支持逐帧共振峰偏移曲线（"formant_shift_cents"）。
     pub supports_formant: bool,
@@ -174,7 +178,7 @@ pub struct ParamDescriptor {
 ///
 /// 一次 `process()` 调用涵盖——
 /// - 音高合成（声码器内核）
-/// - 时间拉伸（原生或 RubberBand Stage）
+/// - 时间拉伸（原生或 Signalsmith Stretch Stage）
 /// - 所有声码器参数曲线（共振峰、气声等）
 ///
 /// 实现者须 `Send + Sync`，以便在多线程场景下安全使用。

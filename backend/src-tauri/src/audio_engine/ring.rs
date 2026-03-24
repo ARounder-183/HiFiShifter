@@ -15,7 +15,8 @@ pub(crate) struct StreamRingStereo {
 
 impl StreamRingStereo {
     pub(crate) fn new(cap_frames: u64) -> Self {
-        let cap_frames = cap_frames.max(256);
+        // 强制容量为 2 的幂，使得后续可以安全使用位掩码代替取模
+        let cap_frames = cap_frames.max(256).next_power_of_two();
         let len = (cap_frames as usize) * 2;
         let mut buf = Vec::with_capacity(len);
         buf.resize_with(len, || AtomicU32Cell::new(0));
@@ -55,12 +56,19 @@ impl StreamRingStereo {
             self.base_frame.store(base, Ordering::Release);
         }
 
-        for i in 0..frames {
-            let f = start_frame.saturating_add(i as u64);
-            if f < base {
-                continue;
-            }
-            let idx = ((f % self.cap_frames) as usize) * 2;
+        // 定义掩码
+        let mask = self.cap_frames - 1;
+
+        // 提前计算跳过的帧，消除循环里的 if
+        let skip = if start_frame < base {
+            (base - start_frame) as usize
+        } else {
+            0
+        };
+
+        for i in skip..frames {
+            let f = start_frame + (i as u64);
+            let idx = ((f & mask) as usize) * 2; // 使用掩码替代 %
             self.buf[idx].store(pcm[i * 2].to_bits(), Ordering::Relaxed);
             self.buf[idx + 1].store(pcm[i * 2 + 1].to_bits(), Ordering::Relaxed);
         }
@@ -77,7 +85,8 @@ impl StreamRingStereo {
         if frame < base || frame >= write {
             return None;
         }
-        let idx = ((frame % self.cap_frames) as usize) * 2;
+        let mask = self.cap_frames - 1; // 定义掩码
+        let idx = ((frame & mask) as usize) * 2; // 使用掩码替代 %
         let l = f32::from_bits(self.buf[idx].load(Ordering::Relaxed));
         let r = f32::from_bits(self.buf[idx + 1].load(Ordering::Relaxed));
         Some((l, r))
@@ -102,9 +111,10 @@ impl StreamRingStereo {
         if !self.is_window_covered(start_frame, frames) {
             return false;
         }
+        let mask = self.cap_frames - 1; // 定义掩码
         for i in 0..(frames as usize) {
-            let f = start_frame.saturating_add(i as u64);
-            let idx = ((f % self.cap_frames) as usize) * 2;
+            let f = start_frame + (i as u64);
+            let idx = ((f & mask) as usize) * 2; // 使用掩码替代 %
             out[i * 2] = f32::from_bits(self.buf[idx].load(Ordering::Relaxed));
             out[i * 2 + 1] = f32::from_bits(self.buf[idx + 1].load(Ordering::Relaxed));
         }

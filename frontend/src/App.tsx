@@ -10,6 +10,7 @@ import {
     closeReaperSkippedFilesDialog,
     fetchTimeline,
     refreshRuntime,
+    loadUiSettings,
     syncPlaybackState,
     stopAudioPlayback,
     playOriginal,
@@ -18,6 +19,9 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openVocalShifterFromPath,
+    openReaperFromPath,
+    importAudioFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
     exportAudio,
@@ -46,7 +50,16 @@ import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep"
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
+import { projectApi } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
+import { MISSING_FILE_CONFIRM_EVENT } from "./features/session/thunks/missingFilePrompt";
+import {
+    OPEN_PROJECT_PATH_EVENT,
+    type ExternalFileActionDetail,
+    type ExternalFileActionKind,
+} from "./features/session/projectOpenEvents";
+import type { MessageKey } from "./i18n/messages";
+import type { CloseRequestedEvent } from "@tauri-apps/api/window";
 
 const statusKey: Record<string, string> = {
     Ready: "status_ready",
@@ -86,6 +99,20 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
 };
 
+function detectExternalActionKindFromPath(
+    path: string,
+): ExternalFileActionKind | null {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return null;
+    if (/\.(hshp|hsp)$/i.test(normalized)) return "openProject";
+    if (/\.rpp$/i.test(normalized)) return "importReaper";
+    if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
+    if (/\.(wav|flac|mp3|ogg|m4a|aac|aif|aiff|wma|opus)$/i.test(normalized)) {
+        return "importAudio";
+    }
+    return null;
+}
+
 function AppInner() {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
@@ -105,8 +132,14 @@ function AppInner() {
         (state) => state.fileBrowser.visible,
     );
     const toolMode = useAppSelector((state) => state.session.toolMode);
+    const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const outputPath = useAppSelector((state) => state.session.outputPath);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
+    // 使用 ref 桥接最新的工程修改状态
+    const projectDirtyRef = useRef(projectDirty);
+    useEffect(() => {
+        projectDirtyRef.current = projectDirty;
+    }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
     const vocalShifterSkippedFilesDialog = useAppSelector(
         (state) => state.session.vocalShifterSkippedFilesDialog,
@@ -130,8 +163,15 @@ function AppInner() {
         open: boolean;
         mode: "switch" | "exit";
     }>({ open: false, mode: "switch" });
+    const [missingFileDialog, setMissingFileDialog] = useState<{
+        open: boolean;
+        missingPath: string;
+    }>({ open: false, missingPath: "" });
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
+    const missingFileResolverRef = useRef<
+        ((shouldPick: boolean) => void) | null
+    >(null);
     const processorParamCacheRef = useRef(
         new Map<string, ProcessorParamDescriptor[]>(),
     );
@@ -145,37 +185,53 @@ function AppInner() {
             return Math.min(maxV, Math.max(minV, v));
         }
 
-        function setFromClientY(clientY: number) {
+        // 提取纯计算逻辑，不在此处触发 React 状态更新
+        function calculateRatio(clientY: number) {
             const el = containerRef.current;
-            if (!el) return;
+            if (!el) return null;
             const rect = el.getBoundingClientRect();
             const total = rect.height;
             if (
                 !Number.isFinite(total) ||
                 total <= minTopPx + minBottomPx + handlePx
             ) {
-                return;
+                return null;
             }
             const y = clientY - rect.top;
             const maxTop = total - handlePx - minBottomPx;
             const nextTop = clamp(y, minTopPx, maxTop);
-            const nextRatio = clamp(nextTop / total, 0.15, 0.85);
-            setSplitRatio(nextRatio);
+            return clamp(nextTop / total, 0.15, 0.85);
         }
 
         function onPointerMove(e: PointerEvent) {
             if (!dragRef.current) return;
-            setFromClientY(e.clientY);
+            const nextRatio = calculateRatio(e.clientY);
+            if (nextRatio === null) return;
+
+            // 拖拽时直接修改 DOM 的 flexGrow，绕过 React 重绘
+            const container = containerRef.current;
+            if (container && container.children.length >= 3) {
+                const topPanel = container.children[0] as HTMLElement;
+                const bottomPanel = container.children[2] as HTMLElement;
+                topPanel.style.flexGrow = String(nextRatio);
+                bottomPanel.style.flexGrow = String(1 - nextRatio);
+            }
+
+            splitRatioRef.current = nextRatio;
         }
 
         function endDrag() {
             if (!dragRef.current) return;
             dragRef.current = null;
             setIsDragging(false);
+
+            // 只在松开鼠标的最后一刻，才把最终状态同步给 React 并持久化
+            setSplitRatio(splitRatioRef.current);
             localStorage.setItem(
                 "hifishifter.splitRatio",
                 String(splitRatioRef.current),
             );
+
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", endDrag);
             window.removeEventListener("pointercancel", endDrag);
@@ -186,33 +242,97 @@ function AppInner() {
             dragRef.current = { pointerId: e.pointerId };
             setIsDragging(true);
             (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-            setFromClientY(e.clientY);
+
+            // 按下的瞬间也走一次 DOM 直通更新
+            const nextRatio = calculateRatio(e.clientY);
+            if (nextRatio !== null) {
+                splitRatioRef.current = nextRatio;
+                const container = containerRef.current;
+                if (container && container.children.length >= 3) {
+                    const topPanel = container.children[0] as HTMLElement;
+                    const bottomPanel = container.children[2] as HTMLElement;
+                    topPanel.style.flexGrow = String(nextRatio);
+                    bottomPanel.style.flexGrow = String(1 - nextRatio);
+                }
+            }
+
             window.addEventListener("pointermove", onPointerMove);
             window.addEventListener("pointerup", endDrag);
             window.addEventListener("pointercancel", endDrag);
         }
 
         return { startDrag };
-    }, [splitRatio]);
+    }, []);
 
     const statusText = useMemo(() => {
         // 精确匹配
-        if (statusKey[status]) return t(statusKey[status] as any);
+        if (statusKey[status]) return t(statusKey[status] as MessageKey);
         // 前缀匹配：支持 "Export done — path" 等带后缀的状态
         for (const key of Object.keys(statusKey)) {
             if (status.startsWith(key) && status.length > key.length) {
                 const suffix = status.slice(key.length);
-                return t(statusKey[key] as any) + suffix;
+                return t(statusKey[key] as MessageKey) + suffix;
             }
         }
         return status;
     }, [status, t]);
 
-    // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store。
+    // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store
     useClipPitchDataListener();
 
+    // 阻止浏览器默认的 Ctrl+F 搜索、右键菜单和 Alt 键
+
+    // 改用 useRef，取消重绘
+    const isModifierRef = useRef(false);
+
+    useEffect(() => {
+        function preventBrowserFind(e: KeyboardEvent) {
+            const isMac = navigator.platform?.toLowerCase().includes("mac");
+            const mod = isMac ? e.metaKey : e.ctrlKey;
+            if (mod && e.key.toLowerCase() === "f") {
+                e.preventDefault();
+            }
+            if (mod && e.key.toLowerCase() === "p") {
+                e.preventDefault();
+            }
+        }
+        function preventContextMenu(e: MouseEvent) {
+            const target = e.target as HTMLElement | null;
+            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA")
+                return;
+            if (target?.closest?.("[data-hs-context-menu]")) return;
+            e.preventDefault();
+        }
+
+        function altKeyDown(e: KeyboardEvent) {
+            if (e.key !== "Alt") isModifierRef.current = true;
+        }
+
+        function altKeyUp(e: KeyboardEvent) {
+            if (e.key === "Alt" && !isModifierRef.current) {
+                e.preventDefault();
+            }
+            isModifierRef.current = false;
+        }
+
+        window.addEventListener("keydown", altKeyDown, true);
+        window.addEventListener("keyup", altKeyUp, true);
+        window.addEventListener("keydown", preventBrowserFind, true);
+        document.addEventListener("contextmenu", preventContextMenu, true);
+        return () => {
+            window.removeEventListener("keydown", preventBrowserFind, true);
+            window.removeEventListener("keydown", altKeyDown, true);
+            window.removeEventListener("keyup", altKeyUp, true);
+            document.removeEventListener(
+                "contextmenu",
+                preventContextMenu,
+                true,
+            );
+        };
+    }, []);
+
     const errorText = error
-        ? `${t("status_error_prefix")}：${errorCodeKey[error] ? t(errorCodeKey[error] as any) : error}`
+        ? `${t("status_error_prefix")}：${errorCodeKey[error] ? t(errorCodeKey[error] as MessageKey) : error}`
         : statusText;
 
     // 构建 pitch 分析进度文本（分析中时显示在状态栏左侧）
@@ -251,6 +371,13 @@ function AppInner() {
         clipName: string | null;
     }>({ active: false, clipName: null });
 
+    // 波形分析进度状态
+    const [waveformAnalysis, setWaveformAnalysis] = useState<{
+        active: boolean;
+        sourcePath: string | null;
+        progress: number | null;
+    }>({ active: false, sourcePath: null, progress: null });
+
     // Listen for backend stretch progress notifications (Tauri only).
     useEffect(() => {
         let disposed = false;
@@ -284,6 +411,89 @@ function AppInner() {
         return () => {
             disposed = true;
             if (unlisten) unlisten();
+        };
+    }, []);
+
+    // 监听后端波形分析进度事件 (waveform_analysis_progress)
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+        let fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "waveform_analysis_progress",
+                    (event: any) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            sourcePath?: string;
+                            progress?: number;
+                            status?: string;
+                        };
+                        const status = payload?.status ?? "";
+                        const sourcePath =
+                            typeof payload?.sourcePath === "string"
+                                ? payload.sourcePath
+                                : null;
+                        const p =
+                            typeof payload?.progress === "number" &&
+                            Number.isFinite(payload.progress)
+                                ? Math.max(0, Math.min(1, payload.progress))
+                                : null;
+
+                        if (status === "computing") {
+                            // 清除之前的淡出定时器
+                            if (fadeOutTimer) {
+                                clearTimeout(fadeOutTimer);
+                                fadeOutTimer = null;
+                            }
+                            // 提取文件名（不含路径和扩展名）
+                            const fileName = sourcePath
+                                ? (sourcePath
+                                      .replace(/\\/g, "/")
+                                      .split("/")
+                                      .pop()
+                                      ?.replace(/\.[^.]+$/, "") ?? sourcePath)
+                                : null;
+                            setWaveformAnalysis({
+                                active: true,
+                                sourcePath: fileName,
+                                progress: p,
+                            });
+                        } else if (status === "done" || status === "cached") {
+                            // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
+                            if (status === "done") {
+                                setWaveformAnalysis({
+                                    active: true,
+                                    sourcePath: null,
+                                    progress: 1.0,
+                                });
+                                fadeOutTimer = setTimeout(() => {
+                                    if (!disposed) {
+                                        setWaveformAnalysis({
+                                            active: false,
+                                            sourcePath: null,
+                                            progress: null,
+                                        });
+                                    }
+                                }, 1500);
+                            }
+                            // cached 状态不显示进度条
+                        }
+                    },
+                );
+            } catch {
+                // Safe no-op for non-Tauri builds.
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+            if (fadeOutTimer) clearTimeout(fadeOutTimer);
         };
     }, []);
 
@@ -342,7 +552,9 @@ function AppInner() {
     const runtimeRef = useRef({
         isPlaying: false,
         hasSynthesized: false,
-        toolMode: "draw" as "draw" | "select",
+        toolMode: "draw" as import("./features/session/sessionTypes").ToolMode,
+        drawToolMode:
+            "draw" as import("./features/session/sessionTypes").DrawToolMode,
     });
     const outputPathRef = useRef(outputPath);
 
@@ -451,6 +663,31 @@ function AppInner() {
         [dispatch, runOrPromptUnsavedAction],
     );
 
+    const handleExternalFileAction = useCallback(
+        (kind: ExternalFileActionKind, path: string) => {
+            const normalized = String(path ?? "").trim();
+            if (!normalized) return;
+            if (kind === "openProject") {
+                runOrPromptUnsavedAction("switch", async () => {
+                    await dispatch(openProjectFromPath(normalized)).unwrap();
+                });
+                return;
+            }
+            if (kind === "importVocalShifter") {
+                void dispatch(openVocalShifterFromPath(normalized));
+                return;
+            }
+            if (kind === "importReaper") {
+                void dispatch(openReaperFromPath(normalized));
+                return;
+            }
+            if (kind === "importAudio") {
+                void dispatch(importAudioFromPath(normalized));
+            }
+        },
+        [dispatch, runOrPromptUnsavedAction],
+    );
+
     const handleExitApp = useCallback(() => {
         runOrPromptUnsavedAction("exit", closeWindowNow);
     }, [closeWindowNow, runOrPromptUnsavedAction]);
@@ -458,19 +695,95 @@ function AppInner() {
     useEffect(() => {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
+        void dispatch(loadUiSettings());
     }, [dispatch]);
+
+    useEffect(() => {
+        let canceled = false;
+
+        async function consumeStartupProjectPath() {
+            try {
+                const result = await projectApi.consumeStartupProjectPath();
+                const startupPath = String(result?.path ?? "").trim();
+                const kind = detectExternalActionKindFromPath(startupPath);
+                if (!canceled && startupPath && kind) {
+                    handleExternalFileAction(kind, startupPath);
+                }
+            } catch {
+                // no-op
+            }
+        }
+
+        void consumeStartupProjectPath();
+        return () => {
+            canceled = true;
+        };
+    }, [handleExternalFileAction]);
+
+    useEffect(() => {
+        function onOpenProjectPath(event: Event) {
+            const detail = (event as CustomEvent<ExternalFileActionDetail>).detail;
+            const path = String(detail?.path ?? "").trim();
+            const kind = detail?.kind ?? detectExternalActionKindFromPath(path);
+            if (!path || !kind) return;
+            handleExternalFileAction(kind, path);
+        }
+
+        window.addEventListener(OPEN_PROJECT_PATH_EVENT, onOpenProjectPath as EventListener);
+        return () => {
+            window.removeEventListener(
+                OPEN_PROJECT_PATH_EVENT,
+                onOpenProjectPath as EventListener,
+            );
+        };
+    }, [handleExternalFileAction]);
 
     useEffect(() => {
         runtimeRef.current = {
             isPlaying: Boolean(runtimeIsPlaying),
             hasSynthesized: Boolean(runtimeHasSynthesized),
             toolMode,
+            drawToolMode,
         };
-    }, [runtimeIsPlaying, runtimeHasSynthesized, toolMode]);
+    }, [runtimeIsPlaying, runtimeHasSynthesized, toolMode, drawToolMode]);
 
     useEffect(() => {
         outputPathRef.current = outputPath;
     }, [outputPath]);
+
+    useEffect(() => {
+        const handler = (event: Event) => {
+            const detail = (
+                event as CustomEvent<{
+                    missingPath?: string;
+                    resolve?: (shouldPick: boolean) => void;
+                }>
+            ).detail;
+            if (!detail || typeof detail.resolve !== "function") return;
+            missingFileResolverRef.current = detail.resolve;
+            setMissingFileDialog({
+                open: true,
+                missingPath:
+                    typeof detail.missingPath === "string"
+                        ? detail.missingPath
+                        : "",
+            });
+        };
+        window.addEventListener(
+            MISSING_FILE_CONFIRM_EVENT,
+            handler as EventListener,
+        );
+        return () => {
+            window.removeEventListener(
+                MISSING_FILE_CONFIRM_EVENT,
+                handler as EventListener,
+            );
+            if (missingFileResolverRef.current) {
+                missingFileResolverRef.current(false);
+                missingFileResolverRef.current = null;
+            }
+        };
+    }, []);
 
     useEffect(() => {
         let disposed = false;
@@ -481,12 +794,13 @@ function AppInner() {
                 const mod = await import("@tauri-apps/api/window");
                 const currentWindow = mod.getCurrentWindow();
                 unlisten = await currentWindow.onCloseRequested(
-                    (event: any) => {
+                    (event: CloseRequestedEvent) => {
                         if (allowWindowCloseRef.current) {
                             allowWindowCloseRef.current = false;
                             return;
                         }
-                        if (!projectDirty) {
+                        // 读取 ref 的值，无需重建整个监听器
+                        if (!projectDirtyRef.current) {
                             return;
                         }
                         event.preventDefault();
@@ -495,9 +809,7 @@ function AppInner() {
                         }
                     },
                 );
-            } catch {
-                // Safe no-op for non-Tauri builds.
-            }
+            } catch {}
         }
 
         void setup();
@@ -505,7 +817,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [closeWindowNow, projectDirty, promptUnsavedAction]);
+    }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
@@ -518,11 +830,65 @@ function AppInner() {
                         void dispatch(playOriginal());
                     }
                     break;
+                case "playback.stop":
+                    if (runtimeRef.current.isPlaying) {
+                        void dispatch(
+                            stopAudioPlayback({ restoreAnchor: true }),
+                        );
+                    } else {
+                        void dispatch(playOriginal());
+                    }
+                    break;
+                case "playback.focusCursor":
+                    window.dispatchEvent(new CustomEvent("hifi:focusCursor"));
+                    break;
+                case "playback.seekLeft":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:nudgePlayhead", {
+                            detail: { direction: -1 },
+                        }),
+                    );
+                    break;
+                case "playback.seekRight":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:nudgePlayhead", {
+                            detail: { direction: 1 },
+                        }),
+                    );
+                    break;
+                case "timeline.zoomIn":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:zoomTimelineFocus", {
+                            detail: { factor: 1.1 },
+                        }),
+                    );
+                    break;
+                case "timeline.zoomOut":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:zoomTimelineFocus", {
+                            detail: { factor: 0.9 },
+                        }),
+                    );
+                    break;
                 case "edit.undo":
                     void dispatch(undoRemote());
                     break;
                 case "edit.redo":
                     void dispatch(redoRemote());
+                    break;
+                case "edit.selectAll":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "selectAll" },
+                        }),
+                    );
+                    break;
+                case "edit.deselect":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "deselect" },
+                        }),
+                    );
                     break;
                 case "project.new":
                     handleNewProject();
@@ -550,14 +916,23 @@ function AppInner() {
                         await dispatch(exportAudio(curPath));
                     })();
                     break;
-                case "mode.toggle":
-                    dispatch(
-                        setToolMode(
-                            runtimeRef.current.toolMode === "draw"
-                                ? "select"
-                                : "draw",
-                        ),
-                    );
+                case "mode.toggle": {
+                    const cur = runtimeRef.current.toolMode;
+                    if (cur === "select") {
+                        dispatch(setToolMode(runtimeRef.current.drawToolMode));
+                    } else {
+                        dispatch(setToolMode("select"));
+                    }
+                    break;
+                }
+                case "mode.selectTool":
+                    dispatch(setToolMode("select"));
+                    break;
+                case "mode.drawTool":
+                    dispatch(setToolMode("draw"));
+                    break;
+                case "mode.lineTool":
+                    dispatch(setToolMode("vibrato"));
                     break;
                 case "quickSearch.open":
                     setQuickSearchOpen(true);
@@ -644,24 +1019,207 @@ function AppInner() {
                         }
                         const step = getParamShiftStep(editP, descriptor);
                         const delta = isUp ? step : -step;
-                        const res = await paramsApi.getParamFrames(
+                        const clampNum = (
+                            v: number,
+                            minV: number,
+                            maxV: number,
+                        ) => Math.min(maxV, Math.max(minV, v));
+                        const smoothness = clampNum(
+                            Number(ss.edgeSmoothnessPercent) || 0,
+                            0,
+                            100,
+                        );
+                        const maxTransitionFrames = Math.floor(frameCount / 2);
+                        const transitionFrames =
+                            smoothness > 0 && maxTransitionFrames > 0
+                                ? Math.round(
+                                      (smoothness / 100) * maxTransitionFrames,
+                                  )
+                                : 0;
+                        const halfSpan =
+                            transitionFrames > 0 ? transitionFrames / 2 : 0;
+                        const extend = Math.max(0, Math.ceil(halfSpan));
+                        const extStart = Math.max(0, startFrame - extend);
+                        const extCount =
+                            frameCount +
+                            Math.max(0, startFrame - extStart) +
+                            extend;
+                        const selOffset = startFrame - extStart;
+
+                        const extRes = await paramsApi.getParamFrames(
                             rootTrkId,
                             editP,
-                            startFrame,
-                            frameCount,
+                            extStart,
+                            extCount,
                             1,
                         );
-                        if (!res?.ok) return;
-                        const payload = res as ParamFramesPayload;
-                        const editValues = (payload.edit ?? []).map(
+                        if (!extRes?.ok) return;
+                        const extPayload = extRes as ParamFramesPayload;
+                        const beforeDense = (extPayload.edit ?? []).map(
                             (v) => Number(v) || 0,
                         );
-                        const shifted = editValues.map((v) => v + delta);
+                        if (beforeDense.length === 0) return;
+
+                        const selEnd = Math.min(
+                            beforeDense.length - 1,
+                            selOffset + frameCount - 1,
+                        );
+                        if (
+                            selOffset < 0 ||
+                            selOffset >= beforeDense.length ||
+                            selEnd < selOffset
+                        ) {
+                            return;
+                        }
+                        const actualSelLen = selEnd - selOffset + 1;
+                        const editedDense = beforeDense.slice();
+                        for (let i = 0; i < actualSelLen; i += 1) {
+                            const orig = beforeDense[selOffset + i] ?? 0;
+                            editedDense[selOffset + i] = orig + delta;
+                        }
+
+                        if (smoothness > 0 && transitionFrames > 0) {
+                            const calcMean = (arr: number[]) => {
+                                let sum = 0;
+                                let count = 0;
+                                for (let i = 0; i < actualSelLen; i += 1) {
+                                    const v = Number(arr[selOffset + i] ?? 0);
+                                    if (editP === "pitch" && v === 0) continue;
+                                    sum += v;
+                                    count += 1;
+                                }
+                                return { sum, count };
+                            };
+
+                            const beforeMean = calcMean(beforeDense);
+                            const afterMean = calcMean(editedDense);
+                            const meanDelta =
+                                beforeMean.count > 0 && afterMean.count > 0
+                                    ? Math.abs(
+                                          afterMean.sum / afterMean.count -
+                                              beforeMean.sum / beforeMean.count,
+                                      )
+                                    : 0;
+
+                            let boundaryDelta = 0;
+                            let boundaryCount = 0;
+                            if (selOffset > 0) {
+                                boundaryDelta += Math.abs(
+                                    Number(beforeDense[selOffset] ?? 0) -
+                                        Number(beforeDense[selOffset - 1] ?? 0),
+                                );
+                                boundaryCount += 1;
+                            }
+                            if (selEnd < beforeDense.length - 1) {
+                                boundaryDelta += Math.abs(
+                                    Number(beforeDense[selEnd] ?? 0) -
+                                        Number(beforeDense[selEnd + 1] ?? 0),
+                                );
+                                boundaryCount += 1;
+                            }
+                            const boundaryMean =
+                                boundaryCount > 0
+                                    ? boundaryDelta / boundaryCount
+                                    : 0;
+                            const changeFactor = clampNum(
+                                meanDelta / (meanDelta + boundaryMean + 1e-6),
+                                0,
+                                1,
+                            );
+
+                            if (changeFactor > 0) {
+                                const snapshot = editedDense.slice();
+                                const span = Math.max(1e-9, 2 * halfSpan);
+                                if (selOffset > 0) {
+                                    const left = Math.max(
+                                        0,
+                                        Math.floor(selOffset - halfSpan),
+                                    );
+                                    const right = Math.min(
+                                        editedDense.length - 1,
+                                        Math.ceil(selOffset + halfSpan),
+                                    );
+                                    for (
+                                        let idx = left;
+                                        idx <= right;
+                                        idx += 1
+                                    ) {
+                                        const t = clampNum(
+                                            (idx - (selOffset - halfSpan)) /
+                                                span,
+                                            0,
+                                            1,
+                                        );
+                                        const outsideIdx = Math.min(
+                                            selOffset - 1,
+                                            idx,
+                                        );
+                                        const insideIdx = Math.max(
+                                            selOffset,
+                                            idx,
+                                        );
+                                        const outsideVal =
+                                            snapshot[outsideIdx] ??
+                                            editedDense[idx];
+                                        const insideVal =
+                                            snapshot[insideIdx] ??
+                                            editedDense[idx];
+                                        const smoothed =
+                                            outsideVal +
+                                            (insideVal - outsideVal) * t;
+                                        editedDense[idx] =
+                                            snapshot[idx] +
+                                            (smoothed - snapshot[idx]) *
+                                                changeFactor;
+                                    }
+                                }
+                                if (selEnd < editedDense.length - 1) {
+                                    const left = Math.max(
+                                        0,
+                                        Math.floor(selEnd - halfSpan),
+                                    );
+                                    const right = Math.min(
+                                        editedDense.length - 1,
+                                        Math.ceil(selEnd + halfSpan),
+                                    );
+                                    for (
+                                        let idx = left;
+                                        idx <= right;
+                                        idx += 1
+                                    ) {
+                                        const t = clampNum(
+                                            (idx - (selEnd - halfSpan)) / span,
+                                            0,
+                                            1,
+                                        );
+                                        const insideIdx = Math.min(selEnd, idx);
+                                        const outsideIdx = Math.max(
+                                            selEnd + 1,
+                                            idx,
+                                        );
+                                        const insideVal =
+                                            snapshot[insideIdx] ??
+                                            editedDense[idx];
+                                        const outsideVal =
+                                            snapshot[outsideIdx] ??
+                                            editedDense[idx];
+                                        const smoothed =
+                                            insideVal +
+                                            (outsideVal - insideVal) * t;
+                                        editedDense[idx] =
+                                            snapshot[idx] +
+                                            (smoothed - snapshot[idx]) *
+                                                changeFactor;
+                                    }
+                                }
+                            }
+                        }
+
                         await paramsApi.setParamFrames(
                             rootTrkId,
                             editP,
-                            startFrame,
-                            shifted,
+                            extStart,
+                            editedDense,
                             true,
                         );
                         // 通知 PianoRoll 刷新曲线
@@ -669,6 +1227,35 @@ function AppInner() {
                     })();
                     break;
                 }
+                case "pianoRoll.shiftParamUpSelection":
+                case "pianoRoll.shiftParamDownSelection": {
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: {
+                                op:
+                                    actionId ===
+                                    "pianoRoll.shiftParamUpSelection"
+                                        ? "shiftParamUpSelection"
+                                        : "shiftParamDownSelection",
+                            },
+                        }),
+                    );
+                    break;
+                }
+                case "edit.pasteReaper":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "pasteReaper" },
+                        }),
+                    );
+                    break;
+                case "edit.pasteVocalShifter":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "pasteVocalShifter" },
+                        }),
+                    );
+                    break;
                 // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
                 default:
                     break;
@@ -683,8 +1270,12 @@ function AppInner() {
         if (!runtimeIsPlaying) return;
         // Keep playhead following backend audio clock.
         // 用 in-flight guard 防止轮询请求堆积；并适度降频以降低 Redux/React 压力。
-        const intervalMs = 80;
+        // Increase playhead sync frequency to ~30Hz for smoother playhead updates
+        const intervalMs = 33;
         const id = window.setInterval(() => {
+            // 预渲染阶段后端还未真正进入 playing，
+            // 若此时同步会把前端“准备播放”状态误判为停止，导致 stop 锚点丢失。
+            if (rendering.active) return;
             if (playbackSyncInFlightRef.current) return;
             playbackSyncInFlightRef.current = true;
             const p = dispatch(
@@ -695,7 +1286,7 @@ function AppInner() {
             });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying]);
+    }, [dispatch, runtimeIsPlaying, rendering.active]);
 
     useEffect(() => {
         splitRatioRef.current = splitRatio;
@@ -821,6 +1412,66 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
+            <Dialog.Root
+                open={missingFileDialog.open}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setMissingFileDialog((prev) => ({
+                            ...prev,
+                            open: false,
+                        }));
+                        if (missingFileResolverRef.current) {
+                            missingFileResolverRef.current(false);
+                            missingFileResolverRef.current = null;
+                        }
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="560px">
+                    <Dialog.Title>
+                        {t("missing_file_replace_title")}
+                    </Dialog.Title>
+                    <Dialog.Description>
+                        {t("missing_file_replace_desc")}
+                    </Dialog.Description>
+                    <div className="mt-2 rounded border border-qt-border bg-qt-base p-2 text-xs break-all">
+                        {missingFileDialog.missingPath}
+                    </div>
+                    <Flex justify="end" gap="2" mt="4">
+                        <Button
+                            variant="soft"
+                            color="gray"
+                            onClick={() => {
+                                setMissingFileDialog((prev) => ({
+                                    ...prev,
+                                    open: false,
+                                }));
+                                if (missingFileResolverRef.current) {
+                                    missingFileResolverRef.current(false);
+                                    missingFileResolverRef.current = null;
+                                }
+                            }}
+                        >
+                            {t("cancel")}
+                        </Button>
+                        <Button
+                            onClick={() => {
+                                setMissingFileDialog((prev) => ({
+                                    ...prev,
+                                    open: false,
+                                }));
+                                if (missingFileResolverRef.current) {
+                                    missingFileResolverRef.current(true);
+                                    missingFileResolverRef.current = null;
+                                }
+                            }}
+                        >
+                            {t("missing_file_replace_pick")}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
             <MenuBar
                 onNewProject={handleNewProject}
                 onOpenProject={handleOpenProject}
@@ -893,9 +1544,28 @@ function AppInner() {
                                 lineHeight: "16px",
                             }}
                         >
-                            {t("status_stretching" as any)}
+                            {t("status_stretching")}
                             {stretching.clipName
                                 ? ` "${stretching.clipName}"`
+                                : ""}
+                        </span>
+                    ) : null}
+                    {waveformAnalysis.active ? (
+                        <span
+                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            style={{
+                                background: "var(--accent-3)",
+                                color: "var(--accent-11)",
+                                fontSize: "11px",
+                                lineHeight: "16px",
+                            }}
+                        >
+                            {"Analyzing waveform"}
+                            {waveformAnalysis.sourcePath
+                                ? ` "${waveformAnalysis.sourcePath}"`
+                                : ""}
+                            {waveformAnalysis.progress != null
+                                ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
                                 : ""}
                         </span>
                     ) : null}
@@ -935,7 +1605,7 @@ function AppInner() {
                                 lineHeight: "16px",
                             }}
                         >
-                            {(t as any)("refreshing_pitch_data") ||
+                            {t("refreshing_pitch_data") ||
                                 "Refreshing pitch data"}
                             {pianoRollStatus.asyncRefreshProgress > 0
                                 ? ` ${Math.round(pianoRollStatus.asyncRefreshProgress)}%`

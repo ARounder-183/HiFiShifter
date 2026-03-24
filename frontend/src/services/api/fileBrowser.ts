@@ -6,6 +6,7 @@ export interface FileEntry {
     isDir: boolean;
     size: number | null;
     extension: string | null;
+    modifiedTime: number | null;
 }
 
 export interface AudioFileInfo {

@@ -66,6 +66,15 @@ export interface ProjectMeta {
     path?: string | null;
     dirty: boolean;
     recent: string[];
+    base_scale?: string;
+    use_custom_scale?: boolean;
+    custom_scale?: {
+        id: string;
+        name: string;
+        notes: number[];
+    } | null;
+    beats_per_bar?: number;
+    grid_size?: string;
 }
 
 export interface TimelineState {
@@ -77,6 +86,8 @@ export interface TimelineState {
     playhead_sec: number;
     project_sec?: number;
     project?: ProjectMeta;
+    missing_files?: string[];
+    skipped_files?: string[];
 }
 
 export interface TimelineResult {
@@ -89,6 +100,8 @@ export interface TimelineResult {
     playhead_sec: number;
     project_sec?: number;
     project?: ProjectMeta;
+    missing_files?: string[];
+    skipped_files?: string[];
 }
 
 export interface TrackSummaryResult {
@@ -154,6 +167,37 @@ export interface WaveformPeaksSegmentPayload {
     ok: boolean;
     min: number[];
     max: number[];
+}
+
+/** HFSPeaks v2 mipmap 级别 */
+export type MipmapLevel = 0 | 1 | 2 | 3;
+
+/** v2 波形峰值响应 */
+export interface WaveformPeaksV2Payload {
+    ok: boolean;
+    min: number[];
+    max: number[];
+    sample_rate: number;
+    mipmap_level: number;
+    division_factor: number;
+    /** 返回数据实际覆盖的起始时间（秒），由后端 floor/ceil 取整后的峰值索引决定 */
+    actual_start_sec: number;
+    /** 返回数据实际覆盖的持续时间（秒），由后端 floor/ceil 取整后的峰值索引决定 */
+    actual_duration_sec: number;
+}
+
+/** v2 波形元数据响应 */
+export interface WaveformPeaksV2MetaPayload {
+    ok: boolean;
+    sample_rate: number;
+    channels: number;
+    total_frames: number;
+    mipmap_levels: Array<{
+        level: number;
+        division_factor: number;
+        peak_count: number;
+    }>;
+    cached: boolean;
 }
 
 export type ParamReferenceKind = "source_curve" | "default_value";

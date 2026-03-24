@@ -1,7 +1,7 @@
 {
     "$schema": "https://schema.tauri.app/config/2",
     "productName": "HiFiShifter",
-    "version": "1.0.1",
+    "version": "0.1.0-beta.6",
     "identifier": "com.arounder.hifishifter",
     "build": {
         "beforeDevCommand": "npm --prefix ../frontend run build",
@@ -13,8 +13,8 @@
         "windows": [
             {
                 "title": "HiFiShifter",
-                "width": 800,
-                "height": 600,
+                "width": 1400,
+                "height": 900,
                 "visible": true,
                 "dragDropEnabled": true
             }
@@ -26,7 +26,9 @@
     "bundle": {
         "active": true,
         "targets": [
-            "nsis"
+            "nsis",
+            "dmg",
+            "appimage"
         ],
         "windows": {
             "nsis": {
@@ -38,7 +40,7 @@
             "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
             "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
-            "third_party/vslib/vslib_x64.dll": "vslib/vslib_x64.dll"
+            "third_party/vslib/vslib_x64.dll": "vslib_x64.dll"
         },
         "icon": [
             "icons/32x32.png",

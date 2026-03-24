@@ -5,28 +5,27 @@ export function toggleSecondaryParamVisibility(
     param: ParamName,
 ): Partial<Record<ParamName, boolean>> {
     if (current[param]) {
-        return {};
+        const next = { ...current };
+        delete next[param];
+        return next;
     }
-    return { [param]: true };
+    return { ...current, [param]: true };
 }
 
-export function getActiveSecondaryParamId(args: {
+export function getVisibleSecondaryParamIds(args: {
     editParam: ParamName;
     processorParamIds: ParamName[];
     secondaryParamVisible: Partial<Record<ParamName, boolean>>;
-}): ParamName | null {
+}): ParamName[] {
     const { editParam, processorParamIds, secondaryParamVisible } = args;
     const candidateIds =
         editParam === "pitch"
             ? processorParamIds
             : ["pitch", ...processorParamIds];
 
-    return (
-        candidateIds.find(
-            (paramId) =>
-                paramId !== editParam &&
-                secondaryParamVisible[paramId] === true,
-        ) ?? null
+    return candidateIds.filter(
+        (paramId) =>
+            paramId !== editParam && secondaryParamVisible[paramId] === true,
     );
 }
 

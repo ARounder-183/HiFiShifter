@@ -1,3 +1,9 @@
+//! 应用全局状态管理模块。
+//!
+//! 定义 AppState 及其内部结构（TimelineState、Track、Clip 等），
+//! 管理 timeline 编辑状态、渲染缓存、外部 Resampler 注册表、
+//! 音频引擎实例等全局共享资源，通过 Mutex/RwLock 保证线程安全。
+
 use crate::audio_engine::AudioEngine;
 use crate::audio_utils::try_read_wav_info;
 use crate::clip_pitch_cache::ClipPitchCache;
@@ -5,8 +11,9 @@ use crate::models::{
     ModelConfig, ModelConfigPayload, PitchRange, ProjectMetaPayload, RuntimeInfoPayload,
     TimelineClip, TimelineStatePayload, TimelineTrack,
 };
+use crate::project::CustomScale;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use uuid::Uuid;
@@ -93,8 +100,8 @@ fn default_frame_period_ms() -> f64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
-    #[default]
     WorldDll,
+    #[default]
     NsfHifiganOnnx,
     #[serde(rename = "vslib")]
     VocalShifterVslib,
@@ -168,6 +175,28 @@ pub struct TrackParamsState {
     pub extra_params: HashMap<String, f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedParamCurvesPayload {
+    #[serde(default = "default_frame_period_ms")]
+    pub frame_period_ms: f64,
+    #[serde(default)]
+    pub pitch_edit: Vec<f32>,
+    #[serde(default)]
+    pub tension_edit: Vec<f32>,
+    #[serde(default)]
+    pub extra_curves: HashMap<String, Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveClipPayload {
+    pub clip_id: String,
+    pub start_sec: f64,
+    #[serde(default)]
+    pub track_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
@@ -199,9 +228,9 @@ pub struct Clip {
     pub color: String,
 
     pub source_path: Option<String>,
-    pub duration_sec: Option<f64>,           // 兼容性保留
-    pub duration_frames: Option<u64>,        // 精确的frame总数
-    pub source_sample_rate: Option<u32>,     // 源文件采样率
+    pub duration_sec: Option<f64>,       // 兼容性保留
+    pub duration_frames: Option<u64>,    // 精确的frame总数
+    pub source_sample_rate: Option<u32>, // 源文件采样率
     pub waveform_preview: Option<Vec<f32>>,
     pub pitch_range: Option<PitchRange>,
 
@@ -285,6 +314,11 @@ pub struct ProjectState {
     pub path: Option<String>,
     pub dirty: bool,
     pub recent: Vec<String>,
+    pub base_scale: String,
+    pub use_custom_scale: bool,
+    pub custom_scale: Option<CustomScale>,
+    pub beats_per_bar: u32,
+    pub grid_size: String,
     pub allow_close: bool,
 }
 
@@ -295,6 +329,11 @@ impl Default for ProjectState {
             path: None,
             dirty: false,
             recent: Vec::new(),
+            base_scale: "C".to_string(),
+            use_custom_scale: false,
+            custom_scale: None,
+            beats_per_bar: 4,
+            grid_size: "1/4".to_string(),
             allow_close: false,
         }
     }
@@ -331,6 +370,286 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    fn clip_frame_bounds(
+        &self,
+        start_sec: f64,
+        length_sec: f64,
+        frame_period_ms: f64,
+    ) -> (usize, usize) {
+        let fp = frame_period_ms.max(0.1);
+        let start_frame = ((start_sec.max(0.0) * 1000.0) / fp).floor() as usize;
+        let frame_len = ((length_sec.max(0.0) * 1000.0) / fp).ceil().max(1.0) as usize;
+        (start_frame, start_frame.saturating_add(frame_len))
+    }
+
+    fn root_track_kind(&self, root_track_id: &str) -> SynthPipelineKind {
+        self.tracks
+            .iter()
+            .find(|track| track.id == root_track_id)
+            .map(|track| SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
+            .unwrap_or(SynthPipelineKind::WorldVocoder)
+    }
+
+    fn linked_param_frame_len(linked_params: &LinkedParamCurvesPayload) -> usize {
+        let mut frame_len = linked_params
+            .pitch_edit
+            .len()
+            .max(linked_params.tension_edit.len());
+        for curve in linked_params.extra_curves.values() {
+            frame_len = frame_len.max(curve.len());
+        }
+        frame_len.max(1)
+    }
+
+    fn clear_curve_range(
+        curve: &mut Vec<f32>,
+        required_len: usize,
+        start_frame: usize,
+        end_frame: usize,
+        default_value: f32,
+    ) {
+        if curve.len() < required_len {
+            curve.resize(required_len, default_value);
+        }
+        let start = start_frame.min(curve.len());
+        let end = end_frame.min(curve.len());
+        if start >= end {
+            return;
+        }
+        for value in &mut curve[start..end] {
+            *value = default_value;
+        }
+    }
+
+    fn write_curve_range(
+        curve: &mut Vec<f32>,
+        required_len: usize,
+        start_frame: usize,
+        values: &[f32],
+        default_value: f32,
+    ) {
+        if curve.len() < required_len {
+            curve.resize(required_len, default_value);
+        }
+        for (offset, value) in values.iter().copied().enumerate() {
+            let idx = start_frame.saturating_add(offset);
+            if idx >= curve.len() {
+                break;
+            }
+            curve[idx] = value;
+        }
+    }
+
+    fn extract_linked_params_from_root_range(
+        &mut self,
+        root_track_id: &str,
+        start_sec: f64,
+        length_sec: f64,
+    ) -> Option<LinkedParamCurvesPayload> {
+        self.ensure_params_for_root(root_track_id);
+        let frame_period_ms = self.frame_period_ms().max(0.1);
+        let (start_frame, end_frame) =
+            self.clip_frame_bounds(start_sec, length_sec, frame_period_ms);
+        let entry = self.params_by_root_track.get(root_track_id)?;
+
+        let pitch_edit = if entry.pitch_edit_user_modified {
+            entry
+                .pitch_edit
+                .get(start_frame..end_frame)
+                .unwrap_or(&[])
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+        let tension_edit = entry
+            .tension_edit
+            .get(start_frame..end_frame)
+            .unwrap_or(&[])
+            .to_vec();
+        let extra_curves = entry
+            .extra_curves
+            .iter()
+            .map(|(param, curve)| {
+                (
+                    param.clone(),
+                    curve.get(start_frame..end_frame).unwrap_or(&[]).to_vec(),
+                )
+            })
+            .collect();
+
+        Some(LinkedParamCurvesPayload {
+            frame_period_ms,
+            pitch_edit,
+            tension_edit,
+            extra_curves,
+        })
+    }
+
+    fn clear_linked_params_in_root_range(
+        &mut self,
+        root_track_id: &str,
+        start_sec: f64,
+        length_sec: f64,
+        clear_pitch: bool,
+        extra_curve_keys: Option<&[String]>,
+    ) {
+        self.ensure_params_for_root(root_track_id);
+        let frame_period_ms = self.frame_period_ms().max(0.1);
+        let (start_frame, end_frame) =
+            self.clip_frame_bounds(start_sec, length_sec, frame_period_ms);
+        let kind = self.root_track_kind(root_track_id);
+        let Some(entry) = self.params_by_root_track.get_mut(root_track_id) else {
+            return;
+        };
+
+        let required_len = entry.pitch_edit.len().max(end_frame);
+        if clear_pitch {
+            Self::clear_curve_range(
+                &mut entry.pitch_edit,
+                required_len,
+                start_frame,
+                end_frame,
+                0.0,
+            );
+        }
+        Self::clear_curve_range(
+            &mut entry.tension_edit,
+            required_len,
+            start_frame,
+            end_frame,
+            0.0,
+        );
+
+        let keys = extra_curve_keys
+            .map(|keys| keys.to_vec())
+            .unwrap_or_else(|| entry.extra_curves.keys().cloned().collect());
+        for key in keys {
+            let default_value =
+                crate::renderer::automation_curve_default_value(kind, &key).unwrap_or(0.0);
+            let curve = entry
+                .extra_curves
+                .entry(key)
+                .or_insert_with(|| vec![default_value; required_len]);
+            Self::clear_curve_range(curve, required_len, start_frame, end_frame, default_value);
+        }
+
+        if clear_pitch {
+            entry.pitch_edit_user_modified = true;
+        }
+    }
+
+    fn apply_linked_params_to_root_range(
+        &mut self,
+        root_track_id: &str,
+        start_sec: f64,
+        linked_params: &LinkedParamCurvesPayload,
+    ) {
+        self.ensure_params_for_root(root_track_id);
+        let frame_period_ms = self.frame_period_ms().max(0.1);
+        let start_frame = ((start_sec.max(0.0) * 1000.0) / frame_period_ms).floor() as usize;
+        let frame_len = Self::linked_param_frame_len(linked_params);
+        let end_frame = start_frame.saturating_add(frame_len);
+        let kind = self.root_track_kind(root_track_id);
+        let has_pitch = !linked_params.pitch_edit.is_empty();
+
+        let target_existing_keys = self
+            .params_by_root_track
+            .get(root_track_id)
+            .map(|entry| entry.extra_curves.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        let Some(entry) = self.params_by_root_track.get_mut(root_track_id) else {
+            return;
+        };
+
+        let required_len = entry.pitch_edit.len().max(end_frame);
+        if has_pitch {
+            Self::clear_curve_range(
+                &mut entry.pitch_edit,
+                required_len,
+                start_frame,
+                end_frame,
+                0.0,
+            );
+        }
+        Self::clear_curve_range(
+            &mut entry.tension_edit,
+            required_len,
+            start_frame,
+            end_frame,
+            0.0,
+        );
+        if has_pitch {
+            Self::write_curve_range(
+                &mut entry.pitch_edit,
+                required_len,
+                start_frame,
+                &linked_params.pitch_edit,
+                0.0,
+            );
+        }
+        Self::write_curve_range(
+            &mut entry.tension_edit,
+            required_len,
+            start_frame,
+            &linked_params.tension_edit,
+            0.0,
+        );
+
+        let mut all_keys = target_existing_keys;
+        for key in linked_params.extra_curves.keys() {
+            if !all_keys.iter().any(|existing| existing == key) {
+                all_keys.push(key.clone());
+            }
+        }
+        for key in &all_keys {
+            let default_value =
+                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+            let curve = entry
+                .extra_curves
+                .entry(key.clone())
+                .or_insert_with(|| vec![default_value; required_len]);
+            Self::clear_curve_range(curve, required_len, start_frame, end_frame, default_value);
+        }
+        for (key, values) in &linked_params.extra_curves {
+            let default_value =
+                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+            let curve = entry
+                .extra_curves
+                .entry(key.clone())
+                .or_insert_with(|| vec![default_value; required_len]);
+            Self::write_curve_range(curve, required_len, start_frame, values, default_value);
+        }
+
+        if has_pitch {
+            entry.pitch_edit_user_modified = true;
+        }
+    }
+
+    pub fn extract_clip_linked_params(
+        &mut self,
+        clip_id: &str,
+    ) -> Option<LinkedParamCurvesPayload> {
+        let clip = self.clips.iter().find(|clip| clip.id == clip_id)?;
+        let root_track_id = self.resolve_root_track_id(&clip.track_id)?;
+        self.extract_linked_params_from_root_range(&root_track_id, clip.start_sec, clip.length_sec)
+    }
+
+    pub fn apply_linked_params_to_clip(
+        &mut self,
+        clip_id: &str,
+        linked_params: &LinkedParamCurvesPayload,
+    ) -> bool {
+        let Some(clip) = self.clips.iter().find(|clip| clip.id == clip_id) else {
+            return false;
+        };
+        let Some(root_track_id) = self.resolve_root_track_id(&clip.track_id) else {
+            return false;
+        };
+        self.apply_linked_params_to_root_range(&root_track_id, clip.start_sec, linked_params);
+        true
+    }
+
     pub fn resolve_root_track_id(&self, track_id: &str) -> Option<String> {
         if track_id.trim().is_empty() {
             return None;
@@ -377,10 +696,10 @@ impl TimelineState {
     pub fn ensure_params_for_root(&mut self, root_track_id: &str) {
         let fp = self.frame_period_ms();
         let target = self.target_param_frames(fp);
-        
+
         // Calculate expected cache key to detect when timeline changed
         let expected_key = crate::pitch_analysis::build_root_pitch_key(self, root_track_id);
-        
+
         let entry = self
             .params_by_root_track
             .entry(root_track_id.to_string())
@@ -390,11 +709,11 @@ impl TimelineState {
             });
 
         entry.frame_period_ms = fp;
-        
+
         // CRITICAL FIX: Detect stale pitch curves and clear them when clip/timeline changes.
         // This prevents old pitch data from being displayed after clip replacement or timeline edits.
         let key_changed = entry.pitch_orig_key.as_deref() != Some(&expected_key);
-        
+
         if key_changed && entry.pitch_orig_key.is_some() {
             // Timeline/clip configuration changed - clear orig curves to force re-analysis
             entry.pitch_orig.clear();
@@ -403,7 +722,7 @@ impl TimelineState {
             if !entry.pitch_edit_user_modified {
                 entry.pitch_edit.clear();
             }
-            
+
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                 eprintln!(
                     "state: [INVALIDATE] Cleared stale pitch curves for root_track={} (key changed, user_modified={})",
@@ -475,9 +794,19 @@ pub struct AppState {
     /// Used to localize native dialogs implemented in Rust.
     pub ui_locale: RwLock<String>,
 
+    /// When true, `checkpoint_timeline` calls are suppressed.
+    /// Used by begin_undo_group / end_undo_group to group multiple
+    /// backend operations into a single undo entry.
+    pub suppress_checkpoints: std::sync::atomic::AtomicBool,
+
     pub waveform_cache_dir: std::sync::Mutex<PathBuf>,
     pub waveform_cache: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Arc<crate::waveform::CachedPeaks>>,
+    >,
+
+    /// V2 多级 mipmap 波形缓存 (key = source_path)
+    pub waveform_cache_v2: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>>,
     >,
 
     // Set in Tauri setup. Used for async notifications.
@@ -485,13 +814,14 @@ pub struct AppState {
 
     // De-dup background pitch analysis jobs (keyed by rootTrackId + analysis key).
     pub pitch_inflight: std::sync::Mutex<std::collections::HashSet<String>>,
-    
+
     // Current pitch analysis progress (for polling from frontend)
-    pub pitch_analysis_progress: std::sync::RwLock<Option<crate::pitch_analysis::PitchOrigAnalysisProgressEvent>>,
+    pub pitch_analysis_progress:
+        std::sync::RwLock<Option<crate::pitch_analysis::PitchOrigAnalysisProgressEvent>>,
 
     // Clip-level pitch analysis cache for performance optimization
     pub clip_pitch_cache: Arc<Mutex<ClipPitchCache>>,
-    
+
     // Timeline snapshot for incremental pitch refresh (keyed by root_track_id)
     pub pitch_timeline_snapshot: Mutex<HashMap<String, TimelineSnapshot>>,
 
@@ -502,6 +832,9 @@ pub struct AppState {
 
     /// 外部 Resampler 注册表（持久化到 config 目录）。
     pub resampler_registry: Mutex<ResamplerRegistry>,
+
+    /// 启动参数传入的待打开工程路径（一次性消费）。
+    pub pending_startup_project_path: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -518,10 +851,13 @@ impl Default for AppState {
 
             ui_locale: RwLock::new("en-US".to_string()),
 
+            suppress_checkpoints: std::sync::atomic::AtomicBool::new(false),
+
             waveform_cache_dir: std::sync::Mutex::new(
                 crate::waveform_disk_cache::default_cache_dir(),
             ),
             waveform_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            waveform_cache_v2: std::sync::Mutex::new(std::collections::HashMap::new()),
 
             app_handle: OnceLock::new(),
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -532,11 +868,28 @@ impl Default for AppState {
             audio_engine: AudioEngine::new(),
             config_dir: OnceLock::new(),
             resampler_registry: Mutex::new(ResamplerRegistry::default()),
+            pending_startup_project_path: Mutex::new(None),
         }
     }
 }
 
 impl AppState {
+    pub fn set_pending_startup_project_path(&self, path: Option<String>) {
+        let mut guard = self
+            .pending_startup_project_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = path;
+    }
+
+    pub fn take_pending_startup_project_path(&self) -> Option<String> {
+        let mut guard = self
+            .pending_startup_project_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    }
+
     pub fn get_or_compute_waveform_peaks(
         &self,
         source_path: &str,
@@ -601,13 +954,154 @@ impl AppState {
             cache.clear();
         }
 
+        // 也清理 v2 缓存
+        {
+            let mut cache_v2 = self
+                .waveform_cache_v2
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            cache_v2.clear();
+        }
+
+        let cache_dir = {
+            self.waveform_cache_dir
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner())
+                .clone()
+        };
+        crate::waveform_disk_cache::clear_dir(&cache_dir)
+    }
+
+    /// 获取或计算 v2 多级 mipmap 峰值数据
+    ///
+    /// 优先从内存缓存读取，其次从磁盘缓存读取，最后计算
+    /// 首次计算时会通过 Tauri 事件推送进度（waveform_analysis_progress）
+    pub fn get_or_compute_waveform_peaks_v2(
+        &self,
+        source_path: &str,
+    ) -> Result<std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>, String> {
+        if source_path.trim().is_empty() {
+            return Err("empty source_path".to_string());
+        }
+
+        // 检查内存缓存
+        {
+            let cache = self
+                .waveform_cache_v2
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            if let Some(found) = cache.get(source_path) {
+                // 缓存命中：发送 cached 状态事件
+                if let Some(handle) = self.app_handle.get() {
+                    use tauri::Emitter;
+                    let _ = handle.emit(
+                        "waveform_analysis_progress",
+                        serde_json::json!({
+                            "sourcePath": source_path,
+                            "progress": 1.0,
+                            "status": "cached",
+                        }),
+                    );
+                }
+                return Ok(found.clone() as std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>);
+            }
+        }
+
+        // 磁盘缓存
         let cache_dir = {
             self.waveform_cache_dir
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
         };
-        crate::waveform_disk_cache::clear_dir(&cache_dir)
+
+        let hfs_cache = crate::hfspeaks_v2::HfsPeaksCache::new(cache_dir);
+        let path = std::path::Path::new(source_path);
+
+        // 尝试从磁盘加载
+        if let Some(cached) = hfs_cache.try_load(path) {
+            let cached: std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile> =
+                std::sync::Arc::new(cached);
+            let mut cache = self
+                .waveform_cache_v2
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            cache.insert(source_path.to_string(), cached.clone());
+            // 磁盘缓存命中：发送 cached 状态事件
+            if let Some(handle) = self.app_handle.get() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "waveform_analysis_progress",
+                    serde_json::json!({
+                        "sourcePath": source_path,
+                        "progress": 1.0,
+                        "status": "cached",
+                    }),
+                );
+            }
+            return Ok(cached);
+        }
+
+        // 发送 computing 状态事件（进度 0）
+        let source_path_owned = source_path.to_string();
+        if let Some(handle) = self.app_handle.get() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "waveform_analysis_progress",
+                serde_json::json!({
+                    "sourcePath": &source_path_owned,
+                    "progress": 0.0,
+                    "status": "computing",
+                }),
+            );
+        }
+
+        // 构建进度回调：通过 app_handle emit 事件
+        let app_handle_for_cb = self.app_handle.get().cloned();
+        let source_path_for_cb = source_path_owned.clone();
+        let progress_cb = move |progress: f32| {
+            if let Some(ref handle) = app_handle_for_cb {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "waveform_analysis_progress",
+                    serde_json::json!({
+                        "sourcePath": &source_path_for_cb,
+                        "progress": progress.clamp(0.0, 1.0),
+                        "status": "computing",
+                    }),
+                );
+            }
+        };
+
+        // 计算新的峰值数据（带进度回调）
+        let peaks =
+            crate::hfspeaks_v2::compute_mipmap_peaks_with_progress(path, Some(progress_cb))?;
+
+        // 保存到磁盘缓存
+        if let Err(e) = hfs_cache.save(path, &peaks) {
+            eprintln!("Warning: failed to save v2 peaks cache: {}", e);
+        }
+
+        // 发送 done 状态事件
+        if let Some(handle) = self.app_handle.get() {
+            use tauri::Emitter;
+            let _ = handle.emit(
+                "waveform_analysis_progress",
+                serde_json::json!({
+                    "sourcePath": &source_path_owned,
+                    "progress": 1.0,
+                    "status": "done",
+                }),
+            );
+        }
+
+        let peaks = std::sync::Arc::new(peaks);
+        let mut cache = self
+            .waveform_cache_v2
+            .lock()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+        cache.insert(source_path.to_string(), peaks.clone());
+        Ok(peaks)
     }
 
     pub fn project_meta_payload(&self) -> ProjectMetaPayload {
@@ -621,10 +1115,40 @@ impl AppState {
             path: p.path,
             dirty: p.dirty,
             recent: p.recent,
+            base_scale: p.base_scale,
+            use_custom_scale: p.use_custom_scale,
+            custom_scale: p.custom_scale,
+            beats_per_bar: p.beats_per_bar,
+            grid_size: p.grid_size,
         }
     }
 
     pub fn checkpoint_timeline(&self, snapshot: &TimelineState) {
+        // When suppress_checkpoints is active (inside an undo group),
+        // skip pushing to the undo stack so multiple operations become
+        // a single undo entry.
+        if self
+            .suppress_checkpoints
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            // Still mark project dirty
+            let (name, was_clean) = {
+                let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+                let was_clean = !p.dirty;
+                p.dirty = true;
+                (p.name.clone(), was_clean)
+            };
+            if was_clean {
+                if let Some(handle) = self.app_handle.get() {
+                    use tauri::Manager;
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let title = format!("HiFiShifter - {}*", name);
+                        let _ = win.set_title(&title);
+                    }
+                }
+            }
+            return;
+        }
         let mut h = self
             .timeline_history
             .lock()
@@ -662,6 +1186,27 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         h.undo.clear();
         h.redo.clear();
+    }
+
+    /// Begin an undo group: push the current state once and suppress further checkpoints.
+    pub fn begin_undo_group(&self) -> TimelineStatePayload {
+        let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // Force a checkpoint even if suppress was already active (defensive)
+        self.suppress_checkpoints
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.checkpoint_timeline(&tl);
+        self.suppress_checkpoints
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut payload = tl.to_payload();
+        payload.project = Some(self.project_meta_payload());
+        payload
+    }
+
+    /// End the undo group: re-enable checkpoints.
+    pub fn end_undo_group(&self) -> serde_json::Value {
+        self.suppress_checkpoints
+            .store(false, std::sync::atomic::Ordering::Release);
+        serde_json::json!({ "ok": true })
     }
 
     pub fn undo_timeline(&self) -> TimelineStatePayload {
@@ -770,6 +1315,7 @@ impl TimelineState {
             playhead_sec: self.playhead_sec,
             project_sec: Some(self.project_sec),
             project: None,
+            missing_files: None,
         }
     }
 
@@ -820,6 +1366,133 @@ impl TimelineState {
 
         self.selected_track_id = Some(id.clone());
         id
+    }
+
+    /// 克隆轨道：
+    /// - 普通子轨道：创建新子轨道（同 parent），克隆所有 clip
+    /// - 根轨道：创建整个轨道组（根 + 后代），克隆所有 clip + params_by_root_track
+    pub fn duplicate_track(&mut self, track_id: &str) -> Vec<String> {
+        use std::collections::HashMap;
+
+        let source = match self.tracks.iter().find(|t| t.id == track_id) {
+            Some(t) => t.clone(),
+            None => return vec![],
+        };
+
+        let is_root = source.parent_id.is_none();
+
+        if is_root {
+            // ── 根轨道：收集整棵子树 ──
+            let mut all_ids = vec![track_id.to_string()];
+            let mut idx = 0;
+            while idx < all_ids.len() {
+                let cur = all_ids[idx].clone();
+                for child in self
+                    .tracks
+                    .iter()
+                    .filter(|t| t.parent_id.as_deref() == Some(cur.as_str()))
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>()
+                {
+                    all_ids.push(child);
+                }
+                idx += 1;
+                if idx > 4096 {
+                    break;
+                }
+            }
+
+            // old_id → new_id 映射
+            let id_map: HashMap<String, String> = all_ids
+                .iter()
+                .map(|old| (old.clone(), new_id("track")))
+                .collect();
+
+            let mut new_track_ids = Vec::new();
+
+            // 克隆轨道
+            for old_id in &all_ids {
+                let src_track = match self.tracks.iter().find(|t| &t.id == old_id) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let new_tid = id_map[old_id].clone();
+                let new_parent = src_track
+                    .parent_id
+                    .as_ref()
+                    .and_then(|pid| id_map.get(pid))
+                    .cloned();
+
+                let order = self.next_track_order;
+                self.next_track_order += 1;
+
+                let mut cloned = src_track.clone();
+                cloned.id = new_tid.clone();
+                cloned.parent_id = new_parent;
+                cloned.order = order;
+                // 根轨道名称加 " (Copy)" 后缀
+                if old_id == track_id {
+                    cloned.name = format!("{} (Copy)", cloned.name);
+                }
+                self.tracks.push(cloned);
+                new_track_ids.push(new_tid);
+            }
+
+            // 克隆所有 clip
+            let clips_to_clone: Vec<Clip> = self
+                .clips
+                .iter()
+                .filter(|c| all_ids.contains(&c.track_id))
+                .cloned()
+                .collect();
+            for clip in clips_to_clone {
+                let new_cid = new_id("clip");
+                let new_tid = id_map[&clip.track_id].clone();
+                let mut cloned = clip;
+                cloned.id = new_cid;
+                cloned.track_id = new_tid;
+                self.clips.push(cloned);
+            }
+
+            // 克隆 params_by_root_track
+            let new_root_id = id_map[track_id].clone();
+            if let Some(params) = self.params_by_root_track.get(track_id).cloned() {
+                self.params_by_root_track
+                    .insert(new_root_id.clone(), params);
+            }
+
+            self.selected_track_id = Some(new_root_id);
+            new_track_ids
+        } else {
+            // ── 普通子轨道：只克隆单个轨道 + 其 clip ──
+            let order = self.next_track_order;
+            self.next_track_order += 1;
+            let new_tid = new_id("track");
+
+            let mut cloned = source.clone();
+            cloned.id = new_tid.clone();
+            cloned.name = format!("{} (Copy)", cloned.name);
+            cloned.order = order;
+            self.tracks.push(cloned);
+
+            // 克隆 clip
+            let clips_to_clone: Vec<Clip> = self
+                .clips
+                .iter()
+                .filter(|c| c.track_id == track_id)
+                .cloned()
+                .collect();
+            for clip in clips_to_clone {
+                let new_cid = new_id("clip");
+                let mut cloned = clip;
+                cloned.id = new_cid;
+                cloned.track_id = new_tid.clone();
+                self.clips.push(cloned);
+            }
+
+            self.selected_track_id = Some(new_tid.clone());
+            vec![new_tid]
+        }
     }
 
     fn reorder_siblings(&mut self, track_id: &str, target_index: usize) {
@@ -902,6 +1575,7 @@ impl TimelineState {
         compose_enabled: Option<bool>,
         pitch_analysis_algo: Option<PitchAnalysisAlgo>,
         color: Option<String>,
+        name: Option<String>,
     ) {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             if let Some(v) = muted {
@@ -922,6 +1596,12 @@ impl TimelineState {
             }
             if let Some(v) = color {
                 t.color = v;
+            }
+            if let Some(v) = name {
+                let trimmed = v.trim().to_string();
+                if !trimmed.is_empty() {
+                    t.name = trimmed;
+                }
             }
         }
     }
@@ -990,6 +1670,29 @@ impl TimelineState {
         let ss = start_sec.unwrap_or(self.playhead_sec).max(0.0);
         let ls = length_sec.unwrap_or(4.0).max(0.01);
         self.ensure_project_end_sec(ss + ls);
+
+        // If no inherited metadata (duration / waveform) is available for this
+        // source_path, try to read basic audio info and a preview from the file
+        // so newly created clips (e.g. pasted ones) display waveforms.
+        let mut computed_duration_sec = inherited.as_ref().and_then(|v| v.0);
+        let mut computed_duration_frames = inherited.as_ref().and_then(|v| v.1);
+        let mut computed_source_sr = inherited.as_ref().and_then(|v| v.2);
+        let mut computed_waveform = inherited.as_ref().and_then(|v| v.3.clone());
+
+        if computed_waveform.is_none() {
+            if let Some(sp) = source_path.as_deref() {
+                let p = std::path::Path::new(sp);
+                if p.exists() {
+                    if let Some(info) = crate::audio_utils::try_read_wav_info(p, 4096) {
+                        computed_duration_sec = Some(info.duration_sec);
+                        computed_duration_frames = Some(info.total_frames);
+                        computed_source_sr = Some(info.sample_rate);
+                        computed_waveform = Some(info.waveform_preview);
+                    }
+                }
+            }
+        }
+
         let clip = Clip {
             id: id.clone(),
             track_id: track_id.clone(),
@@ -998,10 +1701,10 @@ impl TimelineState {
             length_sec: ls,
             color: default_clip_color(),
             source_path,
-            duration_sec: inherited.as_ref().and_then(|v| v.0),
-            duration_frames: inherited.as_ref().and_then(|v| v.1),
-            source_sample_rate: inherited.as_ref().and_then(|v| v.2),
-            waveform_preview: inherited.as_ref().and_then(|v| v.3.clone()),
+            duration_sec: computed_duration_sec,
+            duration_frames: computed_duration_frames,
+            source_sample_rate: computed_source_sr,
+            waveform_preview: computed_waveform,
             pitch_range: inherited
                 .as_ref()
                 .and_then(|v| v.4.clone())
@@ -1012,7 +1715,7 @@ impl TimelineState {
             gain: 1.0,
             muted: false,
             source_start_sec: 0.0,
-            source_end_sec: inherited.as_ref().and_then(|v| v.0).unwrap_or(ls),
+            source_end_sec: computed_duration_sec.unwrap_or(ls),
             playback_rate: 1.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
@@ -1034,19 +1737,144 @@ impl TimelineState {
         }
     }
 
-    pub fn move_clip(&mut self, clip_id: &str, start_sec: f64, track_id: Option<String>) {
-        let mut end_sec: Option<f64> = None;
-        if let Some(c) = self.clips.iter_mut().find(|c| c.id == clip_id) {
-            c.start_sec = start_sec.max(0.0);
-            if let Some(tid) = track_id {
-                if self.tracks.iter().any(|t| t.id == tid) {
-                    c.track_id = tid;
-                }
-            }
-            end_sec = Some(c.start_sec + c.length_sec);
+    pub fn move_clip(
+        &mut self,
+        clip_id: &str,
+        start_sec: f64,
+        track_id: Option<String>,
+        move_linked_params: bool,
+    ) {
+        self.move_clips(
+            &[MoveClipPayload {
+                clip_id: clip_id.to_string(),
+                start_sec,
+                track_id,
+            }],
+            move_linked_params,
+        );
+    }
+
+    pub fn move_clips(&mut self, moves: &[MoveClipPayload], move_linked_params: bool) {
+        #[derive(Debug)]
+        struct LinkedMovePlan {
+            old_root_track_id: String,
+            old_start_sec: f64,
+            clip_length_sec: f64,
+            source_extra_keys: Vec<String>,
+            new_root_track_id: String,
+            new_start_sec: f64,
+            linked_params: LinkedParamCurvesPayload,
         }
-        if let Some(v) = end_sec {
-            self.ensure_project_end_sec(v);
+
+        #[derive(Debug)]
+        struct MovePlan {
+            clip_id: String,
+            new_track_id: String,
+            new_start_sec: f64,
+            new_end_sec: f64,
+            linked_move: Option<LinkedMovePlan>,
+        }
+
+        let mut seen_clip_ids = HashSet::new();
+        let mut plans = Vec::new();
+
+        for requested_move in moves {
+            if !seen_clip_ids.insert(requested_move.clip_id.clone()) {
+                continue;
+            }
+
+            let Some((old_track_id, old_start_sec, clip_length_sec)) = self
+                .clips
+                .iter()
+                .find(|clip| clip.id == requested_move.clip_id)
+                .map(|clip| {
+                    (
+                        clip.track_id.clone(),
+                        clip.start_sec,
+                        clip.length_sec.max(0.0),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            let new_start_sec = requested_move.start_sec.max(0.0);
+            let new_track_id = requested_move
+                .track_id
+                .clone()
+                .filter(|track_id| self.tracks.iter().any(|track| track.id == *track_id))
+                .unwrap_or_else(|| old_track_id.clone());
+
+            let linked_move = if move_linked_params && clip_length_sec > 0.0 {
+                let old_root_track_id = self.resolve_root_track_id(&old_track_id);
+                let new_root_track_id = self.resolve_root_track_id(&new_track_id);
+                match (old_root_track_id, new_root_track_id) {
+                    (Some(old_root_track_id), Some(new_root_track_id))
+                        if old_root_track_id != new_root_track_id
+                            || (new_start_sec - old_start_sec).abs() > f64::EPSILON =>
+                    {
+                        let source_extra_keys = self
+                            .params_by_root_track
+                            .get(&old_root_track_id)
+                            .map(|entry| entry.extra_curves.keys().cloned().collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        self.extract_linked_params_from_root_range(
+                            &old_root_track_id,
+                            old_start_sec,
+                            clip_length_sec,
+                        )
+                        .map(|linked_params| LinkedMovePlan {
+                            old_root_track_id,
+                            old_start_sec,
+                            clip_length_sec,
+                            source_extra_keys,
+                            new_root_track_id,
+                            new_start_sec,
+                            linked_params,
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            plans.push(MovePlan {
+                clip_id: requested_move.clip_id.clone(),
+                new_track_id,
+                new_start_sec,
+                new_end_sec: new_start_sec + clip_length_sec,
+                linked_move,
+            });
+        }
+
+        for plan in &plans {
+            if let Some(clip) = self.clips.iter_mut().find(|clip| clip.id == plan.clip_id) {
+                clip.start_sec = plan.new_start_sec;
+                clip.track_id = plan.new_track_id.clone();
+            }
+            self.ensure_project_end_sec(plan.new_end_sec);
+        }
+
+        let linked_moves: Vec<&LinkedMovePlan> = plans
+            .iter()
+            .filter_map(|plan| plan.linked_move.as_ref())
+            .collect();
+        for linked_move in &linked_moves {
+            self.clear_linked_params_in_root_range(
+                &linked_move.old_root_track_id,
+                linked_move.old_start_sec,
+                linked_move.clip_length_sec,
+                !linked_move.linked_params.pitch_edit.is_empty(),
+                Some(&linked_move.source_extra_keys),
+            );
+        }
+        for linked_move in linked_moves {
+            self.apply_linked_params_to_root_range(
+                &linked_move.new_root_track_id,
+                linked_move.new_start_sec,
+                &linked_move.linked_params,
+            );
         }
     }
 
@@ -1158,7 +1986,11 @@ impl TimelineState {
         // 计算左 clip 的 playback_rate，用于更新 source_end_sec
         let left_rate = {
             let r = self.clips[idx].playback_rate as f64;
-            if r.is_finite() && r > 0.0 { r } else { 1.0 }
+            if r.is_finite() && r > 0.0 {
+                r
+            } else {
+                1.0
+            }
         };
 
         self.clips[idx].length_sec = left_len;
@@ -1232,6 +2064,76 @@ impl TimelineState {
         glued.name = "Glued".to_string();
         glued.start_sec = start;
         glued.length_sec = (end - start).max(0.01);
+
+        // Render selected clips into one baked audio file so glue includes all selected data,
+        // not only the first clip's source payload.
+        let selected_id_set: HashSet<String> = selected.iter().map(|c| c.id.clone()).collect();
+
+        let temp_glue_path = crate::temp_manager::hifishifter_temp_dir()
+            .map(|dir| dir.join(format!("glue_{}.wav", Uuid::new_v4().simple())));
+
+        if let Ok(glue_path) = temp_glue_path {
+            let mut render_timeline = self.clone();
+            render_timeline
+                .clips
+                .retain(|c| selected_id_set.contains(&c.id));
+
+            for tr in &mut render_timeline.tracks {
+                if tr.id == track_id {
+                    tr.muted = false;
+                    tr.solo = false;
+                    tr.volume = 1.0;
+                } else {
+                    tr.muted = true;
+                    tr.solo = false;
+                    tr.volume = 0.0;
+                }
+            }
+
+            let render_result = crate::mixdown::render_mixdown_wav(
+                &render_timeline,
+                &glue_path,
+                crate::mixdown::MixdownOptions {
+                    sample_rate: 44_100,
+                    start_sec: start,
+                    end_sec: Some(end),
+                    stretch: crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
+                    apply_pitch_edit: true,
+                    export_format: crate::mixdown::ExportFormat::Wav32f,
+                    quality_preset: crate::mixdown::QualityPreset::Export,
+                },
+                None, // glue 渲染不涉及外部 resampler
+            );
+
+            if render_result.is_ok() {
+                let info = try_read_wav_info(&glue_path, 4096);
+                let rendered_duration_sec = info
+                    .as_ref()
+                    .map(|v| v.duration_sec)
+                    .unwrap_or(glued.length_sec);
+
+                glued.source_path = Some(glue_path.to_string_lossy().to_string());
+                glued.duration_sec = Some(rendered_duration_sec);
+                glued.duration_frames = info.as_ref().map(|v| v.total_frames);
+                glued.source_sample_rate = info.as_ref().map(|v| v.sample_rate);
+                glued.waveform_preview = info.map(|v| v.waveform_preview);
+                glued.source_start_sec = 0.0;
+                glued.source_end_sec = rendered_duration_sec;
+                glued.playback_rate = 1.0;
+                glued.gain = 1.0;
+                glued.muted = false;
+                glued.fade_in_sec = 0.0;
+                glued.fade_out_sec = 0.0;
+                glued.fade_in_curve = default_fade_curve();
+                glued.fade_out_curve = default_fade_curve();
+                glued.extra_curves = None;
+                glued.extra_params = None;
+                glued.pitch_range = Some(PitchRange {
+                    min: -24.0,
+                    max: 24.0,
+                });
+            }
+        }
 
         self.clips.retain(|c| !clip_ids.contains(&c.id));
         self.clips.push(glued.clone());
@@ -1308,11 +2210,12 @@ impl TimelineState {
         }
 
         // 使用精确的frame计算length_sec（直接用秒，不依赖BPM）
-        let computed_length_sec = if let (Some(frames), Some(sr)) = (duration_frames, source_sample_rate) {
-            frames as f64 / sr as f64
-        } else {
-            duration_sec.unwrap_or(4.0)
-        };
+        let computed_length_sec =
+            if let (Some(frames), Some(sr)) = (duration_frames, source_sample_rate) {
+                frames as f64 / sr as f64
+            } else {
+                duration_sec.unwrap_or(4.0)
+            };
 
         let clip_id = self.add_clip(
             track_id,
@@ -1339,6 +2242,57 @@ impl TimelineState {
             c.source_sample_rate = source_sample_rate;
             c.waveform_preview = waveform_preview;
         }
+    }
+
+    pub fn replace_clip_sources(
+        &mut self,
+        clip_ids: &[String],
+        new_source_path: &str,
+        replace_same_source: bool,
+    ) -> usize {
+        if clip_ids.is_empty() || new_source_path.trim().is_empty() {
+            return 0;
+        }
+
+        let target_id_set: HashSet<&str> = clip_ids.iter().map(|id| id.as_str()).collect();
+        let mut old_source_set: HashSet<String> = HashSet::new();
+        for clip in &self.clips {
+            if target_id_set.contains(clip.id.as_str()) {
+                if let Some(path) = clip.source_path.as_ref() {
+                    old_source_set.insert(path.clone());
+                }
+            }
+        }
+
+        let info = try_read_wav_info(Path::new(new_source_path), 4096);
+        let duration_sec = info.as_ref().map(|v| v.duration_sec);
+        let duration_frames = info.as_ref().map(|v| v.total_frames);
+        let source_sample_rate = info.as_ref().map(|v| v.sample_rate);
+        let waveform_preview = info.map(|v| v.waveform_preview);
+
+        let mut changed = 0usize;
+        for clip in &mut self.clips {
+            let direct_match = target_id_set.contains(clip.id.as_str());
+            let same_source_match = replace_same_source
+                && clip
+                    .source_path
+                    .as_ref()
+                    .map(|p| old_source_set.contains(p))
+                    .unwrap_or(false);
+
+            if !direct_match && !same_source_match {
+                continue;
+            }
+
+            clip.source_path = Some(new_source_path.to_string());
+            clip.duration_sec = duration_sec;
+            clip.duration_frames = duration_frames;
+            clip.source_sample_rate = source_sample_rate;
+            clip.waveform_preview = waveform_preview.clone();
+            changed += 1;
+        }
+
+        changed
     }
 }
 

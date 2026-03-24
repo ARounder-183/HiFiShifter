@@ -67,9 +67,29 @@ pub fn infer_pitch_edit_chunked(
     _sample_rate: u32,
     _start_sec: f64,
     _midi_at_time: impl Fn(f64) -> f64 + Clone,
+    _formant_shift_fn: impl Fn(f64) -> f32 + Clone,
     _chunk_sec: f64,
     _overlap_sec: f64,
 ) -> Result<Vec<f32>, String> {
     // ONNX feature disabled: bypass.
+    Ok(mono.to_vec())
+}
+
+/// Mel-stretch variant used when caller performs time-stretch in mel-domain
+/// before invoking the vocoder. Stubbed to match real interface when ONNX
+/// feature is disabled so `cargo check` / builds that compile without the
+/// `onnx` feature still succeed.
+pub fn infer_pitch_edit_chunked_mel_stretch(
+    mono: &[f32],
+    _sample_rate: u32,
+    _playback_rate: f64,
+    _start_sec: f64,
+    _midi_at_time: impl Fn(f64) -> f64 + Clone,
+    _formant_shift_fn: impl Fn(f64) -> f32 + Clone,
+    _chunk_sec: f64,
+    _overlap_sec: f64,
+) -> Result<Vec<f32>, String> {
+    // ONNX feature disabled: bypass. We ignore playback_rate and formant
+    // adjustments in the stub and return input PCM unchanged.
     Ok(mono.to_vec())
 }

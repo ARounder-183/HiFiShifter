@@ -5,50 +5,52 @@
 // - 具体实现按领域拆分在 `backend/src-tauri/src/commands/*.rs`，并通过本文件转发调用。
 // - 拆分模块中的函数请保持 `pub(super)` / `pub(crate)`，避免被当成公共 API 直接依赖。
 
+#[path = "commands/cache.rs"]
+mod cache;
 #[path = "commands/common.rs"]
 mod common;
 #[path = "commands/core.rs"]
 mod core;
-#[path = "commands/dialogs.rs"]
-mod dialogs;
 #[path = "commands/debug.rs"]
 mod debug;
-#[path = "commands/params.rs"]
-mod params;
-#[path = "commands/playback.rs"]
-mod playback;
-#[path = "commands/project.rs"]
-mod project;
-#[path = "commands/synth.rs"]
-mod synth;
-#[path = "commands/timeline.rs"]
-mod timeline;
-#[path = "commands/waveform.rs"]
-mod waveform;
-#[path = "commands/pitch_progress.rs"]
-mod pitch_progress;
-#[path = "commands/onnx_status.rs"]
-mod onnx_status;
-#[path = "commands/pitch_cache.rs"]
-mod pitch_cache;
+#[path = "commands/dialogs.rs"]
+mod dialogs;
 #[path = "commands/file_browser.rs"]
 mod file_browser;
-#[path = "commands/vocalshifter.rs"]
-mod vocalshifter;
-#[path = "commands/vocalshifter_clipboard.rs"]
-mod vocalshifter_clipboard;
+#[path = "commands/midi.rs"]
+mod midi;
+#[path = "commands/onnx_status.rs"]
+mod onnx_status;
+#[path = "commands/params.rs"]
+mod params;
+#[path = "commands/pitch_cache.rs"]
+mod pitch_cache;
+#[path = "commands/pitch_progress.rs"]
+mod pitch_progress;
+#[path = "commands/playback.rs"]
+mod playback;
+#[path = "commands/processor_caps.rs"]
+mod processor_caps;
+#[path = "commands/project.rs"]
+mod project;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
 mod reaper_clipboard;
-#[path = "commands/cache.rs"]
-mod cache;
-#[path = "commands/processor_caps.rs"]
-mod processor_caps;
+#[path = "commands/synth.rs"]
+mod synth;
+#[path = "commands/timeline.rs"]
+mod timeline;
+#[path = "commands/ui_settings.rs"]
+mod ui_settings;
+#[path = "commands/vocalshifter.rs"]
+mod vocalshifter;
+#[path = "commands/vocalshifter_clipboard.rs"]
+mod vocalshifter_clipboard;
+#[path = "commands/waveform.rs"]
+mod waveform;
 #[path = "commands/resampler_registry.rs"]
 mod resampler_registry;
-#[path = "commands/midi.rs"]
-mod midi;
 // TODO: 异步音高刷新功能未完成，缺少必要的状态管理和依赖
 // #[path = "commands/pitch_refresh_async.rs"]
 // mod pitch_refresh_async;
@@ -57,7 +59,7 @@ use crate::state::AppState;
 use tauri::{State, Window};
 
 // This is used by the window close handler (crate-internal), not a tauri command.
-pub(crate) use project::save_project_to_path_inner;
+// pub(crate) use project::save_project_to_path_inner;
 
 // ===================== core =====================
 
@@ -69,6 +71,11 @@ pub fn ping() -> serde_json::Value {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInfoPayload {
     core::get_runtime_info(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {
+    core::consume_startup_project_path(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -99,6 +106,16 @@ pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineState
     core::redo_timeline(state)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn begin_undo_group(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
+    state.begin_undo_group()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn end_undo_group(state: State<'_, AppState>) -> serde_json::Value {
+    state.end_undo_group()
+}
+
 // ===================== project =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -112,7 +129,10 @@ pub fn get_project_meta(state: State<'_, AppState>) -> crate::models::ProjectMet
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn new_project(state: State<'_, AppState>, window: Window) -> crate::models::TimelineStatePayload {
+pub fn new_project(
+    state: State<'_, AppState>,
+    window: Window,
+) -> crate::models::TimelineStatePayload {
     project::new_project(state, window)
 }
 
@@ -140,11 +160,38 @@ pub fn save_project_as(state: State<'_, AppState>, window: Window) -> serde_json
     project::save_project_as(state, window)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_base_scale(state: State<'_, AppState>, base_scale: String) -> serde_json::Value {
+    project::set_project_base_scale(state, base_scale)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_custom_scale(
+    state: State<'_, AppState>,
+    custom_scale: crate::project::CustomScale,
+) -> serde_json::Value {
+    project::set_project_custom_scale(state, custom_scale)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_timeline_settings(
+    state: State<'_, AppState>,
+    beats_per_bar: u32,
+    grid_size: String,
+) -> serde_json::Value {
+    project::set_project_timeline_settings(state, beats_per_bar, grid_size)
+}
+
 // ===================== dialogs =====================
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_audio_dialog() -> serde_json::Value {
     dialogs::open_audio_dialog()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_audio_dialog_multi() -> serde_json::Value {
+    dialogs::open_audio_dialog_multi()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -165,17 +212,6 @@ pub fn open_midi_dialog() -> serde_json::Value {
 // ===================== waveform =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_waveform_peaks_segment(
-    state: State<'_, AppState>,
-    source_path: String,
-    start_sec: f64,
-    duration_sec: f64,
-    columns: usize,
-) -> crate::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_waveform_peaks_segment(state, source_path, start_sec, duration_sec, columns)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn get_root_mix_waveform_peaks_segment(
     state: State<'_, AppState>,
     track_id: String,
@@ -194,12 +230,37 @@ pub fn get_track_mix_waveform_peaks_segment(
     duration_sec: f64,
     columns: usize,
 ) -> crate::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_track_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
+    waveform::get_track_mix_waveform_peaks_segment(
+        state,
+        track_id,
+        start_sec,
+        duration_sec,
+        columns,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
     waveform::clear_waveform_cache(state)
+}
+
+// ===================== waveform v2 (二进制 mipmap) =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_waveform_mipmap_binary(
+    state: State<'_, AppState>,
+    source_path: String,
+    level: u8,
+) -> Vec<u8> {
+    waveform::get_waveform_mipmap_binary(state, source_path, level)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn preload_waveform_mipmap(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> serde_json::Value {
+    waveform::preload_waveform_mipmap(state, source_path)
 }
 
 // ===================== timeline =====================
@@ -234,8 +295,19 @@ pub fn add_track(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn remove_track(state: State<'_, AppState>, track_id: String) -> crate::models::TimelineStatePayload {
+pub fn remove_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
     timeline::remove_track(state, track_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn duplicate_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
+    timeline::duplicate_track(state, track_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -258,6 +330,7 @@ pub fn set_track_state(
     compose_enabled: Option<bool>,
     pitch_analysis_algo: Option<String>,
     color: Option<String>,
+    name: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     timeline::set_track_state(
         state,
@@ -268,11 +341,15 @@ pub fn set_track_state(
         compose_enabled,
         pitch_analysis_algo,
         color,
+        name,
     )
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn select_track(state: State<'_, AppState>, track_id: String) -> crate::models::TimelineStatePayload {
+pub fn select_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> crate::models::TimelineStatePayload {
     timeline::select_track(state, track_id)
 }
 
@@ -284,7 +361,10 @@ pub fn set_project_length(
     timeline::set_project_length(state, project_sec)
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_track_summary(state: State<'_, AppState>, track_id: Option<String>) -> serde_json::Value {
+pub fn get_track_summary(
+    state: State<'_, AppState>,
+    track_id: Option<String>,
+) -> serde_json::Value {
     timeline::get_track_summary(state, track_id)
 }
 
@@ -300,7 +380,10 @@ pub fn add_clip(
     timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn remove_clip(state: State<'_, AppState>, clip_id: String) -> crate::models::TimelineStatePayload {
+pub fn remove_clip(
+    state: State<'_, AppState>,
+    clip_id: String,
+) -> crate::models::TimelineStatePayload {
     timeline::remove_clip(state, clip_id)
 }
 
@@ -310,9 +393,34 @@ pub fn move_clip(
     clip_id: String,
     start_sec: f64,
     track_id: Option<String>,
+    move_linked_params: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::move_clip(state, clip_id, start_sec, track_id)
+    timeline::move_clip(state, clip_id, start_sec, track_id, move_linked_params)
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn move_clips(
+    state: State<'_, AppState>,
+    moves: Vec<crate::state::MoveClipPayload>,
+    move_linked_params: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::move_clips(state, moves, move_linked_params)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_clip_linked_params(state: State<'_, AppState>, clip_id: String) -> serde_json::Value {
+    timeline::get_clip_linked_params(state, clip_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn apply_clip_linked_params(
+    state: State<'_, AppState>,
+    clip_id: String,
+    linked_params: crate::state::LinkedParamCurvesPayload,
+) -> crate::models::TimelineStatePayload {
+    timeline::apply_clip_linked_params(state, clip_id, linked_params)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 pub fn set_clip_state(
@@ -349,6 +457,16 @@ pub fn set_clip_state(
         fade_out_curve,
         color,
     )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn replace_clip_source(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    new_source_path: String,
+    replace_same_source: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::replace_clip_source(state, clip_ids, new_source_path, replace_same_source)
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn split_clip(
@@ -440,7 +558,10 @@ pub fn load_default_model(state: State<'_, AppState>) -> crate::models::ModelCon
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn load_model(state: State<'_, AppState>, model_dir: String) -> crate::models::ModelConfigPayload {
+pub fn load_model(
+    state: State<'_, AppState>,
+    model_dir: String,
+) -> crate::models::ModelConfigPayload {
     synth::load_model(state, model_dir)
 }
 
@@ -450,7 +571,10 @@ pub fn set_pitch_shift(semitones: f64) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn process_audio(state: State<'_, AppState>, audio_path: String) -> crate::models::ProcessAudioPayload {
+pub fn process_audio(
+    state: State<'_, AppState>,
+    audio_path: String,
+) -> crate::models::ProcessAudioPayload {
     synth::process_audio(state, audio_path)
 }
 
@@ -573,8 +697,18 @@ pub fn import_vocalshifter_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn paste_vocalshifter_clipboard(state: State<'_, AppState>) -> serde_json::Value {
-    vocalshifter_clipboard::paste_vocalshifter_clipboard(state.inner())
+pub fn paste_vocalshifter_clipboard(
+    state: State<'_, AppState>,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
+    active_param: Option<String>,
+) -> serde_json::Value {
+    vocalshifter_clipboard::paste_vocalshifter_clipboard(
+        state.inner(),
+        selection_start_frame,
+        selection_max_frames,
+        active_param,
+    )
 }
 
 // ===================== reaper =====================
@@ -594,8 +728,16 @@ pub fn import_reaper_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn paste_reaper_clipboard(state: State<'_, AppState>) -> serde_json::Value {
-    reaper_clipboard::paste_reaper_clipboard(state.inner())
+pub fn paste_reaper_clipboard(
+    state: State<'_, AppState>,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
+) -> serde_json::Value {
+    reaper_clipboard::paste_reaper_clipboard(
+        state.inner(),
+        selection_start_frame,
+        selection_max_frames,
+    )
 }
 
 // ===================== cache =====================
@@ -675,9 +817,31 @@ pub fn import_midi_to_pitch(
     state: State<'_, AppState>,
     midi_path: String,
     track_index: Option<usize>,
-    offset_sec: Option<f64>,
+    selection_start_frame: Option<usize>,
+    selection_max_frames: Option<usize>,
 ) -> serde_json::Value {
-    midi::import_midi_to_pitch(state.inner(), midi_path, track_index, offset_sec)
+    midi::import_midi_to_pitch(
+        state.inner(),
+        midi_path,
+        track_index,
+        selection_start_frame,
+        selection_max_frames,
+    )
+}
+
+// ===================== ui_settings =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings {
+    ui_settings::get_ui_settings(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_ui_settings(
+    state: State<'_, AppState>,
+    settings: crate::config::UiSettings,
+) -> serde_json::Value {
+    ui_settings::save_ui_settings(state, settings)
 }
 
 // ===================== pitch_refresh_async (暂时禁用) =====================

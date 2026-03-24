@@ -60,3 +60,68 @@ export function extractLocalFilePath(
 
     return null;
 }
+
+export function isProjectFilePath(path: string | null | undefined): boolean {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return false;
+    return /\.(hshp|hsp)$/i.test(normalized);
+}
+
+export function isReaperProjectFilePath(path: string | null | undefined): boolean {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return false;
+    return /\.rpp$/i.test(normalized);
+}
+
+export function isVocalShifterProjectFilePath(path: string | null | undefined): boolean {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return false;
+    return /\.(vshp|vsp)$/i.test(normalized);
+}
+
+export function isAudioFilePath(path: string | null | undefined): boolean {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return false;
+    return /\.(wav|flac|mp3|ogg|m4a|aac|aif|aiff|wma|opus)$/i.test(normalized);
+}
+
+export type ExternalPathActionKind =
+    | "openProject"
+    | "importReaper"
+    | "importVocalShifter"
+    | "importAudio";
+
+export function detectExternalPathAction(
+    path: string | null | undefined,
+): ExternalPathActionKind | null {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return null;
+    if (isProjectFilePath(normalized)) return "openProject";
+    if (isReaperProjectFilePath(normalized)) return "importReaper";
+    if (isVocalShifterProjectFilePath(normalized)) return "importVocalShifter";
+    if (isAudioFilePath(normalized)) return "importAudio";
+    return null;
+}
+
+export function findFirstProjectFilePath(
+    paths: Array<string | null | undefined>,
+): string | null {
+    for (const raw of paths) {
+        const normalized = String(raw ?? "").trim();
+        if (isProjectFilePath(normalized)) return normalized;
+    }
+    return null;
+}
+
+export function findFirstExternalPathAction(
+    paths: Array<string | null | undefined>,
+): { path: string; kind: ExternalPathActionKind } | null {
+    for (const raw of paths) {
+        const normalized = String(raw ?? "").trim();
+        const kind = detectExternalPathAction(normalized);
+        if (kind) {
+            return { path: normalized, kind };
+        }
+    }
+    return null;
+}

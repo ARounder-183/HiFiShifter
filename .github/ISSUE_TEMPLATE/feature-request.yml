@@ -1,0 +1,16 @@
+name: 🚀 功能建议
+description: 有什么新点子吗？
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: 你的建议是什么？
+      description: 请清晰地描述你想要实现的功能。
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么需要这个功能？
+      description: 这个功能解决了什么痛点？

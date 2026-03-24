@@ -17,16 +17,16 @@ export interface WaveformColors {
  * 深色主题波形颜色
  */
 const darkWaveformColors: WaveformColors = {
-    fill: "rgba(255,255,255,0.2)",
-    stroke: "rgba(255,255,255,0.7)",
+    fill: "rgba(255,255,255,0.34)",
+    stroke: "rgba(255,255,255,0.92)",
 };
 
 /**
  * 浅色主题波形颜色
  */
 const lightWaveformColors: WaveformColors = {
-    fill: "rgba(0,0,0,0.15)",
-    stroke: "rgba(0,0,0,0.6)",
+    fill: "rgba(0,0,0,0.28)",
+    stroke: "rgba(0,0,0,0.82)",
 };
 
 /**

@@ -13,21 +13,28 @@ use crate::state::TimelineState;
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 
 use super::mix::{
-    render_callback_f32, render_callback_i16, render_callback_u16,
-    SnapshotTransitionState,
+    render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
 };
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
     build_snapshot, build_snapshot_for_file, schedule_stretch_jobs, source_bounds_frames,
 };
-use crate::pitch_clip::{schedule_clip_pitch_jobs};
 use super::types::{
     AudioEngineStateSnapshot, EngineCommand, EngineSnapshot, ResampledStereo, StretchJob,
     StretchKey,
 };
+use crate::pitch_clip::schedule_clip_pitch_jobs;
 
 use crate::pitch_clip::get_or_compute_clip_pitch_midi_global;
 use tauri::{Emitter, Manager};
+
+// 仅在 Debug 模式下编译并执行打印
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        std::eprintln!($($arg)*);
+    }
+}
 
 /// 拉伸进度推送给前端的事件 payload。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -166,7 +173,7 @@ impl AudioEngine {
 
             let (stretch_tx, stretch_rx) = mpsc::channel::<StretchJob>();
 
-            // Worker that computes RubberBand stretches off the command thread.
+            // Worker that computes Signalsmith Stretch off the command thread.
             // Keep it small to avoid CPU spikes.
             {
                 let cache = cache_for_cmd.clone();
@@ -175,8 +182,8 @@ impl AudioEngine {
                 let tx_ready = tx_for_worker.clone();
                 thread::spawn(move || {
                     while let Ok(job) = stretch_rx.recv() {
-                        // If RubberBand isn't available, drop the job.
-                        if !crate::rubberband::is_available() {
+                        // If Signalsmith Stretch isn't available, drop the job.
+                        if !crate::sstretch::is_available() {
                             if let Ok(mut s) = inflight.lock() {
                                 s.remove(&job.key);
                             }
@@ -239,10 +246,13 @@ impl AudioEngine {
 
                         // 向前端推送拉伸开始事件
                         if let Some(ref app) = job.app_handle {
-                            let _ = app.emit("stretch_progress", StretchProgressPayload {
-                                active: true,
-                                clip_name: Some(job.clip_name.clone()),
-                            });
+                            let _ = app.emit(
+                                "stretch_progress",
+                                StretchProgressPayload {
+                                    active: true,
+                                    clip_name: Some(job.clip_name.clone()),
+                                },
+                            );
                         }
 
                         let stretched = time_stretch_interleaved(
@@ -250,7 +260,7 @@ impl AudioEngine {
                             2,
                             job.key.out_rate,
                             loop_out_frames,
-                            StretchAlgorithm::RubberBand,
+                            StretchAlgorithm::SignalsmithStretch,
                         );
 
                         let stretched_src = ResampledStereo {
@@ -265,10 +275,13 @@ impl AudioEngine {
 
                         // 向前端推送拉伸完成事件
                         if let Some(ref app) = job.app_handle {
-                            let _ = app.emit("stretch_progress", StretchProgressPayload {
-                                active: false,
-                                clip_name: None,
-                            });
+                            let _ = app.emit(
+                                "stretch_progress",
+                                StretchProgressPayload {
+                                    active: false,
+                                    clip_name: None,
+                                },
+                            );
                         }
 
                         let _ = tx_ready.send(EngineCommand::StretchReady { key: job.key });
@@ -297,7 +310,7 @@ impl AudioEngine {
                         &config,
                         move |data: &mut [f32], _| {
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    render_callback_f32(
+                                render_callback_f32(
                                     data,
                                     channels,
                                     &snapshot_for_cb,
@@ -436,7 +449,9 @@ impl AudioEngine {
                             EngineCommand::SetAppHandle { handle } => {
                                 app_handle_for_worker = Some(handle);
                             }
-                            EngineCommand::AudioReady { key } => handle_audio_ready(&mut state, key),
+                            EngineCommand::AudioReady { key } => {
+                                handle_audio_ready(&mut state, key)
+                            }
                             EngineCommand::PlayFile {
                                 path,
                                 offset_sec,
@@ -574,8 +589,12 @@ fn handle_set_playing(s: &mut EngineWorkerState, playing: bool, target: Option<S
 }
 
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
-    eprintln!("[engine] handle_update_timeline: tracks={}, clips={}", tl.tracks.len(), tl.clips.len());
-    
+    eprintln!(
+        "[engine] handle_update_timeline: tracks={}, clips={}",
+        tl.tracks.len(),
+        tl.clips.len()
+    );
+
     // ── 1. 合成缓存失效 ──────────────────────────────────────────────────
     // 当某个 root_track 的 pitch_edit 曲线发生变化时，
     // 使该 track 上所有 clip 的合成缓存失效，触发下次播放时重新合成。
@@ -586,8 +605,13 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             .last_timeline
             .as_ref()
             .map(|old_tl| {
-                let old_params = old_tl.params_by_root_track.get(&clip.track_id);
-                let new_params = tl.params_by_root_track.get(&clip.track_id);
+                // 先解析 root_track_id，否则子轨道中的 clip 无法正确失效缓存
+                let old_root = old_tl.resolve_root_track_id(&clip.track_id);
+                let new_root = tl.resolve_root_track_id(&clip.track_id);
+
+                let old_params = old_root.and_then(|r| old_tl.params_by_root_track.get(&r));
+                let new_params = new_root.and_then(|r| tl.params_by_root_track.get(&r));
+
                 match (old_params, new_params) {
                     (Some(old), Some(new)) => old.pitch_edit != new.pitch_edit,
                     (None, Some(new)) => !new.pitch_edit.is_empty(),
@@ -598,63 +622,63 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             .unwrap_or(false); // 首次 timeline，不触发重新合成
 
         if pitch_changed {
-            crate::synth_clip_cache::global_synth_clip_cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .invalidate(&clip.id);
+            // 修改：不再暴力清除全部缓存，而是仅清除片段缓存和解绑 pending_key。
+            // 这样系统会自然计算出新的 Hash，并在新 Hash 未渲染完成时，
+            // 利用留存下来的 RenderedClipCache 进行无缝垫音播放
+            crate::synth_clip_cache::invalidate_clip_for_pitch_edit(&clip.id);
         }
     }
 
+    // 提前构建旧 Clip 的 Hash 表，将后续所有查询从 O(N^2) 降维到 O(N)
+    let old_clips_map: std::collections::HashMap<&str, &crate::state::Clip> = s
+        .last_timeline
+        .as_ref()
+        .map(|old_tl| old_tl.clips.iter().map(|c| (c.id.as_str(), c)).collect())
+        .unwrap_or_default();
+
     // ── 3. 收集需要重新推送 pitch data 的 clip ─────────────────────────────
-    // 全量分析策略：trim/rate 变化不触发重新分析，但需要重新推送 pitch 数据
-    // 包括：(a) start_sec 变化（clip 被移动）
-    //       (b) source_start_sec / source_end_sec 变化（trim 变化 → 截取区间变了）
-    //       (c) playback_rate 变化（resample 比例变了）
-    // 必须在 last_timeline 更新之前收集，否则比较的是新旧相同的值。
-    let moved_clip_ids: Vec<String> = tl
+    let moved_clip_ids: std::collections::HashSet<&str> = tl
         .clips
         .iter()
         .filter(|clip| {
-            s.last_timeline
-                .as_ref()
-                .and_then(|old_tl| old_tl.clips.iter().find(|c| c.id == clip.id))
+            old_clips_map
+                .get(clip.id.as_str())
                 .map(|old| {
-                    // (a) clip 位置变化
                     let pos_changed = (old.start_sec - clip.start_sec).abs() > 1e-9;
-                    // (b) source range 变化（任何 rate 下都需要重新推送）
-                    let source_range_changed =
-                        (old.source_start_sec - clip.source_start_sec).abs() > 1e-6
+                    let source_range_changed = (old.source_start_sec - clip.source_start_sec).abs()
+                        > 1e-6
                         || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6;
-                    // (c) playback_rate 变化
                     let rate_changed = (old.playback_rate - clip.playback_rate).abs() > 1e-6;
                     pos_changed || source_range_changed || rate_changed
                 })
-                .unwrap_or(false) // 新 clip 由 ClipPitchReady 事件处理，此处跳过
+                .unwrap_or(false)
         })
-        .map(|clip| clip.id.clone())
+        .map(|clip| clip.id.as_str()) // 零拷贝
         .collect();
 
     // ── 4. 检测音高相关变化（必须在 last_timeline 更新之前）──────────────────
-    // 检测 clip 级别的变化
     let clip_changed = tl.clips.iter().any(|clip| {
-        match s.last_timeline.as_ref().and_then(|old_tl| old_tl.clips.iter().find(|c| c.id == clip.id)) {
+        match old_clips_map.get(clip.id.as_str()) {
             None => true, // 新增 clip
             Some(old) => clip_pitch_params_changed(old, clip),
         }
     });
 
-    // 收集 pitch 参数变化的 clip id（用于后续清空前端过时曲线）
-    // 必须在 last_timeline 更新之前收集
-    let pitch_params_changed_clip_ids: Vec<String> = tl.clips.iter().filter_map(|clip| {
-        s.last_timeline.as_ref()
-            .and_then(|old_tl| old_tl.clips.iter().find(|c| c.id == clip.id))
-            .and_then(|old| {
-                if clip_pitch_params_changed(old, clip) { Some(clip.id.clone()) } else { None }
+    let pitch_params_changed_clip_ids: std::collections::HashSet<&str> = tl
+        .clips
+        .iter()
+        .filter_map(|clip| {
+            old_clips_map.get(clip.id.as_str()).and_then(|old| {
+                if clip_pitch_params_changed(*old, clip) {
+                    Some(clip.id.as_str()) // 优化：零拷贝
+                } else {
+                    None
+                }
             })
-    }).collect();
-    
-    // 检测 track 级别的变化    
-    // 检测 track 级别的变化（compose_enabled 或 pitch_analysis_algo）
+        })
+        .collect();
+
+    // 检测 track 级别的变化
     let has_last_timeline = s.last_timeline.is_some();
     let track_pitch_settings_changed = s.last_timeline.as_ref().map_or(true, |old_tl| {
         tl.tracks.iter().any(|track| {
@@ -672,11 +696,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 })
         })
     });
-    
+
     if !has_last_timeline {
         eprintln!("[engine] First timeline update (no last_timeline), forcing pitch schedule");
     }
-    
+
     let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
     eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, needs_schedule={}",
         tl.clips.len(), clip_changed, track_pitch_settings_changed, needs_pitch_schedule);
@@ -687,17 +711,18 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // Pre-request decoded PCM for all audible clips (async, non-blocking).
     {
         let track_gain = super::snapshot::compute_track_gains(&tl.tracks);
-        let mut audible_tracks: HashSet<String> = HashSet::new();
-        for (tid, (_gain, muted, solo_ok)) in &track_gain {
+        // 消除高频循环中的 String 堆分配，直接使用 &str
+        let mut audible_tracks: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (&tid, (_gain, muted, solo_ok)) in &track_gain {
             if !*muted && *solo_ok {
-                audible_tracks.insert(tid.clone());
+                audible_tracks.insert(tid);
             }
         }
         for clip in &tl.clips {
             if clip.muted {
                 continue;
             }
-            if !audible_tracks.contains(&clip.track_id) {
+            if !audible_tracks.contains(clip.track_id.as_str()) {
                 continue;
             }
             let Some(source_path) = clip.source_path.as_ref() else {
@@ -712,7 +737,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     }
 
     // Schedule stretch work in background (do not block snapshot build).
-    if crate::rubberband::is_available() {
+    if crate::sstretch::is_available() {
         schedule_stretch_jobs(
             &tl,
             s.sr,
@@ -731,40 +756,39 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 才调用 schedule_clip_pitch_jobs。clip 仅移动（start_sec 变化）时跳过，
     // 避免对所有 clip 做不必要的文件系统 I/O 和缓存查询。
     // 注意：检测逻辑已在 last_timeline 更新之前完成（见上方）
-    
+
     if needs_pitch_schedule {
-        // 对参数变化的 clip（rate/trim 变化），从全量缓存重新截取+resample 推送。
-        // 如果全量缓存已存在（源音频未变，只是 trim/rate 变了），可以立即推送正确的曲线；
-        // 如果缓存未命中（首次分析或源音频变化），schedule_clip_pitch_jobs 会触发异步分析。
         if !pitch_params_changed_clip_ids.is_empty() {
             if let Some(app) = s.app_handle.as_ref() {
-                for clip in tl.clips.iter().filter(|c| pitch_params_changed_clip_ids.contains(&c.id)) {
+                for clip in tl
+                    .clips
+                    .iter()
+                    .filter(|c| pitch_params_changed_clip_ids.contains(c.id.as_str()))
+                // 适配 &str
+                {
                     emit_clip_pitch_data_for_clip(app, &tl, clip);
                 }
             }
         }
-
         schedule_clip_pitch_jobs(&tl, s.tx, s.app_handle.as_ref(), s.sr);
     }
 
-    // 当 clip 的 start_sec 发生变化时（clip 被移动），即使 MIDI 缓存命中，
-    // 也需要重新发送 clip_pitch_data 事件以更新前端的 startFrame。
-    // 这里直接用缓存的 MIDI 曲线重新推送，无需重新分析。
     if !moved_clip_ids.is_empty() {
         if let Some(app) = s.app_handle.as_ref() {
-            for clip in tl.clips.iter().filter(|c| moved_clip_ids.contains(&c.id)) {
+            for clip in tl
+                .clips
+                .iter()
+                .filter(|c| moved_clip_ids.contains(c.id.as_str()))
+            {
+                // 适配 &str
                 emit_clip_pitch_data_for_clip(app, &tl, clip);
             }
         }
     }
 
-    let snap = build_snapshot(
-        &tl,
-        s.sr,
-        s.cache,
-        s.stretch_cache,
-    );
-    s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    s.duration_frames
+        .store(snap.duration_frames, Ordering::Relaxed);
     s.snapshot.store(Arc::new(snap));
 }
 
@@ -780,7 +804,8 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
     if let Some(tl) = s.last_timeline.as_ref() {
         if let Some(app) = s.app_handle.as_ref() {
             let state = app.state::<crate::state::AppState>();
-            let mut root_track_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut root_track_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for clip in &tl.clips {
                 if let Some(src) = clip.source_path.as_deref() {
                     if std::path::Path::new(src) == key.path.as_path() {
@@ -800,36 +825,32 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
     }
 
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(
-            tl,
-            s.sr,
-            s.cache,
-            s.stretch_cache,
-        );
-        s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        s.duration_frames
+            .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
     }
 }
 
 fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
-    eprintln!("[engine] handle_clip_pitch_ready: clip_id={}", clip_id);
+    debug_eprintln!("[engine] handle_clip_pitch_ready: clip_id={}", clip_id);
     // clip pitch MIDI 异步预计算完成（全量源音频），缓存已就绪。
     // 向前端推送 ClipPitchData 事件（rate==1 全量传送，rate!=1 截取+resample）。
     if let Some(app) = s.app_handle.as_ref() {
         if let Some(tl) = s.last_timeline.as_ref() {
             if let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) {
-                eprintln!("[engine] Found clip in timeline, emitting clip_pitch_data");
+                debug_eprintln!("[engine] Found clip in timeline, emitting clip_pitch_data");
                 emit_clip_pitch_data_for_clip(app, tl, clip);
-                eprintln!("[engine] clip_pitch_data emitted successfully");
+                debug_eprintln!("[engine] clip_pitch_data emitted successfully");
             } else {
-                eprintln!("[engine] Clip not found in timeline");
+                debug_eprintln!("[engine] Clip not found in timeline");
             }
         }
     }
 
     // 每当一个 clip 分析完成，尝试重新组装整体音高线（pitch_orig）
     // 使用"最上方 clip 为准"的覆盖策略，直接从缓存读取，不重新分析音频
-    eprintln!("[engine] Calling maybe_schedule_pitch_orig");
+    debug_eprintln!("[engine] Calling maybe_schedule_pitch_orig");
     if let Some(app) = s.app_handle.as_ref() {
         if let Some(tl) = s.last_timeline.as_ref() {
             if let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) {
@@ -837,24 +858,23 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
                 if !root_track_id.is_empty() {
                     let state = app.state::<crate::state::AppState>();
                     crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_track_id);
-                    eprintln!("[engine] maybe_schedule_pitch_orig called");
+                    debug_eprintln!("[engine] maybe_schedule_pitch_orig called");
                 }
             }
         }
     }
 
-    eprintln!("[engine] Building snapshot...");
+    debug_eprintln!("[engine] Building snapshot...");
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(
-            tl,
-            s.sr,
-            s.cache,
-            s.stretch_cache,
+        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        debug_eprintln!(
+            "[engine] Snapshot built successfully, duration_frames={}",
+            snap.duration_frames
         );
-        eprintln!("[engine] Snapshot built successfully, duration_frames={}", snap.duration_frames);
-        s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+        s.duration_frames
+            .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
-        eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
+        debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
     }
 }
 
@@ -862,27 +882,19 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
     // A decoded/resampled buffer became available.
     // Rebuild the snapshot so missing clips can be attached.
     if let Some(tl) = s.last_timeline.as_ref() {
-        let snap = build_snapshot(
-            tl,
-            s.sr,
-            s.cache,
-            s.stretch_cache,
-        );
-        s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+        let snap = build_snapshot(tl, s.sr, s.cache, s.stretch_cache);
+        s.duration_frames
+            .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
     } else if let Some((path, offset_sec, _target)) = s.last_play_file.as_ref() {
         let snap = build_snapshot_for_file(path.as_path(), s.sr, *offset_sec, s.cache);
-        s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+        s.duration_frames
+            .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
     }
 }
 
-fn handle_play_file(
-    s: &mut EngineWorkerState,
-    path: PathBuf,
-    offset_sec: f64,
-    target: String,
-) {
+fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, target: String) {
     *s.last_timeline = None;
     *s.last_play_file = Some((path.clone(), offset_sec, target.clone()));
 
@@ -891,7 +903,8 @@ fn handle_play_file(
 
     // Represent the file as a single clip in a snapshot.
     let snap = build_snapshot_for_file(&path, s.sr, offset_sec, s.cache);
-    s.duration_frames.store(snap.duration_frames, Ordering::Relaxed);
+    s.duration_frames
+        .store(snap.duration_frames, Ordering::Relaxed);
     s.snapshot.store(Arc::new(snap));
     // File playback reports absolute position via base_sec + position_sec.
     let base = (offset_sec.max(0.0) * s.sr as f64).round().max(0.0) as u64;
@@ -933,14 +946,16 @@ fn emit_clip_pitch_data_for_clip(
         clip.playback_rate, root,
     );
 
-    let Some(cached) = get_or_compute_clip_pitch_midi_global(tl, clip, &root, frame_period_ms) else {
+    let Some(cached) = get_or_compute_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
+    else {
         eprintln!("[pitch:emit] clip_id={} → 缓存未命中，跳过", clip.id);
         return;
     };
 
     eprintln!(
         "[pitch:emit] clip_id={} cached_midi_len={}",
-        clip.id, cached.midi.len(),
+        clip.id,
+        cached.midi.len(),
     );
 
     // 统一截取 + resample（rate==1 时 resample 实际为无损复制）
@@ -958,7 +973,10 @@ fn emit_clip_pitch_data_for_clip(
 
     eprintln!(
         "[pitch:emit] clip_id={} → curve_start={:.3}s curve_len={} fp={:.1}ms total_dur={:.3}s",
-        clip.id, curve_start_sec, midi_curve.len(), frame_period_ms,
+        clip.id,
+        curve_start_sec,
+        midi_curve.len(),
+        frame_period_ms,
         midi_curve.len() as f64 * frame_period_ms / 1000.0,
     );
 

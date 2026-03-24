@@ -28,3 +28,19 @@ export type ParamViewSegment = {
     orig: number[];
     edit: number[];
 };
+
+export type ParamMorphPointKind = "left" | "mid1" | "mid2" | "right";
+
+export type ParamMorphControlPoint = {
+    kind: ParamMorphPointKind;
+    frame: number;
+    value: number;
+};
+
+export type ParamMorphOverlay = {
+    selectionStartFrame: number;
+    selectionEndFrame: number;
+    meanValue: number;
+    baselineValues: number[];
+    points: ParamMorphControlPoint[];
+};

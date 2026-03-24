@@ -47,8 +47,9 @@ pub(crate) fn is_audio_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {
-            let e = e.to_ascii_lowercase();
-            matches!(e.as_str(), "wav" | "mp3" | "flac" | "ogg" | "m4a" | "aac")
+            ["wav", "mp3", "flac", "ogg", "m4a", "aac"]
+                .iter()
+                .any(|&ext| e.eq_ignore_ascii_case(ext))
         })
         .unwrap_or(false)
 }
@@ -111,7 +112,7 @@ pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, V
         }
     }
 
-    use symphonia::core::audio::{AudioBufferRef, Signal};
+    
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::FormatOptions;
@@ -169,31 +170,12 @@ pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, V
             Err(e) => return Err(e.to_string()),
         };
 
-        match decoded {
-            AudioBufferRef::F32(buf) => {
-                let frames = buf.frames();
-                let planes_buf = buf.planes();
-                let planes = planes_buf.planes();
-                for f in 0..frames {
-                    for ch in 0..channels {
-                        let v = planes
-                            .get(ch)
-                            .and_then(|p| p.get(f))
-                            .copied()
-                            .unwrap_or(0.0);
-                        out.push(v);
-                    }
-                }
-            }
-            _ => {
-                // Convert anything else into f32 interleaved.
-                let spec = *decoded.spec();
-                let duration = decoded.capacity() as u64;
-                let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
-                sbuf.copy_interleaved_ref(decoded);
-                out.extend_from_slice(sbuf.samples());
-            }
-        }
+        // 统一使用 Symphonia 高度优化的 SampleBuffer，消除手写的 Option 边界检查开销
+        let spec = *decoded.spec();
+        let duration = decoded.capacity() as u64;
+        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
+        sbuf.copy_interleaved_ref(decoded);
+        out.extend_from_slice(sbuf.samples());
     }
 
     Ok((sample_rate, channels, out))
@@ -223,11 +205,13 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
 
     let stereo: Vec<f32> = if in_channels == 1 {
         let mut out = Vec::with_capacity(resampled.len() * 2);
-        for s in resampled {
-            out.push(s);
-            out.push(s);
+        for s in &resampled {
+            out.push(*s);
+            out.push(*s);
         }
         out
+    } else if in_channels == 2 {
+        resampled
     } else {
         let frames = resampled.len() / in_channels;
         let mut out = Vec::with_capacity(frames * 2);

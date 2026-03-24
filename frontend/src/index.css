@@ -26,9 +26,9 @@
   --qt-warning-bg: #3d2a0a;
   --qt-warning-text: #fcd34d;
   --qt-warning-border: #f59e0b;
-  --qt-graph-bg: #252525;
-  --qt-graph-grid-strong: #303030;
-  --qt-graph-grid-weak: #2a2a2a;
+  --qt-graph-bg: #232323;
+  --qt-graph-grid-strong: #4a4a4a;
+  --qt-graph-grid-weak: #373737;
   --qt-scrollbar-thumb: #555555;
   --qt-scrollbar-thumb-hover: #707070;
 }
@@ -51,9 +51,9 @@
   --qt-warning-bg: var(--amber-3);
   --qt-warning-text: var(--amber-11);
   --qt-warning-border: var(--amber-9);
-  --qt-graph-bg: var(--gray-2);
-  --qt-graph-grid-strong: var(--gray-6);
-  --qt-graph-grid-weak: var(--gray-5);
+  --qt-graph-bg: var(--gray-1);
+  --qt-graph-grid-strong: var(--gray-8);
+  --qt-graph-grid-weak: var(--gray-6);
   --qt-scrollbar-thumb: var(--gray-8);
   --qt-scrollbar-thumb-hover: var(--gray-9);
 }
@@ -95,6 +95,16 @@ textarea {
   font-family: inherit;
 }
 
+button:focus,
+button:focus-visible,
+[role="button"]:focus,
+[role="button"]:focus-visible,
+.rt-BaseButton:focus,
+.rt-BaseButton:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 /* Qt/DAW-style scrollbars */
 ::-webkit-scrollbar {
   width: 10px;
@@ -128,4 +138,14 @@ textarea {
 .custom-scrollbar::-webkit-scrollbar {
   width: 8px;
   height: 8px;
+}
+
+/* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头 */
+.hide-v-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE 10+ */
+}
+.hide-v-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }

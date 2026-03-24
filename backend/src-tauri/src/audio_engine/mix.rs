@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
-use super::types::EngineClip;
 
 const SNAPSHOT_XFADE_FRAMES: usize = 256;
 
@@ -67,7 +67,15 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
                     right += breath_noise[idx + 1] * gain;
                 }
             }
-            return Some((left, right));
+            // 应用 volume 曲线（不触发重渲染，实时乘到最终输出）
+            let vol = sample_automation_curve(
+                clip.volume_curve.as_deref(),
+                clip.start_frame.saturating_add(local),
+                clip.src.sample_rate,
+                clip.volume_curve_frame_period_ms,
+                1.0,
+            );
+            return Some((left * vol, right * vol));
         }
         // rendered_pcm 存在但越界时返回静音
         return None;
@@ -165,7 +173,6 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
     }
 }
 
-
 fn snapshot_has_pending_clip(snap: &EngineSnapshot, pos0: u64, pos1: u64) -> bool {
     snap.clips.iter().any(|clip| {
         if !clip.needs_synthesis || clip.rendered_pcm.is_some() {
@@ -194,25 +201,24 @@ fn render_snapshot_window(
     true
 }
 
-fn blend_snapshot_windows(
-    out: &mut [f32],
+fn blend_snapshot_windows_in_place(
+    current_and_out: &mut [f32],
     from: &[f32],
-    to: &[f32],
     fade_remaining_frames: usize,
 ) {
     let total = SNAPSHOT_XFADE_FRAMES.max(1);
     let already_blended = total.saturating_sub(fade_remaining_frames);
-    let frames = (out.len() / 2)
-        .min(from.len() / 2)
-        .min(to.len() / 2);
+    let frames = (current_and_out.len() / 2).min(from.len() / 2);
 
     for frame in 0..frames {
         let t = ((already_blended + frame + 1).min(total) as f32) / total as f32;
         let from_gain = 1.0 - t;
         let to_gain = t;
         let base = frame * 2;
-        out[base] = from[base] * from_gain + to[base] * to_gain;
-        out[base + 1] = from[base + 1] * from_gain + to[base + 1] * to_gain;
+        // 在 current_and_out 内部完成读取与复写
+        current_and_out[base] = from[base] * from_gain + current_and_out[base] * to_gain;
+        current_and_out[base + 1] =
+            from[base + 1] * from_gain + current_and_out[base + 1] * to_gain;
     }
 }
 
@@ -231,8 +237,6 @@ fn advance_playback_position(
         is_playing.store(false, Ordering::Relaxed);
     }
 }
-
-
 
 fn mix_into_scratch_stereo(
     frames: usize,
@@ -271,8 +275,11 @@ fn mix_into_scratch_stereo(
 
     if !current_ready && transition.fade_from_snapshot.is_none() {
         // cursor 暂停，不推进 position，输出静音等待
-        // 调试：每隔约 1s 打印一次（避免刷屏）
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
+        // 调试：每隔约 1s 打印一次
+        static DEBUG_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DEBUG_LOG.get_or_init(|| {
+            std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
+        }) {
             static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let now = pos0 / 44100; // rough seconds
             let last = LAST_LOG.load(Ordering::Relaxed);
@@ -295,13 +302,8 @@ fn mix_into_scratch_stereo(
     }
 
     if let Some(from_snapshot) = transition.fade_from_snapshot.as_ref() {
-        let from_ready = render_snapshot_window(
-            frames,
-            from_snapshot,
-            pos0,
-            pos1,
-            scratch_fade_from,
-        );
+        let from_ready =
+            render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from);
 
         if from_ready && !current_ready {
             scratch.resize(scratch_fade_from.len(), 0.0);
@@ -311,16 +313,14 @@ fn mix_into_scratch_stereo(
         }
 
         if from_ready && current_ready && transition.fade_remaining_frames > 0 {
-            let current_window = scratch.clone();
-            blend_snapshot_windows(
+            // 直接就地混合，删掉极其耗时的 scratch.clone()
+            blend_snapshot_windows_in_place(
                 scratch.as_mut_slice(),
                 scratch_fade_from.as_slice(),
-                current_window.as_slice(),
                 transition.fade_remaining_frames,
             );
-            transition.fade_remaining_frames = transition
-                .fade_remaining_frames
-                .saturating_sub(frames);
+            transition.fade_remaining_frames =
+                transition.fade_remaining_frames.saturating_sub(frames);
             if transition.fade_remaining_frames == 0 {
                 transition.fade_from_snapshot = None;
             }
@@ -482,14 +482,12 @@ pub(crate) fn render_callback_u16(
         let r = clamp11(scratch[f * 2 + 1]);
         if out_channels == 1 {
             let v = clamp11((l + r) * 0.5);
-            let s = ((v * 0.5 + 0.5) * u16::MAX as f32).round();
-            data[f] = s.clamp(0.0, u16::MAX as f32) as u16;
+            // 用 Rust 自带的安全强转，不需要边界检测与 round 了
+            data[f] = ((v * 0.5 + 0.5) * u16::MAX as f32) as u16;
         } else {
             let base = f * out_channels;
-            let sl = ((l * 0.5 + 0.5) * u16::MAX as f32).round();
-            let sr = ((r * 0.5 + 0.5) * u16::MAX as f32).round();
-            data[base] = sl.clamp(0.0, u16::MAX as f32) as u16;
-            data[base + 1] = sr.clamp(0.0, u16::MAX as f32) as u16;
+            data[base] = ((l * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            data[base + 1] = ((r * 0.5 + 0.5) * u16::MAX as f32) as u16;
             for ch in 2..out_channels {
                 data[base + ch] = u16::MAX / 2;
             }

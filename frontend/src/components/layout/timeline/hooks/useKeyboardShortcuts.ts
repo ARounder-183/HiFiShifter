@@ -3,15 +3,15 @@ import type { AppDispatch } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
-    checkpointHistory,
-    createClipsRemote,
     removeClipRemote,
-    selectClipRemote,
-    splitClipRemote,
 } from "../../../../features/session/sessionSlice";
 import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import { selectMergedKeybindings } from "../../../../features/keybindings/keybindingsSlice";
-import type { ActionId, Keybinding, KeybindingMap } from "../../../../features/keybindings/types";
+import type {
+    ActionId,
+    Keybinding,
+    KeybindingMap,
+} from "../../../../features/keybindings/types";
 
 /**
  * 判断 KeyboardEvent 是否匹配某个 Keybinding
@@ -44,8 +44,10 @@ function matchClipAction(
     const clipActions: ActionId[] = [
         "clip.delete",
         "clip.copy",
+        "clip.cut",
         "clip.paste",
         "clip.split",
+        "clip.normalize",
     ];
     // 优先匹配含修饰键的
     for (const actionId of clipActions) {
@@ -69,7 +71,11 @@ export function useKeyboardShortcuts(deps: {
     multiSelectedClipIds: string[];
     setMultiSelectedClipIds: (ids: string[]) => void;
     clipClipboardRef: React.RefObject<ClipTemplate[] | null>;
+    buildClipClipboardTemplates: (ids: string[]) => Promise<ClipTemplate[]>;
     isEditableTarget: (target: EventTarget | null) => boolean;
+    onNormalize: (ids: string[]) => void;
+    onPaste: () => void;
+    onSplitSelected: () => void;
 }) {
     const {
         sessionRef,
@@ -77,7 +83,11 @@ export function useKeyboardShortcuts(deps: {
         multiSelectedClipIds,
         setMultiSelectedClipIds,
         clipClipboardRef,
+        buildClipClipboardTemplates,
         isEditableTarget,
+        onNormalize,
+        onPaste,
+        onSplitSelected,
     } = deps;
 
     const keybindings = useAppSelector(selectMergedKeybindings);
@@ -91,6 +101,10 @@ export function useKeyboardShortcuts(deps: {
             )
                 return;
 
+            // 快捷键设置对话框打开时，阻塞所有快捷键
+            if (document.body.hasAttribute("data-keybindings-dialog-open"))
+                return;
+
             const s = sessionRef.current;
             const selectedIds =
                 multiSelectedClipIds.length > 0
@@ -102,16 +116,30 @@ export function useKeyboardShortcuts(deps: {
             const actionId = matchClipAction(e, keybindings);
             if (!actionId) return;
 
-            // clip.copy / clip.paste: PianoRoll 有自己的复制粘贴逻辑，焦点在其中时跳过
-            if (actionId === "clip.copy" || actionId === "clip.paste") {
+            // clip.copy / clip.cut / clip.paste: 焦点在 PianoRoll 时优先交给参数编辑器。
+            if (
+                actionId === "clip.copy" ||
+                actionId === "clip.cut" ||
+                actionId === "clip.paste"
+            ) {
                 const active = document.activeElement as HTMLElement | null;
-                if (
+                const inPianoRoll =
                     active?.hasAttribute("data-piano-roll-scroller") ||
-                    active?.closest?.("[data-piano-roll-scroller]")
-                ) {
+                    active?.closest?.("[data-piano-roll-scroller]");
+                if (inPianoRoll) {
+                    if (s.toolMode === "select") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const op = actionId.replace("clip.", "");
+                        window.dispatchEvent(
+                            new CustomEvent("hifi:editOp", { detail: { op } }),
+                        );
+                    }
                     return;
                 }
             }
+
+            // 不再对 clip.delete 做焦点位于 PianoRoll 的特殊放行。
 
             switch (actionId) {
                 case "clip.delete": {
@@ -129,74 +157,81 @@ export function useKeyboardShortcuts(deps: {
                     if (selectedIds.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    const clips = s.clips.filter((c) => selectedIds.includes(c.id));
-                    if (clips.length === 0) return;
-                    const templates = clips.map((c) => ({
-                        trackId: c.trackId,
-                        name: c.name,
-                        startSec: c.startSec,
-                        lengthSec: c.lengthSec,
-                        sourcePath: c.sourcePath,
-                        durationSec: c.durationSec,
-                        gain: c.gain,
-                        muted: c.muted,
-                        sourceStartSec: c.sourceStartSec,
-                        sourceEndSec: c.sourceEndSec,
-                        playbackRate: c.playbackRate,
-                        fadeInSec: c.fadeInSec,
-                        fadeOutSec: c.fadeOutSec,
-                    }));
-                    (clipClipboardRef as React.MutableRefObject<ClipTemplate[] | null>).current = templates;
-                    try {
-                        void navigator.clipboard?.writeText(
-                            JSON.stringify({
-                                type: "hifishifter.clipTemplates.v1",
-                                templates,
-                            }),
+                    void (async () => {
+                        const templates = await buildClipClipboardTemplates(
+                            selectedIds,
                         );
-                    } catch {
-                        // ignore
-                    }
+                        if (templates.length === 0) return;
+                        (
+                            clipClipboardRef as React.MutableRefObject<
+                                ClipTemplate[] | null
+                            >
+                        ).current = templates;
+                        try {
+                            void navigator.clipboard?.writeText(
+                                JSON.stringify({
+                                    type: "hifishifter.clipTemplates.v1",
+                                    templates,
+                                }),
+                            );
+                        } catch {
+                            // ignore
+                        }
+                    })();
+                    return;
+                }
+
+                case "clip.cut": {
+                    if (selectedIds.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void (async () => {
+                        const templates = await buildClipClipboardTemplates(
+                            selectedIds,
+                        );
+                        if (templates.length === 0) return;
+                        (
+                            clipClipboardRef as React.MutableRefObject<
+                                ClipTemplate[] | null
+                            >
+                        ).current = templates;
+                        try {
+                            void navigator.clipboard?.writeText(
+                                JSON.stringify({
+                                    type: "hifishifter.clipTemplates.v1",
+                                    templates,
+                                }),
+                            );
+                        } catch {
+                            // ignore
+                        }
+                        setMultiSelectedClipIds([]);
+                        for (const id of selectedIds) {
+                            void dispatch(removeClipRemote(id));
+                        }
+                    })();
                     return;
                 }
 
                 case "clip.paste": {
-                    const tpl = clipClipboardRef.current;
-                    if (!tpl || tpl.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    const playhead = s.playheadSec ?? 0;
-                    const minStart = tpl
-                        .map((c) => c.startSec)
-                        .reduce((a, b) => Math.min(a, b), Number.POSITIVE_INFINITY);
-                    const delta =
-                        Number.isFinite(minStart) && minStart !== Number.POSITIVE_INFINITY
-                            ? playhead - minStart
-                            : 0;
-                    const templates = tpl.map((c) => ({
-                        ...c,
-                        startSec: Math.max(0, c.startSec + delta),
-                    }));
-                    dispatch(checkpointHistory());
-                    void dispatch(createClipsRemote({ templates }))
-                        .unwrap()
-                        .then((payload) => {
-                            const created: string[] = payload?.createdClipIds ?? [];
-                            if (!Array.isArray(created) || created.length === 0) return;
-                            setMultiSelectedClipIds(created);
-                            void dispatch(selectClipRemote(created[0]));
-                        })
-                        .catch(() => undefined);
+                    onPaste();
                     return;
                 }
 
                 case "clip.split": {
-                    const clipId = s.selectedClipId;
-                    if (!clipId) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    const splitSec = Math.max(0, Number(s.playheadSec ?? 0) || 0);
-                    void dispatch(splitClipRemote({ clipId, splitSec }));
+                    onSplitSelected();
+                    return;
+                }
+
+                case "clip.normalize": {
+                    if (selectedIds.length === 0) return;
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    onNormalize(selectedIds);
                     return;
                 }
             }
@@ -209,7 +244,11 @@ export function useKeyboardShortcuts(deps: {
         sessionRef,
         setMultiSelectedClipIds,
         clipClipboardRef,
+        buildClipClipboardTemplates,
         isEditableTarget,
         keybindings,
+        onNormalize,
+        onPaste,
+        onSplitSelected,
     ]);
 }

@@ -21,6 +21,13 @@ export const removeTrackRemote = createAsyncThunk(
     },
 );
 
+export const duplicateTrackRemote = createAsyncThunk(
+    "session/duplicateTrackRemote",
+    async (trackId: string) => {
+        return webApi.duplicateTrack(trackId);
+    },
+);
+
 export const moveTrackRemote = createAsyncThunk(
     "session/moveTrackRemote",
     async (payload: {
@@ -66,15 +73,108 @@ export const addClipOnTrack = createAsyncThunk(
 export const createClipsRemote = createAsyncThunk(
     "session/createClipsRemote",
     async (
-        payload: { templates: ClipTemplate[] },
-        { getState, rejectWithValue },
+        payload: {
+            templates: ClipTemplate[];
+            options?: {
+                /**
+                 * 粘贴时将模板按源轨道相对顺序重映射到当前选中轨道，
+                 * 并在轨道不足时自动创建新轨道。
+                 */
+                placeOnSelectedTrack?: boolean;
+            };
+        },
+        { getState, dispatch, rejectWithValue },
     ) => {
+        let templates = payload.templates;
+        const shouldApplyLinkedParams =
+            (getState() as { session: SessionState }).session
+                .lockParamLinesEnabled;
+
+        if (payload.options?.placeOnSelectedTrack && templates.length > 0) {
+            const state = getState() as { session: SessionState };
+            const selectedTrackId = state.session.selectedTrackId;
+            const selectedTrackIndex = selectedTrackId
+                ? state.session.tracks.findIndex((t) => t.id === selectedTrackId)
+                : -1;
+
+            if (selectedTrackId && selectedTrackIndex >= 0) {
+                const trackOrder = new Map<string, number>();
+                for (let i = 0; i < state.session.tracks.length; i += 1) {
+                    trackOrder.set(state.session.tracks[i].id, i);
+                }
+
+                const sourceTrackIds = Array.from(
+                    new Set(
+                        templates
+                            .map((t) => t.trackId)
+                            .filter((id): id is string => Boolean(id)),
+                    ),
+                ).sort((a, b) => {
+                    const ai = trackOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
+                    const bi = trackOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
+                    if (ai !== bi) return ai - bi;
+                    return a.localeCompare(b);
+                });
+
+                const sourceGroupKeys =
+                    sourceTrackIds.length > 0 ? sourceTrackIds : ["__default__"];
+
+                let workingTracks = state.session.tracks.map((t) => ({
+                    id: t.id,
+                }));
+                const neededLastIndex =
+                    selectedTrackIndex + sourceGroupKeys.length - 1;
+
+                while (workingTracks.length - 1 < neededLastIndex) {
+                    const beforeIds = new Set(workingTracks.map((t) => t.id));
+                    const added = await dispatch(
+                        addTrackRemote({ name: undefined, parentTrackId: null }),
+                    ).unwrap();
+                    workingTracks = (added.tracks ?? []).map((t) => ({
+                        id: t.id,
+                    }));
+
+                    const createdTrackId =
+                        workingTracks.find((t) => !beforeIds.has(t.id))?.id ??
+                        added.selected_track_id ??
+                        workingTracks[workingTracks.length - 1]?.id ??
+                        null;
+
+                    if (!createdTrackId) {
+                        return rejectWithValue("add_track_failed");
+                    }
+                }
+
+                const sourceToTargetTrack = new Map<string, string>();
+                for (let i = 0; i < sourceGroupKeys.length; i += 1) {
+                    const targetTrack = workingTracks[selectedTrackIndex + i];
+                    if (!targetTrack?.id) {
+                        return rejectWithValue("add_track_failed");
+                    }
+                    sourceToTargetTrack.set(sourceGroupKeys[i], targetTrack.id);
+                }
+
+                const defaultTargetTrack =
+                    sourceToTargetTrack.get(sourceGroupKeys[0]) ?? selectedTrackId;
+                templates = templates.map((tpl) => {
+                    const key = tpl.trackId && sourceToTargetTrack.has(tpl.trackId)
+                        ? tpl.trackId
+                        : sourceGroupKeys[0];
+                    return {
+                        ...tpl,
+                        trackId: sourceToTargetTrack.get(key) ?? defaultTargetTrack,
+                    };
+                });
+            }
+        }
+
         const state0 = getState() as { session: SessionState };
         const knownIds = new Set(state0.session.clips.map((c) => c.id));
+        const createdIdsInBatch = new Set<string>();
 
         // 并行创建所�?clip，提升批量操作性能
         const results = await Promise.all(
-            payload.templates.map(async (tpl) => {
+            templates.map(async (tpl) => {
                 const added = await webApi.addClip({
                     trackId: tpl.trackId,
                     name: tpl.name,
@@ -89,12 +189,22 @@ export const createClipsRemote = createAsyncThunk(
                     );
                 }
 
+                const addedTimeline = added as TimelineState;
                 const createdId =
-                    (added as TimelineState).clips.find((c) => !knownIds.has(c.id))
-                        ?.id ?? null;
+                    addedTimeline.clips.find(
+                        (c) =>
+                            !knownIds.has(c.id) &&
+                            !createdIdsInBatch.has(c.id),
+                    )?.id ??
+                    (addedTimeline.selected_clip_id &&
+                    !knownIds.has(addedTimeline.selected_clip_id) &&
+                    !createdIdsInBatch.has(addedTimeline.selected_clip_id)
+                        ? addedTimeline.selected_clip_id
+                        : null);
                 if (!createdId) {
                     throw new Error("add_clip_failed");
                 }
+                createdIdsInBatch.add(createdId);
 
                 const updated = await webApi.setClipState({
                     clipId: createdId,
@@ -114,7 +224,37 @@ export const createClipsRemote = createAsyncThunk(
                     );
                 }
 
-                return { createdId, timeline: updated as TimelineState };
+                let finalTimeline = updated as TimelineState;
+                if (shouldApplyLinkedParams && tpl.linkedParams) {
+                    const linkedApplied = await webApi.applyClipLinkedParams({
+                        clipId: createdId,
+                        linkedParams: tpl.linkedParams,
+                    });
+                    if (!(linkedApplied as { ok?: boolean }).ok) {
+                        throw new Error(
+                            (linkedApplied as { error?: { message?: string } }).error
+                                ?.message ?? "apply_clip_linked_params_failed",
+                        );
+                    }
+                    finalTimeline = linkedApplied as TimelineState;
+                }
+
+                // Keep waveform visible after cut→paste even when backend cannot
+                // reconstruct preview metadata from source_path (e.g. stale/relative path).
+                if (Array.isArray(tpl.waveformPreview)) {
+                    const createdClip = finalTimeline.clips.find(
+                        (c) => c.id === createdId,
+                    );
+                    if (
+                        createdClip &&
+                        (!Array.isArray(createdClip.waveform_preview) ||
+                            createdClip.waveform_preview.length === 0)
+                    ) {
+                        createdClip.waveform_preview = tpl.waveformPreview;
+                    }
+                }
+
+                return { createdId, timeline: finalTimeline };
             }),
         ).catch((err: unknown) => {
             return rejectWithValue(
@@ -148,8 +288,27 @@ export const removeClipRemote = createAsyncThunk(
 
 export const moveClipRemote = createAsyncThunk(
     "session/moveClipRemote",
-    async (payload: { clipId: string; startSec: number; trackId?: string }) => {
+    async (payload: {
+        clipId: string;
+        startSec: number;
+        trackId?: string;
+        moveLinkedParams?: boolean;
+    }) => {
         return webApi.moveClip(payload);
+    },
+);
+
+export const moveClipsRemote = createAsyncThunk(
+    "session/moveClipsRemote",
+    async (payload: {
+        moves: Array<{
+            clipId: string;
+            startSec: number;
+            trackId?: string;
+        }>;
+        moveLinkedParams?: boolean;
+    }) => {
+        return webApi.moveClips(payload);
     },
 );
 
@@ -172,6 +331,17 @@ export const setClipStateRemote = createAsyncThunk(
         fadeOutCurve?: string;
     }) => {
         return webApi.setClipState(payload);
+    },
+);
+
+export const replaceClipSourceRemote = createAsyncThunk(
+    "session/replaceClipSourceRemote",
+    async (payload: {
+        clipIds: string[];
+        newSourcePath: string;
+        replaceSameSource?: boolean;
+    }) => {
+        return webApi.replaceClipSource(payload);
     },
 );
 

@@ -1,16 +1,38 @@
+//! 播放控制命令模块。
+//!
+//! 提供播放、暂停、停止、跳转等 Tauri 前端命令实现，
+//! 负责触发单 clip 或完整 timeline 的实时渲染与音频引擎播放。
+
 use crate::models::PlaybackStatePayload;
 use crate::state::AppState;
 use tauri::Emitter;
 use tauri::State;
 
-use super::common::{
-    guard_json_command, ok_bool, PlaybackRenderingStateEvent,
-};
+use super::common::{guard_json_command, ok_bool, PlaybackRenderingStateEvent};
 
-// ===================== playback clock =====================
-
-
-
+/// 检查 clip 的音高分析是否完成（clip_midi 非空）。
+///
+/// 当音高分析未完成时，不应将渲染结果存入 RenderedClipCache，
+/// 否则后续 snapshot rebuild 会命中这个"未编辑"的缓存，导致音高编辑不生效。
+fn is_clip_pitch_analysis_ready(
+    timeline: &crate::state::TimelineState,
+    clip: &crate::state::Clip,
+) -> bool {
+    let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
+        return false;
+    };
+    let Some(entry) = timeline.params_by_root_track.get(&clip_root) else {
+        return false;
+    };
+    // 检查 clip_pitch（原始 MIDI 曲线）是否已分析
+    let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+        timeline,
+        clip,
+        &clip_root,
+        entry.frame_period_ms.max(0.1),
+    );
+    clip_pitch.is_some()
+}
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
@@ -30,7 +52,8 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
         // 不依赖当前选中轨；按时间线里实际需要 pitch edit 的 clip 决定是否进入预渲染路径。
-        let clips_needing_render = collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
+        let clips_needing_render =
+            collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
         let need_prerender = !clips_needing_render.is_empty();
 
         if !need_prerender {
@@ -47,6 +70,11 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         if let Some(app) = state.app_handle.get().cloned() {
             let engine = state.audio_engine.clone();
             let tl_for_render = timeline.clone();
+            let registry_for_render = state
+                .resampler_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let render_start_sec = start_sec;
             // 改法 D：确保 engine_sr 已被 worker 线程 store 为实际采样率。
             // AudioEngine::new() 初始化 AtomicU32 为 44100，worker spawn 后才 store 实际值。
@@ -83,16 +111,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
 
                 // 收集需要预渲染的 clip 列表，按时间线顺序排序
                 let mut clips_to_render = collect_clips_needing_render(&tl_for_render, engine_sr);
-                clips_to_render.sort_by(|a, b| {
-                    a.clip.start_sec.total_cmp(&b.clip.start_sec)
-                });
+                clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
+                clips_to_render
+                    .retain(|info| is_clip_pitch_analysis_ready(&tl_for_render, &info.clip));
+
+                clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
 
                 // 防呆：当 pitch_edit_user_modified 为 true 但当前时间线中并没有任何 clip
                 // 在播放窗口内需要 pitch edit（例如用户把所有点都清空为 0），
                 // 则无需进入预渲染路径，直接播放即可。
                 if clips_to_render.is_empty() {
                     engine.seek_sec(render_start_sec);
-                    engine.update_timeline(tl_for_render.clone());
+                    engine.update_timeline(tl_for_render);
                     engine.set_playing(true, Some("original"));
 
                     let _ = app.emit(
@@ -105,9 +135,45 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     );
                     return;
                 }
-                
+
                 // 新一轮渲染开始，清空上次的 pending_rendered_keys
                 crate::synth_clip_cache::clear_pending_rendered_keys();
+
+                // 预渲染批次保护：按本轮 clip 数动态扩容缓存，
+                // 避免同一轮中早先渲染好的条目被后续插入提前淘汰。
+                {
+                    let mut rendered_cache = crate::synth_clip_cache::global_rendered_clip_cache()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let required = rendered_cache.len().saturating_add(clips_to_render.len());
+                    rendered_cache.ensure_capacity(required);
+                }
+                {
+                    let mut tension_cache =
+                        crate::synth_clip_cache::global_tension_rendered_clip_cache()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                    let required = clips_to_render.len().max(1);
+                    tension_cache.ensure_capacity(required);
+                }
+                // 动态扩容 HNSEP 分离缓存：确保容量 >= 本轮 clip 数 + 余量，
+                // 避免大量切片场景下 LRU 驱逐导致重复执行 HNSEP 推理。
+                {
+                    let breath_clips = clips_to_render.len();
+                    // 预留 25% 余量，至少 128
+                    let required = (breath_clips + breath_clips / 4).max(128);
+                    crate::hnsep_onnx::ensure_cache_capacity(required);
+                }
+                // 动态扩容 Breath Noise 独立缓存：确保容量 >= 本轮 clip 数，
+                // 使 formant 编辑时可复用已缓存的 noise stem，避免重复 HNSEP 推理。
+                {
+                    let mut breath_noise_cache =
+                        crate::synth_clip_cache::global_breath_noise_cache()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                    let required = clips_to_render.len().max(1);
+                    breath_noise_cache.ensure_capacity(required);
+                }
 
                 let total = clips_to_render.len().max(1);
                 let mut rendered_count = 0u32;
@@ -122,6 +188,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                         cache.get(&clip_render_info.cache_key).cloned()
                     };
 
+                    // 由于上面已经通过 retain 过滤过了，这里直接放行
                     if base_entry.is_some() {
                         crate::synth_clip_cache::register_pending_rendered_key(
                             &clip_render_info.clip.id,
@@ -130,20 +197,35 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     }
 
                     if base_entry.is_none() {
+                        if let Ok(mut state_mgr) =
+                            crate::clip_rendering_state::global_clip_rendering_state().lock()
+                        {
+                            state_mgr.set_state(
+                                &clip_render_info.clip.id,
+                                crate::clip_rendering_state::ClipRenderingState::Rendering,
+                                0.0,
+                                None,
+                            );
+                        }
+
                         match render_single_clip(
                             &tl_for_render,
                             &clip_render_info.clip,
                             clip_render_info.sr,
+                            Some(&registry_for_render),
                         ) {
                             Ok(rendered) => {
                                 let stereo_pcm = rendered.rendered_stereo;
-                                if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-                                    let nonzero = stereo_pcm.iter().filter(|&&v| v.abs() > 1e-6).count();
+                                if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref()
+                                    == Some("1")
+                                {
+                                    let nonzero =
+                                        stereo_pcm.iter().filter(|&&v| v.abs() > 1e-6).count();
                                     eprintln!(
-                                        "[play_original] clip rendered: id={} pcm_len={} nonzero={} hash={:#018x}",
-                                        clip_render_info.clip.id, stereo_pcm.len(), nonzero,
-                                        clip_render_info.cache_key.param_hash
-                                    );
+                        "[play_original] clip rendered: id={} pcm_len={} nonzero={} hash={:#018x}",
+                        clip_render_info.clip.id, stereo_pcm.len(), nonzero,
+                        clip_render_info.cache_key.param_hash
+                    );
                                 }
                                 let frames = (stereo_pcm.len() / 2) as u64;
                                 let entry = crate::synth_clip_cache::RenderedClipCacheEntry {
@@ -154,14 +236,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                     frames,
                                     sample_rate: clip_render_info.sr,
                                 };
-                                let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
+
+                                // 现在存入缓存
+                                let mut cache =
+                                    crate::synth_clip_cache::global_rendered_clip_cache()
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
                                 cache.insert(clip_render_info.cache_key.clone(), entry.clone());
                                 crate::synth_clip_cache::register_pending_rendered_key(
                                     &clip_render_info.clip.id,
                                     clip_render_info.cache_key.clone(),
                                 );
+
                                 base_entry = Some(entry);
                             }
                             Err(e) => {
@@ -170,12 +256,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                     clip_render_info.clip.id, e
                                 );
                                 any_error = true;
-                                if let Ok(mut state_mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
+                                if let Ok(mut state_mgr) =
+                                    crate::clip_rendering_state::global_clip_rendering_state()
+                                        .lock()
+                                {
                                     state_mgr.set_state(
                                         &clip_render_info.clip.id,
                                         crate::clip_rendering_state::ClipRenderingState::Failed,
                                         0.0,
-                                        Some(e.clone())
+                                        Some(e.clone()),
                                     );
                                 }
                             }
@@ -191,12 +280,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             base_entry.pcm_stereo.as_slice(),
                         ) {
                             Ok(_) => {
-                                if let Ok(mut state_mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
+                                if let Ok(mut state_mgr) =
+                                    crate::clip_rendering_state::global_clip_rendering_state()
+                                        .lock()
+                                {
                                     state_mgr.set_state(
                                         &clip_render_info.clip.id,
                                         crate::clip_rendering_state::ClipRenderingState::Ready,
                                         1.0,
-                                        None
+                                        None,
                                     );
                                 }
                             }
@@ -206,12 +298,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                     clip_render_info.clip.id, e
                                 );
                                 any_error = true;
-                                if let Ok(mut state_mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
+                                if let Ok(mut state_mgr) =
+                                    crate::clip_rendering_state::global_clip_rendering_state()
+                                        .lock()
+                                {
                                     state_mgr.set_state(
                                         &clip_render_info.clip.id,
                                         crate::clip_rendering_state::ClipRenderingState::Failed,
                                         0.0,
-                                        Some(e.clone())
+                                        Some(e.clone()),
                                     );
                                 }
                             }
@@ -257,7 +352,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     return;
                 }
                 engine.seek_sec(render_start_sec);
-                engine.update_timeline(tl_for_render.clone());
+                engine.update_timeline(tl_for_render);
                 engine.set_playing(true, Some("original"));
 
                 // 推送渲染完成
@@ -316,9 +411,11 @@ fn ensure_hifigan_tension_cache(
         return Ok(None);
     }
 
-    let start_frame = (clip_start_sec * out_rate as f64).round().max(0.0) as u64;
+    let start_frame = (clip_start_sec * out_rate as f64).round() as u64;
     let end_frame = start_frame
-        + (clip.length_sec.max(0.0) * out_rate as f64).round().max(1.0) as u64;
+        + (clip.length_sec.max(0.0) * out_rate as f64)
+            .round()
+            .max(1.0) as u64;
     let frame_period_ms = entry.frame_period_ms.max(0.1);
     let tension_curve = crate::pitch_editing::hifigan_tension_curve_for_clip(entry, clip);
     let tension_hash = crate::synth_clip_cache::compute_hifigan_tension_hash(
@@ -382,9 +479,14 @@ fn collect_clips_needing_render(
     if debug {
         eprintln!(
             "[collect_clips_needing_render] engine_sr={} effective_sr={} clips_count={}",
-            engine_sr, sr, timeline.clips.len()
+            engine_sr,
+            sr,
+            timeline.clips.len()
         );
     }
+    // 预构建轨道的 O(1) 查找表，消除内部的 O(N) 线性扫描
+    let tracks_by_id: std::collections::HashMap<&str, &crate::state::Track> =
+        timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
 
     for clip in &timeline.clips {
         if clip.muted {
@@ -393,26 +495,27 @@ fn collect_clips_needing_render(
         let Some(source_path) = clip.source_path.as_deref() else {
             continue;
         };
-        
+
         // 使用新的检测逻辑：检查clip是否需要pitch edit
         let clip_start_sec = clip.start_sec.max(0.0);
-        let needs_pitch_edit = crate::pitch_editing::does_clip_need_processor_render(
-            timeline,
-            clip,
-            clip_start_sec,
-        );
-        
+        let needs_pitch_edit =
+            crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec);
+
         if !needs_pitch_edit {
             continue;
         }
 
         let playback_rate = {
             let r = clip.playback_rate as f64;
-            if r.is_finite() && r > 0.0 { r } else { 1.0 }
+            if r.is_finite() && r > 0.0 {
+                r
+            } else {
+                1.0
+            }
         };
-        let start_frame = (clip.start_sec.max(0.0) * sr as f64).round().max(0.0) as u64;
-        let end_frame = start_frame
-            + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
+        let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
+        let end_frame =
+            start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
 
         // 获取pitch edit参数
         let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
@@ -422,8 +525,8 @@ fn collect_clips_needing_render(
             Some(e) => e,
             None => continue,
         };
-        let track = match timeline.tracks.iter().find(|t| t.id == clip_root) {
-            Some(t) => t,
+        let track = match tracks_by_id.get(clip_root.as_str()) {
+            Some(&t) => t,
             None => continue,
         };
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
@@ -472,6 +575,7 @@ fn render_single_clip(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
     out_rate: u32,
+    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<RenderedClipOutput, String> {
     let source_path = clip
         .source_path
@@ -492,7 +596,11 @@ fn render_single_clip(
     // 2. 源裁剪
     let playback_rate = {
         let r = clip.playback_rate as f64;
-        if r.is_finite() && r > 0.0 { r } else { 1.0 }
+        if r.is_finite() && r > 0.0 {
+            r
+        } else {
+            1.0
+        }
     };
     let source_start_sec = clip.source_start_sec.max(0.0);
     let source_end_sec = clip.source_end_sec;
@@ -511,19 +619,17 @@ fn render_single_clip(
 
     // 3. 切片 + resample
     let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-    let src_i1 = ((src_end_limit_sec * in_rate as f64).ceil().max(src_i0 as f64) as usize)
+    let src_i1 = ((src_end_limit_sec * in_rate as f64)
+        .ceil()
+        .max(src_i0 as f64) as usize)
         .min(in_frames);
     if src_i1 <= src_i0 + 1 {
         return Err("source slice too short".to_string());
     }
 
     let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
-    let segment = crate::mixdown::linear_resample_interleaved(
-        segment,
-        in_channels_usize,
-        in_rate,
-        out_rate,
-    );
+    let segment =
+        crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
 
     // 4. 转 stereo
     let segment = if in_channels == 1 {
@@ -535,27 +641,29 @@ fn render_single_clip(
         }
         stereo
     } else if in_channels >= 2 {
-        let frames = segment.len() / in_channels_usize;
-        let mut stereo = Vec::with_capacity(frames * 2);
-        for frame in 0..frames {
-            stereo.push(segment[frame * in_channels_usize]);
-            stereo.push(segment[frame * in_channels_usize + 1]);
-        }
-        stereo
+        segment
+            .chunks_exact(in_channels_usize)
+            .flat_map(|chunk| [chunk[0], chunk[1]])
+            .collect()
     } else {
         return Err("unsupported channel count".to_string());
     };
 
     // 5. 时间拉伸（playback_rate != 1）
     // 若合成处理器声明自己处理时间拉伸（handles_time_stretch = true），
-    // 则跳过此处的 RubberBand，由处理器在 pitch edit 阶段通过 ClipProcessContext.playback_rate 内部完成。
+    // 则跳过此处的时间拉伸，由处理器在 pitch edit 阶段通过 ClipProcessContext.playback_rate 内部完成。
     let processor_handles_stretch = {
         let clip_root = timeline.resolve_root_track_id(&clip.track_id);
         clip_root
             .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
             .map(|t| {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::get_processor(kind).capabilities().handles_time_stretch
+                let processor = if let Some(reg) = resampler_registry {
+                    crate::renderer::get_processor_with_registry(kind, reg)
+                } else {
+                    crate::renderer::get_processor(kind)
+                };
+                processor.capabilities().handles_time_stretch
             })
             .unwrap_or(false)
     };
@@ -568,14 +676,15 @@ fn render_single_clip(
             2,
             out_rate,
             target_frames,
-            crate::time_stretch::StretchAlgorithm::RubberBand,
+            crate::time_stretch::StretchAlgorithm::SignalsmithStretch,
         );
     }
 
     let clip_start_sec = clip.start_sec.max(0.0);
     let seg_start_sec = clip_start_sec + pre_silence_sec;
-    let clip_timeline_frames =
-        (clip.length_sec.max(0.0) * out_rate as f64).round().max(1.0) as usize;
+    let clip_timeline_frames = (clip.length_sec.max(0.0) * out_rate as f64)
+        .round()
+        .max(1.0) as usize;
     let clip_stereo_len = clip_timeline_frames * 2;
 
     let root_params = timeline
@@ -598,28 +707,26 @@ fn render_single_clip(
 
     let render_variant = |clip_variant: &crate::state::Clip| {
         let mut rendered = segment.clone();
-        let seg_frames = rendered.len() / 2;
-        if seg_frames >= 16 {
-            match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
-                timeline,
-                clip_variant,
-                clip_start_sec,
-                seg_start_sec,
-                out_rate,
-                &mut rendered,
-            ) {
-                Ok(true) => {
-                    if debug {
-                        eprintln!(
-                            "render_single_clip: pitch_edit applied to clip_id={}",
-                            &clip_variant.id
-                        );
-                    }
+        match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+            timeline,
+            clip_variant,
+            clip_start_sec,
+            seg_start_sec,
+            out_rate,
+            &mut rendered,
+            resampler_registry.as_ref(),
+        ) {
+            Ok(true) => {
+                if debug {
+                    eprintln!(
+                        "render_single_clip: pitch_edit applied to clip_id={}",
+                        &clip_variant.id
+                    );
                 }
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("[pitch_edit] clip_id={} ERROR: {e}", &clip_variant.id);
-                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("[pitch_edit] clip_id={} ERROR: {e}", &clip_variant.id);
             }
         }
 
@@ -661,6 +768,82 @@ fn render_single_clip(
         merged_extra_curves.extend(extra_curves.clone());
     }
 
+    // ── 构造 BreathNoiseCache key（显式排除 formant_shift_cents）──
+    let breath_noise_cache_key = {
+        let clip_root = timeline.resolve_root_track_id(&clip.track_id);
+        let entry = clip_root.as_ref().and_then(|root| timeline.params_by_root_track.get(root));
+        let track = clip_root.as_ref().and_then(|root| timeline.tracks.iter().find(|t| &t.id == root));
+        match (entry, track) {
+            (Some(entry), Some(track)) => {
+                let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+                let renderer_id = crate::renderer::get_renderer(kind).id();
+                let start_frame = (clip.start_sec.max(0.0) * out_rate as f64).round() as u64;
+                let end_frame = start_frame + (clip.length_sec.max(0.0) * out_rate as f64).round().max(1.0) as u64;
+                let source_path = clip.source_path.as_deref().unwrap_or("");
+                let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(
+                    &clip.id,
+                    source_path,
+                    start_frame,
+                    end_frame,
+                    out_rate,
+                    renderer_id,
+                    &entry.pitch_edit,
+                    entry.frame_period_ms.max(0.1),
+                    playback_rate,
+                    &entry.extra_curves,
+                    &entry.extra_params,
+                );
+                Some(crate::synth_clip_cache::BreathNoiseCacheKey {
+                    clip_id: clip.id.clone(),
+                    param_hash,
+                })
+            }
+            _ => None,
+        }
+    };
+
+    // ── 尝试从 BreathNoiseCache 中命中已有的 noise stem ──────────────────
+    let cached_noise = breath_noise_cache_key.as_ref().and_then(|key| {
+        let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.get(key).map(|entry| entry.noise_stereo.clone())
+    });
+
+    if let Some(cached_noise_arc) = cached_noise {
+        // BreathNoiseCache 命中：仅需渲染 harmonic_only（1 次 HNSEP + 1 次 HiFiGAN），
+        // noise stem 直接复用缓存。
+        if debug {
+            eprintln!(
+                "render_single_clip: breath_noise_cache HIT for clip_id={}, skipping second render_variant",
+                clip.id
+            );
+        }
+
+        let mut harmonic_only_clip = clip.clone();
+        merged_extra_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
+        harmonic_only_clip.extra_params = Some(merged_extra_params);
+        harmonic_only_clip.extra_curves = Some(merged_extra_curves);
+        let mut harmonic_only = render_variant(&harmonic_only_clip);
+
+        let out_len = harmonic_only.len().min(cached_noise_arc.len());
+        harmonic_only.truncate(out_len);
+        let breath_noise_stereo = cached_noise_arc[..out_len].to_vec();
+
+        return Ok(RenderedClipOutput {
+            rendered_stereo: harmonic_only,
+            breath_noise_stereo: Some(breath_noise_stereo),
+        });
+    }
+
+    // ── BreathNoiseCache 未命中：完整的两次 render_variant ──────────────────
+    if debug {
+        eprintln!(
+            "render_single_clip: breath_noise_cache MISS for clip_id={}, doing full 2-pass render",
+            clip.id
+        );
+    }
+
     let mut harmonic_only_clip = clip.clone();
     merged_extra_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
     harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
@@ -675,9 +858,23 @@ fn render_single_clip(
 
     let out_len = harmonic_only.len().min(unity_mix.len());
     harmonic_only.truncate(out_len);
-    let mut breath_noise_stereo = vec![0.0f32; out_len];
-    for index in 0..out_len {
-        breath_noise_stereo[index] = unity_mix[index] - harmonic_only[index];
+    let breath_noise_stereo: Vec<f32> = unity_mix[..out_len]
+        .iter()
+        .zip(&harmonic_only[..out_len])
+        .map(|(u, h)| u - h)
+        .collect();
+
+    // 将 noise stem 存入 BreathNoiseCache，后续 formant 编辑时可直接复用
+    if let Some(key) = breath_noise_cache_key {
+        let entry = crate::synth_clip_cache::BreathNoiseCacheEntry {
+            noise_stereo: std::sync::Arc::new(breath_noise_stereo.clone()),
+            frames: (breath_noise_stereo.len() / 2) as u64,
+            sample_rate: out_rate,
+        };
+        let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.insert(key, entry);
     }
 
     Ok(RenderedClipOutput {
@@ -686,16 +883,10 @@ fn render_single_clip(
     })
 }
 
-
-
-
 pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
     state.audio_engine.stop();
     ok_bool()
 }
-
-
-
 
 pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePayload {
     let pb = state.audio_engine.snapshot_state();
