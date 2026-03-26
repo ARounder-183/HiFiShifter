@@ -37,10 +37,7 @@ fn resolve_extra_curve_frame_pair(
     (default_value, edit_value)
 }
 
-fn resolve_static_param_default_value(
-    kind: &crate::state::SynthPipelineKind,
-    param: &str,
-) -> f64 {
+fn resolve_static_param_default_value(kind: &crate::state::SynthPipelineKind, param: &str) -> f64 {
     crate::renderer::static_enum_default_value(kind, param)
         .map(|value| value as f64)
         .unwrap_or(0.0)
@@ -114,7 +111,6 @@ pub(super) fn get_param_frames(
             }
             #[cfg(feature = "vslib")]
             crate::pitch_editing::PitchEditAlgorithm::VocalShifterVslib => true,
-            crate::pitch_editing::PitchEditAlgorithm::ExternalResampler(_) => true,
             crate::pitch_editing::PitchEditAlgorithm::Bypass => true,
         };
         Some(available)
@@ -498,5 +494,3 @@ pub(super) fn set_static_param(
 
     serde_json::json!({"ok": true})
 }
-
-

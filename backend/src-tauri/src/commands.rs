@@ -218,7 +218,7 @@ pub fn get_root_mix_waveform_peaks_segment(
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
-) -> crate::waveform::WaveformPeaksSegmentPayload {
+) -> self::waveform::WaveformPeaksSegmentPayload {
     waveform::get_root_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
 }
 
@@ -229,7 +229,7 @@ pub fn get_track_mix_waveform_peaks_segment(
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
-) -> crate::waveform::WaveformPeaksSegmentPayload {
+) -> self::waveform::WaveformPeaksSegmentPayload {
     waveform::get_track_mix_waveform_peaks_segment(
         state,
         track_id,
@@ -251,7 +251,7 @@ pub fn get_waveform_mipmap_binary(
     state: State<'_, AppState>,
     source_path: String,
     level: u8,
-) -> Vec<u8> {
+) -> String {
     waveform::get_waveform_mipmap_binary(state, source_path, level)
 }
 
@@ -261,6 +261,14 @@ pub fn preload_waveform_mipmap(
     source_path: String,
 ) -> serde_json::Value {
     waveform::preload_waveform_mipmap(state, source_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn batch_get_waveform_mipmap(
+    state: State<'_, AppState>,
+    source_paths: Vec<String>,
+) -> std::collections::HashMap<String, [String; 3]> {
+    waveform::batch_get_waveform_mipmap(state, source_paths)
 }
 
 // ===================== timeline =====================
@@ -385,6 +393,14 @@ pub fn remove_clip(
     clip_id: String,
 ) -> crate::models::TimelineStatePayload {
     timeline::remove_clip(state, clip_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_clips(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> crate::models::TimelineStatePayload {
+    timeline::remove_clips(state, clip_ids)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -754,57 +770,6 @@ pub fn get_processor_params(algo: String) -> Vec<processor_caps::ParamDescriptor
     processor_caps::get_processor_params(algo)
 }
 
-// ===================== resampler_registry =====================
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn list_resamplers(state: tauri::State<'_, crate::state::AppState>) -> resampler_registry::ResamplerListPayload {
-    resampler_registry::list_resamplers(state)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn add_resampler(
-    state: tauri::State<'_, crate::state::AppState>,
-    display_name: String,
-    exe_path: String,
-    default_flags: Option<String>,
-    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
-) -> resampler_registry::ResamplerOpPayload {
-    resampler_registry::add_resampler(state, display_name, exe_path, default_flags, flag_params)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn remove_resampler(
-    state: tauri::State<'_, crate::state::AppState>,
-    id: String,
-) -> resampler_registry::ResamplerOpPayload {
-    resampler_registry::remove_resampler(state, id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn update_resampler(
-    state: tauri::State<'_, crate::state::AppState>,
-    id: String,
-    display_name: Option<String>,
-    exe_path: Option<String>,
-    default_flags: Option<String>,
-    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
-) -> resampler_registry::ResamplerOpPayload {
-    resampler_registry::update_resampler(state, id, display_name, exe_path, default_flags, flag_params)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn scan_resamplers(
-    state: tauri::State<'_, crate::state::AppState>,
-    directory: String,
-) -> resampler_registry::ResamplerListPayload {
-    resampler_registry::scan_resamplers(state, directory)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn browse_resampler_exe() -> Option<String> {
-    resampler_registry::browse_resampler_exe().await
-}
-
 // ===================== midi =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -842,6 +807,52 @@ pub fn save_ui_settings(
     settings: crate::config::UiSettings,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
+}
+
+// ===================== resampler_registry =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_resamplers(state: tauri::State<'_, crate::state::AppState>) -> resampler_registry::ResamplerListPayload {
+    resampler_registry::list_resamplers(state)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    display_name: String,
+    exe_path: String,
+    default_flags: Option<String>,
+    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::add_resampler(state, display_name, exe_path, default_flags, flag_params)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::remove_resampler(state, id)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_resampler(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+    display_name: Option<String>,
+    exe_path: Option<String>,
+    default_flags: Option<String>,
+    flag_params: Option<Vec<resampler_registry::FlagParamPayload>>,
+) -> resampler_registry::ResamplerOpPayload {
+    resampler_registry::update_resampler(state, id, display_name, exe_path, default_flags, flag_params)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn scan_resamplers(
+    state: tauri::State<'_, crate::state::AppState>,
+    directory: String,
+) -> resampler_registry::ResamplerListPayload {
+    resampler_registry::scan_resamplers(state, directory)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn browse_resampler_exe() -> Option<String> {
+    resampler_registry::browse_resampler_exe().await
 }
 
 // ===================== pitch_refresh_async (暂时禁用) =====================

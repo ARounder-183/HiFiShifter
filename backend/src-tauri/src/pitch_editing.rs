@@ -1,9 +1,3 @@
-//! 音高编辑处理模块。
-//!
-//! 根据用户选择的音高编辑算法（PitchEditAlgorithm），对 clip 片段执行
-//! 音高变换处理，支持内部 WORLD/VSLib 引擎以及外部 UTAU Resampler。
-//! 同时负责判定 track 是否需要额外渲染处理、构建 ClipProcessContext 等。
-
 use crate::state::{PitchAnalysisAlgo, SynthPipelineKind, TimelineState};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,14 +13,12 @@ fn pitch_edit_algo_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PitchEditAlgorithm {
     WorldVocoder,
     NsfHifiganOnnx,
     #[cfg(feature = "vslib")]
     VocalShifterVslib,
-    /// 外部 UTAU Resampler（携带 registry entry ID）。
-    ExternalResampler(String),
     Bypass,
 }
 
@@ -132,7 +124,6 @@ fn pitch_edit_backend_available_for_track(track: &crate::state::Track) -> bool {
         PitchEditAlgorithm::NsfHifiganOnnx => crate::nsf_hifigan_onnx::is_available(),
         #[cfg(feature = "vslib")]
         PitchEditAlgorithm::VocalShifterVslib => true,
-        PitchEditAlgorithm::ExternalResampler(_) => true,
         PitchEditAlgorithm::Bypass => true,
     }
 }
@@ -216,7 +207,7 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
 }
 
 fn track_requests_extra_processing(
-    algo: &PitchEditAlgorithm,
+    algo: PitchEditAlgorithm,
     entry: &crate::state::TrackParamsState,
     clip: &crate::state::Clip,
 ) -> bool {
@@ -242,8 +233,9 @@ impl PitchEditAlgorithm {
             PitchAnalysisAlgo::VocalShifterVslib => Self::VocalShifterVslib,
             #[cfg(not(feature = "vslib"))]
             PitchAnalysisAlgo::VocalShifterVslib => Self::Bypass,
-            PitchAnalysisAlgo::ExternalResampler(ref id) => Self::ExternalResampler(id.clone()),
             PitchAnalysisAlgo::None => Self::Bypass,
+            // 外部 resampler 不走内部 pitch editing 路径，直接 bypass
+            PitchAnalysisAlgo::ExternalResampler(_) => Self::Bypass,
         }
     }
 }
@@ -530,7 +522,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     seg_start_sec: f64,
     sample_rate: u32,
     pcm_stereo: &mut Vec<f32>,
-    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<bool, String> {
     if pcm_stereo.len() < 2 {
         return Ok(false);
@@ -548,26 +539,19 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    let extra_processing = track_requests_extra_processing(&algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
 
-    // 外部 UTAU Resampler 模式：只要 compose_enabled 就始终触发 processor，
-    // 因为所有音高变换、时间拉伸都由外部 resampler 一站式完成。
-    let is_external_resampler = matches!(algo, PitchEditAlgorithm::ExternalResampler(_));
-
     // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
     // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行 mel 域拉伸。
     let needs_processor_stretch = {
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let processor = if let Some(reg) = resampler_registry {
-            crate::renderer::get_processor_with_registry(kind, reg)
-        } else {
-            crate::renderer::get_processor(kind)
-        };
-        let handles = processor.capabilities().handles_time_stretch;
+        let handles = crate::renderer::get_processor(&kind)
+            .capabilities()
+            .handles_time_stretch;
         let rate = (clip.playback_rate as f64).max(1e-6);
         handles && (rate - 1.0).abs() > 1e-6
     };
@@ -575,9 +559,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // v2 semantics: do nothing until the user actually modified the edit curve.
     // This avoids treating auto-synced `pitch_edit` (e.g. copied from pitch_orig) as an edit.
     // 例外：needs_processor_stretch 时必须进入处理器以执行 mel 拉伸。
-    // 例外：外部 UTAU Resampler 始终需要触发（所有合成由外部处理器完成）。
-    if !is_external_resampler
-        && !entry.pitch_edit_user_modified
+    if !entry.pitch_edit_user_modified
         && !extra_processing
         && !tension_processing
         && !formant_processing
@@ -595,14 +577,9 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // - handles_time_stretch=false：输入 PCM 已由外部 Signalsmith Stretch 预拉伸，帧数 = 时间轴帧数
     let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
     let clip_playback_rate = (clip.playback_rate as f64).max(1e-6);
-    let processor_handles_stretch = {
-        let p = if let Some(reg) = resampler_registry {
-            crate::renderer::get_processor_with_registry(kind.clone(), reg)
-        } else {
-            crate::renderer::get_processor(kind.clone())
-        };
-        p.capabilities().handles_time_stretch
-    };
+    let processor_handles_stretch = crate::renderer::get_processor(&kind)
+        .capabilities()
+        .handles_time_stretch;
 
     // Quick skip when user never set a target in this segment window.
     let seg_frames = pcm_stereo.len() / 2;
@@ -616,8 +593,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let seg_end_sec = seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
     let has_pitch_user_edit =
         any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
-    if !is_external_resampler
-        && !has_pitch_user_edit
+    if !has_pitch_user_edit
         && !extra_processing
         && !tension_processing
         && !formant_processing
@@ -640,10 +616,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // 向 VslibSetPitchArray 传递绝对目标音高，不需要原始 MIDI 曲线。
     // 因此对 vslib 跳过 get_or_compute_clip_pitch_midi_global 和 any_effective_pitch_change_in_range，
     // 仅凭 any_user_edit_in_range（已在上方通过）即可触发合成。
-    //
-    // 外部 UTAU Resampler 同理：音高变换完全由外部 resampler 处理，
-    // 不需要内部 WORLD 音高轮廓。pitch_edit 曲线直接传给 ExternalResamplerProcessor，
-    // 由其转换为 UTAU pitchbend 编码。
     #[cfg(feature = "vslib")]
     let is_vslib = matches!(algo, PitchEditAlgorithm::VocalShifterVslib);
     #[cfg(not(feature = "vslib"))]
@@ -652,9 +624,9 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // Get per-clip original MIDI curve (full source, source-time indexed).
     // HiFi-GAN 始终需要 clip_midi 才能合成（即使没有音高编辑）：
     //   clip_midi 提供原始音高，使 HiFi-GAN 能以相同音高重合成并应用 formant/tension 效果。
-    // vslib / ExternalResampler 例外：使用各自内部处理，忽略 clip_midi 字段。
-    let timeline_midi: Vec<f32> = if is_vslib || is_external_resampler {
-        // vslib / ExternalResampler 不需要原始音高轮廓，传空切片。
+    // vslib 例外：使用内部分析，忽略 clip_midi 字段。
+    let timeline_midi: Vec<f32> = if is_vslib {
+        // vslib 不需要原始音高轮廓，传空切片，VslibProcessor 会忽略 clip_midi 字段。
         Vec::new()
     } else {
         let Some(clip_root) = clip_root_track_id(timeline, clip) else {
@@ -722,12 +694,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         mono.extend(pcm_stereo.iter().step_by(2).take(frames).copied());
 
         // 通过 ClipProcessor trait 调用，解耦合成链路（含音高合成）。
-        // 外部 UTAU Resampler 需要从 registry 获取 entry 才能创建正确的 processor。
-        let processor: Box<dyn crate::renderer::ClipProcessor> = if let Some(reg) = resampler_registry {
-            crate::renderer::get_processor_with_registry(kind, reg)
-        } else {
-            crate::renderer::get_processor(kind)
-        };
+        let processor = crate::renderer::get_processor(&kind);
         if !processor.is_available() {
             return Ok(None);
         }
@@ -754,7 +721,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             seg_end_sec: seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64),
             frame_period_ms,
             pitch_edit,
-            pitch_orig: entry.pitch_orig.as_slice(),
+            pitch_orig: &entry.pitch_orig,
             clip_midi: &timeline_midi,
             playback_rate: ctx_playback_rate,
             out_frames: expected_out_frames,
@@ -905,7 +872,7 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    let extra_processing = track_requests_extra_processing(&algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
@@ -915,7 +882,7 @@ pub fn does_clip_need_processor_render(
     // 即使用户没有编辑音高，也需要触发处理器预渲染以执行 mel 域拉伸。
     let needs_processor_stretch = {
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let handles = crate::renderer::get_processor(kind)
+        let handles = crate::renderer::get_processor(&kind)
             .capabilities()
             .handles_time_stretch;
         let rate = (clip.playback_rate as f64).max(1e-6);

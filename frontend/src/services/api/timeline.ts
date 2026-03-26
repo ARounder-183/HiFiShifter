@@ -133,6 +133,9 @@ export const timelineApi = {
     removeClip: (clipId: string) =>
         invoke<TimelineResult>("remove_clip", clipId),
 
+    removeClips: (clipIds: string[]) =>
+        invoke<TimelineResult>("remove_clips", clipIds),
+
     moveClip: (payload: {
         clipId: string;
         startSec: number;

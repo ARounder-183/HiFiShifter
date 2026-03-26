@@ -1,8 +1,3 @@
-//! 播放控制命令模块。
-//!
-//! 提供播放、暂停、停止、跳转等 Tauri 前端命令实现，
-//! 负责触发单 clip 或完整 timeline 的实时渲染与音频引擎播放。
-
 use crate::models::PlaybackStatePayload;
 use crate::state::AppState;
 use tauri::Emitter;
@@ -70,11 +65,6 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         if let Some(app) = state.app_handle.get().cloned() {
             let engine = state.audio_engine.clone();
             let tl_for_render = timeline.clone();
-            let registry_for_render = state
-                .resampler_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
             let render_start_sec = start_sec;
             // 改法 D：确保 engine_sr 已被 worker 线程 store 为实际采样率。
             // AudioEngine::new() 初始化 AtomicU32 为 44100，worker spawn 后才 store 实际值。
@@ -212,7 +202,6 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             &tl_for_render,
                             &clip_render_info.clip,
                             clip_render_info.sr,
-                            Some(&registry_for_render),
                         ) {
                             Ok(rendered) => {
                                 let stereo_pcm = rendered.rendered_stereo;
@@ -530,7 +519,7 @@ fn collect_clips_needing_render(
             None => continue,
         };
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-            let renderer_id = crate::renderer::get_renderer(&kind).id();
+        let renderer_id = crate::renderer::get_renderer(&kind).id();
         let pitch_edit = entry.pitch_edit.as_slice();
         let frame_period_ms = entry.frame_period_ms.max(0.1);
 
@@ -575,7 +564,6 @@ fn render_single_clip(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
     out_rate: u32,
-    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<RenderedClipOutput, String> {
     let source_path = clip
         .source_path
@@ -658,12 +646,9 @@ fn render_single_clip(
             .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
             .map(|t| {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                let processor = if let Some(reg) = resampler_registry {
-                    crate::renderer::get_processor_with_registry(kind, reg)
-                } else {
-                    crate::renderer::get_processor(kind)
-                };
-                processor.capabilities().handles_time_stretch
+                crate::renderer::get_processor(&kind)
+                    .capabilities()
+                    .handles_time_stretch
             })
             .unwrap_or(false)
     };
@@ -707,14 +692,13 @@ fn render_single_clip(
 
     let render_variant = |clip_variant: &crate::state::Clip| {
         let mut rendered = segment.clone();
-            match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
+        match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
             timeline,
             clip_variant,
             clip_start_sec,
             seg_start_sec,
             out_rate,
             &mut rendered,
-            resampler_registry,
         ) {
             Ok(true) => {
                 if debug {
@@ -773,7 +757,7 @@ fn render_single_clip(
         let clip_root = timeline.resolve_root_track_id(&clip.track_id);
         let entry = clip_root.as_ref().and_then(|root| timeline.params_by_root_track.get(root));
         let track = clip_root.as_ref().and_then(|root| timeline.tracks.iter().find(|t| &t.id == root));
-                match (entry, track) {
+        match (entry, track) {
             (Some(entry), Some(track)) => {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
                 let renderer_id = crate::renderer::get_renderer(&kind).id();

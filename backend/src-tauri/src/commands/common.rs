@@ -1,10 +1,5 @@
-//! 命令层公共工具与辅助函数。
-//!
-//! 包含各 Tauri 命令模块共享的 guard 包装、临时文件管理、
-//! timeline 渲染入口（render_timeline_to_wav）以及 JSON 命令通用响应格式。
-
+// 命令层共用工具函数
 use crate::state::AppState;
-use crate::waveform;
 use serde::Serialize;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -34,13 +29,13 @@ pub(crate) fn guard_json_command(
 
 pub(crate) fn guard_waveform_command(
     name: &str,
-    f: impl FnOnce() -> waveform::WaveformPeaksSegmentPayload,
-) -> waveform::WaveformPeaksSegmentPayload {
+    f: impl FnOnce() -> super::waveform::WaveformPeaksSegmentPayload,
+) -> super::waveform::WaveformPeaksSegmentPayload {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
             eprintln!("command panicked: {name}");
-            waveform::WaveformPeaksSegmentPayload {
+            super::waveform::WaveformPeaksSegmentPayload {
                 ok: false,
                 min: vec![],
                 max: vec![],
@@ -75,11 +70,6 @@ pub(crate) fn render_timeline_to_wav(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let registry = state
-        .resampler_registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
     crate::mixdown::render_mixdown_wav(
         &timeline,
         output_path,
@@ -93,6 +83,5 @@ pub(crate) fn render_timeline_to_wav(
             export_format: crate::mixdown::ExportFormat::Wav32f,
             quality_preset: crate::mixdown::QualityPreset::Export,
         },
-        Some(&registry),
     )
 }

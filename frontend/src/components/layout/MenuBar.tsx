@@ -417,13 +417,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.pasteVocalShifter")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setRsDialogOpen(true)}>
-                        {(t as (key: string) => string)("menu_manage_resampler")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
-                        {(t as (key: string) => string)("menu_keybindings")}
-                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -439,7 +432,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("track_add")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        disabled={!s.selectedTrackId}
+                        disabled={
+                            !s.selectedTrackId ||
+                            // 只剩最后一个根轨道时，禁止删除根轨道
+                            (s.tracks.filter((t) => !t.parentId).length <= 1 &&
+                                !s.tracks.find(
+                                    (t) => t.id === s.selectedTrackId,
+                                )?.parentId)
+                        }
                         onSelect={() =>
                             s.selectedTrackId &&
                             dispatch(removeTrackRemote(s.selectedTrackId))
@@ -474,6 +474,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {theme.mode === "dark"
                             ? t("theme_dark")
                             : t("theme_light")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => setRsDialogOpen(true)}>
+                        {(t as (key: string) => string)("menu_manage_resampler")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
+                        {(t as (key: string) => string)("menu_keybindings")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
@@ -524,7 +531,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 open={kbDialogOpen}
                 onOpenChange={setKbDialogOpen}
             />
-            {/* Resampler 管理对话框 */}
+
+            {/* 外部 Resampler 管理对话框 */}
             <ResamplerManagerDialog
                 open={rsDialogOpen}
                 onOpenChange={setRsDialogOpen}

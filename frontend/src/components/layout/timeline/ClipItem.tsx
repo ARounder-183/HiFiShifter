@@ -19,13 +19,10 @@ import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import { ClipHeader } from "./clip/ClipHeader";
 
 
-type WaveformPreview = number[] | { l: number[]; r: number[] };
-
 export const ClipItem = React.memo(function ClipItem({
     clip,
     rowHeight,
     pxPerSec,
-    waveform: _waveform,
     altPressed = false,
     selected,
     isInMultiSelectedSet,
@@ -51,7 +48,6 @@ export const ClipItem = React.memo(function ClipItem({
     clip: ClipInfo;
     rowHeight: number;
     pxPerSec: number;
-    waveform: WaveformPreview | undefined;
     altPressed?: boolean;
     selected: boolean;
     isInMultiSelectedSet: boolean;

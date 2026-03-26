@@ -1,8 +1,3 @@
-//! 合成与音频处理命令模块。
-//!
-//! 提供模型加载、音频合成（synthesize）、导出混音 WAV 等 Tauri 命令实现，
-//! 是前端「合成」「导出」操作的后端入口。
-
 use crate::audio_utils::try_read_wav_info;
 use crate::models::{ProcessAudioPayload, SynthesizePayload};
 use crate::state::AppState;
@@ -140,11 +135,6 @@ pub(super) fn save_synthesized(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let registry = state
-        .resampler_registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
 
     // 2. 构造与分轨导出完全一致的高质量渲染选项
     let opts = crate::mixdown::MixdownOptions {
@@ -158,7 +148,7 @@ pub(super) fn save_synthesized(
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
-    match crate::mixdown::render_mixdown_wav(&timeline, out_path, opts, Some(&registry)) {
+    match crate::mixdown::render_mixdown_wav(&timeline, out_path, opts) {
         Ok(result) => {
             let num_samples = (result.duration_sec * result.sample_rate as f64)
                 .round()
@@ -197,11 +187,6 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
 
     let timeline = state
         .timeline
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let registry = state
-        .resampler_registry
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -299,7 +284,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             quality_preset: crate::mixdown::QualityPreset::Export,
         };
 
-        match crate::mixdown::render_mixdown_wav(&sub_tl, &out_path, opts, Some(&registry)) {
+        match crate::mixdown::render_mixdown_wav(&sub_tl, &out_path, opts) {
             Ok(result) => {
                 let num_samples = (result.duration_sec * result.sample_rate as f64)
                     .round()

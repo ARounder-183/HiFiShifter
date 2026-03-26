@@ -3,7 +3,7 @@ export * from "./grid";
 export * from "./math";
 export * from "./paths";
 export * from "./dnd";
-export * from "./clipWaveform";
+
 export * from "./TrackList";
 export * from "./TimeRuler";
 export * from "./BackgroundGrid";

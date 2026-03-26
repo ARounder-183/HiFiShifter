@@ -12,34 +12,6 @@ export function fadeCurveGain(t: number, curve: FadeCurveType): number {
     }
 }
 
-export function waveformAreaPath(
-    samples: number[],
-    width: number,
-    height: number,
-    ampScale: number = 1,
-): string {
-    if (!samples.length || width <= 0 || height <= 0) return "";
-    const mid = height / 2;
-    const scale = height * 0.45;
-    const step = width / Math.max(1, samples.length - 1);
-    const s = Math.max(0, Number(ampScale) || 0);
-    let top = `M 0 ${mid.toFixed(2)}`;
-    for (let i = 0; i < samples.length; i++) {
-        const x = i * step;
-        const amp = Math.max(0, Math.min(1, Math.abs(samples[i] ?? 0) * s));
-        const y = mid - amp * scale;
-        top += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }
-    let bottom = "";
-    for (let i = samples.length - 1; i >= 0; i--) {
-        const x = i * step;
-        const amp = Math.max(0, Math.min(1, Math.abs(samples[i] ?? 0) * s));
-        const y = mid + amp * scale;
-        bottom += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }
-    return `${top}${bottom} Z`;
-}
-
 export function fadeInAreaPath(
     width: number,
     height: number,

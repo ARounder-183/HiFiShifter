@@ -553,6 +553,8 @@ export function useClipDrag(deps: {
                                     Number(now.playbackRate ?? 1) || 1,
                                 fadeInSec: Number(now.fadeInSec ?? 0) || 0,
                                 fadeOutSec: Number(now.fadeOutSec ?? 0) || 0,
+                                fadeInCurve: now.fadeInCurve,
+                                fadeOutCurve: now.fadeOutCurve,
                                 linkedParams: linkedParamsResult.ok
                                     ? linkedParamsResult.linkedParams
                                     : undefined,
@@ -671,8 +673,9 @@ export function useClipDrag(deps: {
                     })().catch(() => undefined);
                 })().catch(() => undefined);
             } else {
-                // 非 copyMode：先释放交互锁，再发最终持久化请求
-                dispatch(endInteraction());
+                // 非 copyMode：交互锁在最终持久化请求完成后才释放，
+                // 避免 endInteraction() 到 fulfilled 之间的窗口内，
+                // 其他 in-flight thunk（如 selectClipRemote）的旧快照覆盖前端乐观更新导致闪烁。
 
                 if (dropToNewTrack) {
                     void (async () => {
@@ -816,6 +819,7 @@ export function useClipDrag(deps: {
                             }
                         } finally {
                             void webApi.endUndoGroup();
+                            dispatch(endInteraction());
                         }
                     })();
                     window.removeEventListener("pointermove", onMove);
@@ -886,12 +890,14 @@ export function useClipDrag(deps: {
                             );
                         }
                         void webApi.endUndoGroup();
+                        dispatch(endInteraction());
                     });
                 } else {
                     if (autoCrossfadeEnabled) {
                         applyAutoCrossfade(session, drag.clipIds, dispatch);
                     }
                     void webApi.endUndoGroup();
+                    dispatch(endInteraction());
                 }
             }
             window.removeEventListener("pointermove", onMove);

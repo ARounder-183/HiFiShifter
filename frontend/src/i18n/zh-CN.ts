@@ -536,23 +536,4 @@ export const zhCN = {
     drag_direction_x_only: "仅 X",
     drag_direction_y_only: "仅 Y",
     drag_direction: "拖动方向",
-
-    // Resampler 管理
-    menu_manage_resampler: "管理 Resampler...",
-    resampler_dialog_title: "Resampler 管理器",
-    resampler_dialog_desc: "注册、删除和配置外部 Resampler。",
-    resampler_empty: "尚未注册任何 Resampler。",
-    resampler_unavailable: "不可用",
-    remove_resampler: "删除 Resampler",
-    resampler_extra_flags: "额外 Flags",
-    resampler_flag_params: "Flag 参数",
-    resampler_flag_default: "默认值",
-    resampler_flag_remove: "删除",
-    resampler_flag_letter: "字母",
-    resampler_flag_name: "名称",
-    resampler_flag_range: "范围",
-    add_flag_param: "添加 Flag 参数",
-    add_resampler: "添加 Resampler",
-    resampler_close: "关闭",
-    confirm: "确认",
 } as const;

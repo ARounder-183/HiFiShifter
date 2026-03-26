@@ -31,6 +31,7 @@ import {
     moveClipsRemote,
     moveTrackRemote,
     removeClipRemote,
+    removeClipsRemote,
     removeTrackRemote,
     replaceClipSourceRemote,
     selectClipRemote,
@@ -808,6 +809,7 @@ export {
     addClipOnTrack,
     createClipsRemote,
     removeClipRemote,
+    removeClipsRemote,
     moveClipRemote,
     moveClipsRemote,
     duplicateTrackRemote,
@@ -1490,17 +1492,10 @@ const sessionSlice = createSlice({
                     );
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
-                if ((s as any).lockParamLines != null)
+                if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(
-                        (s as any).lockParamLines,
+                        s.lockParamLines,
                     );
-                const legacyDir = (s as any).dragDirection;
-                if (legacyDir != null) {
-                    const validDirs = ["free", "x-only", "y-only"];
-                    if (validDirs.includes(legacyDir)) {
-                        state.selectDragDirection = legacyDir as DragDirection;
-                    }
-                }
                 const selectDir = (s as any).selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
                     state.selectDragDirection = selectDir as DragDirection;
@@ -2432,6 +2427,16 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(removeClipsRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                } & TimelineState;
+                if (!payload.ok) {
+                    return;
+                }
+                applyTimelineState(state, payload, { force: true });
+            })
+
             .addCase(removeSelectedClipRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -2553,10 +2558,21 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                state.playheadSec = Math.max(
-                    0,
-                    Number(payload.playhead_sec ?? state.playheadSec),
+                // 使用请求参数（action.meta.arg）作为可信值，而非后端返回的
+                // playhead_sec，因为并发请求时旧响应可能晚于新请求到达，
+                // 用旧值覆盖前端已更新的 playheadSec 会导致光标闪烁。
+                const requestedSec = action.meta.arg as number;
+                const backendSec = Number(
+                    payload.playhead_sec ?? requestedSec,
                 );
+                // 仅在前端 playheadSec 与请求参数一致（未被更新的请求覆盖）
+                // 或后端返回值与请求参数不同时才采纳后端值。
+                const EPS = 0.001;
+                if (Math.abs(backendSec - requestedSec) > EPS) {
+                    // 后端对位置做了修正（如 clamp），采纳后端值
+                    state.playheadSec = Math.max(0, backendSec);
+                }
+                // 否则保持前端已同步设好的 state.playheadSec，不再覆盖
                 if (state.runtime.isPlaying) {
                     state.playbackAnchorSec = state.playheadSec;
                 }

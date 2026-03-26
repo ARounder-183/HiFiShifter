@@ -1,9 +1,3 @@
-//! 混音渲染模块。
-//!
-//! 将 timeline 中所有 track/clip 按时间对齐并混缩为单段连续音频，
-//! 支持多格式导出（16-bit / 24-bit / 32-bit float WAV）以及
-//! 时间拉伸、音高编辑等后处理流程的集成。
-
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -213,10 +207,9 @@ pub fn render_mixdown_wav(
     timeline: &TimelineState,
     output_path: &Path,
     opts: MixdownOptions,
-    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<MixdownResult, String> {
     let (out_rate, out_channels, duration_sec, mix) =
-        render_mixdown_interleaved(timeline, opts.clone(), resampler_registry)?;
+        render_mixdown_interleaved(timeline, opts.clone())?;
 
     // 根据 export_format 选择 WavSpec。
     let spec = match opts.export_format {
@@ -275,7 +268,6 @@ pub fn render_mixdown_wav(
 pub fn render_mixdown_interleaved(
     timeline: &TimelineState,
     opts: MixdownOptions,
-    resampler_registry: Option<&crate::state::ResamplerRegistry>,
 ) -> Result<(u32, u16, f64, Vec<f32>), String> {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
 
@@ -441,7 +433,7 @@ pub fn render_mixdown_interleaved(
             .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
             .map(|t| {
                 let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::get_processor(kind)
+                crate::renderer::get_processor(&kind)
                     .capabilities()
                     .handles_time_stretch
             })
@@ -469,7 +461,6 @@ pub fn render_mixdown_interleaved(
                 seg_start_sec,
                 out_rate,
                 &mut seg,
-                resampler_registry,
             );
             match applied {
                 Ok(true) => {

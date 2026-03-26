@@ -3,7 +3,7 @@ import type { AppDispatch } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
-    removeClipRemote,
+    removeClipsRemote,
 } from "../../../../features/session/sessionSlice";
 import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import { selectMergedKeybindings } from "../../../../features/keybindings/keybindingsSlice";
@@ -147,9 +147,7 @@ export function useKeyboardShortcuts(deps: {
                     e.preventDefault();
                     e.stopPropagation();
                     setMultiSelectedClipIds([]);
-                    for (const id of selectedIds) {
-                        void dispatch(removeClipRemote(id));
-                    }
+                    void dispatch(removeClipsRemote(selectedIds));
                     return;
                 }
 
@@ -206,9 +204,7 @@ export function useKeyboardShortcuts(deps: {
                             // ignore
                         }
                         setMultiSelectedClipIds([]);
-                        for (const id of selectedIds) {
-                            void dispatch(removeClipRemote(id));
-                        }
+                        void dispatch(removeClipsRemote(selectedIds));
                     })();
                     return;
                 }

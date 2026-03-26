@@ -45,7 +45,7 @@ pub struct ParamDescriptorDto {
 /// 音高面板（pitch）不在此列表中，由前端固定显示。
 pub(super) fn get_processor_params(algo: String) -> Vec<ParamDescriptorDto> {
     let kind = algo_to_kind(&algo);
-    let processor = crate::renderer::get_processor(kind);
+    let processor = crate::renderer::get_processor(&kind);
     processor
         .param_descriptors()
         .into_iter()

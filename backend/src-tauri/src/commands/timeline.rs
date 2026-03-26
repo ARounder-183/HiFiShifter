@@ -167,10 +167,6 @@ pub(super) fn set_track_state(
         }
         "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
         "none" => crate::state::PitchAnalysisAlgo::None,
-        other if other.starts_with("external_resampler:") => {
-            let id = other.trim_start_matches("external_resampler:").to_string();
-            crate::state::PitchAnalysisAlgo::ExternalResampler(id)
-        }
         _ => crate::state::PitchAnalysisAlgo::Unknown,
     });
     tl.set_track_state(
@@ -238,6 +234,20 @@ pub(super) fn remove_clip(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
     tl.remove_clip(&clip_id);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+/// 批量删除多个 clip，只产生一个 undo checkpoint
+pub(super) fn remove_clips(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl);
+    tl.remove_clips(&clip_ids);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());

@@ -8,11 +8,11 @@
 //! 时间拉伸 + 全部声码器参数曲线。
 
 pub(crate) mod chain;
+pub(crate) mod external_resampler;
 pub(crate) mod hifigan;
 mod traits;
 mod utils;
 pub(crate) mod world;
-pub(crate) mod external_resampler;
 
 #[cfg(feature = "vslib")]
 pub(crate) mod vslib_processor;
@@ -35,29 +35,33 @@ static VSLIB_RENDERER: vslib_processor::VslibRenderer = vslib_processor::VslibRe
 
 // ─── 注册表 ────────────────────────────────────────────────────────────────────
 
-/// 根据 [`SynthPipelineKind`] 返回对应的渲染器 ID 字符串（用于缓存 key）。
+/// 根据 [`SynthPipelineKind`] 返回对应的静态渲染器实例。
 ///
-/// 对于内置渲染器使用静态实例；对于外部 resampler 返回对应的 entry id。
+/// 使用静态分发（`&'static dyn Renderer`）避免堆分配，
+/// 渲染器数量固定，静态分发足够高效。
+///
+/// **注意**：`ExternalResampler` 使用 World 作为 fallback（因为外部 resampler 是运行时动态的，
+/// 无法返回 `'static` 引用）。调用方应使用 [`renderer_id`] 获取正确的 ID。
 pub fn get_renderer(kind: &SynthPipelineKind) -> &'static dyn Renderer {
     match kind {
         SynthPipelineKind::WorldVocoder => &WORLD_RENDERER,
         SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
         #[cfg(feature = "vslib")]
         SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
-        // 外部 resampler 不通过 get_renderer 使用（走 get_processor），
-        // 此处返回 WORLD_RENDERER 作为 fallback。
+        // 外部 resampler 没有静态实例；此处 fallback 到 World 仅用于兼容
+        // 调用方应使用 renderer_id() 获取正确的 ID
         SynthPipelineKind::ExternalResampler(_) => &WORLD_RENDERER,
     }
 }
 
-/// 返回渲染器 ID 字符串（用于缓存 key），支持外部 resampler。
+/// 获取 [`SynthPipelineKind`] 对应的 renderer ID 字符串。
+///
+/// 与 `get_renderer(kind).id()` 不同，此函数正确处理 `ExternalResampler`：
+/// 返回 `"ext:<resampler_id>"`，确保缓存 key 唯一。
 pub fn renderer_id(kind: &SynthPipelineKind) -> String {
     match kind {
-        SynthPipelineKind::WorldVocoder => "world_vocoder".to_string(),
-        SynthPipelineKind::NsfHifiganOnnx => "nsf_hifigan_onnx".to_string(),
-        #[cfg(feature = "vslib")]
-        SynthPipelineKind::VocalShifterVslib => "vslib".to_string(),
-        SynthPipelineKind::ExternalResampler(id) => format!("external_resampler:{}", id),
+        SynthPipelineKind::ExternalResampler(id) => format!("ext:{}", id),
+        _ => get_renderer(kind).id().to_string(),
     }
 }
 
@@ -73,79 +77,45 @@ pub fn all_renderers() -> Vec<&'static dyn Renderer> {
 ///
 /// 对于 World / HiFiGAN，返回对应的 [`ProcessorChain`]（含 Signalsmith Stretch + 声码器 Stage）。
 /// 对于 vslib，返回 [`VslibProcessor`]（需 `feature = "vslib"`）。
-/// 对于外部 resampler，需要从 AppState 的 registry 中查找 entry。
-pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
+/// 对于 ExternalResampler，返回 [`ExternalResamplerProcessor`]（需要 registry entry）。
+pub fn get_processor(kind: &SynthPipelineKind) -> Box<dyn ClipProcessor> {
     match kind {
         SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
         SynthPipelineKind::NsfHifiganOnnx => Box::new(chain::hifigan_chain()),
         #[cfg(feature = "vslib")]
-        SynthPipelineKind::VocalShifterVslib => {
-            Box::new(vslib_processor::VslibProcessor)
-        }
-        SynthPipelineKind::ExternalResampler(ref id) => {
-            // 需要从全局 registry 获取 entry——这里使用一个 fallback 的默认 entry
-            // 实际使用时由调用方通过 get_processor_with_registry() 提供。
-            eprintln!("[renderer] get_processor called for external resampler '{}' without registry context", id);
-            Box::new(chain::world_chain()) // fallback
-        }
-    }
-}
-
-/// 根据 [`SynthPipelineKind`] 创建 [`ClipProcessor`]，支持从 registry 查找外部 resampler。
-pub fn get_processor_with_registry(
-    kind: SynthPipelineKind,
-    registry: &crate::state::ResamplerRegistry,
-) -> Box<dyn ClipProcessor> {
-    match kind {
-        SynthPipelineKind::ExternalResampler(ref id) => {
-            match registry.get(id) {
-                Some(entry) => {
-                    if !entry.available {
-                        eprintln!(
-                            "[renderer] 外部 Resampler '{}' 已注册但不可用 (exe 不存在: {})",
-                            entry.display_name,
-                            entry.exe_path.display(),
-                        );
-                    }
-                    Box::new(external_resampler::ExternalResamplerProcessor::new(entry.clone()))
-                }
+        SynthPipelineKind::VocalShifterVslib => Box::new(vslib_processor::VslibProcessor),
+        SynthPipelineKind::ExternalResampler(id) => {
+            // 尝试从全局 registry 获取 entry；若不存在则 fallback 到 World
+            let entry = crate::state::get_global_resampler_entry(id);
+            match entry {
+                Some(e) => Box::new(external_resampler::ExternalResamplerProcessor::new(e)),
                 None => {
                     eprintln!(
-                        "[renderer] 外部 Resampler '{}' 未在注册表中找到，回退到 WorldVocoder",
+                        "[renderer] ExternalResampler '{}' not found in registry, fallback to World",
                         id
                     );
                     Box::new(chain::world_chain())
                 }
             }
         }
-        other => get_processor(other),
     }
 }
 
-pub fn get_param_descriptor(
-    kind: &SynthPipelineKind,
-    param_id: &str,
-) -> Option<ParamDescriptor> {
-    get_processor(kind.clone())
+pub fn get_param_descriptor(kind: &SynthPipelineKind, param_id: &str) -> Option<ParamDescriptor> {
+    get_processor(kind)
         .param_descriptors()
         .into_iter()
         .find(|descriptor| descriptor.id == param_id)
 }
 
-pub fn automation_curve_default_value(
-    kind: &SynthPipelineKind,
-    param_id: &str,
-) -> Option<f32> {
+pub fn automation_curve_default_value(kind: &SynthPipelineKind, param_id: &str) -> Option<f32> {
     match get_param_descriptor(kind, param_id)?.kind {
         ParamKind::AutomationCurve { default_value, .. } => Some(default_value),
         _ => None,
     }
 }
 
-pub fn static_enum_default_value(
-    kind: &SynthPipelineKind,
-    param_id: &str,
-) -> Option<i32> {
+pub fn static_enum_default_value(kind: &SynthPipelineKind, param_id: &str) -> Option<i32> {
     match get_param_descriptor(kind, param_id)?.kind {
         ParamKind::StaticEnum { default_value, .. } => Some(default_value),
         _ => None,

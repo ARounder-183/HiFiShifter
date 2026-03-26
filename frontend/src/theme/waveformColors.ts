@@ -22,11 +22,11 @@ const darkWaveformColors: WaveformColors = {
 };
 
 /**
- * 浅色主题波形颜色
+ * 浅色主题波形颜色（蓝灰色调，避免纯黑过于刺眼）
  */
 const lightWaveformColors: WaveformColors = {
-    fill: "rgba(0,0,0,0.28)",
-    stroke: "rgba(0,0,0,0.82)",
+    fill: "rgba(60,90,130,0.22)",
+    stroke: "rgba(60,90,130,0.65)",
 };
 
 /**

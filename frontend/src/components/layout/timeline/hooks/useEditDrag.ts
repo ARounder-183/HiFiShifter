@@ -508,9 +508,9 @@ export function useEditDrag(deps: {
                 return;
             }
 
-            // 先释放交互锁，再发最终持久化请求，
-            // 这样最终请求的 fulfilled handler 能正常 applyTimelineState。
-            dispatch(endInteraction());
+            // 交互锁在最终持久化请求完成后才释放，
+            // 避免 endInteraction() 到 fulfilled 之间的窗口内，
+            // 其他 in-flight thunk 的旧快照覆盖前端乐观更新导致闪烁。
 
             let persistPromise: Promise<unknown> | null = null;
             if (drag.type === "trim_left") {
@@ -549,26 +549,26 @@ export function useEditDrag(deps: {
                 ).unwrap();
             } else if (drag.type === "fade_in") {
                 // 确保结束时把最终值持久化到后端
-                void dispatch(
+                persistPromise = dispatch(
                     setClipStateRemote({
                         clipId: drag.clipId,
                         fadeInSec: clipNow.fadeInSec,
                     }),
-                );
+                ).unwrap();
             } else if (drag.type === "fade_out") {
-                void dispatch(
+                persistPromise = dispatch(
                     setClipStateRemote({
                         clipId: drag.clipId,
                         fadeOutSec: clipNow.fadeOutSec,
                     }),
-                );
+                ).unwrap();
             } else if (drag.type === "gain") {
-                void dispatch(
+                persistPromise = dispatch(
                     setClipStateRemote({
                         clipId: drag.clipId,
                         gain: clipNow.gain,
                     }),
-                );
+                ).unwrap();
             }
 
             const shouldApplyAutoCrossfade =
@@ -610,6 +610,11 @@ export function useEditDrag(deps: {
                     ),
                 );
             }
+
+            // 在所有持久化请求完成后释放交互锁
+            void Promise.resolve(persistPromise).finally(() => {
+                dispatch(endInteraction());
+            });
 
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", end);

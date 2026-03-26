@@ -552,23 +552,4 @@ export const koKR = {
     drag_direction_x_only: "X 축만",
     drag_direction_y_only: "Y 축만",
     drag_direction: "드래그 방향",
-
-    // Resampler 관리
-    menu_manage_resampler: "Resampler 관리...",
-    resampler_dialog_title: "Resampler 관리자",
-    resampler_dialog_desc: "외부 Resampler를 등록, 삭제 및 설정합니다.",
-    resampler_empty: "등록된 Resampler가 없습니다.",
-    resampler_unavailable: "사용 불가",
-    remove_resampler: "Resampler 삭제",
-    resampler_extra_flags: "추가 플래그",
-    resampler_flag_params: "플래그 파라미터",
-    resampler_flag_default: "기본값",
-    resampler_flag_remove: "삭제",
-    resampler_flag_letter: "문자",
-    resampler_flag_name: "이름",
-    resampler_flag_range: "범위",
-    add_flag_param: "플래그 파라미터 추가",
-    add_resampler: "Resampler 추가",
-    resampler_close: "닫기",
-    confirm: "확인",
 } as const;

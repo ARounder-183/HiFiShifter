@@ -558,23 +558,4 @@ export const jaJP = {
     drag_direction_x_only: "X方向のみ",
     drag_direction_y_only: "Y方向のみ",
     drag_direction: "ドラッグ方向",
-
-    // Resampler 管理
-    menu_manage_resampler: "Resampler を管理...",
-    resampler_dialog_title: "Resampler マネージャー",
-    resampler_dialog_desc: "外部 Resampler の登録・削除・設定を行います。",
-    resampler_empty: "Resampler が登録されていません。",
-    resampler_unavailable: "利用不可",
-    remove_resampler: "Resampler を削除",
-    resampler_extra_flags: "追加フラグ",
-    resampler_flag_params: "フラグパラメータ",
-    resampler_flag_default: "デフォルト",
-    resampler_flag_remove: "削除",
-    resampler_flag_letter: "文字",
-    resampler_flag_name: "名前",
-    resampler_flag_range: "範囲",
-    add_flag_param: "フラグパラメータを追加",
-    add_resampler: "Resampler を追加",
-    resampler_close: "閉じる",
-    confirm: "確認",
 } as const;

@@ -419,6 +419,10 @@ function AppInner() {
         let disposed = false;
         let unlisten: null | (() => void) = null;
         let fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
+        // 跟踪当前显示的进度值，用于防止进度回退导致的跳动
+        let currentProgress = -1;
+        // 跟踪当前正在 computing 的 sourcePath，用于判断是否为同一文件
+        let currentComputingPath: string | null = null;
 
         async function setup() {
             try {
@@ -444,11 +448,25 @@ function AppInner() {
                                 : null;
 
                         if (status === "computing") {
+                            // 如果已在显示进度且新进度比当前低，忽略（防止并发去重后
+                            // 残留的事件或不同触发点导致进度回退）
+                            if (
+                                currentProgress > 0 &&
+                                p !== null &&
+                                p < currentProgress &&
+                                // 同一文件的进度回退才忽略；不同文件的 0 是正常的
+                                currentComputingPath === sourcePath
+                            ) {
+                                return;
+                            }
+
                             // 清除之前的淡出定时器
                             if (fadeOutTimer) {
                                 clearTimeout(fadeOutTimer);
                                 fadeOutTimer = null;
                             }
+                            currentProgress = p ?? 0;
+                            currentComputingPath = sourcePath;
                             // 提取文件名（不含路径和扩展名）
                             const fileName = sourcePath
                                 ? (sourcePath
@@ -465,6 +483,8 @@ function AppInner() {
                         } else if (status === "done" || status === "cached") {
                             // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
                             if (status === "done") {
+                                currentProgress = 1.0;
+                                currentComputingPath = null;
                                 setWaveformAnalysis({
                                     active: true,
                                     sourcePath: null,
@@ -472,6 +492,7 @@ function AppInner() {
                                 });
                                 fadeOutTimer = setTimeout(() => {
                                     if (!disposed) {
+                                        currentProgress = -1;
                                         setWaveformAnalysis({
                                             active: false,
                                             sourcePath: null,

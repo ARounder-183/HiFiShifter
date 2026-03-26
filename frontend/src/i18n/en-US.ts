@@ -553,23 +553,4 @@ export const enUS = {
     drag_direction_x_only: "X Only",
     drag_direction_y_only: "Y Only",
     drag_direction: "Drag Direction",
-
-    // Resampler management
-    menu_manage_resampler: "Manage Resamplers...",
-    resampler_dialog_title: "Resampler Manager",
-    resampler_dialog_desc: "Register, remove, and configure external resamplers.",
-    resampler_empty: "No resamplers registered.",
-    resampler_unavailable: "Unavailable",
-    remove_resampler: "Remove Resampler",
-    resampler_extra_flags: "Extra Flags",
-    resampler_flag_params: "Flag Parameters",
-    resampler_flag_default: "Default",
-    resampler_flag_remove: "Remove",
-    resampler_flag_letter: "Letter",
-    resampler_flag_name: "Name",
-    resampler_flag_range: "Range",
-    add_flag_param: "Add Flag Parameter",
-    add_resampler: "Add Resampler",
-    resampler_close: "Close",
-    confirm: "Confirm",
 } as const;

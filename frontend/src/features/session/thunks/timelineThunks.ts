@@ -216,6 +216,8 @@ export const createClipsRemote = createAsyncThunk(
                     playbackRate: tpl.playbackRate,
                     fadeInSec: tpl.fadeInSec,
                     fadeOutSec: tpl.fadeOutSec,
+                    fadeInCurve: tpl.fadeInCurve,
+                    fadeOutCurve: tpl.fadeOutCurve,
                 });
                 if (!(updated as { ok?: boolean }).ok) {
                     throw new Error(
@@ -283,6 +285,13 @@ export const removeClipRemote = createAsyncThunk(
     "session/removeClipRemote",
     async (clipId: string) => {
         return webApi.removeClip(clipId);
+    },
+);
+
+export const removeClipsRemote = createAsyncThunk(
+    "session/removeClipsRemote",
+    async (clipIds: string[]) => {
+        return webApi.removeClips(clipIds);
     },
 );
 

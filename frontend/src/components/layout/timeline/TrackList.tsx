@@ -168,6 +168,23 @@ export const TrackList: React.FC<{
     return m;
   }, [tracks]);
 
+  /** 根轨道数量 */
+  const rootTrackCount = useMemo(
+    () => tracks.filter((t) => (t.parentId ?? null) == null).length,
+    [tracks],
+  );
+
+  /**
+   * 判断是否不允许删除该轨道：
+   * 当该轨道是根轨道且只剩最后一个根轨道时，禁止删除（否则会导致零轨道）。
+   * 子轨道的删除不会导致零轨道，始终允许。
+   */
+  function isLastRootTrack(trackId: string): boolean {
+    if (rootTrackCount > 1) return false;
+    const track = tracks.find((t) => t.id === trackId);
+    return !!track && (track.parentId ?? null) == null;
+  }
+
   useEffect(() => {
     return () => {
       // Safety cleanup.
@@ -772,7 +789,7 @@ export const TrackList: React.FC<{
                       variant="ghost"
                       color="gray"
                       className="opacity-0 group-hover:opacity-100"
-                      disabled={tracks.length <= 1}
+                      disabled={isLastRootTrack(track.id)}
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -933,7 +950,7 @@ export const TrackList: React.FC<{
           </button>
           <button
             className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300"
-            disabled={tracks.length <= 1}
+            disabled={isLastRootTrack(trackCtxMenu.trackId)}
             onClick={() => {
               onRemoveTrack(trackCtxMenu.trackId);
               setTrackCtxMenu(null);

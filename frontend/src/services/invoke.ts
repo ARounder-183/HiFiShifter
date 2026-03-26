@@ -211,6 +211,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "remove_clip":
             return { clipId: args[0] };
 
+        case "remove_clips":
+            return { clipIds: args[0] };
+
         case "move_clip":
             return {
                 clipId: args[0],
@@ -333,6 +336,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
 
         case "preload_waveform_mipmap":
             return { sourcePath: args[0] };
+
+        case "batch_get_waveform_mipmap":
+            return { sourcePaths: args[0] };
 
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
