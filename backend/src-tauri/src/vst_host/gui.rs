@@ -114,7 +114,12 @@ mod win32 {
     // ── 窗口消息 ──
     pub const WM_DESTROY: UINT = 0x0002;
     pub const WM_CLOSE: UINT = 0x0010;
+    pub const WM_ERASEBKGND: UINT = 0x0014;
     pub const WM_TIMER: UINT = 0x0113;
+
+    // ── 窗口类样式 ──
+    /// CS_OWNDC: 分配独占设备上下文，许多使用 OpenGL/Direct2D 渲染的 VST 插件需要此标志。
+    pub const CS_OWNDC: UINT = 0x0020;
 
     // ── 窗口样式 ──
     pub const WS_OVERLAPPED: DWORD = 0x00000000;
@@ -122,6 +127,8 @@ mod win32 {
     pub const WS_SYSMENU: DWORD = 0x00080000;
     pub const WS_MINIMIZEBOX: DWORD = 0x00020000;
     pub const WS_VISIBLE: DWORD = 0x10000000;
+    /// WS_CLIPCHILDREN: 防止父窗口绘制覆盖 VST 子窗口内容（解决白屏问题的关键）。
+    pub const WS_CLIPCHILDREN: DWORD = 0x02000000;
     pub const WS_OVERLAPPEDWINDOW_NO_RESIZE: DWORD =
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
@@ -228,6 +235,11 @@ mod win32 {
                 PostQuitMessage(0);
                 0
             }
+            WM_ERASEBKGND => {
+                // 返回 1 表示已处理背景擦除（实际不做任何绘制），
+                // 防止 Windows 用白色画刷覆盖 VST 插件的渲染内容。
+                1
+            }
             WM_TIMER => {
                 // timer id 1 = VST idle callback（30 Hz）
                 // VST2 editor 需要定期调用 idle 来处理 GUI 重绘
@@ -282,14 +294,14 @@ fn open_editor_window_win32(
 
                 let wc = WNDCLASSEXW {
                     cbSize: std::mem::size_of::<WNDCLASSEXW>() as UINT,
-                    style: 0,
+                    style: CS_OWNDC,
                     lpfnWndProc: Some(vst_editor_wnd_proc),
                     cbClsExtra: 0,
                     cbWndExtra: 0,
                     hInstance: h_instance,
                     hIcon: std::ptr::null_mut(),
                     hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
-                    hbrBackground: (COLOR_WINDOW + 1) as HBRUSH,
+                    hbrBackground: std::ptr::null_mut(), // null 画刷：不绘制背景，避免白屏
                     lpszMenuName: std::ptr::null(),
                     lpszClassName: class_name.as_ptr(),
                     hIconSm: std::ptr::null_mut(),
@@ -304,7 +316,8 @@ fn open_editor_window_win32(
                 }
 
                 // ── 计算含窗口边框的实际尺寸 ──
-                let style = WS_OVERLAPPEDWINDOW_NO_RESIZE | WS_VISIBLE;
+                // WS_CLIPCHILDREN 确保父窗口绘制时不覆盖 VST 子窗口内容
+                let style = WS_OVERLAPPEDWINDOW_NO_RESIZE | WS_VISIBLE | WS_CLIPCHILDREN;
                 let mut rect = RECT {
                     left: 0,
                     top: 0,
@@ -343,44 +356,71 @@ fn open_editor_window_win32(
                 ShowWindow(hwnd, SW_SHOW);
                 UpdateWindow(hwnd);
 
-                // ── 将 VST editor 附着到窗口 ──
+                // ── 将 VST editor 附着到窗口（catch_unwind 保护） ──
                 {
-                    let mut inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    match &mut inst.backend {
-                        #[cfg(feature = "vst")]
-                        VstPluginBackend::Vst2 { plugin, .. } => {
-                            let editor = plugin.get_editor();
-                            if let Some(mut editor) = editor {
-                                editor.open(hwnd);
-                                eprintln!(
-                                    "[vst_host::gui] VST2 editor opened in HWND {:?}",
-                                    hwnd
-                                );
-                            } else {
-                                eprintln!(
-                                    "[vst_host::gui] VST2 plugin has no editor GUI"
-                                );
-                            }
-                        }
-                        #[cfg(feature = "vst")]
-                        VstPluginBackend::Vst3 { instance } => {
-                            match instance.attach_editor(hwnd) {
-                                Ok(()) => {
-                                    eprintln!(
-                                        "[vst_host::gui] VST3 editor attached to HWND {:?}",
-                                        hwnd
-                                    );
+                    let attach_result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| {
+                            let mut inst = instance_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            match &mut inst.backend {
+                                #[cfg(feature = "vst")]
+                                VstPluginBackend::Vst2 { plugin, .. } => {
+                                    let editor = plugin.get_editor();
+                                    if let Some(mut editor) = editor {
+                                        editor.open(hwnd);
+                                        // 立即调用一次 idle() 触发首次绘制，
+                                        // 部分 VST2 插件需要 open() 后首次 idle 才会渲染 GUI
+                                        editor.idle();
+                                        eprintln!(
+                                            "[vst_host::gui] VST2 editor opened in HWND {:?}",
+                                            hwnd
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "[vst_host::gui] VST2 plugin has no editor GUI"
+                                        );
+                                    }
                                 }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[vst_host::gui] VST3 editor attach failed: {}",
-                                        e
-                                    );
+                                #[cfg(feature = "vst")]
+                                VstPluginBackend::Vst3 { instance } => {
+                                    match instance.attach_editor(hwnd) {
+                                        Ok(()) => {
+                                            eprintln!(
+                                                "[vst_host::gui] VST3 editor attached to HWND {:?}",
+                                                hwnd
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[vst_host::gui] VST3 editor attach failed: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                                #[cfg(not(feature = "vst"))]
+                                VstPluginBackend::Stub => {}
                             }
-                        }
-                        #[cfg(not(feature = "vst"))]
-                        VstPluginBackend::Stub => {}
+                        }),
+                    );
+
+                    if let Err(panic_info) = attach_result {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        eprintln!(
+                            "[vst_host::gui] Plugin panicked during editor attach: {}",
+                            msg
+                        );
+                        // 销毁窗口并通知调用方失败
+                        DestroyWindow(hwnd);
+                        let _ = tx.send(Err(format!(
+                            "Plugin panicked during editor attach: {}", msg
+                        )));
+                        return;
                     }
                 }
 
@@ -396,19 +436,23 @@ fn open_editor_window_win32(
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
 
-                    // 在 WM_TIMER 消息中调用 VST2 editor idle
+                    // 在 WM_TIMER 消息中调用 VST2 editor idle（catch_unwind 保护）
                     if msg.message == WM_TIMER {
-                        let mut inst =
-                            instance_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        match &mut inst.backend {
-                            #[cfg(feature = "vst")]
-                            VstPluginBackend::Vst2 { plugin, .. } => {
-                                if let Some(mut editor) = plugin.get_editor() {
-                                    editor.idle();
+                        let _ = std::panic::catch_unwind(
+                            std::panic::AssertUnwindSafe(|| {
+                                let mut inst =
+                                    instance_clone.lock().unwrap_or_else(|e| e.into_inner());
+                                match &mut inst.backend {
+                                    #[cfg(feature = "vst")]
+                                    VstPluginBackend::Vst2 { plugin, .. } => {
+                                        if let Some(mut editor) = plugin.get_editor() {
+                                            editor.idle();
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                            }
-                            _ => {}
-                        }
+                            }),
+                        );
                     }
                 }
 

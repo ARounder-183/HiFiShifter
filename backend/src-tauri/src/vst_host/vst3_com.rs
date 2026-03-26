@@ -221,6 +221,190 @@ unsafe extern "system" fn memory_stream_tell(
 
 // ─── VST3 实例封装 ──────────────────────────────────────────────────────────
 
+// ─── IPlugFrame 最小实现 ─────────────────────────────────────────────────────
+//
+// VST3 规范要求宿主在 IPlugView::attached() 前通过 setFrame() 传入 IPlugFrame。
+// 许多插件在没有 IPlugFrame 的情况下不渲染 GUI（白屏）。
+// 这里提供一个最小实现：resizeView 直接返回 kResultOk。
+
+/// IPlugFrame 最小实现的 VTable。
+#[cfg(target_os = "windows")]
+static SIMPLE_PLUG_FRAME_VTBL: IPlugFrameVtbl = IPlugFrameVtbl {
+    base: FUnknownVtbl {
+        queryInterface: simple_plug_frame_query_interface,
+        addRef: simple_plug_frame_add_ref,
+        release: simple_plug_frame_release,
+    },
+    resizeView: simple_plug_frame_resize_view,
+};
+
+/// 简化的 IPlugFrame 宿主实现。
+///
+/// 使用引用计数管理生命周期。`resizeView` 回调中调整宿主窗口大小
+/// 以配合插件请求的尺寸变化。
+#[repr(C)]
+#[cfg(target_os = "windows")]
+pub struct SimplePlugFrame {
+    vtbl: *const IPlugFrameVtbl,
+    ref_count: std::sync::atomic::AtomicI32,
+    /// 宿主窗口句柄，用于在 resizeView 中调整窗口大小。
+    hwnd: *mut c_void,
+}
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for SimplePlugFrame {}
+
+#[cfg(target_os = "windows")]
+impl SimplePlugFrame {
+    /// 创建新的 IPlugFrame 实例，关联到指定的宿主窗口句柄。
+    pub fn new(hwnd: *mut c_void) -> Box<Self> {
+        Box::new(Self {
+            vtbl: &SIMPLE_PLUG_FRAME_VTBL,
+            ref_count: std::sync::atomic::AtomicI32::new(1),
+            hwnd,
+        })
+    }
+
+    /// 将 Box<Self> 转换为 IPlugFrame 原始指针。
+    pub fn into_raw(self: Box<Self>) -> *mut IPlugFrame {
+        Box::into_raw(self) as *mut IPlugFrame
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn simple_plug_frame_query_interface(
+    this: *mut FUnknown,
+    iid: *const TUID,
+    obj: *mut *mut c_void,
+) -> tresult {
+    if obj.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+
+    // 检查是否请求 IPlugFrame 或 FUnknown
+    let requested_iid = &*iid;
+    let plug_frame_iid = &IPlugFrame_iid;
+    let funknown_iid = &FUnknown_iid;
+
+    if requested_iid == plug_frame_iid || requested_iid == funknown_iid {
+        *obj = this as *mut c_void;
+        simple_plug_frame_add_ref(this);
+        kResultOk
+    } else {
+        *obj = ptr::null_mut();
+        K_NO_INTERFACE
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn simple_plug_frame_add_ref(this: *mut FUnknown) -> u32 {
+    let frame = &*(this as *const SimplePlugFrame);
+    frame
+        .ref_count
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u32
+        + 1
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn simple_plug_frame_release(this: *mut FUnknown) -> u32 {
+    let frame = &*(this as *const SimplePlugFrame);
+    let prev = frame
+        .ref_count
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    if prev <= 1 {
+        // 引用计数归零，释放
+        drop(Box::from_raw(this as *mut SimplePlugFrame));
+        return 0;
+    }
+    (prev - 1) as u32
+}
+
+/// resizeView 回调：插件请求改变编辑器大小时，调整宿主窗口。
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn simple_plug_frame_resize_view(
+    this: *mut IPlugFrame,
+    _view: *mut IPlugView,
+    new_size: *mut ViewRect,
+) -> tresult {
+    if new_size.is_null() {
+        return K_INVALID_ARGUMENT;
+    }
+
+    let frame = &*(this as *const SimplePlugFrame);
+    let rect = &*new_size;
+    let new_w = rect.right - rect.left;
+    let new_h = rect.bottom - rect.top;
+
+    eprintln!(
+        "[vst3_com::IPlugFrame] resizeView requested: {}x{}",
+        new_w, new_h
+    );
+
+    // 调整宿主窗口客户区大小
+    // 使用与 gui.rs 中一致的 RECT 结构体定义（4 个 i32 字段）
+    #[repr(C)]
+    struct RECT {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    extern "system" {
+        fn SetWindowPos(
+            hWnd: *mut c_void,
+            hWndInsertAfter: *mut c_void,
+            X: i32,
+            Y: i32,
+            cx: i32,
+            cy: i32,
+            uFlags: u32,
+        ) -> i32;
+        fn AdjustWindowRectEx(
+            lpRect: *mut RECT,
+            dwStyle: u32,
+            bMenu: i32,
+            dwExStyle: u32,
+        ) -> i32;
+        fn GetWindowLongW(hWnd: *mut c_void, nIndex: i32) -> i32;
+    }
+
+    const GWL_STYLE: i32 = -16;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+
+    let style = GetWindowLongW(frame.hwnd, GWL_STYLE) as u32;
+    let mut adj_rect = RECT {
+        left: 0,
+        top: 0,
+        right: new_w,
+        bottom: new_h,
+    };
+    AdjustWindowRectEx(&mut adj_rect, style, 0, 0);
+    let adj_w = adj_rect.right - adj_rect.left;
+    let adj_h = adj_rect.bottom - adj_rect.top;
+
+    SetWindowPos(
+        frame.hwnd,
+        ptr::null_mut(),
+        0,
+        0,
+        adj_w,
+        adj_h,
+        SWP_NOMOVE | SWP_NOZORDER,
+    );
+
+    kResultOk
+}
+
+// ─── 辅助常量 ──
+#[cfg(target_os = "windows")]
+#[allow(non_upper_case_globals)]
+const K_INVALID_ARGUMENT: tresult = -1; // Steinberg::kInvalidArgument
+#[cfg(target_os = "windows")]
+#[allow(non_upper_case_globals)]
+const K_NO_INTERFACE: tresult = -2; // Steinberg::kNoInterface
+
 /// VST3 插件实例的 COM 接口集合。
 ///
 /// 持有一个 VST3 插件的所有必要 COM 接口指针，
@@ -239,6 +423,10 @@ pub struct Vst3Instance {
     pub controller: Option<ComPtr<IEditController>>,
     /// 当前打开的编辑器视图（持有引用以便窗口关闭时调用 removed()）。
     pub editor_view: Option<ComPtr<IPlugView>>,
+    /// 当前关联的 IPlugFrame 原始指针（编辑器打开期间保持有效）。
+    /// 通过 SimplePlugFrame 的引用计数管理生命周期。
+    #[cfg(target_os = "windows")]
+    pub plug_frame_ptr: Option<*mut IPlugFrame>,
     /// 是否已初始化并激活。
     pub active: bool,
     /// 已配置的采样率。
@@ -453,6 +641,8 @@ impl Vst3Instance {
                 processor,
                 controller,
                 editor_view: None,
+                #[cfg(target_os = "windows")]
+                plug_frame_ptr: None,
                 active: true,
                 configured_sample_rate: sample_rate,
                 configured_block_size: block_size,
@@ -686,6 +876,12 @@ impl Vst3Instance {
     /// 将 VST3 编辑器 GUI 附着到指定窗口句柄。
     ///
     /// 在 Windows 上使用 kPlatformTypeHWND。
+    /// 遵循 VST3 规范的完整流程：
+    ///   1. createView("editor") → IPlugView
+    ///   2. setFrame(IPlugFrame) — 许多插件无 frame 不渲染
+    ///   3. attached(hwnd, "HWND")
+    ///   4. onSize(rect) — 触发首次绘制
+    ///
     /// 成功后将 IPlugView 保存到 `editor_view` 字段，以便后续调用 `detach_editor` 清理。
     #[cfg(target_os = "windows")]
     pub fn attach_editor(&mut self, hwnd: *mut c_void) -> Result<(), String> {
@@ -711,9 +907,29 @@ impl Vst3Instance {
                     );
                 }
 
-                // 附着到窗口
+                // ── 步骤 1：创建并设置 IPlugFrame ──
+                // VST3 规范要求 attached() 前必须 setFrame()，
+                // 许多插件在没有 IPlugFrame 的情况下白屏不渲染。
+                let frame = SimplePlugFrame::new(hwnd);
+                let frame_ptr = frame.into_raw();
+                let set_frame_result = view.setFrame(frame_ptr);
+                if set_frame_result != kResultOk {
+                    eprintln!(
+                        "[vst3_com] IPlugView::setFrame returned {} (non-fatal, continuing)",
+                        set_frame_result
+                    );
+                } else {
+                    eprintln!("[vst3_com] IPlugFrame set successfully");
+                }
+                // 保存 frame 指针以保持生命周期
+                self.plug_frame_ptr = Some(frame_ptr);
+
+                // ── 步骤 2：附着到窗口 ──
                 let attach_result = view.attached(hwnd, platform_type);
                 if attach_result != kResultOk {
+                    // 清理 frame
+                    simple_plug_frame_release(frame_ptr as *mut FUnknown);
+                    self.plug_frame_ptr = None;
                     return Err(format!(
                         "VST3 IPlugView::attached failed: {}",
                         attach_result
@@ -721,6 +937,20 @@ impl Vst3Instance {
                 }
 
                 eprintln!("[vst3_com] VST3 editor attached to HWND {:?}", hwnd);
+
+                // ── 步骤 3：发送 onSize 通知触发首次渲染 ──
+                // 许多 VST3 插件在 attached() 后需要一次 onSize() 才会开始绘制
+                let mut rect: ViewRect = std::mem::zeroed();
+                if view.getSize(&mut rect) == kResultOk {
+                    let on_size_result = view.onSize(&mut rect);
+                    eprintln!(
+                        "[vst3_com] onSize({}x{}) returned {}",
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        on_size_result
+                    );
+                }
+
                 // 保存 view 引用，以便窗口关闭时调用 removed()
                 self.editor_view = Some(view);
                 Ok(())
@@ -739,14 +969,26 @@ impl Vst3Instance {
     /// 从窗口分离 VST3 编辑器 GUI。
     ///
     /// 调用 `IPlugView::removed()` 通知插件编辑器已从窗口分离，
-    /// 然后释放 IPlugView 引用。
+    /// 然后释放 IPlugView 和 IPlugFrame 引用。
     pub fn detach_editor(&mut self) {
         if let Some(view) = self.editor_view.take() {
             unsafe {
+                // 先通知 view 移除
                 let _ = view.removed();
+                // 清除 frame（setFrame(null)）
+                let _ = view.setFrame(ptr::null_mut());
             }
             eprintln!("[vst3_com] VST3 editor detached");
-            // ComPtr drop 时自动 release
+            // ComPtr drop 时自动 release view
+        }
+
+        // 释放 IPlugFrame
+        #[cfg(target_os = "windows")]
+        if let Some(frame_ptr) = self.plug_frame_ptr.take() {
+            unsafe {
+                simple_plug_frame_release(frame_ptr as *mut FUnknown);
+            }
+            eprintln!("[vst3_com] IPlugFrame released");
         }
     }
 }

@@ -140,11 +140,13 @@ impl ProcessingStage for VstProcessingStage {
 
 /// 从轨道的 VstChainConfig 构建 ProcessingStage 列表。
 ///
-/// 对于链中的每个插件状态，尝试从全局注册表加载或复用实例，
-/// 构建对应的 `VstProcessingStage`。
+/// 优先从 `VstPluginRegistry.instances` 中复用已有实例（与编辑器 GUI 共享同一
+/// `Arc<Mutex<VstPluginInstance>>`），使得编辑器中的参数调整能实时影响音频处理。
+/// 仅在注册表中找不到实例时才从磁盘加载新实例。
 pub fn build_vst_stages_for_track(
+    track_id: &str,
     chain_config: &super::VstChainConfig,
-    _registry: &super::VstPluginRegistry,
+    registry: &super::VstPluginRegistry,
     sample_rate: f32,
     block_size: usize,
 ) -> Vec<Box<dyn ProcessingStage>> {
@@ -164,50 +166,79 @@ pub fn build_vst_stages_for_track(
             continue;
         }
 
-        // 尝试加载插件
-        let instance_result = match plugin_state.format {
-            super::VstFormat::Vst2 => {
-                super::plugin_host::load_vst2(path, sample_rate, block_size as i64)
+        // 生成与 vst_open_editor / build_vst_stages_map 一致的实例 ID
+        let instance_id = format!("{}:{}:{}", track_id, idx, plugin_state.plugin_uid);
+
+        // 优先从注册表复用已有实例（与编辑器 GUI 共享）
+        let existing = {
+            let instances = registry.instances.lock().unwrap_or_else(|e| e.into_inner());
+            instances.get(&instance_id).cloned()
+        };
+
+        let instance = if let Some(inst) = existing {
+            // 确保采样率正确
+            {
+                let mut locked = inst.lock().unwrap_or_else(|e| e.into_inner());
+                if (locked.sample_rate - sample_rate).abs() > 1.0 {
+                    locked.set_sample_rate(sample_rate);
+                }
             }
-            super::VstFormat::Vst3 => {
-                super::plugin_host::load_vst3(path, sample_rate as f64, block_size as i32)
+            inst
+        } else {
+            // 注册表中没有，从磁盘加载新实例
+            let instance_result = match plugin_state.format {
+                super::VstFormat::Vst2 => {
+                    super::plugin_host::load_vst2(path, sample_rate, block_size as i64)
+                }
+                super::VstFormat::Vst3 => {
+                    super::plugin_host::load_vst3(path, sample_rate as f64, block_size as i32)
+                }
+            };
+
+            match instance_result {
+                Ok(inst) => {
+                    // 恢复插件状态
+                    if let Some(ref chunk) = plugin_state.chunk_data {
+                        let mut locked = inst.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Err(e) = locked.set_chunk(chunk) {
+                            eprintln!(
+                                "[vst_host::stage] Failed to restore chunk for '{}': {}",
+                                plugin_state.plugin_uid, e
+                            );
+                        }
+                    }
+
+                    // 存入注册表以便后续复用
+                    {
+                        let mut instances = registry.instances.lock().unwrap_or_else(|e| e.into_inner());
+                        instances.insert(instance_id.clone(), inst.clone());
+                    }
+
+                    inst
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[vst_host::stage] Failed to load plugin '{}': {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
             }
         };
 
-        match instance_result {
-            Ok(instance) => {
-                // 恢复插件状态
-                if let Some(ref chunk) = plugin_state.chunk_data {
-                    let mut inst = instance.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Err(e) = inst.set_chunk(chunk) {
-                        eprintln!(
-                            "[vst_host::stage] Failed to restore chunk for '{}': {}",
-                            plugin_state.plugin_uid, e
-                        );
-                    }
-                }
+        let stage_id = format!("vst_{}_{}", plugin_state.plugin_uid, idx);
+        let name = instance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .name
+            .clone();
 
-                let stage_id = format!("vst_{}_{}", plugin_state.plugin_uid, idx);
-                let name = instance
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .name
-                    .clone();
-
-                stages.push(Box::new(VstProcessingStage::new(
-                    instance,
-                    stage_id,
-                    name,
-                )));
-            }
-            Err(e) => {
-                eprintln!(
-                    "[vst_host::stage] Failed to load plugin '{}': {}",
-                    path.display(),
-                    e
-                );
-            }
-        }
+        stages.push(Box::new(VstProcessingStage::new(
+            instance,
+            stage_id,
+            name,
+        )));
     }
 
     stages

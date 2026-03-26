@@ -44,7 +44,8 @@ pub(super) fn vst_scan_plugins(state: &AppState) -> serde_json::Value {
     {
         let registry = state.vst_registry.clone();
         let app_handle = state.app_handle.get().cloned();
-        crate::vst_host::scanner::scan_plugins_async(registry, app_handle);
+        let config_dir = state.config_dir.get().cloned();
+        crate::vst_host::scanner::scan_plugins_async(registry, app_handle, config_dir);
 
         // 返回当前已有的结果（后台扫描完成后前端通过事件获取更新）
         let descs = state.vst_registry.list_all();
@@ -408,12 +409,29 @@ pub(super) fn vst_open_editor(
                 let sample_rate = if engine_sr > 0 { engine_sr } else { 44100 };
                 let block_size: usize = 512;
 
-                let load_result = match plugin_state.format {
-                    crate::vst_host::VstFormat::Vst2 => {
-                        plugin_host::load_vst2(path, sample_rate as f32, block_size as i64)
+                // catch_unwind 保护插件加载过程，防止有问题的 VST 导致崩溃
+                let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match plugin_state.format {
+                        crate::vst_host::VstFormat::Vst2 => {
+                            plugin_host::load_vst2(path, sample_rate as f32, block_size as i64)
+                        }
+                        crate::vst_host::VstFormat::Vst3 => {
+                            plugin_host::load_vst3(path, sample_rate as f64, block_size as i32)
+                        }
                     }
-                    crate::vst_host::VstFormat::Vst3 => {
-                        plugin_host::load_vst3(path, sample_rate as f64, block_size as i32)
+                }));
+
+                let load_result = match load_result {
+                    Ok(r) => r,
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        Err(format!("Plugin panicked during load: {}", msg))
                     }
                 };
 
@@ -504,6 +522,19 @@ pub(super) fn vst_open_editor(
             app_state.audio_engine.update_timeline(snapshot);
             eprintln!("[vst::on_close] Timeline updated with saved chunk");
         });
+
+        // 编辑器打开前，触发一次 update_timeline 以确保音频路径的 snapshot
+        // 包含该实例（使 GUI 调参能实时影响音频处理）
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            let snap = tl.clone();
+            drop(tl);
+            state.audio_engine.update_timeline(snap);
+            eprintln!(
+                "[vst::open_editor] Triggered timeline update to include instance '{}' in audio path",
+                instance_id
+            );
+        }
 
         // 创建编辑器窗口
         match gui::open_editor_window(&instance, &window_title, Some(on_close)) {

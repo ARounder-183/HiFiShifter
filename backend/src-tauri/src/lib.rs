@@ -165,6 +165,21 @@ pub fn run() {
                             custom.len()
                         );
                     }
+
+                    // 从缓存文件恢复上次扫描结果，避免每次启动都重新扫描
+                    let cached_descriptors = crate::vst_host::scanner::load_scan_cache(&cfg_dir);
+                    if !cached_descriptors.is_empty() {
+                        let mut descs = state
+                            .vst_registry
+                            .descriptors
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner());
+                        *descs = cached_descriptors;
+                        eprintln!(
+                            "[vst_host] Restored {} plugin descriptors from cache",
+                            descs.len()
+                        );
+                    }
                 }
             }
 

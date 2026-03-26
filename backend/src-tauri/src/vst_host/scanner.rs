@@ -466,6 +466,7 @@ pub fn scan_all_plugins_with_progress(
 pub fn scan_plugins_async(
     registry: std::sync::Arc<VstPluginRegistry>,
     app_handle: Option<tauri::AppHandle>,
+    config_dir: Option<PathBuf>,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -518,6 +519,11 @@ pub fn scan_plugins_async(
             .unwrap_or_else(|e| e.into_inner());
         *descs = result.clone();
         drop(descs);
+
+        // 将扫描结果保存到缓存文件
+        if let Some(ref dir) = config_dir {
+            save_scan_cache(dir, &result);
+        }
 
         reg.scan_in_progress
             .store(false, Ordering::SeqCst);
@@ -608,6 +614,74 @@ pub fn scan_plugins_sync(registry: &VstPluginRegistry) {
         "[vst_host::scanner] Sync scan complete: {} plugins found",
         descs.len()
     );
+}
+
+// ─── 扫描结果缓存持久化 ─────────────────────────────────────────────────────
+
+/// 缓存文件名（保存在 config_dir 下）。
+const SCAN_CACHE_FILENAME: &str = "vst_plugin_cache.json";
+
+/// 从配置目录加载缓存的 VST 扫描结果。
+///
+/// 缓存保存在 `config_dir/vst_plugin_cache.json` 中。
+/// 加载后会过滤掉文件已不存在的条目（插件可能已被卸载）。
+/// 文件不存在或解析失败时返回空列表。
+pub fn load_scan_cache(config_dir: &Path) -> Vec<VstPluginDescriptor> {
+    let file = config_dir.join(SCAN_CACHE_FILENAME);
+    let Ok(data) = std::fs::read_to_string(&file) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<VstPluginDescriptor>>(&data) {
+        Ok(descs) => {
+            // 过滤掉文件已不存在的插件
+            let valid: Vec<VstPluginDescriptor> = descs
+                .into_iter()
+                .filter(|d| d.path.exists())
+                .collect();
+            eprintln!(
+                "[vst_host::scanner] Loaded {} cached plugin descriptors from {}",
+                valid.len(),
+                file.display()
+            );
+            valid
+        }
+        Err(e) => {
+            eprintln!(
+                "[vst_host::scanner] Failed to parse scan cache: {}",
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// 将扫描结果保存到配置目录的缓存文件。
+///
+/// 持久化为 `config_dir/vst_plugin_cache.json`。
+/// 写入失败时静默忽略（仅打印日志）。
+pub fn save_scan_cache(config_dir: &Path, descriptors: &[VstPluginDescriptor]) {
+    let file = config_dir.join(SCAN_CACHE_FILENAME);
+    match serde_json::to_string_pretty(descriptors) {
+        Ok(data) => {
+            if let Err(e) = std::fs::write(&file, data) {
+                eprintln!(
+                    "[vst_host::scanner] Failed to write scan cache: {}",
+                    e
+                );
+            } else {
+                eprintln!(
+                    "[vst_host::scanner] Saved {} plugin descriptors to cache",
+                    descriptors.len()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[vst_host::scanner] Failed to serialize scan cache: {}",
+                e
+            );
+        }
+    }
 }
 
 // ─── 自定义扫描路径持久化 ───────────────────────────────────────────────────
