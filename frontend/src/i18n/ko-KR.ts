@@ -552,4 +552,22 @@ export const koKR = {
     drag_direction_x_only: "X 축만",
     drag_direction_y_only: "Y 축만",
     drag_direction: "드래그 방향",
+
+    // 외부 리샘플러 관리
+    menu_manage_resampler: "리샘플러 관리",
+    resampler_dialog_title: "외부 리샘플러 관리",
+    resampler_dialog_desc: "피치 합성에 사용할 외부 UTAU 리샘플러를 등록 및 관리합니다.",
+    resampler_empty: "등록된 외부 리샘플러가 없습니다.",
+    resampler_unavailable: "사용 불가",
+    remove_resampler: "제거",
+    resampler_extra_flags: "추가 플래그",
+    resampler_flag_params: "플래그 매개변수",
+    resampler_flag_default: "기본값",
+    resampler_flag_remove: "플래그 제거",
+    resampler_flag_letter: "문자",
+    resampler_flag_name: "이름",
+    resampler_flag_range: "범위",
+    add_flag_param: "플래그 매개변수 추가",
+    add_resampler: "리샘플러 추가",
+    resampler_close: "닫기",
 } as const;

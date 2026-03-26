@@ -87,6 +87,11 @@ import {
     getVisibleSecondaryParamIds,
     toggleSecondaryParamVisibility,
 } from "./pianoRoll/secondaryOverlaySelection";
+import {
+    useResamplerList,
+    normalizeAlgoValue,
+    buildExtAlgoValue,
+} from "../../hooks/useResamplerList";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -136,6 +141,7 @@ export const PianoRollPanel: React.FC = () => {
     }, []);
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
+    const { resamplers } = useResamplerList();
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
     const effectiveProjectScale = useMemo<ScaleLike>(
         () =>
@@ -3057,16 +3063,10 @@ export const PianoRollPanel: React.FC = () => {
                                 {t("algo_label")}
                             </Text>
                             <Select.Root
-                                value={
-                                    [
-                                        "world_dll",
-                                        "nsf_hifigan_onnx",
-                                        "vslib",
-                                        "none",
-                                    ].includes(rootTrack.pitchAnalysisAlgo)
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
+                                value={normalizeAlgoValue(
+                                    rootTrack.pitchAnalysisAlgo,
+                                    resamplers,
+                                )}
                                 onValueChange={(v) => {
                                     if (!rootTrackId) return;
                                     dispatch(
@@ -3088,6 +3088,16 @@ export const PianoRollPanel: React.FC = () => {
                                     <Select.Item value="vslib">
                                         vslib
                                     </Select.Item>
+                                    {resamplers
+                                        .filter((r) => r.available)
+                                        .map((r) => (
+                                            <Select.Item
+                                                key={r.id}
+                                                value={buildExtAlgoValue(r)}
+                                            >
+                                                📦 {r.displayName}
+                                            </Select.Item>
+                                        ))}
                                     <Select.Item value="none">
                                         {t("none")}
                                     </Select.Item>

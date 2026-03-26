@@ -62,9 +62,11 @@ import { useTimelineState } from "./timeline/hooks/useTimelineState";
 import { useTimelineDragDrop } from "./timeline/hooks/useTimelineDragDrop";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
+import { useResamplerList } from "../../hooks/useResamplerList";
 
 export const TimelinePanel: React.FC = () => {
     const { t } = useI18n();
+    const { resamplers } = useResamplerList();
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
@@ -334,6 +336,7 @@ export const TimelinePanel: React.FC = () => {
                 rowHeight={rowHeight}
                 trackVolumeUi={trackVolumeUi}
                 listScrollRef={trackListScrollRef}
+                resamplers={resamplers}
                 onSelectTrack={(trackId) => {
                     dispatch(selectTrackRemote(trackId));
                 }}

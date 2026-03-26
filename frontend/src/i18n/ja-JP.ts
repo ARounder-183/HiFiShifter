@@ -558,4 +558,22 @@ export const jaJP = {
     drag_direction_x_only: "X方向のみ",
     drag_direction_y_only: "Y方向のみ",
     drag_direction: "ドラッグ方向",
+
+    // 外部リサンプラー管理
+    menu_manage_resampler: "リサンプラー管理",
+    resampler_dialog_title: "外部リサンプラー管理",
+    resampler_dialog_desc: "ピッチ合成に使用する外部UTAUリサンプラーを登録・管理します。",
+    resampler_empty: "外部リサンプラーが登録されていません。",
+    resampler_unavailable: "利用不可",
+    remove_resampler: "削除",
+    resampler_extra_flags: "追加フラグ",
+    resampler_flag_params: "フラグパラメータ",
+    resampler_flag_default: "デフォルト",
+    resampler_flag_remove: "フラグを削除",
+    resampler_flag_letter: "文字",
+    resampler_flag_name: "名前",
+    resampler_flag_range: "範囲",
+    add_flag_param: "フラグパラメータを追加",
+    add_resampler: "リサンプラーを追加",
+    resampler_close: "閉じる",
 } as const;

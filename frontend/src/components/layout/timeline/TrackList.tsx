@@ -10,6 +10,11 @@ import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import type { TrackInfo } from "../../../features/session/sessionTypes";
 import type { MessageKey } from "../../../i18n/messages";
 import { TRACK_ADD_ROW_HEIGHT } from "./constants";
+import type { ResamplerEntry } from "../../../services/api/resampler";
+import {
+  normalizeAlgoValue,
+  buildExtAlgoValue,
+} from "../../../hooks/useResamplerList";
 
 /** 轨道颜色调色板（与后端 add_track 预设一致） */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
@@ -49,6 +54,8 @@ export const TrackList: React.FC<{
   onScrollTopChange?: (scrollTop: number) => void;
   /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚动 */
   listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
+  /** 已注册的外部 Resampler 列表，用于在算法下拉框中显示 */
+  resamplers?: ResamplerEntry[];
 }> = ({
   t,
   tracks,
@@ -70,6 +77,7 @@ export const TrackList: React.FC<{
   onDuplicateTrack,
   onScrollTopChange,
   listScrollRef,
+  resamplers = [],
 }) => {
   const listRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef<{
@@ -864,16 +872,10 @@ export const TrackList: React.FC<{
                       <div onPointerDown={(e) => e.stopPropagation()}>
                         <Select.Root
                           size="1"
-                          value={
-                            [
-                              "world_dll",
-                              "nsf_hifigan_onnx",
-                              "vslib",
-                              "none",
-                            ].includes(track.pitchAnalysisAlgo)
-                              ? track.pitchAnalysisAlgo
-                              : "nsf_hifigan_onnx"
-                          }
+                          value={normalizeAlgoValue(
+                            track.pitchAnalysisAlgo,
+                            resamplers,
+                          )}
                           onValueChange={(v) => {
                             onAlgoChange(track.id, v);
                           }}
@@ -885,6 +887,16 @@ export const TrackList: React.FC<{
                               nsf-hifigan
                             </Select.Item>
                             <Select.Item value="vslib">vslib</Select.Item>
+                            {resamplers
+                              .filter((r) => r.available)
+                              .map((r) => (
+                                <Select.Item
+                                  key={r.id}
+                                  value={buildExtAlgoValue(r)}
+                                >
+                                  📦 {r.displayName}
+                                </Select.Item>
+                              ))}
                             <Select.Item value="none">{t("none")}</Select.Item>
                           </Select.Content>
                         </Select.Root>

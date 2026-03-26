@@ -167,6 +167,10 @@ pub(super) fn set_track_state(
         }
         "vslib" | "vocalshifter_vslib" => crate::state::PitchAnalysisAlgo::VocalShifterVslib,
         "none" => crate::state::PitchAnalysisAlgo::None,
+        other if other.starts_with("ext:") => {
+            let id = other.trim_start_matches("ext:").to_string();
+            crate::state::PitchAnalysisAlgo::ExternalResampler(id)
+        }
         _ => crate::state::PitchAnalysisAlgo::Unknown,
     });
     tl.set_track_state(

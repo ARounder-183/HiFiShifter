@@ -553,4 +553,22 @@ export const enUS = {
     drag_direction_x_only: "X Only",
     drag_direction_y_only: "Y Only",
     drag_direction: "Drag Direction",
+
+    // External Resampler management
+    menu_manage_resampler: "Manage Resamplers",
+    resampler_dialog_title: "External Resampler Manager",
+    resampler_dialog_desc: "Register and manage external UTAU resamplers for pitch synthesis.",
+    resampler_empty: "No external resamplers registered.",
+    resampler_unavailable: "Unavailable",
+    remove_resampler: "Remove",
+    resampler_extra_flags: "Extra Flags",
+    resampler_flag_params: "Flag Parameters",
+    resampler_flag_default: "Default",
+    resampler_flag_remove: "Remove flag",
+    resampler_flag_letter: "Letter",
+    resampler_flag_name: "Name",
+    resampler_flag_range: "Range",
+    add_flag_param: "Add Flag Parameter",
+    add_resampler: "Add Resampler",
+    resampler_close: "Close",
 } as const;

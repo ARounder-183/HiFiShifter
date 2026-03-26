@@ -536,4 +536,22 @@ export const zhCN = {
     drag_direction_x_only: "仅 X",
     drag_direction_y_only: "仅 Y",
     drag_direction: "拖动方向",
+
+    // 外部 Resampler 管理
+    menu_manage_resampler: "管理 Resampler",
+    resampler_dialog_title: "外部 Resampler 管理",
+    resampler_dialog_desc: "注册和管理外部 UTAU Resampler，用于音高合成。",
+    resampler_empty: "尚未注册外部 Resampler。",
+    resampler_unavailable: "不可用",
+    remove_resampler: "移除",
+    resampler_extra_flags: "附加 Flags",
+    resampler_flag_params: "Flag 参数",
+    resampler_flag_default: "默认值",
+    resampler_flag_remove: "移除 Flag",
+    resampler_flag_letter: "字母",
+    resampler_flag_name: "名称",
+    resampler_flag_range: "范围",
+    add_flag_param: "添加 Flag 参数",
+    add_resampler: "添加 Resampler",
+    resampler_close: "关闭",
 } as const;

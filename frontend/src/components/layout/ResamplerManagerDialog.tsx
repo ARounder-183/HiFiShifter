@@ -19,6 +19,7 @@ import {
     type ResamplerEntry,
     type FlagParam,
 } from "../../services/api/resampler";
+import { dispatchResamplerChanged } from "../../hooks/useResamplerList";
 
 interface ResamplerManagerDialogProps {
     open: boolean;
@@ -83,6 +84,7 @@ export const ResamplerManagerDialog: React.FC<ResamplerManagerDialogProps> = ({
         const entry = await addResampler(name, path);
         if (entry) {
             setResamplerList((prev) => [...prev, entry]);
+            dispatchResamplerChanged();
         }
     }, []);
 
@@ -91,6 +93,7 @@ export const ResamplerManagerDialog: React.FC<ResamplerManagerDialogProps> = ({
         const ok = await removeResampler(id);
         if (ok) {
             setResamplerList((prev) => prev.filter((r) => r.id !== id));
+            dispatchResamplerChanged();
         }
     }, []);
 
