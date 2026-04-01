@@ -42,6 +42,9 @@ pub enum SynthPipelineKind {
 
 impl SynthPipelineKind {
     /// 从 Track 的分析算法推断合成链路类型。
+    ///
+    /// 当 `vslib` feature 被禁用时，`PitchAnalysisAlgo::VocalShifterVslib`
+    /// 仍可能从旧项目文件反序列化出来，此时回退到 WorldVocoder。
     pub fn from_track_algo(algo: &PitchAnalysisAlgo) -> Self {
         match algo {
             PitchAnalysisAlgo::NsfHifiganOnnx => Self::NsfHifiganOnnx,

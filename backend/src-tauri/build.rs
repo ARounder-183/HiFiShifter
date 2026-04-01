@@ -166,6 +166,11 @@ fn build_world_static() {
         .compile("world");
 
     println!("cargo:rustc-link-lib=static=world");
+
+    // macOS: clang++ uses libc++ by default; explicitly link it so WORLD's C++ symbols resolve.
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=c++");
+    }
 }
 
 /// Build Signalsmith Stretch as a static library using cc crate.
@@ -261,6 +266,11 @@ fn build_signalsmith_stretch() {
     build.compile("signalsmith_stretch");
 
     println!("cargo:rustc-link-lib=static=signalsmith_stretch");
+
+    // macOS: link libc++ for Signalsmith Stretch C++ runtime.
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=c++");
+    }
 }
 
 /// Link against vslib_x64.dll via its import library.

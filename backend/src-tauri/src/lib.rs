@@ -101,7 +101,8 @@ pub fn run() {
                 if let Ok(res_dir) = app.path().resource_dir() {
                     let p = res_dir.join("models").join("nsf_hifigan");
                     if p.join("pc_nsf_hifigan.onnx").exists() && p.join("config.json").exists() {
-                        std::env::set_var("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR", &p);
+                        // SAFETY: called during single-threaded Tauri setup before workers start.
+                        unsafe { std::env::set_var("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR", &p) };
                     }
                 }
             }
@@ -110,7 +111,8 @@ pub fn run() {
                 if let Ok(res_dir) = app.path().resource_dir() {
                     let p = res_dir.join("models").join("hnsep");
                     if p.join("hnsep.onnx").exists() {
-                        std::env::set_var("HIFISHIFTER_HNSEP_MODEL_DIR", &p);
+                        // SAFETY: called during single-threaded Tauri setup before workers start.
+                        unsafe { std::env::set_var("HIFISHIFTER_HNSEP_MODEL_DIR", &p) };
                     }
                 }
             }

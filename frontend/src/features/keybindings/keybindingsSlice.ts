@@ -48,10 +48,15 @@ const VIBRATO_WHEEL_MODIFIERS = new Set<ActionId>([
  */
 export function formatKeybinding(kb: Keybinding, noneLabel?: string): string {
     if (isNoneBinding(kb)) return noneLabel ?? "—";
+
+    const isMac =
+        typeof navigator !== "undefined" &&
+        navigator.platform?.toLowerCase().includes("mac");
+
     const parts: string[] = [];
-    if (kb.ctrl) parts.push("Ctrl");
-    if (kb.alt) parts.push("Alt");
-    if (kb.shift) parts.push("Shift");
+    if (kb.ctrl) parts.push(isMac ? "⌘" : "Ctrl");
+    if (kb.alt) parts.push(isMac ? "⌥" : "Alt");
+    if (kb.shift) parts.push(isMac ? "⇧" : "Shift");
 
     // modifierOnly 类型无主键，直接返回修饰键名称
     if (kb.modifierOnly) {

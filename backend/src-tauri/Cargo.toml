@@ -57,8 +57,8 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 objc2 = "0.6"
 
 [features]
-default = ["onnx", "vslib"]
-onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
+default = ["onnx"]
+onnx = ["dep:ort", "dep:ndarray"]
 vslib = []
 
 # Linux / Windows
