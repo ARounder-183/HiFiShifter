@@ -71,13 +71,16 @@ export function formatKeybinding(kb: Keybinding, noneLabel?: string): string {
 }
 
 function prettifyKey(key: string): string {
+    const isMac =
+        typeof navigator !== "undefined" &&
+        navigator.platform?.toLowerCase().includes("mac");
     const map: Record<string, string> = {
         space: "Space",
-        delete: "Delete",
-        backspace: "Backspace",
-        tab: "Tab",
-        enter: "Enter",
-        escape: "Escape",
+        delete: isMac ? "⌦" : "Delete",
+        backspace: isMac ? "⌫" : "Backspace",
+        tab: isMac ? "⇥" : "Tab",
+        enter: isMac ? "↩" : "Enter",
+        escape: isMac ? "⎋" : "Escape",
         arrowup: "↑",
         arrowdown: "↓",
         arrowleft: "←",

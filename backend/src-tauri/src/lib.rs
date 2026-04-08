@@ -123,7 +123,8 @@ pub fn run() {
                 if let Ok(res_dir) = app.path().resource_dir() {
                     let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
                     if p.exists() {
-                        std::env::set_var("HIFISHIFTER_FCPE_ONNX", &p);
+                        // SAFETY: called during single-threaded Tauri setup before workers start.
+                        unsafe { std::env::set_var("HIFISHIFTER_FCPE_ONNX", &p) };
                     }
                 }
             }

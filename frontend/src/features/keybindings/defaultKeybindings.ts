@@ -26,7 +26,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.redo": { key: "y", ctrl: true },
     "edit.selectAll": { key: "a", ctrl: true },
     "edit.deselect": { key: "r", ctrl: true },
-    "edit.initialize": { key: "backspace" },
+    "edit.initialize": { key: "delete" },
     "edit.transposeCents": { key: "f", ctrl: true },
     "edit.transposeDegrees": { key: "i", ctrl: true },
     "edit.setPitch": { key: "t", ctrl: true },
@@ -51,7 +51,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "track.selectDown": { key: "arrowdown" },
 
     // Clip 操作
-    "clip.delete": { key: "delete" },
+    "clip.delete": { key: "backspace" },
     "clip.copy": { key: "c", ctrl: true },
     "clip.cut": { key: "x", ctrl: true },
     "clip.paste": { key: "v", ctrl: true },
@@ -71,7 +71,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
     "modifier.clipCopyDrag": { key: "control", modifierOnly: true, ctrl: true },
-    "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
+    "modifier.horizontalZoom": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.pianoRollVerticalZoom": {
         key: "control",
         modifierOnly: true,
