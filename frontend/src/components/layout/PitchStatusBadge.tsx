@@ -13,13 +13,7 @@ type TrackLite = {
     pitchAnalysisAlgo?: string;
 };
 
-type PitchStatusKind =
-    | "off"
-    | "pending"
-    | "ready"
-    | "no_edit"
-    | "unavailable"
-    | "unknown";
+type PitchStatusKind = "off" | "pending" | "ready" | "no_edit" | "unavailable" | "unknown";
 
 export type PitchStatusSnapshot = {
     analysisPending: boolean;
@@ -78,9 +72,10 @@ export function PitchStatusBadge(props: {
             if (pending) {
                 return {
                     kind: "pending",
-                    progress: typeof status.analysisProgress === "number"
-                        ? status.analysisProgress
-                        : null,
+                    progress:
+                        typeof status.analysisProgress === "number"
+                            ? status.analysisProgress
+                            : null,
                 };
             }
             if (userModified === false) return { kind: "no_edit", progress: null };

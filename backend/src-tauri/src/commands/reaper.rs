@@ -52,9 +52,9 @@ pub(super) fn import_reaper_project(
     };
 
     // 应用到 AppState —— 合并到现有工程（不替换）
+    state.begin_undo_group();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
 
         // 计算现有轨道的最大 order
         let max_existing_order = tl.tracks.iter().map(|t| t.order).max().unwrap_or(-1);
@@ -93,6 +93,7 @@ pub(super) fn import_reaper_project(
 
         state.audio_engine.update_timeline(tl.clone());
     }
+    let _ = state.end_undo_group();
 
     // 更新工程元信息
     {

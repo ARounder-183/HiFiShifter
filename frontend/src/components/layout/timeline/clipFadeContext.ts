@@ -7,10 +7,8 @@ function clipEndSec(clip: ClipInfo): number {
 function hasFadeAtTime(clip: ClipInfo, timeSec: number): boolean {
     const fadeInEnd = clip.startSec + Math.max(0, clip.fadeInSec || 0);
     const fadeOutStart = clipEndSec(clip) - Math.max(0, clip.fadeOutSec || 0);
-    const inFadeIn =
-        clip.fadeInSec > 0 && timeSec >= clip.startSec && timeSec <= fadeInEnd;
-    const inFadeOut =
-        clip.fadeOutSec > 0 && timeSec >= fadeOutStart && timeSec <= clipEndSec(clip);
+    const inFadeIn = clip.fadeInSec > 0 && timeSec >= clip.startSec && timeSec <= fadeInEnd;
+    const inFadeOut = clip.fadeOutSec > 0 && timeSec >= fadeOutStart && timeSec <= clipEndSec(clip);
     return inFadeIn || inFadeOut;
 }
 
@@ -33,12 +31,7 @@ export function collectFadeContextClips(params: {
     contextTimeSec: number;
     explicitOverlappingClipIds?: string[];
 }): ClipInfo[] {
-    const {
-        allClips,
-        contextClip,
-        contextTimeSec,
-        explicitOverlappingClipIds = [],
-    } = params;
+    const { allClips, contextClip, contextTimeSec, explicitOverlappingClipIds = [] } = params;
 
     const candidates =
         explicitOverlappingClipIds.length > 0
@@ -48,9 +41,7 @@ export function collectFadeContextClips(params: {
                       c.trackId === contextClip.trackId,
               )
             : allClips.filter(
-                  (c) =>
-                      c.trackId === contextClip.trackId &&
-                      hasFadeAtTime(c, contextTimeSec),
+                  (c) => c.trackId === contextClip.trackId && hasFadeAtTime(c, contextTimeSec),
               );
 
     return sortClipsByTimelineOrder(candidates).filter(

@@ -57,9 +57,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
         try {
             // Task 7.3: 检查是否为最新任务
             if (latestTaskIdRef.current !== taskId) {
-                console.log(
-                    `[useAsyncPitchRefresh] Task ${taskId} is stale, stopping poll`,
-                );
+                console.log(`[useAsyncPitchRefresh] Task ${taskId} is stale, stopping poll`);
                 return;
             }
 
@@ -74,9 +72,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
                 return;
             }
 
-            const elapsed = startTimeRef.current
-                ? (Date.now() - startTimeRef.current) / 1000
-                : 0;
+            const elapsed = startTimeRef.current ? (Date.now() - startTimeRef.current) / 1000 : 0;
 
             let estimatedRemaining: number | null = null;
             if (info.progress > 0 && info.progress < 100 && elapsed > 0) {
@@ -126,9 +122,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
         async (rootTrackId: string) => {
             // Task 3.8: 防抖逻辑
             if (isRefreshingRef.current) {
-                console.log(
-                    "[useAsyncPitchRefresh] Debounce: refresh already in progress",
-                );
+                console.log("[useAsyncPitchRefresh] Debounce: refresh already in progress");
                 return;
             }
 
@@ -139,10 +133,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
             }
 
             await new Promise((resolve) => {
-                debounceTimerRef.current = setTimeout(
-                    resolve,
-                    DEBOUNCE_DELAY_MS,
-                );
+                debounceTimerRef.current = setTimeout(resolve, DEBOUNCE_DELAY_MS);
             });
 
             try {
@@ -154,10 +145,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
                     try {
                         await coreApi.cancelPitchTask(latestTaskIdRef.current);
                     } catch (err) {
-                        console.warn(
-                            "[useAsyncPitchRefresh] Failed to cancel previous task:",
-                            err,
-                        );
+                        console.warn("[useAsyncPitchRefresh] Failed to cancel previous task:", err);
                     }
                 }
 
@@ -193,10 +181,7 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
                 setState((prev) => ({
                     ...prev,
                     isLoading: false,
-                    error:
-                        error instanceof Error
-                            ? error.message
-                            : "Failed to start refresh",
+                    error: error instanceof Error ? error.message : "Failed to start refresh",
                 }));
                 latestTaskIdRef.current = null;
             } finally {
@@ -237,15 +222,22 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
             console.error("[useAsyncPitchRefresh] Cancel error:", error);
             setState((prev) => ({
                 ...prev,
-                error:
-                    error instanceof Error
-                        ? error.message
-                        : "Failed to cancel task",
+                error: error instanceof Error ? error.message : "Failed to cancel task",
             }));
         }
     }, [state.taskId]);
 
     const reset = useCallback(() => {
+        // 清理可能残留的轮询和防抖定时器
+        if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+        }
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+
         setState({
             isLoading: false,
             taskId: null,
@@ -269,14 +261,9 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
             }
             // 组件卸载时尝试取消任务
             if (latestTaskIdRef.current) {
-                coreApi
-                    .cancelPitchTask(latestTaskIdRef.current)
-                    .catch((err) => {
-                        console.warn(
-                            "[useAsyncPitchRefresh] Cleanup cancel failed:",
-                            err,
-                        );
-                    });
+                coreApi.cancelPitchTask(latestTaskIdRef.current).catch((err) => {
+                    console.warn("[useAsyncPitchRefresh] Cleanup cancel failed:", err);
+                });
             }
         };
     }, []);

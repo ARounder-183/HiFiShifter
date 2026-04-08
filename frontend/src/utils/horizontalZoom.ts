@@ -54,10 +54,7 @@ export function computeAnchoredHorizontalZoom(
     const width = Math.max(1, viewportWidth);
     let anchorX = anchorSec * currentScale - scrollLeft;
     if (anchorX < 0 || anchorX > width) {
-        const centeredScrollLeft = Math.max(
-            0,
-            anchorSec * currentScale - width / 2,
-        );
+        const centeredScrollLeft = Math.max(0, anchorSec * currentScale - width / 2);
         anchorX = anchorSec * currentScale - centeredScrollLeft;
     }
     anchorX = clamp(anchorX, 0, width);

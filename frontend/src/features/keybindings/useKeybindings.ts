@@ -4,7 +4,18 @@ import { selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId, Keybinding, KeybindingMap } from "./types";
 import type { RootState } from "../../app/store";
-
+const IS_MAC =
+    typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+const EXCLUDE_QUICK_SEARCH = new Set(["quickSearch"]);
+const EXCLUDE_BOTH = new Set(["paramEditorSelect", "quickSearch"]);
+const REPEATABLE_ACTIONS = new Set<ActionId>([
+    "playback.seekLeft",
+    "playback.seekRight",
+    "timeline.zoomIn",
+    "timeline.zoomOut",
+    "track.selectUp",
+    "track.selectDown",
+]);
 /**
  * 判断当前焦点是否在可编辑元素上（输入框等），此时不拦截快捷键
  */
@@ -16,8 +27,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
         return true;
     }
     if (el.isContentEditable) return true;
-    if (el.closest?.('input,textarea,select,[contenteditable="true"]'))
-        return true;
+    if (el.closest?.('input,textarea,select,[contenteditable="true"]')) return true;
     return false;
 }
 
@@ -37,11 +47,7 @@ export function matchesKeybinding(e: KeyboardEvent, kb: Keybinding): boolean {
     const key = normalizeEventKey(e);
     if (key !== kb.key) return false;
 
-    const isMac =
-        typeof navigator !== "undefined" &&
-        navigator.platform?.toLowerCase().includes("mac");
-
-    const modKey = isMac ? e.metaKey : e.ctrlKey;
+    const modKey = IS_MAC ? e.metaKey : e.ctrlKey;
     const wantCtrl = Boolean(kb.ctrl);
     const wantShift = Boolean(kb.shift);
     const wantAlt = Boolean(kb.alt);
@@ -89,17 +95,6 @@ function findMatchingAction(
     return null;
 }
 
-function mergeExcludes(
-    ...sets: Array<Set<string> | undefined>
-): Set<string> | undefined {
-    const merged = new Set<string>();
-    for (const s of sets) {
-        if (!s) continue;
-        for (const v of s) merged.add(v);
-    }
-    return merged.size > 0 ? merged : undefined;
-}
-
 export type KeybindingActionHandler = (actionId: ActionId) => void;
 
 /**
@@ -130,13 +125,8 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
     }, [toolMode]);
 
     useEffect(() => {
-        const excludeParamEditor = new Set(["paramEditorSelect"]);
-        const excludeQuickSearch = new Set(["quickSearch"]);
-
         function onKeyDown(e: KeyboardEvent) {
-            if (e.repeat) return;
-            if (isEditableTarget(document.activeElement) || isEditableTarget(e.target))
-                return;
+            if (isEditableTarget(document.activeElement) || isEditableTarget(e.target)) return;
 
             // 快捷键设置对话框打开时，阻塞所有快捷键
             if (document.body.hasAttribute("data-keybindings-dialog-open")) return;
@@ -144,14 +134,33 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             // Quick Search 打开时，交给弹窗自身输入框处理（避免 ↑/↓ 与时间轴缩放冲突）
             if (document.body.hasAttribute("data-quick-search-open")) return;
 
-            // PianoRoll scroller 内的快捷键由其自身 onKeyDown 处理，不拦截
             const active = document.activeElement as HTMLElement | null;
+            const focusWindow = document.body.getAttribute("data-hs-focus-window");
             const inPianoRoll =
                 active?.hasAttribute("data-piano-roll-scroller") ||
-                active?.closest?.("[data-piano-roll-scroller]");
+                active?.closest?.("[data-piano-roll-scroller]") ||
+                focusWindow === "pianoRoll";
+            const inTimeline =
+                active?.hasAttribute("data-timeline-scroller") ||
+                active?.closest?.("[data-timeline-scroller]") ||
+                focusWindow === "timeline";
+            const inTrackHeader =
+                Boolean(active?.closest?.("[data-track-list-panel]")) ||
+                focusWindow === "trackHeader";
+
+            const key = normalizeEventKey(e);
+            const isArrowKey =
+                key === "arrowup" ||
+                key === "arrowdown" ||
+                key === "arrowleft" ||
+                key === "arrowright";
+            if (isArrowKey && (inPianoRoll || inTimeline || inTrackHeader)) {
+                e.preventDefault();
+            }
+
+            // PianoRoll scroller 内的快捷键由其自身 onKeyDown 处理，不拦截
             if (inPianoRoll) {
                 // 查找匹配的 actionId，如果属于 pianoRoll.* 则放行给 PianoRoll 自己处理
-                // （shiftParamUp/Down 已移至全局 handler，不需要放行）
                 const matchedAction = findMatchingAction(e, keybindingsRef.current);
                 if (
                     matchedAction?.startsWith("pianoRoll.") &&
@@ -162,15 +171,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 ) {
                     return;
                 }
-                // clip.copy/clip.paste 同样放行，因为 pianoRoll.copy/pianoRoll.paste
-                // 共享相同快捷键，PianoRoll 的本地 onKeyDown 处理参数帧的复制粘贴
                 if (matchedAction === "clip.copy" || matchedAction === "clip.paste") {
                     return;
                 }
-                // paramEditorSelect 级别的操作（如 edit.initialize/transposeCents/...）
-                // 仅当当前工具为 "select" 时放行给 PianoRoll 处理；
-                // 否则跳过此操作，继续查找非 scoped 的匹配（如 clip.delete）
-                if (matchedAction && ACTION_META[matchedAction]?.scopedContext === "paramEditorSelect") {
+                if (
+                    matchedAction &&
+                    ACTION_META[matchedAction]?.scopedContext === "paramEditorSelect"
+                ) {
                     if (toolModeRef.current === "select") {
                         return; // PianoRoll 会处理
                     }
@@ -178,16 +185,18 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                     const fallbackAction = findMatchingAction(
                         e,
                         keybindingsRef.current,
-                        mergeExcludes(excludeParamEditor, excludeQuickSearch),
+                        EXCLUDE_BOTH,
                     );
                     if (fallbackAction) {
+                        if (e.repeat && !REPEATABLE_ACTIONS.has(fallbackAction)) {
+                            return;
+                        }
                         e.preventDefault();
                         e.stopPropagation();
                         handlerRef.current(fallbackAction);
                     }
                     return;
                 }
-                // edit.selectAll / edit.deselect 在 PianoRoll 中也放行
                 if (matchedAction === "edit.selectAll" || matchedAction === "edit.deselect") {
                     if (toolModeRef.current === "select") {
                         return;
@@ -196,15 +205,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             }
 
             // 非 PianoRoll 上下文：排除 paramEditorSelect 级别操作以避免冲突
-            // （如 Delete 应匹配 clip.delete 而非 edit.initialize）
             const actionId = findMatchingAction(
                 e,
                 keybindingsRef.current,
-                inPianoRoll
-                    ? excludeQuickSearch
-                    : mergeExcludes(excludeParamEditor, excludeQuickSearch),
+                inPianoRoll ? EXCLUDE_QUICK_SEARCH : EXCLUDE_BOTH,
             );
             if (!actionId) return;
+            if (e.repeat && !REPEATABLE_ACTIONS.has(actionId)) return;
 
             e.preventDefault();
             e.stopPropagation();

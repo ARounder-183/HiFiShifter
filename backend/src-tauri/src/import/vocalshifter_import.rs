@@ -56,6 +56,7 @@ const MAGIC: [u8; 4] = [0x56, 0x53, 0x50, 0x44]; // "VSPD"
 struct VspProject {
     sample_rate: u32,
     time_sig_num: i32,
+    #[allow(dead_code)]
     time_sig_den: i32,
     bpm: f64,
 }
@@ -64,6 +65,7 @@ struct VspProject {
 struct VspTrack {
     name: String,
     volume: f64,
+    #[allow(dead_code)]
     pan: f64,
     muted: bool,
     solo: bool,
@@ -89,16 +91,20 @@ struct VspItemExt {
 #[derive(Debug, Clone, Copy)]
 struct VspPitchPoint {
     disabled: bool,
+    #[allow(dead_code)]
     original_pitch: i16, // *PIT (offset 20)
     pitch: i16,          // PIT (offset 22)
     formant: i16,        // FRM (offset 24)
     bre: i16,            // BRE (offset 26)
+    #[allow(dead_code)]
     eq1: i16,            // EQ1 (offset 28)
+    #[allow(dead_code)]
     eq2: i16,            // EQ2 (offset 30)
     dyn_orig: f64,       // *DYN (offset 32)
     dyn_edit: f64,       // DYN (offset 40)
     vol: f64,            // VOL (offset 48)
     pan: f64,            // PAN (offset 56)
+    #[allow(dead_code)]
     heq_or_mrp: i16,     // HEQ/MRP (offset 82)
 }
 
@@ -211,16 +217,19 @@ impl<'a> BinReader<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn read_i16_le(&mut self) -> Option<i16> {
         let b = self.read_bytes(2)?;
         Some(i16::from_le_bytes([b[0], b[1]]))
     }
 
+    #[allow(dead_code)]
     fn read_i32_le(&mut self) -> Option<i32> {
         let b = self.read_bytes(4)?;
         Some(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    #[allow(dead_code)]
     fn read_f64_le(&mut self) -> Option<f64> {
         let b = self.read_bytes(8)?;
         Some(f64::from_le_bytes([
@@ -464,6 +473,7 @@ fn algo_synth_mode(algo_type: i16) -> i32 {
 }
 
 /// 根据 (is_world, synth_mode) 对返回轨道名称后缀。
+#[allow(dead_code)]
 fn algo_pair_suffix(is_world: bool, synth_mode: i32) -> &'static str {
     if is_world {
         " (World)"
@@ -654,7 +664,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     order: track_order,
                     muted: false,
                     solo: false,
-                    volume: 0.9,
+                    volume: 1.0,
                     compose_enabled: false,
                     pitch_analysis_algo: PitchAnalysisAlgo::default(),
                     color: TRACK_COLORS[hs_tracks.len() % TRACK_COLORS.len()].to_string(),
@@ -804,6 +814,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     length_sec: clip_length,
                     color: clip_color(),
                     source_path: Some(audio_path.clone()),
+                    source_path_relative: None,
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
@@ -817,6 +828,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    reversed: false,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
@@ -903,6 +915,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 length_sec: clip_length,
                 color: clip_color(),
                 source_path: Some(audio_path.clone()),
+                source_path_relative: None,
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
@@ -916,6 +929,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                reversed: false,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
@@ -1027,6 +1041,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         playhead_sec: 0.0,
         project_sec: project_end,
         params_by_root_track,
+        project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
         next_track_order: track_order,
     };
 
@@ -1369,7 +1384,7 @@ pub fn import_vsp_clipboard(
                 order: next_order,
                 muted: false,
                 solo: false,
-                volume: 0.9,
+                volume: 1.0,
                 compose_enabled: false,
                 pitch_analysis_algo: algo,
                 color: TRACK_COLORS[color_idx].to_string(),
@@ -1480,6 +1495,7 @@ pub fn import_vsp_clipboard(
                     length_sec: clip_length,
                     color: clip_color(),
                     source_path: Some(audio_path.clone()),
+                    source_path_relative: None,
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
@@ -1493,6 +1509,7 @@ pub fn import_vsp_clipboard(
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    reversed: false,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
@@ -1578,6 +1595,7 @@ pub fn import_vsp_clipboard(
                 length_sec: clip_length,
                 color: clip_color(),
                 source_path: Some(audio_path.clone()),
+                source_path_relative: None,
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
@@ -1591,6 +1609,7 @@ pub fn import_vsp_clipboard(
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                reversed: false,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
@@ -1697,6 +1716,7 @@ pub fn import_vsp_clipboard(
         playhead_sec: 0.0,
         project_sec: project_end,
         params_by_root_track,
+        project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
         next_track_order: next_order,
     };
 
@@ -1977,6 +1997,7 @@ fn import_vsp_clipboard_selected_tracks(
                     length_sec: clip_length,
                     color: clip_color(),
                     source_path: Some(audio_path.clone()),
+                    source_path_relative: None,
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
@@ -1990,6 +2011,7 @@ fn import_vsp_clipboard_selected_tracks(
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    reversed: false,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
@@ -2073,6 +2095,7 @@ fn import_vsp_clipboard_selected_tracks(
                 length_sec: clip_length,
                 color: clip_color(),
                 source_path: Some(audio_path.clone()),
+                source_path_relative: None,
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
@@ -2086,6 +2109,7 @@ fn import_vsp_clipboard_selected_tracks(
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                reversed: false,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
@@ -2189,6 +2213,7 @@ fn import_vsp_clipboard_selected_tracks(
         playhead_sec: 0.0,
         project_sec: project_end,
         params_by_root_track,
+        project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
         next_track_order: track_order,
     };
 

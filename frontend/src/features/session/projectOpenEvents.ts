@@ -19,10 +19,7 @@ export function emitOpenProjectPath(path: string) {
     emitExternalFileAction("openProject", path);
 }
 
-export function emitExternalFileAction(
-    kind: ExternalFileActionKind,
-    path: string,
-) {
+export function emitExternalFileAction(kind: ExternalFileActionKind, path: string) {
     const normalized = String(path ?? "").trim();
     if (!normalized) return;
     window.dispatchEvent(

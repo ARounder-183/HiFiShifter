@@ -1,6 +1,8 @@
 ﻿// pitch_analysis::analysis — 核心分析流水线
 // 包含：快照/diff、单 clip 分析、并行多 clip 分析、音高曲线合成。
 
+#![allow(dead_code)]
+
 use crate::state::{AppState, Clip, PitchAnalysisAlgo, TimelineState};
 use std::collections::HashSet;
 use std::path::Path;
@@ -400,36 +402,9 @@ fn analyze_clip_with_cache(
     }
     let mono = mono_raw;
 
-    // Compute F0 using WORLD
-    let fs_i32 = 44100i32;
-    let prefer = std::env::var("HIFISHIFTER_WORLD_F0")
-        .ok()
-        .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "harvest".to_string());
-
-    let f0_hz: Vec<f64> = {
-        let try_harvest = || {
-            crate::world::compute_f0_hz_harvest(&mono, fs_i32, frame_period_ms, f0_floor, f0_ceil)
-        };
-        let try_dio = || {
-            crate::world::compute_f0_hz_dio_stonemask(
-                &mono,
-                fs_i32,
-                frame_period_ms,
-                f0_floor,
-                f0_ceil,
-            )
-        };
-
-        let res = if prefer == "dio" {
-            try_dio().or_else(|_| try_harvest())
-        } else {
-            try_harvest().or_else(|_| try_dio())
-        };
-
-        res.map_err(|e| format!("F0 analysis failed: {}", e))?
-    };
+    // Compute F0 using FCPE ONNX.
+    let f0_hz = crate::fcpe_onnx::infer_f0_hz(&mono, 44100, frame_period_ms, f0_floor, f0_ceil)
+        .map_err(|e| format!("F0 analysis failed: {e}"))?;
 
     if f0_hz.len() < 2 {
         return Err("F0 analysis returned too few frames".to_string());
@@ -1252,17 +1227,17 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
     on_progress(0.02);
 
-    // If WORLD isn't available, return zeros.
+    // If FCPE isn't available, return zeros.
     if matches!(
         job.algo,
         PitchAnalysisAlgo::WorldDll
             | PitchAnalysisAlgo::NsfHifiganOnnx
             | PitchAnalysisAlgo::Unknown
-    ) && !crate::world::is_available()
+    ) && !crate::fcpe_onnx::is_available()
     {
         if debug {
             eprintln!(
-                "pitch: WORLD unavailable; return zeros (root_track_id={} key={} frames={})",
+                "pitch: FCPE unavailable; return zeros (root_track_id={} key={} frames={})",
                 job.root_track_id, job.key, job.target_frames
             );
         }
@@ -1296,12 +1271,6 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
     let f0_floor = 40.0;
     let f0_ceil = 1600.0;
     let frame_period_tl_ms = job.frame_period_ms.max(0.1);
-
-    let prefer = std::env::var("HIFISHIFTER_WORLD_F0")
-        .ok()
-        .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "harvest".to_string());
 
     // Track gains (mute/solo already cleared in build_root_mix_timeline).
     let mut track_gain: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
@@ -1387,8 +1356,15 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
 
         // Resample to analysis rate (44100) and convert to mono.
-        let segment =
-            crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, 44100);
+        let mut segment = crate::mixdown::linear_resample_interleaved(
+            segment,
+            in_channels_usize,
+            in_rate,
+            44100,
+        );
+        if clip.reversed {
+            crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
+        }
 
         let seg_frames = segment.len() / in_channels_usize;
         if seg_frames < 2 {
@@ -1426,34 +1402,15 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         let mono = mono_raw;
 
         // Compute f0.
-        let fs_i32 = 44100i32;
-        let f0_hz: Vec<f64> = {
-            let try_harvest = || {
-                crate::world::compute_f0_hz_harvest(
-                    &mono,
-                    fs_i32,
-                    frame_period_tl_ms,
-                    f0_floor,
-                    f0_ceil,
-                )
-            };
-            let try_dio = || {
-                crate::world::compute_f0_hz_dio_stonemask(
-                    &mono,
-                    fs_i32,
-                    frame_period_tl_ms,
-                    f0_floor,
-                    f0_ceil,
-                )
-            };
-
-            let res = if prefer == "dio" {
-                try_dio().or_else(|_| try_harvest())
-            } else {
-                try_harvest().or_else(|_| try_dio())
-            };
-
-            res.unwrap_or_default()
+        let f0_hz = match crate::fcpe_onnx::infer_f0_hz(
+            &mono,
+            44100,
+            frame_period_tl_ms,
+            f0_floor,
+            f0_ceil,
+        ) {
+            Ok(v) => v,
+            Err(_) => Vec::new(),
         };
 
         if f0_hz.len() < 2 {

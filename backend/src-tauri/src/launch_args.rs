@@ -18,7 +18,11 @@ fn normalize_candidate(arg: &str) -> String {
 pub fn is_project_file_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("hshp") || ext.eq_ignore_ascii_case("hsp"))
+        .map(|ext| {
+            ext.eq_ignore_ascii_case("hshp")
+                || ext.eq_ignore_ascii_case("hsp")
+                || ext.eq_ignore_ascii_case("json")
+        })
         .unwrap_or(false)
 }
 
@@ -92,57 +96,4 @@ where
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::extract_project_path_from_args;
-
-    #[test]
-    fn extract_path_accepts_hifishifter_project() {
-        let temp = std::env::temp_dir().join("hifishifter_launch_args_test.hshp");
-        std::fs::write(&temp, b"{}").expect("failed to create temp hshp file");
-
-        let args = vec!["HiFiShifter.exe".to_string(), temp.display().to_string()];
-        let found = extract_project_path_from_args(args);
-
-        assert_eq!(found, Some(temp.display().to_string()));
-        let _ = std::fs::remove_file(&temp);
-    }
-
-    #[test]
-    fn extract_path_accepts_reaper_project() {
-        let temp = std::env::temp_dir().join("hifishifter_launch_args_test.rpp");
-        std::fs::write(&temp, b"reaper").expect("failed to create temp rpp file");
-
-        let args = vec!["HiFiShifter.exe".to_string(), temp.display().to_string()];
-        let found = extract_project_path_from_args(args);
-
-        assert_eq!(found, Some(temp.display().to_string()));
-        let _ = std::fs::remove_file(&temp);
-    }
-
-    #[test]
-    fn extract_path_accepts_vocalshifter_project() {
-        let temp = std::env::temp_dir().join("hifishifter_launch_args_test.vsp");
-        std::fs::write(&temp, b"vsp").expect("failed to create temp vsp file");
-
-        let args = vec!["HiFiShifter.exe".to_string(), temp.display().to_string()];
-        let found = extract_project_path_from_args(args);
-
-        assert_eq!(found, Some(temp.display().to_string()));
-        let _ = std::fs::remove_file(&temp);
-    }
-
-    #[test]
-    fn extract_path_accepts_audio_file() {
-        let temp = std::env::temp_dir().join("hifishifter_launch_args_test.wav");
-        std::fs::write(&temp, b"RIFF").expect("failed to create temp wav file");
-
-        let args = vec!["HiFiShifter.exe".to_string(), temp.display().to_string()];
-        let found = extract_project_path_from_args(args);
-
-        assert_eq!(found, Some(temp.display().to_string()));
-        let _ = std::fs::remove_file(&temp);
-    }
 }

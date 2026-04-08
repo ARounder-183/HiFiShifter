@@ -5,6 +5,8 @@ import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
     persistUiSettings,
+    removeCustomScalePreset,
+    setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     upsertCustomScalePreset,
 } from "../../features/session/sessionSlice";
@@ -15,6 +17,8 @@ import {
     sanitizeCustomScalePreset,
 } from "../../utils/customScales";
 import { SCALE_KEYS, SCALE_LABELS, resolveScaleNotes } from "../../utils/musicalScales";
+import { applySelectWheelChange } from "../../utils/selectWheel";
+import { getSelectedCustomScaleId } from "./customScaleDialogLogic";
 
 interface Props {
     open: boolean;
@@ -36,12 +40,17 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
     const [templateValue, setTemplateValue] = useState<string>(`${BUILTIN_TEMPLATE_PREFIX}C`);
 
     const customPresetOptions = useMemo(() => s.customScalePresets, [s.customScalePresets]);
+    const selectedCustomPresetId = useMemo(() => {
+        return getSelectedCustomScaleId(
+            templateValue,
+            customPresetOptions.map((preset) => preset.id),
+        );
+    }, [templateValue, customPresetOptions]);
 
     useEffect(() => {
         if (!open) return;
-        const current = s.project.useCustomScale && s.project.customScale
-            ? s.project.customScale
-            : null;
+        const current =
+            s.project.useCustomScale && s.project.customScale ? s.project.customScale : null;
         if (current) {
             const normalized = sanitizeCustomScalePreset(current);
             setName(normalized.name);
@@ -97,6 +106,31 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
         onOpenChange(false);
     }
 
+    function handleDeleteSelectedPreset() {
+        if (!selectedCustomPresetId) return;
+
+        const preset = customPresetOptions.find((item) => item.id === selectedCustomPresetId);
+        if (!preset) return;
+
+        const isCurrentProjectCustom =
+            s.project.useCustomScale && s.project.customScale?.id === selectedCustomPresetId;
+
+        dispatch(removeCustomScalePreset(selectedCustomPresetId));
+        void dispatch(persistUiSettings());
+
+        if (isCurrentProjectCustom) {
+            dispatch(setProjectBaseScaleRemote(s.project.baseScale));
+        }
+
+        if (editingPresetId === selectedCustomPresetId) {
+            const fallbackScale = s.project.baseScale;
+            setEditingPresetId(null);
+            setName(tAny("custom_scale_default_name"));
+            setNotes(resolveScaleNotes(fallbackScale));
+            setTemplateValue(`${BUILTIN_TEMPLATE_PREFIX}${fallbackScale}`);
+        }
+    }
+
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
             <Dialog.Content style={{ maxWidth: 520 }} onKeyDown={(e) => e.stopPropagation()}>
@@ -104,13 +138,35 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
 
                 <Flex direction="column" gap="3" mt="3">
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 112 }}>{tAny("custom_scale_template")}</Text>
+                        <Text size="2" style={{ minWidth: 112 }}>
+                            {tAny("custom_scale_template")}
+                        </Text>
                         <Select.Root value={templateValue} onValueChange={applyTemplate} size="2">
-                            <Select.Trigger style={{ flex: 1 }} />
+                            <Select.Trigger
+                                style={{ flex: 1 }}
+                                onWheel={(event) => {
+                                    applySelectWheelChange({
+                                        event,
+                                        currentValue: templateValue,
+                                        options: [
+                                            ...SCALE_KEYS.map(
+                                                (k) => `${BUILTIN_TEMPLATE_PREFIX}${k}`,
+                                            ),
+                                            ...customPresetOptions.map(
+                                                (preset) => `${CUSTOM_TEMPLATE_PREFIX}${preset.id}`,
+                                            ),
+                                        ],
+                                        onChange: applyTemplate,
+                                    });
+                                }}
+                            />
                             <Select.Content>
                                 <Select.Group>
                                     {SCALE_KEYS.map((k) => (
-                                        <Select.Item key={k} value={`${BUILTIN_TEMPLATE_PREFIX}${k}`}>
+                                        <Select.Item
+                                            key={k}
+                                            value={`${BUILTIN_TEMPLATE_PREFIX}${k}`}
+                                        >
                                             {SCALE_LABELS[k]}
                                         </Select.Item>
                                     ))}
@@ -135,7 +191,9 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                     </Flex>
 
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 112 }}>{tAny("custom_scale_name")}</Text>
+                        <Text size="2" style={{ minWidth: 112 }}>
+                            {tAny("custom_scale_name")}
+                        </Text>
                         <TextField.Root
                             size="2"
                             value={name}
@@ -167,8 +225,19 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
                 </Flex>
 
                 <Flex justify="end" gap="2" mt="4">
+                    <Button
+                        type="button"
+                        variant="solid"
+                        color="red"
+                        disabled={!selectedCustomPresetId}
+                        onClick={handleDeleteSelectedPreset}
+                    >
+                        {tAny("custom_scale_delete")}
+                    </Button>
                     <Dialog.Close>
-                        <Button variant="soft" color="gray">{tAny("cancel")}</Button>
+                        <Button variant="soft" color="gray">
+                            {tAny("cancel")}
+                        </Button>
                     </Dialog.Close>
                     <Button onClick={handleSave}>{tAny("custom_scale_save_apply")}</Button>
                 </Flex>

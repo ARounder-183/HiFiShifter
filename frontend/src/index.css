@@ -8,144 +8,246 @@
   - Light derives from Radix Theme tokens to avoid inventing a new palette.
 */
 
-.qt-theme.dark {
-  --qt-window: #353535;
-  --qt-base: #2d2d2d;
-  --qt-panel: #2a2a2a;
-  --qt-surface: #404040;
-  --qt-text: #d0d0d0;
-  --qt-text-muted: #909090;
-  --qt-highlight: #3b82f6;
-  --qt-playhead: #f05a5a;
-  --qt-button: #3d3d3d;
-  --qt-button-hover: #484848;
-  --qt-border: #505050;
-  --qt-danger-bg: #4a1a1a;
-  --qt-danger-text: #fca5a5;
-  --qt-danger-border: #ef4444;
-  --qt-warning-bg: #3d2a0a;
-  --qt-warning-text: #fcd34d;
-  --qt-warning-border: #f59e0b;
-  --qt-graph-bg: #232323;
-  --qt-graph-grid-strong: #4a4a4a;
-  --qt-graph-grid-weak: #373737;
-  --qt-scrollbar-thumb: #555555;
-  --qt-scrollbar-thumb-hover: #707070;
+.qt-theme.dark,
+:root[data-theme="dark"] {
+    --qt-window: #353535;
+    --qt-base: #2d2d2d;
+    --qt-panel: #2a2a2a;
+    --qt-surface: #404040;
+    --qt-clip-bg: #343434;
+    --qt-clip-border: rgba(255, 255, 255, 0.14);
+    --qt-clip-selected-border: rgba(255, 255, 255, 0.55);
+    --qt-text: #d0d0d0;
+    --qt-text-muted: #909090;
+    --qt-highlight: #3b82f6;
+    --qt-playhead: #f05a5a;
+    --qt-button: #3d3d3d;
+    --qt-button-hover: #484848;
+    --qt-border: #505050;
+    --qt-hover: #484848;
+    --qt-danger-bg: #4a1a1a;
+    --qt-danger-text: #fca5a5;
+    --qt-danger-border: #ef4444;
+    --qt-warning-bg: #3d2a0a;
+    --qt-warning-text: #fcd34d;
+    --qt-warning-border: #f59e0b;
+    --qt-graph-bg: #232323;
+    --qt-graph-grid-strong: #4a4a4a;
+    --qt-graph-grid-weak: #373737;
+    --qt-scrollbar-thumb: #555555;
+    --qt-scrollbar-thumb-hover: #707070;
+    --qt-overlay: rgba(0, 0, 0, 0.35);
+    --qt-divider: rgba(255, 255, 255, 0.04);
+    --qt-subtle-1: rgba(255, 255, 255, 0.025);
+    --qt-subtle-2: rgba(255, 255, 255, 0.045);
+    --qt-subtle-3: rgba(255, 255, 255, 0.07);
+    --qt-subtle-hover: rgba(255, 255, 255, 0.04);
+    --qt-meter-rail: #2a2a2a;
+    --qt-meter-well: #1d1d1d;
 }
 
-.qt-theme.light {
-  --qt-window: var(--gray-2);
-  --qt-base: var(--gray-3);
-  --qt-panel: var(--gray-1);
-  --qt-surface: var(--gray-4);
-  --qt-text: var(--gray-12);
-  --qt-text-muted: var(--gray-11);
-  --qt-highlight: var(--accent-9);
-  --qt-playhead: var(--red-9);
-  --qt-button: var(--gray-3);
-  --qt-button-hover: var(--gray-4);
-  --qt-border: var(--gray-6);
-  --qt-danger-bg: var(--red-3);
-  --qt-danger-text: var(--red-11);
-  --qt-danger-border: var(--red-9);
-  --qt-warning-bg: var(--amber-3);
-  --qt-warning-text: var(--amber-11);
-  --qt-warning-border: var(--amber-9);
-  --qt-graph-bg: var(--gray-1);
-  --qt-graph-grid-strong: var(--gray-8);
-  --qt-graph-grid-weak: var(--gray-6);
-  --qt-scrollbar-thumb: var(--gray-8);
-  --qt-scrollbar-thumb-hover: var(--gray-9);
+.qt-theme.light,
+:root[data-theme="light"] {
+    --qt-window: #f2f3f6;
+    --qt-base: #ebedf1;
+    --qt-panel: #f8f9fb;
+    --qt-surface: #e1e4ea;
+    --qt-clip-bg: #dde1e8;
+    --qt-clip-border: rgba(32, 38, 52, 0.18);
+    --qt-clip-selected-border: rgba(32, 38, 52, 0.42);
+    --qt-text: #1f232b;
+    --qt-text-muted: #666d79;
+    --qt-highlight: #4b68d1;
+    --qt-playhead: #de4f5d;
+    --qt-button: #e3e6ec;
+    --qt-button-hover: #d7dbe4;
+    --qt-border: #b8bdc9;
+    --qt-hover: #dde1e8;
+    --qt-danger-bg: #ffe6ea;
+    --qt-danger-text: #b53a49;
+    --qt-danger-border: #df6674;
+    --qt-warning-bg: #fff1dc;
+    --qt-warning-text: #9b5f13;
+    --qt-warning-border: #d59140;
+    --qt-graph-bg: #f6f7fa;
+    --qt-graph-grid-strong: #aab1bf;
+    --qt-graph-grid-weak: #cfd4df;
+    --qt-scrollbar-thumb: #b4bac7;
+    --qt-scrollbar-thumb-hover: #969ead;
+    --qt-overlay: rgba(20, 24, 32, 0.22);
+    --qt-divider: rgba(32, 38, 52, 0.1);
+    --qt-subtle-1: rgba(28, 36, 52, 0.025);
+    --qt-subtle-2: rgba(28, 36, 52, 0.04);
+    --qt-subtle-3: rgba(28, 36, 52, 0.06);
+    --qt-subtle-hover: rgba(28, 36, 52, 0.04);
+    --qt-meter-rail: #d6dbe5;
+    --qt-meter-well: #c8ceda;
 }
 
 :root {
-  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --qt-font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --default-font-family: var(--qt-font-family);
+    font-family: var(--qt-font-family);
 }
 
-:root[data-theme='dark'] {
-  color-scheme: dark;
+:root[data-theme="dark"] {
+    color-scheme: dark;
 }
 
-:root[data-theme='light'] {
-  color-scheme: light;
+:root[data-theme="light"] {
+    color-scheme: light;
 }
 
 html,
 body,
 #root {
-  margin: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden; /* Prevent scrolling on body */
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden; /* Prevent scrolling on body */
 }
 
 body {
-  background: var(--qt-window, #353535);
-  color: var(--qt-text, #cccccc);
+    background: var(--qt-window, #353535);
+    color: var(--qt-text, #cccccc);
+    font-family: var(--qt-font-family);
 }
 
 * {
-  box-sizing: border-box;
+    box-sizing: border-box;
 }
 
 button,
 input,
 select,
 textarea {
-  font-family: inherit;
+    font-family: inherit;
 }
 
-button:focus,
-button:focus-visible,
-[role="button"]:focus,
-[role="button"]:focus-visible,
-.rt-BaseButton:focus,
-.rt-BaseButton:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
+:where(button, [role="button"], .rt-BaseButton):focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--qt-highlight) 72%, white 28%);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--qt-highlight) 24%, transparent);
+}
+
+:where(input, textarea, select, .rt-TextFieldInput, .rt-SelectTrigger):focus-visible {
+    outline: none;
+    box-shadow: none;
 }
 
 /* Qt/DAW-style scrollbars */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+    width: 10px;
+    height: 10px;
 }
 
 .qt-overlay {
-  background: rgba(0, 0, 0, 0.35);
-  background: color-mix(in srgb, var(--qt-base) 70%, transparent);
+    background: var(--qt-overlay);
+    backdrop-filter: blur(2px);
 }
 
 ::-webkit-scrollbar-corner {
-  background: var(--qt-base, #303030);
+    background: var(--qt-base, #303030);
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--qt-base, #303030);
-  border-left: 1px solid var(--qt-border, #444444);
+    background: var(--qt-base, #303030);
+    border-left: 1px solid var(--qt-border, #444444);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--qt-scrollbar-thumb, #555555);
-  border-radius: 2px;
-  border: 2px solid var(--qt-base, #303030);
+    background: var(--qt-scrollbar-thumb, #555555);
+    border-radius: 2px;
+    border: 2px solid var(--qt-base, #303030);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--qt-scrollbar-thumb-hover, #777777);
+    background: var(--qt-scrollbar-thumb-hover, #777777);
 }
 
 .custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+    width: 8px;
+    height: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+    border: none;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--qt-scrollbar-thumb, #555555);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: var(--qt-scrollbar-thumb-hover, #777777);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
 }
 
 /* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头 */
 .hide-v-scrollbar {
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* IE 10+ */
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE 10+ */
 }
 .hide-v-scrollbar::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+    width: 0;
+    height: 0;
+}
+
+/* Unified popup/menu/dialog surfaces for Radix and custom panels */
+.rt-DialogOverlay {
+    background: var(--qt-overlay) !important;
+    backdrop-filter: blur(2px);
+}
+
+.rt-DialogContent,
+.rt-DropdownMenuContent,
+.rt-SelectContent,
+.rt-ContextMenuContent,
+.rt-PopoverContent {
+    background: var(--qt-panel) !important;
+    color: var(--qt-text) !important;
+    border: 1px solid var(--qt-border) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 20px 44px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* Ensure Radix controls follow custom font everywhere */
+.rt-Theme,
+.rt-BaseButton,
+.rt-SelectTrigger,
+.rt-TextFieldInput,
+.rt-TextArea,
+.rt-DialogContent,
+.rt-DropdownMenuContent,
+.rt-SelectContent,
+.rt-SelectItem,
+.rt-ContextMenuContent,
+.rt-PopoverContent,
+.rt-TooltipContent {
+    font-family: var(--qt-font-family) !important;
+}
+
+.rt-DropdownMenuItem,
+.rt-SelectItem,
+.rt-ContextMenuItem {
+    border-radius: 7px !important;
+}
+
+.rt-DropdownMenuItem[data-highlighted],
+.rt-SelectItem[data-highlighted],
+.rt-ContextMenuItem[data-highlighted] {
+    background: color-mix(in oklab, var(--qt-highlight) 24%, transparent) !important;
+    color: var(--qt-text) !important;
+}
+
+.rt-DropdownMenuSeparator,
+.rt-SelectSeparator,
+.rt-ContextMenuSeparator {
+    background: var(--qt-divider) !important;
 }

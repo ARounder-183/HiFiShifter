@@ -47,18 +47,18 @@ export const SCALE_LABELS: Record<ScaleKey, string> = {
  * 0 = C, 1 = C#/Db, ... 11 = B
  */
 export const SCALE_NOTES: Record<ScaleKey, number[]> = {
-    C:  [0, 2, 4, 5, 7, 9, 11],
+    C: [0, 2, 4, 5, 7, 9, 11],
     Db: [1, 3, 5, 6, 8, 10, 0],
-    D:  [2, 4, 6, 7, 9, 11, 1],
+    D: [2, 4, 6, 7, 9, 11, 1],
     Eb: [3, 5, 7, 8, 10, 0, 2],
-    E:  [4, 6, 8, 9, 11, 1, 3],
-    F:  [5, 7, 9, 10, 0, 2, 4],
+    E: [4, 6, 8, 9, 11, 1, 3],
+    F: [5, 7, 9, 10, 0, 2, 4],
     Gb: [6, 8, 10, 11, 1, 3, 5],
-    G:  [7, 9, 11, 0, 2, 4, 6],
+    G: [7, 9, 11, 0, 2, 4, 6],
     Ab: [8, 10, 0, 1, 3, 5, 7],
-    A:  [9, 11, 1, 2, 4, 6, 8],
+    A: [9, 11, 1, 2, 4, 6, 8],
     Bb: [10, 0, 2, 3, 5, 7, 9],
-    B:  [11, 1, 3, 4, 6, 8, 10],
+    B: [11, 1, 3, 4, 6, 8, 10],
 };
 
 function normalizePitchClasses(notes: readonly number[]): number[] {
@@ -140,13 +140,31 @@ function positiveMod(a: number, b: number): number {
  * - -3 => -2 steps
  * - +8 => +7 steps (one octave)
  * - -8 => -7 steps (one octave)
+ *
+ * Fractional mapping keeps ratio between neighboring valid degree labels:
+ * - +3.5 => +2.5 steps
+ * - -2.25 => -1.25 steps
  */
 export function degreeInputToScaleSteps(inputDegrees: number): number {
     if (!Number.isFinite(inputDegrees)) return 0;
-    const d = Math.trunc(inputDegrees);
-    const ad = Math.abs(d);
-    if (ad <= 1) return 0;
-    return Math.sign(d) * (ad - 1);
+    if (inputDegrees > 1) return inputDegrees - 1;
+    if (inputDegrees < -1) return inputDegrees + 1;
+    return 0;
+}
+
+/**
+ * Convert internal degree-step shift back to user-facing music-theory degree labels.
+ *
+ * Internal steps intentionally avoid +/-1 in user display:
+ * - 0 => 0
+ * - +2 => +3
+ * - -1 => -2
+ */
+export function scaleStepsToDegreeDisplay(degreeSteps: number): number {
+    if (!Number.isFinite(degreeSteps)) return 0;
+    if (degreeSteps > 0) return degreeSteps + 1;
+    if (degreeSteps < 0) return degreeSteps - 1;
+    return 0;
 }
 
 /**
@@ -176,6 +194,18 @@ function scaleDegreeToMidi(absDegree: number, scale: ScaleLike): number {
     const targetOct = floorDiv(absDegree, degreeCount);
     const targetIdx = positiveMod(absDegree, degreeCount);
     return targetOct * 12 + offsets[targetIdx];
+}
+
+function scaleDegreeToMidiFractional(absDegree: number, scale: ScaleLike): number {
+    if (!Number.isFinite(absDegree)) return 0;
+    const lowerDegree = Math.floor(absDegree);
+    const frac = absDegree - lowerDegree;
+    if (frac <= 1e-9) {
+        return scaleDegreeToMidi(lowerDegree, scale);
+    }
+    const lowerMidi = scaleDegreeToMidi(lowerDegree, scale);
+    const upperMidi = scaleDegreeToMidi(lowerDegree + 1, scale);
+    return lowerMidi + (upperMidi - lowerMidi) * frac;
 }
 
 function getScaleDegreeAnchorsAroundMidi(
@@ -244,10 +274,7 @@ function nearestScaleAnchor(
         for (let i = 0; i < degreeCount; i++) {
             const candidate = oct * 12 + offsets[i];
             const dist = Math.abs(midi - candidate);
-            if (
-                dist < bestDist ||
-                (dist === bestDist && candidate < bestBaseMidi)
-            ) {
+            if (dist < bestDist || (dist === bestDist && candidate < bestBaseMidi)) {
                 bestDist = dist;
                 bestAbsDegree = oct * degreeCount + i;
                 bestBaseMidi = candidate;
@@ -274,20 +301,11 @@ export function transposePitchByScaleSteps(
     if (!Number.isFinite(midi) || !Number.isFinite(degreeSteps)) return midi;
     if (degreeSteps === 0) return midi;
 
-    const stepShift = Math.trunc(degreeSteps);
-    const { lower, upper, ratio } = getScaleDegreeAnchorsAroundMidi(
-        midi,
-        scale,
-    );
+    const stepShift = degreeSteps;
+    const { lower, upper, ratio } = getScaleDegreeAnchorsAroundMidi(midi, scale);
 
-    const targetLowerMidi = scaleDegreeToMidi(
-        lower.absDegree + stepShift,
-        scale,
-    );
-    const targetUpperMidi = scaleDegreeToMidi(
-        upper.absDegree + stepShift,
-        scale,
-    );
+    const targetLowerMidi = scaleDegreeToMidiFractional(lower.absDegree + stepShift, scale);
+    const targetUpperMidi = scaleDegreeToMidiFractional(upper.absDegree + stepShift, scale);
 
     if (Math.abs(upper.midi - lower.midi) <= 1e-9) {
         return targetLowerMidi;
@@ -300,11 +318,7 @@ export function transposePitchByScaleSteps(
  * Calculate degree-step delta between two MIDI positions on the same scale.
  * Used for interactive drag-transpose by degrees.
  */
-export function scaleStepDeltaBetween(
-    fromMidi: number,
-    toMidi: number,
-    scale: ScaleLike,
-): number {
+export function scaleStepDeltaBetween(fromMidi: number, toMidi: number, scale: ScaleLike): number {
     if (!Number.isFinite(fromMidi) || !Number.isFinite(toMidi)) return 0;
     const from = nearestScaleAnchor(fromMidi, scale);
     const to = nearestScaleAnchor(toMidi, scale);

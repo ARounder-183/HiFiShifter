@@ -1,51 +1,64 @@
 /**
- * WaveformTrackCanvas - 轨道级波形 Canvas 组件（v2 mipmap 缓存架构）
+ * WaveformTrackCanvas - 轨道级波形 Canvas 组件（v3 rAF+invalidate 架构）
  *
  * 核心思想：每条轨道只有一个 Canvas，负责绘制该轨道上所有可见 clip 的波形。
  * 相比之前「每 clip 一个 Canvas」的方案，大幅减少 Canvas 上下文数量（从 O(clip) 降为 O(track)）。
  *
+ * v3 性能优化（对齐 PianoRoll 架构）：
+ *   - rAF + invalidate() 帧合并：同一帧内多次 invalidate 只绘制一次
+ *   - 高频参数（viewportStartSec / pxPerSec / viewportEndSec）存 ref，避免 React re-render 触发重绘
+ *   - 数据获取切换为 getInterleavedSlice + renderWaveform per-pixel 聚合（与 PianoRoll 完全一致）
+ *   - 离屏 Canvas 缓存：每个 clip 先绘制到离屏 Canvas，再 drawImage 到主 Canvas
+ *
  * 渲染流程：
- *   1. Canvas 宽度 = 视口可见宽度，通过 CSS left 偏移跟随水平滚动
- *   2. 遍历所有可见 clip，对每个 clip：
- *      a. waveformMipmapStore.getInterleavedSlice() 获取该 clip 对应源文件的稳定峰值切片
- *         （整文件级三级 mipmap 缓存 + 零拷贝切片）
- *      b. applyGainsToPeaks 应用增益/淡入淡出
- *      c. ctx.save() / ctx.clip() 限制绘制区域到 clip 的像素边界
- *      d. renderWaveform() 绘制波形
- *      e. ctx.restore()
+ *   1. Canvas 物理宽度 = viewportWidthPx，固定不变
+ *   2. Canvas 通过 left = viewportStartSec * pxPerSec 定位在视口左边缘
+ *   3. 遍历所有可见 clip，对每个 clip：
+ *      a. waveformMipmapStore.getInterleavedSlice() 获取原始 interleaved 数据（不 resample）
+ *      b. applyGainsToPeaks 应用增益/淡入淡出（带 buffer 复用池）
+ *      c. 在离屏 Canvas 上调用 renderWaveform() 绘制波形
+ *      d. ctx.drawImage() 将离屏结果绘制到主 Canvas
  *
- * 防闪烁策略（缩放时消除白闪/黑闪）：
- *   - Canvas 物理尺寸只增不减（避免浏览器清空画布内容）
- *   - 通过 CSS width/height 控制显示区域，物理尺寸保持 ≥ 显示尺寸
- *   - backBuffer 按实际需要尺寸绘制，drawImage 到主 Canvas 时只覆盖所需区域
- *   - 尺寸增大时先画新帧到 backBuffer，再扩展主 Canvas 并立即 blit，无空白帧
- *
- * 性能优势：
- *   - 100+ clip 场景下只需 10-20 个 Canvas 上下文（= 轨道数）
- *   - 无 DOM 布局抖动：clip 拖拽时只需 requestAnimationFrame 重绘 Canvas
- *   - GPU 批量提交：单 Canvas 上所有 drawCall 合并为一次 GPU 提交
- *   - 整文件级缓存：无 IPC 请求，数据已在前端内存中
- *   - Float32Array 零拷贝切片：无需每帧分配新 buffer
- *
- * 数据流（v2 mipmap 架构）：
- *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderWaveform
+ * 数据流（v3 架构）：
+ *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderWaveform（离屏） → drawImage
  */
 
 import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import type { FadeCurveType } from "../layout/timeline/paths";
 import { waveformMipmapStore } from "../../utils/waveformMipmapStore";
+import { timelineViewportBus } from "../../utils/timelineViewportBus";
 import {
     applyGainsToPeaks,
+    releaseGainBuffer,
     renderWaveform,
     type WaveformRenderParams,
 } from "../../utils/waveformRenderer";
+// ========================================
+// 局部 Buffer 复用池
+// ========================================
+const _downsamplePool: Float32Array[] = [];
+const POOL_MAX = 8;
 
-/** 可视区缓冲（像素），防止滚动时出现空白；固定像素数，不随缩放膨胀 */
-const BUFFER_PX = 500;
+function acquireDownsampleBuffer(minLen: number): Float32Array {
+    for (let i = 0; i < _downsamplePool.length; i++) {
+        if (_downsamplePool[i].buffer.byteLength / 4 >= minLen) {
+            const buf = _downsamplePool[i];
+            _downsamplePool.splice(i, 1);
+            return new Float32Array(buf.buffer, 0, minLen);
+        }
+    }
+    return new Float32Array(minLen);
+}
+
+function releaseDownsampleBuffer(buf: Float32Array): void {
+    if (buf.length > 0 && _downsamplePool.length < POOL_MAX) {
+        _downsamplePool.push(new Float32Array(buf.buffer));
+    }
+}
 
 export interface WaveformTrackCanvasProps {
-    /** 当前轨道上所有 clip（已由 TrackLane 做过可视区过滤） */
+    /** 当前轨道上的完整 clip 列表，由组件内部按视口自行过滤以保持引用稳定 */
     clips: ClipInfo[];
     /** 轨道高度（像素），包含 header 和 padding */
     trackHeight: number;
@@ -55,7 +68,7 @@ export interface WaveformTrackCanvasProps {
     waveformHeight: number;
     /** 每秒像素数 */
     pxPerSec: number;
-    /** 视口宽度（CSS 像素），用于固定 canvas 宽度避免缩放时抖动 */
+    /** 视口宽度（CSS 像素），Canvas 物理宽度固定为此值 */
     viewportWidthPx: number;
     /** 视口起始时间（秒） */
     viewportStartSec: number;
@@ -67,317 +80,460 @@ export interface WaveformTrackCanvasProps {
     strokeWidth?: number;
 }
 
-export const WaveformTrackCanvas = React.memo(function WaveformTrackCanvas(
-    props: WaveformTrackCanvasProps,
-) {
-    const {
-        clips,
-        waveformTop,
-        waveformHeight,
-        pxPerSec,
-        viewportWidthPx,
-        viewportStartSec,
-        strokeColor,
-        strokeWidth = 1,
-    } = props;
+export const WaveformTrackCanvas = React.memo(
+    function WaveformTrackCanvas(props: WaveformTrackCanvasProps) {
+        const {
+            clips,
+            waveformTop,
+            waveformHeight,
+            viewportWidthPx,
+            strokeColor,
+            strokeWidth = 1,
+        } = props;
 
-    const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-    const backBufferRef = React.useRef<HTMLCanvasElement | null>(null);
-    const lastLevelByPathRef = React.useRef<Record<string, 0 | 1 | 2>>({});
+        // ========================================
+        // refs：高频变化的参数存 ref，避免 React re-render
+        // ========================================
+        const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+        const lastLevelByClipRef = React.useRef<Record<string, 0 | 1 | 2>>({});
+        const rafRef = React.useRef<number | null>(null);
 
-    /**
-     * 确保 Canvas 物理尺寸 ≥ 目标尺寸（只增不减，避免清空内容导致闪烁）。
-     * 返回 true 表示尺寸被修改过。
-     */
-    const ensureCanvasSize = React.useCallback(
-        (canvas: HTMLCanvasElement, w: number, h: number): boolean => {
-            let changed = false;
-            if (canvas.width < w) {
-                canvas.width = w;
-                changed = true;
-            }
-            if (canvas.height < h) {
-                canvas.height = h;
-                changed = true;
-            }
-            return changed;
-        },
-        [],
-    );
+        // 高频参数用 ref 存储，避免依赖数组变化触发 useLayoutEffect
+        const pxPerSecRef = React.useRef(props.pxPerSec);
+        const viewportStartSecRef = React.useRef(props.viewportStartSec);
+        const viewportEndSecRef = React.useRef(props.viewportEndSec);
+        const clipsRef = React.useRef(clips);
+        const waveformHeightRef = React.useRef(waveformHeight);
+        const strokeColorRef = React.useRef(strokeColor);
+        const strokeWidthRef = React.useRef(strokeWidth);
+        const viewportWidthPxRef = React.useRef(viewportWidthPx);
 
-    // 强制重绘计数器（mipmap 数据加载完成时 +1 触发重绘）
-    const [redrawTick, setRedrawTick] = React.useState(0);
+        // 同步 ref
+        pxPerSecRef.current = props.pxPerSec;
+        viewportStartSecRef.current = props.viewportStartSec;
+        viewportEndSecRef.current = props.viewportEndSec;
+        clipsRef.current = clips;
+        waveformHeightRef.current = waveformHeight;
+        strokeColorRef.current = strokeColor;
+        strokeWidthRef.current = strokeWidth;
+        viewportWidthPxRef.current = viewportWidthPx;
 
-    // 以像素为基准计算缓冲区，避免高缩放下秒↔像素往返换算造成画布原点漂移
-    const viewportLeftPx = viewportStartSec * pxPerSec;
-    const canvasLeftPx = Math.max(0, Math.floor(viewportLeftPx - BUFFER_PX));
-    const canvasWidthPx = Math.max(
-        1,
-        Math.ceil(Math.max(1, viewportWidthPx)) + BUFFER_PX * 2,
-    );
-    const bufferedStartSec = canvasLeftPx / Math.max(1e-9, pxPerSec);
-    const bufferedEndSec =
-        (canvasLeftPx + canvasWidthPx) / Math.max(1e-9, pxPerSec);
+        // ========================================
+        // invalidate + rAF 帧合并（与 PianoRoll 完全一致）
+        // 同一帧内无论有多少次 invalidate 调用，只执行一次绘制
+        // ========================================
+        const drawRef = React.useRef<() => void>(() => {});
 
-    // ========================================
-    // 监听 mipmap 缓存加载完成事件，触发重绘
-    // ========================================
-    React.useEffect(() => {
-        // 收集本轮需要的 sourcePath 集合
-        const neededPaths = new Set<string>();
-        for (const clip of clips) {
-            if (clip.sourcePath) neededPaths.add(clip.sourcePath);
-        }
+        const invalidate = React.useCallback(() => {
+            if (rafRef.current != null) return; // 已有待执行帧，跳过
+            rafRef.current = requestAnimationFrame(() => {
+                rafRef.current = null;
+                drawRef.current();
+            });
+        }, []);
 
-        const unsub = waveformMipmapStore.addListener((sourcePath, status) => {
-            if (status === "done" && neededPaths.has(sourcePath)) {
-                setRedrawTick((t) => t + 1);
-            }
-        });
-
-        return unsub;
-    }, [clips]);
-
-    // ========================================
-    // 主渲染逻辑：在单个 Canvas 上绘制所有 clip 的波形
-    // ========================================
-    React.useLayoutEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-
-        const dpr = Math.max(1, window.devicePixelRatio || 1);
-        const displayW = canvasWidthPx;
-        const displayH = waveformHeight;
-        const backBuffer =
-            backBufferRef.current ?? document.createElement("canvas");
-        backBufferRef.current = backBuffer;
-
-        // Canvas 内部像素 = CSS 尺寸 × dpr
-        const internalW = Math.max(1, Math.floor(displayW * dpr));
-        const internalH = Math.max(1, Math.floor(displayH * dpr));
-
-        if (backBuffer.width !== internalW) {
-            backBuffer.width = internalW;
-        }
-        if (backBuffer.height !== internalH) {
-            backBuffer.height = internalH;
-        }
-
-        const backCtx = backBuffer.getContext("2d");
-        if (!backCtx) return;
-
-        const scaleX = internalW / Math.max(1, displayW);
-        const scaleY = internalH / Math.max(1, displayH);
-        backCtx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-        backCtx.clearRect(0, 0, displayW, displayH);
-
-        // Canvas 左边缘对应的 timeline 时间
-        const canvasStartSec = bufferedStartSec;
-
-        // 遍历所有 clip，绘制波形
-        console.info(
-            `[Timeline] 🎨 渲染开始 | clips=${clips.length} | pxPerSec=${pxPerSec.toFixed(1)} | buffered=[${bufferedStartSec.toFixed(2)}s, ${bufferedEndSec.toFixed(2)}s] | canvasW=${canvasWidthPx}`,
-        );
-        let renderedCount = 0;
-        let skippedCount = 0;
-
-        for (const clip of clips) {
-            if (!clip.sourcePath || !clip.durationSec || clip.durationSec <= 0) continue;
-
-            const clipStartSec = clip.startSec;
-            const clipEndSec = clipStartSec + clip.lengthSec;
-            const clipWidthPx = clip.lengthSec * pxPerSec;
-
-            // clip 与视口交集的像素区域
-            const visStartSec = Math.max(clipStartSec, bufferedStartSec);
-            const visEndSec = Math.min(clipEndSec, bufferedEndSec);
-            if (visEndSec <= visStartSec) continue;
-
-            // 可见区域在 canvas 上的像素位置
-            const visLeftPx = Math.max(0, (visStartSec - canvasStartSec) * pxPerSec);
-            const visRightPx = Math.min(displayW, (visEndSec - canvasStartSec) * pxPerSec);
-            const pr = Math.max(1e-6, clip.playbackRate);
-            const clipLen = clip.lengthSec;
-            const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
-            const sampleStartSec = visStartSec;
-            const sampleEndSec = visEndSec;
-            if (sampleEndSec <= sampleStartSec) continue;
-            const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx));
+        // ========================================
+        // 核心绘制函数（存入 drawRef，由 invalidate 调度）
+        // ========================================
+        drawRef.current = () => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
 
             // ========================================
-            // 计算源文件时间范围（与实际绘制窗口对齐）
+            // 性能诊断探针（通过 localStorage 开关）
+            // 开启: localStorage.setItem('hifishifter.debugWaveformPerf', '1')
+            // 关闭: localStorage.removeItem('hifishifter.debugWaveformPerf')
             // ========================================
-            const sampleRate = clip.sourceSampleRate || 44100;
-            const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-            const previousLevel = lastLevelByPathRef.current[clip.sourcePath];
-            const stableLevel = waveformMipmapStore.selectLevelStable(
-                spp,
-                previousLevel,
-            );
-            lastLevelByPathRef.current[clip.sourcePath] = stableLevel;
+            const __perfDebug =
+                typeof window !== "undefined" &&
+                window.localStorage?.getItem("hifishifter.debugWaveformPerf") === "1";
+            const __t0 = __perfDebug ? performance.now() : 0;
+            let __tSetup = 0,
+                __clipTimings: {
+                    name: string;
+                    sliceMs: number;
+                    downsampleMs: number;
+                    gainMs: number;
+                    renderMs: number;
+                    drawImageMs: number;
+                    interleavedLen: number;
+                    visibleWidthPx: number;
+                    downsampledTo: number;
+                }[] = [];
 
-            const levelLabels = ["L0(div=64)", "L1(div=512)", "L2(div=4096)"];
-            const fileName = clip.sourcePath.split(/[/\\]/).pop() ?? clip.sourcePath;
+            const currentPxPerSec = pxPerSecRef.current;
+            const currentViewportStartSec = viewportStartSecRef.current;
+            const currentViewportEndSec = viewportEndSecRef.current;
+            const currentClips = clipsRef.current;
+            const currentWaveformHeight = waveformHeightRef.current;
+            const currentStrokeColor = strokeColorRef.current;
+            const currentStrokeWidth = strokeWidthRef.current;
+            const currentViewportWidthPx = viewportWidthPxRef.current;
+            const displayW = Math.max(1, Math.ceil(currentViewportWidthPx));
+            const displayH = currentWaveformHeight;
 
-            // 可见部分在 clip 内的比例
-            const ratioStart = (sampleStartSec - clipStartSec) / Math.max(1e-6, clipLen);
-            const ratioEnd = (sampleEndSec - clipStartSec) / Math.max(1e-6, clipLen);
+            // 取消限制 dpr 为 1
+            const dpr = window.devicePixelRatio || 1;
+            const internalW = Math.max(1, Math.floor(displayW * dpr));
+            const internalH = Math.max(1, Math.floor(displayH * dpr));
 
-            const clipSourceEndSec =
-                Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
-            const clipSourceSpanSec = Math.max(
-                0,
-                Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-            );
-            const sourceTimeStart = Math.max(
-                0,
-                sourceStartSec + ratioStart * clipSourceSpanSec,
-            );
-            const sourceTimeEnd = Math.min(
-                clip.durationSec,
-                sourceStartSec + ratioEnd * clipSourceSpanSec,
-            );
-            const sourceDuration = Math.max(0.1, sourceTimeEnd - sourceTimeStart);
+            // 仅在尺寸变化时更新 canvas 物理尺寸
+            if (canvas.width !== internalW) canvas.width = internalW;
+            if (canvas.height !== internalH) canvas.height = internalH;
 
-            // ========================================
-            // 从 mipmap 缓存获取 resample 后的数据
-            // ========================================
-            const result = waveformMipmapStore.getInterleavedSlice(
-                clip.sourcePath,
-                stableLevel,
-                sourceTimeStart,
-                sourceDuration,
-            );
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
 
-            if (!result || result.interleaved.length < 4) {
-                console.warn(
-                    `[Timeline] ⏭️ clip 跳过: "${fileName}" | level=${levelLabels[stableLevel]} | spp=${spp} | 原因=${!result ? "数据未加载" : "interleaved 太短(" + result.interleaved.length + ")"}`,
+            const scaleX = internalW / Math.max(1, displayW);
+            const scaleY = internalH / Math.max(1, displayH);
+            ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+            ctx.clearRect(0, 0, displayW, displayH);
+
+            // left 由 timelineViewportBus 单一来源更新，避免双来源写入导致的微抖
+            canvas.style.width = `${displayW}px`;
+            canvas.style.height = `${displayH}px`;
+
+            if (__perfDebug) __tSetup = performance.now() - __t0;
+
+            for (const clip of currentClips) {
+                if (!clip.sourcePath || !clip.durationSec || clip.durationSec <= 0) continue;
+
+                const clipStartSec = clip.startSec;
+                const clipEndSec = clipStartSec + clip.lengthSec;
+                const clipWidthPx = clip.lengthSec * currentPxPerSec;
+
+                // clip 与视口的交集
+                const visStartSec = Math.max(clipStartSec, currentViewportStartSec);
+                const visEndSec = Math.min(clipEndSec, currentViewportEndSec);
+                if (visEndSec <= visStartSec) continue;
+
+                // 统一使用浮点像素坐标，避免多重 round 导致的帧间抖动
+                const viewportStartPx = currentViewportStartSec * currentPxPerSec;
+                const clipStartPx = clipStartSec * currentPxPerSec;
+                const clipEndPx = clipEndSec * currentPxPerSec;
+                const visLeftPx = Math.max(0, clipStartPx - viewportStartPx);
+                const visRightPx = Math.min(displayW, clipEndPx - viewportStartPx);
+                if (visRightPx <= visLeftPx) continue;
+                const pr = Math.max(1e-6, clip.playbackRate);
+                const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
+                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx));
+
+                // 计算源文件时间范围
+                const sampleRate = clip.sourceSampleRate || 44100;
+                const spp = Math.max(1, Math.round(sampleRate / currentPxPerSec));
+                const levelKey = `${clip.sourcePath}::${clip.id}`;
+                const previousLevel = lastLevelByClipRef.current[levelKey];
+                const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+                lastLevelByClipRef.current[levelKey] = stableLevel;
+
+                const clipSourceEndSec =
+                    Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
+                const clipSourceSpanSec = Math.max(
+                    0,
+                    Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
                 );
-                skippedCount++;
-                continue;
+                if (clipSourceSpanSec <= 1e-6) continue;
+
+                // 仅请求当前可见窗口对应的源数据，显著降低每帧处理成本
+                const visClipStartSec = Math.max(0, visStartSec - clipStartSec);
+                const visClipEndSec = Math.min(clip.lengthSec, visEndSec - clipStartSec);
+                const clipSourceWindowStartSec = sourceStartSec;
+                const clipSourceWindowEndSec = sourceStartSec + clipSourceSpanSec;
+                const sourceVisStartSec = clip.reversed
+                    ? clipSourceWindowEndSec - visClipEndSec * pr
+                    : clipSourceWindowStartSec + visClipStartSec * pr;
+                const sourceVisEndSec = clip.reversed
+                    ? clipSourceWindowEndSec - visClipStartSec * pr
+                    : clipSourceWindowStartSec + visClipEndSec * pr;
+                const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
+                const sourceTimeStart = Math.max(
+                    clipSourceWindowStartSec,
+                    Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSec,
+                );
+                const sourceTimeEnd = Math.min(
+                    clipSourceWindowEndSec,
+                    Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSec,
+                );
+                const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
+
+                // ========================================
+                // 从 mipmap 缓存获取 interleaved 数据（不 resample，与 PianoRoll 一致）
+                // ========================================
+                const __tSlice0 = __perfDebug ? performance.now() : 0;
+                const result = waveformMipmapStore.getInterleavedSlice(
+                    clip.sourcePath,
+                    stableLevel,
+                    sourceTimeStart,
+                    sourceDuration,
+                );
+                const __tSlice1 = __perfDebug ? performance.now() : 0;
+
+                if (!result || result.interleaved.length < 4) {
+                    continue;
+                }
+
+                // ========================================
+                // 方案2：限制数据量 — 当原始数据点数远超可视像素时，快速预降采样
+                // ========================================
+                const __tDs0 = __perfDebug ? performance.now() : 0;
+                const storeInterleaved = result.interleaved;
+                let renderInterleaved: Float32Array = storeInterleaved;
+                let releasedStoreInterleaved = false;
+                const rawSampleCount = storeInterleaved.length / 2;
+                // 使用与 clip 自身宽度绑定的稳定采样目标，避免滚屏时分桶边界漂移导致抖动
+                const stableTargetWidthPx = Math.max(1, Math.ceil(visibleWidthPx * 2));
+                const targetSamples = stableTargetWidthPx * 2;
+
+                if (rawSampleCount > targetSamples && targetSamples >= 2) {
+                    const w = Math.ceil(targetSamples);
+
+                    // 从局部池获取 Buffer
+                    const downsampled = acquireDownsampleBuffer(w * 2);
+
+                    // 提取线性步长常数，将循环内的 4 次浮点乘除降至 1 次加法
+                    const srcStep = rawSampleCount / w;
+
+                    for (let i = 0; i < w; i++) {
+                        const srcStart = i * srcStep;
+                        const srcEnd = srcStart + srcStep;
+
+                        const iStart = Math.max(0, Math.floor(srcStart));
+                        const iEnd = Math.min(rawSampleCount - 1, Math.ceil(srcEnd));
+
+                        let pMin = Infinity;
+                        let pMax = -Infinity;
+                        for (let j = iStart; j <= iEnd; j++) {
+                            const sMin = storeInterleaved[j * 2];
+                            const sMax = storeInterleaved[j * 2 + 1];
+                            if (sMin < pMin) pMin = sMin;
+                            if (sMax > pMax) pMax = sMax;
+                        }
+                        downsampled[i * 2] = pMin === Infinity ? 0 : pMin;
+                        downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
+                    }
+
+                    waveformMipmapStore.releaseInterleaved(storeInterleaved);
+                    releasedStoreInterleaved = true;
+                    renderInterleaved = downsampled;
+                }
+
+                // --- 从这里开始替换 ---
+
+                // 偏移量改为相对于主屏幕，而不是裁剪视口
+                const clipPixelOffset = viewportStartPx - clipStartPx;
+
+                // 构建渲染参数
+                const params: WaveformRenderParams = {
+                    canvasWidth: displayW,
+                    canvasHeight: displayH,
+                    centerY: displayH / 2,
+                    zeroDbHalfHeight: displayH / 2,
+                    sourceStartSec,
+                    clipDuration: clip.lengthSec,
+                    playbackRate: Number(clip.playbackRate ?? 1) || 1,
+                    reversed: Boolean(clip.reversed),
+                    sourceDurationSec: clip.durationSec,
+                    volumeGain: Number(clip.gain ?? 1) || 1,
+                    fadeInSec: Number(clip.fadeInSec ?? 0) || 0,
+                    fadeOutSec: Number(clip.fadeOutSec ?? 0) || 0,
+                    fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
+                    fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
+                    dataStartSec: result.dataStartSec,
+                    dataDurationSec: result.dataDurationSec,
+                    clipPixelOffset, // 相对于主 Canvas 的偏移
+                    clipTotalWidthPx: Math.max(1, clipWidthPx),
+                };
+
+                // 应用增益（音量 + 淡入淡出）
+                const peaksForRender = renderInterleaved;
+
+                const __tDs1 = __perfDebug ? performance.now() : 0;
+                const __tGain0 = __perfDebug ? performance.now() : 0;
+                const withGains = applyGainsToPeaks(peaksForRender, params);
+                const __tGain1 = __perfDebug ? performance.now() : 0;
+
+                // ========================================
+                // 废弃离屏 Canvas
+                // ========================================
+                const __tRender0 = __perfDebug ? performance.now() : 0;
+
+                ctx.save();
+                ctx.beginPath();
+                // 严格裁剪在 clip 实际可见范围内，防止越界绘制到其他片段上
+                ctx.rect(visLeftPx, 0, visRightPx - visLeftPx, displayH);
+                ctx.clip();
+
+                // 处理静音片段半透明
+                ctx.globalAlpha = clip.muted ? 0.4 : 1.0;
+
+                renderWaveform(
+                    ctx,
+                    withGains,
+                    params,
+                    currentStrokeColor,
+                    currentStrokeWidth,
+                    "line",
+                );
+
+                ctx.restore();
+
+                const __tRender1 = __perfDebug ? performance.now() : 0;
+                const __tDraw0 = 0; // 已废弃 drawImage
+                const __tDraw1 = 0;
+
+                // 1. 归还增益 buffer
+                if (withGains !== renderInterleaved) {
+                    releaseGainBuffer(withGains);
+                }
+
+                // 2. 归还预降采样产生的 buffer（如果有）
+                if (renderInterleaved !== storeInterleaved) {
+                    releaseDownsampleBuffer(renderInterleaved);
+                }
+
+                // 3. 归还 store 复用池 buffer
+                if (!releasedStoreInterleaved) {
+                    waveformMipmapStore.releaseInterleaved(storeInterleaved);
+                }
+
+                // 收集诊断数据
+                if (__perfDebug) {
+                    const fileName = clip.sourcePath?.split(/[/\\]/).pop() ?? "?";
+                    __clipTimings.push({
+                        name: fileName,
+                        sliceMs: __tSlice1 - __tSlice0,
+                        downsampleMs: __tDs1 - __tDs0,
+                        gainMs: __tGain1 - __tGain0,
+                        renderMs: __tRender1 - __tRender0,
+                        drawImageMs: __tDraw1 - __tDraw0,
+                        interleavedLen: storeInterleaved.length,
+                        visibleWidthPx,
+                        downsampledTo: renderInterleaved.length / 2,
+                    });
+                }
             }
 
-            console.debug(
-                `[Timeline] ✅ clip 渲染: "${fileName}" | level=${levelLabels[stableLevel]} | spp=${spp} | srcTime=[${sourceTimeStart.toFixed(3)}s, ${sourceTimeEnd.toFixed(3)}s] | interleaved=${result.interleaved.length} | clipPx=[${visLeftPx.toFixed(0)}, ${visRightPx.toFixed(0)}]`,
-            );
-            renderedCount++;
+            if (ctx.globalAlpha !== 1) {
+                ctx.globalAlpha = 1;
+            }
 
-            // 计算 clip 内的偏移
-            const clipPixelOffset = (visStartSec - clipStartSec) * pxPerSec;
+            // ========================================
+            // 性能诊断输出
+            // ========================================
+            if (__perfDebug) {
+                const totalMs = performance.now() - __t0;
+                const clipCount = __clipTimings.length;
+                const sumSlice = __clipTimings.reduce((s, c) => s + c.sliceMs, 0);
+                const sumDs = __clipTimings.reduce((s, c) => s + c.downsampleMs, 0);
+                const sumGain = __clipTimings.reduce((s, c) => s + c.gainMs, 0);
+                const sumRender = __clipTimings.reduce((s, c) => s + c.renderMs, 0);
+                const sumDrawImg = __clipTimings.reduce((s, c) => s + c.drawImageMs, 0);
+                console.log(
+                    `%c[WaveformPerf] frame ${totalMs.toFixed(1)}ms | setup=${__tSetup.toFixed(1)}ms | clips=${clipCount} | pxPerSec=${currentPxPerSec.toFixed(0)} | canvasW=${displayW} | dpr=${dpr}`,
+                    totalMs > 16 ? "color:red;font-weight:bold" : "color:green",
+                );
+                console.log(
+                    `  ├ slice=${sumSlice.toFixed(1)}ms | downsample=${sumDs.toFixed(1)}ms | gain=${sumGain.toFixed(1)}ms | render=${sumRender.toFixed(1)}ms | drawImage=${sumDrawImg.toFixed(1)}ms`,
+                );
+                for (const c of __clipTimings) {
+                    console.log(
+                        `  └ clip "${c.name}": interleaved=${c.interleavedLen} → ds=${c.downsampledTo} | visPx=${c.visibleWidthPx} | slice=${c.sliceMs.toFixed(2)} ds=${c.downsampleMs.toFixed(2)} gain=${c.gainMs.toFixed(2)} render=${c.renderMs.toFixed(2)} draw=${c.drawImageMs.toFixed(2)}`,
+                    );
+                }
+            }
+        };
 
-            // 构建渲染参数
-            const params: WaveformRenderParams = {
-                canvasWidth: visibleWidthPx,
-                canvasHeight: displayH,
-                centerY: displayH / 2,
-                sourceStartSec,
-                clipDuration: clip.lengthSec,
-                playbackRate: Number(clip.playbackRate ?? 1) || 1,
-                sourceDurationSec: clip.durationSec,
-                volumeGain: Number(clip.gain ?? 1) || 1,
-                fadeInSec: Number(clip.fadeInSec ?? 0) || 0,
-                fadeOutSec: Number(clip.fadeOutSec ?? 0) || 0,
-                fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
-                fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
-                dataStartSec: result.dataStartSec,
-                dataDurationSec: result.dataDurationSec,
-                clipPixelOffset,
-                clipTotalWidthPx: Math.max(1, clipWidthPx),
+        // ========================================
+        // 监听 mipmap 缓存加载完成事件，触发 invalidate
+        // ========================================
+        React.useEffect(() => {
+            const neededPaths = new Set<string>();
+            for (const clip of clips) {
+                if (clip.sourcePath) neededPaths.add(clip.sourcePath);
+            }
+
+            const unsub = waveformMipmapStore.addListener((sourcePath, status) => {
+                if (status === "done" && neededPaths.has(sourcePath)) {
+                    invalidate();
+                }
+            });
+
+            return unsub;
+        }, [clips, invalidate]);
+
+        // ========================================
+        // ★ 订阅事件总线（核心性能优化）
+        // TimelinePanel.syncScrollLeft() 直接广播 → 更新 ref → invalidate
+        // 完全绕过 React props 链路，与 PianoRoll 架构一致
+        // ========================================
+        React.useEffect(() => {
+            const unsub = timelineViewportBus.subscribe((scrollLeft, pxPerSec, viewportWidth) => {
+                // 直接更新 ref（不触发 React re-render）
+                pxPerSecRef.current = pxPerSec;
+                const vpStartSec = scrollLeft / pxPerSec;
+                const vpEndSec = vpStartSec + viewportWidth / pxPerSec;
+                viewportStartSecRef.current = vpStartSec;
+                viewportEndSecRef.current = vpEndSec;
+                viewportWidthPxRef.current = viewportWidth;
+                if (canvasRef.current) {
+                    canvasRef.current.style.transform = `translate3d(${scrollLeft}px,0,0)`;
+                }
+
+                invalidate();
+            });
+            return unsub;
+        }, [invalidate]);
+
+        // ========================================
+        // 低频 props 变化时 invalidate
+        // 仅监听 clips / waveformHeight / strokeColor 等不频繁变化的 props
+        // 高频视口参数（pxPerSec / viewportStartSec / viewportEndSec）已由事件总线处理
+        // ========================================
+        React.useEffect(() => {
+            invalidate();
+        }, [clips, waveformHeight, strokeColor, strokeWidth, viewportWidthPx, invalidate]);
+
+        // 组件卸载时取消待执行的 rAF
+        React.useEffect(() => {
+            return () => {
+                if (rafRef.current != null) {
+                    cancelAnimationFrame(rafRef.current);
+                    rafRef.current = null;
+                }
             };
+        }, []);
 
-            // 应用增益（音量 + 淡入淡出）
-            const withGains = applyGainsToPeaks(result.interleaved, params);
-
-            // 使用 clip 裁剪区域绘制
-            backCtx.save();
-            backCtx.beginPath();
-            backCtx.rect(visLeftPx, 0, visRightPx - visLeftPx, displayH);
-            backCtx.clip();
-
-            // 平移 ctx 使得 renderWaveform 的坐标从 0 开始
-            backCtx.translate(visLeftPx, 0);
-
-            // 静音 clip 半透明
-            if (clip.muted) {
-                backCtx.globalAlpha = 0.4;
-            } else {
-                backCtx.globalAlpha = 1.0;
-            }
-
-            renderWaveform(
-                backCtx,
-                withGains,
-                params,
-                strokeColor,
-                strokeWidth,
-                "line",
-            );
-
-            backCtx.restore();
-        }
-
-        console.info(
-            `[Timeline] 🎨 渲染完成 | 渲染=${renderedCount} | 跳过=${skippedCount} | 总clips=${clips.length}`,
+        // 移除原有的 canvasWidthPx 和 canvasLeftPx 的计算，直接替换 return
+        return (
+            <canvas
+                ref={canvasRef}
+                style={{
+                    position: "absolute",
+                    top: waveformTop,
+                    // height 交给 style 控制比较稳定
+                    height: waveformHeight,
+                    pointerEvents: "none",
+                    zIndex: 1,
+                    left: 0,
+                    willChange: "transform",
+                    // 移除 left 和 width
+                    // 它们属于高频变化属性，已完全交由内部 drawRef 直接操作 DOM 更新。
+                }}
+            />
         );
-
-        // 防闪烁：主 Canvas 物理尺寸只增不减，避免 canvas.width 赋值清空内容
-        ensureCanvasSize(canvas, internalW, internalH);
-
-        // CSS 尺寸控制实际显示区域
-        const nextStyleWidth = `${displayW}px`;
-        const nextStyleHeight = `${displayH}px`;
-        if (canvas.style.width !== nextStyleWidth) {
-            canvas.style.width = nextStyleWidth;
-        }
-        if (canvas.style.height !== nextStyleHeight) {
-            canvas.style.height = nextStyleHeight;
-        }
-
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-
-        // 关键：使用基于实际物理尺寸的缩放比例，而非 internalW / displayW。
-        // 当 canvas.width > internalW 时（只增不减策略），浏览器会把整个 canvas.width
-        // 映射到 CSS displayW，因此绘制时必须按 canvas.width / displayW 缩放，
-        // 才能让波形在 CSS 坐标系中的位置正确。
-        const actualScaleX = canvas.width / Math.max(1, displayW);
-        const actualScaleY = canvas.height / Math.max(1, displayH);
-        ctx.setTransform(actualScaleX, 0, 0, actualScaleY, 0, 0);
-
-        // 清除整个画布（CSS 坐标系下，displayW/H 刚好覆盖整个物理画布）
-        ctx.clearRect(0, 0, displayW, displayH);
-
-        // 将 backBuffer (internalW×internalH) 绘制到 CSS 坐标系的 (0,0,displayW,displayH)
-        // 经过 actualScale 变换后，实际写入物理像素 (0,0, canvas.width, canvas.height)
-        // 但 backBuffer 源区域只取 internalW×internalH（当前帧的实际数据）
-        ctx.drawImage(backBuffer, 0, 0, internalW, internalH, 0, 0, displayW, displayH);
-        if (ctx.globalAlpha !== 1) {
-            ctx.globalAlpha = 1;
-        }
-    }, [
-        clips,
-        canvasWidthPx,
-        waveformHeight,
-        pxPerSec,
-        bufferedStartSec,
-        bufferedEndSec,
-        strokeColor,
-        strokeWidth,
-        redrawTick,
-    ]);
-
-    return (
-        <canvas
-            ref={canvasRef}
-            style={{
-                position: "absolute",
-                left: canvasLeftPx,
-                top: waveformTop,
-                width: canvasWidthPx,
-                height: waveformHeight,
-                pointerEvents: "none",
-                zIndex: 0,
-            }}
-        />
-    );
-});
+    },
+    // ★ 自定义比较函数：忽略高频 props（pxPerSec/viewportStartSec/viewportEndSec）
+    // 这些高频参数由 timelineViewportBus 直接推送到 ref → invalidate，无需 React re-render
+    (prev, next) => {
+        return (
+            prev.clips === next.clips &&
+            prev.trackHeight === next.trackHeight &&
+            prev.waveformTop === next.waveformTop &&
+            prev.waveformHeight === next.waveformHeight &&
+            prev.viewportWidthPx === next.viewportWidthPx &&
+            prev.strokeColor === next.strokeColor &&
+            prev.strokeWidth === next.strokeWidth
+            // 故意不比较 pxPerSec / viewportStartSec / viewportEndSec
+        );
+    },
+);

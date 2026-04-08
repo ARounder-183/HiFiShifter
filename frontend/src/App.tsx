@@ -24,22 +24,15 @@ import {
     importAudioFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
-    exportAudio,
-    pickOutputPath,
+    setTrackMeters,
     setToolMode,
     checkpointHistory,
     addTrackRemote,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
-import {
-    PitchAnalysisProvider,
-    usePitchAnalysis,
-} from "./contexts/PitchAnalysisContext";
-import {
-    PianoRollStatusProvider,
-    usePianoRollStatus,
-} from "./contexts/PianoRollStatusContext";
+import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
+import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
@@ -99,12 +92,10 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
 };
 
-function detectExternalActionKindFromPath(
-    path: string,
-): ExternalFileActionKind | null {
+function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
     const normalized = String(path ?? "").trim();
     if (!normalized) return null;
-    if (/\.(hshp|hsp)$/i.test(normalized)) return "openProject";
+    if (/\.(hshp|hsp|json)$/i.test(normalized)) return "openProject";
     if (/\.rpp$/i.test(normalized)) return "importReaper";
     if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
     if (/\.(wav|flac|mp3|ogg|m4a|aac|aif|aiff|wma|opus)$/i.test(normalized)) {
@@ -122,18 +113,11 @@ function AppInner() {
     const status = useAppSelector((state) => state.session.status);
     const error = useAppSelector((state) => state.session.error);
 
-    const runtimeIsPlaying = useAppSelector(
-        (state) => state.session.runtime.isPlaying,
-    );
-    const runtimeHasSynthesized = useAppSelector(
-        (state) => state.session.runtime.hasSynthesized,
-    );
-    const fileBrowserVisible = useAppSelector(
-        (state) => state.fileBrowser.visible,
-    );
+    const runtimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
+    const runtimeHasSynthesized = useAppSelector((state) => state.session.runtime.hasSynthesized);
+    const fileBrowserVisible = useAppSelector((state) => state.fileBrowser.visible);
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
-    const outputPath = useAppSelector((state) => state.session.outputPath);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
     // 使用 ref 桥接最新的工程修改状态
     const projectDirtyRef = useRef(projectDirty);
@@ -152,9 +136,7 @@ function AppInner() {
     const dragRef = useRef<{ pointerId: number } | null>(null);
     const [splitRatio, setSplitRatio] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.splitRatio"));
-        return Number.isFinite(stored)
-            ? Math.min(0.85, Math.max(0.15, stored))
-            : 0.6;
+        return Number.isFinite(stored) ? Math.min(0.85, Math.max(0.15, stored)) : 0.6;
     });
     const splitRatioRef = useRef(splitRatio);
     const [isDragging, setIsDragging] = useState(false);
@@ -169,12 +151,8 @@ function AppInner() {
     }>({ open: false, missingPath: "" });
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
-    const missingFileResolverRef = useRef<
-        ((shouldPick: boolean) => void) | null
-    >(null);
-    const processorParamCacheRef = useRef(
-        new Map<string, ProcessorParamDescriptor[]>(),
-    );
+    const missingFileResolverRef = useRef<((shouldPick: boolean) => void) | null>(null);
+    const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
 
     const splitter = useMemo(() => {
         const minTopPx = 200;
@@ -191,10 +169,7 @@ function AppInner() {
             if (!el) return null;
             const rect = el.getBoundingClientRect();
             const total = rect.height;
-            if (
-                !Number.isFinite(total) ||
-                total <= minTopPx + minBottomPx + handlePx
-            ) {
+            if (!Number.isFinite(total) || total <= minTopPx + minBottomPx + handlePx) {
                 return null;
             }
             const y = clientY - rect.top;
@@ -227,10 +202,7 @@ function AppInner() {
 
             // 只在松开鼠标的最后一刻，才把最终状态同步给 React 并持久化
             setSplitRatio(splitRatioRef.current);
-            localStorage.setItem(
-                "hifishifter.splitRatio",
-                String(splitRatioRef.current),
-            );
+            localStorage.setItem("hifishifter.splitRatio", String(splitRatioRef.current));
 
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", endDrag);
@@ -298,8 +270,7 @@ function AppInner() {
         }
         function preventContextMenu(e: MouseEvent) {
             const target = e.target as HTMLElement | null;
-            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA")
-                return;
+            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
             if (target?.closest?.("[data-hs-context-menu]")) return;
             e.preventDefault();
         }
@@ -323,11 +294,7 @@ function AppInner() {
             window.removeEventListener("keydown", preventBrowserFind, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
-            document.removeEventListener(
-                "contextmenu",
-                preventContextMenu,
-                true,
-            );
+            document.removeEventListener("contextmenu", preventContextMenu, true);
         };
     }, []);
 
@@ -342,18 +309,10 @@ function AppInner() {
               if (pitchAnalysis.currentClip) {
                   parts.push(`"${pitchAnalysis.currentClip}"`);
               }
-              if (
-                  pitchAnalysis.totalClips != null &&
-                  pitchAnalysis.totalClips > 0
-              ) {
-                  parts.push(
-                      `(${pitchAnalysis.completedClips ?? 0}/${pitchAnalysis.totalClips})`,
-                  );
+              if (pitchAnalysis.totalClips != null && pitchAnalysis.totalClips > 0) {
+                  parts.push(`(${pitchAnalysis.completedClips ?? 0}/${pitchAnalysis.totalClips})`);
               }
-              if (
-                  pitchAnalysis.progress != null &&
-                  Number.isFinite(pitchAnalysis.progress)
-              ) {
+              if (pitchAnalysis.progress != null && Number.isFinite(pitchAnalysis.progress)) {
                   parts.push(`${Math.round(pitchAnalysis.progress * 100)}%`);
               }
               return parts.join(" ");
@@ -386,22 +345,17 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen(
-                    "stretch_progress",
-                    (event: any) => {
-                        if (disposed) return;
-                        const payload = (event?.payload ?? {}) as {
-                            active?: boolean;
-                            clipName?: string | null;
-                        };
-                        const active = Boolean(payload?.active);
-                        const clipName =
-                            typeof payload?.clipName === "string"
-                                ? payload.clipName
-                                : null;
-                        setStretching({ active, clipName });
-                    },
-                );
+                unlisten = await mod.listen("stretch_progress", (event: any) => {
+                    if (disposed) return;
+                    const payload = (event?.payload ?? {}) as {
+                        active?: boolean;
+                        clipName?: string | null;
+                    };
+                    const active = Boolean(payload?.active);
+                    const clipName =
+                        typeof payload?.clipName === "string" ? payload.clipName : null;
+                    setStretching({ active, clipName });
+                });
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -414,76 +368,150 @@ function AppInner() {
         };
     }, []);
 
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen("track_meter", (event: any) => {
+                    if (disposed) return;
+                    const payload = (event?.payload ?? {}) as {
+                        tracks?: Array<{
+                            trackId?: string;
+                            peakLinear?: number;
+                            maxPeakLinear?: number;
+                            clipped?: boolean;
+                        }>;
+                    };
+                    const next: Record<
+                        string,
+                        {
+                            peakLinear: number;
+                            maxPeakLinear: number;
+                            clipped: boolean;
+                        }
+                    > = {};
+
+                    for (const entry of payload?.tracks ?? []) {
+                        if (typeof entry?.trackId !== "string" || !entry.trackId) {
+                            continue;
+                        }
+                        next[entry.trackId] = {
+                            peakLinear:
+                                typeof entry.peakLinear === "number" &&
+                                Number.isFinite(entry.peakLinear)
+                                    ? Math.max(0, entry.peakLinear)
+                                    : 0,
+                            maxPeakLinear:
+                                typeof entry.maxPeakLinear === "number" &&
+                                Number.isFinite(entry.maxPeakLinear)
+                                    ? Math.max(0, entry.maxPeakLinear)
+                                    : 0,
+                            clipped: Boolean(entry.clipped),
+                        };
+                    }
+
+                    dispatch(setTrackMeters(next));
+                });
+            } catch {
+                // Safe no-op for non-Tauri builds.
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, [dispatch]);
+
     // 监听后端波形分析进度事件 (waveform_analysis_progress)
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
         let fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
+        // 跟踪当前显示的进度值，用于防止进度回退导致的跳动
+        let currentProgress = -1;
+        // 跟踪当前正在 computing 的 sourcePath，用于判断是否为同一文件
+        let currentComputingPath: string | null = null;
 
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen(
-                    "waveform_analysis_progress",
-                    (event: any) => {
-                        if (disposed) return;
-                        const payload = (event?.payload ?? {}) as {
-                            sourcePath?: string;
-                            progress?: number;
-                            status?: string;
-                        };
-                        const status = payload?.status ?? "";
-                        const sourcePath =
-                            typeof payload?.sourcePath === "string"
-                                ? payload.sourcePath
-                                : null;
-                        const p =
-                            typeof payload?.progress === "number" &&
-                            Number.isFinite(payload.progress)
-                                ? Math.max(0, Math.min(1, payload.progress))
-                                : null;
+                unlisten = await mod.listen("waveform_analysis_progress", (event: any) => {
+                    if (disposed) return;
+                    const payload = (event?.payload ?? {}) as {
+                        sourcePath?: string;
+                        progress?: number;
+                        status?: string;
+                    };
+                    const status = payload?.status ?? "";
+                    const sourcePath =
+                        typeof payload?.sourcePath === "string" ? payload.sourcePath : null;
+                    const p =
+                        typeof payload?.progress === "number" && Number.isFinite(payload.progress)
+                            ? Math.max(0, Math.min(1, payload.progress))
+                            : null;
 
-                        if (status === "computing") {
-                            // 清除之前的淡出定时器
-                            if (fadeOutTimer) {
-                                clearTimeout(fadeOutTimer);
-                                fadeOutTimer = null;
-                            }
-                            // 提取文件名（不含路径和扩展名）
-                            const fileName = sourcePath
-                                ? (sourcePath
-                                      .replace(/\\/g, "/")
-                                      .split("/")
-                                      .pop()
-                                      ?.replace(/\.[^.]+$/, "") ?? sourcePath)
-                                : null;
+                    if (status === "computing") {
+                        // 如果已在显示进度且新进度比当前低，忽略（防止并发去重后
+                        // 残留的事件或不同触发点导致进度回退）
+                        if (
+                            currentProgress > 0 &&
+                            p !== null &&
+                            p < currentProgress &&
+                            // 同一文件的进度回退才忽略；不同文件的 0 是正常的
+                            currentComputingPath === sourcePath
+                        ) {
+                            return;
+                        }
+
+                        // 清除之前的淡出定时器
+                        if (fadeOutTimer) {
+                            clearTimeout(fadeOutTimer);
+                            fadeOutTimer = null;
+                        }
+                        currentProgress = p ?? 0;
+                        currentComputingPath = sourcePath;
+                        // 提取文件名（不含路径和扩展名）
+                        const fileName = sourcePath
+                            ? (sourcePath
+                                  .replace(/\\/g, "/")
+                                  .split("/")
+                                  .pop()
+                                  ?.replace(/\.[^.]+$/, "") ?? sourcePath)
+                            : null;
+                        setWaveformAnalysis({
+                            active: true,
+                            sourcePath: fileName,
+                            progress: p,
+                        });
+                    } else if (status === "done" || status === "cached") {
+                        // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
+                        if (status === "done") {
+                            currentProgress = 1.0;
+                            currentComputingPath = null;
                             setWaveformAnalysis({
                                 active: true,
-                                sourcePath: fileName,
-                                progress: p,
+                                sourcePath: null,
+                                progress: 1.0,
                             });
-                        } else if (status === "done" || status === "cached") {
-                            // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
-                            if (status === "done") {
-                                setWaveformAnalysis({
-                                    active: true,
-                                    sourcePath: null,
-                                    progress: 1.0,
-                                });
-                                fadeOutTimer = setTimeout(() => {
-                                    if (!disposed) {
-                                        setWaveformAnalysis({
-                                            active: false,
-                                            sourcePath: null,
-                                            progress: null,
-                                        });
-                                    }
-                                }, 1500);
-                            }
-                            // cached 状态不显示进度条
+                            fadeOutTimer = setTimeout(() => {
+                                if (!disposed) {
+                                    currentProgress = -1;
+                                    setWaveformAnalysis({
+                                        active: false,
+                                        sourcePath: null,
+                                        progress: null,
+                                    });
+                                }
+                            }, 1500);
                         }
-                    },
-                );
+                        // cached 状态不显示进度条
+                    }
+                });
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -505,38 +533,32 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen(
-                    "playback_rendering_state",
-                    (event: any) => {
-                        if (disposed) return;
-                        const payload = (event?.payload ?? {}) as {
-                            active?: boolean;
-                            progress?: number | null;
-                            target?: string | null;
-                        };
-                        const active = Boolean(payload?.active);
-                        const pRaw = payload?.progress;
-                        const p =
-                            typeof pRaw === "number" && Number.isFinite(pRaw)
-                                ? Math.max(0, Math.min(1, pRaw))
-                                : null;
-                        const target =
-                            typeof payload?.target === "string"
-                                ? payload.target
-                                : null;
+                unlisten = await mod.listen("playback_rendering_state", (event: any) => {
+                    if (disposed) return;
+                    const payload = (event?.payload ?? {}) as {
+                        active?: boolean;
+                        progress?: number | null;
+                        target?: string | null;
+                    };
+                    const active = Boolean(payload?.active);
+                    const pRaw = payload?.progress;
+                    const p =
+                        typeof pRaw === "number" && Number.isFinite(pRaw)
+                            ? Math.max(0, Math.min(1, pRaw))
+                            : null;
+                    const target = typeof payload?.target === "string" ? payload.target : null;
 
-                        setRendering({ active, progress: p, target });
+                    setRendering({ active, progress: p, target });
 
-                        // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
-                        // 使前端能感知后端已真正开始播放。
-                        if (!active && renderingWasActiveRef.current) {
-                            setTimeout(() => {
-                                dispatch(syncPlaybackState());
-                            }, 200);
-                        }
-                        renderingWasActiveRef.current = active;
-                    },
-                );
+                    // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
+                    // 使前端能感知后端已真正开始播放。
+                    if (!active && renderingWasActiveRef.current) {
+                        setTimeout(() => {
+                            dispatch(syncPlaybackState());
+                        }, 200);
+                    }
+                    renderingWasActiveRef.current = active;
+                });
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -553,10 +575,8 @@ function AppInner() {
         isPlaying: false,
         hasSynthesized: false,
         toolMode: "draw" as import("./features/session/sessionTypes").ToolMode,
-        drawToolMode:
-            "draw" as import("./features/session/sessionTypes").DrawToolMode,
+        drawToolMode: "draw" as import("./features/session/sessionTypes").DrawToolMode,
     });
-    const outputPathRef = useRef(outputPath);
 
     const playbackSyncInFlightRef = useRef(false);
     const renderingWasActiveRef = useRef(false);
@@ -731,10 +751,7 @@ function AppInner() {
 
         window.addEventListener(OPEN_PROJECT_PATH_EVENT, onOpenProjectPath as EventListener);
         return () => {
-            window.removeEventListener(
-                OPEN_PROJECT_PATH_EVENT,
-                onOpenProjectPath as EventListener,
-            );
+            window.removeEventListener(OPEN_PROJECT_PATH_EVENT, onOpenProjectPath as EventListener);
         };
     }, [handleExternalFileAction]);
 
@@ -748,10 +765,6 @@ function AppInner() {
     }, [runtimeIsPlaying, runtimeHasSynthesized, toolMode, drawToolMode]);
 
     useEffect(() => {
-        outputPathRef.current = outputPath;
-    }, [outputPath]);
-
-    useEffect(() => {
         const handler = (event: Event) => {
             const detail = (
                 event as CustomEvent<{
@@ -763,21 +776,12 @@ function AppInner() {
             missingFileResolverRef.current = detail.resolve;
             setMissingFileDialog({
                 open: true,
-                missingPath:
-                    typeof detail.missingPath === "string"
-                        ? detail.missingPath
-                        : "",
+                missingPath: typeof detail.missingPath === "string" ? detail.missingPath : "",
             });
         };
-        window.addEventListener(
-            MISSING_FILE_CONFIRM_EVENT,
-            handler as EventListener,
-        );
+        window.addEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
         return () => {
-            window.removeEventListener(
-                MISSING_FILE_CONFIRM_EVENT,
-                handler as EventListener,
-            );
+            window.removeEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
             if (missingFileResolverRef.current) {
                 missingFileResolverRef.current(false);
                 missingFileResolverRef.current = null;
@@ -793,22 +797,20 @@ function AppInner() {
             try {
                 const mod = await import("@tauri-apps/api/window");
                 const currentWindow = mod.getCurrentWindow();
-                unlisten = await currentWindow.onCloseRequested(
-                    (event: CloseRequestedEvent) => {
-                        if (allowWindowCloseRef.current) {
-                            allowWindowCloseRef.current = false;
-                            return;
-                        }
-                        // 读取 ref 的值，无需重建整个监听器
-                        if (!projectDirtyRef.current) {
-                            return;
-                        }
-                        event.preventDefault();
-                        if (!disposed) {
-                            promptUnsavedAction("exit", closeWindowNow);
-                        }
-                    },
-                );
+                unlisten = await currentWindow.onCloseRequested((event: CloseRequestedEvent) => {
+                    if (allowWindowCloseRef.current) {
+                        allowWindowCloseRef.current = false;
+                        return;
+                    }
+                    // 读取 ref 的值，无需重建整个监听器
+                    if (!projectDirtyRef.current) {
+                        return;
+                    }
+                    event.preventDefault();
+                    if (!disposed) {
+                        promptUnsavedAction("exit", closeWindowNow);
+                    }
+                });
             } catch {}
         }
 
@@ -832,9 +834,7 @@ function AppInner() {
                     break;
                 case "playback.stop":
                     if (runtimeRef.current.isPlaying) {
-                        void dispatch(
-                            stopAudioPlayback({ restoreAnchor: true }),
-                        );
+                        void dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     } else {
                         void dispatch(playOriginal());
                     }
@@ -903,18 +903,11 @@ function AppInner() {
                     void dispatch(saveProjectAsRemote());
                     break;
                 case "project.export":
-                    void (async () => {
-                        const curPath = outputPathRef.current?.trim();
-                        if (!curPath) {
-                            const picked =
-                                await dispatch(pickOutputPath()).unwrap();
-                            if (picked.ok && !picked.canceled && picked.path) {
-                                await dispatch(exportAudio(picked.path));
-                            }
-                            return;
-                        }
-                        await dispatch(exportAudio(curPath));
-                    })();
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:openEditDialog", {
+                            detail: { dialog: "exportAudio" },
+                        }),
+                    );
                     break;
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
@@ -943,107 +936,77 @@ function AppInner() {
                     void dispatch(addTrackRemote({ parentTrackId: parentId }));
                     break;
                 }
+                case "track.selectUp":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:selectAdjacentTrack", {
+                            detail: { direction: -1 },
+                        }),
+                    );
+                    break;
+                case "track.selectDown":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:selectAdjacentTrack", {
+                            detail: { direction: 1 },
+                        }),
+                    );
+                    break;
                 case "pianoRoll.shiftParamUp":
                 case "pianoRoll.shiftParamDown": {
                     const isUp = actionId === "pianoRoll.shiftParamUp";
                     const ss = store.getState().session;
-                    const rootTrkId = resolveRootTrackId(
-                        ss.tracks,
-                        ss.selectedTrackId,
-                    );
+                    const rootTrkId = resolveRootTrackId(ss.tracks, ss.selectedTrackId);
                     if (!rootTrkId) break;
                     const editP = ss.editParam;
                     const rootTrk = ss.tracks.find((tr) => tr.id === rootTrkId);
                     // pitch 参数需要 pitch 分析可用才能操作
                     if (editP === "pitch") {
-                        if (
-                            !rootTrk?.composeEnabled ||
-                            rootTrk.pitchAnalysisAlgo === "none"
-                        )
-                            break;
+                        if (!rootTrk?.composeEnabled || rootTrk.pitchAnalysisAlgo === "none") break;
                     }
                     const selClipId = ss.selectedClipId;
                     // 优先使用多选 clip 列表，否则 fallback 到单选
                     const multiIds = ss.multiSelectedClipIds;
-                    const clipIds =
-                        multiIds.length >= 1
-                            ? multiIds
-                            : selClipId
-                              ? [selClipId]
-                              : [];
+                    const clipIds = multiIds.length >= 1 ? multiIds : selClipId ? [selClipId] : [];
                     if (clipIds.length === 0) break;
-                    const selClips = ss.clips.filter((c) =>
-                        clipIds.includes(c.id),
-                    );
+                    const selClips = ss.clips.filter((c) => clipIds.includes(c.id));
                     if (selClips.length === 0) break;
                     const minSec = Math.min(...selClips.map((c) => c.startSec));
-                    const maxSec = Math.max(
-                        ...selClips.map((c) => c.startSec + c.lengthSec),
-                    );
+                    const maxSec = Math.max(...selClips.map((c) => c.startSec + c.lengthSec));
                     // 默认 framePeriodMs = 5
                     const fp = 5;
-                    const startFrame = Math.max(
-                        0,
-                        Math.floor((minSec * 1000) / fp),
-                    );
+                    const startFrame = Math.max(0, Math.floor((minSec * 1000) / fp));
                     const frameCount = Math.max(
                         1,
-                        Math.min(
-                            200_000,
-                            Math.ceil(((maxSec - minSec) * 1000) / fp),
-                        ),
+                        Math.min(200_000, Math.ceil(((maxSec - minSec) * 1000) / fp)),
                     );
                     void (async () => {
                         let descriptor: ProcessorParamDescriptor | undefined;
                         if (editP !== "pitch" && rootTrk?.pitchAnalysisAlgo) {
                             const algo = rootTrk.pitchAnalysisAlgo;
-                            let descriptors =
-                                processorParamCacheRef.current.get(algo);
+                            let descriptors = processorParamCacheRef.current.get(algo);
                             if (!descriptors) {
                                 try {
-                                    descriptors =
-                                        await paramsApi.getProcessorParams(
-                                            algo,
-                                        );
-                                    processorParamCacheRef.current.set(
-                                        algo,
-                                        descriptors,
-                                    );
+                                    descriptors = await paramsApi.getProcessorParams(algo);
+                                    processorParamCacheRef.current.set(algo, descriptors);
                                 } catch {
                                     descriptors = undefined;
                                 }
                             }
-                            descriptor = descriptors?.find(
-                                (param) => param.id === editP,
-                            );
+                            descriptor = descriptors?.find((param) => param.id === editP);
                         }
                         const step = getParamShiftStep(editP, descriptor);
                         const delta = isUp ? step : -step;
-                        const clampNum = (
-                            v: number,
-                            minV: number,
-                            maxV: number,
-                        ) => Math.min(maxV, Math.max(minV, v));
-                        const smoothness = clampNum(
-                            Number(ss.edgeSmoothnessPercent) || 0,
-                            0,
-                            100,
-                        );
+                        const clampNum = (v: number, minV: number, maxV: number) =>
+                            Math.min(maxV, Math.max(minV, v));
+                        const smoothness = clampNum(Number(ss.edgeSmoothnessPercent) || 0, 0, 100);
                         const maxTransitionFrames = Math.floor(frameCount / 2);
                         const transitionFrames =
                             smoothness > 0 && maxTransitionFrames > 0
-                                ? Math.round(
-                                      (smoothness / 100) * maxTransitionFrames,
-                                  )
+                                ? Math.round((smoothness / 100) * maxTransitionFrames)
                                 : 0;
-                        const halfSpan =
-                            transitionFrames > 0 ? transitionFrames / 2 : 0;
+                        const halfSpan = transitionFrames > 0 ? transitionFrames / 2 : 0;
                         const extend = Math.max(0, Math.ceil(halfSpan));
                         const extStart = Math.max(0, startFrame - extend);
-                        const extCount =
-                            frameCount +
-                            Math.max(0, startFrame - extStart) +
-                            extend;
+                        const extCount = frameCount + Math.max(0, startFrame - extStart) + extend;
                         const selOffset = startFrame - extStart;
 
                         const extRes = await paramsApi.getParamFrames(
@@ -1055,15 +1018,10 @@ function AppInner() {
                         );
                         if (!extRes?.ok) return;
                         const extPayload = extRes as ParamFramesPayload;
-                        const beforeDense = (extPayload.edit ?? []).map(
-                            (v) => Number(v) || 0,
-                        );
+                        const beforeDense = (extPayload.edit ?? []).map((v) => Number(v) || 0);
                         if (beforeDense.length === 0) return;
 
-                        const selEnd = Math.min(
-                            beforeDense.length - 1,
-                            selOffset + frameCount - 1,
-                        );
+                        const selEnd = Math.min(beforeDense.length - 1, selOffset + frameCount - 1);
                         if (
                             selOffset < 0 ||
                             selOffset >= beforeDense.length ||
@@ -1118,9 +1076,7 @@ function AppInner() {
                                 boundaryCount += 1;
                             }
                             const boundaryMean =
-                                boundaryCount > 0
-                                    ? boundaryDelta / boundaryCount
-                                    : 0;
+                                boundaryCount > 0 ? boundaryDelta / boundaryCount : 0;
                             const changeFactor = clampNum(
                                 meanDelta / (meanDelta + boundaryMean + 1e-6),
                                 0,
@@ -1131,85 +1087,47 @@ function AppInner() {
                                 const snapshot = editedDense.slice();
                                 const span = Math.max(1e-9, 2 * halfSpan);
                                 if (selOffset > 0) {
-                                    const left = Math.max(
-                                        0,
-                                        Math.floor(selOffset - halfSpan),
-                                    );
+                                    const left = Math.max(0, Math.floor(selOffset - halfSpan));
                                     const right = Math.min(
                                         editedDense.length - 1,
                                         Math.ceil(selOffset + halfSpan),
                                     );
-                                    for (
-                                        let idx = left;
-                                        idx <= right;
-                                        idx += 1
-                                    ) {
+                                    for (let idx = left; idx <= right; idx += 1) {
                                         const t = clampNum(
-                                            (idx - (selOffset - halfSpan)) /
-                                                span,
+                                            (idx - (selOffset - halfSpan)) / span,
                                             0,
                                             1,
                                         );
-                                        const outsideIdx = Math.min(
-                                            selOffset - 1,
-                                            idx,
-                                        );
-                                        const insideIdx = Math.max(
-                                            selOffset,
-                                            idx,
-                                        );
-                                        const outsideVal =
-                                            snapshot[outsideIdx] ??
-                                            editedDense[idx];
-                                        const insideVal =
-                                            snapshot[insideIdx] ??
-                                            editedDense[idx];
-                                        const smoothed =
-                                            outsideVal +
-                                            (insideVal - outsideVal) * t;
+                                        const outsideIdx = Math.min(selOffset - 1, idx);
+                                        const insideIdx = Math.max(selOffset, idx);
+                                        const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
+                                        const insideVal = snapshot[insideIdx] ?? editedDense[idx];
+                                        const smoothed = outsideVal + (insideVal - outsideVal) * t;
                                         editedDense[idx] =
                                             snapshot[idx] +
-                                            (smoothed - snapshot[idx]) *
-                                                changeFactor;
+                                            (smoothed - snapshot[idx]) * changeFactor;
                                     }
                                 }
                                 if (selEnd < editedDense.length - 1) {
-                                    const left = Math.max(
-                                        0,
-                                        Math.floor(selEnd - halfSpan),
-                                    );
+                                    const left = Math.max(0, Math.floor(selEnd - halfSpan));
                                     const right = Math.min(
                                         editedDense.length - 1,
                                         Math.ceil(selEnd + halfSpan),
                                     );
-                                    for (
-                                        let idx = left;
-                                        idx <= right;
-                                        idx += 1
-                                    ) {
+                                    for (let idx = left; idx <= right; idx += 1) {
                                         const t = clampNum(
                                             (idx - (selEnd - halfSpan)) / span,
                                             0,
                                             1,
                                         );
                                         const insideIdx = Math.min(selEnd, idx);
-                                        const outsideIdx = Math.max(
-                                            selEnd + 1,
-                                            idx,
-                                        );
-                                        const insideVal =
-                                            snapshot[insideIdx] ??
-                                            editedDense[idx];
-                                        const outsideVal =
-                                            snapshot[outsideIdx] ??
-                                            editedDense[idx];
-                                        const smoothed =
-                                            insideVal +
-                                            (outsideVal - insideVal) * t;
+                                        const outsideIdx = Math.max(selEnd + 1, idx);
+                                        const insideVal = snapshot[insideIdx] ?? editedDense[idx];
+                                        const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
+                                        const smoothed = insideVal + (outsideVal - insideVal) * t;
                                         editedDense[idx] =
                                             snapshot[idx] +
-                                            (smoothed - snapshot[idx]) *
-                                                changeFactor;
+                                            (smoothed - snapshot[idx]) * changeFactor;
                                     }
                                 }
                             }
@@ -1233,8 +1151,7 @@ function AppInner() {
                         new CustomEvent("hifi:editOp", {
                             detail: {
                                 op:
-                                    actionId ===
-                                    "pianoRoll.shiftParamUpSelection"
+                                    actionId === "pianoRoll.shiftParamUpSelection"
                                         ? "shiftParamUpSelection"
                                         : "shiftParamDownSelection",
                             },
@@ -1278,9 +1195,7 @@ function AppInner() {
             if (rendering.active) return;
             if (playbackSyncInFlightRef.current) return;
             playbackSyncInFlightRef.current = true;
-            const p = dispatch(
-                syncPlaybackState(),
-            ) as unknown as Promise<unknown>;
+            const p = dispatch(syncPlaybackState()) as unknown as Promise<unknown>;
             p.finally(() => {
                 playbackSyncInFlightRef.current = false;
             });
@@ -1319,9 +1234,7 @@ function AppInner() {
             >
                 <Dialog.Content maxWidth="620px">
                     <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t("vs_import_skipped_header")}
-                    </Dialog.Description>
+                    <Dialog.Description>{t("vs_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" title={file}>
@@ -1330,11 +1243,7 @@ function AppInner() {
                         ))}
                     </div>
                     <Flex justify="end" mt="3">
-                        <Button
-                            onClick={() =>
-                                dispatch(closeVocalShifterSkippedFilesDialog())
-                            }
-                        >
+                        <Button onClick={() => dispatch(closeVocalShifterSkippedFilesDialog())}>
                             {"OK"}
                         </Button>
                     </Flex>
@@ -1351,9 +1260,7 @@ function AppInner() {
             >
                 <Dialog.Content maxWidth="620px">
                     <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t("reaper_import_skipped_header")}
-                    </Dialog.Description>
+                    <Dialog.Description>{t("reaper_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
                             <div key={file} className="truncate" title={file}>
@@ -1362,11 +1269,7 @@ function AppInner() {
                         ))}
                     </div>
                     <Flex justify="end" mt="3">
-                        <Button
-                            onClick={() =>
-                                dispatch(closeReaperSkippedFilesDialog())
-                            }
-                        >
+                        <Button onClick={() => dispatch(closeReaperSkippedFilesDialog())}>
                             {"OK"}
                         </Button>
                     </Flex>
@@ -1391,23 +1294,13 @@ function AppInner() {
                         )}
                     </Dialog.Description>
                     <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={cancelUnsavedAction}
-                        >
+                        <Button variant="soft" color="gray" onClick={cancelUnsavedAction}>
                             {t("progress_cancel")}
                         </Button>
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={discardUnsavedAndContinue}
-                        >
+                        <Button variant="soft" color="gray" onClick={discardUnsavedAndContinue}>
                             {t("unsaved_changes_discard")}
                         </Button>
-                        <Button onClick={saveUnsavedAndContinue}>
-                            {t("menu_save_project")}
-                        </Button>
+                        <Button onClick={saveUnsavedAndContinue}>{t("menu_save_project")}</Button>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>
@@ -1428,12 +1321,8 @@ function AppInner() {
                 }}
             >
                 <Dialog.Content maxWidth="560px">
-                    <Dialog.Title>
-                        {t("missing_file_replace_title")}
-                    </Dialog.Title>
-                    <Dialog.Description>
-                        {t("missing_file_replace_desc")}
-                    </Dialog.Description>
+                    <Dialog.Title>{t("missing_file_replace_title")}</Dialog.Title>
+                    <Dialog.Description>{t("missing_file_replace_desc")}</Dialog.Description>
                     <div className="mt-2 rounded border border-qt-border bg-qt-base p-2 text-xs break-all">
                         {missingFileDialog.missingPath}
                     </div>
@@ -1483,10 +1372,7 @@ function AppInner() {
             {/* Main Content Area: Splitter + optional File Browser */}
             <Flex className="flex-1 min-h-0">
                 {/* Left: Timeline / PianoRoll vertical splitter */}
-                <div
-                    ref={containerRef}
-                    className="flex-1 min-w-0 min-h-0 flex flex-col"
-                >
+                <div ref={containerRef} className="flex-1 min-w-0 min-h-0 flex flex-col">
                     {/* Top: Timeline / Tracks */}
                     <Box
                         className="min-h-[200px] border-b border-qt-border relative bg-qt-base"
@@ -1522,10 +1408,7 @@ function AppInner() {
             </Flex>
 
             {/* Quick Search Popup */}
-            <QuickSearchPopup
-                open={quickSearchOpen}
-                onClose={() => setQuickSearchOpen(false)}
-            />
+            <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />
 
             {/* Status Bar */}
             <Flex
@@ -1545,9 +1428,7 @@ function AppInner() {
                             }}
                         >
                             {t("status_stretching")}
-                            {stretching.clipName
-                                ? ` "${stretching.clipName}"`
-                                : ""}
+                            {stretching.clipName ? ` "${stretching.clipName}"` : ""}
                         </span>
                     ) : null}
                     {waveformAnalysis.active ? (
@@ -1561,9 +1442,7 @@ function AppInner() {
                             }}
                         >
                             {"Analyzing waveform"}
-                            {waveformAnalysis.sourcePath
-                                ? ` "${waveformAnalysis.sourcePath}"`
-                                : ""}
+                            {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
                             {waveformAnalysis.progress != null
                                 ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
                                 : ""}
@@ -1605,8 +1484,7 @@ function AppInner() {
                                 lineHeight: "16px",
                             }}
                         >
-                            {t("refreshing_pitch_data") ||
-                                "Refreshing pitch data"}
+                            {t("refreshing_pitch_data") || "Refreshing pitch data"}
                             {pianoRollStatus.asyncRefreshProgress > 0
                                 ? ` ${Math.round(pianoRollStatus.asyncRefreshProgress)}%`
                                 : ""}
@@ -1628,11 +1506,7 @@ function AppInner() {
                                 : ""}
                         </span>
                     ) : null}
-                    <Text
-                        size="1"
-                        color={error ? "red" : "gray"}
-                        className="truncate"
-                    >
+                    <Text size="1" color={error ? "red" : "gray"} className="truncate">
                         {errorText}
                     </Text>
                 </Flex>

@@ -59,9 +59,7 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
  * @param buffer - 二进制数据（ArrayBuffer）
  * @returns 解码后的数据，或 null（数据无效时）
  */
-export function decodeWaveformBinary(
-    buffer: ArrayBuffer,
-): WaveformMipmapBinary | null {
+export function decodeWaveformBinary(buffer: ArrayBuffer): WaveformMipmapBinary | null {
     if (buffer.byteLength < HEADER_SIZE) return null;
 
     const view = new DataView(buffer);
@@ -85,11 +83,7 @@ export function decodeWaveformBinary(
 
     // Float32Array 视图（零拷贝，直接引用原始 buffer）
     const min = new Float32Array(buffer, HEADER_SIZE, peakCount);
-    const max = new Float32Array(
-        buffer,
-        HEADER_SIZE + peakCount * 4,
-        peakCount,
-    );
+    const max = new Float32Array(buffer, HEADER_SIZE + peakCount * 4, peakCount);
 
     return { sampleRate, divisionFactor, peakCount, level, min, max };
 }
@@ -100,12 +94,8 @@ export function decodeWaveformBinary(
  * 便捷方法，合并 base64ToArrayBuffer + decodeWaveformBinary。
  * 替代旧版 decodeWaveformFromNumberArray（基于 JSON number[] 的低效方案）。
  */
-export function decodeWaveformFromBase64(
-    base64: string,
-): WaveformMipmapBinary | null {
+export function decodeWaveformFromBase64(base64: string): WaveformMipmapBinary | null {
     if (!base64 || base64.length < HEADER_SIZE) return null;
     const buffer = base64ToArrayBuffer(base64);
     return decodeWaveformBinary(buffer);
 }
-
-

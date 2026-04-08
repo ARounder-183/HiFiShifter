@@ -12,6 +12,7 @@ pub(crate) mod schedule;
 // 公开 API — 供 crate 内其他模块使用
 pub use schedule::maybe_schedule_pitch_orig;
 
+#[allow(dead_code)]
 pub(crate) fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
         return 0.0;
@@ -92,15 +93,15 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
         PitchAnalysisAlgo::Unknown => b"unknown",
     });
 
-    // If WORLD is selected, include its availability so we can cache the
-    // unavailable state but still recompute when the DLL becomes available.
+    // Include detector availability so unavailable states can be cached and
+    // recomputed when the detector becomes available.
     if matches!(
         algo,
         PitchAnalysisAlgo::WorldDll
             | PitchAnalysisAlgo::NsfHifiganOnnx
             | PitchAnalysisAlgo::Unknown
     ) {
-        hasher.update(&[if crate::world::is_available() { 1 } else { 0 }]);
+        hasher.update(&[if crate::fcpe_onnx::is_available() { 1 } else { 0 }]);
     }
 
     // Include each clip mapped to this root track.
@@ -137,12 +138,16 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
 pub(crate) struct PitchJob {
     pub(crate) root_track_id: String,
     pub(crate) key: String,
+    #[allow(dead_code)]
     pub(crate) frame_period_ms: f64,
+    #[allow(dead_code)]
     pub(crate) target_frames: usize,
+    #[allow(dead_code)]
     pub(crate) algo: PitchAnalysisAlgo,
 
     /// Root-subtree timeline snapshot used for root-mix analysis.
     /// This matches what the parameter panel background waveform shows.
+    #[allow(dead_code)]
     pub(crate) timeline: TimelineState,
 }
 
@@ -172,6 +177,7 @@ pub struct PitchOrigAnalysisProgressEvent {
     pub total_clips: u32,
 }
 
+#[allow(dead_code)]
 pub(crate) fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
     if out_len == 0 {
         return vec![];

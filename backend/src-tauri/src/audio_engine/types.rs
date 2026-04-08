@@ -38,6 +38,13 @@ pub struct AudioEngineStateSnapshot {
     pub sample_rate: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TrackMeterValue {
+    pub(crate) peak_linear: f32,
+    pub(crate) max_peak_linear: f32,
+    pub(crate) clipped: bool,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ResampledStereo {
@@ -50,6 +57,7 @@ pub(crate) struct ResampledStereo {
 #[derive(Debug, Clone)]
 pub(crate) struct EngineClip {
     pub(crate) clip_id: String,
+    #[allow(dead_code)]
     pub(crate) track_id: String,
 
     pub(crate) start_frame: u64,
@@ -63,6 +71,7 @@ pub(crate) struct EngineClip {
     // For file playback we do not repeat and treat src_end_frame as a hard end.
     pub(crate) src_start_frame: u64,
     pub(crate) src_end_frame: u64,
+    pub(crate) reversed: bool,
     pub(crate) playback_rate: f64,
 
     // Local (timeline) frame offset applied before sampling the source.
@@ -101,6 +110,7 @@ pub(crate) struct EngineSnapshot {
     pub(crate) bpm: f64,
     pub(crate) sample_rate: u32,
     pub(crate) duration_frames: u64,
+    pub(crate) track_ids: Arc<Vec<String>>,
     pub(crate) clips: Arc<Vec<EngineClip>>,
 }
 
@@ -110,6 +120,7 @@ impl EngineSnapshot {
             bpm: 120.0,
             sample_rate,
             duration_frames: 0,
+            track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
         }
     }

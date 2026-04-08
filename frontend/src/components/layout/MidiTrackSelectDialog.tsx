@@ -1,12 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import {
-    Dialog,
-    Flex,
-    Text,
-    Button,
-    ScrollArea,
-    RadioGroup,
-} from "@radix-ui/themes";
+import { Dialog, Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { paramsApi } from "../../services/api/params";
 
@@ -29,28 +22,12 @@ interface MidiTrackSelectDialogProps {
     /** 选区最大帧数（与 paste_reaper_clipboard 一致） */
     selectionMaxFrames?: number;
     /** 导入完成后的回调 */
-    onImported?: (result: {
-        notes_imported: number;
-        frames_touched: number;
-    }) => void;
+    onImported?: (result: { notes_imported: number; frames_touched: number }) => void;
 }
 
 /** MIDI note number → 音名 */
 function noteToName(note: number): string {
-    const names = [
-        "C",
-        "C#",
-        "D",
-        "D#",
-        "E",
-        "F",
-        "F#",
-        "G",
-        "G#",
-        "A",
-        "A#",
-        "B",
-    ];
+    const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     const octave = Math.floor(note / 12) - 1;
     return `${names[note % 12]}${octave}`;
 }
@@ -123,10 +100,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
         setImporting(true);
         try {
-            const trackIndex =
-                selectedTrack === "all"
-                    ? undefined
-                    : parseInt(selectedTrack, 10);
+            const trackIndex = selectedTrack === "all" ? undefined : parseInt(selectedTrack, 10);
             console.info("[midi_import_ui] import:start", {
                 midiPath,
                 trackIndex,
@@ -166,7 +140,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         } finally {
             setImporting(false);
         }
-    }, [midiPath, selectionStartFrame, selectionMaxFrames, selectedTrack, onImported, onOpenChange, tAny]);
+    }, [
+        midiPath,
+        selectionStartFrame,
+        selectionMaxFrames,
+        selectedTrack,
+        onImported,
+        onOpenChange,
+        tAny,
+    ]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -205,10 +187,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                         style={{ maxHeight: 300 }}
                         className="mt-3 rounded border border-qt-border"
                     >
-                        <RadioGroup.Root
-                            value={selectedTrack}
-                            onValueChange={setSelectedTrack}
-                        >
+                        <RadioGroup.Root value={selectedTrack} onValueChange={setSelectedTrack}>
                             <Flex direction="column" gap="0">
                                 {/* 合并所有轨道选项（仅多轨时显示） */}
                                 {tracks.length > 1 && (
@@ -219,15 +198,11 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                 {tAny("midi_all_tracks")}
                                             </Text>
                                             <Text size="1" color="gray">
-                                                {tAny(
-                                                    "midi_track_notes",
-                                                ).replace(
+                                                {tAny("midi_track_notes").replace(
                                                     "{count}",
                                                     String(
                                                         tracks.reduce(
-                                                            (sum, t) =>
-                                                                sum +
-                                                                t.note_count,
+                                                            (sum, t) => sum + t.note_count,
                                                             0,
                                                         ),
                                                     ),
@@ -243,46 +218,27 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         key={track.index}
                                         className="flex items-center gap-2 px-3 py-2 hover:bg-qt-highlight cursor-pointer border-b border-qt-border last:border-b-0"
                                     >
-                                        <RadioGroup.Item
-                                            value={String(track.index)}
-                                        />
-                                        <Flex
-                                            direction="column"
-                                            gap="0"
-                                            className="flex-1 min-w-0"
-                                        >
-                                            <Text
-                                                size="2"
-                                                weight="medium"
-                                                className="truncate"
-                                            >
-                                                {track.name ||
-                                                    `Track ${track.index + 1}`}
+                                        <RadioGroup.Item value={String(track.index)} />
+                                        <Flex direction="column" gap="0" className="flex-1 min-w-0">
+                                            <Text size="2" weight="medium" className="truncate">
+                                                {track.name || `Track ${track.index + 1}`}
                                             </Text>
                                             <Flex gap="2">
                                                 <Text size="1" color="gray">
-                                                    {tAny(
-                                                        "midi_track_notes",
-                                                    ).replace(
+                                                    {tAny("midi_track_notes").replace(
                                                         "{count}",
-                                                        String(
-                                                            track.note_count,
-                                                        ),
+                                                        String(track.note_count),
                                                     )}
                                                 </Text>
                                                 <Text size="1" color="gray">
                                                     {tAny("midi_track_range")
                                                         .replace(
                                                             "{min}",
-                                                            noteToName(
-                                                                track.min_note,
-                                                            ),
+                                                            noteToName(track.min_note),
                                                         )
                                                         .replace(
                                                             "{max}",
-                                                            noteToName(
-                                                                track.max_note,
-                                                            ),
+                                                            noteToName(track.max_note),
                                                         )}
                                                 </Text>
                                             </Flex>
@@ -305,16 +261,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     </Button>
                     <Button
                         onClick={handleImport}
-                        disabled={
-                            importing ||
-                            loading ||
-                            tracks.length === 0 ||
-                            !!error
-                        }
+                        disabled={importing || loading || tracks.length === 0 || !!error}
                     >
-                        {importing
-                            ? tAny("midi_importing")
-                            : tAny("midi_import")}
+                        {importing ? tAny("midi_importing") : tAny("midi_import")}
                     </Button>
                 </Flex>
             </Dialog.Content>

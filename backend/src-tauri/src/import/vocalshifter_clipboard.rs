@@ -43,14 +43,18 @@ pub struct ClipboardPitchPoint {
     /// DYN (dynamics edit, multiplier)
     pub dyn_edit: f64,
     /// *PIT (original pitch cents before edit)
+    #[allow(dead_code)]
     pub original_pitch_cents: f64,
     /// BRE (breathiness, raw value -10000..10000)
     pub breathiness: f64,
     /// EQ1 (raw value)
+    #[allow(dead_code)]
     pub eq1: f64,
     /// EQ2 (raw value)
+    #[allow(dead_code)]
     pub eq2: f64,
     /// HEQ/MRP (raw value)
+    #[allow(dead_code)]
     pub heq_mrp: f64,
 }
 

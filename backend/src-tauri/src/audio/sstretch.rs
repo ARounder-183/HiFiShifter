@@ -17,8 +17,10 @@ type SStretchState = *mut std::ffi::c_void;
 extern "C" {
     fn sstretch_new(sample_rate: u32, channels: u32) -> SStretchState;
     fn sstretch_delete(state: SStretchState);
+    #[allow(dead_code)]
     fn sstretch_reset(state: SStretchState);
     fn sstretch_set_transpose_semitones(state: SStretchState, semitones: f64);
+    #[allow(dead_code)]
     fn sstretch_set_transpose_factor(state: SStretchState, factor: f64);
     fn sstretch_input_latency(state: SStretchState) -> c_int;
     fn sstretch_output_latency(state: SStretchState) -> c_int;
@@ -59,19 +61,24 @@ pub fn is_available() -> bool {
 /// 同时消费输入和产出输出。为保持 API 兼容性，我们在内部缓冲输出。
 pub struct SignalsmithRealtimeStretcher {
     state: SStretchState,
+    #[allow(dead_code)]
     channels: usize,
     sample_rate: u32,
+    #[allow(dead_code)]
     time_ratio: f64,
 
     /// 内部输出缓冲区（交错格式）
     /// process_interleaved() 产出的数据暂存于此，
     /// retrieve_interleaved_into() 从中取出。
+    #[allow(dead_code)]
     out_buffer: Vec<f32>,
+    #[allow(dead_code)]
     temp_out: Vec<f32>,
 }
 
 unsafe impl Send for SignalsmithRealtimeStretcher {}
 
+#[allow(dead_code)]
 impl SignalsmithRealtimeStretcher {
     pub fn new(sample_rate: u32, channels: usize, time_ratio: f64) -> Result<Self, String> {
         if channels == 0 {

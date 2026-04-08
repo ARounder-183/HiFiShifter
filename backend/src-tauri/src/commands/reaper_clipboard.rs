@@ -374,9 +374,9 @@ pub(super) fn paste_reaper_clipboard(
         .collect();
 
     // 应用到 AppState
+    state.begin_undo_group();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
 
         if !result.timeline.tracks.is_empty() {
             // 有新轨道：合并到现有 timeline
@@ -423,6 +423,7 @@ pub(super) fn paste_reaper_clipboard(
 
         state.audio_engine.update_timeline(tl.clone());
     }
+    let _ = state.end_undo_group();
 
     let payload = get_timeline_state_from_ref(state);
     let mut json = serde_json::to_value(&payload).unwrap_or_default();

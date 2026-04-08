@@ -4,6 +4,8 @@
 //! redundant expensive F0 analysis operations. The cache uses LRU eviction
 //! and generates keys based on all parameters that affect pitch analysis results.
 
+#![allow(dead_code)]
+
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -12,7 +14,7 @@ use std::time::SystemTime;
 
 /// Version number for cache format. Increment this when the cache key format
 /// or analysis algorithm changes to invalidate old cache entries.
-pub const CACHE_FORMAT_VERSION: u32 = 1;
+pub const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Default maximum number of cached clip pitch curves
 pub const DEFAULT_CACHE_CAPACITY: usize = 100;

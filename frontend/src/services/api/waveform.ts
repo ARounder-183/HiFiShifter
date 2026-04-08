@@ -20,10 +20,7 @@ export const waveformApi = {
      * 返回 Record<sourcePath, [L0_base64, L1_base64, L2_base64]>。
      */
     batchGetWaveformMipmap: (sourcePaths: string[]) =>
-        invoke<Record<string, [string, string, string]>>(
-            "batch_get_waveform_mipmap",
-            sourcePaths,
-        ),
+        invoke<Record<string, [string, string, string]>>("batch_get_waveform_mipmap", sourcePaths),
 
     // ============== Mix 波形 API ==============
 

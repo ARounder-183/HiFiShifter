@@ -26,40 +26,20 @@ export const timelineApi = {
         invoke<TimelineResult>("set_project_length", projectSec),
 
     // Import
-    importAudioItem: (
-        audioPath: string,
-        trackId?: string | null,
-        startSec?: number,
-    ) =>
-        invoke<TimelineResult>(
-            "import_audio_item",
-            audioPath,
-            trackId,
-            startSec,
-        ),
+    importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>
+        invoke<TimelineResult>("import_audio_item", audioPath, trackId, startSec),
 
     importAudioBytes: (
         fileName: string,
         base64Data: string,
         trackId?: string | null,
         startSec?: number,
-    ) =>
-        invoke<TimelineResult>(
-            "import_audio_bytes",
-            fileName,
-            base64Data,
-            trackId,
-            startSec,
-        ),
+    ) => invoke<TimelineResult>("import_audio_bytes", fileName, base64Data, trackId, startSec),
 
     // Tracks
     addTrack: (name?: string) => invoke<TimelineResult>("add_track", name),
 
-    addTrackNested: (payload: {
-        name?: string;
-        parentTrackId?: string | null;
-        index?: number;
-    }) =>
+    addTrackNested: (payload: { name?: string; parentTrackId?: string | null; index?: number }) =>
         invoke<TimelineResult>(
             "add_track",
             payload.name,
@@ -67,17 +47,11 @@ export const timelineApi = {
             payload.index,
         ),
 
-    removeTrack: (trackId: string) =>
-        invoke<TimelineResult>("remove_track", trackId),
+    removeTrack: (trackId: string) => invoke<TimelineResult>("remove_track", trackId),
 
-    duplicateTrack: (trackId: string) =>
-        invoke<TimelineResult>("duplicate_track", trackId),
+    duplicateTrack: (trackId: string) => invoke<TimelineResult>("duplicate_track", trackId),
 
-    moveTrack: (payload: {
-        trackId: string;
-        targetIndex: number;
-        parentTrackId?: string | null;
-    }) =>
+    moveTrack: (payload: { trackId: string; targetIndex: number; parentTrackId?: string | null }) =>
         invoke<TimelineResult>(
             "move_track",
             payload.trackId,
@@ -107,11 +81,9 @@ export const timelineApi = {
             payload.name,
         ),
 
-    selectTrack: (trackId: string) =>
-        invoke<TimelineResult>("select_track", trackId),
+    selectTrack: (trackId: string) => invoke<TimelineResult>("select_track", trackId),
 
-    getTrackSummary: (trackId?: string) =>
-        invoke<TrackSummaryResult>("get_track_summary", trackId),
+    getTrackSummary: (trackId?: string) => invoke<TrackSummaryResult>("get_track_summary", trackId),
 
     // Clips
     addClip: (payload: {
@@ -130,8 +102,9 @@ export const timelineApi = {
             payload.sourcePath,
         ),
 
-    removeClip: (clipId: string) =>
-        invoke<TimelineResult>("remove_clip", clipId),
+    removeClip: (clipId: string) => invoke<TimelineResult>("remove_clip", clipId),
+
+    removeClips: (clipIds: string[]) => invoke<TimelineResult>("remove_clips", clipIds),
 
     moveClip: (payload: {
         clipId: string;
@@ -154,28 +127,13 @@ export const timelineApi = {
             trackId?: string;
         }>;
         moveLinkedParams?: boolean;
-    }) =>
-        invoke<TimelineResult>(
-            "move_clips",
-            payload.moves,
-            payload.moveLinkedParams,
-        ),
+    }) => invoke<TimelineResult>("move_clips", payload.moves, payload.moveLinkedParams),
 
     getClipLinkedParams: (clipId: string) =>
-        invoke<{ ok: boolean; linkedParams?: LinkedParamCurves }>(
-            "get_clip_linked_params",
-            clipId,
-        ),
+        invoke<{ ok: boolean; linkedParams?: LinkedParamCurves }>("get_clip_linked_params", clipId),
 
-    applyClipLinkedParams: (payload: {
-        clipId: string;
-        linkedParams: LinkedParamCurves;
-    }) =>
-        invoke<TimelineResult>(
-            "apply_clip_linked_params",
-            payload.clipId,
-            payload.linkedParams,
-        ),
+    applyClipLinkedParams: (payload: { clipId: string; linkedParams: LinkedParamCurves }) =>
+        invoke<TimelineResult>("apply_clip_linked_params", payload.clipId, payload.linkedParams),
 
     setClipState: (payload: {
         clipId: string;
@@ -187,11 +145,14 @@ export const timelineApi = {
         sourceStartSec?: number;
         sourceEndSec?: number;
         playbackRate?: number;
+        reversed?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
         color?: string;
+        /** 是否创建 undo checkpoint，默认为 true */
+        checkpoint?: boolean;
     }) =>
         invoke<TimelineResult>(
             "set_clip_state",
@@ -204,11 +165,13 @@ export const timelineApi = {
             payload.sourceStartSec,
             payload.sourceEndSec,
             payload.playbackRate,
+            payload.reversed,
             payload.fadeInSec,
             payload.fadeOutSec,
             payload.fadeInCurve,
             payload.fadeOutCurve,
             payload.color,
+            payload.checkpoint,
         ),
 
     replaceClipSource: (payload: {
@@ -226,9 +189,7 @@ export const timelineApi = {
     splitClip: (clipId: string, splitSec: number) =>
         invoke<TimelineResult>("split_clip", clipId, splitSec),
 
-    glueClips: (clipIds: string[]) =>
-        invoke<TimelineResult>("glue_clips", clipIds),
+    glueClips: (clipIds: string[]) => invoke<TimelineResult>("glue_clips", clipIds),
 
-    selectClip: (clipId: string | null) =>
-        invoke<TimelineResult>("select_clip", clipId),
+    selectClip: (clipId: string | null) => invoke<TimelineResult>("select_clip", clipId),
 };

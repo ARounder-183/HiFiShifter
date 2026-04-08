@@ -25,10 +25,10 @@ export class PianoKeySound {
             this.compressor.threshold.value = -8;
             this.compressor.knee.value = 20;
             this.compressor.ratio.value = 6;
-            this.compressor.attack.value = 0.005; 
+            this.compressor.attack.value = 0.005;
             this.compressor.release.value = 0.1;
             this.masterGain = ctx.createGain();
-            this.masterGain.gain.value = 1.3; 
+            this.masterGain.gain.value = 1.3;
 
             this.compressor.connect(this.masterGain);
             this.masterGain.connect(ctx.destination);
@@ -58,7 +58,7 @@ export class PianoKeySound {
         osc.frequency.value = freq;
 
         filter.type = "lowpass";
-        filter.frequency.value = Math.min(freq * 4.5, 15000); 
+        filter.frequency.value = Math.min(freq * 4.5, 15000);
         filter.Q.value = 1.5;
 
         const now = ctx.currentTime;
@@ -72,7 +72,7 @@ export class PianoKeySound {
 
         osc.connect(filter);
         filter.connect(gain);
-        gain.connect(this.compressor!); 
+        gain.connect(this.compressor!);
 
         osc.start(startTime);
 
@@ -87,7 +87,7 @@ export class PianoKeySound {
         const ctx = this.audioContext!;
         const now = ctx.currentTime;
 
-        if (typeof gain.gain.cancelAndHoldAtTime === 'function') {
+        if (typeof gain.gain.cancelAndHoldAtTime === "function") {
             gain.gain.cancelAndHoldAtTime(now);
         } else {
             gain.gain.cancelScheduledValues(now);

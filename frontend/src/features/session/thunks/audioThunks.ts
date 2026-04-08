@@ -1,11 +1,9 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
+import type { AdvancedExportRequest } from "../../../services/api/core";
 import { requestMissingFileReplacement } from "./missingFilePrompt";
 
-async function resolveMissingFilesInteractively(
-    timeline: any,
-    missingFiles: string[] | undefined,
-) {
+async function resolveMissingFilesInteractively(timeline: any, missingFiles: string[] | undefined) {
     let latestTimeline = timeline;
     const uniquePaths = Array.from(
         new Set((missingFiles ?? []).filter((p) => typeof p === "string" && p.trim().length > 0)),
@@ -38,12 +36,9 @@ async function resolveMissingFilesInteractively(
     return latestTimeline;
 }
 
-export const processAudio = createAsyncThunk(
-    "session/processAudio",
-    async (audioPath: string) => {
-        return webApi.processAudio(audioPath);
-    },
-);
+export const processAudio = createAsyncThunk("session/processAudio", async (audioPath: string) => {
+    return webApi.processAudio(audioPath);
+});
 
 export const pickOutputPath = createAsyncThunk(
     "session/pickOutputPath",
@@ -63,24 +58,25 @@ export const applyPitchShift = createAsyncThunk(
     },
 );
 
-export const synthesizeAudio = createAsyncThunk(
-    "session/synthesizeAudio",
-    async () => {
-        return webApi.synthesize();
-    },
-);
+export const synthesizeAudio = createAsyncThunk("session/synthesizeAudio", async () => {
+    return webApi.synthesize();
+});
 
-export const exportAudio = createAsyncThunk(
-    "session/exportAudio",
-    async (outputPath: string) => {
-        return webApi.saveSynthesized(outputPath);
-    },
-);
+export const exportAudio = createAsyncThunk("session/exportAudio", async (outputPath: string) => {
+    return webApi.saveSynthesized(outputPath);
+});
 
 export const exportSeparated = createAsyncThunk(
     "session/exportSeparated",
     async (outputDir: string) => {
         return webApi.saveSeparated(outputDir);
+    },
+);
+
+export const exportAudioAdvanced = createAsyncThunk(
+    "session/exportAudioAdvanced",
+    async (request: AdvancedExportRequest) => {
+        return webApi.exportAudioAdvanced(request);
     },
 );
 
@@ -104,10 +100,7 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_vocalshifter_clipboard_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return result;
     },
 );
@@ -125,10 +118,7 @@ export const pasteReaperClipboard = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_reaper_clipboard_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return {
             ok: true,
             timeline: result,

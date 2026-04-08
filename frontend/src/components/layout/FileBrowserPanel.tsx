@@ -1,19 +1,5 @@
-import React, {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
-import {
-    Flex,
-    Text,
-    IconButton,
-    Select,
-    Slider,
-    TextField,
-    ScrollArea,
-} from "@radix-ui/themes";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Flex, Text, IconButton, Select, Slider, TextField, ScrollArea } from "@radix-ui/themes";
 import {
     Cross2Icon,
     FileIcon,
@@ -41,25 +27,14 @@ import {
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import type { FileEntry } from "../../services/api/fileBrowser";
+import { applySelectWheelChange } from "../../utils/selectWheel";
 
 /** 支持的音频扩展名 */
-const AUDIO_EXTENSIONS = new Set([
-    "wav",
-    "mp3",
-    "flac",
-    "ogg",
-    "aac",
-    "aif",
-    "aiff",
-    "m4a",
-]);
+const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"]);
+const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
-    return (
-        !entry.isDir &&
-        !!entry.extension &&
-        AUDIO_EXTENSIONS.has(entry.extension)
-    );
+    return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
 }
 
 /** 格式化文件大小 */
@@ -73,13 +48,7 @@ function formatSize(bytes: number | null): string {
 /** 文件夹图标 SVG */
 function FolderIcon({ className }: { className?: string }) {
     return (
-        <svg
-            width="14"
-            height="14"
-            viewBox="0 0 15 15"
-            fill="none"
-            className={className}
-        >
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
             <path
                 d="M1 3.5C1 3.22386 1.22386 3 1.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H13.5C13.7761 4.5 14 4.72386 14 5V12.5C14 12.7761 13.7761 13 13.5 13H1.5C1.22386 13 1 12.7761 1 12.5V3.5Z"
                 fill="currentColor"
@@ -91,13 +60,7 @@ function FolderIcon({ className }: { className?: string }) {
 /** 音频文件图标 SVG */
 function AudioIcon({ className }: { className?: string }) {
     return (
-        <svg
-            width="14"
-            height="14"
-            viewBox="0 0 15 15"
-            fill="none"
-            className={className}
-        >
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
             <path
                 d="M7.5 0.75L7.5 14.25M10.5 3L10.5 12M4.5 3L4.5 12M13.5 5.5L13.5 9.5M1.5 5.5L1.5 9.5"
                 stroke="currentColor"
@@ -170,9 +133,7 @@ export const FileBrowserPanel: React.FC = () => {
     // 音频过滤
     const audioFilteredEntries = useMemo(() => {
         if (!fb.audioOnly) return regexFilteredEntries;
-        return regexFilteredEntries.filter(
-            (e) => e.isDir || isAudioFile(e),
-        );
+        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e));
     }, [regexFilteredEntries, fb.audioOnly]);
 
     // 排序
@@ -183,9 +144,7 @@ export const FileBrowserPanel: React.FC = () => {
                 sorted.sort((a, b) => a.name.localeCompare(b.name));
                 break;
             case "date":
-                sorted.sort(
-                    (a, b) => (b.modifiedTime ?? 0) - (a.modifiedTime ?? 0),
-                );
+                sorted.sort((a, b) => (b.modifiedTime ?? 0) - (a.modifiedTime ?? 0));
                 break;
             case "size":
                 sorted.sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
@@ -199,12 +158,8 @@ export const FileBrowserPanel: React.FC = () => {
     // 计算展示相对路径（搜索模式下显示文件所在目录）
     function getRelativeDirHint(fullPath: string): string {
         const normalFull = fullPath.replace(/\\/g, "/");
-        const normalBase = fb.currentPath
-            .replace(/\\/g, "/")
-            .replace(/\/$/, "");
-        if (
-            normalFull.toLowerCase().startsWith(normalBase.toLowerCase() + "/")
-        ) {
+        const normalBase = fb.currentPath.replace(/\\/g, "/").replace(/\/$/, "");
+        if (normalFull.toLowerCase().startsWith(normalBase.toLowerCase() + "/")) {
             const rel = normalFull.slice(normalBase.length + 1);
             const lastSlash = rel.lastIndexOf("/");
             return lastSlash >= 0 ? rel.slice(0, lastSlash) : "";
@@ -215,8 +170,7 @@ export const FileBrowserPanel: React.FC = () => {
     // 选择文件夹（通过后端 rfd dialog）
     const handleOpenFolder = useCallback(async () => {
         try {
-            const { fileBrowserApi } =
-                await import("../../services/api/fileBrowser");
+            const { fileBrowserApi } = await import("../../services/api/fileBrowser");
             const result = await fileBrowserApi.pickDirectory();
             if (result.ok && !result.canceled && result.path) {
                 void dispatch(loadDirectory(result.path));
@@ -267,10 +221,7 @@ export const FileBrowserPanel: React.FC = () => {
     const lastClickedIndexRef = useRef<number>(-1);
 
     // 获取仅音频的列表用于 shift-range 选择
-    const audioEntries = useMemo(
-        () => displayEntries.filter(isAudioFile),
-        [displayEntries],
-    );
+    const audioEntries = useMemo(() => displayEntries.filter(isAudioFile), [displayEntries]);
 
     const handleClickAudio = useCallback(
         (entry: FileEntry, ev?: React.MouseEvent) => {
@@ -342,9 +293,10 @@ export const FileBrowserPanel: React.FC = () => {
             // 允许左键(0)和右键(2)拖拽
             if (e.button !== 0 && e.button !== 2) return;
             // Collect all selected paths (include current entry)
-            const paths = selectedPaths.size > 0 && selectedPaths.has(entry.path)
-                ? Array.from(selectedPaths)
-                : [entry.path];
+            const paths =
+                selectedPaths.size > 0 && selectedPaths.has(entry.path)
+                    ? Array.from(selectedPaths)
+                    : [entry.path];
             // 不拦截 pointer，让 click 事件仍能触发预览
             setDragState({
                 filePath: entry.path,
@@ -388,44 +340,32 @@ export const FileBrowserPanel: React.FC = () => {
                     }),
                 );
                 // 异步获取音频时长，获取后通知 TimelinePanel 更新 ghost 宽度
-                import("../../services/api/fileBrowser").then(
-                    ({ fileBrowserApi }) => {
-                        fileBrowserApi
-                            .getAudioFileInfo(ds.filePath)
-                            .then((info) => {
-                                if (
-                                    info &&
-                                    dragStateRef.current?.filePath ===
-                                        ds.filePath
-                                ) {
-                                    window.dispatchEvent(
-                                        new CustomEvent("hifi-file-drag", {
-                                            detail: {
-                                                type: "duration",
-                                                filePath: ds.filePath,
-                                                durationSec: info.durationSec,
-                                            },
-                                        }),
-                                    );
-                                }
-                            })
-                            .catch(() => {
-                                /* 获取失败则保持默认宽度 */
-                            });
-                    },
-                );
+                import("../../services/api/fileBrowser").then(({ fileBrowserApi }) => {
+                    fileBrowserApi
+                        .getAudioFileInfo(ds.filePath)
+                        .then((info) => {
+                            if (info && dragStateRef.current?.filePath === ds.filePath) {
+                                window.dispatchEvent(
+                                    new CustomEvent("hifi-file-drag", {
+                                        detail: {
+                                            type: "duration",
+                                            filePath: ds.filePath,
+                                            durationSec: info.durationSec,
+                                        },
+                                    }),
+                                );
+                            }
+                        })
+                        .catch(() => {
+                            /* 获取失败则保持默认宽度 */
+                        });
+                });
             }
 
             // 更新 ghost 位置（clamp 到窗口可视范围内，鼠标超出界面时 ghost 停在边缘）
             if (ghostRef.current) {
-                const clampedX = Math.max(
-                    0,
-                    Math.min(e.clientX + 12, window.innerWidth - 100),
-                );
-                const clampedY = Math.max(
-                    0,
-                    Math.min(e.clientY + 12, window.innerHeight - 30),
-                );
+                const clampedX = Math.max(0, Math.min(e.clientX + 12, window.innerWidth - 100));
+                const clampedY = Math.max(0, Math.min(e.clientY + 12, window.innerHeight - 30));
                 ghostRef.current.style.left = `${clampedX}px`;
                 ghostRef.current.style.top = `${clampedY}px`;
             }
@@ -485,10 +425,7 @@ export const FileBrowserPanel: React.FC = () => {
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
-        <Flex
-            direction="column"
-            className="h-full bg-qt-window text-qt-text select-none"
-        >
+        <Flex direction="column" className="h-full bg-qt-window text-qt-text select-none">
             {/* 标题栏 */}
             <Flex
                 align="center"
@@ -534,19 +471,14 @@ export const FileBrowserPanel: React.FC = () => {
                 <TextField.Root
                     ref={searchInputRef}
                     size="1"
-                    placeholder={(t as (key: string) => string)(
-                        "fb_search_placeholder",
-                    )}
+                    placeholder={(t as (key: string) => string)("fb_search_placeholder")}
                     value={fb.searchQuery}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const q = e.target.value;
                         dispatch(setSearchQuery(q));
-                        if (debounceRef.current)
-                            clearTimeout(debounceRef.current);
+                        if (debounceRef.current) clearTimeout(debounceRef.current);
                         if (q.trim() && fb.currentPath) {
-                            const backendQuery = fb.regexEnabled
-                                ? ""
-                                : q.trim();
+                            const backendQuery = fb.regexEnabled ? "" : q.trim();
                             debounceRef.current = setTimeout(() => {
                                 void dispatch(
                                     searchFilesRecursive({
@@ -596,9 +528,7 @@ export const FileBrowserPanel: React.FC = () => {
                                 void dispatch(
                                     searchFilesRecursive({
                                         dirPath: fb.currentPath,
-                                        query: nextRegexEnabled
-                                            ? ""
-                                            : trimmedSearchQuery,
+                                        query: nextRegexEnabled ? "" : trimmedSearchQuery,
                                     }),
                                 );
                             }
@@ -628,23 +558,23 @@ export const FileBrowserPanel: React.FC = () => {
                     <Select.Root
                         value={fb.sortMode}
                         size="1"
-                        onValueChange={(v) =>
-                            dispatch(setSortMode(v as SortMode))
-                        }
+                        onValueChange={(v) => dispatch(setSortMode(v as SortMode))}
                     >
                         <Select.Trigger
                             style={{ fontSize: 11, height: 22, flex: 1 }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: fb.sortMode,
+                                    options: SORT_MODE_OPTIONS,
+                                    onChange: (next) => dispatch(setSortMode(next as SortMode)),
+                                });
+                            }}
                         />
                         <Select.Content>
-                            <Select.Item value="name">
-                                {tAny("fb_sort_name")}
-                            </Select.Item>
-                            <Select.Item value="date">
-                                {tAny("fb_sort_date")}
-                            </Select.Item>
-                            <Select.Item value="size">
-                                {tAny("fb_sort_size")}
-                            </Select.Item>
+                            <Select.Item value="name">{tAny("fb_sort_name")}</Select.Item>
+                            <Select.Item value="date">{tAny("fb_sort_date")}</Select.Item>
+                            <Select.Item value="size">{tAny("fb_sort_size")}</Select.Item>
                         </Select.Content>
                     </Select.Root>
                 </Flex>
@@ -672,12 +602,7 @@ export const FileBrowserPanel: React.FC = () => {
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <Text
-                        size="1"
-                        color="gray"
-                        className="truncate flex-1"
-                        title={fb.currentPath}
-                    >
+                    <Text size="1" color="gray" className="truncate flex-1" title={fb.currentPath}>
                         {fb.currentPath}
                     </Text>
                 </Flex>
@@ -687,51 +612,26 @@ export const FileBrowserPanel: React.FC = () => {
             <ScrollArea className="flex-1 min-h-0" scrollbars="vertical">
                 <div className="py-1">
                     {fb.loading ? (
-                        <Text
-                            size="1"
-                            color="gray"
-                            className="px-3 py-4 block text-center"
-                        >
+                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
                             {(t as (key: string) => string)("fb_loading")}
                         </Text>
                     ) : fb.error ? (
-                        <Text
-                            size="1"
-                            color="red"
-                            className="px-3 py-4 block text-center"
-                        >
-                            {(t as (key: string) => string)("fb_error")}:{" "}
-                            {fb.error}
+                        <Text size="1" color="red" className="px-3 py-4 block text-center">
+                            {(t as (key: string) => string)("fb_error")}: {fb.error}
                         </Text>
                     ) : !fb.currentPath ? (
-                        <Text
-                            size="1"
-                            color="gray"
-                            className="px-3 py-4 block text-center"
-                        >
+                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
                             {(t as (key: string) => string)("fb_no_folder")}
                         </Text>
                     ) : isSearchMode && fb.searchLoading ? (
-                        <Text
-                            size="1"
-                            color="gray"
-                            className="px-3 py-4 block text-center"
-                        >
+                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
                             {(t as (key: string) => string)("fb_searching")}
                         </Text>
                     ) : displayEntries.length === 0 ? (
-                        <Text
-                            size="1"
-                            color="gray"
-                            className="px-3 py-4 block text-center"
-                        >
+                        <Text size="1" color="gray" className="px-3 py-4 block text-center">
                             {isSearchMode
-                                ? (t as (key: string) => string)(
-                                      "fb_no_results",
-                                  )
-                                : (t as (key: string) => string)(
-                                      "fb_empty_folder",
-                                  )}
+                                ? (t as (key: string) => string)("fb_no_results")
+                                : (t as (key: string) => string)("fb_empty_folder")}
                         </Text>
                     ) : (
                         displayEntries.map((entry) => (
@@ -747,11 +647,7 @@ export const FileBrowserPanel: React.FC = () => {
                                     dragState?.active === true &&
                                     dragState.allFilePaths.includes(entry.path)
                                 }
-                                pathHint={
-                                    isSearchMode
-                                        ? getRelativeDirHint(entry.path)
-                                        : undefined
-                                }
+                                pathHint={isSearchMode ? getRelativeDirHint(entry.path) : undefined}
                             />
                         ))
                     )}
@@ -759,16 +655,8 @@ export const FileBrowserPanel: React.FC = () => {
             </ScrollArea>
 
             {/* 底部音量滑块 */}
-            <Flex
-                align="center"
-                gap="2"
-                className="px-2 py-1.5 border-t border-qt-border shrink-0"
-            >
-                <SpeakerLoudIcon
-                    width="14"
-                    height="14"
-                    className="text-qt-text-muted shrink-0"
-                />
+            <Flex align="center" gap="2" className="px-2 py-1.5 border-t border-qt-border shrink-0">
+                <SpeakerLoudIcon width="14" height="14" className="text-qt-text-muted shrink-0" />
                 <Slider
                     size="1"
                     min={0}
@@ -780,11 +668,7 @@ export const FileBrowserPanel: React.FC = () => {
                     }}
                     className="flex-1"
                 />
-                <Text
-                    size="1"
-                    color="gray"
-                    className="w-[32px] text-right shrink-0"
-                >
+                <Text size="1" color="gray" className="w-[32px] text-right shrink-0">
                     {Math.round(fb.previewVolume * 100)}%
                 </Text>
             </Flex>
@@ -800,7 +684,7 @@ export const FileBrowserPanel: React.FC = () => {
                         pointerEvents: "none",
                         zIndex: 99999,
                         background: "var(--qt-highlight)",
-                        color: "#fff",
+                        color: "var(--qt-text)",
                         padding: "2px 8px",
                         borderRadius: 4,
                         fontSize: 11,
@@ -809,7 +693,8 @@ export const FileBrowserPanel: React.FC = () => {
                         boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
                     }}
                 >
-                    🎵 {dragState.allFilePaths.length > 1
+                    🎵{" "}
+                    {dragState.allFilePaths.length > 1
                         ? `${dragState.fileName} (+${dragState.allFilePaths.length - 1})`
                         : dragState.fileName}
                 </div>
@@ -828,10 +713,7 @@ interface FileEntryRowProps {
     isSelected?: boolean;
     onDoubleClickDir: (dirPath: string) => void;
     onClickAudio: (entry: FileEntry, ev?: React.MouseEvent) => void;
-    onPointerDownForDrag: (
-        e: React.PointerEvent<HTMLDivElement>,
-        entry: FileEntry,
-    ) => void;
+    onPointerDownForDrag: (e: React.PointerEvent<HTMLDivElement>, entry: FileEntry) => void;
     isDragging: boolean;
     pathHint?: string;
 }
@@ -857,19 +739,15 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                     isSelected
                         ? "bg-[color-mix(in_oklab,var(--qt-highlight)_25%,transparent)]"
                         : isPlaying
-                        ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
-                        : "",
+                          ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
+                          : "",
                     isDragging ? "opacity-50" : "",
                     !entry.isDir && !isAudio ? "opacity-50" : "",
                 ]
                     .filter(Boolean)
                     .join(" ")}
-                onPointerDown={
-                    isAudio ? (e) => onPointerDownForDrag(e, entry) : undefined
-                }
-                onDoubleClick={
-                    entry.isDir ? () => onDoubleClickDir(entry.path) : undefined
-                }
+                onPointerDown={isAudio ? (e) => onPointerDownForDrag(e, entry) : undefined}
+                onDoubleClick={entry.isDir ? () => onDoubleClickDir(entry.path) : undefined}
                 onClick={isAudio ? (ev: React.MouseEvent) => onClickAudio(entry, ev) : undefined}
             >
                 {/* 图标 */}
@@ -878,20 +756,12 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         <FolderIcon className="text-yellow-500" />
                     ) : isAudio ? (
                         isPlaying ? (
-                            <StopIcon
-                                width="12"
-                                height="12"
-                                className="text-qt-highlight"
-                            />
+                            <StopIcon width="12" height="12" className="text-qt-highlight" />
                         ) : (
                             <AudioIcon className="text-blue-400" />
                         )
                     ) : (
-                        <FileIcon
-                            width="12"
-                            height="12"
-                            className="text-qt-text-muted"
-                        />
+                        <FileIcon width="12" height="12" className="text-qt-text-muted" />
                     )}
                 </span>
 
@@ -915,11 +785,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 右侧信息 */}
                 {!entry.isDir && entry.size != null && (
-                    <Text
-                        size="1"
-                        color="gray"
-                        className="shrink-0 text-[10px]"
-                    >
+                    <Text size="1" color="gray" className="shrink-0 text-[10px]">
                         {formatSize(entry.size)}
                     </Text>
                 )}

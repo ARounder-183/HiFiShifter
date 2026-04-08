@@ -99,6 +99,7 @@ impl<'a> PitchCurvesSnapshot<'a> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn selected_pitch_curves_snapshot<'a>(
     timeline: &'a TimelineState,
 ) -> Option<PitchCurvesSnapshot<'a>> {
@@ -238,6 +239,7 @@ impl PitchEditAlgorithm {
     }
 }
 
+#[allow(dead_code)]
 pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgorithm {
     let selected = timeline
         .selected_track_id
@@ -258,6 +260,331 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 fn semitone_ratio(semitones: f64) -> f64 {
     (2.0f64).powf(semitones / 12.0)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ChildPitchOffsetParamMode {
+    Cents,
+    Degrees,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChildPitchOffsetLayer<'a> {
+    cents: f64,
+    degree_steps: f64,
+    cents_curve: Option<&'a Vec<f32>>,
+    degree_steps_curve: Option<&'a Vec<f32>>,
+}
+
+#[derive(Debug, Clone)]
+struct ChildPitchOffsetConfig<'a> {
+    layers: Vec<ChildPitchOffsetLayer<'a>>,
+}
+
+const CHILD_PITCH_OFFSET_CENTS_PREFIX: &str = "child_pitch_offset_cents@";
+const CHILD_PITCH_OFFSET_DEGREES_PREFIX: &str = "child_pitch_offset_degrees@";
+const CHILD_PITCH_OFFSET_CENTS_DEFAULT: f64 = 0.0;
+const CHILD_PITCH_OFFSET_DEGREES_DEFAULT: f64 = 0.0;
+
+fn child_pitch_offset_curve_key(mode: ChildPitchOffsetParamMode, track_id: &str) -> String {
+    match mode {
+        ChildPitchOffsetParamMode::Cents => {
+            format!("{CHILD_PITCH_OFFSET_CENTS_PREFIX}{track_id}")
+        }
+        ChildPitchOffsetParamMode::Degrees => {
+            format!("{CHILD_PITCH_OFFSET_DEGREES_PREFIX}{track_id}")
+        }
+    }
+}
+
+fn ordered_scale_semitone_offsets(scale_notes: &[u8]) -> Vec<i32> {
+    if scale_notes.is_empty() {
+        return vec![0, 2, 4, 5, 7, 9, 11];
+    }
+    let mut normalized: Vec<i32> = scale_notes.iter().map(|v| (v % 12) as i32).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return vec![0, 2, 4, 5, 7, 9, 11];
+    }
+
+    let mut out = Vec::with_capacity(normalized.len());
+    let mut prev = i32::MIN;
+    for mut value in normalized {
+        while value <= prev {
+            value += 12;
+        }
+        out.push(value);
+        prev = value;
+    }
+    out
+}
+
+fn scale_degree_to_midi_integer(abs_degree: i32, offsets: &[i32]) -> f64 {
+    let degree_count = offsets.len() as i32;
+    if degree_count <= 0 {
+        return 0.0;
+    }
+    let oct = abs_degree.div_euclid(degree_count);
+    let idx = abs_degree.rem_euclid(degree_count) as usize;
+    (oct * 12 + offsets[idx]) as f64
+}
+
+fn scale_degree_to_midi(abs_degree: f64, offsets: &[i32]) -> f64 {
+    if !abs_degree.is_finite() {
+        return 0.0;
+    }
+    let lower_degree = abs_degree.floor() as i32;
+    let frac = abs_degree - lower_degree as f64;
+    let lower = scale_degree_to_midi_integer(lower_degree, offsets);
+    if frac <= 1e-9 {
+        return lower;
+    }
+    let upper = scale_degree_to_midi_integer(lower_degree + 1, offsets);
+    lower + (upper - lower) * frac
+}
+
+fn transpose_midi_by_scale_steps(midi: f64, degree_steps: f64, scale_notes: &[u8]) -> f64 {
+    if !midi.is_finite() || degree_steps.abs() <= 1e-9 {
+        return midi;
+    }
+    let offsets = ordered_scale_semitone_offsets(scale_notes);
+    if offsets.is_empty() {
+        return midi;
+    }
+
+    let degree_count = offsets.len() as i32;
+    let base_oct = (midi / 12.0).floor() as i32;
+
+    let mut lower: Option<(i32, f64)> = None;
+    let mut upper: Option<(i32, f64)> = None;
+    for oct in (base_oct - 3)..=(base_oct + 3) {
+        for (idx, offset) in offsets.iter().enumerate() {
+            let candidate_midi = (oct * 12 + *offset) as f64;
+            let abs_degree = oct * degree_count + idx as i32;
+            if candidate_midi <= midi {
+                if lower.map(|(_, v)| candidate_midi > v).unwrap_or(true) {
+                    lower = Some((abs_degree, candidate_midi));
+                }
+            }
+            if candidate_midi >= midi {
+                if upper.map(|(_, v)| candidate_midi < v).unwrap_or(true) {
+                    upper = Some((abs_degree, candidate_midi));
+                }
+            }
+        }
+    }
+
+    let (lower_degree, lower_midi) = lower.unwrap_or((0, midi));
+    let (upper_degree, upper_midi) = upper.unwrap_or((lower_degree, lower_midi));
+    let span = upper_midi - lower_midi;
+    let ratio = if span.abs() <= 1e-9 {
+        0.0
+    } else {
+        ((midi - lower_midi) / span).clamp(0.0, 1.0)
+    };
+
+    let target_lower = scale_degree_to_midi(lower_degree as f64 + degree_steps, &offsets);
+    let target_upper = scale_degree_to_midi(upper_degree as f64 + degree_steps, &offsets);
+    target_lower + (target_upper - target_lower) * ratio
+}
+
+fn active_child_pitch_offset_config<'a>(
+    timeline: &'a TimelineState,
+    clip_track_id: &str,
+) -> Option<ChildPitchOffsetConfig<'a>> {
+    let track = timeline.tracks.iter().find(|track| track.id == clip_track_id)?;
+    if track.parent_id.is_none() {
+        return None;
+    }
+
+    let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
+    let entry = timeline.params_by_root_track.get(&root_track_id);
+
+    let mut lineage_child_ids: Vec<&str> = Vec::new();
+    let mut cursor = Some(clip_track_id);
+    let mut safety = 0usize;
+    while let Some(track_id) = cursor {
+        let Some(node) = timeline.tracks.iter().find(|track| track.id == track_id) else {
+            break;
+        };
+        if node.parent_id.is_none() {
+            break;
+        }
+        lineage_child_ids.push(track_id);
+        cursor = node.parent_id.as_deref();
+        safety += 1;
+        if safety > timeline.tracks.len() + 2 {
+            break;
+        }
+    }
+
+    if lineage_child_ids.is_empty() {
+        return None;
+    }
+
+    lineage_child_ids.reverse();
+
+    let frame_period_ms = entry.map(|state| state.frame_period_ms).unwrap_or(5.0);
+    let mut has_effective = false;
+    let mut layers: Vec<ChildPitchOffsetLayer<'a>> = Vec::with_capacity(lineage_child_ids.len());
+
+    for track_id in lineage_child_ids {
+        let cents_curve = entry.and_then(|state| {
+            state
+                .extra_curves
+                .get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Cents,
+                    track_id,
+                ))
+        });
+        let degree_steps_curve = entry.and_then(|state| {
+            state
+                .extra_curves
+                .get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Degrees,
+                    track_id,
+                ))
+        });
+
+        let static_cents = CHILD_PITCH_OFFSET_CENTS_DEFAULT;
+        let static_degree_steps = CHILD_PITCH_OFFSET_DEGREES_DEFAULT;
+
+        let has_cents_curve = curve_differs_from_default_in_range(
+            cents_curve,
+            frame_period_ms,
+            0.0,
+            f64::MAX,
+            static_cents as f32,
+        );
+        let has_degree_curve = curve_differs_from_default_in_range(
+            degree_steps_curve,
+            frame_period_ms,
+            0.0,
+            f64::MAX,
+            static_degree_steps as f32,
+        );
+        has_effective = has_effective || has_cents_curve || has_degree_curve;
+
+        layers.push(ChildPitchOffsetLayer {
+            cents: static_cents,
+            degree_steps: static_degree_steps,
+            cents_curve,
+            degree_steps_curve,
+        });
+    }
+
+    if !has_effective {
+        return None;
+    }
+
+    Some(ChildPitchOffsetConfig { layers })
+}
+
+fn sample_child_offset_cents(layer: &ChildPitchOffsetLayer<'_>, frame_idx: usize) -> f64 {
+    layer
+        .cents_curve
+        .and_then(|curve| curve.get(frame_idx).copied())
+        .filter(|value| value.is_finite())
+        .map(|value| value as f64)
+        .unwrap_or(layer.cents)
+}
+
+fn sample_child_offset_degree_steps(layer: &ChildPitchOffsetLayer<'_>, frame_idx: usize) -> f64 {
+    layer
+        .degree_steps_curve
+        .and_then(|curve| curve.get(frame_idx).copied())
+        .filter(|value| value.is_finite())
+        .map(|value| value as f64)
+        .unwrap_or(layer.degree_steps)
+}
+
+fn apply_child_pitch_offset_to_midi(
+    midi: f64,
+    cfg: &ChildPitchOffsetConfig<'_>,
+    frame_idx: usize,
+    scale_notes: &[u8],
+) -> f64 {
+    if !(midi.is_finite() && midi > 0.0) {
+        return 0.0;
+    }
+
+    let mut current = midi;
+    for layer in &cfg.layers {
+        let steps = sample_child_offset_degree_steps(layer, frame_idx);
+        let cents = sample_child_offset_cents(layer, frame_idx);
+
+        if steps.abs() > 1e-9 {
+            current = transpose_midi_by_scale_steps(current, steps, scale_notes);
+        }
+        if cents.abs() > 1e-9 {
+            current += cents / 100.0;
+        }
+
+        if !(current.is_finite() && current > 0.0) {
+            return 0.0;
+        }
+    }
+
+    current
+}
+
+pub(crate) fn build_clip_input_pitch_curve(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+    frame_period_ms: f64,
+    clip_playback_rate: f64,
+    is_vslib: bool,
+) -> Option<Vec<f32>> {
+    let child_offset_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
+
+    let timeline_midi_raw: Vec<f32> = if is_vslib {
+        Vec::new()
+    } else {
+        let clip_root = clip_root_track_id(timeline, clip)?;
+        let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
+            timeline,
+            clip,
+            &clip_root,
+            frame_period_ms,
+        )?;
+
+        let tm = crate::pitch_clip::trim_and_resample_midi(
+            &clip_pitch.midi,
+            frame_period_ms,
+            clip.source_start_sec,
+            clip.source_end_sec,
+            clip_playback_rate,
+            clip.length_sec.max(0.0),
+        );
+        if tm.is_empty() {
+            return None;
+        }
+        tm
+    };
+
+    let timeline_midi = if let Some(ref cfg) = child_offset_cfg {
+        let fp = frame_period_ms.max(0.1);
+        let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+        timeline_midi_raw
+            .iter()
+            .enumerate()
+            .map(|(local_idx, &midi)| {
+                let frame_idx = start_idx.saturating_add(local_idx);
+                apply_child_pitch_offset_to_midi(
+                    midi as f64,
+                    cfg,
+                    frame_idx,
+                    &timeline.project_scale_notes,
+                ) as f32
+            })
+            .collect()
+    } else {
+        timeline_midi_raw
+    };
+
+    Some(timeline_midi)
 }
 
 fn root_pitch_edit_state<'a>(
@@ -528,6 +855,8 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let Some((track, entry)) = clip_pitch_edit_state(timeline, clip) else {
         return Ok(false);
     };
+    let child_offset_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
+    let has_child_pitch_offset = child_offset_cfg.is_some();
     if !track.compose_enabled {
         return Ok(false);
     }
@@ -561,6 +890,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         && !extra_processing
         && !tension_processing
         && !formant_processing
+        && !has_child_pitch_offset
         && !needs_processor_stretch
     {
         return Ok(false);
@@ -589,12 +919,17 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     };
     // seg_end_sec 始终以时间轴坐标（输出帧）计，确保音高编辑范围检测与声码器上下文一致
     let seg_end_sec = seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64);
-    let has_pitch_user_edit =
-        any_user_edit_in_range(frame_period_ms, pitch_edit, seg_start_sec, seg_end_sec);
+    let has_pitch_user_edit = any_user_edit_in_range(
+        frame_period_ms,
+        pitch_edit,
+        seg_start_sec,
+        seg_end_sec,
+    ) || has_child_pitch_offset;
     if !has_pitch_user_edit
         && !extra_processing
         && !tension_processing
         && !formant_processing
+        && !has_child_pitch_offset
         && !needs_processor_stretch
     {
         return Ok(false);
@@ -619,66 +954,66 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     #[cfg(not(feature = "vslib"))]
     let is_vslib = false;
 
-    // Get per-clip original MIDI curve (full source, source-time indexed).
-    // HiFi-GAN 始终需要 clip_midi 才能合成（即使没有音高编辑）：
-    //   clip_midi 提供原始音高，使 HiFi-GAN 能以相同音高重合成并应用 formant/tension 效果。
-    // vslib 例外：使用内部分析，忽略 clip_midi 字段。
-    let timeline_midi: Vec<f32> = if is_vslib {
-        // vslib 不需要原始音高轮廓，传空切片，VslibProcessor 会忽略 clip_midi 字段。
-        Vec::new()
-    } else {
-        let Some(clip_root) = clip_root_track_id(timeline, clip) else {
-            return Ok(false);
-        };
-        let clip_pitch = crate::pitch_clip::get_or_compute_clip_pitch_midi_global(
-            timeline,
-            clip,
-            &clip_root,
-            frame_period_ms,
-        );
-        let Some(clip_pitch) = clip_pitch else {
-            return Ok(false);
-        };
+    // 在渲染前统一构建 clip 输入 pitch 曲线（根轨对应曲线 + 子轨偏移变换）。
+    let Some(timeline_midi) = build_clip_input_pitch_curve(
+        timeline,
+        clip,
+        clip_start_sec,
+        frame_period_ms,
+        clip_playback_rate,
+        is_vslib,
+    ) else {
+        return Ok(false);
+    };
 
-        // 将源时间索引的 MIDI 曲线 trim+resample 为时间轴对齐的曲线：
-        // timeline_midi[0] 对应 clip_start_sec，每帧 frame_period_ms，按 playback_rate 拉伸后的时间轴坐标。
-        // 这与前端显示所用的曲线变换完全一致（见 emit_clip_pitch_data_for_clip）。
-        let tm = crate::pitch_clip::trim_and_resample_midi(
-            &clip_pitch.midi,
+    if has_pitch_user_edit && !has_child_pitch_offset && !is_vslib {
+        // 若音高编辑值与原始音高完全一致（无实际变化），且不需要其他效果处理，则跳过。
+        let has_effective_pitch_change = any_effective_pitch_change_in_range(
             frame_period_ms,
-            clip.source_start_sec,
-            clip.source_end_sec,
-            clip_playback_rate,
-            clip.length_sec.max(0.0),
+            pitch_edit,
+            clip_start_sec,
+            &timeline_midi,
+            seg_start_sec,
+            seg_end_sec,
         );
-        if tm.is_empty() {
+        if !has_effective_pitch_change
+            && !(extra_processing || tension_processing || formant_processing || needs_processor_stretch)
+        {
             return Ok(false);
         }
+    }
 
-        if has_pitch_user_edit {
-            // 若音高编辑值与原始音高完全一致（无实际变化），且不需要其他效果处理，则跳过。
-            let has_effective_pitch_change = any_effective_pitch_change_in_range(
-                frame_period_ms,
-                pitch_edit,
-                clip_start_sec,
-                &tm,
-                seg_start_sec,
-                seg_end_sec,
-            );
-            if !has_effective_pitch_change
-                && !(extra_processing
-                    || tension_processing
-                    || formant_processing
-                    || needs_processor_stretch)
-            {
-                return Ok(false);
+    let mut effective_pitch_edit: Vec<f32> = pitch_edit.to_vec();
+    if let Some(ref cfg) = child_offset_cfg {
+        for (frame_idx, value) in effective_pitch_edit.iter_mut().enumerate() {
+            if *value > 0.0 {
+                *value = apply_child_pitch_offset_to_midi(
+                    *value as f64,
+                    cfg,
+                    frame_idx,
+                    &timeline.project_scale_notes,
+                ) as f32;
             }
         }
-        // !has_pitch_user_edit 时：早期退出已确保 extra/tension/formant 至少一个为 true。
-        // 始终传递原始 MIDI 曲线；pitch_edit 全零时 edit_midi_at_time_or_none 返回 None，
-        // HiFi-GAN fallback 到原始音高，在原始音高基础上应用 formant/tension 效果。
-        tm
-    };
+
+        if is_vslib && !timeline_midi.is_empty() {
+            let fp = frame_period_ms.max(0.1);
+            let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+            for (local_idx, midi) in timeline_midi.iter().copied().enumerate() {
+                if !(midi.is_finite() && midi > 0.0) {
+                    continue;
+                }
+                let abs_idx = start_idx.saturating_add(local_idx);
+                if abs_idx >= effective_pitch_edit.len() {
+                    break;
+                }
+                if effective_pitch_edit[abs_idx] <= 0.0 {
+                    effective_pitch_edit[abs_idx] = midi;
+                }
+            }
+        }
+    }
+    let pitch_edit_for_ctx = effective_pitch_edit.as_slice();
 
     // stereo -> mono (we don't preserve stereo; use left channel for cheaper conversion)
     let frames = seg_frames;
@@ -718,7 +1053,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             seg_start_sec,
             seg_end_sec: seg_start_sec + (expected_out_frames as f64) / (sample_rate.max(1) as f64),
             frame_period_ms,
-            pitch_edit,
+            pitch_edit: pitch_edit_for_ctx,
             clip_midi: &timeline_midi,
             playback_rate: ctx_playback_rate,
             out_frames: expected_out_frames,
@@ -780,6 +1115,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     let selected = timeline
         .selected_track_id
@@ -812,6 +1148,7 @@ pub fn is_pitch_edit_active(timeline: &TimelineState) -> bool {
     entry.pitch_edit_user_modified
 }
 
+#[allow(dead_code)]
 pub fn is_pitch_edit_backend_available(timeline: &TimelineState) -> bool {
     let selected = timeline
         .selected_track_id
@@ -836,6 +1173,7 @@ pub fn semitone_to_ratio(semitones: f64) -> f64 {
 
 /// 检测指定clip是否需要pitch edit
 /// 返回true表示该clip需要pitch edit处理
+#[allow(dead_code)]
 pub fn does_clip_need_pitch_edit(
     timeline: &TimelineState,
     clip: &crate::state::Clip,
@@ -849,6 +1187,7 @@ pub fn does_clip_need_processor_render(
     clip: &crate::state::Clip,
     clip_start_sec: f64,
 ) -> bool {
+    let has_child_pitch_offset = active_child_pitch_offset_config(timeline, &clip.track_id).is_some();
     let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return false;
     };
@@ -893,12 +1232,18 @@ pub fn does_clip_need_processor_render(
         && !extra_processing
         && !tension_processing
         && !formant_processing
+        && !has_child_pitch_offset
         && !needs_processor_stretch
     {
         return false;
     }
 
-    if extra_processing || tension_processing || formant_processing || needs_processor_stretch {
+    if extra_processing
+        || tension_processing
+        || formant_processing
+        || has_child_pitch_offset
+        || needs_processor_stretch
+    {
         return true;
     }
 

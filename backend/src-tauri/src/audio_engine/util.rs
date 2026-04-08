@@ -8,10 +8,6 @@ pub(crate) fn beat_to_sec(beat: f64, bpm: f64) -> f64 {
     beat * 60.0 / bpm
 }
 
-pub(crate) fn clamp01(x: f32) -> f32 {
-    x.clamp(0.0, 1.0)
-}
-
 pub(crate) fn clamp11(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
 }

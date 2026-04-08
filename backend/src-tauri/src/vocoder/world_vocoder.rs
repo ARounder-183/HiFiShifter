@@ -117,6 +117,7 @@ extern "C" {
         aperiodicity: *mut *mut f64,
         synth: *mut WorldSynthesizerRaw,
     ) -> i32;
+    #[allow(dead_code)]
     pub fn RefreshSynthesizer(synth: *mut WorldSynthesizerRaw);
     pub fn DestroySynthesizer(synth: *mut WorldSynthesizerRaw);
     pub fn IsLocked(synth: *mut WorldSynthesizerRaw) -> i32;
@@ -476,6 +477,7 @@ fn compute_f0_with_positions_harvest(
     Ok((temporal_positions, f0))
 }
 
+#[allow(dead_code)]
 fn vocode_one(
     x_f64: &[f64],
     fs: i32,

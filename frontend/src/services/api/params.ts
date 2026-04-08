@@ -31,14 +31,7 @@ export const paramsApi = {
         values: number[],
         checkpoint?: boolean,
     ) =>
-        invoke<{ ok: boolean }>(
-            "set_param_frames",
-            trackId,
-            param,
-            startFrame,
-            values,
-            checkpoint,
-        ),
+        invoke<{ ok: boolean }>("set_param_frames", trackId, param, startFrame, values, checkpoint),
 
     restoreParamFrames: (
         trackId: string,
@@ -59,19 +52,8 @@ export const paramsApi = {
     getStaticParam: (trackId: string, param: string) =>
         invoke<StaticParamValuePayload>("get_static_param", trackId, param),
 
-    setStaticParam: (
-        trackId: string,
-        param: string,
-        value: number,
-        checkpoint?: boolean,
-    ) =>
-        invoke<{ ok: boolean }>(
-            "set_static_param",
-            trackId,
-            param,
-            value,
-            checkpoint,
-        ),
+    setStaticParam: (trackId: string, param: string, value: number, checkpoint?: boolean) =>
+        invoke<{ ok: boolean }>("set_static_param", trackId, param, value, checkpoint),
 
     pasteVocalShifterClipboard: (
         selectionStartFrame?: number,
@@ -85,10 +67,7 @@ export const paramsApi = {
             activeParam,
         ),
 
-    pasteReaperClipboard: (
-        selectionStartFrame?: number,
-        selectionMaxFrames?: number,
-    ) =>
+    pasteReaperClipboard: (selectionStartFrame?: number, selectionMaxFrames?: number) =>
         invoke<
             TimelineResult & {
                 ok: boolean;

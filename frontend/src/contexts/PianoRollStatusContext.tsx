@@ -38,9 +38,7 @@ export function PianoRollStatusProvider({ children }: { children: ReactNode }) {
     const value = useMemo(() => ({ status, update }), [status, update]);
 
     return (
-        <PianoRollStatusContext.Provider value={value}>
-            {children}
-        </PianoRollStatusContext.Provider>
+        <PianoRollStatusContext.Provider value={value}>{children}</PianoRollStatusContext.Provider>
     );
 }
 

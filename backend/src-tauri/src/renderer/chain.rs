@@ -85,6 +85,7 @@ pub struct StageContext<'a> {
 /// 单一处理阶段，接收上一步 PCM，输出处理后 PCM。
 pub trait ProcessingStage: Send + Sync {
     fn id(&self) -> &str;
+    #[allow(dead_code)]
     fn display_name(&self) -> &str;
     /// Stage 自身贡献的参数描述符（可选）。
     fn param_descriptors(&self) -> &'static [ParamDescriptor] {
@@ -99,6 +100,7 @@ pub trait ProcessingStage: Send + Sync {
 /// 实现 `ClipProcessor` 的 Stage 链，将多个 Stage 串联。
 pub struct ProcessorChain {
     pub id: String,
+    #[allow(dead_code)]
     pub display_name: String,
     pub stages: Vec<Box<dyn ProcessingStage>>,
     /// 链内是否包含时间拉伸 Stage（[`SignalsmithTimeStretchStage`]）。

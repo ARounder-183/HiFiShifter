@@ -25,9 +25,7 @@ export function loadKeybindingOverrides(): KeybindingOverrides {
 export function saveKeybindingOverrides(overrides: KeybindingOverrides): void {
     try {
         // 只保存非空的覆盖项
-        const cleaned = Object.fromEntries(
-            Object.entries(overrides).filter(([, v]) => v != null),
-        );
+        const cleaned = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v != null));
         if (Object.keys(cleaned).length === 0) {
             localStorage.removeItem(STORAGE_KEY);
         } else {

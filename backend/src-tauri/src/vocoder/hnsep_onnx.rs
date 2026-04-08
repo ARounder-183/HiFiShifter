@@ -152,6 +152,7 @@ pub fn is_available() -> bool {
     }
 }
 
+#[allow(dead_code)]
 pub fn probe_load() -> Result<String, String> {
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;

@@ -1,18 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 
-import {
-    MAX_PX_PER_SEC,
-    MAX_ROW_HEIGHT,
-    MIN_PX_PER_SEC,
-    MIN_ROW_HEIGHT,
-} from "./constants";
+import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "./constants";
 import { clamp } from "./math";
-import {
-    isNoneBinding,
-    isModifierActive,
-} from "../../../features/keybindings/keybindingsSlice";
+import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
-import { getWheelGestureAxis } from "../wheelGesture";
+import { getTimelineWheelAction } from "../wheelGesture";
+import { computeAnchoredHorizontalZoom } from "../../../utils/horizontalZoom";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
@@ -27,6 +20,7 @@ export const TimelineScrollArea: React.FC<
         scrollHorizontalKb?: Keybinding;
         scrollVerticalKb?: Keybinding;
         horizontalZoomKb?: Keybinding;
+        verticalZoomKb?: Keybinding;
         playheadSec?: number;
         playheadZoomEnabled?: boolean;
     }
@@ -44,6 +38,7 @@ export const TimelineScrollArea: React.FC<
     scrollHorizontalKb,
     scrollVerticalKb,
     horizontalZoomKb,
+    verticalZoomKb,
     playheadSec,
     playheadZoomEnabled,
     ...divProps
@@ -52,28 +47,35 @@ export const TimelineScrollArea: React.FC<
     const pxPerSecRef = useRef(pxPerSec);
     const zoomRafRef = useRef<number | null>(null);
     const zoomPendingRef = useRef<{
-        pointerX: number;
-        secAtPointer: number;
         nextPxPerSec: number;
+        nextScrollLeft: number;
     } | null>(null);
 
     // zoom 中心点以秒为基准
     const pendingZoomRef = useRef<{
-        pointerX: number;
-        secAtPointer: number;
         nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>(null);
+
+    const rowHeightRef = useRef(rowHeight);
+    const pendingVerticalZoomRef = useRef<{
+        pointerY: number;
+        rowUnitAtPointer: number;
+        nextRowHeight: number;
+        nextScrollTop: number;
     } | null>(null);
 
     useEffect(() => {
         pxPerSecRef.current = pxPerSec;
     }, [pxPerSec]);
 
+    useEffect(() => {
+        rowHeightRef.current = rowHeight;
+    }, [rowHeight]);
+
     function syncScrollLeft(scroller: HTMLDivElement) {
         const next = scroller.scrollLeft;
-        if (
-            lastScrollLeftRef.current != null &&
-            lastScrollLeftRef.current === next
-        ) {
+        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
             return;
         }
         lastScrollLeftRef.current = next;
@@ -107,20 +109,21 @@ export const TimelineScrollArea: React.FC<
         if (Math.abs(pending.nextPxPerSec - pxPerSec) > 1e-9) return;
 
         pendingZoomRef.current = null;
-        const { secAtPointer, pointerX } = pending;
-        // 直接使用 projectSec * pxPerSec 计算 maxScroll，避免依赖 DOM scrollWidth 的更新时序
-        // DOM 的 scrollWidth 在 useLayoutEffect 执行时可能还未更新到新值
-        const maxScroll = Math.max(
-            0,
-            projectSec * pxPerSec - scroller.clientWidth,
-        );
-        const nextScrollLeft = Math.min(
-            maxScroll,
-            Math.max(0, secAtPointer * pxPerSec - pointerX),
-        );
-        scroller.scrollLeft = nextScrollLeft;
+        scroller.scrollLeft = pending.nextScrollLeft;
         syncScrollLeft(scroller);
     }, [projectSec, bpm, pxPerSec, scrollRef]);
+
+    useLayoutEffect(() => {
+        const scroller = scrollRef.current;
+        const pending = pendingVerticalZoomRef.current;
+        if (!scroller || !pending) return;
+        if (Math.abs(pending.nextRowHeight - rowHeight) > 1e-9) return;
+
+        pendingVerticalZoomRef.current = null;
+
+        const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        scroller.scrollTop = Math.min(Math.max(0, pending.nextScrollTop), maxScrollTop);
+    }, [rowHeight, scrollRef]);
 
     useEffect(() => {
         localStorage.setItem("hifishifter.pxPerSec", String(pxPerSec));
@@ -136,92 +139,114 @@ export const TimelineScrollArea: React.FC<
 
         const handler: EventListener = (evt) => {
             const e = evt as globalThis.WheelEvent;
-            const wheelAxis = getWheelGestureAxis(e);
-            const noModifierPressed =
-                !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+            const clipGainKnobEl = (e.target as HTMLElement | null)?.closest(
+                "[data-clip-gain-knob]",
+            );
+            if (clipGainKnobEl) {
+                return;
+            }
+            const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
                 if (!kb) return false;
                 if (isNoneBinding(kb)) return noModifierPressed;
                 return isModifierActive(kb, e);
             };
+            const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
+            const verticalScrollRequested = isWheelBindingRequested(scrollVerticalKb);
             const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
+            const verticalZoomRequested = isWheelBindingRequested(verticalZoomKb);
 
-            // Scroll modifier: convert wheel to horizontal scroll
-            if (isWheelBindingRequested(scrollHorizontalKb)) {
+            const wheelAction = getTimelineWheelAction({
+                deltaX: e.deltaX,
+                deltaY: e.deltaY,
+                horizontalScrollRequested,
+                verticalScrollRequested,
+                verticalZoomRequested,
+                horizontalZoomRequested,
+            });
+
+            if (wheelAction === "horizontal-scroll") {
                 e.preventDefault();
-                scroller.scrollLeft += e.deltaY;
+                scroller.scrollLeft += horizontalScrollRequested ? e.deltaY : e.deltaX;
                 syncScrollLeft(scroller);
                 return;
             }
 
-            // Scroll modifier: convert wheel to vertical scroll
-            if (isWheelBindingRequested(scrollVerticalKb)) {
+            if (wheelAction === "vertical-scroll") {
                 e.preventDefault();
                 scroller.scrollTop += e.deltaY;
                 return;
             }
 
-            if (!horizontalZoomRequested && wheelAxis === "horizontal") {
-                e.preventDefault();
-                scroller.scrollLeft += e.deltaX;
-                syncScrollLeft(scroller);
+            if (wheelAction === "native") {
                 return;
             }
 
-            // Ctrl + wheel: vertical zoom (track height)
-            if (e.ctrlKey) {
+            const bounds = scroller.getBoundingClientRect();
+
+            if (wheelAction === "vertical-zoom") {
                 e.preventDefault();
                 const dir = e.deltaY < 0 ? 1 : -1;
                 const factor = dir > 0 ? 1.1 : 0.9;
-                setRowHeight((prev) =>
-                    Math.round(
-                        clamp(prev * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
-                    ),
+                const baseRowHeight =
+                    pendingVerticalZoomRef.current?.nextRowHeight ?? rowHeightRef.current;
+                const baseScrollTop =
+                    pendingVerticalZoomRef.current?.nextScrollTop ?? scroller.scrollTop;
+                const pointerY = clamp(e.clientY - bounds.top, 0, Math.max(1, bounds.height));
+                const rowUnitAtPointer = (baseScrollTop + pointerY) / Math.max(1e-9, baseRowHeight);
+                const nextRowHeight = Math.round(
+                    clamp(baseRowHeight * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
                 );
+                if (Math.abs(nextRowHeight - baseRowHeight) < 1e-9) {
+                    return;
+                }
+                pendingVerticalZoomRef.current = {
+                    pointerY,
+                    rowUnitAtPointer,
+                    nextRowHeight,
+                    nextScrollTop: Math.max(0, rowUnitAtPointer * nextRowHeight - pointerY),
+                };
+                setRowHeight(nextRowHeight);
                 return;
             }
 
-            // Wheel: horizontal zoom (time scale)
-            if (!horizontalZoomRequested) {
+            if (wheelAction !== "horizontal-zoom") {
                 return;
             }
+
             e.preventDefault();
             const dir = e.deltaY < 0 ? 1 : -1;
             const factor = dir > 0 ? 1.1 : 0.9;
-            const bounds = scroller.getBoundingClientRect();
+
+            const basePxPerSec = zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
+            const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
+
+            const totalSec = Math.max(0, projectSec);
+            let anchorSec: number;
 
             // Playhead-based zoom: use playhead as anchor instead of pointer
-            let anchorX: number;
-            let anchorSec: number;
             if (playheadZoomEnabled && playheadSec != null) {
-                anchorSec = playheadSec;
-                anchorX = anchorSec * pxPerSec - scroller.scrollLeft;
-                // 如果 playhead 在可视区域外，先将其居中，再以其为锚点缩放
-                if (anchorX < 0 || anchorX > bounds.width) {
-                    const centeredScrollLeft =
-                        anchorSec * pxPerSec - bounds.width / 2;
-                    scroller.scrollLeft = Math.max(0, centeredScrollLeft);
-                    anchorX = anchorSec * pxPerSec - scroller.scrollLeft;
-                }
+                anchorSec = clamp(playheadSec, 0, totalSec);
             } else {
-                anchorX = e.clientX - bounds.left;
-                anchorSec =
-                    (anchorX + scroller.scrollLeft) / Math.max(1e-9, pxPerSec);
+                const anchorX = clamp(e.clientX - bounds.left, 0, Math.max(1, bounds.width));
+                anchorSec = (anchorX + baseScrollLeft) / Math.max(1e-9, basePxPerSec);
             }
 
-            const basePxPerSec =
-                zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
-            const next = clamp(
-                basePxPerSec * factor,
-                MIN_PX_PER_SEC,
-                MAX_PX_PER_SEC,
-            );
-            if (Math.abs(next - basePxPerSec) < 1e-9) return;
+            const zoom = computeAnchoredHorizontalZoom({
+                currentScale: basePxPerSec,
+                factor,
+                minScale: MIN_PX_PER_SEC,
+                maxScale: MAX_PX_PER_SEC,
+                scrollLeft: baseScrollLeft,
+                viewportWidth: Math.max(1, bounds.width),
+                anchorSec,
+                contentSec: totalSec,
+            });
+            if (!zoom) return;
 
             zoomPendingRef.current = {
-                pointerX: anchorX,
-                secAtPointer: anchorSec,
-                nextPxPerSec: next,
+                nextPxPerSec: zoom.nextScale,
+                nextScrollLeft: zoom.nextScrollLeft,
             };
 
             if (zoomRafRef.current == null) {
@@ -250,6 +275,7 @@ export const TimelineScrollArea: React.FC<
         scrollHorizontalKb,
         scrollVerticalKb,
         horizontalZoomKb,
+        verticalZoomKb,
         playheadSec,
         playheadZoomEnabled,
     ]);

@@ -32,6 +32,7 @@ pub struct AudioPreviewData {
 }
 
 /// 支持的音频扩展名（用于前端标记）
+#[allow(dead_code)]
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"];
 
 fn _is_audio_extension(ext: &str) -> bool {
@@ -137,10 +138,13 @@ fn collect_matching_files(dir: &Path, query: &str, results: &mut Vec<FileEntry>,
         if metadata.is_dir() {
             collect_matching_files(&entry.path(), query, results, max);
         } else {
-            // 匹配完整文件名（含扩展名），同时也匹配 stem
+            // 匹配文件名的 stem（不包含后缀），中间匹配、不区分大小写 → 忽略扩展名
             let path = entry.path();
-            let name_lower = name.to_lowercase();
-            if name_lower.contains(query) {
+            let stem_lower = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if stem_lower.contains(query) {
                 let extension = path
                     .extension()
                     .and_then(|e| e.to_str())

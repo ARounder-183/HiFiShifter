@@ -16,11 +16,16 @@ pub(crate) mod world;
 #[cfg(feature = "vslib")]
 pub(crate) mod vslib_processor;
 
-pub use chain::{ProcessingStage, ProcessorChain, StageContext};
+pub use chain::ProcessingStage;
+#[allow(unused_imports)]
+pub use chain::{ProcessorChain, StageContext};
 pub use traits::{
-    ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, ProcessorCapabilities,
-    RenderContext, Renderer, RendererCapabilities,
+    ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind,
+    Renderer,
 };
+#[allow(unused_imports)]
+pub use traits::{ProcessorCapabilities, RenderContext, RendererCapabilities};
+#[allow(unused_imports)]
 pub use utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 
 use crate::state::SynthPipelineKind;

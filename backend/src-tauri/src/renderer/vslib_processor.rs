@@ -273,6 +273,25 @@ fn stereo_i16_to_mono_f32(buf_stereo: &[i16]) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(feature = "vslib")]
+fn apply_head_declick_ramp(samples: &mut [f32], sample_rate: u32) {
+    if samples.is_empty() {
+        return;
+    }
+
+    // Keep this very short to remove onset discontinuity without audible attack loss.
+    let ramp_frames = ((sample_rate as f64) * 0.002).round() as usize;
+    let ramp_frames = ramp_frames.clamp(16, 192).min(samples.len());
+    if ramp_frames <= 1 {
+        return;
+    }
+
+    for (i, sample) in samples.iter_mut().take(ramp_frames).enumerate() {
+        let k = (i as f32) / (ramp_frames as f32);
+        *sample *= k.clamp(0.0, 1.0);
+    }
+}
+
 // ─── 静态参数描述符 ───────────────────────────────────────────────────────────
 
 static VSLIB_PARAMS: &[ParamDescriptor] = &[
@@ -788,6 +807,9 @@ impl ClipProcessor for VslibProcessor {
             std::cmp::Ordering::Less => out.resize(ctx.out_frames, 0.0),
             std::cmp::Ordering::Equal => {}
         }
+
+        // vslib occasionally starts with a hard non-zero onset; add a short head ramp to prevent clip-start clicks.
+        apply_head_declick_ramp(&mut out, ctx.sample_rate);
 
         let out_stats = sample_stats_f32(&out);
         eprintln!(

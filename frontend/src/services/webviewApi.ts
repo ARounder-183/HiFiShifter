@@ -41,6 +41,7 @@ export const webApi = {
     synthesize: coreApi.synthesize,
     saveSynthesized: coreApi.saveSynthesized,
     saveSeparated: coreApi.saveSeparated,
+    exportAudioAdvanced: coreApi.exportAudioAdvanced,
     playOriginal: coreApi.playOriginal,
     stopAudio: coreApi.stopAudio,
 
@@ -94,6 +95,7 @@ export const webApi = {
 
     addClip: timelineApi.addClip,
     removeClip: timelineApi.removeClip,
+    removeClips: timelineApi.removeClips,
     moveClip: timelineApi.moveClip,
     moveClips: timelineApi.moveClips,
     getClipLinkedParams: timelineApi.getClipLinkedParams,
@@ -106,7 +108,6 @@ export const webApi = {
 
     setTransport: timelineApi.setTransport,
     setProjectLength: timelineApi.setProjectLength,
-
 };
 
 // 保留旧类型导入的“锚点”，以降低大范围改动时的冲突概率（不影响运行时）。

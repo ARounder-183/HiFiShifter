@@ -36,6 +36,8 @@ export type ActionId =
     | "project.export" // 导出音频
     // 轨道
     | "track.add" // 新建轨道
+    | "track.selectUp" // 选择上一条轨道
+    | "track.selectDown" // 选择下一条轨道
     // Clip 操作
     | "clip.delete" // 删除选中 clip
     | "clip.copy" // 复制 clip

@@ -11,9 +11,10 @@ function clamp(value: number, min: number, max: number): number {
     return Math.min(Math.max(value, min), max);
 }
 
-export function getQuickSearchInitialPosition(
-    input: QuickSearchPositionInput,
-): { x: number; y: number } {
+export function getQuickSearchInitialPosition(input: QuickSearchPositionInput): {
+    x: number;
+    y: number;
+} {
     const maxX = Math.max(0, input.viewportWidth - QUICK_SEARCH_POPUP_WIDTH - 20);
     const maxY = Math.max(0, input.viewportHeight - QUICK_SEARCH_POPUP_HEIGHT);
 

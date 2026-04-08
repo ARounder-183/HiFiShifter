@@ -43,11 +43,11 @@ pub const MAX_MIPMAP_LEVELS: usize = 3;
 
 /// 默认 mipmap 除数因子 (针对 44.1kHz 优化)
 /// 三级 mipmap 缓存方案：
-/// - L0 (div=64):   精细级，近距离对轨，spp ≤ 256
+/// - L0 (div=32):   精细级，近距离对轨，spp ≤ 256
 /// - L1 (div=512):  中间级，日常编辑，256 < spp ≤ 2048
 /// - L2 (div=4096): 全局级，预览/导航，spp > 2048
 pub const DEFAULT_DIVISION_FACTORS: [u32; MAX_MIPMAP_LEVELS] = [
-    64,   // Level 0: ~689 peaks/sec at 44.1kHz (精细级，近距离对轨)
+    32,   // Level 0: ~1378 peaks/sec at 44.1kHz (精细级，近距离对轨)
     512,  // Level 1: ~86 peaks/sec at 44.1kHz (中间级，日常编辑)
     4096, // Level 2: ~11 peaks/sec at 44.1kHz (全局级，预览/导航)
 ];
@@ -56,6 +56,7 @@ pub const DEFAULT_DIVISION_FACTORS: [u32; MAX_MIPMAP_LEVELS] = [
 /// spp ≤ SPP_THRESHOLDS[0] → L0
 /// SPP_THRESHOLDS[0] < spp ≤ SPP_THRESHOLDS[1] → L1
 /// spp > SPP_THRESHOLDS[1] → L2
+#[allow(dead_code)]
 pub const SPP_THRESHOLDS: [f64; 2] = [256.0, 2048.0];
 
 // ============== 文件头结构 ==============
@@ -235,6 +236,7 @@ impl MipmapData {
     }
 
     /// 创建指定容量的峰值数据
+    #[allow(dead_code)]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             min: Vec::with_capacity(capacity),
@@ -248,11 +250,13 @@ impl MipmapData {
     }
 
     /// 是否为空
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// 计算数据大小 (bytes)
+    #[allow(dead_code)]
     pub fn data_size(&self, channels: u16) -> usize {
         self.len() * channels as usize * 8 // min(f32) + max(f32) = 8 bytes per channel per peak
     }
@@ -375,6 +379,7 @@ impl HfsPeakFile {
     ///
     /// # 返回
     /// 最佳 mipmap 级别索引
+    #[allow(dead_code)]
     pub fn select_mipmap_level(&self, samples_per_pixel: f64) -> usize {
         // 根据 spp 阈值选择最佳 mipmap 级别
         // spp ≤ 256 → L0 (div=64, 精细级)
@@ -447,6 +452,7 @@ impl HfsPeakFile {
     ///
     /// # 返回
     /// 裁剪后的峰值数据
+    #[allow(dead_code)]
     pub fn get_peaks_segment(
         &self,
         level: usize,
@@ -602,6 +608,7 @@ pub struct PeaksSegmentResult {
 /// 多级峰值查询响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub struct PeaksResponse {
     /// 是否成功
     pub ok: bool,
@@ -634,6 +641,7 @@ pub fn calculate_division_factors(sample_rate: u32) -> Vec<u32> {
 use std::path::Path;
 
 /// 多级 Mipmap 峰值计算器
+#[allow(dead_code)]
 pub struct MipmapPeakCalculator {
     /// 采样率
     sample_rate: u32,
@@ -732,6 +740,7 @@ impl MipmapPeakCalculator {
 ///
 /// # 参数
 /// - `progress_cb`: 可选的进度回调，参数为 0.0~1.0 的进度值
+#[allow(dead_code)]
 pub fn compute_mipmap_peaks(path: &Path) -> Result<HfsPeakFile, String> {
     compute_mipmap_peaks_with_progress(path, None::<fn(f32)>)
 }
@@ -1213,6 +1222,7 @@ impl HfsPeakFile {
 
     /// 从文件加载，仅读取指定级别的 mipmap 数据
     /// 用于按需加载，减少内存占用
+    #[allow(dead_code)]
     pub fn load_mipmap_level(
         path: &Path,
         level: usize,
@@ -1407,6 +1417,7 @@ impl HfsPeaksCache {
     /// 获取或计算峰值数据
     ///
     /// 优先从缓存加载，缓存不存在时计算并保存
+    #[allow(dead_code)]
     pub fn get_or_compute(&self, source_path: &Path) -> Result<HfsPeakFile, String> {
         // 尝试从缓存加载
         if let Some(cached) = self.try_load(source_path) {
@@ -1425,6 +1436,7 @@ impl HfsPeaksCache {
     }
 
     /// 清理缓存目录
+    #[allow(dead_code)]
     pub fn clear(&self) -> std::io::Result<(u64, u64)> {
         let mut removed_files = 0u64;
         let mut removed_bytes = 0u64;

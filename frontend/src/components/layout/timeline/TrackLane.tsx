@@ -1,9 +1,9 @@
+/**
+ * TrackLane - 时间轴单轨道视图，负责布局轨道波形、剪辑项与拖拽中的 ghost 预览。
+ */
 import React from "react";
 
-import type {
-    ClipInfo,
-    TrackInfo,
-} from "../../../features/session/sessionTypes";
+import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import { ClipItem } from "./ClipItem";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
@@ -56,10 +56,14 @@ export const TrackLane = React.memo(function TrackLane(props: {
             | "gain",
     ) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
+    /** Ctrl+左键选择切换（会更新主选中 clip） */
+    onCtrlToggleSelect: (clipId: string) => void;
     /** Ctrl+左键多选切换 */
     toggleMultiSelect: (clipId: string) => void;
     /** Shift+点击范围选择 */
-    onShiftRangeSelect: (clipId: string) => void;
+    onShiftRangeSelect: (clipId: string, anchorClipIdOverride?: string | null) => void;
+    /** Shift 范围选择锚点（点击前快照） */
+    rangeSelectAnchorClipId: string | null;
 
     clearContextMenu: () => void;
 
@@ -95,8 +99,10 @@ export const TrackLane = React.memo(function TrackLane(props: {
         startClipDrag,
         startEditDrag,
         toggleClipMuted,
+        onCtrlToggleSelect,
         toggleMultiSelect,
         onShiftRangeSelect,
+        rangeSelectAnchorClipId,
         clearContextMenu,
         renamingClipId,
         onRenameCommit,
@@ -109,7 +115,7 @@ export const TrackLane = React.memo(function TrackLane(props: {
     // 获取波形颜色配置
     const { mode: themeMode } = useAppTheme();
     const waveformColors = React.useMemo(
-        () => getWaveformColors(themeMode),
+        () => getWaveformColors(themeMode, "timeline"),
         [themeMode],
     );
 
@@ -134,10 +140,8 @@ export const TrackLane = React.memo(function TrackLane(props: {
                     continue;
                 } else {
                     const sourceIndex = trackIndexById[initial.trackId];
-                    const targetIndex =
-                        sourceIndex + ghostDrag.targetTrackOffset;
-                    ghostTrackId =
-                        orderedTrackIds[targetIndex] ?? initial.trackId;
+                    const targetIndex = sourceIndex + ghostDrag.targetTrackOffset;
+                    ghostTrackId = orderedTrackIds[targetIndex] ?? initial.trackId;
                 }
             }
             if (ghostTrackId !== track.id) continue;
@@ -149,10 +153,7 @@ export const TrackLane = React.memo(function TrackLane(props: {
             if (!clip) continue;
             result.push({
                 clip,
-                ghostStartSec: Math.max(
-                    0,
-                    initial.startSec + ghostDrag.deltaSec,
-                ),
+                ghostStartSec: Math.max(0, initial.startSec + ghostDrag.deltaSec),
             });
         }
         return result;
@@ -223,8 +224,10 @@ export const TrackLane = React.memo(function TrackLane(props: {
                         startClipDrag={startClipDrag}
                         startEditDrag={startEditDrag}
                         toggleClipMuted={toggleClipMuted}
+                        onCtrlToggleSelect={onCtrlToggleSelect}
                         toggleMultiSelect={toggleMultiSelect}
                         onShiftRangeSelect={onShiftRangeSelect}
+                        rangeSelectAnchorClipId={rangeSelectAnchorClipId}
                         clearContextMenu={clearContextMenu}
                         triggerRename={renamingClipId === clip.id}
                         onRenameCommit={onRenameCommit}
@@ -250,22 +253,22 @@ export const TrackLane = React.memo(function TrackLane(props: {
                     >
                         {/* Ghost header 条 */}
                         <div
-                            className="absolute left-0 right-0 top-0 rounded-t-sm"
+                            className="absolute left-0 right-0 top-0"
                             style={{
                                 height: CLIP_HEADER_HEIGHT,
                                 backgroundColor: trackColor
-                                    ? `color-mix(in oklab, ${trackColor} 50%, transparent)`
-                                    : "color-mix(in oklab, var(--qt-highlight) 50%, transparent)",
+                                    ? `color-mix(in oklab, var(--qt-clip-bg) 56%, ${trackColor} 44%)`
+                                    : "var(--qt-clip-bg)",
                             }}
                         />
                         {/* Ghost body 区域 */}
                         <div
-                            className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/60"
+                            className="absolute left-0 right-0 bottom-0 border border-dashed border-white/60"
                             style={{
                                 top: CLIP_HEADER_HEIGHT,
                                 backgroundColor: trackColor
-                                    ? `color-mix(in oklab, ${trackColor} 20%, transparent)`
-                                    : "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
+                                    ? `color-mix(in oklab, var(--qt-clip-bg) 60%, ${trackColor} 40%)`
+                                    : "var(--qt-clip-bg)",
                             }}
                         />
                     </div>

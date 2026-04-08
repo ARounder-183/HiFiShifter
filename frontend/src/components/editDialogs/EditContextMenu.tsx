@@ -88,60 +88,140 @@ export function EditContextMenu({
             className="fixed z-[9999] min-w-[180px] rounded-md border border-[var(--gray-a6)] bg-[var(--color-panel-solid)] shadow-lg py-1"
             style={{ left: x, top: y }}
         >
-            <div className={itemClass} onClick={() => { onCopy?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onCopy?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_copy")}
             </div>
-            <div className={itemClass} onClick={() => { onCut?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onCut?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_cut")}
             </div>
-            <div className={itemClass} onClick={() => { onPaste?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onPaste?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_paste")}
             </div>
             <div className={sepClass} />
-            <div className={itemClass} onClick={() => { onSelectAll?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onSelectAll?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_select_all")}
             </div>
-            <div className={itemClass} onClick={() => { onDeselect?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onDeselect?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_deselect")}
             </div>
             <div className={sepClass} />
-            <div className={itemClass} onClick={() => { onInitialize?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onInitialize?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_initialize")}
             </div>
             {isPitchParam && (
                 <>
                     <div className={sepClass} />
-                    <div className={itemClass} onClick={() => { onTransposeCents?.(); onClose(); }}>
+                    <div
+                        className={itemClass}
+                        onClick={() => {
+                            onTransposeCents?.();
+                            onClose();
+                        }}
+                    >
                         {tAny("menu_transpose_cents")}
                     </div>
-                    <div className={itemClass} onClick={() => { onTransposeDegrees?.(); onClose(); }}>
+                    <div
+                        className={itemClass}
+                        onClick={() => {
+                            onTransposeDegrees?.();
+                            onClose();
+                        }}
+                    >
                         {tAny("menu_transpose_degrees")}
                     </div>
-                    <div className={itemClass} onClick={() => { onSetPitch?.(); onClose(); }}>
-                        {tAny("menu_set_pitch")}
-                    </div>
                 </>
             )}
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onSetPitch?.();
+                    onClose();
+                }}
+            >
+                {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
+            </div>
             <div className={sepClass} />
-            <div className={itemClass} onClick={() => { onAverage?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onAverage?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_average")}
             </div>
-            <div className={itemClass} onClick={() => { onSmooth?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onSmooth?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_smooth")}
             </div>
-            <div className={itemClass} onClick={() => { onAddVibrato?.(); onClose(); }}>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onAddVibrato?.();
+                    onClose();
+                }}
+            >
                 {tAny("menu_add_vibrato")}
             </div>
-            {isPitchParam && (
-                <>
-                    <div className={itemClass} onClick={() => { onQuantize?.(); onClose(); }}>
-                        {tAny("menu_quantize")}
-                    </div>
-                    <div className={itemClass} onClick={() => { onMeanQuantize?.(); onClose(); }}>
-                        {tAny("menu_mean_quantize")}
-                    </div>
-                </>
-            )}
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onQuantize?.();
+                    onClose();
+                }}
+            >
+                {tAny("menu_quantize")}
+            </div>
+            <div
+                className={itemClass}
+                onClick={() => {
+                    onMeanQuantize?.();
+                    onClose();
+                }}
+            >
+                {tAny("menu_mean_quantize")}
+            </div>
         </div>
     );
 }

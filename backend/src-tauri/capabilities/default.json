@@ -3,11 +3,23 @@
     "identifier": "default",
     "description": "Capability for the main window",
     "windows": [
-        "main"
+        "main",
+        "appearance"
     ],
     "permissions": [
         "core:default",
         "core:window:allow-destroy",
+        "core:window:allow-create",
+        "core:window:allow-close",
+        "core:window:allow-set-size",
+        "core:window:allow-set-title",
+        "core:window:allow-set-focus",
+        "core:window:allow-center",
+        "core:window:allow-set-always-on-top",
+        "core:window:allow-set-decorations",
+        "core:webview:allow-create-webview",
+        "core:webview:allow-create-webview-window",
+        "core:event:default",
         "opener:default"
     ]
 }

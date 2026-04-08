@@ -33,6 +33,7 @@ pub struct MidiNoteEvent {
     /// MIDI note number (0-127)
     pub note: u8,
     /// 力度 (0-127)
+    #[allow(dead_code)]
     pub velocity: u8,
 }
 

@@ -5,7 +5,8 @@
 use crate::audio_utils::try_read_audio_header_only;
 use crate::models::PitchRange;
 use crate::reaper_parser::{
-    self, stretch_segments_from_markers, ReaperData, ReaperEnvelope, ReaperItem, ReaperTrack,
+    self, stretch_segments_from_markers, ReaperData, ReaperEnvelope, ReaperItem, ReaperTake,
+    ReaperTrack,
 };
 use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};
 use std::collections::BTreeMap;
@@ -61,6 +62,279 @@ fn is_audio_supported(path: &str) -> bool {
 /// 将 Reaper 音量倍率转换为 HiFiShifter 的 0.0–1.0 范围。
 fn convert_volume(vol: f64) -> f32 {
     (vol as f32).clamp(0.0, 1.0)
+}
+
+fn reaper_fade_length_sec(values: &[f64]) -> f64 {
+    if values.len() >= 2 {
+        values[1].max(0.0)
+    } else {
+        values.first().copied().unwrap_or(0.0).max(0.0)
+    }
+}
+
+fn reaper_fade_curve(values: &[f64]) -> String {
+    let shape = values.first().copied().unwrap_or(0.0).round() as i32;
+    match shape {
+        0 => "linear",
+        1 => "sine",
+        2 => "exponential",
+        3 => "logarithmic",
+        4 => "scurve",
+        5 => "exponential",
+        6 => "logarithmic",
+        _ => "sine",
+    }
+    .to_string()
+}
+
+fn derive_fades_from_item_volume_envelope(item: &ReaperItem, item_length: f64) -> (Option<f64>, Option<f64>) {
+    let mut points: Vec<(f64, f64)> = item
+        .envelopes
+        .iter()
+        .filter(|env| {
+            let t = env.env_type.to_uppercase();
+            env.act.first().copied().unwrap_or(1) != 0 && (t.contains("VOLENV") || t == "VOLENV")
+        })
+        .flat_map(|env| {
+            env.points.iter().filter_map(|pt| {
+                if pt.len() >= 2 {
+                    let t = pt[0];
+                    let v = pt[1];
+                    if t.is_finite() && v.is_finite() {
+                        Some((t.clamp(0.0, item_length.max(0.0)), v))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    if points.len() < 2 || item_length <= 0.0 {
+        return (None, None);
+    }
+
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let peak = points
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !peak.is_finite() || peak <= 0.0 {
+        return (None, None);
+    }
+
+    // Reaper item volume envelope does not always plateau at exactly 1.0
+    // (e.g. when item/take gain is already attenuated). Use a relative peak.
+    let unity_threshold = peak * 0.98;
+    let edge_sec = item_length.mul_add(0.05, 0.0).max(0.05);
+
+    let first = points.first().copied();
+    let last = points.last().copied();
+
+    let fade_in = first.and_then(|(t0, v0)| {
+        if t0 <= edge_sec && v0 < unity_threshold {
+            points
+                .iter()
+                .find(|(t, v)| *t > t0 && *v >= unity_threshold)
+                .map(|(t, _)| t.clamp(0.0, item_length))
+        } else {
+            None
+        }
+    });
+
+    let fade_out = last.and_then(|(t1, v1)| {
+        if item_length - t1 <= edge_sec && v1 < unity_threshold {
+            points
+                .iter()
+                .rev()
+                .find(|(t, v)| *t < t1 && *v >= unity_threshold)
+                .map(|(t, _)| (item_length - *t).clamp(0.0, item_length))
+        } else {
+            None
+        }
+    });
+
+    (fade_in, fade_out)
+}
+
+fn effective_item_fades(item: &ReaperItem, take: &ReaperTake, item_length: f64) -> (f64, f64) {
+    let max_len = item_length.max(0.0);
+    let take_fade_in = reaper_fade_length_sec(&take.fade_in);
+    let take_fade_out = reaper_fade_length_sec(&take.fade_out);
+
+    let mut fade_in_sec = if take_fade_in > 1e-9 {
+        take_fade_in.clamp(0.0, max_len)
+    } else {
+        reaper_fade_length_sec(&item.fade_in).clamp(0.0, max_len)
+    };
+    let mut fade_out_sec = if take_fade_out > 1e-9 {
+        take_fade_out.clamp(0.0, max_len)
+    } else {
+        reaper_fade_length_sec(&item.fade_out).clamp(0.0, max_len)
+    };
+    let (env_fade_in, env_fade_out) = derive_fades_from_item_volume_envelope(item, item_length.max(0.0));
+
+    // 仅在显式 fade 长度缺失时才从音量包络推导，避免覆盖 Reaper 的直接 FADEIN/FADEOUT。
+    if fade_in_sec <= 1e-9 {
+        if let Some(v) = env_fade_in {
+            fade_in_sec = v.clamp(0.0, item_length.max(0.0));
+        }
+    }
+    if fade_out_sec <= 1e-9 {
+        if let Some(v) = env_fade_out {
+            fade_out_sec = v.clamp(0.0, item_length.max(0.0));
+        }
+    }
+
+    (fade_in_sec, fade_out_sec)
+}
+
+fn compute_take_source_bounds_sec(
+    take: &ReaperTake,
+    source_duration_sec: Option<f64>,
+) -> (f64, f64, bool) {
+    let section_start = take
+        .source
+        .as_ref()
+        .and_then(|src| src.section_start_sec)
+        .unwrap_or(0.0);
+    let section_length = take
+        .source
+        .as_ref()
+        .and_then(|src| src.section_length_sec)
+        .filter(|len| len.is_finite() && *len > 0.0);
+
+    let mut min_bound = 0.0;
+    let mut max_bound = f64::INFINITY;
+    let has_section = take
+        .source
+        .as_ref()
+        .and_then(|src| src.section_start_sec)
+        .is_some();
+
+    if has_section {
+        min_bound = section_start.max(0.0);
+        if let Some(section_len) = section_length {
+            max_bound = (section_start + section_len).max(min_bound);
+        }
+    }
+
+    if let Some(total_sec) = source_duration_sec.filter(|v| v.is_finite() && *v > 0.0) {
+        max_bound = max_bound.min(total_sec);
+    }
+
+    (min_bound, max_bound, has_section)
+}
+
+fn compute_take_source_anchor_sec(
+    take: &ReaperTake,
+    min_bound: f64,
+    max_bound: f64,
+    has_section: bool,
+    is_reversed: bool,
+) -> f64 {
+    let section_start = take
+        .source
+        .as_ref()
+        .and_then(|src| src.section_start_sec)
+        .unwrap_or(0.0);
+    let soffs_nonneg = take.s_offs.max(0.0);
+
+    let primary_anchor = if has_section {
+        if is_reversed {
+            max_bound - soffs_nonneg
+        } else {
+            section_start + soffs_nonneg
+        }
+    } else if is_reversed {
+        if max_bound.is_finite() {
+            max_bound - soffs_nonneg
+        } else {
+            take.s_offs
+        }
+    } else {
+        take.s_offs
+    };
+
+    let mut anchor = primary_anchor.clamp(min_bound, max_bound);
+
+    if has_section {
+        // 兼容部分工程里 SOFFS 已经是绝对源坐标的写法。
+        let alt_anchor = soffs_nonneg.clamp(min_bound, max_bound);
+        let primary_span = if is_reversed {
+            anchor - min_bound
+        } else {
+            max_bound - anchor
+        };
+        let alt_span = if is_reversed {
+            alt_anchor - min_bound
+        } else {
+            max_bound - alt_anchor
+        };
+        if alt_span > primary_span {
+            anchor = alt_anchor;
+        }
+    }
+
+    anchor
+}
+
+fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
+    let vol = take
+        .vol_pan
+        .first()
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0);
+    if vol > 0.0 {
+        return vol;
+    }
+
+    // 兼容部分 Reaper 多 Take 工程：非主 take 的 VOLPAN 可能写成 0，
+    // 但实际可听音量继承自主 take。此处仅对“显式 take”做回退。
+    let explicit_take = item.takes.iter().any(|candidate| std::ptr::eq(candidate, take));
+    if !explicit_take {
+        return vol.max(0.0);
+    }
+
+    let fallback = item
+        .default_take
+        .vol_pan
+        .first()
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0);
+    if fallback > 0.0 {
+        fallback
+    } else {
+        vol.max(0.0)
+    }
+}
+
+fn compute_item_source_window_sec(
+    take: &ReaperTake,
+    consumed_sec: f64,
+    source_duration_sec: Option<f64>,
+    is_reversed: bool,
+) -> (f64, f64) {
+    let (min_bound, max_bound, has_section) =
+        compute_take_source_bounds_sec(take, source_duration_sec);
+
+    let consumed = consumed_sec.max(0.0);
+    let anchor = compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, is_reversed);
+
+    if is_reversed {
+        let end = anchor;
+        let start = (end - consumed).max(min_bound).min(end);
+        (start, end)
+    } else {
+        let start = anchor;
+        let end = (start + consumed).min(max_bound).max(start);
+        (start, end)
+    }
 }
 
 pub struct ReaperImportResult {
@@ -179,7 +453,7 @@ fn convert_reaper_items_to_existing_tracks(
                 order: next_order,
                 muted: false,
                 solo: false,
-                volume: 0.9,
+                volume: 1.0,
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
                 color: TRACK_COLORS[color_idx].to_string(),
@@ -249,6 +523,7 @@ fn convert_reaper_items_to_existing_tracks(
         playhead_sec: 0.0,
         project_sec: project_end,
         params_by_root_track,
+        project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
         next_track_order: next_order,
     };
 
@@ -419,6 +694,7 @@ fn convert_reaper_data(
         playhead_sec: 0.0,
         project_sec: project_end,
         params_by_root_track,
+        project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
         next_track_order: track_order,
     };
 
@@ -487,20 +763,33 @@ fn process_item(
         ),
         None => (None, None, None),
     };
-    let source_duration_sec = duration_sec.unwrap_or(0.0);
 
     // 获取 take 参数
-    let play_rate = take.play_rate.first().copied().unwrap_or(1.0).max(0.01);
+    let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
+    let source_section_reversed = take
+        .source
+        .as_ref()
+        .map(|src| src.section_mode > 0)
+        .unwrap_or(false);
+    let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
+    let play_rate = raw_play_rate.abs().max(0.01);
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
-    let take_volume = take.vol_pan.first().copied().unwrap_or(1.0);
-    // vol_pan[2] 在 Reaper 中是 gainTrim
-    let gain_trim = take.vol_pan.get(2).copied().unwrap_or(1.0);
+    let take_gain = take_linear_gain(item, take);
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
     let s_offs = take.s_offs; // source offset (seconds)
     let item_pos = item.position; // timeline position (seconds)
     let item_length = item.length; // visible length (seconds)
-    let fade_in_sec = item.fade_in.get(1).copied().unwrap_or(0.0);
-    let fade_out_sec = item.fade_out.get(1).copied().unwrap_or(0.0);
+    let (fade_in_sec, fade_out_sec) = effective_item_fades(item, take, item_length.max(0.0));
+    let fade_in_curve = if reaper_fade_length_sec(&take.fade_in) > 1e-9 {
+        reaper_fade_curve(&take.fade_in)
+    } else {
+        reaper_fade_curve(&item.fade_in)
+    };
+    let fade_out_curve = if reaper_fade_length_sec(&take.fade_out) > 1e-9 {
+        reaper_fade_curve(&take.fade_out)
+    } else {
+        reaper_fade_curve(&item.fade_out)
+    };
 
     // 获取音高包络（如果有）
     let pitch_envelope = find_pitch_envelope(&item.envelopes);
@@ -521,6 +810,15 @@ fn process_item(
             .collect();
         let mut current_timeline_pos = item_pos + time_offset;
         let mut cumulative_source_pos: f64 = 0.0;
+        let (source_min_bound, source_max_bound, has_source_section) =
+            compute_take_source_bounds_sec(take, duration_sec);
+        let source_anchor = compute_take_source_anchor_sec(
+            take,
+            source_min_bound,
+            source_max_bound,
+            has_source_section,
+            item_reversed,
+        );
 
         for (seg_idx, seg) in segments.iter().enumerate() {
             let seg_avg_rate = seg.velocity_average().max(0.01);
@@ -545,14 +843,20 @@ fn process_item(
             let actual_pre_tl = actual_pre_src / effective_rate;
             let actual_post_tl = actual_post_src / effective_rate;
 
-            let clip_src_start = s_offs + cumulative_source_pos - actual_pre_src;
-            // 计算原始的源结束位置（可能会超过真实音频长度）
-            let raw_clip_src_end =
-                s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
-            // 仅当已知源文件时长时才进行裁剪；否则保留原始计算值
-            let clip_src_end = match duration_sec {
-                Some(dur) => raw_clip_src_end.min(dur),
-                None => raw_clip_src_end,
+            let (clip_src_start, clip_src_end) = if item_reversed {
+                let raw_start =
+                    source_anchor - cumulative_source_pos - seg_source_duration - actual_post_src;
+                let raw_end = source_anchor - cumulative_source_pos + actual_pre_src;
+                let start = raw_start.max(source_min_bound).min(source_max_bound);
+                let end = raw_end.max(start).min(source_max_bound);
+                (start, end)
+            } else {
+                let start = (s_offs + cumulative_source_pos - actual_pre_src)
+                    .max(source_min_bound)
+                    .min(source_max_bound);
+                let raw_end = s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
+                let end = raw_end.max(start).min(source_max_bound);
+                (start, end)
             };
             let clip_start = current_timeline_pos - actual_pre_tl;
             let clip_length = (seg_timeline_duration + actual_pre_tl + actual_post_tl).max(0.001);
@@ -573,6 +877,7 @@ fn process_item(
                 length_sec: clip_length,
                 color: clip_color(),
                 source_path: Some(audio_path.clone()),
+                source_path_relative: None,
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
@@ -581,11 +886,12 @@ fn process_item(
                     min: -24.0,
                     max: 24.0,
                 }),
-                gain: convert_volume(take_volume * gain_trim),
+                gain: convert_volume(take_gain),
                 muted: item_muted,
                 source_start_sec: clip_src_start.max(0.0),
                 source_end_sec: clip_src_end,
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
+                reversed: item_reversed,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: "sine".to_string(),
@@ -633,14 +939,53 @@ fn process_item(
                 fade_out_sec.min(clip.length_sec.max(0.0))
             };
 
+            let fade_in_curve_name = if seg_idx == 0 {
+                fade_in_curve.clone()
+            } else {
+                "sine".to_string()
+            };
+            let fade_out_curve_name = if seg_idx + 1 == seg_count {
+                fade_out_curve.clone()
+            } else {
+                "sine".to_string()
+            };
+
             clip.fade_in_sec = fade_in_sec;
             clip.fade_out_sec = fade_out_sec;
+            clip.fade_in_curve = fade_in_curve_name;
+            clip.fade_out_curve = fade_out_curve_name;
         }
     } else {
         // 无 stretch markers：使用 take 的 play_rate
         let effective_rate = play_rate;
-        let source_start = s_offs;
-        let source_end = s_offs + item_length * effective_rate;
+        let (mut source_start, mut source_end) = compute_item_source_window_sec(
+            take,
+            item_length * effective_rate,
+            duration_sec,
+            item_reversed,
+        );
+
+        // 兜底：若窗口被裁成零长度，回退到基于 SOFFS 的正向区间，避免导入后静音。
+        if source_end - source_start <= 1e-9 {
+            let consumed = item_length * effective_rate;
+            let (min_bound, max_bound, has_section) =
+                compute_take_source_bounds_sec(take, duration_sec);
+            let anchor =
+                compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, item_reversed);
+            let (fallback_start, fallback_end) = if item_reversed {
+                let end = anchor;
+                let start = (end - consumed).max(min_bound).min(end);
+                (start, end)
+            } else {
+                let start = anchor;
+                let end = (start + consumed).min(max_bound).max(start);
+                (start, end)
+            };
+            if fallback_end - fallback_start > source_end - source_start {
+                source_start = fallback_start;
+                source_end = fallback_end;
+            }
+        }
         let clip_name = clip_name_from_path(&audio_path);
         let clip_id = new_clip_id();
         let clip_start = item_pos + time_offset;
@@ -653,6 +998,7 @@ fn process_item(
             length_sec: item_length,
             color: clip_color(),
             source_path: Some(audio_path.clone()),
+            source_path_relative: None,
             duration_sec,
             duration_frames,
             source_sample_rate: source_sr,
@@ -661,19 +1007,16 @@ fn process_item(
                 min: -24.0,
                 max: 24.0,
             }),
-            gain: convert_volume(take_volume * gain_trim),
+            gain: convert_volume(take_gain),
             muted: item_muted,
             source_start_sec: source_start.max(0.0),
-            source_end_sec: if source_duration_sec > 0.0 {
-                source_end.min(source_duration_sec)
-            } else {
-                source_end
-            },
+            source_end_sec: source_end,
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
+            reversed: item_reversed,
             fade_in_sec,
             fade_out_sec,
-            fade_in_curve: "sine".to_string(),
-            fade_out_curve: "sine".to_string(),
+            fade_in_curve,
+            fade_out_curve,
             extra_curves: None,
             extra_params: None,
         });

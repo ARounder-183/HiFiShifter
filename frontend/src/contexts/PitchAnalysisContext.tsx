@@ -41,9 +41,7 @@ interface PitchAnalysisContextValue {
     reset: () => void;
 }
 
-const PitchAnalysisContext = createContext<PitchAnalysisContextValue | null>(
-    null,
-);
+const PitchAnalysisContext = createContext<PitchAnalysisContextValue | null>(null);
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
@@ -159,16 +157,9 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
         };
     }, []);
 
-    const value = useMemo(
-        () => ({ state, setState, reset }),
-        [state, setState, reset],
-    );
+    const value = useMemo(() => ({ state, setState, reset }), [state, setState, reset]);
 
-    return (
-        <PitchAnalysisContext.Provider value={value}>
-            {children}
-        </PitchAnalysisContext.Provider>
-    );
+    return <PitchAnalysisContext.Provider value={value}>{children}</PitchAnalysisContext.Provider>;
 }
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
@@ -177,9 +168,7 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
 export function usePitchAnalysis(): PitchAnalysisState {
     const ctx = useContext(PitchAnalysisContext);
     if (!ctx) {
-        throw new Error(
-            "usePitchAnalysis must be used within PitchAnalysisProvider",
-        );
+        throw new Error("usePitchAnalysis must be used within PitchAnalysisProvider");
     }
     return ctx.state;
 }
@@ -188,9 +177,7 @@ export function usePitchAnalysis(): PitchAnalysisState {
 export function usePitchAnalysisDispatch() {
     const ctx = useContext(PitchAnalysisContext);
     if (!ctx) {
-        throw new Error(
-            "usePitchAnalysisDispatch must be used within PitchAnalysisProvider",
-        );
+        throw new Error("usePitchAnalysisDispatch must be used within PitchAnalysisProvider");
     }
     return { setState: ctx.setState, reset: ctx.reset };
 }

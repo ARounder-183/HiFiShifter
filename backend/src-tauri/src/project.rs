@@ -1,5 +1,6 @@
 use crate::state::{SynthPipelineKind, TimelineState};
 use serde::{Deserialize, Serialize};
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +137,21 @@ pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("无法解析工程文件: {}", e))
 }
 
+pub fn is_json_project_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+pub fn serialize_project_file_for_path(pf: &ProjectFile, path: &Path) -> Result<Vec<u8>, String> {
+    if is_json_project_path(path) {
+        // 当用户选择 .json 后缀时，按 JSON 文本保存工程。
+        return serde_json::to_vec_pretty(pf).map_err(|e| e.to_string());
+    }
+    rmp_serde::to_vec_named(pf).map_err(|e| e.to_string())
+}
+
 // ─── 路径处理 ──────────────────────────────────────────────────────────────────
 
 pub fn project_name_from_path(path: &Path) -> String {
@@ -145,31 +161,148 @@ pub fn project_name_from_path(path: &Path) -> String {
         .to_string()
 }
 
-pub fn make_paths_relative(mut tl: TimelineState, project_path: &Path) -> TimelineState {
-    let dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+fn compute_relative_source_path(source_path: &Path, project_path: &Path) -> Option<String> {
+    let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let base_dir_abs = if project_dir.is_absolute() {
+        project_dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(project_dir)
+    };
+    let source_abs = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        base_dir_abs.join(source_path)
+    };
+
+    let base_components: Vec<Component<'_>> = base_dir_abs.components().collect();
+    let source_components: Vec<Component<'_>> = source_abs.components().collect();
+
+    let mut common = 0usize;
+    while common < base_components.len()
+        && common < source_components.len()
+        && base_components[common] == source_components[common]
+    {
+        common += 1;
+    }
+
+    if common == 0 {
+        return None;
+    }
+
+    let mut rel_parts: Vec<String> = Vec::new();
+
+    for comp in &base_components[common..] {
+        if matches!(comp, Component::Normal(_)) {
+            rel_parts.push("..".to_string());
+        }
+    }
+
+    for comp in &source_components[common..] {
+        match comp {
+            Component::Normal(part) => rel_parts.push(part.to_string_lossy().to_string()),
+            Component::ParentDir => rel_parts.push("..".to_string()),
+            Component::CurDir => {}
+            _ => {}
+        }
+    }
+
+    if rel_parts.is_empty() {
+        return None;
+    }
+
+    Some(rel_parts.join("/"))
+}
+
+pub fn prepare_source_paths_for_save(mut tl: TimelineState, project_path: &Path) -> TimelineState {
     for c in tl.clips.iter_mut() {
         if let Some(sp) = c.source_path.clone() {
-            let p = PathBuf::from(&sp);
-            if p.is_absolute() {
-                if let Ok(stripped) = p.strip_prefix(dir) {
-                    c.source_path = Some(stripped.to_string_lossy().to_string());
+            let trimmed = sp.trim();
+            if trimmed.is_empty() {
+                c.source_path_relative = None;
+            } else {
+                let p = PathBuf::from(trimmed);
+                if p.is_absolute() {
+                    c.source_path_relative = compute_relative_source_path(&p, project_path);
+                } else {
+                    c.source_path_relative = Some(trimmed.replace('\\', "/"));
                 }
             }
+        } else {
+            c.source_path_relative = None;
         }
     }
     tl
 }
 
-pub fn resolve_paths_relative(mut tl: TimelineState, project_path: &Path) -> TimelineState {
+pub fn resolve_source_paths_on_open(mut tl: TimelineState, project_path: &Path) -> (TimelineState, Vec<String>) {
     let dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut missing_files = std::collections::BTreeSet::new();
+
     for c in tl.clips.iter_mut() {
-        if let Some(sp) = c.source_path.clone() {
-            let p = PathBuf::from(&sp);
-            if !p.is_absolute() {
-                let joined = dir.join(p);
-                c.source_path = Some(joined.to_string_lossy().to_string());
+        let source_path_raw = c
+            .source_path
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let source_path_relative_raw = c
+            .source_path_relative
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let mut resolved_absolute: Option<String> = None;
+        let mut missing_display_abs: Option<String> = None;
+
+        if let Some(sp) = source_path_raw.as_ref() {
+            let p = PathBuf::from(sp);
+            if p.is_absolute() {
+                if p.exists() {
+                    resolved_absolute = Some(p.to_string_lossy().to_string());
+                } else {
+                    missing_display_abs = Some(p.to_string_lossy().to_string());
+                }
             }
         }
+
+        if resolved_absolute.is_none() {
+            if let Some(rel) = source_path_relative_raw.as_ref() {
+                let joined = dir.join(rel);
+                if joined.exists() {
+                    resolved_absolute = Some(joined.to_string_lossy().to_string());
+                } else if missing_display_abs.is_none() {
+                    missing_display_abs = Some(joined.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        if resolved_absolute.is_none() {
+            if let Some(sp) = source_path_raw.as_ref() {
+                let p = PathBuf::from(sp);
+                if !p.is_absolute() {
+                    let joined = dir.join(p);
+                    if joined.exists() {
+                        resolved_absolute = Some(joined.to_string_lossy().to_string());
+                        c.source_path_relative = Some(sp.clone());
+                    } else if missing_display_abs.is_none() {
+                        missing_display_abs = Some(joined.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(found) = resolved_absolute {
+            c.source_path = Some(found);
+            if c.source_path_relative.is_none() {
+                c.source_path_relative = source_path_relative_raw;
+            }
+        } else if let Some(missing_abs) = missing_display_abs {
+            c.source_path = Some(missing_abs.clone());
+            if c.source_path_relative.is_none() {
+                c.source_path_relative = source_path_relative_raw;
+            }
+            missing_files.insert(missing_abs);
+        }
     }
-    tl
+
+    (tl, missing_files.into_iter().collect())
 }

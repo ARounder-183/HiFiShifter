@@ -39,13 +39,11 @@ export interface TimelineClip {
     length_sec: number;
     color: string;
     source_path?: string;
+    source_path_relative?: string;
     duration_sec?: number;
     duration_frames?: number; // 精确frame总数
     source_sample_rate?: number; // 源文件采样率
-    waveform_preview?:
-        | number[]
-        | { l: number[]; r: number[] }
-        | { min: number[]; max: number[] };
+    waveform_preview?: number[] | { l: number[]; r: number[] } | { min: number[]; max: number[] };
     pitch_range?: {
         min: number;
         max: number;
@@ -55,6 +53,7 @@ export interface TimelineClip {
     source_start_sec?: number;
     source_end_sec?: number;
     playback_rate?: number;
+    reversed?: boolean;
     fade_in_sec?: number;
     fade_out_sec?: number;
     fade_in_curve?: string;
@@ -169,7 +168,7 @@ export interface WaveformPeaksSegmentPayload {
     max: number[];
 }
 
-/** HFSPeaks v2 mipmap 级别（L0=div64, L1=div512, L2=div4096） */
+/** HFSPeaks v2 mipmap 级别（L0=div32, L1=div512, L2=div4096） */
 export type MipmapLevel = 0 | 1 | 2;
 
 /** v2 波形峰值响应 */

@@ -4,9 +4,7 @@ import { invoke } from "../invoke";
 
 export const projectApi = {
     consumeStartupProjectPath: () =>
-        invoke<{ ok: boolean; path?: string | null }>(
-            "consume_startup_project_path",
-        ),
+        invoke<{ ok: boolean; path?: string | null }>("consume_startup_project_path"),
 
     // Project meta
     getProjectMeta: () =>
@@ -38,16 +36,9 @@ export const projectApi = {
                     notes: number[];
                 } | null;
             };
-        }>(
-            "set_project_base_scale",
-            baseScale,
-        ),
+        }>("set_project_base_scale", baseScale),
 
-    setProjectCustomScale: (customScale: {
-        id: string;
-        name: string;
-        notes: number[];
-    }) =>
+    setProjectCustomScale: (customScale: { id: string; name: string; notes: number[] }) =>
         invoke<{ ok: boolean; project?: { custom_scale?: unknown; use_custom_scale?: boolean } }>(
             "set_project_custom_scale",
             customScale,
@@ -62,30 +53,29 @@ export const projectApi = {
     newProject: () => invoke<TimelineResult>("new_project"),
 
     openProjectDialog: () =>
-        invoke<{ ok: boolean; canceled?: boolean; path?: string }>(
-            "open_project_dialog",
-        ),
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_project_dialog"),
 
-    openProject: (projectPath: string) =>
-        invoke<TimelineResult>("open_project", projectPath),
+    openProject: (projectPath: string) => invoke<TimelineResult>("open_project", projectPath),
 
     saveProject: () => invoke<any>("save_project"),
 
     saveProjectAs: () => invoke<any>("save_project_as"),
 
     openVocalShifterDialog: () =>
-        invoke<{ ok: boolean; canceled?: boolean; path?: string }>(
-            "open_vocalshifter_dialog",
-        ),
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_vocalshifter_dialog"),
 
     importVocalShifterProject: (vspPath: string) =>
-        invoke<TimelineResult & { error?: string; skipped_files?: string[] }>("import_vocalshifter_project", vspPath),
-
-    openReaperDialog: () =>
-        invoke<{ ok: boolean; canceled?: boolean; path?: string }>(
-            "open_reaper_dialog",
+        invoke<TimelineResult & { error?: string; skipped_files?: string[] }>(
+            "import_vocalshifter_project",
+            vspPath,
         ),
 
+    openReaperDialog: () =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_reaper_dialog"),
+
     importReaperProject: (rppPath: string) =>
-        invoke<TimelineResult & { error?: string; skipped_files?: string[] }>("import_reaper_project", rppPath),
+        invoke<TimelineResult & { error?: string; skipped_files?: string[] }>(
+            "import_reaper_project",
+            rppPath,
+        ),
 };

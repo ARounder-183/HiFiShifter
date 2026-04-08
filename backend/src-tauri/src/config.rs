@@ -49,6 +49,47 @@ pub struct UiSettings {
     pub custom_scale_presets: Vec<CustomScale>,
 }
 
+/// 导出音频设置（持久化到 app_config.json）
+///
+/// 用于记住导出窗口中不同导出类型的输出目录与文件名设置。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSettings {
+    #[serde(default)]
+    pub project_output_dir: Option<String>,
+    #[serde(default)]
+    pub project_file_name: Option<String>,
+    #[serde(default)]
+    pub separated_output_dir: Option<String>,
+    #[serde(default)]
+    pub separated_file_name_pattern: Option<String>,
+    #[serde(default = "default_export_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_export_bit_depth")]
+    pub bit_depth: u32,
+}
+
+fn default_export_sample_rate() -> u32 {
+    48_000
+}
+
+fn default_export_bit_depth() -> u32 {
+    32
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            project_output_dir: None,
+            project_file_name: None,
+            separated_output_dir: None,
+            separated_file_name_pattern: None,
+            sample_rate: default_export_sample_rate(),
+            bit_depth: default_export_bit_depth(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -102,6 +143,8 @@ struct AppConfig {
     recent: Vec<String>,
     #[serde(default)]
     ui: UiSettings,
+    #[serde(default)]
+    export: ExportSettings,
     /// 持久化的窗口状态（可选）。
     #[serde(default)]
     window: WindowState,
@@ -174,5 +217,17 @@ pub fn load_ui_settings(config_dir: &Path) -> UiSettings {
 pub fn save_ui_settings(config_dir: &Path, ui: &UiSettings) {
     let mut cfg = load_config(config_dir);
     cfg.ui = ui.clone();
+    save_config(config_dir, &cfg);
+}
+
+/// 从 config dir 读取导出设置。
+pub fn load_export_settings(config_dir: &Path) -> ExportSettings {
+    load_config(config_dir).export
+}
+
+/// 将导出设置写入 config dir；保留现有配置中的其他字段。
+pub fn save_export_settings(config_dir: &Path, export: &ExportSettings) {
+    let mut cfg = load_config(config_dir);
+    cfg.export = export.clone();
     save_config(config_dir, &cfg);
 }

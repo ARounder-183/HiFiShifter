@@ -1,7 +1,4 @@
-import {
-    fileBrowserApi,
-    type AudioPreviewData,
-} from "../../services/api/fileBrowser";
+import { fileBrowserApi, type AudioPreviewData } from "../../services/api/fileBrowser";
 
 /**
  * 音频预览播放引擎（单例）
@@ -14,6 +11,7 @@ class AudioPreviewEngine {
     private currentFile: string | null = null;
     private cache = new Map<string, AudioBuffer>();
     private onEndCallback: (() => void) | null = null;
+    private playSessionId = 0;
 
     private ensureContext(): { ctx: AudioContext; gain: GainNode } {
         if (!this.ctx) {
@@ -36,13 +34,25 @@ class AudioPreviewEngine {
         this.onEndCallback = onEnd ?? null;
         const { ctx, gain } = this.ensureContext();
 
+        // 记录当前的播放会话 ID
+        const currentSession = ++this.playSessionId;
+
         let buffer = this.cache.get(filePath);
         if (!buffer) {
             // 从后端获取 PCM 数据
-            const data: AudioPreviewData =
-                await fileBrowserApi.readAudioPreview(filePath, 480_000);
+            const data: AudioPreviewData = await fileBrowserApi.readAudioPreview(filePath, 480_000);
+
+            // 如果 await 期间用户点击了其他音频，直接放弃当前操作
+            if (currentSession !== this.playSessionId) return;
+
             buffer = this.decodePreviewData(ctx, data);
             this.cache.set(filePath, buffer);
+
+            // 限制缓存数量为 20 个，超出则淘汰最旧的
+            if (this.cache.size > 20) {
+                const oldestKey = this.cache.keys().next().value;
+                if (oldestKey) this.cache.delete(oldestKey);
+            }
         }
 
         const source = ctx.createBufferSource();
@@ -100,10 +110,7 @@ class AudioPreviewEngine {
      * 将后端返回的 base64 编码 f32 LE interleaved PCM 数据
      * 解码为 Web Audio AudioBuffer
      */
-    private decodePreviewData(
-        ctx: AudioContext,
-        data: AudioPreviewData,
-    ): AudioBuffer {
+    private decodePreviewData(ctx: AudioContext, data: AudioPreviewData): AudioBuffer {
         const binaryStr = atob(data.pcmBase64);
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {

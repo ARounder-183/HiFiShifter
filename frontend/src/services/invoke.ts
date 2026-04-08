@@ -11,15 +11,9 @@ declare global {
         };
         __TAURI__?: {
             core?: {
-                invoke?: <T>(
-                    cmd: string,
-                    args?: Record<string, unknown>,
-                ) => Promise<T>;
+                invoke?: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
             };
-            invoke?: <T>(
-                cmd: string,
-                args?: Record<string, unknown>,
-            ) => Promise<T>;
+            invoke?: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
         };
     }
 }
@@ -33,12 +27,7 @@ export class BackendInvokeError extends Error {
     public readonly method: string;
     public readonly args?: unknown;
 
-    constructor(params: {
-        mode: InvokeMode;
-        method: string;
-        args?: unknown;
-        cause?: unknown;
-    }) {
+    constructor(params: { mode: InvokeMode; method: string; args?: unknown; cause?: unknown }) {
         super(`Backend invoke failed: ${params.mode}:${params.method}`, {
             cause: params.cause,
         });
@@ -51,9 +40,7 @@ export class BackendInvokeError extends Error {
 
 let pywebviewAvailability: "unknown" | "available" | "unavailable" = "unknown";
 
-async function waitForPyWebviewApi(
-    timeoutMs: number,
-): Promise<PyWebviewApi | null> {
+async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | null> {
     const already = window.pywebview?.api;
     if (already) {
         pywebviewAvailability = "available";
@@ -116,19 +103,13 @@ async function waitForPyWebviewApi(
     return null;
 }
 
-function getTauriInvoke():
-    | (<T>(cmd: string, args?: Record<string, unknown>) => Promise<T>)
-    | null {
-    const tauriInvoke =
-        window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke;
+function getTauriInvoke(): (<T>(cmd: string, args?: Record<string, unknown>) => Promise<T>) | null {
+    const tauriInvoke = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke;
     if (typeof tauriInvoke !== "function") return null;
     return tauriInvoke;
 }
 
-type BuildArgsResult =
-    | Record<string, unknown>
-    | undefined
-    | { __unwired: true };
+type BuildArgsResult = Record<string, unknown> | undefined | { __unwired: true };
 
 function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     // 注意：Tauri invoke uses a named-argument object; pywebview uses positional args.
@@ -211,6 +192,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "remove_clip":
             return { clipId: args[0] };
 
+        case "remove_clips":
+            return { clipIds: args[0] };
+
         case "move_clip":
             return {
                 clipId: args[0],
@@ -245,11 +229,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],
                 playbackRate: args[8],
-                fadeInSec: args[9],
-                fadeOutSec: args[10],
-                fadeInCurve: args[11],
-                fadeOutCurve: args[12],
-                color: args[13],
+                reversed: args[9],
+                fadeInSec: args[10],
+                fadeOutSec: args[11],
+                fadeInCurve: args[12],
+                fadeOutCurve: args[13],
+                color: args[14],
+                checkpoint: args[15],
             };
 
         case "replace_clip_source":
@@ -283,6 +269,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_separated":
             return { outputDir: args[0] };
 
+        case "export_audio_advanced":
+            return { request: args[0] };
+
+        case "preview_export_audio_plan":
+            return { request: args[0] };
+
         case "play_original":
             return { startSec: args[0] };
 
@@ -306,23 +298,15 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
 
         case "paste_vocalshifter_clipboard":
             return {
-                ...(args[0] !== undefined
-                    ? { selectionStartFrame: args[0] }
-                    : {}),
-                ...(args[1] !== undefined
-                    ? { selectionMaxFrames: args[1] }
-                    : {}),
+                ...(args[0] !== undefined ? { selectionStartFrame: args[0] } : {}),
+                ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
                 ...(args[2] !== undefined ? { activeParam: args[2] } : {}),
             };
 
         case "paste_reaper_clipboard":
             return {
-                ...(args[0] !== undefined
-                    ? { selectionStartFrame: args[0] }
-                    : {}),
-                ...(args[1] !== undefined
-                    ? { selectionMaxFrames: args[1] }
-                    : {}),
+                ...(args[0] !== undefined ? { selectionStartFrame: args[0] } : {}),
+                ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
             };
 
         case "open_midi_dialog":
@@ -412,12 +396,8 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return {
                 midiPath: args[0],
                 ...(args[1] !== undefined ? { trackIndex: args[1] } : {}),
-                ...(args[2] !== undefined
-                    ? { selectionStartFrame: args[2] }
-                    : {}),
-                ...(args[3] !== undefined
-                    ? { selectionMaxFrames: args[3] }
-                    : {}),
+                ...(args[2] !== undefined ? { selectionStartFrame: args[2] } : {}),
+                ...(args[3] !== undefined ? { selectionMaxFrames: args[3] } : {}),
             };
 
         case "save_ui_settings":
@@ -434,10 +414,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     }
 }
 
-export async function invoke<T>(
-    method: string,
-    ...args: unknown[]
-): Promise<T> {
+export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
     const tauriInvoke = getTauriInvoke();
     if (tauriInvoke) {
         const invokeArgs = buildTauriArgs(method, args);

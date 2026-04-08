@@ -9,13 +9,9 @@ import { settingsApi } from "../../../services/api";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import type { SessionState } from "../sessionSlice";
 
-
-export const refreshRuntime = createAsyncThunk(
-    "session/refreshRuntime",
-    async () => {
-        return webApi.getRuntimeInfo();
-    },
-);
+export const refreshRuntime = createAsyncThunk("session/refreshRuntime", async () => {
+    return webApi.getRuntimeInfo();
+});
 
 export const clearWaveformCacheRemote = createAsyncThunk(
     "session/clearWaveformCacheRemote",
@@ -27,12 +23,9 @@ export const clearWaveformCacheRemote = createAsyncThunk(
     },
 );
 
-export const loadUiSettings = createAsyncThunk(
-    "session/loadUiSettings",
-    async () => {
-        return settingsApi.getUiSettings();
-    },
-);
+export const loadUiSettings = createAsyncThunk("session/loadUiSettings", async () => {
+    return settingsApi.getUiSettings();
+});
 
 /** Read current UI toggle state from Redux and persist to backend config. */
 export const persistUiSettings = createAsyncThunk(

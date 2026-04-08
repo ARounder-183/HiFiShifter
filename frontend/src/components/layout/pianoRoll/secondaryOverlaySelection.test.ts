@@ -18,18 +18,12 @@ assertDeepEqual(toggleSecondaryParamVisibility({}, "tension"), {
     tension: true,
 });
 
-assertDeepEqual(
-    toggleSecondaryParamVisibility({ tension: true }, "breathiness"),
-    {
-        tension: true,
-        breathiness: true,
-    },
-);
+assertDeepEqual(toggleSecondaryParamVisibility({ tension: true }, "breathiness"), {
+    tension: true,
+    breathiness: true,
+});
 
-assertDeepEqual(
-    toggleSecondaryParamVisibility({ breathiness: true }, "breathiness"),
-    {},
-);
+assertDeepEqual(toggleSecondaryParamVisibility({ breathiness: true }, "breathiness"), {});
 
 assertDeepEqual(
     getVisibleSecondaryParamIds({

@@ -53,6 +53,7 @@ pub struct StreamingWorldAnalyzer {
 }
 
 /// 一批分析帧的输出。
+#[allow(dead_code)]
 pub struct AnalysisFrames {
     /// F0 曲线（Hz，0 表示无声）
     pub f0: Vec<f64>,
@@ -68,6 +69,7 @@ pub struct AnalysisFrames {
     pub frame_period_ms: f64,
 }
 
+#[allow(dead_code)]
 impl StreamingWorldAnalyzer {
     /// 创建分析器。
     ///

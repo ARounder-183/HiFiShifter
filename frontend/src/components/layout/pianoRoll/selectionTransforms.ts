@@ -12,10 +12,7 @@ function isEditableValue(editParam: ParamName, value: number): boolean {
     return Number.isFinite(value) && (!isPitchParam(editParam) || value !== 0);
 }
 
-export function computeSelectionMean(
-    values: number[],
-    editParam: ParamName,
-): number {
+export function computeSelectionMean(values: number[], editParam: ParamName): number {
     let sum = 0;
     let count = 0;
     for (const value of values) {
@@ -94,7 +91,7 @@ export function smoothSelectionValues(
                 sum += buffer[cursor] ?? 0;
                 count += 1;
             }
-            next[index] = count > 0 ? sum / count : buffer[index] ?? 0;
+            next[index] = count > 0 ? sum / count : (buffer[index] ?? 0);
         }
         buffer = next;
     }
@@ -107,9 +104,7 @@ export function smoothSelectionValues(
     });
 }
 
-export function rightDragDownSmoothStrength(
-    dragDelta: number,
-): number {
+export function rightDragDownSmoothStrength(dragDelta: number): number {
     return Math.max(0, -dragDelta / 50);
 }
 
@@ -123,9 +118,5 @@ export function transformSelectionByRightDrag(
         const scale = Math.max(0, 1 + deviationPercent / 100);
         return scaleSelectionDeviation(values, editParam, scale);
     }
-    return smoothSelectionValues(
-        values,
-        editParam,
-        rightDragDownSmoothStrength(dragDelta),
-    );
+    return smoothSelectionValues(values, editParam, rightDragDownSmoothStrength(dragDelta));
 }

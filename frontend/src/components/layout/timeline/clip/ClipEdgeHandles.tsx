@@ -7,6 +7,9 @@ export const ClipEdgeHandles: React.FC<{
     isInMultiSelectedSet: boolean;
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
+    onCtrlToggleSelect: (clipId: string) => void;
+    onShiftRangeSelect: (clipId: string, anchorClipIdOverride?: string | null) => void;
+    rangeSelectAnchorClipId: string | null;
     seekFromClientX: (clientX: number, commit: boolean) => void;
     startEditDrag: (
         e: React.PointerEvent,
@@ -20,6 +23,9 @@ export const ClipEdgeHandles: React.FC<{
     isInMultiSelectedSet,
     ensureSelected,
     selectClipRemote,
+    onCtrlToggleSelect,
+    onShiftRangeSelect,
+    rangeSelectAnchorClipId,
     seekFromClientX,
     startEditDrag,
 }) => {
@@ -41,16 +47,30 @@ export const ClipEdgeHandles: React.FC<{
                     if (e.button !== 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
-                        ensureSelected(clipId);
+
+                    const alt = Boolean(
+                        altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
+                    );
+                    const ctrlOrMeta = e.ctrlKey || e.metaKey;
+                    const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                    const shiftRangeAnchorClipId = doShiftRangeSelect
+                        ? rangeSelectAnchorClipId
+                        : null;
+                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+                    const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+
+                    if (shouldPrimeSelection) {
+                        if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
+                            ensureSelected(clipId);
+                        }
+                        selectClipRemote(clipId);
                     }
-                    selectClipRemote(clipId);
 
                     const startX = e.clientX;
                     const startY = e.clientY;
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
-                    const mode = altPressed ? "stretch_left" : "trim_left";
+                    const mode = alt ? "stretch_left" : "trim_left";
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {
@@ -76,6 +96,14 @@ export const ClipEdgeHandles: React.FC<{
                         window.removeEventListener("pointerup", onEnd, true);
                         window.removeEventListener("pointercancel", onEnd, true);
                         if (!dragStarted) {
+                            if (doCtrlToggleOnly) {
+                                onCtrlToggleSelect(clipId);
+                                return;
+                            }
+                            if (doShiftRangeSelect) {
+                                onShiftRangeSelect(clipId, shiftRangeAnchorClipId);
+                                return;
+                            }
                             seekFromClientX(ev.clientX, true);
                         }
                     };
@@ -95,16 +123,30 @@ export const ClipEdgeHandles: React.FC<{
                     if (e.button !== 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
-                        ensureSelected(clipId);
+
+                    const alt = Boolean(
+                        altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
+                    );
+                    const ctrlOrMeta = e.ctrlKey || e.metaKey;
+                    const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                    const shiftRangeAnchorClipId = doShiftRangeSelect
+                        ? rangeSelectAnchorClipId
+                        : null;
+                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+                    const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+
+                    if (shouldPrimeSelection) {
+                        if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
+                            ensureSelected(clipId);
+                        }
+                        selectClipRemote(clipId);
                     }
-                    selectClipRemote(clipId);
 
                     const startX = e.clientX;
                     const startY = e.clientY;
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
-                    const mode = altPressed ? "stretch_right" : "trim_right";
+                    const mode = alt ? "stretch_right" : "trim_right";
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {
@@ -130,6 +172,14 @@ export const ClipEdgeHandles: React.FC<{
                         window.removeEventListener("pointerup", onEnd, true);
                         window.removeEventListener("pointercancel", onEnd, true);
                         if (!dragStarted) {
+                            if (doCtrlToggleOnly) {
+                                onCtrlToggleSelect(clipId);
+                                return;
+                            }
+                            if (doShiftRangeSelect) {
+                                onShiftRangeSelect(clipId, shiftRangeAnchorClipId);
+                                return;
+                            }
                             seekFromClientX(ev.clientX, true);
                         }
                     };

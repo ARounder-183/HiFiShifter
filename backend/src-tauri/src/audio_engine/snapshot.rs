@@ -6,7 +6,7 @@ use crate::state::{Clip, TimelineState, Track};
 
 use super::io::{get_resampled_stereo_cached, is_audio_path};
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
-use super::util::{clamp01, quantize_i64, quantize_u32};
+use super::util::{quantize_i64, quantize_u32};
 
 pub(crate) fn compute_track_gains<'a>(tracks: &'a [Track]) -> HashMap<&'a str, (f32, bool, bool)> {
     let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
@@ -24,7 +24,7 @@ pub(crate) fn compute_track_gains<'a>(tracks: &'a [Track]) -> HashMap<&'a str, (
 
         while let Some(id) = cur {
             if let Some(node) = by_id.get(id) {
-                gain *= clamp01(node.volume);
+                gain *= node.volume.clamp(0.0, 4.0);
                 muted |= node.muted;
                 soloed |= node.solo;
                 cur = node.parent_id.as_deref();
@@ -279,7 +279,8 @@ pub(crate) fn build_snapshot(
         };
 
         let (mut src_start, mut src_end) = clip_source_bounds_frames(clip, src.frames, out_rate);
-        if src_end.saturating_sub(src_start) <= 1 {
+        // Keep 1-frame slices audible; only drop truly empty source ranges.
+        if src_end.saturating_sub(src_start) == 0 {
             continue;
         }
 
@@ -427,6 +428,7 @@ pub(crate) fn build_snapshot(
                             playback_rate,
                             extra_curves,
                             extra_params,
+                            None,
                         );
                         if debug {
                             eprintln!(
@@ -555,7 +557,9 @@ pub(crate) fn build_snapshot(
                             // 这样下一次重新触发播放时，引擎才会识别到最新 Hash 未渲染而去重新渲染
                             (Some(old_pcm), fallback_breath, true)
                         } else {
-                            // 连旧版本都没有（可能是这个 clip 第一次编辑），判断是回退原声还是静音等待
+                            // 连旧版本都没有（可能是这个 clip 第一次编辑）：
+                            // 不再回退原声，避免出现“原始音频与处理后音频混播”残留问题。
+                            // 统一进入静音等待，直到当前参数对应的渲染结果可用。
                             let state = crate::synth_clip_cache::get_clip_rendering_state(&clip.id);
                             let is_rendering = matches!(
                                 state,
@@ -577,15 +581,18 @@ pub(crate) fn build_snapshot(
                                 })
                                 .unwrap_or(false);
 
-                            if !pitch_analysis_ready || !is_rendering {
-                                if debug {
-                                    eprintln!("[snapshot] clip_id={} cache missing, fallback to original PCM (ready={}, rendering={})", clip.id, pitch_analysis_ready, is_rendering);
-                                }
-                                (None, None, false)
-                            } else {
-                                eprintln!("[snapshot:WARN] clip_id={} hash={:#018x} cache_key found but rendered_pcm=None (rendering in progress, muting)", clip.id, key.param_hash);
-                                (None, None, true)
+                            if debug {
+                                eprintln!(
+                                    "[snapshot] clip_id={} cache missing, keep muted waiting render (ready={}, rendering={})",
+                                    clip.id,
+                                    pitch_analysis_ready,
+                                    is_rendering
+                                );
                             }
+                            if is_rendering || pitch_analysis_ready {
+                                eprintln!("[snapshot:WARN] clip_id={} hash={:#018x} cache_key found but rendered_pcm=None (rendering in progress, muting)", clip.id, key.param_hash);
+                            }
+                            (None, None, true)
                         }
                     } else {
                         (pcm, breath_noise, true)
@@ -606,6 +613,7 @@ pub(crate) fn build_snapshot(
             src: src_render,
             src_start_frame: src_start,
             src_end_frame: src_end,
+            reversed: clip.reversed,
             playback_rate: playback_rate_render,
             local_src_offset_frames,
             repeat,
@@ -646,10 +654,19 @@ pub(crate) fn build_snapshot(
         }
     }
 
+    let mut track_ids = Vec::new();
+    let mut seen_track_ids = std::collections::HashSet::new();
+    for clip in &clips_out {
+        if seen_track_ids.insert(clip.track_id.clone()) {
+            track_ids.push(clip.track_id.clone());
+        }
+    }
+
     EngineSnapshot {
         bpm,
         sample_rate: out_rate,
         duration_frames,
+        track_ids: Arc::new(track_ids),
         clips: Arc::new(clips_out),
     }
 }
@@ -677,6 +694,7 @@ pub(crate) fn build_snapshot_for_file(
         bpm: 120.0,
         sample_rate: out_rate,
         duration_frames: length_frames,
+        track_ids: Arc::new(vec!["__file_preview__".to_string()]),
         clips: Arc::new(vec![EngineClip {
             clip_id: "__file_preview__".to_string(),
             track_id: "__file_preview__".to_string(),
@@ -685,6 +703,7 @@ pub(crate) fn build_snapshot_for_file(
             src,
             src_start_frame: offset_frames,
             src_end_frame,
+            reversed: false,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,

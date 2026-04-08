@@ -112,8 +112,65 @@ pub(super) fn remove_track(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
+
+    // 删除前：BFS 收集将被删除的轨道 ID 及其关联的 clip ID，用于后续清理全局缓存。
+    let (clip_ids_to_clean, root_track_ids_to_clean) = {
+        let mut to_remove = vec![track_id.clone()];
+        let mut idx = 0;
+        while idx < to_remove.len() {
+            let cur = to_remove[idx].clone();
+            for child in tl
+                .tracks
+                .iter()
+                .filter(|t| t.parent_id.as_deref() == Some(cur.as_str()))
+                .map(|t| t.id.clone())
+            {
+                to_remove.push(child);
+            }
+            idx += 1;
+        }
+        let remove_set: std::collections::HashSet<&str> =
+            to_remove.iter().map(|s| s.as_str()).collect();
+        let clip_ids: Vec<String> = tl
+            .clips
+            .iter()
+            .filter(|c| remove_set.contains(c.track_id.as_str()))
+            .map(|c| c.id.clone())
+            .collect();
+        (clip_ids, to_remove)
+    };
+
     tl.remove_track(&track_id);
     state.audio_engine.update_timeline(tl.clone());
+
+    // 清理被删除 clip 的全局合成缓存和渲染状态，防止内存泄漏和旧数据残留。
+    for clip_id in &clip_ids_to_clean {
+        crate::synth_clip_cache::invalidate_clip_all_caches(clip_id);
+    }
+
+    // 将锁的获取移到循环外部，避免 O(N) 的锁争用开销
+    if let Ok(mut mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
+        for clip_id in &clip_ids_to_clean {
+            mgr.remove_state(clip_id);
+        }
+    }
+
+    // 清理被删除轨道的 pitch_timeline_snapshot，防止增量分析数据残留。
+    if let Ok(mut snapshot_map) = state.pitch_timeline_snapshot.lock() {
+        for root_id in &root_track_ids_to_clean {
+            snapshot_map.remove(root_id);
+        }
+    }
+
+    // 清理 pitch_inflight 中包含被删轨道 ID 的去重 key。
+    if let Ok(mut inflight) = state.pitch_inflight.lock() {
+        inflight.retain(|key| {
+            !root_track_ids_to_clean
+                .iter()
+                .any(|tid| key.contains(tid.as_str()))
+        });
+    }
+
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     payload
@@ -240,6 +297,20 @@ pub(super) fn remove_clip(
     payload
 }
 
+/// 批量删除多个 clip，只产生一个 undo checkpoint
+pub(super) fn remove_clips(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl);
+    tl.remove_clips(&clip_ids);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
 pub(super) fn move_clip(
     state: State<'_, AppState>,
     clip_id: String,
@@ -319,14 +390,21 @@ pub(super) fn set_clip_state(
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
     playback_rate: Option<f32>,
+    reversed: Option<bool>,
     fade_in_sec: Option<f64>,
     fade_out_sec: Option<f64>,
     fade_in_curve: Option<String>,
     fade_out_curve: Option<String>,
     color: Option<String>,
+    checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    // checkpoint 默认为 true，但可以通过传递 false 来抑制 undo checkpoint
+    // 这在 undo group 内进行多次操作时很有用
+    let do_checkpoint = checkpoint.unwrap_or(true);
+    if do_checkpoint {
+        state.checkpoint_timeline(&tl);
+    }
     tl.patch_clip_state(
         &clip_id,
         crate::state::ClipStatePatch {
@@ -338,6 +416,7 @@ pub(super) fn set_clip_state(
             source_start_sec,
             source_end_sec,
             playback_rate,
+            reversed,
             fade_in_sec,
             fade_out_sec,
             fade_in_curve,

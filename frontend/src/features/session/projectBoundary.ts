@@ -2,9 +2,7 @@ import type { ClipInfo } from "./sessionTypes";
 
 const EMPTY_PROJECT_BOUNDARY_SEC = 30;
 
-export function getDynamicProjectSec(
-    clips: ClipInfo[],
-): number {
+export function getDynamicProjectSec(clips: ClipInfo[]): number {
     if (!Array.isArray(clips) || clips.length === 0) {
         return EMPTY_PROJECT_BOUNDARY_SEC;
     }

@@ -41,6 +41,15 @@ mod hnsep_onnx_stub;
 #[cfg(not(feature = "onnx"))]
 use hnsep_onnx_stub as hnsep_onnx;
 
+#[cfg(feature = "onnx")]
+#[path = "vocoder/fcpe_onnx.rs"]
+mod fcpe_onnx;
+#[cfg(not(feature = "onnx"))]
+#[path = "vocoder/fcpe_onnx_stub.rs"]
+mod fcpe_onnx_stub;
+#[cfg(not(feature = "onnx"))]
+use fcpe_onnx_stub as fcpe_onnx;
+
 mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
@@ -66,17 +75,10 @@ mod vocalshifter_import;
 #[cfg(feature = "vslib")]
 #[path = "vocoder/vslib.rs"]
 mod vslib;
-#[path = "vocoder/world.rs"]
-mod world;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
 use tauri::Manager;
-use tauri::WindowEvent;
-use tauri::Size as TauriSize;
-use tauri::LogicalSize as TauriLogicalSize;
-use tauri::Position as TauriPosition;
-use tauri::LogicalPosition as TauriLogicalPosition;
 
 pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     // Probe ONNX model availability.
@@ -113,6 +115,15 @@ pub fn run() {
                     if p.join("hnsep.onnx").exists() {
                         // SAFETY: called during single-threaded Tauri setup before workers start.
                         unsafe { std::env::set_var("HIFISHIFTER_HNSEP_MODEL_DIR", &p) };
+                    }
+                }
+            }
+
+            if std::env::var_os("HIFISHIFTER_FCPE_ONNX").is_none() {
+                if let Ok(res_dir) = app.path().resource_dir() {
+                    let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
+                    if p.exists() {
+                        std::env::set_var("HIFISHIFTER_FCPE_ONNX", &p);
                     }
                 }
             }
@@ -268,6 +279,7 @@ pub fn run() {
             commands::get_static_param,
             commands::set_static_param,
             commands::remove_clip,
+            commands::remove_clips,
             commands::move_clip,
             commands::move_clips,
             commands::get_clip_linked_params,
@@ -284,6 +296,10 @@ pub fn run() {
             commands::synthesize,
             commands::save_synthesized,
             commands::save_separated,
+            commands::export_audio_advanced,
+            commands::cancel_export_audio,
+            commands::get_export_audio_defaults,
+            commands::preview_export_audio_plan,
             commands::play_original,
             commands::stop_audio,
             commands::get_playback_state,

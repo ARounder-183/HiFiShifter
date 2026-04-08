@@ -47,8 +47,7 @@ export function usePianoRollData(args: {
 
     // 鍐呴儴 fallback锛氳嫢澶栭儴鏈紶锟?liveEditActiveRef锛屽垯浣跨敤鍐呴儴 ref锛堝缁堜负 false锛夛拷?
     const internalLiveEditActiveRef = useRef(false);
-    const liveEditActiveRef =
-        externalLiveEditActiveRef ?? internalLiveEditActiveRef;
+    const liveEditActiveRef = externalLiveEditActiveRef ?? internalLiveEditActiveRef;
 
     // 锟?pitch_orig_updated 鍒拌揪鏃惰嫢姝ｅ湪缂栬緫锛屽皢鍒锋柊鎺ㄨ繜锟?pointer-up 鍚庢墽琛岋拷?
     const pendingPitchUpdatedRefreshRef = useRef(false);
@@ -59,12 +58,10 @@ export function usePianoRollData(args: {
     >({});
     const secondaryFetchReqIdRef = useRef(0);
 
-    const [pitchEditUserModified, setPitchEditUserModified] = useState<
-        boolean | null
-    >(null);
-    const [pitchEditBackendAvailable, setPitchEditBackendAvailable] = useState<
-        boolean | null
-    >(null);
+    const [pitchEditUserModified, setPitchEditUserModified] = useState<boolean | null>(null);
+    const [pitchEditBackendAvailable, setPitchEditBackendAvailable] = useState<boolean | null>(
+        null,
+    );
 
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [loadingCount, setLoadingCount] = useState(0);
@@ -122,11 +119,7 @@ export function usePianoRollData(args: {
                     (event) => {
                         if (disposed) return;
                         const payload = event.payload ?? {};
-                        if (
-                            payload?.rootTrackId &&
-                            payload.rootTrackId !== rootTrackId
-                        )
-                            return;
+                        if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
 
                         // 鑻ョ敤鎴锋鍦ㄧ粯鍒舵洸绾匡紙pointer down锛夛紝鎺ㄨ繜鏇茬嚎鍒锋柊锟?pointer-up 鍚庯紝
                         // 閬垮厤鍚庣鍒嗘瀽缁撴灉瑕嗙洊鐢ㄦ埛姝ｅ湪缁樺埗锟?liveEditOverride 鍐呭锟?
@@ -266,9 +259,7 @@ export function usePianoRollData(args: {
             Math.max(
                 1,
                 // Use unquantized duration for frame count calculation
-                timeToFrame(covParamStartSec + covParamDurSec, fpMs) -
-                    startFrame +
-                    1,
+                timeToFrame(covParamStartSec + covParamDurSec, fpMs) - startFrame + 1,
             ),
             1,
             200_000,
@@ -282,17 +273,11 @@ export function usePianoRollData(args: {
             const secondaryFpKey = `${trackId}|${secondaryParam}`;
             const secondaryCachedFp = paramFramePeriodCache.get(secondaryFpKey);
             const secondaryFpMs = Number(secondaryCachedFp ?? 5) || 5;
-            const secondaryStartFrame = Math.max(
-                0,
-                timeToFrame(covParamStartSec, secondaryFpMs),
-            );
+            const secondaryStartFrame = Math.max(0, timeToFrame(covParamStartSec, secondaryFpMs));
             const secondaryFrameCount = clamp(
                 Math.max(
                     1,
-                    timeToFrame(
-                        covParamStartSec + covParamDurSec,
-                        secondaryFpMs,
-                    ) -
+                    timeToFrame(covParamStartSec + covParamDurSec, secondaryFpMs) -
                         secondaryStartFrame +
                         1,
                 ),
@@ -349,9 +334,7 @@ export function usePianoRollData(args: {
             return;
         }
 
-        const forceParam =
-            localForceParamFetchToken !==
-            lastAppliedForceParamFetchTokenRef.current;
+        const forceParam = localForceParamFetchToken !== lastAppliedForceParamFetchTokenRef.current;
         const shouldFetchParam = !paramCoversVisible || forceParam;
 
         // 鍓弬鏁板紓姝ュ姞杞斤紙鐙珛璇锋眰锛屼笉褰卞搷涓诲弬鏁板埛鏂伴€昏緫锟?
@@ -365,10 +348,7 @@ export function usePianoRollData(args: {
                             secondaryReq.secondaryParam !== "pitch" ||
                             pitchEnabled ||
                             editParam === "pitch";
-                        if (
-                            !secondaryPitchEnabled &&
-                            secondaryReq.secondaryParam === "pitch"
-                        ) {
+                        if (!secondaryPitchEnabled && secondaryReq.secondaryParam === "pitch") {
                             return null;
                         }
                         const res = await paramsApi.getParamFrames(
@@ -381,14 +361,9 @@ export function usePianoRollData(args: {
                         if (!res?.ok) return null;
                         const payload = res as ParamFramesPayload;
                         const fpRes =
-                            Number(
-                                payload.frame_period_ms ??
-                                    secondaryReq.secondaryFpMs,
-                            ) || secondaryReq.secondaryFpMs;
-                        paramFramePeriodCache.set(
-                            secondaryReq.secondaryFpKey,
-                            fpRes,
-                        );
+                            Number(payload.frame_period_ms ?? secondaryReq.secondaryFpMs) ||
+                            secondaryReq.secondaryFpMs;
+                        paramFramePeriodCache.set(secondaryReq.secondaryFpKey, fpRes);
                         return [
                             secondaryReq.secondaryParam,
                             {
@@ -396,18 +371,12 @@ export function usePianoRollData(args: {
                                 framePeriodMs: fpRes,
                                 startFrame:
                                     Number(
-                                        payload.start_frame ??
-                                            secondaryReq.secondaryStartFrame,
+                                        payload.start_frame ?? secondaryReq.secondaryStartFrame,
                                     ) || secondaryReq.secondaryStartFrame,
                                 stride,
-                                referenceKind:
-                                    payload.reference_kind ?? "source_curve",
-                                orig: (payload.orig ?? []).map(
-                                    (v) => Number(v) || 0,
-                                ),
-                                edit: (payload.edit ?? []).map(
-                                    (v) => Number(v) || 0,
-                                ),
+                                referenceKind: payload.reference_kind ?? "source_curve",
+                                orig: (payload.orig ?? []).map((v) => Number(v) || 0),
+                                edit: (payload.edit ?? []).map((v) => Number(v) || 0),
                             } as ParamViewSegment,
                         ] as const;
                     }),
@@ -434,27 +403,19 @@ export function usePianoRollData(args: {
             void (async () => {
                 const debugEnabled =
                     typeof window !== "undefined" &&
-                    window.localStorage?.getItem(
-                        "hifishifter.debugPianoRoll",
-                    ) === "1";
+                    window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1";
                 beginLoading();
                 try {
                     if (debugEnabled) {
-                        console.log(
-                            "[usePianoRollData] Fetching param frames:",
-                            {
-                                trackId,
-                                editParam,
-                                startFrame,
-                                frameCount,
-                                stride,
-                                startTimeSec: framesToTime(startFrame, fpMs),
-                                endTimeSec: framesToTime(
-                                    startFrame + frameCount - 1,
-                                    fpMs,
-                                ),
-                            },
-                        );
+                        console.log("[usePianoRollData] Fetching param frames:", {
+                            trackId,
+                            editParam,
+                            startFrame,
+                            frameCount,
+                            stride,
+                            startTimeSec: framesToTime(startFrame, fpMs),
+                            endTimeSec: framesToTime(startFrame + frameCount - 1, fpMs),
+                        });
                     }
 
                     const res = await paramsApi.getParamFrames(
@@ -468,18 +429,15 @@ export function usePianoRollData(args: {
                     if (!res?.ok) {
                         if (debug) {
                             // eslint-disable-next-line no-console
-                            console.debug(
-                                "[PianoRollData] paramFrames not ok",
-                                {
-                                    trackId,
-                                    editParam,
-                                    paramKey,
-                                    startFrame,
-                                    frameCount,
-                                    stride,
-                                    res,
-                                },
-                            );
+                            console.debug("[PianoRollData] paramFrames not ok", {
+                                trackId,
+                                editParam,
+                                paramKey,
+                                startFrame,
+                                frameCount,
+                                stride,
+                                res,
+                            });
                         }
                         return;
                     }
@@ -489,21 +447,15 @@ export function usePianoRollData(args: {
                     if (editParam === "pitch") {
                         const userModified = payload.pitch_edit_user_modified;
                         setPitchEditUserModified(
-                            typeof userModified === "boolean"
-                                ? userModified
-                                : null,
+                            typeof userModified === "boolean" ? userModified : null,
                         );
 
-                        const backendAvail =
-                            payload.pitch_edit_backend_available;
+                        const backendAvail = payload.pitch_edit_backend_available;
                         setPitchEditBackendAvailable(
-                            typeof backendAvail === "boolean"
-                                ? backendAvail
-                                : null,
+                            typeof backendAvail === "boolean" ? backendAvail : null,
                         );
                     }
-                    const fpRes =
-                        Number(payload.frame_period_ms ?? fpMs) || fpMs;
+                    const fpRes = Number(payload.frame_period_ms ?? fpMs) || fpMs;
                     paramFramePeriodCache.set(fpKey, fpRes);
 
                     const receivedStartFrame =
@@ -521,18 +473,12 @@ export function usePianoRollData(args: {
                             receivedOrigLen,
                             receivedEditLen,
                             framePeriodMs: fpRes,
-                            receivedStartSec: framesToTime(
-                                receivedStartFrame,
-                                fpRes,
-                            ),
+                            receivedStartSec: framesToTime(receivedStartFrame, fpRes),
                             receivedEndSec: framesToTime(
                                 receivedStartFrame + receivedEditLen - 1,
                                 fpRes,
                             ),
-                            receivedDurSec: framesToTime(
-                                receivedEditLen - 1,
-                                fpRes,
-                            ),
+                            receivedDurSec: framesToTime(receivedEditLen - 1, fpRes),
                         });
                     }
 
@@ -545,8 +491,7 @@ export function usePianoRollData(args: {
                         orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                         edit: (payload.edit ?? []).map((v) => Number(v) || 0),
                     });
-                    lastAppliedForceParamFetchTokenRef.current =
-                        localForceParamFetchToken;
+                    lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                     invalidate();
 
                     if (Math.abs(fpRes - fpMs) > 1e-3) {
@@ -569,16 +514,7 @@ export function usePianoRollData(args: {
         const req = computeVisibleRequest();
         if (!req) return;
 
-        const {
-            debug,
-            trackId,
-            paramKey,
-            startFrame,
-            frameCount,
-            stride,
-            fpMs,
-            fpKey,
-        } = req;
+        const { debug, trackId, paramKey, startFrame, frameCount, stride, fpMs, fpKey } = req;
 
         setIsRefreshing(true);
         const reqId = ++fetchReqIdRef.current;
@@ -587,13 +523,7 @@ export function usePianoRollData(args: {
             beginLoading();
             const [paramRes, secondaryResults] = await Promise.all([
                 shouldFetchParam
-                    ? paramsApi.getParamFrames(
-                          trackId,
-                          editParam,
-                          startFrame,
-                          frameCount,
-                          stride,
-                      )
+                    ? paramsApi.getParamFrames(trackId, editParam, startFrame, frameCount, stride)
                     : Promise.resolve(null),
                 Promise.all(
                     req.secondaryRequests.map(async (secondaryReq) => {
@@ -601,10 +531,7 @@ export function usePianoRollData(args: {
                             secondaryReq.secondaryParam !== "pitch" ||
                             pitchEnabled ||
                             editParam === "pitch";
-                        if (
-                            !secondaryPitchEnabled &&
-                            secondaryReq.secondaryParam === "pitch"
-                        ) {
+                        if (!secondaryPitchEnabled && secondaryReq.secondaryParam === "pitch") {
                             return null;
                         }
                         const res = await paramsApi.getParamFrames(
@@ -617,14 +544,9 @@ export function usePianoRollData(args: {
                         if (!res?.ok) return null;
                         const secPayload = res as ParamFramesPayload;
                         const secFpRes =
-                            Number(
-                                secPayload.frame_period_ms ??
-                                    secondaryReq.secondaryFpMs,
-                            ) || secondaryReq.secondaryFpMs;
-                        paramFramePeriodCache.set(
-                            secondaryReq.secondaryFpKey,
-                            secFpRes,
-                        );
+                            Number(secPayload.frame_period_ms ?? secondaryReq.secondaryFpMs) ||
+                            secondaryReq.secondaryFpMs;
+                        paramFramePeriodCache.set(secondaryReq.secondaryFpKey, secFpRes);
                         return [
                             secondaryReq.secondaryParam,
                             {
@@ -632,18 +554,12 @@ export function usePianoRollData(args: {
                                 framePeriodMs: secFpRes,
                                 startFrame:
                                     Number(
-                                        secPayload.start_frame ??
-                                            secondaryReq.secondaryStartFrame,
+                                        secPayload.start_frame ?? secondaryReq.secondaryStartFrame,
                                     ) || secondaryReq.secondaryStartFrame,
                                 stride,
-                                referenceKind:
-                                    secPayload.reference_kind ?? "source_curve",
-                                orig: (secPayload.orig ?? []).map(
-                                    (v) => Number(v) || 0,
-                                ),
-                                edit: (secPayload.edit ?? []).map(
-                                    (v) => Number(v) || 0,
-                                ),
+                                referenceKind: secPayload.reference_kind ?? "source_curve",
+                                orig: (secPayload.orig ?? []).map((v) => Number(v) || 0),
+                                edit: (secPayload.edit ?? []).map((v) => Number(v) || 0),
                             } as ParamViewSegment,
                         ] as const;
                     }),
@@ -671,8 +587,7 @@ export function usePianoRollData(args: {
                 setParamView({
                     key: paramKey,
                     framePeriodMs: fpRes,
-                    startFrame:
-                        Number(payload.start_frame ?? startFrame) || startFrame,
+                    startFrame: Number(payload.start_frame ?? startFrame) || startFrame,
                     stride,
                     referenceKind: payload.reference_kind ?? "source_curve",
                     orig: (payload.orig ?? []).map((v) => Number(v) || 0),
@@ -732,10 +647,7 @@ export function usePianoRollData(args: {
                         secondaryReq.secondaryParam !== "pitch" ||
                         pitchEnabled ||
                         editParam === "pitch";
-                    if (
-                        !secondaryPitchEnabled &&
-                        secondaryReq.secondaryParam === "pitch"
-                    ) {
+                    if (!secondaryPitchEnabled && secondaryReq.secondaryParam === "pitch") {
                         return null;
                     }
                     const res = await paramsApi.getParamFrames(
@@ -749,33 +661,21 @@ export function usePianoRollData(args: {
 
                     const payload = res as ParamFramesPayload;
                     const fpRes =
-                        Number(
-                            payload.frame_period_ms ??
-                                secondaryReq.secondaryFpMs,
-                        ) || secondaryReq.secondaryFpMs;
-                    paramFramePeriodCache.set(
-                        secondaryReq.secondaryFpKey,
-                        fpRes,
-                    );
+                        Number(payload.frame_period_ms ?? secondaryReq.secondaryFpMs) ||
+                        secondaryReq.secondaryFpMs;
+                    paramFramePeriodCache.set(secondaryReq.secondaryFpKey, fpRes);
                     return [
                         secondaryReq.secondaryParam,
                         {
                             key: secondaryReq.secondaryParamKey,
                             framePeriodMs: fpRes,
                             startFrame:
-                                Number(
-                                    payload.start_frame ??
-                                        secondaryReq.secondaryStartFrame,
-                                ) || secondaryReq.secondaryStartFrame,
+                                Number(payload.start_frame ?? secondaryReq.secondaryStartFrame) ||
+                                secondaryReq.secondaryStartFrame,
                             stride: req.stride,
-                            referenceKind:
-                                payload.reference_kind ?? "source_curve",
-                            orig: (payload.orig ?? []).map(
-                                (v) => Number(v) || 0,
-                            ),
-                            edit: (payload.edit ?? []).map(
-                                (v) => Number(v) || 0,
-                            ),
+                            referenceKind: payload.reference_kind ?? "source_curve",
+                            orig: (payload.orig ?? []).map((v) => Number(v) || 0),
+                            edit: (payload.edit ?? []).map((v) => Number(v) || 0),
                         } as ParamViewSegment,
                     ] as const;
                 }),

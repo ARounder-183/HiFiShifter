@@ -17,7 +17,7 @@ export type SlipDragState = {
     initialById: Record<
         string,
         {
-        sourceStartSec: number;
+            sourceStartSec: number;
             sourceEndSec: number;
             playbackRate: number;
             sourceDurationSec: number | null;
@@ -45,10 +45,7 @@ export function useSlipDrag(deps: {
 
     const slipDragRef = useRef<SlipDragState | null>(null);
 
-    function startSlipDrag(
-        e: React.PointerEvent<HTMLDivElement>,
-        clipId: string,
-    ) {
+    function startSlipDrag(e: React.PointerEvent<HTMLDivElement>, clipId: string) {
         if (e.button !== 0) return;
         const anchor = sessionRef.current.clips.find((c) => c.id === clipId);
         if (!anchor) return;
@@ -117,10 +114,7 @@ export function useSlipDrag(deps: {
                 let nextSourceEnd = initial.sourceEndSec + deltaSrcSec;
 
                 // clamp: sourceStart 不能小于 0，sourceEnd 不能超过源文件时长
-                if (
-                    Number.isFinite(initial.maxSlipSec) &&
-                    initial.maxSlipSec > 1e-6
-                ) {
+                if (Number.isFinite(initial.maxSlipSec) && initial.maxSlipSec > 1e-6) {
                     if (nextSourceStart < 0) {
                         nextSourceEnd -= nextSourceStart;
                         nextSourceStart = 0;
@@ -130,11 +124,13 @@ export function useSlipDrag(deps: {
                         nextSourceEnd = initial.maxSlipSec;
                     }
                 }
-                dispatch(setClipSourceRange({
-                    clipId: id,
-                    sourceStartSec: nextSourceStart,
-                    sourceEndSec: nextSourceEnd,
-                }));
+                dispatch(
+                    setClipSourceRange({
+                        clipId: id,
+                        sourceStartSec: nextSourceStart,
+                        sourceEndSec: nextSourceEnd,
+                    }),
+                );
             }
         }
 

@@ -16,6 +16,10 @@ fn default_frame_period_ms() -> f64 {
     5.0
 }
 
+fn default_project_scale_notes() -> Vec<u8> {
+    vec![0, 2, 4, 5, 7, 9, 11]
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
@@ -145,6 +149,8 @@ pub struct Clip {
     pub color: String,
 
     pub source_path: Option<String>,
+    #[serde(default)]
+    pub source_path_relative: Option<String>,
     pub duration_sec: Option<f64>,       // 兼容性保留
     pub duration_frames: Option<u64>,    // 精确的frame总数
     pub source_sample_rate: Option<u32>, // 源文件采样率
@@ -158,6 +164,8 @@ pub struct Clip {
     #[serde(alias = "trim_end_sec")]
     pub source_end_sec: f64,
     pub playback_rate: f32,
+    #[serde(default)]
+    pub reversed: bool,
     pub fade_in_sec: f64,
     pub fade_out_sec: f64,
     /// 淡入曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
@@ -186,6 +194,7 @@ pub struct ClipStatePatch {
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
+    pub reversed: Option<bool>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -216,6 +225,9 @@ pub struct TimelineState {
     #[serde(default)]
     pub params_by_root_track: BTreeMap<String, TrackParamsState>,
 
+    #[serde(default = "default_project_scale_notes")]
+    pub project_scale_notes: Vec<u8>,
+
     pub next_track_order: i32,
 }
 
@@ -236,6 +248,7 @@ pub struct ProjectState {
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
     pub grid_size: String,
+    #[allow(dead_code)]
     pub allow_close: bool,
 }
 
@@ -267,7 +280,7 @@ impl Default for TimelineState {
                 order: 0,
                 muted: false,
                 solo: false,
-                volume: 0.9,
+                volume: 1.0,
 
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
@@ -281,6 +294,7 @@ impl Default for TimelineState {
             project_sec: 32.0, // 64 beats @ 120 BPM = 32 sec
 
             params_by_root_track: BTreeMap::new(),
+            project_scale_notes: default_project_scale_notes(),
             next_track_order: 1,
         }
     }
@@ -703,6 +717,7 @@ pub struct TimelineSnapshot {
 
 pub struct AppState {
     pub timeline: std::sync::Mutex<TimelineState>,
+    pub timeline_version: std::sync::atomic::AtomicU64,
     pub timeline_history: std::sync::Mutex<TimelineHistory>,
     pub project: std::sync::Mutex<ProjectState>,
     pub runtime: std::sync::Mutex<RuntimeState>,
@@ -722,6 +737,13 @@ pub struct AppState {
     pub waveform_cache_v2: std::sync::Mutex<
         std::collections::HashMap<String, std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>>,
     >,
+
+    /// Inflight deduplication for waveform peak computation.
+    /// When a file is being computed, its source_path is in this set.
+    /// Other threads calling get_or_compute for the same path will wait
+    /// on the Condvar until computation finishes, then read from cache.
+    pub waveform_inflight: std::sync::Mutex<std::collections::HashSet<String>>,
+    pub waveform_inflight_cv: std::sync::Condvar,
 
     // Set in Tauri setup. Used for async notifications.
     pub app_handle: OnceLock<tauri::AppHandle>,
@@ -752,6 +774,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             timeline: std::sync::Mutex::new(TimelineState::default()),
+            timeline_version: std::sync::atomic::AtomicU64::new(0),
             timeline_history: std::sync::Mutex::new(TimelineHistory::default()),
             project: std::sync::Mutex::new(ProjectState::default()),
             runtime: std::sync::Mutex::new(RuntimeState {
@@ -769,6 +792,9 @@ impl Default for AppState {
             ),
             waveform_cache_v2: std::sync::Mutex::new(std::collections::HashMap::new()),
 
+            waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            waveform_inflight_cv: std::sync::Condvar::new(),
+
             app_handle: OnceLock::new(),
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             pitch_analysis_progress: std::sync::RwLock::new(None),
@@ -783,6 +809,12 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn bump_timeline_version(&self) -> u64 {
+        self.timeline_version
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
     pub fn set_pending_startup_project_path(&self, path: Option<String>) {
         let mut guard = self
             .pending_startup_project_path
@@ -820,7 +852,9 @@ impl AppState {
 
     /// 获取或计算 v2 多级 mipmap 峰值数据
     ///
-    /// 优先从内存缓存读取，其次从磁盘缓存读取，最后计算
+    /// 优先从内存缓存读取，其次从磁盘缓存读取，最后计算。
+    /// 使用 inflight 去重：如果另一线程正在计算同一文件，当前线程会等待
+    /// 其完成后直接从缓存读取，避免重复计算和重复进度事件。
     /// 首次计算时会通过 Tauri 事件推送进度（waveform_analysis_progress）
     pub fn get_or_compute_waveform_peaks_v2(
         &self,
@@ -830,7 +864,7 @@ impl AppState {
             return Err("empty source_path".to_string());
         }
 
-        // 检查内存缓存
+        // ── 1. 检查内存缓存 ──
         {
             let cache = self
                 .waveform_cache_v2
@@ -853,7 +887,49 @@ impl AppState {
             }
         }
 
-        // 磁盘缓存
+        // ── 2. Inflight 去重检查 ──
+        // 如果另一线程已在计算同一文件，等待它完成后从缓存读取
+        {
+            let mut inflight = self
+                .waveform_inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            if inflight.contains(source_path) {
+                // 另一线程正在计算此文件，等待 Condvar 通知
+                let key = source_path.to_string();
+                let _guard = self
+                    .waveform_inflight_cv
+                    .wait_while(inflight, |set| set.contains(&*key))
+                    .unwrap_or_else(|e| e.into_inner());
+
+                // 计算已完成，从缓存读取
+                let cache = self
+                    .waveform_cache_v2
+                    .lock()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                if let Some(found) = cache.get(source_path) {
+                    if let Some(handle) = self.app_handle.get() {
+                        use tauri::Emitter;
+                        let _ = handle.emit(
+                            "waveform_analysis_progress",
+                            serde_json::json!({
+                                "sourcePath": source_path,
+                                "progress": 1.0,
+                                "status": "cached",
+                            }),
+                        );
+                    }
+                    return Ok(found.clone());
+                }
+                // 极端情况：前一线程计算失败未放入缓存，继续往下重新计算
+            } else {
+                // 标记当前线程为此文件的计算者
+                inflight.insert(source_path.to_string());
+            }
+        }
+
+        // ── 3. 磁盘缓存 ──
         let cache_dir = {
             self.waveform_cache_dir
                 .lock()
@@ -868,11 +944,13 @@ impl AppState {
         if let Some(cached) = hfs_cache.try_load(path) {
             let cached: std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile> =
                 std::sync::Arc::new(cached);
-            let mut cache = self
-                .waveform_cache_v2
-                .lock()
-                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-            cache.insert(source_path.to_string(), cached.clone());
+            {
+                let mut cache = self
+                    .waveform_cache_v2
+                    .lock()
+                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                cache.insert(source_path.to_string(), cached.clone());
+            }
             // 磁盘缓存命中：发送 cached 状态事件
             if let Some(handle) = self.app_handle.get() {
                 use tauri::Emitter;
@@ -885,9 +963,12 @@ impl AppState {
                     }),
                 );
             }
+            // 移除 inflight 标记并通知等待线程
+            self.remove_waveform_inflight(source_path);
             return Ok(cached);
         }
 
+        // ── 4. 计算新的峰值数据 ──
         // 发送 computing 状态事件（进度 0）
         let source_path_owned = source_path.to_string();
         if let Some(handle) = self.app_handle.get() {
@@ -920,8 +1001,17 @@ impl AppState {
         };
 
         // 计算新的峰值数据（带进度回调）
-        let peaks =
-            crate::hfspeaks_v2::compute_mipmap_peaks_with_progress(path, Some(progress_cb))?;
+        let result =
+            crate::hfspeaks_v2::compute_mipmap_peaks_with_progress(path, Some(progress_cb));
+
+        // 如果计算失败，移除 inflight 标记并返回错误
+        let peaks = match result {
+            Ok(p) => p,
+            Err(e) => {
+                self.remove_waveform_inflight(source_path);
+                return Err(e);
+            }
+        };
 
         // 保存到磁盘缓存
         if let Err(e) = hfs_cache.save(path, &peaks) {
@@ -942,12 +1032,26 @@ impl AppState {
         }
 
         let peaks = std::sync::Arc::new(peaks);
-        let mut cache = self
-            .waveform_cache_v2
-            .lock()
-            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-        cache.insert(source_path.to_string(), peaks.clone());
+        {
+            let mut cache = self
+                .waveform_cache_v2
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            cache.insert(source_path.to_string(), peaks.clone());
+        }
+        // 移除 inflight 标记并通知等待线程
+        self.remove_waveform_inflight(source_path);
         Ok(peaks)
+    }
+
+    /// 辅助方法：从 inflight 集合中移除 source_path 并通知所有等待线程
+    fn remove_waveform_inflight(&self, source_path: &str) {
+        let mut inflight = self
+            .waveform_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        inflight.remove(source_path);
+        self.waveform_inflight_cv.notify_all();
     }
 
     pub fn project_meta_payload(&self) -> ProjectMetaPayload {
@@ -1005,6 +1109,8 @@ impl AppState {
         }
         h.redo.clear();
         drop(h);
+
+        self.bump_timeline_version();
 
         let (name, was_clean) = {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -1069,6 +1175,7 @@ impl AppState {
         h.redo.push(tl.clone());
         *tl = prev;
         drop(h);
+        self.bump_timeline_version();
         self.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
@@ -1089,6 +1196,7 @@ impl AppState {
         h.undo.push(tl.clone());
         *tl = next;
         drop(h);
+        self.bump_timeline_version();
         self.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
@@ -1134,6 +1242,7 @@ impl TimelineState {
                 length_sec: c.length_sec,
                 color: c.color.clone(),
                 source_path: c.source_path.clone(),
+                source_path_relative: c.source_path_relative.clone(),
                 duration_sec: c.duration_sec,
                 duration_frames: c.duration_frames,
                 source_sample_rate: c.source_sample_rate,
@@ -1144,6 +1253,7 @@ impl TimelineState {
                 source_start_sec: Some(c.source_start_sec),
                 source_end_sec: Some(c.source_end_sec),
                 playback_rate: Some(c.playback_rate),
+                reversed: Some(c.reversed),
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -1196,7 +1306,7 @@ impl TimelineState {
             order,
             muted: false,
             solo: false,
-            volume: 0.9,
+            volume: 1.0,
 
             compose_enabled: false,
             pitch_analysis_algo: PitchAnalysisAlgo::default(),
@@ -1369,10 +1479,17 @@ impl TimelineState {
     }
 
     pub fn remove_track(&mut self, track_id: &str) {
-        // Remove clips first.
-        self.clips.retain(|c| c.track_id != track_id);
+        // 守卫：如果目标是根轨道且只剩最后一个根轨道，禁止删除。
+        let target = self.tracks.iter().find(|t| t.id == track_id);
+        let is_root = target.map_or(false, |t| t.parent_id.is_none());
+        if is_root {
+            let root_count = self.tracks.iter().filter(|t| t.parent_id.is_none()).count();
+            if root_count <= 1 {
+                return;
+            }
+        }
 
-        // Remove descendants.
+        // BFS 收集要删除的轨道及其所有后代。
         let mut to_remove = vec![track_id.to_string()];
         let mut idx = 0;
         while idx < to_remove.len() {
@@ -1388,7 +1505,13 @@ impl TimelineState {
             }
             idx += 1;
         }
-        self.tracks.retain(|t| !to_remove.contains(&t.id));
+
+        // Remove clips belonging to the removed tracks.
+        let remove_set: std::collections::HashSet<&str> =
+            to_remove.iter().map(|s| s.as_str()).collect();
+        self.clips.retain(|c| !remove_set.contains(c.track_id.as_str()));
+
+        self.tracks.retain(|t| !remove_set.contains(t.id.as_str()));
 
         if self.selected_track_id.as_deref() == Some(track_id) {
             self.selected_track_id = self.tracks.first().map(|t| t.id.clone());
@@ -1431,7 +1554,7 @@ impl TimelineState {
                 t.solo = v;
             }
             if let Some(v) = volume {
-                t.volume = v.clamp(0.0, 1.0);
+                t.volume = v.clamp(0.0, 4.0);
             }
 
             if let Some(v) = compose_enabled {
@@ -1486,7 +1609,7 @@ impl TimelineState {
                 order: self.next_track_order,
                 muted: false,
                 solo: false,
-                volume: 0.9,
+                volume: 1.0,
 
                 compose_enabled: false,
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
@@ -1547,6 +1670,7 @@ impl TimelineState {
             length_sec: ls,
             color: default_clip_color(),
             source_path,
+            source_path_relative: None,
             duration_sec: computed_duration_sec,
             duration_frames: computed_duration_frames,
             source_sample_rate: computed_source_sr,
@@ -1563,6 +1687,7 @@ impl TimelineState {
             source_start_sec: 0.0,
             source_end_sec: computed_duration_sec.unwrap_or(ls),
             playback_rate: 1.0,
+            reversed: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
@@ -1580,6 +1705,17 @@ impl TimelineState {
         self.clips.retain(|c| c.id != clip_id);
         if self.selected_clip_id.as_deref() == Some(clip_id) {
             self.selected_clip_id = None;
+        }
+    }
+
+    /// 批量删除多个 clip，只触发一次状态变更
+    pub fn remove_clips(&mut self, clip_ids: &[String]) {
+        let id_set: HashSet<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
+        self.clips.retain(|c| !id_set.contains(c.id.as_str()));
+        if let Some(ref sel) = self.selected_clip_id {
+            if id_set.contains(sel.as_str()) {
+                self.selected_clip_id = None;
+            }
         }
     }
 
@@ -1725,6 +1861,7 @@ impl TimelineState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn set_clip_state(
         &mut self,
         clip_id: &str,
@@ -1734,6 +1871,7 @@ impl TimelineState {
         source_start_sec: Option<f64>,
         source_end_sec: Option<f64>,
         playback_rate: Option<f32>,
+        reversed: Option<bool>,
         fade_in_sec: Option<f64>,
         fade_out_sec: Option<f64>,
     ) {
@@ -1748,6 +1886,7 @@ impl TimelineState {
                 source_start_sec,
                 source_end_sec,
                 playback_rate,
+                reversed,
                 fade_in_sec,
                 fade_out_sec,
                 fade_in_curve: None,
@@ -1770,7 +1909,7 @@ impl TimelineState {
                 c.length_sec = v.max(0.0);
             }
             if let Some(v) = patch.gain {
-                c.gain = v.clamp(0.0, 2.0);
+                c.gain = v.clamp(0.0, 4.0);
             }
             if let Some(v) = patch.muted {
                 c.muted = v;
@@ -1787,6 +1926,9 @@ impl TimelineState {
             }
             if let Some(v) = patch.playback_rate {
                 c.playback_rate = v.clamp(0.1, 10.0);
+            }
+            if let Some(v) = patch.reversed {
+                c.reversed = v;
             }
             if let Some(v) = patch.fade_in_sec {
                 c.fade_in_sec = v.max(0.0);
@@ -1840,12 +1982,21 @@ impl TimelineState {
         };
 
         self.clips[idx].length_sec = left_len;
-        // 更新左 clip 的 source_end_sec: 切分点对应的源时间
+        // 更新左 clip 的源区间：
+        // - 正放：左段吃掉前半段，收紧 source_end
+        // - 倒放：左段吃掉后半段，收紧 source_start
         {
+            let orig_src_start = self.clips[idx].source_start_sec;
             let orig_src_end = self.clips[idx].source_end_sec;
-            let new_src_end = self.clips[idx].source_start_sec + left_len * left_rate;
-            self.clips[idx].source_end_sec =
-                new_src_end.clamp(self.clips[idx].source_start_sec, orig_src_end);
+            if self.clips[idx].reversed {
+                let new_src_start = orig_src_end - left_len * left_rate;
+                self.clips[idx].source_start_sec =
+                    new_src_start.clamp(orig_src_start, orig_src_end);
+            } else {
+                let new_src_end = orig_src_start + left_len * left_rate;
+                self.clips[idx].source_end_sec =
+                    new_src_end.clamp(orig_src_start, orig_src_end);
+            }
         }
         // Fade semantics on split:
         // - fade-in is anchored to the original start, so only the left clip should keep it.
@@ -1869,7 +2020,12 @@ impl TimelineState {
         } else {
             1.0
         };
-        if right.source_start_sec.is_finite() {
+        if right.reversed {
+            if right.source_end_sec.is_finite() {
+                right.source_end_sec =
+                    (right.source_end_sec - left_len * rate).max(right.source_start_sec);
+            }
+        } else if right.source_start_sec.is_finite() {
             right.source_start_sec =
                 (right.source_start_sec + left_len * rate).clamp(-1_000_000.0, 1_000_000.0);
         }
@@ -1947,6 +2103,7 @@ impl TimelineState {
                     apply_pitch_edit: true,
                     export_format: crate::mixdown::ExportFormat::Wav32f,
                     quality_preset: crate::mixdown::QualityPreset::Export,
+                    cancel_flag: None,
                 },
             );
 
@@ -1965,6 +2122,7 @@ impl TimelineState {
                 glued.source_start_sec = 0.0;
                 glued.source_end_sec = rendered_duration_sec;
                 glued.playback_rate = 1.0;
+                glued.reversed = false;
                 glued.gain = 1.0;
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
@@ -1989,8 +2147,14 @@ impl TimelineState {
         match clip_id {
             None => self.selected_clip_id = None,
             Some(id) => {
-                if self.clips.iter().any(|c| c.id == id) {
+                if let Some(track_id) = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.track_id.clone())
+                {
                     self.selected_clip_id = Some(id);
+                    self.selected_track_id = Some(track_id);
                 }
             }
         }
@@ -2130,6 +2294,7 @@ impl TimelineState {
             }
 
             clip.source_path = Some(new_source_path.to_string());
+            clip.source_path_relative = None;
             clip.duration_sec = duration_sec;
             clip.duration_frames = duration_frames;
             clip.source_sample_rate = source_sample_rate;

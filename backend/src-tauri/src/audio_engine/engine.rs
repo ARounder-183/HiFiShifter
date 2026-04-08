@@ -5,6 +5,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -14,6 +15,7 @@ use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
 
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
+    TrackMeterScratch,
 };
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
@@ -21,7 +23,7 @@ use super::snapshot::{
 };
 use super::types::{
     AudioEngineStateSnapshot, EngineCommand, EngineSnapshot, ResampledStereo, StretchJob,
-    StretchKey,
+    StretchKey, TrackMeterValue,
 };
 use crate::pitch_clip::schedule_clip_pitch_jobs;
 
@@ -44,6 +46,21 @@ pub struct StretchProgressPayload {
     pub active: bool,
     /// 当前正在拉伸的 clip 名称
     pub clip_name: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMeterEntryPayload {
+    pub track_id: String,
+    pub peak_linear: f32,
+    pub max_peak_linear: f32,
+    pub clipped: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMeterPayload {
+    pub tracks: Vec<TrackMeterEntryPayload>,
 }
 
 /// 音高检测完成后推送给前端的事件 payload。
@@ -113,6 +130,9 @@ impl AudioEngine {
         // This is updated by the engine worker thread.
         let snapshot: Arc<ArcSwap<EngineSnapshot>> =
             Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44100)));
+        let meter_state = Arc::new(Mutex::new(HashMap::<String, TrackMeterValue>::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
 
         let is_playing_thread = is_playing.clone();
         let target_thread = target.clone();
@@ -122,6 +142,48 @@ impl AudioEngine {
         let sample_rate_thread = sample_rate.clone();
 
         let snapshot_for_thread = snapshot.clone();
+        {
+            let meter_state = meter_state.clone();
+            let meter_generation = meter_generation.clone();
+            let meter_app_handle = meter_app_handle.clone();
+            thread::spawn(move || {
+                let mut last_generation = u64::MAX;
+                loop {
+                    thread::sleep(Duration::from_millis(33));
+                    let generation = meter_generation.load(Ordering::Relaxed);
+                    if generation == last_generation {
+                        continue;
+                    }
+                    last_generation = generation;
+
+                    let payload = {
+                        let Ok(state) = meter_state.lock() else {
+                            continue;
+                        };
+                        TrackMeterPayload {
+                            tracks: state
+                                .iter()
+                                .map(|(track_id, value)| TrackMeterEntryPayload {
+                                    track_id: track_id.clone(),
+                                    peak_linear: value.peak_linear,
+                                    max_peak_linear: value.max_peak_linear,
+                                    clipped: value.clipped,
+                                })
+                                .collect(),
+                        }
+                    };
+
+                    let Some(app) = meter_app_handle
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone())
+                    else {
+                        continue;
+                    };
+                    let _ = app.emit("track_meter", payload);
+                }
+            });
+        }
         thread::spawn(move || {
             let host = cpal::default_host();
             let device = match host.default_output_device() {
@@ -297,6 +359,8 @@ impl AudioEngine {
             let mut scratch_mix: Vec<f32> = Vec::new();
             let mut scratch_mix_fade_from: Vec<f32> = Vec::new();
             let mut snapshot_transition = SnapshotTransitionState::default();
+            let meter_state_for_cb = meter_state.clone();
+            let meter_generation_for_cb = meter_generation.clone();
 
             // Clone atomics for the audio callback to avoid moving the originals.
             let is_playing_cb = is_playing_thread.clone();
@@ -305,93 +369,120 @@ impl AudioEngine {
             let err_fn = |err| eprintln!("AudioEngine stream error: {err}");
 
             let stream = match sample_format {
-                cpal::SampleFormat::F32 => device
-                    .build_output_stream(
-                        &config,
-                        move |data: &mut [f32], _| {
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                render_callback_f32(
-                                    data,
-                                    channels,
-                                    &snapshot_for_cb,
-                                    is_playing_cb.as_ref(),
-                                    position_frames_cb.as_ref(),
-                                    duration_frames_cb.as_ref(),
-                                    &mut scratch_mix,
-                                    &mut scratch_mix_fade_from,
-                                    &mut snapshot_transition,
-                                );
-                            }));
-                            if r.is_err() {
-                                eprintln!(
-                                    "AudioEngine: panic in audio callback (f32); silencing output"
-                                );
-                                data.fill(0.0);
-                                is_playing_cb.store(false, Ordering::Relaxed);
-                            }
-                        },
-                        err_fn,
-                        None,
-                    )
-                    .ok(),
-                cpal::SampleFormat::I16 => device
-                    .build_output_stream(
-                        &config,
-                        move |data: &mut [i16], _| {
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                render_callback_i16(
-                                    data,
-                                    channels,
-                                    &snapshot_for_cb,
-                                    is_playing_cb.as_ref(),
-                                    position_frames_cb.as_ref(),
-                                    duration_frames_cb.as_ref(),
-                                    &mut scratch_mix,
-                                    &mut scratch_mix_fade_from,
-                                    &mut snapshot_transition,
-                                );
-                            }));
-                            if r.is_err() {
-                                eprintln!(
-                                    "AudioEngine: panic in audio callback (i16); silencing output"
-                                );
-                                data.fill(0);
-                                is_playing_cb.store(false, Ordering::Relaxed);
-                            }
-                        },
-                        err_fn,
-                        None,
-                    )
-                    .ok(),
-                cpal::SampleFormat::U16 => device
-                    .build_output_stream(
-                        &config,
-                        move |data: &mut [u16], _| {
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                render_callback_u16(
-                                    data,
-                                    channels,
-                                    &snapshot_for_cb,
-                                    is_playing_cb.as_ref(),
-                                    position_frames_cb.as_ref(),
-                                    duration_frames_cb.as_ref(),
-                                    &mut scratch_mix,
-                                    &mut scratch_mix_fade_from,
-                                    &mut snapshot_transition,
-                                );
-                            }));
-                            if r.is_err() {
-                                eprintln!(
-                                    "AudioEngine: panic in audio callback (u16); silencing output"
-                                );
-                                data.fill(u16::MAX / 2);
-                                is_playing_cb.store(false, Ordering::Relaxed);
-                            }
-                        },
-                        err_fn,
-                        None,
-                    )
-                    .ok(),
+                cpal::SampleFormat::F32 => {
+                    let meter_state = meter_state_for_cb.clone();
+                    let meter_generation = meter_generation_for_cb.clone();
+                    let mut meter_scratch = TrackMeterScratch::default();
+                    device
+                        .build_output_stream(
+                            &config,
+                            move |data: &mut [f32], _| {
+                                let r =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        render_callback_f32(
+                                            data,
+                                            channels,
+                                            &snapshot_for_cb,
+                                            is_playing_cb.as_ref(),
+                                            position_frames_cb.as_ref(),
+                                            duration_frames_cb.as_ref(),
+                                            &mut scratch_mix,
+                                            &mut scratch_mix_fade_from,
+                                            &mut snapshot_transition,
+                                            &mut meter_scratch,
+                                            &meter_state,
+                                            meter_generation.as_ref(),
+                                        );
+                                    }));
+                                if r.is_err() {
+                                    eprintln!(
+                                        "AudioEngine: panic in audio callback (f32); silencing output"
+                                    );
+                                    data.fill(0.0);
+                                    is_playing_cb.store(false, Ordering::Relaxed);
+                                }
+                            },
+                            err_fn,
+                            None,
+                        )
+                        .ok()
+                }
+                cpal::SampleFormat::I16 => {
+                    let meter_state = meter_state_for_cb.clone();
+                    let meter_generation = meter_generation_for_cb.clone();
+                    let mut meter_scratch = TrackMeterScratch::default();
+                    device
+                        .build_output_stream(
+                            &config,
+                            move |data: &mut [i16], _| {
+                                let r =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        render_callback_i16(
+                                            data,
+                                            channels,
+                                            &snapshot_for_cb,
+                                            is_playing_cb.as_ref(),
+                                            position_frames_cb.as_ref(),
+                                            duration_frames_cb.as_ref(),
+                                            &mut scratch_mix,
+                                            &mut scratch_mix_fade_from,
+                                            &mut snapshot_transition,
+                                            &mut meter_scratch,
+                                            &meter_state,
+                                            meter_generation.as_ref(),
+                                        );
+                                    }));
+                                if r.is_err() {
+                                    eprintln!(
+                                        "AudioEngine: panic in audio callback (i16); silencing output"
+                                    );
+                                    data.fill(0);
+                                    is_playing_cb.store(false, Ordering::Relaxed);
+                                }
+                            },
+                            err_fn,
+                            None,
+                        )
+                        .ok()
+                }
+                cpal::SampleFormat::U16 => {
+                    let meter_state = meter_state_for_cb.clone();
+                    let meter_generation = meter_generation_for_cb.clone();
+                    let mut meter_scratch = TrackMeterScratch::default();
+                    device
+                        .build_output_stream(
+                            &config,
+                            move |data: &mut [u16], _| {
+                                let r =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        render_callback_u16(
+                                            data,
+                                            channels,
+                                            &snapshot_for_cb,
+                                            is_playing_cb.as_ref(),
+                                            position_frames_cb.as_ref(),
+                                            duration_frames_cb.as_ref(),
+                                            &mut scratch_mix,
+                                            &mut scratch_mix_fade_from,
+                                            &mut snapshot_transition,
+                                            &mut meter_scratch,
+                                            &meter_state,
+                                            meter_generation.as_ref(),
+                                        );
+                                    }));
+                                if r.is_err() {
+                                    eprintln!(
+                                        "AudioEngine: panic in audio callback (u16); silencing output"
+                                    );
+                                    data.fill(u16::MAX / 2);
+                                    is_playing_cb.store(false, Ordering::Relaxed);
+                                }
+                            },
+                            err_fn,
+                            None,
+                        )
+                        .ok()
+                }
                 _ => None,
             };
 
@@ -430,6 +521,8 @@ impl AudioEngine {
                             last_timeline: &mut last_timeline,
                             last_play_file: &mut last_play_file,
                             app_handle: app_handle_for_worker.clone(),
+                            meter_state: &meter_state,
+                            meter_generation: &meter_generation,
                         };
                         match cmd {
                             EngineCommand::Stop => handle_stop(&mut state),
@@ -447,6 +540,9 @@ impl AudioEngine {
                                 handle_clip_pitch_ready(&mut state, clip_id)
                             }
                             EngineCommand::SetAppHandle { handle } => {
+                                if let Ok(mut app) = meter_app_handle.lock() {
+                                    *app = Some(handle.clone());
+                                }
                                 app_handle_for_worker = Some(handle);
                             }
                             EngineCommand::AudioReady { key } => {
@@ -505,6 +601,7 @@ impl AudioEngine {
         });
     }
 
+    #[allow(dead_code)]
     pub fn play_file(&self, path: &Path, offset_sec: f64, target: &str) {
         let _ = self.tx.send(EngineCommand::PlayFile {
             path: path.to_path_buf(),
@@ -544,6 +641,28 @@ impl AudioEngine {
 // ─── Worker 状态结构体 ────────────────────────────────────────────────────────
 
 /// Worker 线程的所有可变状态，按命令处理函数传递。
+fn reset_track_meter_state(
+    meter_state: &Arc<Mutex<HashMap<String, TrackMeterValue>>>,
+    meter_generation: &Arc<AtomicU64>,
+) {
+    if let Ok(mut state) = meter_state.lock() {
+        state.clear();
+        meter_generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn idle_track_meter_state(
+    meter_state: &Arc<Mutex<HashMap<String, TrackMeterValue>>>,
+    meter_generation: &Arc<AtomicU64>,
+) {
+    if let Ok(mut state) = meter_state.lock() {
+        for value in state.values_mut() {
+            value.peak_linear = 0.0;
+        }
+        meter_generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct EngineWorkerState<'a> {
     sr: u32,
     is_playing: &'a Arc<AtomicBool>,
@@ -562,6 +681,8 @@ struct EngineWorkerState<'a> {
     last_play_file: &'a mut Option<(PathBuf, f64, String)>,
     /// 可选的 Tauri app handle，用于向前端推送事件
     app_handle: Option<tauri::AppHandle>,
+    meter_state: &'a Arc<Mutex<HashMap<String, TrackMeterValue>>>,
+    meter_generation: &'a Arc<AtomicU64>,
 }
 
 // ─── 命令处理函数 ─────────────────────────────────────────────────────────────
@@ -571,6 +692,7 @@ fn handle_stop(s: &mut EngineWorkerState) {
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
     s.base_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
+    idle_track_meter_state(s.meter_state, s.meter_generation);
     // 播放停止时清空渲染线程传递的 cache_key 映射
     crate::synth_clip_cache::clear_pending_rendered_keys();
 }
@@ -586,6 +708,11 @@ fn handle_seek_sec(s: &mut EngineWorkerState, sec: f64) {
 fn handle_set_playing(s: &mut EngineWorkerState, playing: bool, target: Option<String>) {
     s.is_playing.store(playing, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = target;
+    if playing {
+        reset_track_meter_state(s.meter_state, s.meter_generation);
+    } else {
+        idle_track_meter_state(s.meter_state, s.meter_generation);
+    }
 }
 
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
@@ -599,12 +726,23 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 当某个 root_track 的 pitch_edit 曲线发生变化时，
     // 使该 track 上所有 clip 的合成缓存失效，触发下次播放时重新合成。
     // WORLD 和 ONNX 共享同一个 synth_clip_cache。
-    for clip in &tl.clips {
-        // 检查该 clip 所在 track 的 pitch_edit 是否发生变化
-        let pitch_changed = s
-            .last_timeline
-            .as_ref()
-            .map(|old_tl| {
+    if let Some(old_tl) = s.last_timeline.as_ref() {
+        use std::collections::HashSet;
+
+        let new_clip_ids: HashSet<&str> = tl.clips.iter().map(|c| c.id.as_str()).collect();
+
+        // 删除的 clip 立即全量失效缓存，避免残留 pending key / 旧渲染结果。
+        for old_clip in &old_tl.clips {
+            if !new_clip_ids.contains(old_clip.id.as_str()) {
+                crate::synth_clip_cache::invalidate_clip_all_caches(&old_clip.id);
+            }
+        }
+
+        for clip in &tl.clips {
+            let old_clip = old_tl.clips.iter().find(|c| c.id == clip.id);
+
+            // 检查该 clip 所在 track 的 pitch_edit 是否发生变化
+            let pitch_changed = {
                 // 先解析 root_track_id，否则子轨道中的 clip 无法正确失效缓存
                 let old_root = old_tl.resolve_root_track_id(&clip.track_id);
                 let new_root = tl.resolve_root_track_id(&clip.track_id);
@@ -618,14 +756,27 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     (Some(_), None) => true, // track params 被删除
                     (None, None) => false,
                 }
-            })
-            .unwrap_or(false); // 首次 timeline，不触发重新合成
+            };
 
-        if pitch_changed {
-            // 修改：不再暴力清除全部缓存，而是仅清除片段缓存和解绑 pending_key。
-            // 这样系统会自然计算出新的 Hash，并在新 Hash 未渲染完成时，
-            // 利用留存下来的 RenderedClipCache 进行无缝垫音播放
-            crate::synth_clip_cache::invalidate_clip_for_pitch_edit(&clip.id);
+            let render_shape_changed = old_clip
+                .map(|old| {
+                    old.source_path != clip.source_path
+                        || old.track_id != clip.track_id
+                        || (old.source_start_sec - clip.source_start_sec).abs() > 1e-6
+                        || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6
+                        || (old.playback_rate - clip.playback_rate).abs() > 1e-6
+                        || old.reversed != clip.reversed
+                        || (old.length_sec - clip.length_sec).abs() > 1e-6
+                })
+                .unwrap_or(false);
+
+            if render_shape_changed {
+                // 片段源范围/轨道归属/速率/长度等变化后，旧渲染结果不可安全复用。
+                crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+            } else if pitch_changed {
+                // 仅 pitch 曲线变化时保留最近一次完整渲染，允许短时无缝垫音。
+                crate::synth_clip_cache::invalidate_clip_for_pitch_edit(&clip.id);
+            }
         }
     }
 
@@ -790,6 +941,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
     s.snapshot.store(Arc::new(snap));
+    idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
 fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
@@ -829,6 +981,7 @@ fn handle_stretch_ready(s: &mut EngineWorkerState, key: StretchKey) {
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
+        idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
 
@@ -874,6 +1027,7 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
+        idle_track_meter_state(s.meter_state, s.meter_generation);
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
     }
 }
@@ -886,11 +1040,13 @@ fn handle_audio_ready(s: &mut EngineWorkerState, _key: super::types::AudioKey) {
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
+        idle_track_meter_state(s.meter_state, s.meter_generation);
     } else if let Some((path, offset_sec, _target)) = s.last_play_file.as_ref() {
         let snap = build_snapshot_for_file(path.as_path(), s.sr, *offset_sec, s.cache);
         s.duration_frames
             .store(snap.duration_frames, Ordering::Relaxed);
         s.snapshot.store(Arc::new(snap));
+        idle_track_meter_state(s.meter_state, s.meter_generation);
     }
 }
 
@@ -912,6 +1068,7 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
     s.position_frames.store(0, Ordering::Relaxed);
     s.is_playing.store(true, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
+    reset_track_meter_state(s.meter_state, s.meter_generation);
 }
 
 // ─── 辅助函数 ───────────────────────────────────────────────────────────────

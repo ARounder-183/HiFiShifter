@@ -24,9 +24,7 @@ export function useLiveParamEditing(args: {
         invalidate,
     } = args;
 
-    const liveEditOverrideRef = useRef<{ key: string; edit: number[] } | null>(
-        null,
-    );
+    const liveEditOverrideRef = useRef<{ key: string; edit: number[] } | null>(null);
 
     useEffect(() => {
         if (!paramView) {
@@ -67,8 +65,7 @@ export function useLiveParamEditing(args: {
                     nextEdit[i] = pv.orig[i] ?? nextEdit[i];
                 } else if (dense) {
                     const j = f - denseStartFrame;
-                    if (j >= 0 && j < dense.length)
-                        nextEdit[i] = dense[j] ?? nextEdit[i];
+                    if (j >= 0 && j < dense.length) nextEdit[i] = dense[j] ?? nextEdit[i];
                 }
             }
 
@@ -118,10 +115,7 @@ export function useLiveParamEditing(args: {
 
             const pv = paramView;
 
-            function applyToParamViewDense(
-                denseStartFrame: number,
-                dense: number[] | null,
-            ) {
+            function applyToParamViewDense(denseStartFrame: number, dense: number[] | null) {
                 if (!pv) return;
                 if (pv.stride <= 0) return;
                 const start = pv.startFrame;
@@ -134,8 +128,7 @@ export function useLiveParamEditing(args: {
                         nextEdit[i] = pv.orig[i] ?? nextEdit[i];
                     } else if (dense) {
                         const j = f - denseStartFrame;
-                        if (j >= 0 && j < dense.length)
-                            nextEdit[i] = dense[j] ?? nextEdit[i];
+                        if (j >= 0 && j < dense.length) nextEdit[i] = dense[j] ?? nextEdit[i];
                     }
                 }
                 setParamView({ ...pv, edit: nextEdit });
@@ -145,13 +138,7 @@ export function useLiveParamEditing(args: {
                 applyToParamViewDense(minF, null);
                 liveEditOverrideRef.current = null;
                 invalidate();
-                await paramsApi.restoreParamFrames(
-                    trackId,
-                    editParam,
-                    minF,
-                    maxF - minF + 1,
-                    true,
-                );
+                await paramsApi.restoreParamFrames(trackId, editParam, minF, maxF - minF + 1, true);
                 bumpRefreshToken();
                 return;
             }
@@ -172,10 +159,7 @@ export function useLiveParamEditing(args: {
             const pvStride = paramView?.stride ?? 1;
 
             const canSliceFromPv =
-                Boolean(paramView) &&
-                pvStride === 1 &&
-                Array.isArray(pvEdit) &&
-                pvEdit.length > 0;
+                Boolean(paramView) && pvStride === 1 && Array.isArray(pvEdit) && pvEdit.length > 0;
 
             if (canSliceFromPv) {
                 for (let f = minF; f <= maxF; f += 1) {

@@ -4,11 +4,8 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import {
-    exportAudio,
-    exportSeparated,
     openReaperFromDialog,
     openVocalShifterFromDialog,
-    pickOutputPath,
     addTrackRemote,
     removeTrackRemote,
     refreshRuntime,
@@ -22,7 +19,6 @@ import {
     importAudioFromDialog,
     importMultipleAudioAtPosition,
 } from "../../features/session/thunks/importThunks";
-import { fileBrowserApi } from "../../services/api/fileBrowser";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
@@ -32,6 +28,7 @@ import {
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
 import { KeybindingsDialog } from "./KeybindingsDialog";
+import { AppearanceSettingsDialog } from "./AppearanceSettingsDialog";
 import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
@@ -43,6 +40,11 @@ import {
     MeanQuantizeDialog,
 } from "../editDialogs/EditDialogs";
 import { SCALE_LABELS } from "../../utils/musicalScales";
+import { ExportAudioDialog } from "./ExportAudioDialog";
+import {
+    isChildPitchOffsetCentsParam,
+    isChildPitchOffsetDegreesParam,
+} from "./pianoRoll/childPitchOffsetParams";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -65,6 +67,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
+    const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
+    const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
     // Edit dialog states
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
@@ -73,7 +77,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [averageOpen, setAverageOpen] = useState(false);
     const [smoothOpen, setSmoothOpen] = useState(false);
     const [vibratoOpen, setVibratoOpen] = useState(false);
-    const [vibratoParamRange, setVibratoParamRange] = useState<{ min: number; max: number } | undefined>(undefined);
+    const [vibratoParamRange, setVibratoParamRange] = useState<
+        { min: number; max: number } | undefined
+    >(undefined);
     const [quantizeOpen, setQuantizeOpen] = useState(false);
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
@@ -83,6 +89,37 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     } | null>(null);
 
     const isPitchParam = s.editParam === "pitch";
+    const isChildCentsParam = isChildPitchOffsetCentsParam(s.editParam);
+    const isChildDegreesParam = isChildPitchOffsetDegreesParam(s.editParam);
+    const setToDefaultValue =
+        s.editParam === "pitch"
+            ? 60
+            : isChildCentsParam || isChildDegreesParam
+              ? 0
+              : s.editParam === "volume" || s.editParam === "dyn_edit"
+                ? 1
+                : 0;
+    const setToValueLabel = s.editParam === "pitch" ? tAny("dlg_midi_note") : tAny("dlg_value");
+    const quantizeDefaultUnit = (() => {
+        if (isChildCentsParam) return 100;
+        if (isChildDegreesParam) return 1;
+        switch (s.editParam) {
+            case "volume":
+            case "dyn_edit":
+                return 0.05;
+            case "formant_shift_cents":
+                return 100;
+            case "breath_gain":
+            case "hifigan_tension":
+                return 0.05;
+            case "pan":
+                return 0.1;
+            case "breathiness":
+                return 250;
+            default:
+                return 1;
+        }
+    })();
     const projectScaleLabel =
         s.project.useCustomScale && s.project.customScale
             ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
@@ -96,14 +133,34 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         const handler = (e: Event) => {
             const dialog = (e as CustomEvent).detail?.dialog as string;
             switch (dialog) {
-                case "transposeCents": setTransposeCentsOpen(true); break;
-                case "transposeDegrees": setTransposeDegreesOpen(true); break;
-                case "setPitch": setSetPitchOpen(true); break;
-                case "average": setAverageOpen(true); break;
-                case "smooth": setSmoothOpen(true); break;
-                case "addVibrato": setVibratoParamRange((e as CustomEvent).detail?.paramRange); setVibratoOpen(true); break;
-                case "quantize": setQuantizeOpen(true); break;
-                case "meanQuantize": setMeanQuantizeOpen(true); break;
+                case "transposeCents":
+                    setTransposeCentsOpen(true);
+                    break;
+                case "transposeDegrees":
+                    setTransposeDegreesOpen(true);
+                    break;
+                case "setPitch":
+                    setSetPitchOpen(true);
+                    break;
+                case "average":
+                    setAverageOpen(true);
+                    break;
+                case "smooth":
+                    setSmoothOpen(true);
+                    break;
+                case "addVibrato":
+                    setVibratoParamRange((e as CustomEvent).detail?.paramRange);
+                    setVibratoOpen(true);
+                    break;
+                case "quantize":
+                    setQuantizeOpen(true);
+                    break;
+                case "meanQuantize":
+                    setMeanQuantizeOpen(true);
+                    break;
+                case "exportAudio":
+                    setExportDialogOpen(true);
+                    break;
             }
         };
         window.addEventListener("hifi:openEditDialog", handler);
@@ -124,7 +181,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     const handleImportAudioFromMenu = useCallback(async () => {
         try {
-            const res = await dispatch(importAudioFromDialog()).unwrap() as {
+            const res = (await dispatch(importAudioFromDialog()).unwrap()) as {
                 canceled?: boolean;
                 requiresModeChoice?: boolean;
                 audioPaths?: string[];
@@ -140,32 +197,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             setMenuImportMode({
                 audioPaths: res.audioPaths,
                 trackId: res.trackId ?? s.selectedTrackId ?? null,
-                startSec: typeof res.startSec === "number"
-                    ? res.startSec
-                    : (s.playheadSec ?? 0),
+                startSec: typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
             });
         } catch {
             // Error state is already handled by session thunk reducers.
         }
     }, [dispatch, s.playheadSec, s.selectedTrackId]);
-
-    async function handleExport() {
-        // 每次导出必定弹窗询问路径
-        const picked = await dispatch(pickOutputPath()).unwrap();
-        // 如果用户取消了选择，直接返回
-        if (!picked.ok || picked.canceled || !picked.path) {
-            return;
-        }
-        // 拿到最新路径后，派发导出命令
-        await dispatch(exportAudio(picked.path));
-    }
-
-    async function handleExportSeparated() {
-        // 弹出文件夹选择对话框
-        const result = await fileBrowserApi.pickDirectory();
-        if (!result.ok || result.canceled || !result.path) return;
-        await dispatch(exportSeparated(result.path));
-    }
 
     return (
         <Flex
@@ -219,17 +256,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Separator />
 
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(saveProjectRemote())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
                         {t("menu_save_project")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("project.save")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(saveProjectAsRemote())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(saveProjectAsRemote())}>
                         {t("menu_save_project_as")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("project.saveAs")}
@@ -243,32 +276,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void handleImportAudioFromMenu();
                         }}
                     >
-                        {t("menu_import_audio")} {" "}
+                        {t("menu_import_audio")}{" "}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(openReaperFromDialog())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(openReaperFromDialog())}>
                         {t("menu_import_reaper")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(openVocalShifterFromDialog())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(openVocalShifterFromDialog())}>
                         {t("menu_import_vocalshifter")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={handleExport}>
+                    <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
                         {t("menu_export_audio")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("project.export")}
                         </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={handleExportSeparated}>
-                        {t("menu_export_separated")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item
-                        onSelect={() => dispatch(pickOutputPath())}
-                    >
-                        {t("menu_pick_output")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={onExit} color="red">
@@ -283,17 +303,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_edit")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(undoRemote())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(undoRemote())}>
                         {t("menu_undo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.undo")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => void dispatch(redoRemote())}
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(redoRemote())}>
                         {t("menu_redo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.redo")}
@@ -354,14 +370,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     {shortcutLabel("edit.transposeDegrees")}
                                 </div>
                             </DropdownMenu.Item>
-                            <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
-                                {tAny("menu_set_pitch")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.setPitch")}
-                                </div>
-                            </DropdownMenu.Item>
                         </>
                     )}
+                    <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
+                        {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.setPitch")}
+                        </div>
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAverageOpen(true)}>
                         {tAny("menu_average")}
@@ -381,35 +397,27 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.addVibrato")}
                         </div>
                     </DropdownMenu.Item>
-                    {isPitchParam && (
-                        <>
-                            <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
-                                {tAny("menu_quantize")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.quantize")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
-                                {tAny("menu_mean_quantize")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.meanQuantize")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
+                    <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
+                        {tAny("menu_quantize")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.quantize")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
+                        {tAny("menu_mean_quantize")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.meanQuantize")}
+                        </div>
+                    </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item
-                        onSelect={() => dispatchEditOp("pasteReaper")}
-                    >
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteReaper")}>
                         {t("menu_paste_reaper_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteReaper")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => dispatchEditOp("pasteVocalShifter")}
-                    >
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
                         {t("menu_paste_vocalshifter_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteVocalShifter")}
@@ -424,16 +432,18 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item
-                        onSelect={() => dispatch(addTrackRemote({}))}
-                    >
+                    <DropdownMenu.Item onSelect={() => dispatch(addTrackRemote({}))}>
                         {t("track_add")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        disabled={!s.selectedTrackId}
+                        disabled={
+                            !s.selectedTrackId ||
+                            // 只剩最后一个根轨道时，禁止删除根轨道
+                            (s.tracks.filter((t) => !t.parentId).length <= 1 &&
+                                !s.tracks.find((t) => t.id === s.selectedTrackId)?.parentId)
+                        }
                         onSelect={() =>
-                            s.selectedTrackId &&
-                            dispatch(removeTrackRemote(s.selectedTrackId))
+                            s.selectedTrackId && dispatch(removeTrackRemote(s.selectedTrackId))
                         }
                     >
                         {t("track_remove_selected")}
@@ -447,24 +457,30 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_view")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item
-                        onSelect={() => dispatch(refreshRuntime())}
-                    >
+                    <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
                         {t("action_refresh")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() =>
-                            void dispatch(clearWaveformCacheRemote())
-                        }
-                    >
+                    <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
                         {t("menu_clear_waveform_cache")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => theme.toggleMode()}>
-                        {t("theme")}:{" "}
-                        {theme.mode === "dark"
-                            ? t("theme_dark")
-                            : t("theme_light")}
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            const nextMode = theme.mode === "dark" ? "light" : "dark";
+                            theme.applySettings({
+                                mode: nextMode,
+                                accentColor: theme.accentColor,
+                                grayColor: theme.grayColor,
+                                radius: theme.radius,
+                                fontFamily: theme.fontFamily,
+                                activeCustomThemeId: theme.activeCustomThemeId,
+                            });
+                        }}
+                    >
+                        {t("theme")}: {theme.mode === "dark" ? t("theme_dark") : t("theme_light")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
+                        {tAny("menu_appearance_settings")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
@@ -479,10 +495,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_help")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={async () => {
-                        const { openUrl } = await import("@tauri-apps/plugin-opener");
-                        openUrl("https://github.com/ARounder-183/HiFiShifter");
-                    }}>{t("menu_about")}</DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={async () => {
+                            const { openUrl } = await import("@tauri-apps/plugin-opener");
+                            openUrl("https://github.com/ARounder-183/HiFiShifter");
+                        }}
+                    >
+                        {t("menu_about")}
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -515,19 +535,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             </Flex>
 
             {/* 快捷键设置对话框 */}
-            <KeybindingsDialog
-                open={kbDialogOpen}
-                onOpenChange={setKbDialogOpen}
+            <KeybindingsDialog open={kbDialogOpen} onOpenChange={setKbDialogOpen} />
+
+            {/* 外观设置对话框 */}
+            <AppearanceSettingsDialog
+                open={appearanceDialogOpen}
+                onOpenChange={setAppearanceDialogOpen}
             />
+
+            <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
 
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (
                 <div
-                    className="fixed inset-0 z-[9999] bg-black/35 flex items-center justify-center"
+                    className="fixed inset-0 z-[9999] bg-qt-overlay flex items-center justify-center"
                     onClick={() => setMenuImportMode(null)}
                 >
                     <div
-                        className="w-[380px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-md shadow-xl"
+                        className="w-[380px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-xl shadow-[0_20px_44px_rgba(0,0,0,0.28)]"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
@@ -541,31 +566,35 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                         <div className="px-3 py-3 flex flex-col gap-2">
                             <button
-                                className="w-full text-left px-3 py-2 rounded text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
                                 onClick={() => {
                                     const m = menuImportMode;
                                     setMenuImportMode(null);
-                                    void dispatch(importMultipleAudioAtPosition({
-                                        audioPaths: m.audioPaths,
-                                        mode: "across-time",
-                                        trackId: m.trackId,
-                                        startSec: m.startSec,
-                                    }));
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "across-time",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
                                 }}
                             >
                                 {t("import_across_time")}
                             </button>
                             <button
-                                className="w-full text-left px-3 py-2 rounded text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
                                 onClick={() => {
                                     const m = menuImportMode;
                                     setMenuImportMode(null);
-                                    void dispatch(importMultipleAudioAtPosition({
-                                        audioPaths: m.audioPaths,
-                                        mode: "across-tracks",
-                                        trackId: m.trackId,
-                                        startSec: m.startSec,
-                                    }));
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "across-tracks",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
                                 }}
                             >
                                 {t("import_across_tracks")}
@@ -574,7 +603,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                         <div className="px-3 py-2 border-t border-qt-border flex justify-end">
                             <button
-                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded"
+                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMenuImportMode(null)}
                             >
                                 {tAny("cancel") || "Cancel"}
@@ -614,10 +643,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <SetPitchDialog
                 open={setPitchOpen}
                 onOpenChange={setSetPitchOpen}
+                titleText={isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
+                valueLabelText={setToValueLabel}
+                defaultValue={setToDefaultValue}
                 defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(midiNote, edgeSmoothnessPercent) =>
+                onConfirm={(value, edgeSmoothnessPercent) =>
                     dispatchEditOp("setPitch", {
-                        midiNote,
+                        value,
                         edgeSmoothnessPercent,
                     })
                 }
@@ -640,35 +672,47 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setVibratoOpen}
                 editParam={s.editParam}
                 paramRange={vibratoParamRange}
-                onConfirm={(amplitude, rate, attack, release, phase) => dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })}
+                onConfirm={(amplitude, rate, attack, release, phase) =>
+                    dispatchEditOp("addVibrato", { amplitude, rate, attack, release, phase })
+                }
             />
             <QuantizeDialog
                 open={quantizeOpen}
                 onOpenChange={setQuantizeOpen}
+                valueMode={!isPitchParam}
+                defaultQuantizeUnit={quantizeDefaultUnit}
+                defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabel}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
-                onConfirm={(unit, scaleValue, toleranceCents) =>
+                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("quantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),
                         toleranceCents,
+                        tolerance: toleranceCents,
+                        quantizeUnit,
                     })
                 }
             />
             <MeanQuantizeDialog
                 open={meanQuantizeOpen}
                 onOpenChange={setMeanQuantizeOpen}
+                valueMode={!isPitchParam}
+                defaultQuantizeUnit={quantizeDefaultUnit}
+                defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabel}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
-                onConfirm={(unit, scaleValue, toleranceCents) =>
+                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("meanQuantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),
                         toleranceCents,
+                        tolerance: toleranceCents,
+                        quantizeUnit,
                     })
                 }
             />

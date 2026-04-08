@@ -2,10 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { requestMissingFileReplacement } from "./missingFilePrompt";
 
-async function resolveMissingFilesInteractively(
-    timeline: any,
-    missingFiles: string[] | undefined,
-) {
+async function resolveMissingFilesInteractively(timeline: any, missingFiles: string[] | undefined) {
     let latestTimeline = timeline;
     const uniquePaths = Array.from(
         new Set((missingFiles ?? []).filter((p) => typeof p === "string" && p.trim().length > 0)),
@@ -46,12 +43,9 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
     return webApi.redoTimeline();
 });
 
-export const newProjectRemote = createAsyncThunk(
-    "session/newProjectRemote",
-    async () => {
-        return webApi.newProject();
-    },
-);
+export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
+    return webApi.newProject();
+});
 
 export const openProjectFromDialog = createAsyncThunk(
     "session/openProjectFromDialog",
@@ -62,10 +56,7 @@ export const openProjectFromDialog = createAsyncThunk(
             return { ok: true, canceled: true } as const;
         }
         let timeline = await webApi.openProject(picked.path);
-        timeline = await resolveMissingFilesInteractively(
-            timeline,
-            timeline?.missing_files,
-        );
+        timeline = await resolveMissingFilesInteractively(timeline, timeline?.missing_files);
         return { ok: true, canceled: false, timeline } as const;
     },
 );
@@ -74,10 +65,7 @@ export const openProjectFromPath = createAsyncThunk(
     "session/openProjectFromPath",
     async (projectPath: string) => {
         let timeline = await webApi.openProject(projectPath);
-        timeline = await resolveMissingFilesInteractively(
-            timeline,
-            timeline?.missing_files,
-        );
+        timeline = await resolveMissingFilesInteractively(timeline, timeline?.missing_files);
         return timeline;
     },
 );
@@ -88,9 +76,7 @@ export const saveProjectRemote = createAsyncThunk(
         const state = getState() as any;
         const hasPath = Boolean(state?.session?.project?.path);
 
-        const res = hasPath
-            ? await webApi.saveProject()
-            : await webApi.saveProjectAs();
+        const res = hasPath ? await webApi.saveProject() : await webApi.saveProjectAs();
         if (!res || res.ok === false) {
             return rejectWithValue(res?.error ?? "save_project_failed");
         }
@@ -122,10 +108,7 @@ export const setProjectBaseScaleRemote = createAsyncThunk(
 
 export const setProjectCustomScaleRemote = createAsyncThunk(
     "session/setProjectCustomScaleRemote",
-    async (
-        customScale: { id: string; name: string; notes: number[] },
-        { rejectWithValue },
-    ) => {
+    async (customScale: { id: string; name: string; notes: number[] }, { rejectWithValue }) => {
         const res = await webApi.setProjectCustomScale(customScale);
         if (!res || res.ok === false) {
             return rejectWithValue("set_project_custom_scale_failed");
@@ -136,14 +119,8 @@ export const setProjectCustomScaleRemote = createAsyncThunk(
 
 export const setProjectTimelineSettingsRemote = createAsyncThunk(
     "session/setProjectTimelineSettingsRemote",
-    async (
-        payload: { beatsPerBar: number; gridSize: string },
-        { rejectWithValue },
-    ) => {
-        const res = await webApi.setProjectTimelineSettings(
-            payload.beatsPerBar,
-            payload.gridSize,
-        );
+    async (payload: { beatsPerBar: number; gridSize: string }, { rejectWithValue }) => {
+        const res = await webApi.setProjectTimelineSettings(payload.beatsPerBar, payload.gridSize);
         if (!res || res.ok === false) {
             return rejectWithValue("set_project_timeline_settings_failed");
         }
@@ -163,10 +140,7 @@ export const openVocalShifterFromDialog = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return {
             ok: true,
             canceled: false,
@@ -183,10 +157,7 @@ export const openVocalShifterFromPath = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return {
             ok: true,
             canceled: false,
@@ -208,10 +179,7 @@ export const openReaperFromDialog = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return {
             ok: true,
             canceled: false,
@@ -228,10 +196,7 @@ export const openReaperFromPath = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            (result as any)?.missing_files,
-        );
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         return {
             ok: true,
             canceled: false,

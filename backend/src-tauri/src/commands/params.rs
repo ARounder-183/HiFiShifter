@@ -3,6 +3,103 @@ use tauri::State;
 
 // ===================== param curves =====================
 
+const CHILD_PITCH_OFFSET_CENTS_PREFIX: &str = "child_pitch_offset_cents@";
+const CHILD_PITCH_OFFSET_DEGREES_PREFIX: &str = "child_pitch_offset_degrees@";
+const CHILD_PITCH_OFFSET_CENTS_DEFAULT: f32 = 0.0;
+const CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT: f32 = 0.0;
+
+#[derive(Clone, Copy)]
+enum ChildPitchOffsetParamMode {
+    Cents,
+    Degrees,
+}
+
+#[derive(Clone, Copy)]
+struct ChildPitchOffsetParamSpec<'a> {
+    mode: ChildPitchOffsetParamMode,
+    track_id: &'a str,
+}
+
+fn parse_child_pitch_offset_param(param: &str) -> Option<ChildPitchOffsetParamSpec<'_>> {
+    if let Some(track_id) = param.strip_prefix(CHILD_PITCH_OFFSET_CENTS_PREFIX) {
+        if !track_id.is_empty() {
+            return Some(ChildPitchOffsetParamSpec {
+                mode: ChildPitchOffsetParamMode::Cents,
+                track_id,
+            });
+        }
+    }
+    if let Some(track_id) = param.strip_prefix(CHILD_PITCH_OFFSET_DEGREES_PREFIX) {
+        if !track_id.is_empty() {
+            return Some(ChildPitchOffsetParamSpec {
+                mode: ChildPitchOffsetParamMode::Degrees,
+                track_id,
+            });
+        }
+    }
+    None
+}
+
+fn resolve_child_pitch_offset_curve_default_value(
+    timeline: &crate::state::TimelineState,
+    param: &str,
+) -> Option<f32> {
+    let spec = parse_child_pitch_offset_param(param)?;
+    let track = timeline.tracks.iter().find(|track| track.id == spec.track_id)?;
+    if track.parent_id.is_none() {
+        return None;
+    }
+
+    match spec.mode {
+        ChildPitchOffsetParamMode::Cents => Some(CHILD_PITCH_OFFSET_CENTS_DEFAULT),
+        ChildPitchOffsetParamMode::Degrees => Some(CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT),
+    }
+}
+
+fn invalidate_rendered_clip_caches_for_child_track(
+    timeline: &crate::state::TimelineState,
+    child_track_id: &str,
+) {
+    let clip_ids: Vec<String> = timeline
+        .clips
+        .iter()
+        .filter(|clip| clip.track_id == child_track_id)
+        .map(|clip| clip.id.clone())
+        .collect();
+
+    if clip_ids.is_empty() {
+        return;
+    }
+
+    {
+        let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for clip_id in &clip_ids {
+            cache.invalidate(clip_id);
+        }
+    }
+    {
+        let mut tension_cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for clip_id in &clip_ids {
+            tension_cache.invalidate(clip_id);
+        }
+    }
+    {
+        let mut noise_cache = crate::synth_clip_cache::global_breath_noise_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for clip_id in &clip_ids {
+            noise_cache.invalidate(clip_id);
+        }
+    }
+    for clip_id in &clip_ids {
+        crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
+    }
+}
+
 pub(super) fn resolve_extra_curve_default_value(
     kind: crate::state::SynthPipelineKind,
     param: &str,
@@ -16,6 +113,15 @@ fn resolve_param_reference_value(kind: crate::state::SynthPipelineKind, param: &
         "tension" => 0.0,
         _ => resolve_extra_curve_default_value(kind, param),
     }
+}
+
+fn resolve_param_reference_value_with_timeline(
+    timeline: &crate::state::TimelineState,
+    kind: crate::state::SynthPipelineKind,
+    param: &str,
+) -> f32 {
+    resolve_child_pitch_offset_curve_default_value(timeline, param)
+        .unwrap_or_else(|| resolve_param_reference_value(kind, param))
 }
 
 fn resolve_param_reference_kind(param: &str) -> crate::models::ParamReferenceKind {
@@ -57,7 +163,7 @@ pub(super) fn get_param_frames(
             track_id, param, start_frame, frame_count, stride
         );
     }
-    let (root, fp, entry, compose_enabled, pitch_algo) = {
+    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         let root = match tl.resolve_root_track_id(&track_id) {
@@ -88,6 +194,7 @@ pub(super) fn get_param_frames(
         let pitch_algo = track
             .map(|t| t.pitch_analysis_algo.clone())
             .unwrap_or_default();
+        let kind = crate::state::SynthPipelineKind::from_track_algo(&pitch_algo);
 
         let entry = tl
             .params_by_root_track
@@ -95,7 +202,16 @@ pub(super) fn get_param_frames(
             .cloned()
             .unwrap_or_default();
 
-        (root, fp, entry, compose_enabled, pitch_algo)
+        let param_reference_value = resolve_param_reference_value_with_timeline(&tl, kind, &param);
+
+        (
+            root,
+            fp,
+            entry,
+            compose_enabled,
+            pitch_algo,
+            param_reference_value,
+        )
     };
 
     let pitch_edit_user_modified = (param == "pitch").then_some(entry.pitch_edit_user_modified);
@@ -147,7 +263,6 @@ pub(super) fn get_param_frames(
     let start = start_frame as usize;
     let count = (frame_count as usize).max(1);
     let step = (stride.unwrap_or(1).max(1)) as usize;
-    let kind = crate::state::SynthPipelineKind::from_track_algo(&pitch_algo);
 
     let mut orig = Vec::with_capacity(count);
     let mut edit = Vec::with_capacity(count);
@@ -165,7 +280,7 @@ pub(super) fn get_param_frames(
             }
         }
         "tension" => {
-            let reference_value = resolve_param_reference_value(kind, &param);
+            let reference_value = param_reference_value;
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));
                 let e = entry
@@ -181,7 +296,7 @@ pub(super) fn get_param_frames(
             // Extra automation curve: dashed orig should stay at the processor default,
             // while solid edit reflects the user-authored curve.
             let curve = entry.extra_curves.get(&param);
-            let default_value = resolve_param_reference_value(kind, &param);
+            let default_value = param_reference_value;
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));
                 let (o, e) = resolve_extra_curve_frame_pair(curve, default_value, idx);
@@ -231,6 +346,7 @@ pub(super) fn set_param_frames(
         .find(|track| track.id == root)
         .map(|track| crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
         .unwrap_or(crate::state::SynthPipelineKind::WorldVocoder);
+    let param_reference_value = resolve_param_reference_value_with_timeline(&tl, kind, &param);
 
     let Some(entry) = tl.params_by_root_track.get_mut(&root) else {
         return serde_json::json!({"ok": false, "error": "params missing"});
@@ -245,7 +361,7 @@ pub(super) fn set_param_frames(
             .entry(param.clone())
             .or_insert_with(Vec::new);
         let needed = start_frame as usize + values.len();
-        let default_value = resolve_extra_curve_default_value(kind, &param);
+        let default_value = param_reference_value;
         if curve.len() < needed {
             curve.resize(needed, default_value);
         }
@@ -262,7 +378,7 @@ pub(super) fn set_param_frames(
 
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let extra_curve_default = is_extra_curve
-        .then(|| resolve_extra_curve_default_value(kind, &param))
+        .then_some(param_reference_value)
         .unwrap_or(0.0);
 
     let start = start_frame as usize;
@@ -335,6 +451,10 @@ pub(super) fn set_param_frames(
         entry.pitch_edit_user_modified = true;
     }
 
+    if let Some(spec) = parse_child_pitch_offset_param(&param) {
+        invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
+    }
+
     // Ensure realtime playback reflects edits immediately.
     state.audio_engine.update_timeline(tl.clone());
 
@@ -365,6 +485,7 @@ pub(super) fn restore_param_frames(
         .find(|track| track.id == root)
         .map(|track| crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
         .unwrap_or(crate::state::SynthPipelineKind::WorldVocoder);
+    let param_reference_value = resolve_param_reference_value_with_timeline(&tl, kind, &param);
     let Some(entry) = tl.params_by_root_track.get_mut(&root) else {
         return serde_json::json!({"ok": false, "error": "params missing"});
     };
@@ -398,7 +519,7 @@ pub(super) fn restore_param_frames(
             }
         }
         "tension" => {
-            let reference_value = resolve_param_reference_value(kind, &param);
+            let reference_value = param_reference_value;
             for i in 0..count {
                 let idx = start.saturating_add(i);
                 if idx >= entry.tension_edit.len() {
@@ -408,7 +529,7 @@ pub(super) fn restore_param_frames(
             }
         }
         _ => {
-            let default_value = resolve_param_reference_value(kind, &param);
+            let default_value = param_reference_value;
             if let Some(curve) = entry.extra_curves.get_mut(&param) {
                 for i in 0..count {
                     let idx = start.saturating_add(i);
@@ -419,6 +540,10 @@ pub(super) fn restore_param_frames(
                 }
             }
         }
+    }
+
+    if let Some(spec) = parse_child_pitch_offset_param(&param) {
+        invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
     // Ensure realtime playback reflects edits immediately.

@@ -5,13 +5,14 @@
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc, Mutex,
+    Mutex,
 };
 
 /// Clip 渲染状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ClipRenderingState {
     /// 等待渲染（尚未开始）
+    #[allow(dead_code)]
     Pending,
     /// 正在渲染中
     Rendering,
@@ -27,10 +28,13 @@ pub struct ClipRenderingInfo {
     /// 当前渲染状态
     pub state: ClipRenderingState,
     /// 渲染进度（0.0 - 1.0）
+    #[allow(dead_code)]
     pub progress: f32,
     /// 错误信息（如果状态为 Failed）
+    #[allow(dead_code)]
     pub error: Option<String>,
     /// 渲染开始时间戳（用于超时检测）
+    #[allow(dead_code)]
     pub start_time: Option<std::time::Instant>,
 }
 
@@ -39,6 +43,7 @@ pub struct ClipRenderingStateManager {
     /// Clip ID 到渲染状态的映射
     states: HashMap<String, ClipRenderingInfo>,
     /// 渲染超时时间（秒）
+    #[allow(dead_code)]
     timeout_seconds: u32,
     /// 状态变更计数器（用于检测状态变化）
     change_counter: AtomicU32,
@@ -85,6 +90,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 检查 clip 是否就绪（Ready 状态）
+    #[allow(dead_code)]
     pub fn is_ready(&self, clip_id: &str) -> bool {
         self.states
             .get(clip_id)
@@ -93,6 +99,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 检查 clip 是否正在渲染中（Rendering 状态）
+    #[allow(dead_code)]
     pub fn is_rendering(&self, clip_id: &str) -> bool {
         self.states
             .get(clip_id)
@@ -101,6 +108,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 检查 clip 是否失败（Failed 状态）
+    #[allow(dead_code)]
     pub fn is_failed(&self, clip_id: &str) -> bool {
         self.states
             .get(clip_id)
@@ -109,6 +117,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 检查 clip 是否等待渲染（Pending 状态）
+    #[allow(dead_code)]
     pub fn is_pending(&self, clip_id: &str) -> bool {
         self.states
             .get(clip_id)
@@ -117,6 +126,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 获取所有渲染中的 clip ID 列表
+    #[allow(dead_code)]
     pub fn get_rendering_clips(&self) -> Vec<String> {
         self.states
             .iter()
@@ -126,6 +136,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 获取所有就绪的 clip ID 列表
+    #[allow(dead_code)]
     pub fn get_ready_clips(&self) -> Vec<String> {
         self.states
             .iter()
@@ -135,6 +146,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 获取所有失败的 clip ID 列表
+    #[allow(dead_code)]
     pub fn get_failed_clips(&self) -> Vec<String> {
         self.states
             .iter()
@@ -170,6 +182,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 获取状态变更计数器（用于检测状态变化）
+    #[allow(dead_code)]
     pub fn get_change_counter(&self) -> u32 {
         self.change_counter.load(Ordering::Relaxed)
     }
@@ -185,6 +198,7 @@ impl ClipRenderingStateManager {
     }
 
     /// 清除所有状态
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.states.clear();
         self.change_counter.fetch_add(1, Ordering::Relaxed);
@@ -217,6 +231,7 @@ pub struct ClipRenderingStateEvent {
 
 impl ClipRenderingStateEvent {
     /// 创建新的状态事件
+    #[allow(dead_code)]
     pub fn new(
         clip_id: String,
         state: ClipRenderingState,

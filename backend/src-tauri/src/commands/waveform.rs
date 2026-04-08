@@ -116,6 +116,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
             export_format: crate::mixdown::ExportFormat::Wav16,
             quality_preset: crate::mixdown::QualityPreset::Realtime,
+            cancel_flag: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
@@ -255,6 +256,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
             export_format: crate::mixdown::ExportFormat::Wav16,
             quality_preset: crate::mixdown::QualityPreset::Realtime,
+            cancel_flag: None,
         };
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {

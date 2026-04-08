@@ -30,7 +30,7 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
     }
 
     const latestTimeline = await webApi.getTimelineState();
-    const allClips = ((latestTimeline as { clips?: RawTimelineClip[] }).clips ?? []);
+    const allClips = (latestTimeline as { clips?: RawTimelineClip[] }).clips ?? [];
     const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, newClipIds);
     if (fadeUpdates.length > 0) {
         const fadePromises = fadeUpdates.map((u) =>
@@ -159,9 +159,7 @@ export const importAudioAtPosition = createAsyncThunk(
                     }
                     targetTrackId = createdId;
                 } catch (err) {
-                    return rejectWithValue(
-                        err instanceof Error ? err.message : "add_track_failed",
-                    );
+                    return rejectWithValue(err instanceof Error ? err.message : "add_track_failed");
                 }
             } else {
                 targetTrackId = payload.trackId ?? undefined;
@@ -189,15 +187,18 @@ export const importAudioAtPosition = createAsyncThunk(
                 .filter((id): id is string => !!id && !beforeClipIds.has(id));
 
             const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+                dispatch: dispatch as unknown as (
+                    action: unknown,
+                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
                 getState,
                 newClipIds,
             });
 
             // 导入后将光标定位到第一个音频块的起始位置
             const importedResult = latestTimeline ?? imported;
-            if (importedResult && typeof payload.startSec === 'number') {
-                (importedResult as unknown as Record<string, unknown>).playhead_sec = payload.startSec;
+            if (importedResult && typeof payload.startSec === "number") {
+                (importedResult as unknown as Record<string, unknown>).playhead_sec =
+                    payload.startSec;
             }
 
             return {
@@ -251,9 +252,8 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 reader.readAsDataURL(payload.file);
             });
 
-            const base64 = dataUrl.includes(",")
-                ? dataUrl.split(",").slice(1).join(",")
-                : dataUrl;
+            const commaIdx = dataUrl.indexOf(",");
+            const base64 = commaIdx !== -1 ? dataUrl.substring(commaIdx + 1) : dataUrl;
 
             const imported = await webApi.importAudioBytes(
                 fileName,
@@ -274,15 +274,18 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 .filter((id): id is string => !!id && !beforeClipIds.has(id));
 
             const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+                dispatch: dispatch as unknown as (
+                    action: unknown,
+                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
                 getState,
                 newClipIds,
             });
 
             // 导入后将光标定位到第一个音频块的起始位置
             const importedResult = latestTimeline ?? imported;
-            if (importedResult && typeof payload.startSec === 'number') {
-                (importedResult as unknown as Record<string, unknown>).playhead_sec = payload.startSec;
+            if (importedResult && typeof payload.startSec === "number") {
+                (importedResult as unknown as Record<string, unknown>).playhead_sec =
+                    payload.startSec;
             }
 
             return {
@@ -369,15 +372,13 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 }
 
                 for (const audioPath of audioPaths) {
-                    const imported = await webApi.importAudioItem(
-                        audioPath,
-                        targetTrackId,
-                        cursor,
-                    );
+                    const imported = await webApi.importAudioItem(audioPath, targetTrackId, cursor);
                     if (!(imported as { ok?: boolean }).ok) continue;
                     if (!firstImported) firstImported = imported;
                     lastImported = imported;
-                    const result = imported as { clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }> };
+                    const result = imported as {
+                        clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
+                    };
                     const allClips = result.clips ?? [];
                     for (const c of allClips) {
                         if (c.id) accumulatedNewClipIds.push(c.id);
@@ -441,10 +442,20 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                     }
 
                     try {
-                        const imported = await webApi.importAudioItem(audioPath, targetTrackId, startSec);
+                        const imported = await webApi.importAudioItem(
+                            audioPath,
+                            targetTrackId,
+                            startSec,
+                        );
                         if ((imported as { ok?: boolean }).ok) {
                             lastImported = imported;
-                            const result = imported as { clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }> };
+                            const result = imported as {
+                                clips?: Array<{
+                                    id?: string;
+                                    start_sec?: number;
+                                    length_sec?: number;
+                                }>;
+                            };
                             for (const c of result.clips ?? []) {
                                 if (c.id) accumulatedNewClipIds.push(c.id);
                             }
@@ -459,7 +470,9 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
             const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
 
             const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+                dispatch: dispatch as unknown as (
+                    action: unknown,
+                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
                 getState,
                 newClipIds,
             });
@@ -542,23 +555,38 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                         reader.onload = () => resolve(String(reader.result ?? ""));
                         reader.readAsDataURL(file);
                     });
-                    const base64 = dataUrl.includes(",") ? dataUrl.split(",").slice(1).join(",") : dataUrl;
+                    const base64 = dataUrl.includes(",")
+                        ? dataUrl.split(",").slice(1).join(",")
+                        : dataUrl;
 
-                    const imported = await webApi.importAudioBytes(fileName, base64, targetTrackId, cursor);
+                    const imported = await webApi.importAudioBytes(
+                        fileName,
+                        base64,
+                        targetTrackId,
+                        cursor,
+                    );
                     if (!(imported as { ok?: boolean }).ok) continue;
                     if (!firstImported) firstImported = imported;
                     lastImported = imported;
-                    const result = imported as { clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }> };
+                    const result = imported as {
+                        clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
+                    };
                     for (const c of result.clips ?? []) {
                         if (c.id) accumulatedNewClipIds.push(c.id);
                     }
-                    const newClip = result.clips?.find((c) => Math.abs((c.start_sec ?? 0) - cursor) < 0.01);
+                    const newClip = result.clips?.find(
+                        (c) => Math.abs((c.start_sec ?? 0) - cursor) < 0.01,
+                    );
                     cursor += newClip?.length_sec ?? 0;
                 }
             } else {
                 // across-tracks: similar to importMultipleAudioAtPosition
                 const state = getState() as { session: SessionState };
-                const rootTracks = state.session.tracks.filter((t) => !t.parentId).sort((a, b) => state.session.tracks.indexOf(a) - state.session.tracks.indexOf(b));
+                const rootTracks = state.session.tracks
+                    .filter((t) => !t.parentId)
+                    .sort(
+                        (a, b) => state.session.tracks.indexOf(a) - state.session.tracks.indexOf(b),
+                    );
                 let startIdx = 0;
                 if (payload.trackId) {
                     const idx = rootTracks.findIndex((t) => t.id === payload.trackId);
@@ -575,8 +603,14 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                         const curState = getState() as { session: SessionState };
                         const beforeTrackIds = new Set(curState.session.tracks.map((t) => t.id));
                         try {
-                            const added = await dispatch(addTrackRemote({ name: undefined, parentTrackId: null })).unwrap();
-                            targetTrackId = added.tracks.find((t) => !beforeTrackIds.has(t.id))?.id ?? added.selected_track_id ?? added.tracks[added.tracks.length - 1]?.id ?? undefined;
+                            const added = await dispatch(
+                                addTrackRemote({ name: undefined, parentTrackId: null }),
+                            ).unwrap();
+                            targetTrackId =
+                                added.tracks.find((t) => !beforeTrackIds.has(t.id))?.id ??
+                                added.selected_track_id ??
+                                added.tracks[added.tracks.length - 1]?.id ??
+                                undefined;
                         } catch {
                             continue;
                         }
@@ -589,13 +623,26 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                         reader.onload = () => resolve(String(reader.result ?? ""));
                         reader.readAsDataURL(file);
                     });
-                    const base64 = dataUrl.includes(",") ? dataUrl.split(",").slice(1).join(",") : dataUrl;
+                    const base64 = dataUrl.includes(",")
+                        ? dataUrl.split(",").slice(1).join(",")
+                        : dataUrl;
 
                     try {
-                        const imported = await webApi.importAudioBytes(fileName, base64, targetTrackId, startSec);
+                        const imported = await webApi.importAudioBytes(
+                            fileName,
+                            base64,
+                            targetTrackId,
+                            startSec,
+                        );
                         if ((imported as { ok?: boolean }).ok) {
                             lastImported = imported;
-                            const result = imported as { clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }> };
+                            const result = imported as {
+                                clips?: Array<{
+                                    id?: string;
+                                    start_sec?: number;
+                                    length_sec?: number;
+                                }>;
+                            };
                             for (const c of result.clips ?? []) {
                                 if (c.id) accumulatedNewClipIds.push(c.id);
                             }
@@ -609,7 +656,9 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
 
             const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (action: unknown) => Promise<unknown> & { unwrap: () => Promise<unknown> },
+                dispatch: dispatch as unknown as (
+                    action: unknown,
+                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
                 getState,
                 newClipIds,
             });

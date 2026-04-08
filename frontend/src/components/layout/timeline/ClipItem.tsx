@@ -18,7 +18,6 @@ import { fadeInAreaPath, fadeOutAreaPath } from "./paths";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import { ClipHeader } from "./clip/ClipHeader";
 
-
 export const ClipItem = React.memo(function ClipItem({
     clip,
     rowHeight,
@@ -27,8 +26,8 @@ export const ClipItem = React.memo(function ClipItem({
     selected,
     isInMultiSelectedSet,
     multiSelectedCount,
-    viewportStartSec: _viewportStartSec,
-    viewportEndSec: _viewportEndSec,
+    viewportStartSec,
+    viewportEndSec,
     ensureSelected,
     selectClipRemote,
     openContextMenu,
@@ -36,8 +35,10 @@ export const ClipItem = React.memo(function ClipItem({
     startClipDrag,
     startEditDrag,
     toggleClipMuted,
+    onCtrlToggleSelect,
     toggleMultiSelect: _toggleMultiSelect,
     onShiftRangeSelect,
+    rangeSelectAnchorClipId,
     clearContextMenu,
     triggerRename,
     onRenameCommit,
@@ -83,10 +84,14 @@ export const ClipItem = React.memo(function ClipItem({
             | "gain",
     ) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
+    /** Ctrl+左键选择切换（会更新主选中 clip） */
+    onCtrlToggleSelect: (clipId: string) => void;
     /** Ctrl+左键多选切换 */
     toggleMultiSelect: (clipId: string) => void;
     /** Shift+点击范围选择（跨轨按包围矩形选中） */
-    onShiftRangeSelect: (clipId: string) => void;
+    onShiftRangeSelect: (clipId: string, anchorClipIdOverride?: string | null) => void;
+    /** Shift 范围选择锚点（点击前快照） */
+    rangeSelectAnchorClipId: string | null;
 
     clearContextMenu: () => void;
 
@@ -98,31 +103,33 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
 
-    const left = Math.max(0, clip.startSec * pxPerSec);
-    const width = Math.max(1, clip.lengthSec * pxPerSec);
-    const bodyHeight = Math.max(
-        1,
-        rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
-    );
+    const left = Math.max(0, Math.round(clip.startSec * pxPerSec));
+    const width = Math.max(1, Math.round(clip.lengthSec * pxPerSec));
+    const bodyHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
 
     const showRepeatMarker = false;
     const repeatMarkerX = 0;
-
-
+    const fadeStrokeColor = selected ? "var(--qt-clip-selected-border)" : "var(--qt-clip-border)";
 
     const startDeferredFadeEditDrag = React.useCallback(
-        (
-            e: React.PointerEvent<HTMLDivElement>,
-            type: "fade_in" | "fade_out",
-        ) => {
+        (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {
             e.preventDefault();
             e.stopPropagation();
             clearContextMenu();
 
-            if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
-                ensureSelected(clip.id);
+            const alt = Boolean(altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"));
+            const ctrlOrMeta = e.ctrlKey || e.metaKey;
+            const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+            const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
+            const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+            const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+
+            if (shouldPrimeSelection) {
+                if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
+                    ensureSelected(clip.id);
+                }
+                selectClipRemote(clip.id);
             }
-            selectClipRemote(clip.id);
 
             const startX = e.clientX;
             const startY = e.clientY;
@@ -153,6 +160,14 @@ export const ClipItem = React.memo(function ClipItem({
                 window.removeEventListener("pointerup", onEnd, true);
                 window.removeEventListener("pointercancel", onEnd, true);
                 if (!dragStarted) {
+                    if (doCtrlToggleOnly) {
+                        onCtrlToggleSelect(clip.id);
+                        return;
+                    }
+                    if (doShiftRangeSelect) {
+                        onShiftRangeSelect(clip.id, shiftRangeAnchorClipId);
+                        return;
+                    }
                     seekFromClientX(ev.clientX, true);
                 }
             };
@@ -167,11 +182,31 @@ export const ClipItem = React.memo(function ClipItem({
             ensureSelected,
             isInMultiSelectedSet,
             multiSelectedCount,
+            onCtrlToggleSelect,
+            onShiftRangeSelect,
+            rangeSelectAnchorClipId,
             seekFromClientX,
             selectClipRemote,
             startEditDrag,
+            altPressed,
         ],
     );
+
+    // ========================================
+    // DOM 视口剔除
+    // ========================================
+    if (viewportStartSec !== undefined && viewportEndSec !== undefined) {
+        const clipEndSec = clip.startSec + clip.lengthSec;
+        // 增加 1.5 秒的缓冲余量，防止快速滚动时边缘 DOM 突然卸载造成的闪烁
+        const bufferSec = 1.5;
+        if (
+            clipEndSec < viewportStartSec - bufferSec ||
+            clip.startSec > viewportEndSec + bufferSec
+        ) {
+            // 完全在屏幕/缓冲带之外，直接卸载此 Clip 的一切 DOM 节点
+            return null;
+        }
+    }
 
     return (
         <div
@@ -182,22 +217,13 @@ export const ClipItem = React.memo(function ClipItem({
                 width,
                 top: 0,
                 height: rowHeight - CLIP_BODY_PADDING_Y,
-                // 选中或 hover 时提升 z-index，确保 fade 手柄不被相邻 clip 遮挡
-                zIndex: selected ? 2 : undefined,
-            }}
-            onMouseEnter={(e) => {
-                (e.currentTarget as HTMLElement).style.zIndex = "2";
-            }}
-            onMouseLeave={(e) => {
-                (e.currentTarget as HTMLElement).style.zIndex = selected
-                    ? "2"
-                    : "";
+                transform: "translateZ(0)",
+                backfaceVisibility: "hidden",
             }}
             onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const keepExistingMultiSelection =
-                    multiSelectedCount > 0 && isInMultiSelectedSet;
+                const keepExistingMultiSelection = multiSelectedCount > 1;
                 if (!keepExistingMultiSelection) {
                     ensureSelected(clip.id);
                     selectClipRemote(clip.id);
@@ -208,17 +234,18 @@ export const ClipItem = React.memo(function ClipItem({
                 if (e.button !== 0) return;
 
                 const alt = Boolean(
-                    altPressed ||
-                    e.altKey ||
-                    e.nativeEvent.getModifierState?.("Alt"),
+                    altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
                 );
+                const ctrlOrMeta = e.ctrlKey || e.metaKey;
 
                 // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
-                const doShiftRangeSelect = e.shiftKey && !alt && !e.ctrlKey && !e.metaKey;
+                const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
+                const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
-                const allowSeek = !alt && !e.ctrlKey && !e.metaKey;
+                const allowSeek = !alt && !ctrlOrMeta && !e.shiftKey;
                 const startX = e.clientX;
                 const startY = e.clientY;
                 let moved = false;
@@ -237,7 +264,7 @@ export const ClipItem = React.memo(function ClipItem({
                     window.removeEventListener("pointercancel", onUp, true);
                     // Shift+点击且未移动时执行范围选择
                     if (doShiftRangeSelect && !moved) {
-                        onShiftRangeSelect(clip.id);
+                        onShiftRangeSelect(clip.id, shiftRangeAnchorClipId);
                     } else if (!moved && allowSeek) {
                         seekFromClientX(ev.clientX, true);
                     }
@@ -251,10 +278,13 @@ export const ClipItem = React.memo(function ClipItem({
                 e.stopPropagation();
                 clearContextMenu();
 
-                if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
-                    ensureSelected(clip.id);
+                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                if (shouldPrimeSelection) {
+                    if (multiSelectedCount === 0 || !isInMultiSelectedSet) {
+                        ensureSelected(clip.id);
+                    }
+                    selectClipRemote(clip.id);
                 }
-                selectClipRemote(clip.id);
                 startClipDrag(e, clip.id, clip.startSec, alt);
             }}
             title={clip.sourcePath ?? clip.name}
@@ -266,6 +296,9 @@ export const ClipItem = React.memo(function ClipItem({
                 isInMultiSelectedSet={isInMultiSelectedSet}
                 ensureSelected={ensureSelected}
                 selectClipRemote={selectClipRemote}
+                onCtrlToggleSelect={onCtrlToggleSelect}
+                onShiftRangeSelect={onShiftRangeSelect}
+                rangeSelectAnchorClipId={rangeSelectAnchorClipId}
                 seekFromClientX={seekFromClientX}
                 startEditDrag={startEditDrag}
             />
@@ -287,17 +320,18 @@ export const ClipItem = React.memo(function ClipItem({
 
             {/* Body block (does not fill the entire track row; leaves header lane above) */}
             <div
-                className={`absolute left-0 right-0 bottom-0 rounded-sm shadow-sm overflow-visible border transition-colors ${selected
-                        ? "border-white/90"
-                        : "border-transparent group-hover:border-white/30"
-                    }`}
+                className="absolute left-0 right-0 bottom-0 shadow-sm overflow-visible border"
                 style={{
                     top: CLIP_HEADER_HEIGHT,
                     backgroundColor: trackColor
-                        ? `color-mix(in oklab, ${trackColor} 30%, transparent)`
-                        : "color-mix(in oklab, var(--qt-highlight) 35%, transparent)",
+                        ? `color-mix(in oklab, var(--qt-clip-bg) 60%, ${trackColor} 40%)`
+                        : "var(--qt-clip-bg)",
+                    borderColor: selected
+                        ? "var(--qt-clip-selected-border)"
+                        : "var(--qt-clip-border)",
                 }}
             >
+                <div className="absolute left-0 right-0 top-1/2 h-px bg-black/28 pointer-events-none z-20" />
                 {/* Body (waveform + edit handles) */}
                 <div className="absolute inset-0">
                     {/* Fade 角落 handle：始终存在，位于 body 左上�?右上角，用于�?0 开始拖拽出渐变 */}
@@ -325,10 +359,7 @@ export const ClipItem = React.memo(function ClipItem({
                         <div
                             className="absolute left-0 top-0 h-full z-[40] cursor-nwse-resize"
                             style={{
-                                width: Math.min(
-                                    width,
-                                    (clip.fadeInSec ?? 0) * pxPerSec,
-                                ),
+                                width: Math.min(width, (clip.fadeInSec ?? 0) * pxPerSec),
                             }}
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_in");
@@ -338,11 +369,12 @@ export const ClipItem = React.memo(function ClipItem({
                             {/* 全区域条带：与可交互区域完全重合，右边缘竖线表示可拖拽边�?*/}
                             <div
                                 className={
-                                    "absolute inset-0 rounded-l-sm bg-white/8 border-r transition-opacity " +
+                                    "absolute inset-0 border-r transition-opacity " +
                                     (selected
-                                        ? "opacity-100 border-white/70"
-                                        : "opacity-30 border-white/40 group-hover:opacity-100")
+                                        ? "opacity-100"
+                                        : "opacity-42 group-hover:opacity-100")
                                 }
+                                style={{ borderRightColor: fadeStrokeColor }}
                             />
                         </div>
                     )}
@@ -350,10 +382,7 @@ export const ClipItem = React.memo(function ClipItem({
                         <div
                             className="absolute right-0 top-0 h-full z-[40] cursor-nesw-resize"
                             style={{
-                                width: Math.min(
-                                    width,
-                                    (clip.fadeOutSec ?? 0) * pxPerSec,
-                                ),
+                                width: Math.min(width, (clip.fadeOutSec ?? 0) * pxPerSec),
                             }}
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_out");
@@ -363,11 +392,12 @@ export const ClipItem = React.memo(function ClipItem({
                             {/* 全区域条带：与可交互区域完全重合，左边缘竖线表示可拖拽边�?*/}
                             <div
                                 className={
-                                    "absolute inset-0 rounded-r-sm bg-white/8 border-l transition-opacity " +
+                                    "absolute inset-0 border-l transition-opacity " +
                                     (selected
-                                        ? "opacity-100 border-white/70"
-                                        : "opacity-30 border-white/40 group-hover:opacity-100")
+                                        ? "opacity-100"
+                                        : "opacity-42 group-hover:opacity-100")
                                 }
+                                style={{ borderLeftColor: fadeStrokeColor }}
                             />
                         </div>
                     )}
@@ -377,10 +407,7 @@ export const ClipItem = React.memo(function ClipItem({
                             <div
                                 className="absolute top-0 bottom-0"
                                 style={{
-                                    left: Math.max(
-                                        0,
-                                        Math.min(width - 1, repeatMarkerX),
-                                    ),
+                                    left: Math.max(0, Math.min(width - 1, repeatMarkerX)),
                                     width: 1,
                                     backgroundColor: "rgba(255,255,255,0.35)",
                                 }}
@@ -390,29 +417,20 @@ export const ClipItem = React.memo(function ClipItem({
                         {clip.fadeInSec > 0 ? (
                             <svg
                                 className="absolute left-0 top-0 h-full"
-                                width={Math.min(
-                                    width,
-                                    clip.fadeInSec * pxPerSec,
-                                )}
+                                width={Math.min(width, clip.fadeInSec * pxPerSec)}
                                 height={bodyHeight}
                                 viewBox={`0 0 ${Math.max(1, Math.min(width, clip.fadeInSec * pxPerSec))} ${Math.max(1, bodyHeight)}`}
                                 preserveAspectRatio="none"
                             >
                                 <path
                                     d={fadeInAreaPath(
-                                        Math.max(
-                                            1,
-                                            Math.min(
-                                                width,
-                                                clip.fadeInSec * pxPerSec,
-                                            ),
-                                        ),
+                                        Math.max(1, Math.min(width, clip.fadeInSec * pxPerSec)),
                                         Math.max(1, bodyHeight),
                                         24,
                                         clip.fadeInCurve ?? "sine",
                                     )}
-                                    fill="rgba(255,255,255,0.14)"
-                                    stroke="rgba(255,255,255,0.55)"
+                                    fill="rgba(0,0,0,0.30)"
+                                    stroke={fadeStrokeColor}
                                     strokeWidth="1"
                                     vectorEffect="non-scaling-stroke"
                                 />
@@ -421,29 +439,20 @@ export const ClipItem = React.memo(function ClipItem({
                         {clip.fadeOutSec > 0 ? (
                             <svg
                                 className="absolute right-0 top-0 h-full"
-                                width={Math.min(
-                                    width,
-                                    clip.fadeOutSec * pxPerSec,
-                                )}
+                                width={Math.min(width, clip.fadeOutSec * pxPerSec)}
                                 height={bodyHeight}
                                 viewBox={`0 0 ${Math.max(1, Math.min(width, clip.fadeOutSec * pxPerSec))} ${Math.max(1, bodyHeight)}`}
                                 preserveAspectRatio="none"
                             >
                                 <path
                                     d={fadeOutAreaPath(
-                                        Math.max(
-                                            1,
-                                            Math.min(
-                                                width,
-                                                clip.fadeOutSec * pxPerSec,
-                                            ),
-                                        ),
+                                        Math.max(1, Math.min(width, clip.fadeOutSec * pxPerSec)),
                                         Math.max(1, bodyHeight),
                                         24,
                                         clip.fadeOutCurve ?? "sine",
                                     )}
-                                    fill="rgba(255,255,255,0.14)"
-                                    stroke="rgba(255,255,255,0.55)"
+                                    fill="rgba(0,0,0,0.30)"
+                                    stroke={fadeStrokeColor}
                                     strokeWidth="1"
                                     vectorEffect="non-scaling-stroke"
                                 />

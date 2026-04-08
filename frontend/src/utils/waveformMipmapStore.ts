@@ -2,7 +2,7 @@
  * 波形 Mipmap 缓存管理器（整文件级）
  *
  * 每个音频文件缓存三级 Float32Array 数据：
- * - L0 (div=64):   精细级，近距离对轨，spp ≤ 256
+ * - L0 (div=32):   精细级，近距离对轨，spp ≤ 256
  * - L1 (div=512):  中间级，日常编辑，256 < spp ≤ 2048
  * - L2 (div=4096): 全局级，预览/导航，spp > 2048
  *
@@ -12,15 +12,12 @@
  */
 
 import { waveformApi } from "../services/api/waveform";
-import {
-    decodeWaveformFromBase64,
-    type WaveformMipmapBinary,
-} from "./waveformBinaryCodec";
+import { decodeWaveformFromBase64, type WaveformMipmapBinary } from "./waveformBinaryCodec";
 
 // ============== 常量 ==============
 
 /** 三级 mipmap 的除数因子 */
-const DIV_FACTORS = [64, 512, 4096] as const;
+const DIV_FACTORS = [32, 512, 4096] as const;
 
 /** 级别选择的 spp 阈值 */
 const SPP_THRESHOLDS = [256, 2048] as const;
@@ -84,29 +81,20 @@ class WaveformMipmapStoreImpl {
     /** 池的最大容量（条目数） */
     private static readonly POOL_MAX = 8;
 
-    /**
-     * 从池中获取一个 length === exactLen 的 Float32Array，或新建一个
-     */
-    private acquireInterleaved(exactLen: number): Float32Array {
+    private acquireInterleaved(minLen: number): Float32Array {
         for (let i = 0; i < this.interleavedPool.length; i++) {
-            if (this.interleavedPool[i].length === exactLen) {
+            if (this.interleavedPool[i].buffer.byteLength / 4 >= minLen) {
                 const buf = this.interleavedPool[i];
                 this.interleavedPool.splice(i, 1);
-                return buf;
+                return new Float32Array(buf.buffer, 0, minLen);
             }
         }
-        return new Float32Array(exactLen);
+        return new Float32Array(minLen);
     }
 
-    /**
-     * 归还 buffer 到池（供下一帧复用）
-     */
     releaseInterleaved(buf: Float32Array): void {
-        if (
-            buf.length > 0 &&
-            this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX
-        ) {
-            this.interleavedPool.push(buf);
+        if (buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX) {
+            this.interleavedPool.push(new Float32Array(buf.buffer));
         }
     }
 
@@ -159,10 +147,7 @@ class WaveformMipmapStoreImpl {
      * 如果尚未加载，会自动发起请求并返回 null。
      * 数据加载完成后通过 listener 通知。
      */
-    getPeaks(
-        sourcePath: string,
-        level: 0 | 1 | 2,
-    ): LevelPeaks | null {
+    getPeaks(sourcePath: string, level: 0 | 1 | 2): LevelPeaks | null {
         const entry = this.cache.get(sourcePath);
         if (!entry) {
             // 首次请求，发起加载
@@ -204,10 +189,7 @@ class WaveformMipmapStoreImpl {
         if (sampleRate <= 0 || divisionFactor <= 0) return null;
 
         // 计算索引范围
-        const startIdx = Math.max(
-            0,
-            Math.floor((startSec * sampleRate) / divisionFactor),
-        );
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
         const endIdx = Math.min(
             min.length,
             Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
@@ -270,10 +252,7 @@ class WaveformMipmapStoreImpl {
         let dataDurationSec = durationSec;
         if (peaks) {
             const { sampleRate, divisionFactor } = peaks;
-            const startIdx = Math.max(
-                0,
-                Math.floor((startSec * sampleRate) / divisionFactor),
-            );
+            const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
             const endIdx = Math.min(
                 peaks.min.length,
                 Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
@@ -290,13 +269,17 @@ class WaveformMipmapStoreImpl {
             };
         }
 
-        // 直接映射：源数据已是固定 division factor 的 peaks
-        const interleaved = new Float32Array(w * 2);
+        // 从复用池获取 Buffer
+        const interleaved = this.acquireInterleaved(w * 2);
 
         if (w >= srcLen) {
             // 上采样：线性插值
+            // 提取除法常数，消除循环内反复计算的除法与乘法开销
+            const invWM1 = w > 1 ? 1 / (w - 1) : 0;
+            const scale = (srcLen - 1) * invWM1;
+
             for (let i = 0; i < w; i++) {
-                const srcPos = srcLen > 1 ? (i / (w - 1)) * (srcLen - 1) : 0;
+                const srcPos = srcLen > 1 ? i * scale : 0;
                 const idx = Math.floor(srcPos);
                 const frac = srcPos - idx;
 
@@ -304,17 +287,21 @@ class WaveformMipmapStoreImpl {
                     interleaved[i * 2] = slice.min[srcLen - 1];
                     interleaved[i * 2 + 1] = slice.max[srcLen - 1];
                 } else {
-                    interleaved[i * 2] =
-                        slice.min[idx] * (1 - frac) + slice.min[idx + 1] * frac;
+                    interleaved[i * 2] = slice.min[idx] * (1 - frac) + slice.min[idx + 1] * frac;
                     interleaved[i * 2 + 1] =
                         slice.max[idx] * (1 - frac) + slice.max[idx + 1] * frac;
                 }
             }
         } else {
-            // 降采样：每像素取 min/max 聚合
+            // 每像素取 min/max 聚合
+            // 提取线性步长常量
+            const srcStep = srcLen / w;
+
             for (let i = 0; i < w; i++) {
-                const srcStart = (i / w) * srcLen;
-                const srcEnd = ((i + 1) / w) * srcLen;
+                // 使用乘法和加法替代原本的 4 次浮点乘除运算
+                const srcStart = i * srcStep;
+                const srcEnd = srcStart + srcStep;
+
                 const iStart = Math.max(0, Math.floor(srcStart));
                 const iEnd = Math.min(srcLen - 1, Math.ceil(srcEnd));
 
@@ -367,19 +354,13 @@ class WaveformMipmapStoreImpl {
         if (!slice) return null;
 
         const { sampleRate, divisionFactor } = peaks;
-        const startIdx = Math.max(
-            0,
-            Math.floor((startSec * sampleRate) / divisionFactor),
-        );
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
         const endIdx = Math.min(
             peaks.min.length,
             Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
         );
         const dataStartSec = (startIdx * divisionFactor) / sampleRate;
-        const dataDurationSec = Math.max(
-            0,
-            ((endIdx - startIdx) * divisionFactor) / sampleRate,
-        );
+        const dataDurationSec = Math.max(0, ((endIdx - startIdx) * divisionFactor) / sampleRate);
 
         const len = slice.min.length;
         const interleaved = this.acquireInterleaved(len * 2);
@@ -427,7 +408,6 @@ class WaveformMipmapStoreImpl {
     async batchPreload(sourcePaths: string[]): Promise<void> {
         if (sourcePaths.length === 0) return;
 
-        // 过滤掉已完全缓存的文件（3 级都已加载）
         const needed = sourcePaths.filter((sp) => {
             const entry = this.cache.get(sp);
             if (!entry) return true;
@@ -436,17 +416,26 @@ class WaveformMipmapStoreImpl {
 
         if (needed.length === 0) return;
 
-        // 通知所有需要加载的文件进入 loading 状态
+        // 通知所有需要加载的文件进入 loading 状态，并强制加锁
         for (const sp of needed) {
+            let entry = this.cache.get(sp);
+            if (!entry) {
+                entry = {
+                    sampleRate: 0,
+                    levels: [null, null, null],
+                    loadingLevels: new Set(),
+                };
+                this.cache.set(sp, entry);
+            }
+            entry.loadingLevels.add(0);
+            entry.loadingLevels.add(1);
+            entry.loadingLevels.add(2);
             this.notify(sp, "loading");
         }
 
         try {
-            // 单次 IPC 批量获取所有文件的 3 级 mipmap 数据
-            const batchResult =
-                await waveformApi.batchGetWaveformMipmap(needed);
+            const batchResult = await waveformApi.batchGetWaveformMipmap(needed);
 
-            // 遍历结果，解码并写入缓存
             for (const [sourcePath, levels] of Object.entries(batchResult)) {
                 let hasError = false;
                 for (let level = 0; level < LEVEL_COUNT; level++) {
@@ -457,11 +446,7 @@ class WaveformMipmapStoreImpl {
                     }
                     const decoded = decodeWaveformFromBase64(base64);
                     if (decoded) {
-                        this.applyDecoded(
-                            sourcePath,
-                            level,
-                            decoded,
-                        );
+                        this.applyDecoded(sourcePath, level, decoded);
                     } else {
                         hasError = true;
                     }
@@ -472,18 +457,25 @@ class WaveformMipmapStoreImpl {
                     hasError ? "batch decode partial failure" : undefined,
                 );
             }
-
         } catch (err) {
-            // 批量 IPC 失败，回退到逐个 preload
             console.warn(
                 "[WaveformMipmapStore] batchPreload failed, falling back to individual preload:",
                 err,
             );
             const promises = needed.map((sp) => this.preload(sp));
             await Promise.allSettled(promises);
+        } finally {
+            // 无论成功失败，释放锁，防止 UI 死锁
+            for (const sp of needed) {
+                const entry = this.cache.get(sp);
+                if (entry) {
+                    entry.loadingLevels.delete(0);
+                    entry.loadingLevels.delete(1);
+                    entry.loadingLevels.delete(2);
+                }
+            }
         }
     }
-
     /**
      * 检查指定文件的指定级别是否已缓存
      */
@@ -528,10 +520,7 @@ class WaveformMipmapStoreImpl {
      *
      * 返回的 Promise 可被多次 await，确保 preload 能等待正在进行的加载。
      */
-    private loadLevel(
-        sourcePath: string,
-        level: 0 | 1 | 2,
-    ): Promise<void> {
+    private loadLevel(sourcePath: string, level: 0 | 1 | 2): Promise<void> {
         // 确保缓存条目存在
         let entry = this.cache.get(sourcePath);
         if (!entry) {
@@ -556,10 +545,7 @@ class WaveformMipmapStoreImpl {
 
         const promise = (async () => {
             try {
-                const raw = await waveformApi.getWaveformMipmapBinary(
-                    sourcePath,
-                    level,
-                );
+                const raw = await waveformApi.getWaveformMipmapBinary(sourcePath, level);
                 const decoded = decodeWaveformFromBase64(raw);
 
                 if (decoded) {
@@ -584,11 +570,7 @@ class WaveformMipmapStoreImpl {
     /**
      * 将解码后的二进制数据写入缓存
      */
-    private applyDecoded(
-        sourcePath: string,
-        level: number,
-        decoded: WaveformMipmapBinary,
-    ): void {
+    private applyDecoded(sourcePath: string, level: number, decoded: WaveformMipmapBinary): void {
         let entry = this.cache.get(sourcePath);
         if (!entry) {
             entry = {
@@ -607,7 +589,6 @@ class WaveformMipmapStoreImpl {
             divisionFactor: decoded.divisionFactor,
             sampleRate: decoded.sampleRate,
         };
-
     }
 
     private getSliceFromPeaks(
@@ -618,10 +599,7 @@ class WaveformMipmapStoreImpl {
         const { sampleRate, divisionFactor, min, max } = peaks;
         if (sampleRate <= 0 || divisionFactor <= 0) return null;
 
-        const startIdx = Math.max(
-            0,
-            Math.floor((startSec * sampleRate) / divisionFactor),
-        );
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
         const endIdx = Math.min(
             min.length,
             Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
@@ -661,11 +639,7 @@ class WaveformMipmapStoreImpl {
     /**
      * 通知所有监听器
      */
-    private notify(
-        sourcePath: string,
-        status: "loading" | "done" | "error",
-        error?: string,
-    ): void {
+    private notify(sourcePath: string, status: "loading" | "done" | "error", error?: string): void {
         for (const cb of this.listeners) {
             try {
                 cb(sourcePath, status, error);

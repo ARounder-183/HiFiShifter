@@ -28,22 +28,22 @@ export function useClipPitchDataListener(): void {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen<ClipPitchDataPayload>(
-                    "clip_pitch_data",
-                    (event) => {
-                        if (disposed) return;
-                        const p = event.payload;
-                        if (!p?.clip_id || !Array.isArray(p.midi_curve)) return;
-                        dispatch(
-                            setClipPitchData({
-                                clipId: p.clip_id,
-                                curveStartSec: Number(p.curve_start_sec ?? 0),
-                                midiCurve: p.midi_curve as number[],
-                                framePeriodMs: Number(p.frame_period_ms ?? 5),
-                            }),
-                        );
-                    },
-                );
+                unlisten = await mod.listen<ClipPitchDataPayload>("clip_pitch_data", (event) => {
+                    if (disposed) return;
+                    const p = event.payload;
+                    if (!p?.clip_id || !Array.isArray(p.midi_curve)) return;
+                    dispatch(
+                        setClipPitchData({
+                            clipId: p.clip_id,
+                            curveStartSec: Number(p.curve_start_sec ?? 0),
+                            midiCurve: p.midi_curve as number[],
+                            framePeriodMs: Number(p.frame_period_ms ?? 5),
+                        }),
+                    );
+                });
+                if (disposed && unlisten) {
+                    unlisten();
+                }
             } catch {
                 // 非 Tauri 环境（浏览器/pywebview）下安全忽略。
             }

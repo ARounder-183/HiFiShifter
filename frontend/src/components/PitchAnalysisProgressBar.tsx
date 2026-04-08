@@ -19,9 +19,11 @@ export interface PitchAnalysisProgressBarProps {
     fadeOutDuration?: number;
 }
 
-export const PitchAnalysisProgressBar: React.FC<
-    PitchAnalysisProgressBarProps
-> = ({ pollInterval = 500, className = "", fadeOutDuration = 1000 }) => {
+export const PitchAnalysisProgressBar: React.FC<PitchAnalysisProgressBarProps> = ({
+    pollInterval = 500,
+    className = "",
+    fadeOutDuration = 1000,
+}) => {
     const { t } = useI18n();
     const [progress, setProgress] = useState<PitchProgressPayload | null>(null);
     const [isVisible, setIsVisible] = useState(false);
@@ -76,9 +78,7 @@ export const PitchAnalysisProgressBar: React.FC<
     const completedClips = progress.completedClips ?? 0;
     const totalClips = progress.totalClips ?? 0;
     const clipCountStr = totalClips > 0 ? ` (${completedClips}/${totalClips})` : "";
-    const clipNameStr = progress.currentClipName
-        ? ` "${progress.currentClipName}"`
-        : "";
+    const clipNameStr = progress.currentClipName ? ` "${progress.currentClipName}"` : "";
     const label = t("pitch_analyzing_clips")
         .replace("{clipName}", clipNameStr)
         .replace("{clipCount}", clipCountStr)

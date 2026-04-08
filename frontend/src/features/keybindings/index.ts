@@ -1,5 +1,10 @@
 export type { ActionId, Keybinding, KeybindingMap, KeybindingOverrides, ActionMeta } from "./types";
-export { DEFAULT_KEYBINDINGS, ACTION_META, ALL_ACTION_IDS, GROUP_LABEL_KEYS } from "./defaultKeybindings";
+export {
+    DEFAULT_KEYBINDINGS,
+    ACTION_META,
+    ALL_ACTION_IDS,
+    GROUP_LABEL_KEYS,
+} from "./defaultKeybindings";
 export {
     default as keybindingsReducer,
     setKeybinding,
@@ -10,4 +15,9 @@ export {
     formatKeybinding,
     findConflicts,
 } from "./keybindingsSlice";
-export { useKeybindings, isEditableTarget, matchesKeybinding, normalizeEventKey } from "./useKeybindings";
+export {
+    useKeybindings,
+    isEditableTarget,
+    matchesKeybinding,
+    normalizeEventKey,
+} from "./useKeybindings";

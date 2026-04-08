@@ -1,8 +1,6 @@
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
-import {
-    setClipFades,
-} from "../../../../features/session/sessionSlice";
+import { setClipFades } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
 
 /**
@@ -32,9 +30,7 @@ export function applyAutoCrossfade(
         const clipStart = Number(clip.startSec);
         const clipEnd = clipStart + Number(clip.lengthSec);
 
-        const sameTrack = session.clips.filter(
-            (c) => c.trackId === clip.trackId && c.id !== id,
-        );
+        const sameTrack = session.clips.filter((c) => c.trackId === clip.trackId && c.id !== id);
 
         for (const other of sameTrack) {
             const otherStart = Number(other.startSec);
@@ -49,7 +45,10 @@ export function applyAutoCrossfade(
                 fadeInOverlaps.set(other.id, Math.max(fadeInOverlaps.get(other.id) ?? 0, overlap));
             } else {
                 fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
-                fadeOutOverlaps.set(other.id, Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap));
+                fadeOutOverlaps.set(
+                    other.id,
+                    Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap),
+                );
             }
         }
     }
@@ -72,8 +71,10 @@ export function applyAutoCrossfade(
             ? (fadeOutOverlaps.get(clipId) ?? 0)
             : Number(clip.fadeOutSec ?? 0);
 
-        if (Math.abs(fadeInSec - Number(clip.fadeInSec ?? 0)) > 0.001 ||
-            Math.abs(fadeOutSec - Number(clip.fadeOutSec ?? 0)) > 0.001) {
+        if (
+            Math.abs(fadeInSec - Number(clip.fadeInSec ?? 0)) > 0.001 ||
+            Math.abs(fadeOutSec - Number(clip.fadeOutSec ?? 0)) > 0.001
+        ) {
             updates.push({ clipId, fadeInSec, fadeOutSec });
         }
     }
@@ -124,9 +125,7 @@ export function computeAutoCrossfadeFromPayload(
         const clipStart = Number(clip.start_sec ?? 0);
         const clipEnd = clipStart + Number(clip.length_sec ?? 0);
 
-        const sameTrack = allClips.filter(
-            (c) => c.track_id === clip.track_id && c.id !== id,
-        );
+        const sameTrack = allClips.filter((c) => c.track_id === clip.track_id && c.id !== id);
 
         for (const other of sameTrack) {
             const otherStart = Number(other.start_sec ?? 0);
@@ -138,10 +137,16 @@ export function computeAutoCrossfadeFromPayload(
 
             if (clipStart <= otherStart) {
                 fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, overlap));
-                fadeInOverlaps.set(other.id!, Math.max(fadeInOverlaps.get(other.id!) ?? 0, overlap));
+                fadeInOverlaps.set(
+                    other.id!,
+                    Math.max(fadeInOverlaps.get(other.id!) ?? 0, overlap),
+                );
             } else {
                 fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
-                fadeOutOverlaps.set(other.id!, Math.max(fadeOutOverlaps.get(other.id!) ?? 0, overlap));
+                fadeOutOverlaps.set(
+                    other.id!,
+                    Math.max(fadeOutOverlaps.get(other.id!) ?? 0, overlap),
+                );
             }
         }
     }
@@ -162,8 +167,10 @@ export function computeAutoCrossfadeFromPayload(
             ? (fadeOutOverlaps.get(clipId) ?? 0)
             : Number(clip.fade_out_sec ?? 0);
 
-        if (Math.abs(fadeInSec - Number(clip.fade_in_sec ?? 0)) > 0.001 ||
-            Math.abs(fadeOutSec - Number(clip.fade_out_sec ?? 0)) > 0.001) {
+        if (
+            Math.abs(fadeInSec - Number(clip.fade_in_sec ?? 0)) > 0.001 ||
+            Math.abs(fadeOutSec - Number(clip.fade_out_sec ?? 0)) > 0.001
+        ) {
             results.push({ clipId, fadeInSec, fadeOutSec });
         }
     }

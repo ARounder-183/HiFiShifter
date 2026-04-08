@@ -2,9 +2,7 @@ import { getQuickSearchInitialPosition } from "./quickSearchPosition.js";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {
-        throw new Error(
-            `${label}: expected ${String(expected)}, received ${String(actual)}`,
-        );
+        throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
     }
 }
 

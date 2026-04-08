@@ -18,8 +18,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "playback.focusCursor": { key: "\\" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
     "playback.seekRight": { key: "arrowright" },
-    "timeline.zoomIn": { key: "arrowup" },
-    "timeline.zoomOut": { key: "arrowdown" },
+    "timeline.zoomIn": { key: "__none__" },
+    "timeline.zoomOut": { key: "__none__" },
 
     // 编辑
     "edit.undo": { key: "z", ctrl: true },
@@ -47,6 +47,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 
     // 轨道
     "track.add": { key: "t", ctrl: true },
+    "track.selectUp": { key: "arrowup" },
+    "track.selectDown": { key: "arrowdown" },
 
     // Clip 操作
     "clip.delete": { key: "delete" },
@@ -88,9 +90,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     },
     "modifier.pianoKeysVerticalZoom": { key: "__none__", modifierOnly: true },
     "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
-    // 目前微调操作有逻辑问题，没法完全实现，暂时禁用快捷键
-    // "modifier.paramFineAdjust": { key: "control", modifierOnly: true, ctrl: true },
-    "modifier.paramFineAdjust": { key: "__none__", modifierOnly: true },
+    "modifier.paramFineAdjust": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.vibratoAmplitudeAdjust": { key: "__none__", modifierOnly: true },
     "modifier.vibratoFrequencyAdjust": { key: "alt", modifierOnly: true, alt: true },
 
@@ -199,6 +199,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "project.export": { labelKey: "kb_project_export", group: "project" },
 
     "track.add": { labelKey: "kb_track_add", group: "project" },
+    "track.selectUp": { labelKey: "kb_track_select_up", group: "project" },
+    "track.selectDown": { labelKey: "kb_track_select_down", group: "project" },
 
     "clip.delete": { labelKey: "kb_clip_delete", group: "clip" },
     "clip.copy": { labelKey: "kb_clip_copy", group: "clip" },
@@ -334,9 +336,7 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
 /**
  * 所有 ActionId 列表（保持顺序一致，方便遍历）
  */
-export const ALL_ACTION_IDS: ActionId[] = Object.keys(
-    DEFAULT_KEYBINDINGS,
-) as ActionId[];
+export const ALL_ACTION_IDS: ActionId[] = Object.keys(DEFAULT_KEYBINDINGS) as ActionId[];
 
 /**
  * 分组标题 i18n key

@@ -6,6 +6,13 @@ export type ParamEditorWheelAction =
     | "vertical-zoom"
     | "horizontal-zoom";
 
+export type TimelineWheelAction =
+    | "horizontal-scroll"
+    | "vertical-scroll"
+    | "vertical-zoom"
+    | "horizontal-zoom"
+    | "native";
+
 export function getWheelGestureAxis(input: {
     deltaX: number;
     deltaY: number;
@@ -44,7 +51,32 @@ export function getParamEditorWheelAction(input: {
         return "horizontal-zoom";
     }
 
-    return getWheelGestureAxis(input) === "horizontal"
-        ? "horizontal-scroll"
-        : "horizontal-zoom";
+    return getWheelGestureAxis(input) === "horizontal" ? "horizontal-scroll" : "horizontal-zoom";
+}
+
+export function getTimelineWheelAction(input: {
+    deltaX: number;
+    deltaY: number;
+    horizontalScrollRequested: boolean;
+    verticalScrollRequested: boolean;
+    verticalZoomRequested: boolean;
+    horizontalZoomRequested: boolean;
+}): TimelineWheelAction {
+    if (input.horizontalScrollRequested) {
+        return "horizontal-scroll";
+    }
+
+    if (input.verticalScrollRequested) {
+        return "vertical-scroll";
+    }
+
+    if (input.verticalZoomRequested) {
+        return "vertical-zoom";
+    }
+
+    if (input.horizontalZoomRequested) {
+        return "horizontal-zoom";
+    }
+
+    return getWheelGestureAxis(input) === "horizontal" ? "horizontal-scroll" : "native";
 }
