@@ -74,6 +74,7 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+backend/src-tauri/target-codex/
 
 # Jupyter Notebook
 .ipynb_checkpoints
