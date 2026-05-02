@@ -1511,9 +1511,10 @@ export const PianoRollPanel: React.FC = () => {
         if (!el) return;
 
         const handler = (e: WheelEvent) => {
+            const pinchOnly = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
-                if (isNoneBinding(kb)) return noModifierPressed;
+                if (isNoneBinding(kb)) return noModifierPressed || pinchOnly;
                 return isModifierActive(kb, e as any);
             };
             const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);

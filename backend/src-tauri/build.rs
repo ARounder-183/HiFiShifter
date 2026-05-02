@@ -11,6 +11,11 @@ fn main() {
         build_world_static();
         build_signalsmith_stretch();
         build_vslib();
+<<<<<<< Updated upstream
+=======
+        build_soundtouch_windows();
+        build_soundtouch_mac();
+>>>>>>> Stashed changes
     }
 }
 
@@ -338,3 +343,143 @@ fn build_vslib() {
         println!("cargo:warning=[vslib] OUT_DIR not set; skipping DLL copy")
     }
 }
+<<<<<<< Updated upstream
+=======
+
+/// Link against SoundTouchDLL_x64 via its import library (Windows only).
+///
+/// The DLL and import lib live in third_party/soundtouch/:
+///   SoundTouchDLL_x64.dll  — needs to sit next to the final binary at runtime
+///   SoundTouchDLL_x64.lib  — import library linked at compile time
+fn build_soundtouch_windows() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target_lc = target.to_lowercase();
+    if !(target_lc.contains("windows") && target_lc.contains("x86_64")) {
+        println!(
+            "cargo:warning=[soundtouch] target '{}' not an x86_64 Windows target; skipping",
+            target
+        );
+        return;
+    }
+
+    let lib_dir = std::path::Path::new("third_party/soundtouch");
+    if !lib_dir.exists() {
+        panic!(
+            "[soundtouch] third_party/soundtouch/ not found. \
+             Place SoundTouchDLL_x64.dll and SoundTouchDLL_x64.lib there."
+        );
+    }
+
+    let abs = lib_dir
+        .canonicalize()
+        .expect("[soundtouch] failed to canonicalize third_party/soundtouch path");
+
+    let dll_src = lib_dir.join("SoundTouchDLL_x64.dll");
+    let lib_src = lib_dir.join("SoundTouchDLL_x64.lib");
+    if !dll_src.exists() {
+        panic!("[soundtouch] SoundTouchDLL_x64.dll not found");
+    }
+    if !lib_src.exists() {
+        panic!("[soundtouch] SoundTouchDLL_x64.lib not found");
+    }
+
+    println!("cargo:rerun-if-changed=third_party/soundtouch/SoundTouchDLL_x64.dll");
+    println!("cargo:rerun-if-changed=third_party/soundtouch/SoundTouchDLL_x64.lib");
+    println!("cargo:rustc-link-search=native={}", abs.display());
+    println!("cargo:rustc-link-lib=dylib=SoundTouchDLL_x64");
+
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let target_dir = std::path::Path::new(&out_dir)
+            .ancestors()
+            .nth(3)
+            .expect("[soundtouch] unexpected OUT_DIR depth");
+        let dll_dst = target_dir.join("SoundTouchDLL_x64.dll");
+        if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
+            println!(
+                "cargo:warning=[soundtouch] could not copy DLL to {}: {}",
+                dll_dst.display(),
+                e
+            );
+        } else {
+            println!(
+                "cargo:warning=[soundtouch] copied SoundTouchDLL_x64.dll to {}",
+                dll_dst.display()
+            );
+        }
+    }
+}
+
+/// Build SoundTouch as a static library from source on macOS/Linux.
+///
+/// Uses the SoundTouch source from third_party/soundtouch_mac/ (v2.1.2)
+/// with a C wrapper (soundtouch_c.cpp/ soundtouch_c.h) that provides
+/// the same C API as the Windows SoundTouchDLL.
+///
+/// On Apple Silicon (arm64), x86 SIMD optimizations are automatically
+/// disabled by SoundTouch's own platform detection in STTypes.h.
+fn build_soundtouch_mac() {
+    use std::path::Path;
+
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target_lc = target.to_lowercase();
+
+    // Only for macOS and Linux targets (non-Windows)
+    if target_lc.contains("windows") {
+        return;
+    }
+
+    let st_dir = "third_party/soundtouch_mac";
+
+    // Check that SoundTouch sources exist
+    if !Path::new(st_dir).join("SoundTouch.cpp").exists() {
+        eprintln!("\n========================================");
+        eprintln!("WARNING: SoundTouch source not found at {}", st_dir);
+        eprintln!("SoundTouch time-stretch will not be available on this platform.");
+        eprintln!("========================================\n");
+        return;
+    }
+
+    println!("cargo:warning=[soundtouch_mac] Building SoundTouch static library for target '{}'", target);
+    println!("cargo:rerun-if-changed={}", st_dir);
+
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .warnings(false)
+        .include(st_dir)
+        // Core SoundTouch library files
+        .file(format!("{}/AAFilter.cpp", st_dir))
+        .file(format!("{}/FIFOSampleBuffer.cpp", st_dir))
+        .file(format!("{}/FIRFilter.cpp", st_dir))
+        .file(format!("{}/InterpolateCubic.cpp", st_dir))
+        .file(format!("{}/InterpolateLinear.cpp", st_dir))
+        .file(format!("{}/InterpolateShannon.cpp", st_dir))
+        .file(format!("{}/RateTransposer.cpp", st_dir))
+        .file(format!("{}/SoundTouch.cpp", st_dir))
+        .file(format!("{}/TDStretch.cpp", st_dir))
+        // CPU detection (works on x86/x86_64, stub on ARM)
+        .file(format!("{}/cpu_detect_x86.cpp", st_dir))
+        // x86 SIMD optimizations (guarded by #ifdef, compile to empty on ARM)
+        .file(format!("{}/mmx_optimized.cpp", st_dir))
+        .file(format!("{}/sse_optimized.cpp", st_dir))
+        // C wrapper that provides the DLL-compatible API
+        .file(format!("{}/soundtouch_c.cpp", st_dir));
+
+    let compiler = build.get_compiler();
+    if compiler.is_like_msvc() {
+        build.flag("/EHsc");
+        build.flag("/std:c++14");
+        build.flag("/O2");
+    } else {
+        build.flag("-std=c++14");
+        build.flag("-fPIC");
+        build.flag("-O2");
+        // On Apple Silicon, no x86 intrinsics available - STTypes.h handles this
+    }
+
+    build.compile("soundtouch_mac");
+
+    println!("cargo:rustc-link-lib=static=soundtouch_mac");
+    println!("cargo:warning=[soundtouch_mac] SoundTouch static library built successfully");
+}
+>>>>>>> Stashed changes

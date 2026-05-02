@@ -59,8 +59,17 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 objc2 = "0.6"
 
 [features]
+<<<<<<< Updated upstream
 default = ["onnx"]
 onnx = ["dep:ort", "dep:ndarray"]
+=======
+# Default features are safe for all platforms.
+# On Windows, enable `vslib` for VocalShifter integration:
+#   cargo tauri build --features vslib
+# On macOS/Linux, vslib is not available.
+default = ["onnx"]
+onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
+>>>>>>> Stashed changes
 vslib = []
 
 # Linux / Windows

@@ -1,0 +1,23 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "HiFiShifter",
+    "bundle": {
+        "targets": ["dmg"],
+        "macOS": {
+            "minimumSystemVersion": "11.0",
+            "entitlements": "./entitlements.plist"
+        },
+        "resources": {
+            "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
+            "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
+            "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
+            "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
+            "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx"
+        }
+    },
+    "app": {
+        "security": {
+            "csp": null
+        }
+    }
+}

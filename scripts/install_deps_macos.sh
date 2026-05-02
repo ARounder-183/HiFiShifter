@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "[install_deps_macos] Ensure Xcode Command Line Tools are installed"
+if ! xcode-select -p >/dev/null 2>&1; then
+  echo "Xcode Command Line Tools not found. Installing..."
+  xcode-select --install || true
+  echo "Please complete the installation dialog and re-run this script."
+  exit 1
+fi
+
 echo "[install_deps_macos] Ensure Homebrew is installed"
 if ! command -v brew >/dev/null 2>&1; then
   echo "Homebrew not found. Installing..."

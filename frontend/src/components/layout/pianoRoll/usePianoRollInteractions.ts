@@ -1336,9 +1336,10 @@ export function usePianoRollInteractions(args: {
                 return;
             }
 
+            const pinchOnly = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
-                if (isNoneBinding(kb)) return noModifierPressed;
+                if (isNoneBinding(kb)) return noModifierPressed || pinchOnly;
                 return isModifierActive(kb, e);
             };
             const horizontalScrollModifierActive = isWheelBindingRequested(scrollHorizontalKb);

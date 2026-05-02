@@ -145,10 +145,13 @@ export const TimelineScrollArea: React.FC<
             if (clipGainKnobEl) {
                 return;
             }
+            // macOS: pinch-to-zoom generates synthetic ctrlKey events.
+            // Treat pinch (ctrlKey only) as no-modifier for intent purposes.
+            const pinchOnly = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
                 if (!kb) return false;
-                if (isNoneBinding(kb)) return noModifierPressed;
+                if (isNoneBinding(kb)) return noModifierPressed || pinchOnly;
                 return isModifierActive(kb, e);
             };
             const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);

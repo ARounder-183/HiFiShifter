@@ -197,6 +197,14 @@ export function findConflicts(
  * 检测事件中某个 modifierOnly 绑定的修饰键是否按下。
  * 适用于 PointerEvent / MouseEvent / KeyboardEvent 等任何带修饰键状态的事件。
  * 如果绑定为"无"，始终返回 false。
+<<<<<<< Updated upstream
+=======
+ * 采用子集匹配：绑定中要求为 true 的修饰键必须被按下，
+ * 未要求的修饰键允许同时按下，避免组合修饰键时误判失效。
+ *
+ * macOS 适配：Ctrl 修饰键同时匹配 metaKey（Cmd 键）和 ctrlKey（触控板双指捏合缩放）。
+ * 浏览器会将触控板捏合手势转为 ctrlKey + wheel 事件。
+>>>>>>> Stashed changes
  */
 export function isModifierActive(
     kb: Keybinding,
@@ -208,8 +216,26 @@ export function isModifierActive(
     },
 ): boolean {
     if (isNoneBinding(kb)) return false;
+<<<<<<< Updated upstream
     if (kb.ctrl) return IS_MAC ? Boolean(event.metaKey) : event.ctrlKey;
     if (kb.alt) return event.altKey;
     if (kb.shift) return event.shiftKey;
     return false;
+=======
+    const required = getModifierFlags(kb);
+    if (!hasAnyModifierFlags(required)) return false;
+
+    // macOS: Ctrl 同时匹配 Cmd（metaKey，键盘快捷键）和 Ctrl（ctrlKey，触控板捏合缩放）
+    const pressedCtrl = IS_MAC
+        ? (Boolean(event.metaKey) || Boolean(event.ctrlKey))
+        : Boolean(event.ctrlKey);
+    const pressedShift = Boolean(event.shiftKey);
+    const pressedAlt = Boolean(event.altKey);
+
+    return (
+        (!required.ctrl || pressedCtrl) &&
+        (!required.shift || pressedShift) &&
+        (!required.alt || pressedAlt)
+    );
+>>>>>>> Stashed changes
 }
