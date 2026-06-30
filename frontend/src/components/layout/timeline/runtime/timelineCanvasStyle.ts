@@ -1,3 +1,20 @@
+/**
+ * timelineCanvasStyle.ts - Timeline Clip 视觉样式与文字标签计算。
+ *
+ * 主要内容：
+ * - 计算 Clip 头部各种 badge / label 的可见性、宽度、坐标。
+ * - 根据 gain / playbackRate / 名称等数据生成显示文本与字号宽度。
+ *
+ * 与其他模块的关系：
+ * - 被 ClipHeader.tsx、timelineCanvasRenderer.ts 调用消费。
+ * - 依赖 timelineClipHeaderVisibility.ts 决定哪些元素在当前宽度下可见。
+ *
+ * 维护说明：
+ * - playbackRate 显示走 `formatPlaybackRateLabel`，统一规则：保留至多 2 位小数，
+ *   再去除末尾多余的 0；这样 1 → "x1"、1.5 → "x1.5"、1.23 → "x1.23"，
+ *   避免出现 "x1.50" 这种带冗余尾零或 "x1.0" 让用户误以为没拉伸的情况
+ *   （Bug 修复，2026-06-30）。
+ */
 import { gainToDb } from "../math.js";
 import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
 
@@ -36,6 +53,26 @@ const CHAR_SAMPLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * 将 playbackRate 数值格式化为 Clip 头部用的简洁标签。
+ *
+ * 规则：
+ * - 非有限 / 非正值 → "x1"（兜底）。
+ * - 保留至多 2 位小数，再去除末尾的 0 与可能多余的小数点：
+ *   1.0 → "x1"、1.5 → "x1.5"、1.23 → "x1.23"、0.85 → "x0.85"。
+ * - 这样可避免出现 "x1.50" 这种带冗余尾零，也避免历史实现里 1.0001 显示
+ *   为 "x1.0" 时让用户难以判断是否真正发生了拉伸（Bug 修复，2026-06-30）。
+ *
+ * @param rate 播放速率（>0）
+ * @returns 形如 "x1" / "x1.5" / "x1.23" 的标签。
+ */
+export function formatPlaybackRateLabel(rate: number): string {
+    if (!Number.isFinite(rate) || rate <= 0) return "x1";
+    // toFixed(2) → "1.00" / "1.50" / "1.23"，再去除末尾的 0 和孤立小数点
+    const trimmed = rate.toFixed(2).replace(/\.?0+$/, "");
+    return `x${trimmed.length > 0 ? trimmed : "1"}`;
 }
 
 function parseHexColor(color: string): { r: number; g: number; b: number } | null {
@@ -187,11 +224,7 @@ export function buildTimelineClipVisualStyle(args: {
     const clampedGainDb = clamp(gainDb, -12, 12);
     const playbackRate =
         Number.isFinite(args.playbackRate) && args.playbackRate > 0 ? args.playbackRate : 1;
-    const playbackRateOneDecimal =
-        Math.abs(playbackRate - Math.round(playbackRate)) < 0.001
-            ? playbackRate.toFixed(1)
-            : playbackRate.toFixed(2);
-    const playbackRateLabel = `x${playbackRateOneDecimal}`;
+    const playbackRateLabel = formatPlaybackRateLabel(playbackRate);
     const gainLabel = `${gainDb >= 0 ? "+" : ""}${gainDb.toFixed(1)}dB`;
 
     // Font-aware trailing reserve: measure actual label widths
