@@ -1053,6 +1053,16 @@ fn render_single_clip(
     };
 
     // ── 尝试从 BreathNoiseCache 中命中已有的 noise stem ──────────────────
+    //
+    // 长度安全：缓存的 noise 是按"上次渲染时的 timeline 长度（含 playback_rate）"
+    // 生成的。理论上 BreathNoiseCacheKey 已通过 `start_frame/end_frame/playback_rate`
+    // 区分不同长度，但在拉伸时序竞态、参数 round-trip 等极端场景下，仍可能拿到
+    // 与当前 harmonic_only 长度不一致的旧 noise。若直接复用并按 `min(...)`
+    // 截短 harmonic_only, 会把当前帧的尾部 PCM 截掉, 导致开启气声后拉伸时
+    // clip 后半段静音 (Bug 修复, 2026-06-30)。
+    //
+    // 因此命中时必须验证长度严格一致；不一致则视为未命中, 走完整的双 render
+    // miss 路径重新生成 noise。
     let cached_noise = breath_noise_cache_key.as_ref().and_then(|key| {
         let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
             .lock()
@@ -1071,22 +1081,41 @@ fn render_single_clip(
         }
 
         let mut harmonic_only_clip = clip.clone();
-        merged_extra_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
-        harmonic_only_clip.extra_params = Some(merged_extra_params);
-        harmonic_only_clip.extra_curves = Some(merged_extra_curves);
-        let mut harmonic_only = render_variant(&harmonic_only_clip);
+        let mut harmonic_curves = merged_extra_curves.clone();
+        harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
+        harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
+        harmonic_only_clip.extra_curves = Some(harmonic_curves);
+        let harmonic_only = render_variant(&harmonic_only_clip);
 
-        let out_len = harmonic_only.len().min(cached_noise_arc.len());
-        harmonic_only.truncate(out_len);
-        let breath_noise_stereo = cached_noise_arc[..out_len].to_vec();
+        if harmonic_only.len() == cached_noise_arc.len() {
+            // 长度严格一致：放心复用缓存
+            let breath_noise_stereo = cached_noise_arc.as_slice().to_vec();
+            return Ok(RenderedClipOutput {
+                rendered_stereo: harmonic_only,
+                breath_noise_stereo: Some(breath_noise_stereo),
+            });
+        }
 
-        return Ok(RenderedClipOutput {
-            rendered_stereo: harmonic_only,
-            breath_noise_stereo: Some(breath_noise_stereo),
-        });
+        // 长度不一致：丢弃缓存, 走完整的双 render miss 路径重新生成 noise。
+        if debug {
+            eprintln!(
+                "render_single_clip: breath_noise_cache STALE for clip_id={} (harmonic_len={} cached_noise_len={}), \
+                 invalidating and falling back to full 2-pass render",
+                clip.id,
+                harmonic_only.len(),
+                cached_noise_arc.len()
+            );
+        }
+        if breath_noise_cache_key.is_some() {
+            let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.invalidate(&clip.id);
+        }
+        // fall through to miss path 下方
     }
 
-    // ── BreathNoiseCache 未命中：完整的两次 render_variant ──────────────────
+    // ── BreathNoiseCache 未命中（或长度不匹配已失效）：完整的两次 render_variant ──
     if debug {
         eprintln!(
             "render_single_clip: breath_noise_cache MISS for clip_id={}, doing full 2-pass render",
