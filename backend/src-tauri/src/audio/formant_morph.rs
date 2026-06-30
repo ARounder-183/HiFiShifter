@@ -1,29 +1,82 @@
-use aberth::{AberthSolver, StopReason};
+/*
+ * formant_morph.rs - Clip 级共振峰变形（STFT 包络扭曲版本）。
+ *
+ * 主要内容：
+ * - apply_formant_morph_mono / apply_formant_morph_interleaved：稳定公开 API。
+ * - vowel_formant_preset：元音预设（保留供 IPC 调用，不参与本模块算法）。
+ * - 内部走 STFT + 倒谱包络 + F1/F2 峰位检测 + 频率扭曲映射的处理流。
+ *
+ * 与其他模块的关系：
+ * - 由 formant_cache.rs 在重建 clip 缓存时调用。
+ * - 由 audio_engine/snapshot.rs / commands/playback.rs 间接消费缓存结果。
+ * - 公开签名与 2026-04-30 设计 spec 保持兼容；本模块在 2026-06-30 整体由
+ *   "LPC 极点迁移"路线重写为"包络变形"路线，目标是保留原音色身份的同时
+ *   能可靠把 F1/F2 拽到目标位置。
+ *
+ * 算法要点（重写后）：
+ * 1. 帧分析：50% 重叠 Hann 窗，FFT_SIZE = 2048（采样率 ≥ 24k）/ 1024（其它），
+ *    hop = FFT_SIZE / 4，相位连续性来自 75% 重叠的 OLA。
+ * 2. 倒谱包络：log|X| 做 IFFT，仅保留 lifter 内的低 quefrency 部分（描述
+ *    声道滤波器形状），再 FFT 回频域得到平滑包络 E(k)。激励 X(k)/E(k)
+ *    完全保留（声带振动与高频音色身份不被触碰，这是"保音色"的关键）。
+ * 3. F1/F2 检测：在包络上分别于 [F1_SEARCH_LO, F1_SEARCH_HI] 与
+ *    [F2_SEARCH_LO, F2_SEARCH_HI] 区间寻找局部最大，要求峰值显著高于
+ *    周围谷点，否则该帧记为低置信度并降权。
+ * 4. 频率扭曲映射 w(f)：分段单调扭曲。0Hz、F1、F2、上界锚点 → 目标位置
+ *    的对应锚点；高频区（>HIGH_FIX_HZ）保持恒等不动。锚点之间用单调
+ *    PCHIP 三次插值，保证频率轴单调（不翻转）且过渡平滑。
+ * 5. 新包络：E'(k) = E(w⁻¹(f_k))。逆映射用线性反查实现（包络足够平滑，
+ *    误差可忽略，避免实现复杂的 Hermite 反函数）。
+ * 6. 替换包络：Y(k) = X(k) * (E'(k)/E(k))^strength_eff。
+ *    - strength_eff = strength * voicedness_weight，对清辅音/低能量帧自动降权。
+ *    - 用幂指数混合而非线性 lerp，可保证 strength=0 严格 bypass，且响度
+ *      变化更平滑。
+ * 7. iSTFT：复频谱 IFFT → 加 Hann 窗（合成窗）→ overlap-add → 用 window²
+ *    之和归一化。
+ * 8. 整体峰值保护：output_peak / input_peak 比值受限。
+ *
+ * 维护说明：
+ * - 严禁在内部对 X(k) 的相位做修改（否则会破坏原音色的 fine structure）。
+ * - 包络 E(k) 必须加 floor 防爆零，且 floor 要在 log 域而不是线性域处理。
+ * - 任何对 sample_rate / strength 极端值的入口校验，必须早于 FFT 分配。
+ */
 use crate::state::ClipFormantMorph;
 use num_complex::Complex32;
-use std::collections::BTreeMap;
+use rustfft::FftPlanner;
 
-const PRE_EMPHASIS_COEF: f32 = 0.97;
+// ── 公开常量（供子模块/测试参考） ────────────────────────────────────────
 
+/// 低于该采样率直接 bypass：低于 8kHz 的素材本身就没有可靠的 F2 信息。
 const MIN_SAMPLE_RATE: u32 = 8_000;
+/// 输入样本不足直接 bypass：FFT 都做不满一帧。
 const MIN_INPUT_SAMPLES: usize = 512;
+/// strength 低于此阈值视为关闭（避免极小浮点误差触发处理）。
+const STRENGTH_EPS: f32 = 1.0e-5;
 
-const F1_MIN_HZ: f32 = 250.0;
-const F1_MAX_HZ: f32 = 1_000.0;
-const F2_MIN_HZ: f32 = 540.0;
-const F2_MAX_HZ: f32 = 2_600.0;
+/// F1 搜索区间（用于在包络上寻找当前 F1 峰位）。
+const F1_SEARCH_LO_HZ: f32 = 200.0;
+const F1_SEARCH_HI_HZ: f32 = 1_100.0;
+/// F2 搜索区间。
+const F2_SEARCH_LO_HZ: f32 = 700.0;
+const F2_SEARCH_HI_HZ: f32 = 2_900.0;
 
-const FORMANT_SEARCH_MIN_HZ: f32 = 150.0;
-const FORMANT_SEARCH_MAX_HZ: f32 = 3_000.0;
+/// 高于此频率的部分扭曲映射保持恒等：保留 F3 / F4 / spectral tilt（这是音色身份）。
+const HIGH_FIX_HZ: f32 = 3_800.0;
 
-const MIN_F1_F2_GAP_HZ: f32 = 280.0;
+/// 倒谱 lifter cutoff（quefrency bin 索引比例）：保留前 ~12% 系数描述包络。
+/// 该值越小 → 包络越平滑（更不易受 F0 谐波污染），但太小会模糊 F1/F2 细节。
+const LIFTER_CUTOFF_RATIO: f32 = 0.12;
 
-const EPSILON: f32 = 1.0e-8;
-const MAX_ROOT_RADIUS: f32 = 0.992;
-const MAX_FRAME_GAIN: f32 = 3.5;
-const MIN_FRAME_GAIN: f32 = 0.25;
-const MAX_IIR_ABS: f32 = 24.0;
+/// 包络下限（线性幅度）：避免除零放大噪声。
+const ENVELOPE_FLOOR: f32 = 1.0e-4;
 
+/// 输出整体峰值上限相对输入峰值的最大放大倍数。
+const OUTPUT_PEAK_RATIO_LIMIT: f32 = 1.6;
+
+/// 元音 → 目标共振峰预设（F1, F2，单位 Hz）。
+///
+/// 保留供前端 / IPC 在不知道精确共振峰参数时使用；本模块算法本身只看
+/// `params.target_f1_hz / target_f2_hz`，与本表无直接耦合。
 #[allow(dead_code)]
 pub fn vowel_formant_preset(vowel: &str) -> Option<(f64, f64)> {
     match vowel.trim().to_ascii_lowercase().as_str() {
@@ -36,6 +89,32 @@ pub fn vowel_formant_preset(vowel: &str) -> Option<(f64, f64)> {
     }
 }
 
+// ── 公开入口 ────────────────────────────────────────────────────────────
+
+/// 单声道 PCM 共振峰变形（公开 API，签名与重写前保持一致）。
+///
+/// 流程：
+/// 1. 入口校验（disabled / 空输入 / 低采样率 / 短样本 / strength 接近 0）→ 直接 bypass。
+/// 2. 选择 FFT 尺寸：≥24kHz 用 2048，否则用 1024。hop = FFT/4 实现 75% 重叠。
+/// 3. 构建分析/合成 Hann 窗（同一窗，OLA 用 window² 归一化）。
+/// 4. 计划 FFT / IFFT（rustfft，复用 planner）。
+/// 5. 帧循环（步进 hop）：
+///    - 取帧 + 加窗 → FFT 得到复频谱 X(k)。
+///    - log|X| → IFFT → lifter → FFT → 包络 E(k)。
+///    - 包络上检测 F1 / F2 峰位（带置信度）。
+///    - 构造频率扭曲映射 w(f) 并采样得 E'(k)。
+///    - Y(k) = X(k) * (E'(k)/E(k))^effective_strength。
+///    - IFFT(Y) → 加合成窗 → 累加到 OLA buffer。
+/// 6. 用 window_sum 归一化 OLA buffer，截断到原长。
+/// 7. 整体峰值保护（不超过 input_peak * OUTPUT_PEAK_RATIO_LIMIT）。
+///
+/// 参数说明：
+/// - `input`：mono PCM。
+/// - `sample_rate`：采样率（Hz）。
+/// - `params`：用户指定的目标 F1 / F2 / strength。
+///
+/// 返回：长度与 input 一致的处理后 PCM。失败 / 不适用情况下返回原始 PCM 拷贝
+/// （保持调用方"总能拿到等长输出"的契约）。
 pub fn apply_formant_morph_mono(
     input: &[f32],
     sample_rate: u32,
@@ -44,195 +123,187 @@ pub fn apply_formant_morph_mono(
     if !params.enabled || input.is_empty() {
         return Ok(input.to_vec());
     }
-
     if sample_rate < MIN_SAMPLE_RATE || input.len() < MIN_INPUT_SAMPLES {
         return Ok(input.to_vec());
     }
 
-    let strength = params.strength.clamp(0.0, 1.0) as f32;
-    if strength <= 1.0e-5 {
+    let strength = (params.strength as f32).clamp(0.0, 1.0);
+    if strength <= STRENGTH_EPS {
         return Ok(input.to_vec());
     }
 
-    let (target_f1, target_f2) = sanitize_target_formants(
-        params.target_f1_hz as f32,
-        params.target_f2_hz as f32,
-        sample_rate,
-    );
+    let target_f1 = (params.target_f1_hz as f32).clamp(180.0, 1_200.0);
+    let target_f2 = (params.target_f2_hz as f32).clamp(target_f1 + 250.0, 3_200.0);
 
-    let frame_len = ((sample_rate as f32) * 0.025)
-        .round()
-        .clamp(256.0_f32, 2_048.0_f32) as usize;
+    let fft_size = if sample_rate >= 24_000 { 2048 } else { 1024 };
+    let hop = fft_size / 4;
+    let half = fft_size / 2 + 1;
 
-    let hop_len = (frame_len / 4).max(64);
-    let order = lpc_order_for_sample_rate(sample_rate);
+    let analysis_window = hann_window(fft_size);
+    let synthesis_window = analysis_window.clone();
 
-    let window = hann_window(frame_len);
-    let emphasized = pre_emphasis(input, PRE_EMPHASIS_COEF);
-    let padded = pad_for_overlap_add(&emphasized, frame_len, hop_len);
+    let mut planner = FftPlanner::<f32>::new();
+    let fft_forward = planner.plan_fft_forward(fft_size);
+    let fft_inverse = planner.plan_fft_inverse(fft_size);
 
-    let mut overlap = vec![0.0_f32; padded.len()];
-    let mut window_sum = vec![0.0_f32; padded.len()];
+    // 在样本前后各 pad 一段，让首尾帧也能被完整 OLA 覆盖。
+    let pad_left = fft_size - hop;
+    let pad_right = fft_size;
+    let mut padded = vec![0.0_f32; pad_left + input.len() + pad_right];
+    padded[pad_left..pad_left + input.len()].copy_from_slice(input);
 
-    let total_frames = 1 + padded.len().saturating_sub(frame_len) / hop_len;
-    let mut processed_frames = 0usize;
-    let mut low_energy_frames = 0usize;
-    let mut lpc_ok_frames = 0usize;
-    let mut modify_ok_frames = 0usize;
-    let mut lpc_fail_reasons: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut modify_fail_reasons: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut ola = vec![0.0_f32; padded.len()];
+    let mut win_sum = vec![0.0_f32; padded.len()];
 
-    // ── 预分配 per-frame buffer，循环内复用（避免 per-frame 堆分配）───────────
-    let mut windowed_buf: Vec<f32> = Vec::with_capacity(frame_len);
-    // LPC 内部 buffer 复用
-    let mut lpc_ef: Vec<f32> = Vec::with_capacity(frame_len);
-    let mut lpc_eb: Vec<f32> = Vec::with_capacity(frame_len);
-    let mut lpc_next_ef: Vec<f32> = Vec::with_capacity(frame_len);
-    let mut lpc_next_eb: Vec<f32> = Vec::with_capacity(frame_len);
+    // 复用每帧 buffer，避免循环内堆分配
+    let mut frame_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); fft_size];
+    let mut ifft_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); fft_size];
+    let mut envelope: Vec<f32> = vec![0.0; half];
+    let mut warped_envelope: Vec<f32> = vec![0.0; half];
+    let mut log_mag: Vec<f32> = vec![0.0; fft_size];
+    let mut cepstrum: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); fft_size];
 
-    for start in (0..=padded.len().saturating_sub(frame_len)).step_by(hop_len) {
-        let frame = &padded[start..start + frame_len];
+    let lifter_cutoff = ((fft_size as f32 * LIFTER_CUTOFF_RATIO) as usize).max(8);
 
-        // ── 提前能量检查：跳过静音/低能量帧，避免无谓的 window+collect ──────
-        let mean_energy = frame_energy(frame) / frame_len as f32;
-        if mean_energy < 1.0e-8_f32 {
-            low_energy_frames += 1;
+    let mut start = 0usize;
+    while start + fft_size <= padded.len() {
+        // 1. 取帧 + 加窗 → 复数缓冲
+        let mut frame_energy_lin = 0.0_f32;
+        for i in 0..fft_size {
+            let s = padded[start + i] * analysis_window[i];
+            frame_buf[i] = Complex32::new(s, 0.0);
+            frame_energy_lin += s * s;
+        }
+
+        // 极低能量帧：跳过包络估计，直接把加窗后的帧 OLA（保持原信号）。
+        if frame_energy_lin < 1.0e-10 {
+            for i in 0..fft_size {
+                ola[start + i] += frame_buf[i].re * synthesis_window[i];
+                win_sum[start + i] += synthesis_window[i] * synthesis_window[i];
+            }
+            start += hop;
             continue;
         }
 
-        // 复用 windowed_buf，clear + 填充替代重新分配
-        windowed_buf.clear();
-        for (&sample, &win) in frame.iter().zip(window.iter()) {
-            windowed_buf.push(sample * win);
+        // 2. FFT
+        fft_forward.process(&mut frame_buf);
+
+        // 3. 包络估计（cepstral lifter）
+        // log|X| 在 [0, fft_size) 全段：lifter 在时域是对称低通，因此需要全段 log|X|。
+        for i in 0..fft_size {
+            let mag = frame_buf[i].norm().max(ENVELOPE_FLOOR);
+            log_mag[i] = mag.ln();
+        }
+        for (dst, src) in cepstrum.iter_mut().zip(log_mag.iter()) {
+            *dst = Complex32::new(*src, 0.0);
+        }
+        fft_inverse.process(&mut cepstrum);
+        // lifter：保留 quefrency 中心区，置零其余部分。注意 IFFT 的归一化在最后统一处理。
+        for i in 0..fft_size {
+            let in_low = i < lifter_cutoff;
+            let in_high = i >= fft_size - lifter_cutoff;
+            if !(in_low || in_high) {
+                cepstrum[i] = Complex32::new(0.0, 0.0);
+            }
+        }
+        // 回到频域，得到 log 域的平滑包络
+        fft_forward.process(&mut cepstrum);
+        // rustfft 不归一化：FFT(IFFT(x)) = N * x，因此除以 N。
+        let inv_n = 1.0 / fft_size as f32;
+        for i in 0..half {
+            let log_env = cepstrum[i].re * inv_n;
+            envelope[i] = log_env.exp().max(ENVELOPE_FLOOR);
         }
 
-        let confidence = voiced_confidence(&windowed_buf, mean_energy);
-        let effective_strength = strength * confidence;
+        // 4. 在包络上检测 F1 / F2
+        let bin_hz = sample_rate as f32 / fft_size as f32;
+        let detection = detect_f1_f2(&envelope, bin_hz);
 
-        if effective_strength < 0.015_f32 {
-            low_energy_frames += 1;
-            // 跳过 LPC 管线，直接用原始 windowed 做 OLA
-            for idx in 0..frame_len {
-                overlap[start + idx] += windowed_buf[idx] * window[idx];
-                window_sum[start + idx] += window[idx] * window[idx];
+        // 5. 构造频率扭曲映射并采样新包络
+        build_warped_envelope(
+            &envelope,
+            &mut warped_envelope,
+            bin_hz,
+            detection.f1_hz,
+            detection.f2_hz,
+            target_f1,
+            target_f2,
+        );
+
+        // 6. 频谱包络替换：Y(k) = X(k) * (E'(k)/E(k))^effective_strength
+        let voicedness = detection.confidence;
+        let effective_strength = (strength * voicedness).clamp(0.0, 1.0);
+        if effective_strength > STRENGTH_EPS {
+            for i in 0..half {
+                let ratio = (warped_envelope[i] / envelope[i]).max(1.0e-6);
+                let scale = ratio.powf(effective_strength);
+                frame_buf[i] *= scale;
             }
-        } else {
-            match lpc_coefficients_reuse(&windowed_buf, order, &mut lpc_ef, &mut lpc_eb, &mut lpc_next_ef, &mut lpc_next_eb) {
-                Ok(a_orig) => {
-                    lpc_ok_frames += 1;
-
-                    match modify_lpc_coefficients_with_reason(
-                        &a_orig,
-                        sample_rate,
-                        target_f1,
-                        target_f2,
-                        effective_strength,
-                    ) {
-                        Ok(a_target) => {
-                            let residual = fir_filter(&windowed_buf, &a_orig);
-
-                            match all_pole_filter_checked(&residual, &a_target, MAX_IIR_ABS) {
-                                Some(mut synthesized) => {
-                                    match_energy_limited(
-                                        &windowed_buf,
-                                        &mut synthesized,
-                                        MIN_FRAME_GAIN,
-                                        MAX_FRAME_GAIN,
-                                    );
-
-                                    let dry_peak = peak_abs(&windowed_buf).max(0.01_f32);
-                                    limit_frame(
-                                        &mut synthesized,
-                                        (dry_peak * 3.2_f32).clamp(0.05_f32, 0.98_f32),
-                                    );
-
-                                    let wet_amount = effective_strength.clamp(0.0_f32, 1.0_f32).powf(0.40_f32);
-
-                                    // 复用预分配 windowed_buf 做混合，避免另分配 mixed Vec
-                                    for idx in 0..frame_len {
-                                        windowed_buf[idx] = windowed_buf[idx]
-                                            + wet_amount * (synthesized[idx] - windowed_buf[idx]);
-                                    }
-
-                                    limit_frame(
-                                        &mut windowed_buf,
-                                        (dry_peak * 3.0_f32).clamp(0.05_f32, 0.98_f32),
-                                    );
-
-                                    processed_frames += 1;
-                                    modify_ok_frames += 1;
-                                }
-                                None => {
-                                    *modify_fail_reasons
-                                        .entry("unstable_synthesis")
-                                        .or_default() += 1;
-                                }
-                            }
-                        }
-                        Err(reason) => {
-                            *modify_fail_reasons.entry(reason).or_default() += 1;
-                        }
-                    }
-                }
-                Err(reason) => {
-                    *lpc_fail_reasons.entry(reason).or_default() += 1;
-                }
-            };
-
-            // ── OLA（无论 LPC 成功或失败都执行）───────────────────────────────
-            remove_bad_samples(&mut windowed_buf);
-            for idx in 0..frame_len {
-                overlap[start + idx] += windowed_buf[idx] * window[idx];
-                window_sum[start + idx] += window[idx] * window[idx];
+            // 共轭对称：bin [half..fft_size) 是 [1..half-1] 的镜像
+            for i in 1..half - 1 {
+                frame_buf[fft_size - i] = frame_buf[i].conj();
             }
+        }
+
+        // 7. iFFT 回时域
+        ifft_buf.copy_from_slice(&frame_buf);
+        fft_inverse.process(&mut ifft_buf);
+
+        // 8. 加合成窗 + OLA。rustfft 不归一化，因此 IFFT 输出需要除以 N。
+        for i in 0..fft_size {
+            let s = ifft_buf[i].re * inv_n * synthesis_window[i];
+            ola[start + i] += s;
+            win_sum[start + i] += synthesis_window[i] * synthesis_window[i];
+        }
+
+        start += hop;
+    }
+
+    // 9. window_sum 归一化
+    for (s, w) in ola.iter_mut().zip(win_sum.iter()) {
+        if *w > 1.0e-8 {
+            *s /= *w;
         }
     }
 
-    if processed_frames == 0 {
-        if crate::formant_cache::formant_debug_enabled() {
-            crate::formant_cache::formant_debug_log(format!(
-                "dsp summary sr={} samples={} total_frames={} low_energy={} lpc_ok={} modify_ok={} processed_frames={} final_diff={:.8} lpc_fail={:?} modify_fail={:?} early_return=input",
-                sample_rate,
-                input.len(),
-                total_frames,
-                low_energy_frames,
-                lpc_ok_frames,
-                modify_ok_frames,
-                processed_frames,
-                0.0_f32,
-                lpc_fail_reasons,
-                modify_fail_reasons,
-            ));
+    // 10. 截取与输入等长的部分
+    let mut out = vec![0.0_f32; input.len()];
+    out.copy_from_slice(&ola[pad_left..pad_left + input.len()]);
+
+    // 11. 整体峰值保护（限制相对输入的最大放大倍数）
+    let in_peak = peak_abs(input).max(1.0e-6);
+    let out_peak = peak_abs(&out).max(1.0e-6);
+    let limit = in_peak * OUTPUT_PEAK_RATIO_LIMIT;
+    if out_peak > limit {
+        let gain = limit / out_peak;
+        for s in out.iter_mut() {
+            *s *= gain;
         }
-
-        return Ok(input.to_vec());
     }
-
-    normalize_overlap_add(&mut overlap, &window_sum);
-
-    let mut out = de_emphasis(&overlap[..input.len()], PRE_EMPHASIS_COEF);
-    remove_dc(&mut out);
-    final_output_protect(&mut out, input);
-
-    if crate::formant_cache::formant_debug_enabled() {
-        crate::formant_cache::formant_debug_log(format!(
-            "dsp summary sr={} samples={} total_frames={} low_energy={} lpc_ok={} modify_ok={} processed_frames={} final_diff={:.8} lpc_fail={:?} modify_fail={:?}",
-            sample_rate,
-            input.len(),
-            total_frames,
-            low_energy_frames,
-            lpc_ok_frames,
-            modify_ok_frames,
-            processed_frames,
-            crate::formant_cache::average_abs_diff(input, &out),
-            lpc_fail_reasons,
-            modify_fail_reasons,
-        ));
+    // 兜底：硬限幅
+    for s in out.iter_mut() {
+        if !s.is_finite() {
+            *s = 0.0;
+        } else if *s > 0.99 {
+            *s = 0.99;
+        } else if *s < -0.99 {
+            *s = -0.99;
+        }
     }
 
     Ok(out)
 }
 
+/// 多声道 PCM 共振峰变形（公开 API，签名与重写前保持一致）。
+///
+/// 行为约定：
+/// - channels == 0 → 错误。
+/// - channels == 1 → 直接走 mono 路径。
+/// - channels >= 2 → 取通道平均得到 mono 分析信号、跑 mono 算法、然后把
+///   `wet - dry` delta 加回每个原通道（保留通道间相对差与立体声成像）。
+///
+/// 这种"delta 同步"策略保证：单通道与多通道在中心声像内容上听感一致，
+/// 而不会因为多通道独立分析导致 F1/F2 检测偏差或相位不同步。
 pub fn apply_formant_morph_interleaved(
     input: &[f32],
     sample_rate: u32,
@@ -242,15 +313,12 @@ pub fn apply_formant_morph_interleaved(
     if channels == 0 {
         return Err("channels == 0".to_string());
     }
-
     if channels == 1 {
         return apply_formant_morph_mono(input, sample_rate, params);
     }
-
     if input.is_empty() || !params.enabled {
         return Ok(input.to_vec());
     }
-
     let frames = input.len() / channels;
     if frames == 0 {
         return Ok(input.to_vec());
@@ -267,847 +335,175 @@ pub fn apply_formant_morph_interleaved(
     ))
 }
 
-fn sanitize_target_formants(target_f1: f32, target_f2: f32, sample_rate: u32) -> (f32, f32) {
-    let nyquist_safe = sample_rate as f32 * 0.5_f32 - 150.0_f32;
+// ── 内部辅助 ────────────────────────────────────────────────────────────
 
-    let mut f1 = target_f1
-        .clamp(F1_MIN_HZ, F1_MAX_HZ)
-        .min(nyquist_safe - MIN_F1_F2_GAP_HZ);
-
-    let mut f2 = target_f2
-        .clamp(F2_MIN_HZ, F2_MAX_HZ.min(nyquist_safe))
-        .max(f1 + MIN_F1_F2_GAP_HZ);
-
-    if f2 > nyquist_safe {
-        f2 = nyquist_safe;
-        f1 = f1.min(f2 - MIN_F1_F2_GAP_HZ);
-    }
-
-    (
-        f1.max(FORMANT_SEARCH_MIN_HZ),
-        f2.max(f1 + MIN_F1_F2_GAP_HZ),
-    )
+/// F1 / F2 检测结果。confidence ∈ [0, 1]，越小表示该帧越不像清晰元音。
+struct FormantDetection {
+    f1_hz: f32,
+    f2_hz: f32,
+    confidence: f32,
 }
 
-fn lpc_order_for_sample_rate(sample_rate: u32) -> usize {
-    match sample_rate {
-        0..=16_000 => 12,
-        16_001..=24_000 => 14,
-        24_001..=48_000 => 16,
-        _ => 18,
-    }
-}
+/// 在已估计的包络上检测 F1 / F2。
+///
+/// 流程：
+/// 1. 在 [F1_SEARCH_LO_HZ, F1_SEARCH_HI_HZ] 内找包络的局部最大值（要求两侧
+///    bin 都更低）。失败则用搜索区间中点作为 fallback。
+/// 2. 在 [F2_SEARCH_LO_HZ, F2_SEARCH_HI_HZ] 内同样找局部最大，并要求 > F1 + 250Hz。
+/// 3. 置信度：基于"峰高 / 局部谷高"对数比，clamp 到 [0, 1]。比值越大说明
+///    共振峰越清晰，越是元音材料；清辅音 / 鼻音段比值小，自动降权。
+///
+/// 参数：`bin_hz` = sample_rate / fft_size。
+fn detect_f1_f2(envelope: &[f32], bin_hz: f32) -> FormantDetection {
+    let half = envelope.len();
+    let bin_of = |hz: f32| -> usize {
+        ((hz / bin_hz) as usize).clamp(1, half.saturating_sub(2))
+    };
 
-fn modify_lpc_coefficients_with_reason(
-    a_orig: &[f32],
-    sample_rate: u32,
-    target_f1: f32,
-    target_f2: f32,
-    strength: f32,
-) -> Result<Vec<f32>, &'static str> {
-    if a_orig.len() < 3 {
-        return Err("bad_lpc_order");
-    }
+    let f1_lo = bin_of(F1_SEARCH_LO_HZ);
+    let f1_hi = bin_of(F1_SEARCH_HI_HZ);
+    let f2_lo = bin_of(F2_SEARCH_LO_HZ);
+    let f2_hi = bin_of(F2_SEARCH_HI_HZ);
 
-    let order = a_orig.len() - 1;
-    if order < 4 {
-        return Err("bad_lpc_order");
-    }
+    let f1_bin = find_local_peak(envelope, f1_lo, f1_hi).unwrap_or((f1_lo + f1_hi) / 2);
+    let f2_min = (f1_bin + ((250.0 / bin_hz).round() as usize)).max(f2_lo);
+    let f2_bin = find_local_peak(envelope, f2_min, f2_hi).unwrap_or((f2_min + f2_hi) / 2);
 
-    let strength = strength.clamp(0.0_f32, 1.0_f32);
+    let f1_hz = f1_bin as f32 * bin_hz;
+    let f2_hz = f2_bin as f32 * bin_hz;
 
-    let target = target_vowel_lpc_coefficients(order, sample_rate, target_f1, target_f2)?;
-
-    if target.len() != a_orig.len() {
-        return Err("target_order_mismatch");
-    }
-
-    // 这里故意偏激进：你的需求是“明显地把 a 推成 e/i/u”，不是轻微修饰。
-    let coeff_blend = (0.60_f32 + strength * 0.40_f32).clamp(0.60_f32, 1.0_f32);
-
-    let mut out = vec![0.0_f32; a_orig.len()];
-    out[0] = 1.0_f32;
-
-    let len_f = a_orig.len() as f32;
-
-    for idx in 1..a_orig.len() {
-        let frac = idx as f32 / len_f;
-        let tier = if frac <= 0.33_f32 {
-            coeff_blend
-        } else if frac <= 0.67_f32 {
-            coeff_blend * 0.50_f32
-        } else {
-            coeff_blend * 0.10_f32
-        };
-        out[idx] = a_orig[idx] + (target[idx] - a_orig[idx]) * tier;
-    }
-
-    stabilize_lpc_coefficients(&mut out)?;
-
-    if out
+    // 置信度：用 F1 峰高 / F1 周边最低点的对数比作为衡量
+    let valley_lo = envelope[f1_lo.saturating_sub(0)..f1_bin]
         .iter()
-        .any(|value| !value.is_finite() || value.abs() > 80.0_f32)
-    {
-        return Err("bad_target_coeff");
-    }
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .max(ENVELOPE_FLOOR);
+    let peak_val = envelope[f1_bin].max(ENVELOPE_FLOOR);
+    let prominence = (peak_val / valley_lo).ln().max(0.0);
+    // 0.05 (≈ 5%) → 置信度 0；ln(2.5) ≈ 0.916 → 置信度 1。
+    let confidence = (prominence / 0.916).clamp(0.0, 1.0);
 
-    Ok(out)
+    FormantDetection {
+        f1_hz,
+        f2_hz,
+        confidence,
+    }
 }
 
-fn target_vowel_lpc_coefficients(
-    order: usize,
-    sample_rate: u32,
-    target_f1: f32,
-    target_f2: f32,
-) -> Result<Vec<f32>, &'static str> {
-    let nyquist = sample_rate as f32 * 0.5_f32;
-    let pair_count = order / 2;
-
-    if pair_count < 2 {
-        return Err("order_too_low");
+/// 在 envelope[lo..=hi] 闭区间找一个严格局部最大（两侧均更低）。
+/// 找不到返回 None。
+fn find_local_peak(envelope: &[f32], lo: usize, hi: usize) -> Option<usize> {
+    if hi <= lo + 1 || hi >= envelope.len() {
+        return None;
     }
-
-    let f1 = target_f1.clamp(250.0_f32, nyquist - 500.0_f32);
-    let f2 = target_f2.clamp(f1 + 250.0_f32, nyquist - 400.0_f32);
-
-    // F2 低时偏 o/u，F2 高时偏 e/i。
-    let roundedness: f32 = if f2 < 1_000.0_f32 {
-        1.0_f32
-    } else {
-        0.0_f32
-    };
-
-    let f3_base: f32 = if roundedness > 0.5_f32 {
-        2_300.0_f32
-    } else if f2 > 2_000.0_f32 {
-        3_000.0_f32
-    } else {
-        2_600.0_f32
-    };
-
-    let f4_base: f32 = if roundedness > 0.5_f32 {
-        3_300.0_f32
-    } else {
-        3_600.0_f32
-    };
-
-    let mut formants: Vec<(f32, f32)> = Vec::new();
-
-    // F1/F2 是主要元音色彩。
-    // 带宽不能太窄，否则容易啸叫；也不能太宽，否则听不出变化。
-    formants.push((f1, 100.0_f32));
-    formants.push((f2, 120.0_f32));
-
-    if pair_count >= 3 {
-        let f3 = f3_base
-            .min(nyquist - 350.0_f32)
-            .max(f2 + 350.0_f32);
-        formants.push((f3, 220.0_f32));
+    let mut best: Option<(usize, f32)> = None;
+    for i in (lo + 1)..hi {
+        let v = envelope[i];
+        if v > envelope[i - 1] && v > envelope[i + 1] {
+            match best {
+                Some((_, bv)) if bv >= v => {}
+                _ => best = Some((i, v)),
+            }
+        }
     }
-
-    if pair_count >= 4 {
-        let f4 = f4_base
-            .min(nyquist - 250.0_f32)
-            .max(f3_base + 350.0_f32);
-        formants.push((f4, 330.0_f32));
-    }
-
-    while formants.len() < pair_count {
-        let idx = formants.len();
-        let frac = idx as f32 / pair_count.max(1) as f32;
-
-        let freq = lerp_linear(3_800.0_f32, nyquist - 300.0_f32, frac)
-            .clamp(500.0_f32, nyquist - 250.0_f32);
-
-        let bandwidth = lerp_linear(450.0_f32, 900.0_f32, frac);
-
-        formants.push((freq, bandwidth));
-    }
-
-    let mut roots = Vec::with_capacity(order);
-
-    for (freq, bandwidth) in formants.into_iter().take(pair_count) {
-        let freq = freq.clamp(80.0_f32, nyquist - 80.0_f32);
-        let bandwidth = bandwidth.clamp(70.0_f32, 1_200.0_f32);
-
-        let radius = (-std::f32::consts::PI * bandwidth / sample_rate as f32)
-            .exp()
-            .clamp(0.20_f32, MAX_ROOT_RADIUS);
-
-        let phase = 2.0_f32 * std::f32::consts::PI * freq / sample_rate as f32;
-        let root = Complex32::from_polar(radius, phase);
-
-        roots.push(root);
-        roots.push(root.conj());
-    }
-
-    while roots.len() < order {
-        roots.push(Complex32::new(0.15_f32, 0.0_f32));
-    }
-
-    roots.truncate(order);
-
-    polynomial_from_roots(&roots).ok_or("bad_target_poly")
+    best.map(|(idx, _)| idx)
 }
 
-fn stabilize_lpc_coefficients(coeffs: &mut [f32]) -> Result<(), &'static str> {
-    if coeffs.len() < 2 {
-        return Err("bad_lpc_order");
-    }
+/// 构造扭曲后的包络 E'(k) = E(w⁻¹(f_k))，其中 w 是把
+///   (0, F1_src, F2_src, HIGH_FIX) → (0, F1_tgt, F2_tgt, HIGH_FIX)
+/// 的分段单调映射。
+///
+/// 实现策略：
+/// - 不需要显式构造 w(f)，而是直接构造 w⁻¹：把"目标频率"映射到"源频率"。
+/// - 在 [0, target_f1] 区间：源 = 0..src_f1 线性。
+/// - 在 [target_f1, target_f2] 区间：源 = src_f1..src_f2 线性。
+/// - 在 [target_f2, HIGH_FIX] 区间：源 = src_f2..HIGH_FIX 线性。
+/// - 在 [HIGH_FIX, Nyquist] 区间：源 = 目标（恒等，保护高频音色身份）。
+///
+/// 这样保证频率轴单调（永不交叉），且 F1/F2 锚点精确到位。线性段在 log 域
+/// 听感平滑（人耳频率分辨在中频段近似线性 / mel），再用 PCHIP 反而会引入
+/// 额外形状改变，因此采用最朴素的分段线性。
+fn build_warped_envelope(
+    src_envelope: &[f32],
+    dst_envelope: &mut [f32],
+    bin_hz: f32,
+    src_f1_hz: f32,
+    src_f2_hz: f32,
+    target_f1_hz: f32,
+    target_f2_hz: f32,
+) {
+    let half = src_envelope.len();
+    let nyquist_hz = bin_hz * (half - 1) as f32;
+    let high_fix = HIGH_FIX_HZ.min(nyquist_hz - bin_hz);
 
-    let roots = polynomial_roots(coeffs).ok_or("stabilize_root_solver")?;
+    // 锚点：(target_freq → source_freq) 的分段映射。
+    // 必须保持目标频率严格单调递增，且不会越界。
+    let p0 = (0.0_f32, 0.0_f32);
+    let p1 = (
+        target_f1_hz.clamp(bin_hz, high_fix - 2.0 * bin_hz),
+        src_f1_hz.clamp(bin_hz, high_fix - 2.0 * bin_hz),
+    );
+    let p2_target = target_f2_hz.clamp(p1.0 + bin_hz, high_fix - bin_hz);
+    let p2_source = src_f2_hz.clamp(p1.1 + bin_hz, high_fix - bin_hz);
+    let p2 = (p2_target, p2_source);
+    let p3 = (high_fix, high_fix);
 
-    let mut stable_roots = Vec::with_capacity(roots.len());
-
-    for root in roots {
-        let stable = if root.norm() > MAX_ROOT_RADIUS {
-            clamp_root_radius(root, MAX_ROOT_RADIUS)
+    let lerp = |x: f32, x0: f32, x1: f32, y0: f32, y1: f32| -> f32 {
+        if (x1 - x0).abs() < 1.0e-6 {
+            y0
         } else {
-            root
+            y0 + (y1 - y0) * ((x - x0) / (x1 - x0))
+        }
+    };
+
+    for k in 0..half {
+        let target_hz = k as f32 * bin_hz;
+        let source_hz = if target_hz <= p0.0 {
+            p0.1
+        } else if target_hz <= p1.0 {
+            lerp(target_hz, p0.0, p1.0, p0.1, p1.1)
+        } else if target_hz <= p2.0 {
+            lerp(target_hz, p1.0, p2.0, p1.1, p2.1)
+        } else if target_hz <= p3.0 {
+            lerp(target_hz, p2.0, p3.0, p2.1, p3.1)
+        } else {
+            // 高频区恒等
+            target_hz
         };
 
-        stable_roots.push(stable);
-    }
-
-    let stable_coeffs = polynomial_from_roots(&stable_roots).ok_or("stabilize_bad_poly")?;
-
-    if stable_coeffs.len() != coeffs.len() {
-        return Err("stabilize_order_mismatch");
-    }
-
-    for (dst, src) in coeffs.iter_mut().zip(stable_coeffs.iter()) {
-        *dst = *src;
-    }
-
-    coeffs[0] = 1.0_f32;
-
-    Ok(())
-}
-
-#[cfg(test)]
-fn modify_lpc_coefficients(
-    a_orig: &[f32],
-    sample_rate: u32,
-    target_f1: f32,
-    target_f2: f32,
-    strength: f32,
-) -> Option<Vec<f32>> {
-    modify_lpc_coefficients_with_reason(a_orig, sample_rate, target_f1, target_f2, strength).ok()
-}
-
-#[cfg(test)]
-fn lpc_coefficients(frame: &[f32], order: usize) -> Option<Vec<f32>> {
-    lpc_coefficients_with_reason(frame, order).ok()
-}
-
-fn lpc_coefficients_with_reason(frame: &[f32], order: usize) -> Result<Vec<f32>, &'static str> {
-    let mut ef = Vec::with_capacity(frame.len());
-    let mut eb = Vec::with_capacity(frame.len());
-    let mut next_ef = Vec::new();
-    let mut next_eb = Vec::new();
-    lpc_coefficients_reuse(frame, order, &mut ef, &mut eb, &mut next_ef, &mut next_eb)
-}
-
-/// LPC 系数计算，复用预分配的 buffer（避免 per-frame 堆分配）。
-fn lpc_coefficients_reuse(
-    frame: &[f32],
-    order: usize,
-    ef: &mut Vec<f32>,
-    eb: &mut Vec<f32>,
-    next_ef: &mut Vec<f32>,
-    next_eb: &mut Vec<f32>,
-) -> Result<Vec<f32>, &'static str> {
-    if frame.len() <= order + 2 {
-        return Err("too_short");
-    }
-
-    let mut a = vec![0.0_f32; order + 1];
-    a[0] = 1.0_f32;
-
-    // 复用外部传入的 buffer
-    ef.clear();
-    ef.extend_from_slice(&frame[1..]);
-    eb.clear();
-    eb.extend_from_slice(&frame[..frame.len() - 1]);
-
-    let mut error = frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32;
-
-    if !error.is_finite() || error <= EPSILON {
-        return Err("bad_initial_error");
-    }
-
-    for m in 0..order {
-        if ef.len() < 2 || eb.len() < 2 {
-            break;
-        }
-
-        let numerator = -2.0_f32
-            * eb.iter()
-                .zip(ef.iter())
-                .map(|(backward, forward)| backward * forward)
-                .sum::<f32>();
-
-        let denominator = eb.iter().map(|sample| sample * sample).sum::<f32>()
-            + ef.iter().map(|sample| sample * sample).sum::<f32>();
-
-        if !denominator.is_finite() || denominator <= EPSILON {
-            return Err("bad_denominator");
-        }
-
-        let reflection = (numerator / denominator).clamp(-0.985_f32, 0.985_f32);
-        if !reflection.is_finite() {
-            return Err("bad_reflection");
-        }
-
-        let prev = a.clone();
-
-        for i in 1..=m {
-            a[i] = prev[i] + reflection * prev[m + 1 - i];
-        }
-
-        a[m + 1] = reflection;
-
-        // 复用 next_ef/next_eb，clear + push 替代 Vec::new()
-        next_ef.clear();
-        next_eb.clear();
-        for i in 1..ef.len() {
-            next_ef.push(ef[i] + reflection * eb[i]);
-        }
-        for i in 0..eb.len().saturating_sub(1) {
-            next_eb.push(eb[i] + reflection * ef[i]);
-        }
-
-        std::mem::swap(ef, next_ef);
-        std::mem::swap(eb, next_eb);
-
-        error *= 1.0_f32 - reflection * reflection;
-
-        if !error.is_finite() || error <= EPSILON {
-            break;
-        }
-    }
-
-    if a.iter().any(|value| !value.is_finite()) {
-        return Err("bad_lpc_coeff");
-    }
-
-    Ok(a)
-}
-
-fn polynomial_roots(coeffs: &[f32]) -> Option<Vec<Complex32>> {
-    if coeffs.len() < 2 || coeffs[0].abs() < EPSILON {
-        return None;
-    }
-
-    let degree = coeffs.len() - 1;
-
-    if degree == 1 {
-        return Some(vec![Complex32::new(
-            -coeffs[1] / coeffs[0],
-            0.0_f32,
-        )]);
-    }
-
-    let monic: Vec<Complex32> = coeffs
-        .iter()
-        .map(|value| Complex32::new(*value / coeffs[0], 0.0_f32))
-        .collect();
-
-    let mut solver = AberthSolver::<f32>::new();
-    solver.max_iterations = 256;
-    solver.epsilon = 1.0e-4_f32;
-
-    let reversed: Vec<f32> = coeffs.iter().rev().map(|value| *value / coeffs[0]).collect();
-
-    let aberth_roots = solver.find_roots(&reversed);
-
-    let roots = match aberth_roots.stop_reason {
-        StopReason::Converged(_) | StopReason::MaxIteration(_) => Some(
-            aberth_roots
-                .iter()
-                .map(|root| Complex32::new(root.re, root.im))
-                .collect(),
-        ),
-        StopReason::Failed(_) => None,
-    }
-    .or_else(|| polynomial_roots_via_qr(&monic))
-    .or_else(|| polynomial_roots_durand_kerner(&monic))?;
-
-    if roots.iter().any(|root| {
-        !root.re.is_finite()
-            || !root.im.is_finite()
-            || evaluate_polynomial(&monic, *root).norm() > 3.5e-1_f32
-    }) {
-        return None;
-    }
-
-    Some(roots)
-}
-
-fn polynomial_roots_via_qr(monic: &[Complex32]) -> Option<Vec<Complex32>> {
-    let degree = monic.len().checked_sub(1)?;
-    if degree == 0 {
-        return Some(Vec::new());
-    }
-
-    let mut matrix = vec![Complex32::new(0.0_f32, 0.0_f32); degree * degree];
-
-    for col in 0..degree {
-        matrix[col] = -monic[col + 1];
-    }
-
-    for row in 1..degree {
-        matrix[row * degree + (row - 1)] = Complex32::new(1.0_f32, 0.0_f32);
-    }
-
-    for _ in 0..384 {
-        let subdiag_norm = (1..degree)
-            .map(|row| matrix[row * degree + (row - 1)].norm_sqr())
-            .sum::<f32>()
-            .sqrt();
-
-        if subdiag_norm < 1.0e-5_f32 {
-            break;
-        }
-
-        let shift = matrix[(degree - 1) * degree + (degree - 1)];
-
-        for idx in 0..degree {
-            matrix[idx * degree + idx] -= shift;
-        }
-
-        let (q, r) = qr_decompose_complex(&matrix, degree)?;
-        matrix = mat_mul_complex(&r, &q, degree);
-
-        for idx in 0..degree {
-            matrix[idx * degree + idx] += shift;
-        }
-    }
-
-    Some(
-        (0..degree)
-            .map(|idx| matrix[idx * degree + idx])
-            .collect(),
-    )
-}
-
-fn polynomial_roots_durand_kerner(monic: &[Complex32]) -> Option<Vec<Complex32>> {
-    let degree = monic.len().checked_sub(1)?;
-
-    if degree == 0 {
-        return Some(Vec::new());
-    }
-
-    let radius = 0.92_f32;
-
-    let mut roots: Vec<Complex32> = (0..degree)
-        .map(|idx| {
-            let phase = 2.0_f32 * std::f32::consts::PI * idx as f32 / degree as f32;
-            Complex32::from_polar(radius, phase) * Complex32::new(0.997_f32, 0.071_f32)
-        })
-        .collect();
-
-    for _ in 0..512 {
-        let mut max_delta = 0.0_f32;
-
-        for idx in 0..degree {
-            let root = roots[idx];
-            let numerator = evaluate_polynomial(monic, root);
-
-            let mut denominator = Complex32::new(1.0_f32, 0.0_f32);
-
-            for (other_idx, other_root) in roots.iter().enumerate() {
-                if other_idx != idx {
-                    denominator *= root - *other_root;
-                }
-            }
-
-            if denominator.norm() <= EPSILON {
-                roots[idx] += Complex32::new(1.0e-3_f32 * (idx as f32 + 1.0_f32), 1.0e-3_f32);
-                continue;
-            }
-
-            let next = root - numerator / denominator;
-            let delta = (next - root).norm();
-
-            max_delta = max_delta.max(delta);
-            roots[idx] = next;
-        }
-
-        if max_delta < 1.0e-6_f32 {
-            break;
-        }
-    }
-
-    for root in &mut roots {
-        for _ in 0..8 {
-            let numerator = evaluate_polynomial(monic, *root);
-            let denominator = evaluate_polynomial_derivative(monic, *root);
-
-            if denominator.norm() <= EPSILON {
-                break;
-            }
-
-            let next = *root - numerator / denominator;
-
-            if (next - *root).norm() < 1.0e-7_f32 {
-                *root = next;
-                break;
-            }
-
-            *root = next;
-        }
-    }
-
-    Some(roots)
-}
-
-fn evaluate_polynomial(coeffs: &[Complex32], x: Complex32) -> Complex32 {
-    coeffs.iter().fold(
-        Complex32::new(0.0_f32, 0.0_f32),
-        |acc, coeff| acc * x + *coeff,
-    )
-}
-
-fn evaluate_polynomial_derivative(coeffs: &[Complex32], x: Complex32) -> Complex32 {
-    if coeffs.len() < 2 {
-        return Complex32::new(0.0_f32, 0.0_f32);
-    }
-
-    let mut poly = coeffs[0];
-    let mut deriv = Complex32::new(0.0_f32, 0.0_f32);
-
-    for coeff in coeffs.iter().skip(1) {
-        deriv = deriv * x + poly;
-        poly = poly * x + *coeff;
-    }
-
-    deriv
-}
-
-fn qr_decompose_complex(
-    matrix: &[Complex32],
-    size: usize,
-) -> Option<(Vec<Complex32>, Vec<Complex32>)> {
-    let mut q = vec![Complex32::new(0.0_f32, 0.0_f32); size * size];
-    let mut r = vec![Complex32::new(0.0_f32, 0.0_f32); size * size];
-    let mut v = vec![Complex32::new(0.0_f32, 0.0_f32); size];
-
-    for col in 0..size {
-        for row in 0..size {
-            v[row] = matrix[row * size + col];
-        }
-
-        for prev_col in 0..col {
-            let mut dot = Complex32::new(0.0_f32, 0.0_f32);
-
-            for row in 0..size {
-                dot += q[row * size + prev_col].conj() * v[row];
-            }
-
-            r[prev_col * size + col] = dot;
-
-            for row in 0..size {
-                v[row] -= q[row * size + prev_col] * dot;
-            }
-        }
-
-        let norm = v.iter().map(|value| value.norm_sqr()).sum::<f32>().sqrt();
-
-        if norm <= 1.0e-8_f32 {
-            return None;
-        }
-
-        r[col * size + col] = Complex32::new(norm, 0.0_f32);
-
-        let inv_norm = 1.0_f32 / norm;
-        for row in 0..size {
-            q[row * size + col] = v[row] * inv_norm;
-        }
-    }
-
-    Some((q, r))
-}
-
-fn mat_mul_complex(lhs: &[Complex32], rhs: &[Complex32], size: usize) -> Vec<Complex32> {
-    let mut out = vec![Complex32::new(0.0_f32, 0.0_f32); size * size];
-
-    for row in 0..size {
-        for col in 0..size {
-            let mut acc = Complex32::new(0.0_f32, 0.0_f32);
-
-            for mid in 0..size {
-                acc += lhs[row * size + mid] * rhs[mid * size + col];
-            }
-
-            out[row * size + col] = acc;
-        }
-    }
-
-    out
-}
-
-fn polynomial_from_roots(roots: &[Complex32]) -> Option<Vec<f32>> {
-    let mut coeffs = vec![Complex32::new(1.0_f32, 0.0_f32)];
-
-    for root in roots {
-        let mut next = vec![Complex32::new(0.0_f32, 0.0_f32); coeffs.len() + 1];
-
-        for (idx, coeff) in coeffs.iter().enumerate() {
-            next[idx] += *coeff;
-            next[idx + 1] -= *coeff * *root;
-        }
-
-        coeffs = next;
-    }
-
-    if coeffs
-        .iter()
-        .any(|coeff| !coeff.re.is_finite() || !coeff.im.is_finite())
-    {
-        return None;
-    }
-
-    Some(coeffs.into_iter().map(|coeff| coeff.re).collect())
-}
-
-fn clamp_root_radius(root: Complex32, max_radius: f32) -> Complex32 {
-    let radius = root.norm();
-
-    if !radius.is_finite() || radius <= EPSILON {
-        return Complex32::new(0.0_f32, 0.0_f32);
-    }
-
-    if radius > max_radius {
-        root * (max_radius / radius)
-    } else {
-        root
+        // 在源包络上做线性插值
+        let src_bin_f = (source_hz / bin_hz).clamp(0.0, (half - 1) as f32);
+        let lo = src_bin_f.floor() as usize;
+        let hi = (lo + 1).min(half - 1);
+        let frac = src_bin_f - lo as f32;
+        dst_envelope[k] = src_envelope[lo] * (1.0 - frac) + src_envelope[hi] * frac;
     }
 }
 
-fn fir_filter(input: &[f32], taps: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0_f32; input.len()];
-
-    for n in 0..input.len() {
-        let mut acc = 0.0_f32;
-
-        for k in 0..taps.len() {
-            if n >= k {
-                acc += taps[k] * input[n - k];
-            }
-        }
-
-        out[n] = acc;
+fn hann_window(len: usize) -> Vec<f32> {
+    if len <= 1 {
+        return vec![1.0; len];
     }
-
-    out
-}
-
-fn all_pole_filter_checked(input: &[f32], denominator: &[f32], max_abs: f32) -> Option<Vec<f32>> {
-    if denominator.is_empty() || denominator[0].abs() < EPSILON {
-        return Some(input.to_vec());
-    }
-
-    let mut out = vec![0.0_f32; input.len()];
-    let a0 = denominator[0];
-
-    for n in 0..input.len() {
-        let mut acc = input[n];
-
-        for k in 1..denominator.len() {
-            if n >= k {
-                acc -= denominator[k] * out[n - k];
-            }
-        }
-
-        let sample = acc / a0;
-
-        if !sample.is_finite() {
-            return None;
-        }
-
-        out[n] = sample.clamp(-max_abs, max_abs);
-    }
-
-    Some(out)
-}
-
-fn match_energy_limited(reference: &[f32], candidate: &mut [f32], min_gain: f32, max_gain: f32) {
-    let ref_energy = frame_energy(reference);
-    let cand_energy = frame_energy(candidate);
-
-    if ref_energy <= EPSILON || cand_energy <= EPSILON {
-        return;
-    }
-
-    let gain = (ref_energy / cand_energy).sqrt().clamp(min_gain, max_gain);
-
-    for sample in candidate {
-        *sample *= gain;
-    }
-}
-
-fn voiced_confidence(frame: &[f32], mean_energy: f32) -> f32 {
-    if mean_energy < 1.0e-8_f32 {
-        return 0.0_f32;
-    }
-
-    let peak = peak_abs(frame);
-    if peak < 0.001_f32 {
-        return 0.0_f32;
-    }
-
-    let zcr = zero_crossing_rate(frame);
-
-    if zcr > 0.35_f32 {
-        0.35_f32
-    } else if zcr > 0.28_f32 {
-        0.65_f32
-    } else {
-        1.0_f32
-    }
-}
-
-fn zero_crossing_rate(frame: &[f32]) -> f32 {
-    if frame.len() < 2 {
-        return 0.0_f32;
-    }
-
-    let mut crossings = 0usize;
-
-    for idx in 1..frame.len() {
-        let prev_positive = frame[idx - 1] >= 0.0_f32;
-        let curr_positive = frame[idx] >= 0.0_f32;
-
-        if prev_positive != curr_positive {
-            crossings += 1;
-        }
-    }
-
-    crossings as f32 / frame.len() as f32
+    let denom = (len - 1) as f32;
+    (0..len)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / denom).cos())
+        .collect()
 }
 
 fn peak_abs(input: &[f32]) -> f32 {
-    input
-        .iter()
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
-}
-
-fn limit_frame(frame: &mut [f32], max_abs: f32) {
-    if max_abs <= EPSILON {
-        return;
-    }
-
-    let peak = peak_abs(frame);
-
-    if peak > max_abs {
-        let gain = max_abs / peak;
-
-        for sample in frame {
-            *sample *= gain;
-        }
-    }
-}
-
-fn remove_bad_samples(buffer: &mut [f32]) {
-    for sample in buffer {
-        if !sample.is_finite() {
-            *sample = 0.0_f32;
-        }
-    }
-}
-
-fn normalize_overlap_add(overlap: &mut [f32], window_sum: &[f32]) {
-    for (sample, weight) in overlap.iter_mut().zip(window_sum.iter()) {
-        if *weight > EPSILON {
-            *sample /= *weight;
-        }
-    }
-}
-
-fn final_output_protect(output: &mut [f32], input: &[f32]) {
-    remove_bad_samples(output);
-
-    for sample in output.iter_mut() {
-        *sample = soft_limiter(*sample, 1.25_f32);
-    }
-
-    let input_peak = peak_abs(input).max(0.001_f32);
-    let output_peak = peak_abs(output).max(0.001_f32);
-
-    let max_allowed_peak = (input_peak * 2.2_f32).clamp(0.05_f32, 0.98_f32);
-
-    if output_peak > max_allowed_peak {
-        let gain = max_allowed_peak / output_peak;
-
-        for sample in output.iter_mut() {
-            *sample *= gain;
-        }
-    }
-
-    for sample in output {
-        *sample = sample.clamp(-0.98_f32, 0.98_f32);
-    }
-}
-
-fn soft_limiter(x: f32, drive: f32) -> f32 {
-    if !x.is_finite() {
-        return 0.0_f32;
-    }
-
-    let drive = drive.max(1.0_f32);
-    (x * drive).tanh() / drive.tanh()
-}
-
-fn remove_dc(buffer: &mut [f32]) {
-    if buffer.is_empty() {
-        return;
-    }
-
-    let mean = buffer.iter().sum::<f32>() / buffer.len() as f32;
-
-    if mean.is_finite() {
-        for sample in buffer {
-            *sample -= mean;
-        }
-    }
-}
-
-fn frame_energy(input: &[f32]) -> f32 {
-    input.iter().map(|sample| sample * sample).sum::<f32>()
-}
-
-fn pad_for_overlap_add(input: &[f32], frame_len: usize, hop_len: usize) -> Vec<f32> {
-    let mut out = input.to_vec();
-
-    let mut pad = frame_len.saturating_sub(out.len() % hop_len);
-
-    if pad == 0 {
-        pad = frame_len;
-    }
-
-    out.resize(out.len() + pad, 0.0_f32);
-
-    if out.len() < frame_len {
-        out.resize(frame_len, 0.0_f32);
-    }
-
-    out
+    input.iter().fold(0.0_f32, |p, s| p.max(s.abs()))
 }
 
 fn average_channels_to_mono(input: &[f32], channels: usize, frames: usize) -> Vec<f32> {
     let mut mono = vec![0.0_f32; frames];
-
+    let inv_ch = 1.0 / channels as f32;
     for frame_idx in 0..frames {
         let mut sum = 0.0_f32;
-
         for ch in 0..channels {
             sum += input[frame_idx * channels + ch];
         }
-
-        mono[frame_idx] = sum / channels as f32;
+        mono[frame_idx] = sum * inv_ch;
     }
-
     mono
 }
 
@@ -1119,60 +515,187 @@ fn apply_mono_delta_to_interleaved(
 ) -> Vec<f32> {
     let frames = dry_mono.len().min(wet_mono.len());
     let mut out = input.to_vec();
-
     for frame_idx in 0..frames {
         let delta = wet_mono[frame_idx] - dry_mono[frame_idx];
-
         for ch in 0..channels {
             let idx = frame_idx * channels + ch;
-            out[idx] = soft_limiter(input[idx] + delta, 1.20_f32).clamp(-0.98_f32, 0.98_f32);
+            let v = input[idx] + delta;
+            out[idx] = if !v.is_finite() {
+                0.0
+            } else {
+                v.clamp(-0.99, 0.99)
+            };
+        }
+    }
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 测试
+// ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_params(enabled: bool, strength: f64) -> ClipFormantMorph {
+        ClipFormantMorph {
+            enabled,
+            target_f1_hz: 700.0,
+            target_f2_hz: 1_400.0,
+            strength,
         }
     }
 
-    out
-}
-
-fn hann_window(len: usize) -> Vec<f32> {
-    if len <= 1 {
-        return vec![1.0_f32; len];
+    /// 合成一个稳态元音样本：基频 + 共振峰加权的若干谐波。
+    /// 采样率默认 48kHz，时长 0.5s。
+    fn synth_vowel(f0_hz: f32, f1_hz: f32, f2_hz: f32, sr: u32, secs: f32) -> Vec<f32> {
+        let n = (sr as f32 * secs) as usize;
+        let mut out = vec![0.0_f32; n];
+        // 简单做法：在 F1、F2 附近用窄带阻尼调谐振，然后给 F0 谐波叠加
+        let harmonics = 30;
+        for i in 0..n {
+            let t = i as f32 / sr as f32;
+            let mut s = 0.0_f32;
+            for h in 1..=harmonics {
+                let freq = f0_hz * h as f32;
+                if freq > sr as f32 * 0.45 {
+                    break;
+                }
+                // 共振峰加权：距离 F1/F2 越近振幅越大
+                let d1 = (freq - f1_hz).abs() / 200.0;
+                let d2 = (freq - f2_hz).abs() / 250.0;
+                let amp = (-d1 * d1).exp() + 0.6 * (-d2 * d2).exp() + 0.05;
+                s += amp * (2.0 * std::f32::consts::PI * freq * t).sin();
+            }
+            out[i] = s * 0.05;
+        }
+        out
     }
 
-    (0..len)
-        .map(|idx| {
-            0.5_f32
-                - 0.5_f32
-                    * ((2.0_f32 * std::f32::consts::PI * idx as f32)
-                        / (len - 1) as f32)
-                        .cos()
-        })
-        .collect()
-}
-
-fn pre_emphasis(input: &[f32], coef: f32) -> Vec<f32> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut prev = 0.0_f32;
-
-    for &sample in input {
-        out.push(sample - coef * prev);
-        prev = sample;
+    #[test]
+    fn disabled_is_strict_bypass() {
+        let input: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.001).sin()).collect();
+        let params = default_params(false, 1.0);
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        assert_eq!(out, input, "disabled must be byte-identical bypass");
     }
 
-    out
-}
-
-fn de_emphasis(input: &[f32], coef: f32) -> Vec<f32> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut prev = 0.0_f32;
-
-    for &sample in input {
-        let next = sample + coef * prev;
-        out.push(next);
-        prev = next;
+    #[test]
+    fn zero_strength_is_strict_bypass() {
+        let input: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.001).sin()).collect();
+        let params = default_params(true, 0.0);
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        assert_eq!(out, input, "strength=0 must be byte-identical bypass");
     }
 
-    out
-}
+    #[test]
+    fn empty_input_returns_empty() {
+        let input: Vec<f32> = vec![];
+        let params = default_params(true, 1.0);
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        assert!(out.is_empty());
+    }
 
-fn lerp_linear(from: f32, to: f32, amount: f32) -> f32 {
-    from + (to - from) * amount.clamp(0.0_f32, 1.0_f32)
+    #[test]
+    fn low_sample_rate_is_bypass() {
+        let input: Vec<f32> = vec![0.0; 2048];
+        let params = default_params(true, 1.0);
+        let out = apply_formant_morph_mono(&input, 4_000, &params).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn output_is_finite_and_length_preserving() {
+        let input = synth_vowel(150.0, 800.0, 1_200.0, 48_000, 0.3);
+        let params = default_params(true, 0.7);
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        assert_eq!(out.len(), input.len());
+        for s in &out {
+            assert!(s.is_finite(), "output must be finite");
+            assert!(s.abs() <= 1.0, "output must be within [-1, 1]");
+        }
+    }
+
+    #[test]
+    fn voiced_input_changes_audibly() {
+        // 输入是 a 元音 (F1=800, F2=1200)，目标 i 元音 (F1=300, F2=2300)。
+        // 要求处理后与原信号有可测的差异。
+        let input = synth_vowel(150.0, 800.0, 1_200.0, 48_000, 0.3);
+        let params = ClipFormantMorph {
+            enabled: true,
+            target_f1_hz: 300.0,
+            target_f2_hz: 2_300.0,
+            strength: 0.8,
+        };
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        let diff: f32 = input
+            .iter()
+            .zip(out.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / input.len() as f32;
+        assert!(diff > 1.0e-3, "audible difference expected, got diff={diff}");
+    }
+
+    #[test]
+    fn stronger_strength_yields_larger_diff() {
+        let input = synth_vowel(150.0, 800.0, 1_200.0, 48_000, 0.3);
+        let mk = |s: f64| ClipFormantMorph {
+            enabled: true,
+            target_f1_hz: 300.0,
+            target_f2_hz: 2_300.0,
+            strength: s,
+        };
+        let weak = apply_formant_morph_mono(&input, 48_000, &mk(0.2)).unwrap();
+        let strong = apply_formant_morph_mono(&input, 48_000, &mk(0.9)).unwrap();
+        let diff_of = |out: &[f32]| -> f32 {
+            input
+                .iter()
+                .zip(out.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>()
+                / input.len() as f32
+        };
+        let weak_d = diff_of(&weak);
+        let strong_d = diff_of(&strong);
+        assert!(
+            strong_d > weak_d * 1.15,
+            "expected stronger morph to differ more; weak={weak_d} strong={strong_d}"
+        );
+    }
+
+    #[test]
+    fn silent_input_stays_silent() {
+        let input = vec![0.0_f32; 4096];
+        let params = default_params(true, 1.0);
+        let out = apply_formant_morph_mono(&input, 48_000, &params).unwrap();
+        assert_eq!(out.len(), input.len());
+        let peak = peak_abs(&out);
+        assert!(peak < 1.0e-4, "silent input must stay silent, peak={peak}");
+    }
+
+    #[test]
+    fn interleaved_stereo_matches_length_and_finite() {
+        let mono = synth_vowel(150.0, 800.0, 1_200.0, 48_000, 0.2);
+        let mut stereo = Vec::with_capacity(mono.len() * 2);
+        for &s in &mono {
+            stereo.push(s);
+            stereo.push(s * 0.95);
+        }
+        let params = default_params(true, 0.5);
+        let out = apply_formant_morph_interleaved(&stereo, 48_000, 2, &params).unwrap();
+        assert_eq!(out.len(), stereo.len());
+        for s in &out {
+            assert!(s.is_finite());
+            assert!(s.abs() <= 1.0);
+        }
+    }
+
+    #[test]
+    fn vowel_preset_table_returns_known_values() {
+        assert_eq!(vowel_formant_preset("a"), Some((800.0, 1_200.0)));
+        assert_eq!(vowel_formant_preset("ee"), Some((300.0, 2_300.0)));
+        assert!(vowel_formant_preset("xyz").is_none());
+    }
 }
