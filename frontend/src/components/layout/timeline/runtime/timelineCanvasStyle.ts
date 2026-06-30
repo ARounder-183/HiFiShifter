@@ -24,21 +24,62 @@ import { gainToDb } from "../math.js";
 import { resolveTimelineClipHeaderVisibility } from "./timelineClipHeaderVisibility.js";
 
 // ── Font helpers ─────────────────────────────────────────────────────────
+//
+// 测量 helper 在浏览器和 Node 测试环境下都需要可用：
+// - 浏览器：通过共享一个 measure-canvas 用 ctx.measureText() 拿到精确像素宽度。
+// - Node（vitest / tsx 运行单元测试时）：不存在 `document` / `<canvas>`，
+//   `getMeasureCtx()` 会抛 ReferenceError。此时退化到一个粗略的固定字符宽度
+//   估算 —— 仅用于让纯逻辑断言可跑通，不参与运行时视觉效果。
 
 let _measureCtx: CanvasRenderingContext2D | null = null;
-function getMeasureCtx(): CanvasRenderingContext2D {
-    if (!_measureCtx) {
+let _measureCtxResolved = false;
+
+/**
+ * 取（并缓存）一个用于文字宽度测量的离屏 2D context。
+ *
+ * 在没有 DOM 的运行时（Node / SSR）下返回 null；调用方必须做好 null 兜底。
+ * 第一次失败后会缓存"无 ctx"状态，避免每次测量都尝试访问 document。
+ */
+function getMeasureCtx(): CanvasRenderingContext2D | null {
+    if (_measureCtxResolved) return _measureCtx;
+    _measureCtxResolved = true;
+    if (typeof document === "undefined") {
+        _measureCtx = null;
+        return null;
+    }
+    try {
         const canvas = document.createElement("canvas");
-        _measureCtx = canvas.getContext("2d")!;
+        _measureCtx = canvas.getContext("2d");
+    } catch {
+        _measureCtx = null;
     }
     return _measureCtx;
 }
 
-/** Measure the pixel width of `text` using the given CSS font style + family. */
+/**
+ * 估算字符串宽度（像素）。
+ *
+ * 流程：
+ * 1. 优先使用浏览器 canvas 的 `ctx.measureText()` 拿到与字体严格一致的宽度。
+ * 2. 在 Node 等无 DOM 环境下退化到固定单字符宽估算：从 fontStyle 中解析像素
+ *    字号（默认 12），按 0.55 的字符宽高比作为单字符估算宽度。这只在测试
+ *    跑断言时被用到，不影响线上视觉。
+ *
+ * 参数：
+ * - `text`：待测字符串。
+ * - `fontStyle`：CSS font-style 段（例如 "12px" 或 "bold 10px"）。
+ * - `fontFamily`：CSS font-family。
+ */
 export function measureTextWidth(text: string, fontStyle: string, fontFamily: string): number {
     const ctx = getMeasureCtx();
-    ctx.font = `${fontStyle} ${fontFamily}`;
-    return ctx.measureText(text).width;
+    if (ctx) {
+        ctx.font = `${fontStyle} ${fontFamily}`;
+        return ctx.measureText(text).width;
+    }
+    // Fallback：按字号 × 0.55 估算单字符宽
+    const sizeMatch = fontStyle.match(/(\d+(?:\.\d+)?)px/);
+    const sizePx = sizeMatch ? Number.parseFloat(sizeMatch[1]) : 12;
+    return text.length * sizePx * 0.55;
 }
 
 /** Read the current font-family from the --qt-font-family CSS custom property. */
