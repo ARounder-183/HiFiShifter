@@ -1,3 +1,22 @@
+/**
+ * wheelGesture.ts - 滚轮/触摸板手势 → 动作语义解析。
+ *
+ * 主要内容：
+ * - 区分鼠标滚轮、触摸板的轴向特征（getWheelGestureAxis、isLikelyTouchpadWheelGesture）。
+ * - 将原始 deltaX/deltaY + 修饰键（zoom/scroll/pan request）映射到具体动作：
+ *   getParamEditorWheelAction（参数编辑器）、getTimelineWheelAction（Timeline）、
+ *   getVibratoDragWheelTarget（颤音拖拽幅度/频率）。
+ *
+ * 与其他模块的关系：
+ * - 被 PianoRollPanel.tsx、usePianoRollInteractions.ts、TimelineScrollArea.tsx 调用，
+ *   将解析得到的动作分发给具体的 scroll/zoom 实现。
+ *
+ * 维护说明：
+ * - "horizontal/vertical scroll request" 与 "free-scroll"（双轴自由滚动）必须明确区分；
+ *   首条 free-scroll 分支只能用 `&&`（同时按下），不能用 `||`（任一按下），否则会
+ *   吞掉单独的横向/纵向快捷键，造成"快捷键有时失效"。详见各函数头部注释。
+ */
+
 const WHEEL_AXIS_EPSILON = 0.5;
 const VIBRATO_TOUCHPAD_DELTA_THRESHOLD = 220;
 const VIBRATO_TOUCHPAD_FREQUENCY_AXIS_RATIO = 0.75;
@@ -106,6 +125,20 @@ export function getWheelGestureAxis(input: {
     return "vertical";
 }
 
+/**
+ * 解析 ParamEditor 的滚轮手势动作。
+ *
+ * 流程：
+ * 1. 横向滚动 + 纵向 pan 同时按下 → free-scroll（双轴自由滚动）。
+ * 2. 单独按下显式快捷键时直接命中对应分支。
+ * 3. 没有显式请求时，回退到基于 deltaX/deltaY 主轴的轴向判断；
+ *    水平占主导时走 horizontal-scroll，否则兜底 horizontal-zoom（保留原默认行为）。
+ *
+ * 历史问题：原实现首条分支为 `horizontalScrollRequested || verticalPanRequested
+ * → free-scroll`，导致只按横向滚动键时也被错误判定为 free-scroll，且后续
+ * `horizontal-scroll` 分支变成死代码，进而引发"横向滚动快捷键有时失效"
+ * （Bug 修复，2026-06-30）。
+ */
 export function getParamEditorWheelAction(input: {
     deltaX: number;
     deltaY: number;
@@ -114,16 +147,13 @@ export function getParamEditorWheelAction(input: {
     verticalZoomRequested: boolean;
     horizontalZoomRequested: boolean;
 }): ParamEditorWheelAction {
-    if (input.horizontalScrollRequested || input.verticalPanRequested) {
+    // 双轴自由滚动：仅当横向滚动 + 纵向 pan 同时按下
+    if (input.horizontalScrollRequested && input.verticalPanRequested) {
         return "free-scroll";
     }
 
+    // 单独的显式快捷键各自命中
     if (input.horizontalScrollRequested) {
-        return "horizontal-scroll";
-    }
-
-    const axis = getWheelGestureAxis(input);
-    if (axis === "horizontal") {
         return "horizontal-scroll";
     }
 
@@ -139,9 +169,28 @@ export function getParamEditorWheelAction(input: {
         return "horizontal-zoom";
     }
 
+    // 没有显式请求：根据 deltaX/deltaY 主轴回退判断
+    const axis = getWheelGestureAxis(input);
+    if (axis === "horizontal") {
+        return "horizontal-scroll";
+    }
+
     return "horizontal-zoom";
 }
 
+/**
+ * 解析 Timeline 的滚轮手势动作。
+ *
+ * 流程：
+ * 1. 横向滚动 + 纵向滚动快捷键同时按下 → free-scroll（双轴自由滚动）。
+ * 2. 单独按下显式快捷键时直接命中对应分支。
+ * 3. 没有显式请求时，回退到基于 deltaX/deltaY 主轴的轴向判断；
+ *    水平占主导时走 horizontal-scroll，否则兜底 native（让浏览器原生滚动）。
+ *
+ * 历史问题同 `getParamEditorWheelAction`：原首条分支误把单独的横向滚动快捷键
+ * 吞入 free-scroll，导致 horizontal-scroll 分支永远不会命中
+ * （Bug 修复，2026-06-30）。
+ */
 export function getTimelineWheelAction(input: {
     deltaX: number;
     deltaY: number;
@@ -150,16 +199,13 @@ export function getTimelineWheelAction(input: {
     verticalZoomRequested: boolean;
     horizontalZoomRequested: boolean;
 }): TimelineWheelAction {
-    if (input.horizontalScrollRequested || input.verticalScrollRequested) {
+    // 双轴自由滚动：仅当横向滚动 + 纵向滚动同时按下
+    if (input.horizontalScrollRequested && input.verticalScrollRequested) {
         return "free-scroll";
     }
 
+    // 单独的显式快捷键各自命中
     if (input.horizontalScrollRequested) {
-        return "horizontal-scroll";
-    }
-
-    const axis = getWheelGestureAxis(input);
-    if (axis === "horizontal") {
         return "horizontal-scroll";
     }
 
@@ -173,6 +219,12 @@ export function getTimelineWheelAction(input: {
 
     if (input.horizontalZoomRequested) {
         return "horizontal-zoom";
+    }
+
+    // 没有显式请求：根据 deltaX/deltaY 主轴回退判断
+    const axis = getWheelGestureAxis(input);
+    if (axis === "horizontal") {
+        return "horizontal-scroll";
     }
 
     return "native";
