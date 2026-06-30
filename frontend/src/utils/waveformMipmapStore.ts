@@ -9,6 +9,13 @@
  * 状态管理策略：
  * - 波形二进制数据存在外部 Map（不放 Redux，避免序列化开销）
  * - 文件加载状态可通过回调通知 UI
+ *
+ * 内存安全（2026-06-30 加固）：
+ * - 文件级 cache 限定最多 MAX_FILE_CACHE_SIZE 个条目（一首歌的 3 级 mipmap
+ *   通常占数 MB），通过 LRU 淘汰最久未访问的条目，防止长时间使用后
+ *   内存无界增长导致的前端卡顿/泄漏。
+ * - 缓存读写统一走 cacheGet/cacheSet/touchLru 三个 helper, 集中维护 LRU
+ *   顺序与容量。Map 自身的"插入顺序 = LRU 顺序"是该实现的基础。
  */
 
 import { waveformApi } from "../services/api/waveform";
@@ -26,6 +33,14 @@ const SPP_HYSTERESIS_EXIT_SCALE = 0.75;
 
 /** mipmap 级别数量 */
 const LEVEL_COUNT = 3;
+
+/**
+ * 文件级 mipmap 缓存的最大条目数（LRU 上限）。
+ *
+ * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
+ * 该上限在"避免内存累积"与"频繁切换音频不需要重新解码"之间取折中。
+ */
+const MAX_FILE_CACHE_SIZE = 32;
 
 // ============== 类型 ==============
 
@@ -98,6 +113,62 @@ class WaveformMipmapStoreImpl {
         }
     }
 
+    // ---------- LRU 缓存 helper ----------
+    //
+    // 设计说明：
+    // - 利用 JS Map 自身的"插入顺序 = 迭代顺序"特性来记录 LRU 顺序，
+    //   最旧的条目即为 keys().next().value。
+    // - cacheGet: 读取并将命中的 key 移到末尾（视为最近访问）。
+    // - cacheSet: 写入并保证不超过 MAX_FILE_CACHE_SIZE, 超出则淘汰最旧的。
+    // - touchLru: 仅刷新顺序而不修改 entry, 适用于命中后无需重写值的场景。
+
+    /**
+     * 读取缓存条目；若命中则把该 key 提升到 LRU 末尾。
+     */
+    private cacheGet(sourcePath: string): FileMipmapCache | undefined {
+        const entry = this.cache.get(sourcePath);
+        if (entry !== undefined) {
+            // 移到末尾以更新 LRU 顺序
+            this.cache.delete(sourcePath);
+            this.cache.set(sourcePath, entry);
+        }
+        return entry;
+    }
+
+    /**
+     * 写入或覆盖缓存条目，并按 LRU 上限淘汰最旧条目。
+     */
+    private cacheSet(sourcePath: string, entry: FileMipmapCache): void {
+        if (this.cache.has(sourcePath)) {
+            // 删除旧位置，确保重新插入到末尾
+            this.cache.delete(sourcePath);
+        }
+        this.cache.set(sourcePath, entry);
+        this.evictIfNeeded();
+    }
+
+    /**
+     * 仅把命中的 key 提升为最近访问，不修改 entry 本身。
+     */
+    private touchLru(sourcePath: string): void {
+        const entry = this.cache.get(sourcePath);
+        if (entry === undefined) return;
+        this.cache.delete(sourcePath);
+        this.cache.set(sourcePath, entry);
+    }
+
+    /**
+     * 当条目数超过 MAX_FILE_CACHE_SIZE 时，按 LRU 顺序淘汰最旧的。
+     * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存（保守做法）。
+     */
+    private evictIfNeeded(): void {
+        while (this.cache.size > MAX_FILE_CACHE_SIZE) {
+            const oldestKey = this.cache.keys().next().value as string | undefined;
+            if (!oldestKey) break;
+            this.cache.delete(oldestKey);
+        }
+    }
+
     // ---------- 公共 API ----------
 
     /**
@@ -148,7 +219,7 @@ class WaveformMipmapStoreImpl {
      * 数据加载完成后通过 listener 通知。
      */
     getPeaks(sourcePath: string, level: 0 | 1 | 2): LevelPeaks | null {
-        const entry = this.cache.get(sourcePath);
+        const entry = this.cacheGet(sourcePath);
         if (!entry) {
             // 首次请求，发起加载
             this.loadLevel(sourcePath, level);
@@ -425,7 +496,9 @@ class WaveformMipmapStoreImpl {
                     levels: [null, null, null],
                     loadingLevels: new Set(),
                 };
-                this.cache.set(sp, entry);
+                this.cacheSet(sp, entry);
+            } else {
+                this.touchLru(sp);
             }
             entry.loadingLevels.add(0);
             entry.loadingLevels.add(1);
@@ -476,11 +549,14 @@ class WaveformMipmapStoreImpl {
             }
         }
     }
+
     /**
      * 检查指定文件的指定级别是否已缓存
      */
     hasLevel(sourcePath: string, level: 0 | 1 | 2): boolean {
         const entry = this.cache.get(sourcePath);
+        // 注意：此处仅做存在性检查, 不刷新 LRU 顺序; 真正消费 peaks 的 getPeaks /
+        // getInterleavedSlice 等路径会通过 cacheGet 刷新顺序。
         return entry?.levels[level] != null;
     }
 
@@ -529,7 +605,9 @@ class WaveformMipmapStoreImpl {
                 levels: [null, null, null],
                 loadingLevels: new Set(),
             };
-            this.cache.set(sourcePath, entry);
+            this.cacheSet(sourcePath, entry);
+        } else {
+            this.touchLru(sourcePath);
         }
 
         // 已加载 → 立即返回
@@ -578,7 +656,9 @@ class WaveformMipmapStoreImpl {
                 levels: [null, null, null],
                 loadingLevels: new Set(),
             };
-            this.cache.set(sourcePath, entry);
+            this.cacheSet(sourcePath, entry);
+        } else {
+            this.touchLru(sourcePath);
         }
 
         entry.sampleRate = decoded.sampleRate;
@@ -622,7 +702,7 @@ class WaveformMipmapStoreImpl {
         sourcePath: string,
         preferredLevel: 0 | 1 | 2,
     ): LevelPeaks | null {
-        const entry = this.cache.get(sourcePath);
+        const entry = this.cacheGet(sourcePath);
         if (!entry) return null;
 
         const offsets = [0, -1, 1, -2, 2] as const;
