@@ -217,32 +217,11 @@ if (Test-Path $LicensePath) {
     Write-Host "  ✓ LICENSE" -ForegroundColor DarkGreen
 }
 
-# Copy ONNX Runtime DLLs with explicit CUDA awareness.
-# These are auto-downloaded by the `ort` crate (download-binaries + cuda features)
-# during `cargo build`. The CUDA provider DLL requires a system CUDA Toolkit
-# installation (cublas64_12.dll, cudnn64_9.dll, etc.) at runtime.
-$OrtDllNames = @("onnxruntime.dll", "onnxruntime_providers_cuda.dll")
-foreach ($dllName in $OrtDllNames) {
-    $dllSrc = Join-Path $TargetRelease $dllName
-    if (Test-Path $dllSrc) {
-        Copy-Item $dllSrc -Destination $TempDir
-        Write-Host "  ✓ $dllName" -ForegroundColor DarkGreen
-    }
-}
-# Verify CUDA provider was actually built and warn if missing.
-$cudaDll = Join-Path $TempDir "onnxruntime_providers_cuda.dll"
-$cudaIncluded = Test-Path $cudaDll
-if ($cudaIncluded) {
-    Write-Host "  ✓ CUDA ONNX Runtime 已打包（需用户安装 CUDA Toolkit + cuDNN 方可启用 GPU 加速）" -ForegroundColor DarkYellow
-}
-else {
-    Write-Host "  ⚠ onnxruntime_providers_cuda.dll 未找到 — 此版本仅支持 CPU 推理" -ForegroundColor Yellow
-}
-
-# Collect remaining DLLs from the release directory (SoundTouchDLL.dll, etc.)
-# Exclude vslib_x64.dll (handled separately) and the ONNX DLLs already processed.
+# Copy any DLLs from the release directory produced by build.rs
+# (SoundTouchDLL.dll, onnxruntime.dll, etc.)
+# Exclude vslib_x64.dll which is handled separately above from the third_party source.
 Get-ChildItem -Path $TargetRelease -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.Name -notin @("vslib_x64.dll") -and $_.Name -notin $OrtDllNames) {
+    if ($_.Name -ne "vslib_x64.dll") {
         Copy-Item $_.FullName -Destination $TempDir
         Write-Host "  ✓ $($_.Name)" -ForegroundColor DarkGreen
     }
