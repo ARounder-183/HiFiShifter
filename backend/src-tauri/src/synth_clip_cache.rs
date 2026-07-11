@@ -7,6 +7,18 @@
 //! - 进程级全局 `Mutex<SynthClipCache>`，实时路径与离线路径共享
 //! - LRU 淘汰，容量上限 64 个 clip
 //! - `param_hash` 使用 FNV-1a 64-bit，覆盖 clip 时间参数 + pitch_edit 曲线片段
+//!
+//! # 浮点参数量化（2026-06-30 修复）
+//! 在 `compute_rendered_clip_hash` 中, formant_morph 的 f1 / f2 / strength
+//! 不再直接按 raw bits 哈希, 而是与 `formant_cache.rs::make_formant_cache_key`
+//! 保持一致的量化粒度后再混入哈希:
+//! - target_f1_hz / target_f2_hz: 0.1 Hz 步长
+//! - strength:                    0.001 步长
+//!
+//! 原因: 前后端 JSON 往返 / serde 反序列化 / React 状态重建等场景容易让 f64
+//! 的 raw bits 在用户感知不到的精度下抖动, 若直接按 bits 哈希会让用户"没改
+//! 共振峰参数"的情况下 RenderedClipCache 反复 miss, 表现为"共振峰参数
+//! 频繁出现异常的缓存失效"。
 
 #![allow(dead_code)]
 
@@ -598,9 +610,17 @@ pub fn compute_rendered_clip_hash(
     if let Some(formant) = formant_morph {
         mix_bytes!(b"clip_formant_morph");
         mix_bytes!(&[u8::from(formant.enabled)]);
-        mix_bytes!(&formant.target_f1_hz.to_le_bytes());
-        mix_bytes!(&formant.target_f2_hz.to_le_bytes());
-        mix_bytes!(&formant.strength.to_le_bytes());
+        // 量化后再哈希, 避免浮点 raw bits 的微小抖动 (前后端 round-trip / 状态
+        // 重建等场景) 触发 RenderedClipCache 误失效, 与 formant_cache.rs 中
+        // make_formant_cache_key 的量化粒度保持一致 (Bug 修复, 2026-06-30):
+        //   - target_f1_hz / target_f2_hz: 0.1 Hz 步长
+        //   - strength:                    0.001 步长 (千分位)
+        let f1_q: i64 = (formant.target_f1_hz * 10.0).round() as i64;
+        let f2_q: i64 = (formant.target_f2_hz * 10.0).round() as i64;
+        let st_q: i64 = (formant.strength * 1000.0).round() as i64;
+        mix_bytes!(&f1_q.to_le_bytes());
+        mix_bytes!(&f2_q.to_le_bytes());
+        mix_bytes!(&st_q.to_le_bytes());
     }
 
     h
@@ -1077,5 +1097,45 @@ mod tests {
         );
 
         assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn rendered_clip_hash_is_stable_under_subquantum_formant_jitter() {
+        // 量化粒度: f1/f2 步长 0.1 Hz, strength 步长 0.001。
+        // 在该粒度以下的浮点抖动 (前后端 round-trip / serde 反序列化 / 状态重建)
+        // 不应改变 hash, 否则会触发 RenderedClipCache 的"假性失效"。
+        let formant_a = crate::state::ClipFormantMorph {
+            enabled: true,
+            target_f1_hz: 700.0,
+            target_f2_hz: 1_400.0,
+            strength: 0.55,
+        };
+        let formant_b = crate::state::ClipFormantMorph {
+            // 抖动远小于量化步长 (0.001 Hz << 0.1 Hz, 0.0001 << 0.001)
+            target_f1_hz: 700.0 + 1e-6,
+            target_f2_hz: 1_400.0 - 5e-6,
+            strength: 0.55 + 1e-7,
+            ..formant_a.clone()
+        };
+
+        let make_hash = |formant: &crate::state::ClipFormantMorph| {
+            compute_rendered_clip_hash(
+                "clip-1",
+                "demo.wav",
+                0,
+                48_000,
+                48_000,
+                "nsf_hifigan_onnx",
+                &[60.0, 61.0, 62.0],
+                5.0,
+                1.0,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                Some(formant),
+                None,
+            )
+        };
+
+        assert_eq!(make_hash(&formant_a), make_hash(&formant_b));
     }
 }
