@@ -1806,7 +1806,7 @@ function AppInner() {
                                 fontSize: "10px",
                                 lineHeight: "16px",
                             }}
-                            title={`${t("downloading")} ${cudaDownloading.package} ${cudaDownloading.pct}%`}
+                            title={`${t("loading")} ${cudaDownloading.package} ${cudaDownloading.pct}%`}
                         >
                             {cudaDownloading.pct}%
                         </span>

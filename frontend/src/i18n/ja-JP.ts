@@ -289,7 +289,6 @@ export const jaJP = {
     gpu_label: "GPU",
     cpu_label: "CPU",
     cuda_download_hint: "クリックしてCUDA Runtimeをダウンロード",
-    cuda_download_hint: "クリックしてCUDA Runtimeをダウンロード",
     solo: "ソロ",
     status_analyzing_pitch: "ピッチを分析中",
     status_stretching: "タイムストレッチ中",
