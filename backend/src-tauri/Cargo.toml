@@ -50,7 +50,6 @@ rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"
 ndarray = { version = "0.16", optional = true }
-ureq = { version = "2", features = ["tls"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"

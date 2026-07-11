@@ -276,8 +276,6 @@ export const zhTW = {
     onnx_unavailable_label: "（不可用）",
     gpu_label: "GPU",
     cpu_label: "CPU",
-    cuda_download_hint: "點擊下載 CUDA Runtime 以啟用 GPU 加速",
-    cuda_download_hint: "點擊下載 CUDA Runtime 以啟用 GPU 加速",
     solo: "獨奏",
     status_analyzing_pitch: "正在分析音高",
     status_stretching: "正在拉伸",

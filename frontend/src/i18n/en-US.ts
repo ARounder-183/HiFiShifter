@@ -287,8 +287,6 @@ export const enUS = {
     onnx_unavailable_label: " (unavailable)",
     gpu_label: "GPU",
     cpu_label: "CPU",
-    cuda_download_hint: "Click to download CUDA Runtime for GPU acceleration",
-    cuda_download_hint: "Click to download CUDA Runtime for GPU acceleration",
     solo: "Solo",
     status_analyzing_pitch: "Analyzing pitch",
     status_stretching: "Stretching",

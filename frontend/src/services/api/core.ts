@@ -174,7 +174,6 @@ export const coreApi = {
     // ONNX status and diagnostics
     getOnnxStatus: () => invoke<OnnxStatusResult>("get_onnx_status"),
     getOnnxDiagnostic: () => invoke<OnnxDiagnosticResult>("get_onnx_diagnostic"),
-    downloadCudaRuntime: () => invoke<void>("download_cuda_runtime"),
 
     // Async pitch refresh task system
     startPitchRefreshTask: (rootTrackId: string) =>

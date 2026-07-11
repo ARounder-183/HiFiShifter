@@ -11,8 +11,6 @@ mod cache;
 mod common;
 #[path = "commands/core.rs"]
 mod core;
-#[path = "commands/cuda_download.rs"]
-mod cuda_download;
 #[path = "commands/debug.rs"]
 mod debug;
 #[path = "commands/dialogs.rs"]
@@ -844,11 +842,6 @@ pub fn get_onnx_status() -> onnx_status::OnnxStatusPayload {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     onnx_status::get_onnx_diagnostic_info()
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn download_cuda_runtime(app: tauri::AppHandle) -> Result<(), String> {
-    cuda_download::download_cuda_runtime(app)
 }
 
 // ===================== pitch_cache =====================

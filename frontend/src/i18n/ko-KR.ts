@@ -359,8 +359,6 @@ export const koKR = {
     onnx_unavailable_label: " (사용 불가)",
     gpu_label: "GPU",
     cpu_label: "CPU",
-    cuda_download_hint: "클릭하여 CUDA Runtime 다운로드",
-    cuda_download_hint: "클릭하여 CUDA Runtime 다운로드",
     solo: "솔로",
     status_analyzing_pitch: "피치 분석 중",
     status_stretching: "타임 스트레치 중",

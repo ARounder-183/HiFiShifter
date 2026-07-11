@@ -332,7 +332,6 @@ pub fn run() {
             commands::get_pitch_analysis_progress,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
-            commands::download_cuda_runtime,
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,
