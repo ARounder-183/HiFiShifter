@@ -12,6 +12,8 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
+    // Apply EP setting on load
+    crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
     settings
 }
 
@@ -19,6 +21,13 @@ pub(super) fn save_ui_settings(
     state: State<'_, AppState>,
     settings: UiSettings,
 ) -> serde_json::Value {
+    // Check if EP choice has changed
+    let prev_ep = if let Some(dir) = state.config_dir.get() {
+        crate::config::load_ui_settings(dir).ort_ep
+    } else {
+        "auto".to_string()
+    };
+    
     if let Some(dir) = state.config_dir.get() {
         crate::config::save_ui_settings(dir, &settings);
     }
@@ -26,12 +35,17 @@ pub(super) fn save_ui_settings(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    {
+    
+    // If EP choice changed, update ONNX session and clear caches to force re-render
+    if prev_ep != settings.ort_ep {
+        crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
+        
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for clip in &timeline.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }
         state.audio_engine.update_timeline(timeline);
     }
+    
     serde_json::json!({ "ok": true })
 }

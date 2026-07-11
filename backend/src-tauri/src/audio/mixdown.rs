@@ -75,7 +75,7 @@ fn clamp11(x: f32) -> f32 {
 
 /// 在 mixdown 中采样自动化曲线（与 mix.rs 中的 sample_automation_curve 逻辑一致）。
 fn sample_automation_curve_at_sec(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     abs_sec: f64,
     frame_period_ms: f64,
     default_value: f32,
@@ -182,7 +182,7 @@ fn track_lineage(track_id: &str, parent_map: &HashMap<String, Option<String>>) -
 
 fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
     let parent_map = build_parent_map(tracks);
-    let by_id: HashMap<String, Track> = tracks.iter().cloned().map(|t| (t.id.clone(), t)).collect();
+    let by_id: HashMap<&str, &Track> = tracks.iter().map(|t| (t.id.as_str(), t)).collect();
 
     let any_solo = tracks.iter().any(|t| t.solo);
     let mut out = HashMap::new();
@@ -194,7 +194,7 @@ fn compute_track_gains(tracks: &[Track]) -> HashMap<String, (f32, bool, bool)> {
         let mut muted = false;
         let mut soloed = false;
         for id in &lineage {
-            if let Some(node) = by_id.get(id) {
+            if let Some(node) = by_id.get(id.as_str()) {
                 gain *= clamp_track_volume(node.volume);
                 muted |= node.muted;
                 soloed |= node.solo;
@@ -575,7 +575,7 @@ pub fn render_mixdown_interleaved(
                 let renderer_id = crate::renderer::get_renderer(kind).id();
                 if renderer_id == "nsf_hifigan_onnx" {
                     Some((
-                        entry.extra_curves.get("hifigan_volume"),
+                        entry.extra_curves.get("hifigan_volume").map(|v| v.as_slice()),
                         entry.frame_period_ms.max(0.1),
                     ))
                 } else {

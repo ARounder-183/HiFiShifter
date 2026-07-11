@@ -39,9 +39,7 @@ fn is_clip_pitch_analysis_ready(
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
-        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-            eprintln!("play_original(start_sec={})", start_sec);
-        }
+        eprintln!("[play_original] called start_sec={start_sec}");
         let timeline = match state.timeline.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
@@ -56,17 +54,40 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
-        // 不依赖当前选中轨；按时间线里实际需要 pitch edit 的 clip 决定是否进入预渲染路径。
         let clips_needing_render =
             collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
         let need_prerender = !clips_needing_render.is_empty();
+        eprintln!("[play_original] clips_needing_render={} need_prerender={} timeline_version={}", clips_needing_render.len(), need_prerender, render_timeline_version);
 
-        if !need_prerender {
+        // Check if the engine's current snapshot has clips awaiting synthesis
+        // (rendered_pcm=None, needs_synthesis=true).  This can happen when
+        // pitch_edit data was just invalidated but collect_clips_needing_render
+        // returned empty because user_modified hadn't propagated yet.
+        let snapshot_has_pending = state.audio_engine.snapshot_has_pending_clips();
+
+        if !need_prerender && !snapshot_has_pending {
             // 无 pitch edit：直接走实时 clip mixing（零延迟）
             state.audio_engine.seek_sec(start_sec);
             state.audio_engine.update_timeline(timeline);
             state.audio_engine.set_playing(true, Some("original"));
             return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
+        }
+
+        if !need_prerender && snapshot_has_pending {
+            eprintln!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — waiting for render");
+            state.audio_engine.seek_sec(start_sec);
+            state.audio_engine.update_timeline(timeline);
+            if let Some(app) = state.app_handle.get().cloned() {
+                let _ = app.emit(
+                    "playback_rendering_state",
+                    PlaybackRenderingStateEvent {
+                        active: true,
+                        progress: Some(0.0),
+                        target: Some("original".to_string()),
+                    },
+                );
+            }
+            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "waiting_for_render": true});
         }
 
         // ── 有 pitch edit：Clip 级增量预渲染 + 实时混音 ──────────────────────────
@@ -106,6 +127,20 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     engine_sr
                 );
                 let rendering_state_active = true;
+
+                // Set up chunk-level progress callback for granular UI updates
+                let app_for_progress = app.clone();
+                crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(move |progress: f64| {
+                    let _ = app_for_progress.emit(
+                        "playback_rendering_state",
+                        PlaybackRenderingStateEvent {
+                            active: true,
+                            progress: Some(progress),
+                            target: Some("original".to_string()),
+                        },
+                    );
+                })));
+
                 let _ = app.emit(
                     "playback_rendering_state",
                     PlaybackRenderingStateEvent {
@@ -208,6 +243,9 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 }
 
                 let total = clips_to_render.len().max(1);
+
+                crate::nsf_hifigan_onnx::reset_chunk_progress(total);
+
                 let mut rendered_count = 0u32;
                 let mut cache_hit_count = 0u32;
                 let mut cache_miss_count = 0u32;
@@ -393,24 +431,10 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     }
 
                     rendered_count += 1;
-                    let progress = rendered_count as f64 / total as f64;
-                    // 仅在发生真实工作后再发逐clip进度，
-                    // 全命中场景避免无意义 IPC 开销。
-                    let has_actual_work =
-                        cache_miss_count > 0 || render_success_count > 0 || render_failed_count > 0;
-                    if rendering_state_active && has_actual_work {
-                        let _ = app.emit(
-                            "playback_rendering_state",
-                            PlaybackRenderingStateEvent {
-                                active: true,
-                                progress: Some(progress),
-                                target: Some("original".to_string()),
-                            },
-                        );
-                    }
                 }
 
                 if cancelled {
+                    crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
                     if cache_log {
                         eprintln!(
                             "[play_original][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
@@ -516,6 +540,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 }
 
                 let update_started_at = std::time::Instant::now();
+                crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
                 engine.seek_sec(render_start_sec);
                 engine.update_timeline(tl_for_render);
                 engine.set_playing(true, Some("original"));

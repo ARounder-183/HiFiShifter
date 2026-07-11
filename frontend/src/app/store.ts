@@ -11,6 +11,16 @@ export const store = configureStore({
         keybindings: keybindingsReducer,
         notebook: notebookReducer,
     },
+    middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({
+            serializableCheck: {
+                ignoredPaths: ["session"],
+                ignoredActions: ["session/setTimelineState"],
+            },
+            immutableCheck: {
+                ignoredPaths: ["session.timeline"],
+            },
+        }),
 });
 
 export type RootState = ReturnType<typeof store.getState>;

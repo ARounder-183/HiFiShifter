@@ -27,6 +27,23 @@ mod renderer;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
+mod vocoder_ort_session {
+    #[path = "../vocoder/ort_session.rs"]
+    mod _inner;
+    pub use _inner::*;
+}
+#[cfg(feature = "onnx")]
+use vocoder_ort_session as ort_session;
+
+mod vocoder_mel_utils {
+    #[path = "../vocoder/mel_utils.rs"]
+    mod _inner;
+    pub use _inner::*;
+}
+#[cfg(feature = "onnx")]
+use vocoder_mel_utils as mel_utils;
+
+#[cfg(feature = "onnx")]
 #[path = "vocoder/nsf_hifigan_onnx.rs"]
 mod nsf_hifigan_onnx;
 #[cfg(not(feature = "onnx"))]
@@ -83,7 +100,25 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tauri::Manager;
+
+static NSF_HIFIGAN_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
+static HNSEP_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
+static FCPE_ONNX_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn nsf_hifigan_model_dir() -> Option<&'static Path> {
+    NSF_HIFIGAN_MODEL_DIR.get().map(|p| p.as_path())
+}
+
+pub fn hnsep_model_dir() -> Option<&'static Path> {
+    HNSEP_MODEL_DIR.get().map(|p| p.as_path())
+}
+
+pub fn fcpe_onnx_path() -> Option<&'static Path> {
+    FCPE_ONNX_PATH.get().map(|p| p.as_path())
+}
 
 pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     // Probe ONNX model availability.
@@ -104,30 +139,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 打包后的应用：从 resource_dir 查找内嵌的 ONNX 模型
-            if std::env::var_os("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR").is_none() {
-                if let Ok(res_dir) = app.path().resource_dir() {
-                    let p = res_dir.join("models").join("nsf_hifigan");
-                    if p.join("pc_nsf_hifigan.onnx").exists() && p.join("config.json").exists() {
-                        std::env::set_var("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR", &p);
-                    }
+            if let Ok(res_dir) = app.path().resource_dir() {
+                let p = res_dir.join("models").join("nsf_hifigan");
+                if p.join("pc_nsf_hifigan.onnx").exists() && p.join("config.json").exists() {
+                    let _ = NSF_HIFIGAN_MODEL_DIR.set(p);
                 }
             }
 
-            if std::env::var_os("HIFISHIFTER_HNSEP_MODEL_DIR").is_none() {
-                if let Ok(res_dir) = app.path().resource_dir() {
-                    let p = res_dir.join("models").join("hnsep");
-                    if p.join("hnsep.onnx").exists() {
-                        std::env::set_var("HIFISHIFTER_HNSEP_MODEL_DIR", &p);
-                    }
+            if let Ok(res_dir) = app.path().resource_dir() {
+                let p = res_dir.join("models").join("hnsep");
+                if p.join("hnsep.onnx").exists() {
+                    let _ = HNSEP_MODEL_DIR.set(p);
                 }
             }
 
-            if std::env::var_os("HIFISHIFTER_FCPE_ONNX").is_none() {
-                if let Ok(res_dir) = app.path().resource_dir() {
-                    let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
-                    if p.exists() {
-                        std::env::set_var("HIFISHIFTER_FCPE_ONNX", &p);
-                    }
+            if let Ok(res_dir) = app.path().resource_dir() {
+                let p = res_dir.join("models").join("fcpe").join("fcpe.onnx");
+                if p.exists() {
+                    let _ = FCPE_ONNX_PATH.set(p);
                 }
             }
 
@@ -247,6 +276,7 @@ pub fn run() {
             commands::consume_startup_project_path,
             commands::set_ui_locale,
             commands::get_timeline_state,
+            commands::get_timeline_state_lite,
             commands::set_transport,
             commands::close_window,
             commands::undo_timeline,
@@ -354,10 +384,7 @@ pub fn run() {
             commands::pick_midi_output_path,
             commands::export_pitch_to_midi,
             commands::get_ui_settings,
-            commands::save_ui_settings, // TODO: 异步音高刷新命令暂时禁用，等待基础设施完成
-                                       // commands::start_pitch_refresh_task,
-                                       // commands::get_pitch_refresh_status,
-                                       // commands::cancel_pitch_task
+            commands::save_ui_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

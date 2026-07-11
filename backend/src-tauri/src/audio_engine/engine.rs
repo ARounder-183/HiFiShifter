@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use lru::LruCache;
 
 use crate::state::TimelineState;
 use crate::time_stretch::time_stretch_interleaved;
+
+/// Maximum stretch cache entries to prevent unbounded RAM growth.
+const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
 
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
@@ -336,6 +340,12 @@ impl AudioEngine {
                         };
 
                         if let Ok(mut m) = stretch_cache.lock() {
+                            // Evict oldest entries if cache is full.
+                            if m.len() >= MAX_STRETCH_CACHE_ENTRIES {
+                                if let Some(evict_key) = m.keys().next().cloned() {
+                                    m.remove(&evict_key);
+                                }
+                            }
                             m.insert(job.key.clone(), stretched_src);
                         }
 
@@ -622,6 +632,13 @@ impl AudioEngine {
         self.is_playing.load(Ordering::Relaxed)
     }
 
+    /// Returns true if the current snapshot contains clips that need synthesis
+    /// but have no rendered PCM yet (i.e. a render is in progress or pending).
+    pub fn snapshot_has_pending_clips(&self) -> bool {
+        let snap = self.snapshot.load();
+        snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
+    }
+
     pub fn snapshot_state(&self) -> AudioEngineStateSnapshot {
         let sr = self.sample_rate.load(Ordering::Relaxed).max(1);
         let base = self.base_frames.load(Ordering::Relaxed);
@@ -675,7 +692,7 @@ struct EngineWorkerState<'a> {
     position_frames: &'a Arc<AtomicU64>,
     duration_frames: &'a Arc<AtomicU64>,
     snapshot: &'a Arc<ArcSwap<EngineSnapshot>>,
-    cache: &'a Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &'a Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &'a Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
     stretch_inflight: &'a Arc<Mutex<HashSet<StretchKey>>>,
     stretch_tx: &'a mpsc::Sender<StretchJob>,
@@ -812,7 +829,15 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .collect();
 
     // ── 4. 检测音高相关变化（必须在 last_timeline 更新之前）──────────────────
-    let clip_changed = tl.clips.iter().any(|clip| {
+    // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
+    let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
+        tl.params_by_root_track.iter().any(|(root_id, new_params)| {
+            old_tl.params_by_root_track.get(root_id)
+                .map_or(true, |old_params| old_params.pitch_edit != new_params.pitch_edit)
+        })
+    });
+
+    let clip_changed = track_pitch_edit_changed || tl.clips.iter().any(|clip| {
         match old_clips_map.get(clip.id.as_str()) {
             None => true, // 新增 clip
             Some(old) => clip_pitch_params_changed(old, clip),
@@ -857,8 +882,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     }
 
     let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
-    eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, needs_schedule={}",
-        tl.clips.len(), clip_changed, track_pitch_settings_changed, needs_pitch_schedule);
+    eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, pitch_edit_changed={}, needs_schedule={}",
+        tl.clips.len(), clip_changed, track_pitch_settings_changed, track_pitch_edit_changed, needs_pitch_schedule);
 
     // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
     let midi_clips_needing_emit: std::collections::HashSet<String> = tl
@@ -997,6 +1022,35 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
+
+    // Halt playback when re-rendering is needed so the user never hears stale audio.
+    // Two triggers:
+    //   1. ALL clips need re-rendering (cache miss, no fallback PCM).
+    //   2. Pitch edit data changed — the rendered cache was just invalidated by
+    //      `invalidate_clip_for_pitch_edit`, but the snapshot may not yet mark
+    //      `needs_synthesis` (there is a one-update lag where `user_modified`
+    //      hasn't propagated).  Playing during this window produces the old
+    //      (un-pitched) audio, which the user perceives as "nothing changed".
+    let any_need_render = !snap.clips.is_empty()
+        && snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
+    let should_halt = any_need_render || track_pitch_edit_changed;
+    if should_halt && s.is_playing.load(Ordering::Relaxed) {
+        eprintln!(
+            "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}",
+            any_need_render, track_pitch_edit_changed
+        );
+        s.is_playing.store(false, Ordering::Relaxed);
+        if let Some(app) = s.app_handle.as_ref() {
+            #[derive(Clone, serde::Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Evt { active: bool, progress: Option<f64>, target: Option<String> }
+            let _ = app.emit("playback_rendering_state", Evt {
+                active: false, progress: Some(0.0),
+                target: Some("original".to_string()),
+            });
+        }
+    }
+
     s.snapshot.store(Arc::new(snap));
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }

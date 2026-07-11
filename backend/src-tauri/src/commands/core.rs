@@ -69,6 +69,21 @@ pub(crate) fn get_timeline_state_from_ref(state: &AppState) -> crate::models::Ti
     payload
 }
 
+/// Lightweight timeline state for regular frontend polls.
+/// Skips waveform_preview, pitch_range, and midi_note_data to reduce clone+serialize cost.
+pub(super) fn get_timeline_state_lite(
+    state: State<'_, AppState>,
+) -> crate::models::TimelineStatePayload {
+    let tl = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut payload = tl.to_payload_lite();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
 pub(super) fn set_transport(
     state: State<'_, AppState>,
     playhead_sec: Option<f64>,
