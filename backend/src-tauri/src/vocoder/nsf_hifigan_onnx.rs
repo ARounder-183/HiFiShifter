@@ -1037,6 +1037,31 @@ pub struct OnnxDiagnosticInfo {
     pub ep_choice: String,
     pub onnx_version: Option<String>,
     pub providers: Option<Vec<String>>,
+    /// 当前进程同目录下是否已有 CUDA runtime DLL（cublas/cudnn 等）。
+    /// false 时表示需要用户下载 CUDA runtime 才能启用 GPU 加速。
+    pub cuda_runtime_available: bool,
+}
+
+/// 检测进程同目录下是否已有 CUDA runtime DLL。
+///
+/// ONNX Runtime CUDA EP 在运行时通过 LoadLibrary 动态加载这些 DLL，
+/// 因此它们需要放在 exe 同目录（或系统 PATH）中。
+/// 本函数仅检查最关键的几个 DLL，全部存在即认为 CUDA runtime 就位。
+pub fn is_cuda_runtime_available() -> bool {
+    let required: &[&str] = &[
+        "cudart64_12.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudnn64_9.dll",
+        "cudnn_ops64_9.dll",
+    ];
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    match exe_dir {
+        Some(dir) => required.iter().all(|dll| dir.join(dll).is_file()),
+        None => false,
+    }
 }
 
 pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
@@ -1051,6 +1076,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
             ep_choice: "disabled".to_string(),
             onnx_version: None,
             providers: None,
+            cuda_runtime_available: false,
         };
     }
 
@@ -1073,6 +1099,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
         ep_choice: ep_choice_val,
         onnx_version,
         providers,
+        cuda_runtime_available: is_cuda_runtime_available(),
     }
 }
 

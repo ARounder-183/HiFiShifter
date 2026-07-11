@@ -100,6 +100,8 @@ export const WaveformTrackCanvas = React.memo(
         const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
         const lastLevelByClipRef = React.useRef<Record<string, 0 | 1 | 2>>({});
         const rafRef = React.useRef<number | null>(null);
+        // 缓存 canvas 上次物理尺寸，避免设置 canvas.width/height 属性导致强制清空
+        const lastCanvasDimsRef = React.useRef({ w: 0, h: 0 });
 
         // 高频参数用 ref 存储，避免依赖数组变化触发 useLayoutEffect
         const pxPerSecRef = React.useRef(props.pxPerSec);
@@ -180,24 +182,34 @@ export const WaveformTrackCanvas = React.memo(
 
             // 取消限制 dpr 为 1
             const dpr = window.devicePixelRatio || 1;
-            const internalW = Math.max(1, Math.floor(displayW * dpr));
-            const internalH = Math.max(1, Math.floor(displayH * dpr));
+            // 用 Math.round 代替 Math.floor，消除浮点累积误差导致的帧间尺寸振荡
+            const internalW = Math.max(1, Math.round(displayW * dpr));
+            const internalH = Math.max(1, Math.round(displayH * dpr));
 
-            // 仅在尺寸变化时更新 canvas 物理尺寸
-            if (canvas.width !== internalW) canvas.width = internalW;
-            if (canvas.height !== internalH) canvas.height = internalH;
+            // 仅当物理尺寸真正变化时才设置 canvas.width/height（设置即清空画布）
+            const lastDims = lastCanvasDimsRef.current;
+            const dimsChanged = lastDims.w !== internalW || lastDims.h !== internalH;
+            if (dimsChanged) {
+                canvas.width = internalW;
+                canvas.height = internalH;
+                lastCanvasDimsRef.current = { w: internalW, h: internalH };
+            }
 
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
 
-            const scaleX = internalW / Math.max(1, displayW);
-            const scaleY = internalH / Math.max(1, displayH);
-            ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+            if (dimsChanged) {
+                // 尺寸变化后重设 scale
+                const scaleX = internalW / Math.max(1, displayW);
+                const scaleY = internalH / Math.max(1, displayH);
+                ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+            }
+
             ctx.clearRect(0, 0, displayW, displayH);
 
-            // left 由 timelineViewportBus 单一来源更新，避免双来源写入导致的微抖
-            canvas.style.width = `${displayW}px`;
-            canvas.style.height = `${displayH}px`;
+            // CSS 尺寸也只在变化时写入，避免触发不必要的 layout
+            if (canvas.style.width !== `${displayW}px`) canvas.style.width = `${displayW}px`;
+            if (canvas.style.height !== `${displayH}px`) canvas.style.height = `${displayH}px`;
 
             if (__perfDebug) __tSetup = performance.now() - __t0;
 
@@ -224,7 +236,7 @@ export const WaveformTrackCanvas = React.memo(
                 const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
                 // 减 epsilon 吸收浮点噪声，防止 Math.ceil 在整数边界振荡导致帧间闪烁
                 // 详见 docs/plans/2026-03-20-waveform-rendering-refactor.md 波形渲染链路分析
-                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx - 1e-9));
+                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx - 1e-6));
 
                 // 计算源文件时间范围
                 const sampleRate = clip.sourceSampleRate || 44100;
