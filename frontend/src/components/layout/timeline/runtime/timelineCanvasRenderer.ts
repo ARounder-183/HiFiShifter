@@ -1,21 +1,3 @@
-/**
- * timelineCanvasRenderer.ts - 主时间轴 canvas 的 Clip 绘制入口。
- *
- * 主要内容：
- * - drawTimelineCanvas：清屏 + 逐 clip 绘制 header / body / accent bar /
- *   控件 badge / 名称 / fade 曲线。
- *
- * 与其他模块的关系：
- * - 由 TimelineCanvasViewport 在 rAF 中调用。
- * - 颜色和几何参数全部来自 buildTimelineClipVisualStyle，本模块不再做颜色再加工。
- *
- * 维护说明：
- * - 2026-06-30 重做为 Logic Pro 扁平风格：
- *   * 取消 body 的硬黑分隔线，改为半透明白色细线（headerSeparatorFill）。
- *   * 新增左侧 accent bar（满饱和 trackColor 派生），承担色相识别。
- *   * 选中态用 1px 内描边（饱和色），非选中态描边极淡（视觉降噪）。
- *   * fade 区不再叠生硬的 0.05 白矩形，改为 fade 曲线下半透明三角阴影。
- */
 import {
     buildTimelineClipVisualStyle,
     computeTimelineFadeShadeRange,
@@ -51,39 +33,6 @@ function drawFadeCurveStroke(
         }
     }
     ctx.stroke();
-}
-
-/**
- * 在 fade 区域绘制半透明阴影：fade 曲线之下的部分用低 alpha 覆盖，
- * 视觉上能直观感知淡入/淡出的能量包络，比矩形覆盖更精致也更接近 Logic 风格。
- */
-function fillFadeShade(
-    ctx: CanvasRenderingContext2D,
-    args: {
-        leftPx: number;
-        topPx: number;
-        widthPx: number;
-        heightPx: number;
-        curve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-        mode: "in" | "out";
-    },
-): void {
-    const widthPx = Math.max(1, args.widthPx);
-    const heightPx = Math.max(1, args.heightPx);
-    const steps = Math.max(12, Math.min(48, Math.round(widthPx / 8)));
-    ctx.beginPath();
-    ctx.moveTo(args.leftPx, args.topPx + heightPx);
-    for (let index = 0; index < steps; index += 1) {
-        const t = index / Math.max(1, steps - 1);
-        const x = args.leftPx + t * widthPx;
-        const gain =
-            args.mode === "in" ? fadeCurveGain(t, args.curve) : fadeCurveGain(1 - t, args.curve);
-        const y = args.topPx + heightPx * (1 - gain);
-        ctx.lineTo(x, y);
-    }
-    ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
-    ctx.closePath();
-    ctx.fill();
 }
 
 export function drawTimelineCanvas(
@@ -155,22 +104,14 @@ export function drawTimelineCanvas(
         ctx.save();
         ctx.globalAlpha = visualStyle.mutedAlpha;
 
-        // ── 1. body / header 底色（一次性铺满，不透明，直角扁平）──
         ctx.fillStyle = visualStyle.headerFill;
         ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
+
         ctx.fillStyle = visualStyle.bodyFill;
         ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
 
-        // ── 2. 左侧 accent bar：满饱和 trackColor 细条，承担色相识别 ──
-        const accentWidth = Math.min(visualStyle.accentBarWidthPx, clipWidth);
-        if (accentWidth > 0) {
-            ctx.fillStyle = visualStyle.accentBarFill;
-            ctx.fillRect(clipLeft, clipTop, accentWidth, clipHeight);
-        }
-
-        // ── 3. fade 区柔和阴影（从底部向 fade 曲线内部填半透明黑）──
         if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
             ctx.fillRect(
                 clipLeft + fadeShadeRange.startPx,
                 bodyTop,
@@ -179,20 +120,17 @@ export function drawTimelineCanvas(
             );
         }
 
-        // ── 4. header 与 body 的分隔线：极淡白色，仅提示分层 ──
-        ctx.fillStyle = visualStyle.headerSeparatorFill;
-        ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
-
-        // ── 5. 整体描边：选中态饱和色 1px 内描边，非选中态淡黑细线 ──
         ctx.strokeStyle = visualStyle.borderStroke;
         ctx.lineWidth = 1;
-        // 整 clip 描边（含 header），半像素对齐避免模糊
         ctx.strokeRect(
             clipLeft + 0.5,
-            clipTop + 0.5,
+            bodyTop + 0.5,
             Math.max(0, clipWidth - 1),
-            Math.max(0, clipHeight - 1),
+            Math.max(0, bodyHeight - 1),
         );
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.24)";
+        ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
 
         if (visualStyle.showGainKnob) {
             const knobCenterX = clipLeft + visualStyle.gainKnobCenterOffsetX;
@@ -355,19 +293,11 @@ export function drawTimelineCanvas(
             }
         }
 
-        // ── 6. fade in/out 阴影 + 曲线（半透明三角形 + 1px 白线）──
         if (clip.fadeInPx > 0) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
-            fillFadeShade(ctx, {
-                leftPx: clipLeft,
-                topPx: bodyTop,
-                widthPx: Math.min(clipWidth, clip.fadeInPx),
-                heightPx: bodyHeight,
-                curve: clip.fadeInCurve,
-                mode: "in",
-            });
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
-            ctx.lineWidth = 1;
+            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
                 topPx: bodyTop + 1,
@@ -378,17 +308,15 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
-            fillFadeShade(ctx, {
-                leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
-                topPx: bodyTop,
-                widthPx: Math.min(clipWidth, clip.fadeOutPx),
-                heightPx: bodyHeight,
-                curve: clip.fadeOutCurve,
-                mode: "out",
-            });
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
-            ctx.lineWidth = 1;
+            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            ctx.fillRect(
+                clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
+                bodyTop,
+                Math.min(clipWidth, clip.fadeOutPx),
+                bodyHeight,
+            );
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 topPx: bodyTop + 1,
