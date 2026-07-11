@@ -91,6 +91,8 @@ pub struct AudioEngine {
     position_frames: Arc<AtomicU64>,
     duration_frames: Arc<AtomicU64>,
     sample_rate: Arc<AtomicU32>,
+    /// Shutdown flag shared with the meter thread.
+    meter_shutdown: Arc<AtomicBool>,
 }
 
 impl Clone for AudioEngine {
@@ -104,6 +106,7 @@ impl Clone for AudioEngine {
             position_frames: self.position_frames.clone(),
             duration_frames: self.duration_frames.clone(),
             sample_rate: self.sample_rate.clone(),
+            meter_shutdown: self.meter_shutdown.clone(),
         }
     }
 }
@@ -137,6 +140,8 @@ impl AudioEngine {
         let meter_state = Arc::new(Mutex::new(HashMap::<String, TrackMeterValue>::new()));
         let meter_generation = Arc::new(AtomicU64::new(0));
         let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
+        let meter_shutdown = Arc::new(AtomicBool::new(false));
+        let meter_shutdown_for_thread = meter_shutdown.clone();
 
         let is_playing_thread = is_playing.clone();
         let target_thread = target.clone();
@@ -150,9 +155,13 @@ impl AudioEngine {
             let meter_state = meter_state.clone();
             let meter_generation = meter_generation.clone();
             let meter_app_handle = meter_app_handle.clone();
+            let meter_shutdown = meter_shutdown_for_thread.clone();
             thread::spawn(move || {
                 let mut last_generation = u64::MAX;
                 loop {
+                    if meter_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
                     thread::sleep(Duration::from_millis(33));
                     let generation = meter_generation.load(Ordering::Relaxed);
                     if generation == last_generation {
@@ -583,6 +592,7 @@ impl AudioEngine {
             position_frames,
             duration_frames,
             sample_rate,
+            meter_shutdown,
         }
     }
 
@@ -597,6 +607,7 @@ impl AudioEngine {
 
     #[allow(dead_code)]
     pub fn shutdown(&self) {
+        self.meter_shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(EngineCommand::Shutdown);
     }
 
