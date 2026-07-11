@@ -102,6 +102,8 @@ export const WaveformTrackCanvas = React.memo(
         const rafRef = React.useRef<number | null>(null);
         // 缓存 canvas 上次物理尺寸，避免设置 canvas.width/height 属性导致强制清空
         const lastCanvasDimsRef = React.useRef({ w: 0, h: 0 });
+        // 离屏 Canvas：消除 clearRect 闪白（先绘制到离屏，再一次 copy 到可见 canvas）
+        const offscreenRef = React.useRef<HTMLCanvasElement | null>(null);
 
         // 高频参数用 ref 存储，避免依赖数组变化触发 useLayoutEffect
         const pxPerSecRef = React.useRef(props.pxPerSec);
@@ -186,7 +188,7 @@ export const WaveformTrackCanvas = React.memo(
             const internalW = Math.max(1, Math.round(displayW * dpr));
             const internalH = Math.max(1, Math.round(displayH * dpr));
 
-            // 仅当物理尺寸真正变化时才设置 canvas.width/height（设置即清空画布）
+            // ── 可见 canvas 尺寸管理（只在变化时设置，避免重置）──
             const lastDims = lastCanvasDimsRef.current;
             const dimsChanged = lastDims.w !== internalW || lastDims.h !== internalH;
             if (dimsChanged) {
@@ -194,22 +196,30 @@ export const WaveformTrackCanvas = React.memo(
                 canvas.height = internalH;
                 lastCanvasDimsRef.current = { w: internalW, h: internalH };
             }
-
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-
-            if (dimsChanged) {
-                // 尺寸变化后重设 scale
-                const scaleX = internalW / Math.max(1, displayW);
-                const scaleY = internalH / Math.max(1, displayH);
-                ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-            }
-
-            ctx.clearRect(0, 0, displayW, displayH);
-
-            // CSS 尺寸也只在变化时写入，避免触发不必要的 layout
             if (canvas.style.width !== `${displayW}px`) canvas.style.width = `${displayW}px`;
             if (canvas.style.height !== `${displayH}px`) canvas.style.height = `${displayH}px`;
+
+            // ── 离屏 canvas：与可见 canvas 相同尺寸 ──
+            let offscreen = offscreenRef.current;
+            if (!offscreen || offscreen.width !== internalW || offscreen.height !== internalH) {
+                offscreen = document.createElement("canvas");
+                offscreen.width = internalW;
+                offscreen.height = internalH;
+                offscreenRef.current = offscreen;
+            }
+            const offCtx = offscreen.getContext("2d");
+            if (!offCtx) return;
+
+            // 离屏 canvas 坐标变换：CSS 像素 → 物理像素
+            const scaleX = internalW / Math.max(1, displayW);
+            const scaleY = internalH / Math.max(1, displayH);
+            offCtx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+            offCtx.clearRect(0, 0, displayW, displayH);
+
+            // 可见 canvas 的 ctx 仅用于最后的 copy，也设相同 transform
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
 
             if (__perfDebug) __tSetup = performance.now() - __t0;
 
@@ -399,21 +409,21 @@ export const WaveformTrackCanvas = React.memo(
                     alpha: number,
                 ) => {
                     if (segmentRightPx - segmentLeftPx <= 1e-6) return;
-                    ctx.save();
-                    ctx.beginPath();
+                    offCtx.save();
+                    offCtx.beginPath();
                     // 严格裁剪在片段实际可见范围内，防止越界绘制到其他片段上
-                    ctx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, displayH);
-                    ctx.clip();
-                    ctx.globalAlpha = alpha;
+                    offCtx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, displayH);
+                    offCtx.clip();
+                    offCtx.globalAlpha = alpha;
                     renderWaveform(
-                        ctx,
+                        offCtx,
                         withGains,
                         params,
                         currentStrokeColor,
                         currentStrokeWidth,
                         "line",
                     );
-                    ctx.restore();
+                    offCtx.restore();
                 };
 
                 if (leadingOverlapVisibleRight > visLeftPx + 1e-6) {
@@ -463,9 +473,13 @@ export const WaveformTrackCanvas = React.memo(
                 }
             }
 
-            if (ctx.globalAlpha !== 1) {
-                ctx.globalAlpha = 1;
+            if (offCtx.globalAlpha !== 1) {
+                offCtx.globalAlpha = 1;
             }
+
+            // 双缓冲：离屏绘制完成后，一次性 copy 到可见 canvas（ctx 和 offCtx 有相同 transform）
+            ctx.clearRect(0, 0, displayW, displayH);
+            ctx.drawImage(offscreen, 0, 0, displayW, displayH);
 
             // ========================================
             // 性能诊断输出
