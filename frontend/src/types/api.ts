@@ -265,6 +265,8 @@ export interface OnnxDiagnosticResult {
     ep_choice: string;
     onnx_version?: string;
     providers?: string[];
+    /** true when cublas64_12.dll + cudnn64_9.dll are found alongside the exe */
+    cuda_runtime_available: boolean;
 }
 
 export interface PitchTaskStatusPayload {
