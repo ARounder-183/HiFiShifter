@@ -9,7 +9,6 @@ fn main() {
         build_signalsmith_stretch();
         build_vslib();
         build_soundtouch();
-        copy_cuda_runtime_dlls();
     } else {
         println!("cargo:warning=[build.rs] Skipping native library builds (HIFISHIFTER_SKIP_NATIVE_BUILD=1)");
         // Create placeholder files so tauri_build resource validation passes
@@ -591,69 +590,4 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     }
 
     None
-}
-
-/// Copy pre-downloaded CUDA runtime DLLs to the target output directory.
-///
-/// Run `scripts/download-cuda-runtime.ps1` first to populate
-/// `third_party/cuda-runtime/` with the required DLLs from NVIDIA redistributables.
-/// This function copies them alongside the binary so ONNX Runtime CUDA EP can
-/// load them at runtime without requiring a system-wide CUDA Toolkit installation.
-///
-/// If the directory does not exist or is empty, a warning is printed but the
-/// build continues (graceful fallback to CPU-only inference at runtime).
-fn copy_cuda_runtime_dlls() {
-    use std::path::Path;
-
-    let cuda_dir = Path::new("third_party/cuda-runtime");
-    if !cuda_dir.is_dir() {
-        println!(
-            "cargo:warning=[cuda] third_party/cuda-runtime/ not found \
-             — run scripts/download-cuda-runtime.ps1 to enable GPU acceleration bundling"
-        );
-        return;
-    }
-
-    let mut copied = 0usize;
-    let target_dir = if let Ok(out_dir) = std::env::var("OUT_DIR") {
-        // OUT_DIR = .../target/<profile>/build/<pkg>/out
-        // ancestors().nth(3) = .../target/<profile>/
-        Path::new(&out_dir)
-            .ancestors()
-            .nth(3)
-            .map(|p| p.to_path_buf())
-    } else {
-        None
-    };
-
-    let target_dir = match target_dir {
-        Some(d) => d,
-        None => {
-            println!("cargo:warning=[cuda] could not determine target directory, skipping DLL copy");
-            return;
-        }
-    };
-
-    if let Ok(entries) = std::fs::read_dir(cuda_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "dll").unwrap_or(false) {
-                let dest = target_dir.join(path.file_name().unwrap());
-                match std::fs::copy(&path, &dest) {
-                    Ok(_) => copied += 1,
-                    Err(e) => println!(
-                        "cargo:warning=[cuda] failed to copy {}: {}",
-                        path.display(),
-                        e
-                    ),
-                }
-            }
-        }
-    }
-
-    if copied > 0 {
-        println!("cargo:warning=[cuda] copied {} CUDA runtime DLL(s) to {}", copied, target_dir.display());
-    } else {
-        println!("cargo:warning=[cuda] no DLLs found in third_party/cuda-runtime/");
-    }
 }

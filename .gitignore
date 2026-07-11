@@ -174,5 +174,3 @@ build_and_run.bat
 .tension_analysis.md
 # Cloned third-party sources (built at compile time)
 backend/src-tauri/third_party/soundtouch-static/soundtouch/
-# Pre-downloaded CUDA runtime DLLs (too large for git, run scripts/download-cuda-runtime.ps1)
-backend/src-tauri/third_party/cuda-runtime/

@@ -45,7 +45,7 @@ import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
-import type { OnnxDiagnosticResult, ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
+import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
 import { MISSING_FILE_CONFIRM_EVENT } from "./features/session/thunks/missingFilePrompt";
 import {
     OPEN_PROJECT_PATH_EVENT,
@@ -477,12 +477,7 @@ function AppInner() {
         clipName: string | null;
     }>({ active: false, clipName: null });
 
-    // ONNX / CUDA 诊断状态
-    const [onnxDiag, setOnnxDiag] = useState<OnnxDiagnosticResult | null>(null);
-    const [cudaDownloading, setCudaDownloading] = useState<{
-        package: string;
-        pct: number;
-    } | null>(null);
+    // 波形分析进度状态
     const [waveformAnalysis, setWaveformAnalysis] = useState<{
         active: boolean;
         sourcePath: string | null;
@@ -890,58 +885,6 @@ function AppInner() {
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
     }, [dispatch]);
-
-    // 获取 ONNX 诊断信息（GPU/CPU 状态）
-    useEffect(() => {
-        coreApi.getOnnxDiagnostic().then(setOnnxDiag).catch(() => {});
-    }, []);
-
-    // 监听 CUDA 下载进度事件
-    useEffect(() => {
-        let disposed = false;
-        let unlisten: null | (() => void) = null;
-        async function setup() {
-            try {
-                const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen<{
-                    package: string;
-                    packageIndex: number;
-                    packageCount: number;
-                    downloadedBytes: number;
-                    totalBytes: number;
-                    stage: string;
-                    error?: string;
-                }>("cuda-download-progress", (event) => {
-                    if (disposed) return;
-                    const p = event.payload;
-                    if (p.stage === "downloading" && p.totalBytes > 0) {
-                        setCudaDownloading({
-                            package: p.package,
-                            pct: Math.round((p.downloadedBytes / p.totalBytes) * 100),
-                        });
-                    } else if (p.stage === "extracting") {
-                        setCudaDownloading({ package: p.package, pct: 100 });
-                    } else if (p.stage === "done" && p.packageIndex === p.packageCount - 1) {
-                        setCudaDownloading(null);
-                        // 刷新诊断以更新 GPU 状态
-                        coreApi.getOnnxDiagnostic().then(setOnnxDiag).catch(() => {});
-                    } else if (p.stage === "error") {
-                        setCudaDownloading(null);
-                    }
-                });
-            } catch {}
-        }
-        void setup();
-        return () => {
-            disposed = true;
-            if (unlisten) unlisten();
-        };
-    }, []);
-
-    // CUDA Runtime 下载触发
-    const handleDownloadCuda = useCallback(() => {
-        void coreApi.downloadCudaRuntime();
-    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -1795,62 +1738,6 @@ function AppInner() {
                         {errorText}
                     </Text>
                 </Flex>
-                {/* GPU/CPU 状态标识 */}
-                {onnxDiag?.compiled ? (
-                    cudaDownloading ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium cursor-pointer"
-                            style={{
-                                background: "rgba(59,130,246,0.15)",
-                                color: "rgb(59,130,246)",
-                                fontSize: "10px",
-                                lineHeight: "16px",
-                            }}
-                            title={`${t("loading")} ${cudaDownloading.package} ${cudaDownloading.pct}%`}
-                        >
-                            {cudaDownloading.pct}%
-                        </span>
-                    ) : onnxDiag.ep_choice === "cuda" ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "rgba(34,197,94,0.15)",
-                                color: "rgb(34,197,94)",
-                                fontSize: "10px",
-                                lineHeight: "16px",
-                            }}
-                            title="ONNX Runtime: CUDA GPU"
-                        >
-                            {t("gpu_label")}
-                        </span>
-                    ) : (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium cursor-pointer"
-                            style={{
-                                background: onnxDiag.cuda_runtime_available
-                                    ? "rgba(255,255,255,0.06)"
-                                    : "rgba(250,204,21,0.15)",
-                                color: onnxDiag.cuda_runtime_available
-                                    ? "rgba(255,255,255,0.4)"
-                                    : "rgb(250,204,21)",
-                                fontSize: "10px",
-                                lineHeight: "16px",
-                            }}
-                            title={
-                                onnxDiag.cuda_runtime_available
-                                    ? "ONNX Runtime: CPU"
-                                    : t("cuda_download_hint")
-                            }
-                            onClick={
-                                onnxDiag.cuda_runtime_available
-                                    ? undefined
-                                    : handleDownloadCuda
-                            }
-                        >
-                            {t("cpu_label")}
-                        </span>
-                    )
-                ) : null}
             </Flex>
         </Flex>
     );
