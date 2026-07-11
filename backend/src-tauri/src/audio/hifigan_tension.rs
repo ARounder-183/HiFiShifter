@@ -16,7 +16,7 @@ fn hann_window() -> Vec<f32> {
 }
 
 fn sample_curve_at_abs_sec(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     abs_sec: f64,
     frame_period_ms: f64,
     default_value: f32,
@@ -83,7 +83,7 @@ fn tension_center_hz(midi: f32) -> f64 {
 ///
 /// 若所有值均 ≈ 0（默认中性），则跳过整个 STFT 管线。
 fn has_active_tension_edits(
-    tension_curve: Option<&Vec<f32>>,
+    tension_curve: Option<&[f32]>,
     start_sec: f64,
     end_sec: f64,
     frame_period_ms: f64,
@@ -109,7 +109,7 @@ fn apply_tension_to_channel(
     frame_period_ms: f64,
     pitch_orig: &[f32],
     pitch_edit: &[f32],
-    tension_curve: Option<&Vec<f32>>,
+    tension_curve: Option<&[f32]>,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     ifft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     window: &[f32],
@@ -229,7 +229,7 @@ pub fn apply_tension_to_stereo(
     frame_period_ms: f64,
     pitch_orig: &[f32],
     pitch_edit: &[f32],
-    tension_curve: Option<&Vec<f32>>,
+    tension_curve: Option<&[f32]>,
 ) -> Result<Vec<f32>, String> {
     if stereo_pcm.len() % 2 != 0 {
         return Err("hifigan tension expects stereo interleaved pcm".to_string());

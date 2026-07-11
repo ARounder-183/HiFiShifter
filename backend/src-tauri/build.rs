@@ -1,4 +1,7 @@
 fn main() {
+    // Purge stale ORT DLLs from the cargo output directory.
+    clean_stale_ort_dlls();
+
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
@@ -375,6 +378,9 @@ fn build_soundtouch() {
         println!(
             "cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning..."
         );
+        if st_src_path.exists() {
+            let _ = std::fs::remove_dir_all(st_src_path);
+        }
         let parent = st_src_path.parent().expect("[soundtouch] invalid source path");
         let _ = std::fs::create_dir_all(parent);
 
@@ -404,7 +410,9 @@ fn build_soundtouch() {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", st_src);
+    // Only re-run if build.rs itself changes — the SoundTouch source tree is modified
+    // during the build (cmake outputs, .rc patching) which would cause an infinite rebuild loop.
+    println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
@@ -427,7 +435,8 @@ fn build_soundtouch() {
         let rc_file = st_src_path.join("source").join("SoundTouchDLL").join("SoundTouchDLL.rc");
         if rc_file.exists() {
             let content = std::fs::read_to_string(&rc_file).expect("[soundtouch] failed to read SoundTouchDLL.rc");
-            if content.contains("afxres.h") {
+            // Only write if the file actually needs patching to avoid triggering Tauri's file watcher.
+            if content.contains("afxres.h") && !content.contains("#include <windows.h>") {
                 let patched = content.replace("#include \"afxres.h\"", "#include <windows.h>");
                 // IDC_STATIC is normally defined in afxres.h as -1
                 let patched = if !patched.contains("IDC_STATIC") {
@@ -526,7 +535,7 @@ fn build_soundtouch() {
     }
 
     // Step 5: Copy shared library to target dir (for runtime linking) AND to
-    // source tree (for Tauri resource bundling on all platforms)
+    // source tree (for Tauri resource bundling / tauri_build validation).
     let target_dir = Path::new(&out_dir)
         .ancestors()
         .nth(3)
@@ -548,19 +557,31 @@ fn build_soundtouch() {
         );
     }
 
-    // Also copy to a stable path under third_party/ so tauri.conf.json can reference it.
-    // Skip if destination already exists to avoid triggering cargo's file watcher loop.
+    // Also copy to source tree path for tauri_build resource validation.
+    // IMPORTANT: only write if bytes differ — writing unconditionally updates the
+    // file timestamp every build, which triggers Tauri's dev watcher and causes
+    // an infinite rebuild loop.
     let lib_dst_resource = st_src_path.join(&lib_filename);
-    if lib_dst_resource != lib_dst_target && !lib_dst_resource.exists() {
-        if let Err(e) = std::fs::copy(&lib_src, &lib_dst_resource) {
+    let src_bytes = std::fs::read(&lib_src).unwrap_or_default();
+    let dst_bytes = std::fs::read(&lib_dst_resource).unwrap_or_default();
+    if src_bytes != dst_bytes {
+        if let Err(e) = std::fs::write(&lib_dst_resource, &src_bytes) {
             println!(
                 "cargo:warning=[soundtouch] could not copy {} to resource path {}: {}",
                 lib_src.display(),
                 lib_dst_resource.display(),
                 e
             );
+        } else {
+            println!(
+                "cargo:warning=[soundtouch] updated resource DLL at {}",
+                lib_dst_resource.display()
+            );
         }
+    } else {
+        println!("cargo:warning=[soundtouch] resource DLL unchanged, skipping write");
     }
+
 }
 
 /// Recursively search for a file by name under `dir`.
@@ -593,4 +614,71 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+/// Remove stale ORT/CUDA DLLs from the cargo output directory.
+///
+/// `cargo build` never cleans the output dir, so DLLs from previous ORT versions
+/// persist and get shipped in portable builds, causing runtime failures like
+/// "graph_optimization_level is not valid". This function purges them so the
+/// post-build copy in `build.ps1` / `build-portable.ps1` always writes fresh DLLs.
+fn clean_stale_ort_dlls() {
+    let stale_dlls = [
+        "onnxruntime.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+        "onnxruntime_providers_tensorrt.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudnn64_9.dll",
+        "cudnn_adv64_9.dll",
+        "cudnn_cnn64_9.dll",
+        "cudnn_ops64_9.dll",
+        "cudnn_graph64_9.dll",
+        "cudnn_engines_precompiled64_9.dll",
+        "cudnn_engines_runtime_compiled64_9.dll",
+        "cudnn_heuristic64_9.dll",
+        "cufft64_11.dll",
+        "cufftw64_11.dll",
+        "curand64_10.dll",
+    ];
+
+    // OUT_DIR is target/<triple>/<profile>/build/<crate>-<hash>/out
+    // Navigate up to the profile dir (target/<triple>/<profile>/)
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let path = std::path::PathBuf::from(&out_dir);
+        // Walk up until we find a dir containing "build" as a child (that's the profile dir)
+        if let Some(profile_dir) = path.ancestors().find(|p| {
+            p.join("build").is_dir() && p.join("deps").is_dir()
+        }) {
+            for dll in &stale_dlls {
+                let dll_path = profile_dir.join(dll);
+                if dll_path.exists() {
+                    let _ = std::fs::remove_file(&dll_path);
+                    println!("cargo:warning=[build.rs] Removed stale DLL: {}", dll);
+                }
+            }
+
+            // Copy active ORT DLLs from ORT_LIB_LOCATION if set
+            if let Ok(ort_lib_dir) = std::env::var("ORT_LIB_LOCATION") {
+                let ort_lib_path = std::path::PathBuf::from(ort_lib_dir);
+                let active_dlls = [
+                    "onnxruntime.dll",
+                    "onnxruntime_providers_cuda.dll",
+                    "onnxruntime_providers_shared.dll",
+                ];
+                for dll in &active_dlls {
+                    let src = ort_lib_path.join(dll);
+                    let dst = profile_dir.join(dll);
+                    if src.exists() {
+                        if let Err(e) = std::fs::copy(&src, &dst) {
+                            println!("cargo:warning=[build.rs] Failed to copy active DLL {} to {}: {}", dll, dst.display(), e);
+                        } else {
+                            println!("cargo:warning=[build.rs] Staged active DLL: {}", dll);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

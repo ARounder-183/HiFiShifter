@@ -37,6 +37,7 @@ export interface UiSettings {
     midiImportTargetDragDrop?: string;
     midiImportTargetReaperClipboard?: string;
     midiImportTargetParamEditor?: string;
+    ortEp?: string;
     customScalePresets?: Array<{
         id: string;
         name: string;

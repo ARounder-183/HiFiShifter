@@ -18,7 +18,7 @@ path = "src/main.rs"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "backend_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -35,7 +35,6 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.15"
 hound = "3"
-rodio = "0.20"
 cpal = "0.15"
 arc-swap = "1.7"
 symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
@@ -53,6 +52,7 @@ ndarray = { version = "0.16", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
@@ -62,17 +62,40 @@ objc2 = "0.6"
 [features]
 default = ["onnx", "vslib"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
+tensorrt = ["onnx", "ort/tensorrt"]
 vslib = []
 
 # Linux / Windows
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "cuda", "tensorrt"] }
 
 # macOS Apple Silicon (arm64)
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "cuda"] }
 
 # macOS Intel (x86_64)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.3.0+0.22", optional = true }
+
+[profile.release]
+lto = false
+codegen-units = 16
+strip = true
+opt-level = 3
+panic = "abort"
+
+# Official shipping profile: thin LTO for smaller/faster binaries.
+# Use `cargo build --profile release-ship` for release builds.
+[profile.release-ship]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+
+# Fast iteration profile: opt-level=2 for ORT/CUDA, no LTO, fast compile
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false

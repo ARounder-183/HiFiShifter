@@ -82,6 +82,14 @@ pub struct UiSettings {
     pub midi_close_leading_gap: bool,
     #[serde(default = "default_midi_import_target")]
     pub midi_import_target: String,
+    /// ONNX Runtime execution provider preference ("Auto", "CUDA", "CPU").
+    /// Persisted so the user's GPU/CPU choice survives restarts.
+    #[serde(default = "default_ort_ep")]
+    pub ort_ep: String,
+}
+
+fn default_ort_ep() -> String {
+    "Auto".to_string()
 }
 
 /// 导出音频设置（持久化到 app_config.json）
@@ -255,6 +263,7 @@ impl Default for UiSettings {
             midi_specified_bpm: None,
             midi_close_leading_gap: true,
             midi_import_target: default_midi_import_target(),
+            ort_ep: default_ort_ep(),
         }
     }
 }

@@ -25,19 +25,15 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 - **macOS**: WebKit is provided by the system, no extra installation is required.
 - **Linux**: Requires WebKitGTK. Most major distributions (e.g., Ubuntu, Fedora, Arch Linux) include it by default. If you see a missing component error, use your package manager to install `webkit2gtk` (e.g., `sudo apt install webkit2gtk`). Refer to your distribution's documentation for specifics.
 
-## 2. Feature Introduction
+## 2. Menu
 
-The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `View -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
+The `File` menu allows you to open and save HiFiShifter project files, as well as import audio files, import Reaper projects (`.rpp`), import VocalShifter projects (`.vshp` or `.vsp`), import MIDI files, and export audio.
 
-### 2.1 Menu
-
-The `File` menu allows you to open and save HiFiShifter project files, as well as import audio files, import Reaper projects (`*.rpp`), import VocalShifter projects (`*.vshp` or `*.vsp`), import MIDI files, and export audio.
-
-HiFiShifter project files have the extensions `*.hshp` or `*.hsp`. Additionally, `Save As` supports saving the project as a plain text `json` file, or packaging the current project together with all used media files into an archive zip `*.zip`. Currently, HiFiShifter only supports importing regular audio files, not video files.
+HiFiShifter project files have the extensions `.hshp` or `.hsp`. Additionally, `Save As` supports saving the project as a plain text `json` file, or packaging the current project together with all used media files into an archive zip `.zip`. Currently, HiFiShifter only supports importing regular audio files, not video files.
 
 The automatic backup feature allows you to configure backups for your project files, with two modes: `Backup on save` and `Timed backups`.
 
-- `Backup on save`: When you overwrite the project file via save, the previous project file will automatically be renamed to a backup file with `-bak` appended to the original filename (for example, `*.hshp-bak` or `*.hsp-bak`). Enabled by default.
+- `Backup on save`: When you overwrite the project file via save, the previous project file will automatically be renamed to a backup file with `-bak` appended to the original filename (for example, `.hshp-bak` or `.hsp-bak`). Enabled by default.
 - `Timed backups`: Automatically create backup project files at the interval and path you set while you edit the project. Disabled by default.
 
 The `Edit` menu allows various editing operations. Besides regular track and parameter editing, there are two special items: `Paste Reaper Clipboard Data` and `Paste VocalShifter Clipboard Data`.
@@ -45,7 +41,7 @@ The `Edit` menu allows various editing operations. Besides regular track and par
 - **Paste Reaper Clipboard Data**: After you copy Items, tracks, or MIDI notes in Reaper, this function quickly imports the Reaper clipboard data into HiFiShifter.
     - Item data: Imports as note clips in HiFiShifter, preserving tuning data (both global tuning and pitch envelopes) from Reaper.
     - Track data: Imports tracks along with their items as tracks and audio clips in HiFiShifter, preserving track groups.
-    - MIDI note data: After selecting a pitch curve segment with the `Select` tool in the Parameter Editor, you can import Reaper clipboard MIDI note data into that segment. Note that Reaper clipboard MIDI note data does not contain tempo information; HiFiShifter will import it using the project BPM. Therefore, ensure the HiFiShifter project BPM matches your expected BPM before importing.
+    - MIDI note data: After exporting note data from other DAWs (Reaper, FL Studio, etc.) to the clipboard as MIDI note data, use the `Select` tool in the Parameter Editor to select a pitch curve segment in HiFiShifter, then you can import the clipboard MIDI note data into that segment. For a detailed introduction to MIDI import, see the [Pitch Reference Clip](#pitch-reference-clip) section.
 
 - **Paste VocalShifter Clipboard Data**: After you copy parameter curves, audio clips, or tracks in VocalShifter or VocalShifter LE, this function quickly imports the data into HiFiShifter.
     - Parameter curve data: After selecting a parameter curve segment with the `Select` tool in the Parameter Editor, you can import VocalShifter clipboard parameter curve data into that segment.
@@ -54,7 +50,9 @@ The `Edit` menu allows various editing operations. Besides regular track and par
 
 The `Stretch` menu allows you to modify the current project and global stretching algorithms.
 
-### 2.2 Track View
+## 3. Track View
+
+The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `View -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
 
 The track view is one of HiFiShifter's core features, allowing you to crop, splice, and edit audio clips. Its operation logic is largely based on Reaper.
 
@@ -65,6 +63,8 @@ Common shortcuts:
 - `Space`: Play / Pause (does not return to start)
 - `Enter`: Play / Stop (returns to start)
 - `S`: Split
+- `G`: Group
+- `U`: Ungroup
 - `Ctrl + C`: Copy
 - `Ctrl + V`: Paste
 - `Ctrl + Z`: Undo
@@ -79,7 +79,9 @@ Common shortcuts:
 
 The small circle at the top-left of a clip is a volume adjustment knob, the `M` button can mute that clip individually, and the `F` button can open that clip's formant editing menu. The left and right edges of a clip allow adjusting fade-in/fade-out envelope lengths.
 
-Right-click a clip to open the context menu, which includes functions like `Reverse`, `Normalize`, `Fade Curve Type`, `Convert to Pitch Reference Clip`. If you select multiple clips on the same track, the context menu allows `Glue` to merge them into a single audio clip.
+Right-click a clip to open the context menu, which includes functions like `Reverse`, `Normalize`, `Convert to Pitch Reference Clip`, `Export MIDI`, `Fade Curve Type`. If you select multiple clips on the same track, the context menu allows `Glue` to merge them into a single audio clip.
+
+Select multiple clips, then choose `Group` (or press `G`) in the context menu to group them. Similar to Reaper or VEGAS Pro, clips in the same group are linked during edits. Click the chain button at the top-left of a clip to temporarily disable or enable the group's linked editing. Select grouped clips and choose `Ungroup` (or press `U`) to remove them from the group.
 
 On the left side of the track view is the track header area, where you can add or delete tracks, adjust track parameters, etc. Right-click a track to clone it.
 
@@ -99,20 +101,21 @@ Track view toolbar buttons:
 - `Zoom at Playhead`: When enabled, horizontal zoom centers on the playhead; otherwise, centers on the mouse cursor.
 - `Allow Param Editor to Move Playhead`: When disabled, clicking in the parameter editor will not move the playhead; only clicking the track view or the timecode area of the parameter editor moves the playhead.
 - `Auto Scroll`: When enabled, the view automatically scrolls horizontally during playback to follow the playhead.
+- `Ignore Grouping`: When enabled, edits to grouped audio clips will globally ignore group-linked editing.
 
-### 2.3 File Browser
+## 4. File Browser
 
 The file browser allows you to open a specific folder, search and sort audio files within it, and drag them into the HiFiShifter track view. Search supports regular expressions. Clicking an audio file automatically plays a preview. You can hold `Ctrl` and `Shift` for multi-selection. Left-dragging files adds one or more audio files across time into the timeline. Right-dragging files brings up a menu with `Add Across Time` / `Add Across Tracks`. `Add Across Tracks` allows you to add multiple audio clips vertically across multiple tracks.
 
 When the track view has focus, press `Ctrl + F` to open the Quick Search window. This is a simplified version of the file browser, allowing you to quickly search and preview audio files within a folder and add them to the timeline.
 
-### 2.4 Parameter Editor
+## 5. Parameter Editor
 
 The parameter editor is one of HiFiShifter's core features, allowing you to edit various parameters of the currently selected track.
 
 To enable parameter editing for a track, you must first press the track's `C` (Compose) button and wait for audio analysis to complete. HiFiShifter uses offline rendering; after each parameter edit, you must wait for the parameters to re-render before auditioning.
 
-#### Algorithms and Parameters
+### 1. Algorithms and Parameters
 
 The current version of HiFiShifter supports three vocal tuning algorithms and their parameters:
 
@@ -141,9 +144,7 @@ A track group shares a single set of parameters, with child tracks inheriting pa
 
 After copying a `Pitch` segment using the Select tool, you can paste it onto `Cents Offset` or `Degree Offset`, and HiFiShifter will automatically calculate and apply the appropriate offset.
 
-#### Editing Tools
-
-##### Select Tool
+### 2. Select Tool
 
 The Select tool allows you to select a segment of a parameter curve, drag it, or right-click to open a context menu for parameter adjustments.
 
@@ -168,7 +169,7 @@ Hold `Alt` to enter four-point editing mode for the selected curve. Similar to t
 
 Hold `Alt` and drag the edge of the selection area to stretch the parameter curve within the selection.
 
-##### Draw Tool
+### 3. Draw Tool
 
 The Draw tool allows you to draw parameter curves.
 
@@ -176,7 +177,7 @@ Left-drag to draw freely or horizontally, depending on the `Drag Direction` sett
 
 Right-drag resets the current curve.
 
-##### Line/Vibrato Tool
+### 4. Line/Vibrato Tool
 
 Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool allows you to draw straight lines or vibrato.
 
@@ -188,7 +189,7 @@ Right-drag resets the current curve.
 
 Press `Tab` to cycle through editing tools (Select / Draw-type tools).
 
-##### Pitch Snap
+### 5. Pitch Snap
 
 When editing pitch parameters with any tool, Pitch Snap allows you to snap edits to semitones or scale degrees. Hold `Shift` to temporarily toggle snap.
 
@@ -212,7 +213,7 @@ Alternatively, use the `Cents Offset` and `Degree Offset` parameters on child tr
 
 This quickly creates harmonies by degree transposition.
 
-##### Pitch Reference Clip
+### 6. Pitch Reference Clip
 
 A Pitch Reference Clip on a track is a special type of audio clip that stores a pitch curve on the timeline.
 
@@ -220,7 +221,7 @@ Pitch Reference Clips can be created through the following methods:
 
 - Import MIDI via the `File` menu or by dragging a file. This opens the MIDI Import dialog.
     - MIDI File: Allows you to select a MIDI file to import. Also supports parsing MIDI data exported to the system clipboard by other DAWs. DAWs confirmed to support system clipboard MIDI data transfer include Reaper and FL Studio.
-        - Reaper: In Reaper's MIDI Editor, select notes and copy them to export the selected note data to the system clipboard for HiFiShifter to read. Note that since Reaper's clipboard note data does not include BPM information, when importing, do not select `MIDI own BPM` for `Note BPM`; instead, use the project BPM or specify one manually.
+        - Reaper: In Reaper's MIDI Editor, select notes and copy them to export the selected note data to the system clipboard for HiFiShifter to read. Note that since Reaper's clipboard note data does not include BPM information, when importing, you can use the current project BPM or specify one manually.
         - FL Studio: In FL Studio's Piano Roll, click the small triangle in the top-left corner and select `File` -> `Copy to MIDI Clipboard` to export all notes of the current channel to the system clipboard for HiFiShifter to read.
     - Track Selection: Allows you to select which MIDI tracks to import.
     - Import MIDI BPM as Project BPM: When enabled, imports the MIDI's initial BPM as the project BPM. HiFiShifter still does not support variable BPM.
@@ -243,7 +244,9 @@ Pitch Reference Clips have the following common uses:
     - When using `Initialize`-related functions — for example, right-dragging with the Draw tool in the Parameter Editor — the initialized pitch curve uses the Pitch Reference Clip's pitch curve data rather than the original pitch of the audio clips within the track group's child tracks.
     - If the Pitch Reference Clip is muted, the track group will not reference that Pitch Reference Clip when processing pitch.
 
-##### Other Features
+Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to update the Pitch Reference Clip with the existing pitch parameters within its range.
+
+### 7. Other Features
 
 Additional convenient features of the parameter editor:
 
@@ -254,7 +257,7 @@ Additional convenient features of the parameter editor:
 - `Reference Track Group`: When the parameter is `Pitch`, lets you choose other tracks and display pitch curves from other track groups as references in the pitch editor.
 - `Import MIDI`: Allows you to select a MIDI file and import notes from one or more tracks as a pitch curve.
 
-### 2.5 Export Audio
+## 6. Export Audio
 
 After completing all edits, use the `Export Audio` function in the `File` menu to export the HiFiShifter project as a wav audio file.
 

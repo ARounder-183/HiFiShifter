@@ -216,6 +216,8 @@ export interface SessionState {
     defaultStretchAlgorithm: StretchAlgorithmOption;
     /** 全局默认 HiFiGAN mel stretch 开关 */
     defaultHifiganMelStretch: boolean;
+    ortEp: string;
+
 
     // Monotonic bump token for invalidating parameter curve caches.
     // - Not included in undo/redo snapshots.
@@ -979,6 +981,7 @@ const initialState: SessionState = {
     visibleReferenceRootTrackIds: [],
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
+    ortEp: "auto",
 
     paramsEpoch: 0,
     playbackRateVersion: 0,
@@ -1264,6 +1267,9 @@ const sessionSlice = createSlice({
         },
         setDefaultHifiganMelStretch(state, action: PayloadAction<boolean>) {
             state.defaultHifiganMelStretch = action.payload;
+        },
+        setOrtEp(state, action: PayloadAction<string>) {
+            state.ortEp = action.payload;
         },
         setVisibleReferenceRootTrackIds(state, action: PayloadAction<string[]>) {
             state.visibleReferenceRootTrackIds = Array.from(
@@ -1859,6 +1865,9 @@ const sessionSlice = createSlice({
                 }
                 if ((s as any).defaultHifiganMelStretch != null) {
                     state.defaultHifiganMelStretch = Boolean((s as any).defaultHifiganMelStretch);
+                }
+                if (s.ortEp != null) {
+                    state.ortEp = s.ortEp;
                 }
                 const selectDir = (s as any).selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
@@ -3301,6 +3310,7 @@ export const {
     toggleQuickSearchAutoNormalize,
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
+    setOrtEp,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

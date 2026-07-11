@@ -1,21 +1,30 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use lru::LruCache;
+
 use super::io::decode_resampled_stereo;
 use super::types::{AudioKey, EngineCommand, ResampledStereo};
 
+/// Maximum number of decoded audio entries to retain in memory.
+/// Prevents unbounded RAM growth when many unique sources are loaded.
+const MAX_CACHE_ENTRIES: usize = 256;
+
 pub(crate) struct ResourceManager {
-    cache: Arc<Mutex<HashMap<AudioKey, ResampledStereo>>>,
+    cache: Arc<Mutex<LruCache<AudioKey, ResampledStereo>>>,
     inflight: Arc<Mutex<HashSet<AudioKey>>>,
     request_tx: mpsc::Sender<AudioKey>,
 }
 
 impl ResourceManager {
     pub(crate) fn new(engine_tx: mpsc::Sender<EngineCommand>) -> Self {
-        let cache: Arc<Mutex<HashMap<AudioKey, ResampledStereo>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let cache: Arc<Mutex<LruCache<AudioKey, ResampledStereo>>> =
+            Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHE_ENTRIES).expect("MAX_CACHE_ENTRIES must be non-zero"),
+            )));
         let inflight: Arc<Mutex<HashSet<AudioKey>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let (request_tx, request_rx) = mpsc::channel::<AudioKey>();
@@ -33,7 +42,8 @@ impl ResourceManager {
                     let ok = decode_resampled_stereo(path.as_path(), out_rate)
                         .and_then(|v| {
                             if let Ok(mut m) = cache_for_worker.lock() {
-                                m.insert(key.clone(), v);
+                                // LruCache automatically evicts oldest entry when full.
+                                m.put(key.clone(), v);
                                 Some(())
                             } else {
                                 None
@@ -67,7 +77,7 @@ impl ResourceManager {
         }
     }
 
-    pub(crate) fn cache(&self) -> &Arc<Mutex<HashMap<AudioKey, ResampledStereo>>> {
+    pub(crate) fn cache(&self) -> &Arc<Mutex<LruCache<AudioKey, ResampledStereo>>> {
         &self.cache
     }
 
@@ -76,7 +86,7 @@ impl ResourceManager {
         let key: AudioKey = (PathBuf::from(path), out_rate);
 
         // 1. 优先查询内存缓存，纯内存操作
-        if let Ok(m) = self.cache.lock() {
+        if let Ok(mut m) = self.cache.lock() {
             if let Some(v) = m.get(&key) {
                 return Some(v.clone());
             }

@@ -13,3 +13,5 @@ pub fn infer_f0_hz(
 ) -> Result<Vec<f64>, String> {
     Err("ONNX feature not compiled".to_string())
 }
+
+pub fn drop_shared_session() {}

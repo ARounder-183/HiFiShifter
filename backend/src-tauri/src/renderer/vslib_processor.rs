@@ -180,7 +180,7 @@ impl Drop for TempFileGuard {
 /// 在 `curve` 中按绝对时间插值（curve[i] = i * frame_period_ms/1000 秒）。
 /// 返回 `None` 表示 curve 为空或未提供，调用方应使用默认值。
 #[cfg(feature = "vslib")]
-fn curve_at_abs_sec(curve: Option<&Vec<f32>>, abs_sec: f64, frame_period_ms: f64) -> Option<f32> {
+fn curve_at_abs_sec(curve: Option<&[f32]>, abs_sec: f64, frame_period_ms: f64) -> Option<f32> {
     let c = curve?;
     if c.is_empty() {
         return None;
@@ -539,11 +539,11 @@ impl ClipProcessor for VslibProcessor {
             let seg_start = ctx.seg_start_sec;
             let playback_rate = ctx.playback_rate.max(1e-6);
 
-            let volume_c = ctx.extra_curves.get("volume");
+            let volume_c = ctx.extra_curves.get("volume").map(|v| v.as_slice());
 
-            let pan_c = ctx.extra_curves.get("pan");
-            let formant_c = ctx.extra_curves.get("formant_shift_cents");
-            let breathiness_c = ctx.extra_curves.get("breathiness");
+            let pan_c = ctx.extra_curves.get("pan").map(|v| v.as_slice());
+            let formant_c = ctx.extra_curves.get("formant_shift_cents").map(|v| v.as_slice());
+            let breathiness_c = ctx.extra_curves.get("breathiness").map(|v| v.as_slice());
             let sample_points = [0, ctrl_pnt_num / 2, ctrl_pnt_num - 1];
 
             let mut pitch_applied_count = 0usize;

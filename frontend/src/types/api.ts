@@ -263,8 +263,17 @@ export interface OnnxDiagnosticResult {
     available: boolean;
     error: string | null;
     ep_choice: string;
+    active_ep?: string;
     onnx_version?: string;
     providers?: string[];
+}
+
+export interface BenchmarkResult {
+    cpuMedianMs: number;
+    cpuRtFactor: number;
+    gpuMedianMs?: number | null;
+    gpuRtFactor?: number | null;
+    benchmarkSamples: number;
 }
 
 export interface PitchTaskStatusPayload {

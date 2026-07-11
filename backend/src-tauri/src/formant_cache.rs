@@ -1,9 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
 use crate::state::ClipFormantMorph;
 
 const DEFAULT_CAPACITY: usize = 64;
@@ -30,51 +31,23 @@ pub struct FormantCacheEntry {
 }
 
 pub struct FormantCache {
-    inner: HashMap<FormantCacheKey, FormantCacheEntry>,
-    order: VecDeque<FormantCacheKey>,
-    capacity: usize,
+    inner: ByteBudgetCache<FormantCacheKey, FormantCacheEntry>,
 }
 
 impl FormantCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
-            inner: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(1),
+            inner: ByteBudgetCache::new(capacity, budget_bytes),
         }
     }
 
     pub fn get(&mut self, key: &FormantCacheKey) -> Option<&FormantCacheEntry> {
-        if !self.inner.contains_key(key) {
-            return None;
-        }
-        if let Some(pos) = self.order.iter().position(|existing| existing == key) {
-            let key = self.order.remove(pos).expect("key position should exist");
-            self.order.push_front(key);
-        }
         self.inner.get(key)
     }
 
     pub fn insert(&mut self, key: FormantCacheKey, entry: FormantCacheEntry) {
-        if self.inner.contains_key(&key) {
-            self.inner.insert(key.clone(), entry);
-            if let Some(pos) = self.order.iter().position(|existing| existing == &key) {
-                let key = self.order.remove(pos).expect("key position should exist");
-                self.order.push_front(key);
-            }
-            return;
-        }
-
-        while self.inner.len() >= self.capacity {
-            if let Some(evicted) = self.order.pop_back() {
-                self.inner.remove(&evicted);
-            } else {
-                break;
-            }
-        }
-
-        self.order.push_front(key.clone());
-        self.inner.insert(key, entry);
+        let weight = entry.pcm_stereo.len() as u64 * 4;
+        self.inner.insert(key, entry, weight);
     }
 }
 
@@ -82,7 +55,10 @@ static GLOBAL_FORMANT_CACHE: OnceLock<Mutex<FormantCache>> = OnceLock::new();
 static FORMANT_REBUILD_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 
 pub fn global_formant_cache() -> &'static Mutex<FormantCache> {
-    GLOBAL_FORMANT_CACHE.get_or_init(|| Mutex::new(FormantCache::new(DEFAULT_CAPACITY)))
+    GLOBAL_FORMANT_CACHE.get_or_init(|| {
+        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 8;
+        Mutex::new(FormantCache::new(DEFAULT_CAPACITY, budget))
+    })
 }
 
 pub fn formant_debug_enabled() -> bool {

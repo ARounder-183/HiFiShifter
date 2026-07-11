@@ -3,9 +3,7 @@
 // This module provides F0 extraction for pitch analysis, replacing WORLD
 // Harvest/DIO in clip-level pitch detection.
 
-use ndarray::Array2;
 use num_complex::Complex32;
-use ort::ep;
 use ort::session::Session;
 use ort::value::Tensor;
 use ort::value::TensorElementType;
@@ -42,16 +40,9 @@ fn cent_to_hz(cent: f64) -> f64 {
 }
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static SHARED_SESSION: OnceLock<Arc<Mutex<Session>>> = OnceLock::new();
+static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
 static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrtExecutionProviderChoice {
-    Auto,
-    Cpu,
-    Cuda,
-}
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
@@ -61,23 +52,6 @@ fn ensure_ort_init() -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) => Err(e.clone()),
     }
-}
-
-fn env_ep_choice() -> OrtExecutionProviderChoice {
-    let v = std::env::var("HIFISHIFTER_ORT_EP")
-        .ok()
-        .unwrap_or_else(|| "auto".to_string());
-    match v.trim().to_ascii_lowercase().as_str() {
-        "cpu" => OrtExecutionProviderChoice::Cpu,
-        "cuda" => OrtExecutionProviderChoice::Cuda,
-        _ => OrtExecutionProviderChoice::Auto,
-    }
-}
-
-fn env_i32(name: &str) -> Option<i32> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
 }
 
 fn debug_enabled() -> bool {
@@ -113,7 +87,7 @@ fn default_model_guess() -> Option<PathBuf> {
 }
 
 fn resolve_model_path() -> Result<PathBuf, String> {
-    if let Some(onnx) = env_path("HIFISHIFTER_FCPE_ONNX") {
+    if let Some(onnx) = crate::fcpe_onnx_path().map(|p| p.to_path_buf()) {
         return Ok(onnx);
     }
 
@@ -131,40 +105,31 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let mut builder =
-        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
-
-    let choice = env_ep_choice();
-    let device_id = env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0);
-
-    match choice {
-        OrtExecutionProviderChoice::Cpu => {}
-        OrtExecutionProviderChoice::Cuda => {
-            builder = builder
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-                .map_err(|e| format!("enable CUDA EP failed: {e}"))?;
-        }
-        OrtExecutionProviderChoice::Auto => {
-            if let Ok(b) = builder
-                .clone()
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-            {
-                builder = b;
-            }
-        }
-    }
-
-    builder
-        .commit_from_file(onnx_path)
-        .map_err(|e| format!("load FCPE onnx into ort session failed: {e}"))
+    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(onnx_path, crate::vocoder_ort_session::OrtSessionRole::PitchDetector)?;
+    Ok(session)
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
+    let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    if let Some(ref session) = *guard {
+        return Ok(Arc::clone(session));
+    }
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;
     let session = build_session_with_ep(&onnx_path)?;
     let arc = Arc::new(Mutex::new(session));
-    Ok(Arc::clone(SHARED_SESSION.get_or_init(|| Arc::clone(&arc))))
+    *guard = Some(Arc::clone(&arc));
+    Ok(arc)
+}
+
+/// Drop the shared session to release CUDA memory. Called on app exit.
+pub fn drop_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn probe() -> &'static Result<(), String> {
@@ -228,204 +193,71 @@ fn sanitize_f0(mut f0: Vec<f64>, f0_floor: f64, f0_ceil: f64) -> Vec<f64> {
     f0
 }
 
+static CACHED_FCPE_SR: OnceLock<u32> = OnceLock::new();
+static CACHED_FCPE_HOP: OnceLock<usize> = OnceLock::new();
+static CACHED_FCPE_N_FFT: OnceLock<usize> = OnceLock::new();
+static CACHED_FCPE_WIN: OnceLock<usize> = OnceLock::new();
+static CACHED_FCPE_FMIN: OnceLock<f32> = OnceLock::new();
+static CACHED_FCPE_FMAX: OnceLock<f32> = OnceLock::new();
+
 fn env_fcpe_sr() -> u32 {
-    std::env::var("HIFISHIFTER_FCPE_SAMPLE_RATE")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(16_000)
+    *CACHED_FCPE_SR.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_SAMPLE_RATE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(16_000)
+    })
 }
 
 fn env_fcpe_hop() -> usize {
-    std::env::var("HIFISHIFTER_FCPE_HOP")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(160)
+    *CACHED_FCPE_HOP.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_HOP")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(160)
+    })
 }
 
 fn env_fcpe_n_fft() -> usize {
-    std::env::var("HIFISHIFTER_FCPE_N_FFT")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(1024)
+    *CACHED_FCPE_N_FFT.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_N_FFT")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1024)
+    })
 }
 
 fn env_fcpe_win() -> usize {
-    std::env::var("HIFISHIFTER_FCPE_WIN_SIZE")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(1024)
+    *CACHED_FCPE_WIN.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_WIN_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1024)
+    })
 }
 
 fn env_fcpe_fmin() -> f32 {
-    std::env::var("HIFISHIFTER_FCPE_FMIN")
-        .ok()
-        .and_then(|s| s.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(0.0)
+    *CACHED_FCPE_FMIN.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_FMIN")
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    })
 }
 
 fn env_fcpe_fmax(sr: u32) -> f32 {
-    std::env::var("HIFISHIFTER_FCPE_FMAX")
-        .ok()
-        .and_then(|s| s.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or((sr as f32) * 0.5)
-}
-
-fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
-    if input.is_empty() || in_rate == 0 || out_rate == 0 || in_rate == out_rate {
-        return input.to_vec();
-    }
-    if input.len() < 2 {
-        return input.to_vec();
-    }
-
-    let ratio = out_rate as f64 / in_rate as f64;
-    let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for idx in 0..out_len {
-        let src = idx as f64 / ratio;
-        let i0 = src.floor().max(0.0) as usize;
-        let i1 = (i0 + 1).min(input.len() - 1);
-        let frac = (src - i0 as f64) as f32;
-        let a = input[i0];
-        let b = input[i1];
-        out.push(a + (b - a) * frac);
-    }
-    out
-}
-
-fn hann_window(len: usize) -> Vec<f32> {
-    if len == 0 {
-        return Vec::new();
-    }
-    if len == 1 {
-        return vec![1.0];
-    }
-
-    let denom = (len - 1) as f32;
-    (0..len)
-        .map(|n| {
-            let x = (2.0 * std::f32::consts::PI * n as f32) / denom;
-            0.5 - 0.5 * x.cos()
-        })
-        .collect()
-}
-
-fn reflect_index(i: isize, len: usize) -> usize {
-    if len <= 1 {
-        return 0;
-    }
-    let period = 2 * ((len as isize) - 1);
-    let mut m = i % period;
-    if m < 0 {
-        m += period;
-    }
-    if m < len as isize {
-        m as usize
-    } else {
-        (period - m) as usize
-    }
-}
-
-fn reflect_pad(y: &[f32], left: usize, right: usize) -> Vec<f32> {
-    if y.is_empty() {
-        return vec![0.0; left + right];
-    }
-
-    let len = y.len();
-    let mut out = Vec::with_capacity(left + len + right);
-    for i in -(left as isize)..0 {
-        out.push(y[reflect_index(i, len)]);
-    }
-    out.extend_from_slice(y);
-    for i in (len as isize)..((len as isize) + (right as isize)) {
-        out.push(y[reflect_index(i, len)]);
-    }
-    out
-}
-
-/// Slaney mel scale (librosa default — matches FCPE model training).
-fn hz_to_mel_slaney(hz: f32) -> f32 {
-    let f_min = 0.0;
-    let f_sp = 200.0 / 3.0;
-    let min_log_hz = 1000.0;
-    let min_log_mel = (min_log_hz - f_min) / f_sp;
-    let logstep = (6.4f32).ln() / 27.0;
-
-    if hz >= min_log_hz {
-        min_log_mel + (hz / min_log_hz).ln() / logstep
-    } else {
-        (hz - f_min) / f_sp
-    }
-}
-
-/// Inverse Slaney mel scale.
-fn mel_to_hz_slaney(mel: f32) -> f32 {
-    let f_min = 0.0;
-    let f_sp = 200.0 / 3.0;
-    let min_log_hz = 1000.0;
-    let min_log_mel = (min_log_hz - f_min) / f_sp;
-    let logstep = (6.4f32).ln() / 27.0;
-
-    if mel >= min_log_mel {
-        min_log_hz * (logstep * (mel - min_log_mel)).exp()
-    } else {
-        f_min + f_sp * mel
-    }
-}
-
-fn mel_filterbank_slaney(
-    sr: u32,
-    n_fft: usize,
-    n_mels: usize,
-    fmin: f32,
-    fmax: f32,
-) -> Array2<f32> {
-    let n_freqs = n_fft / 2 + 1;
-    let mel_min = hz_to_mel_slaney(fmin.max(0.0));
-    let mel_max = hz_to_mel_slaney(fmax.max(fmin + 1.0));
-
-    let mut mel_points = Vec::with_capacity(n_mels + 2);
-    for i in 0..(n_mels + 2) {
-        let t = i as f32 / (n_mels + 1) as f32;
-        mel_points.push(mel_min + (mel_max - mel_min) * t);
-    }
-
-    let mut hz_points = Vec::with_capacity(n_mels + 2);
-    for &m in &mel_points {
-        hz_points.push(mel_to_hz_slaney(m));
-    }
-
-    let mut fftfreqs = Vec::with_capacity(n_freqs);
-    for i in 0..n_freqs {
-        fftfreqs.push((i as f32) * (sr as f32) / (n_fft as f32));
-    }
-
-    let mut weights = Array2::<f32>::zeros((n_mels, n_freqs));
-    for m in 0..n_mels {
-        let f_left = hz_points[m];
-        let f_center = hz_points[m + 1];
-        let f_right = hz_points[m + 2];
-        let dl = (f_center - f_left).max(1e-6);
-        let dr = (f_right - f_center).max(1e-6);
-
-        for (i, &f) in fftfreqs.iter().enumerate() {
-            let lower = (f - f_left) / dl;
-            let upper = (f_right - f) / dr;
-            weights[[m, i]] = lower.min(upper).max(0.0);
-        }
-
-        let enorm = 2.0 / (f_right - f_left).max(1e-6);
-        for i in 0..n_freqs {
-            weights[[m, i]] *= enorm;
-        }
-    }
-    weights
+    *CACHED_FCPE_FMAX.get_or_init(|| {
+        std::env::var("HIFISHIFTER_FCPE_FMAX")
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or((sr as f32) * 0.5)
+    })
 }
 
 fn build_mel_from_waveform(
@@ -444,18 +276,18 @@ fn build_mel_from_waveform(
         return Err("fcpe mel config invalid".to_string());
     }
 
-    let y = linear_resample_mono(waveform, in_sr, target_sr);
+    let y = crate::mel_utils::linear_resample_mono(waveform, in_sr, target_sr);
     let pad_left = ((win_size as isize - hop as isize) / 2).max(0) as usize;
     let pad_right = ((win_size as isize - hop as isize + 1) / 2).max(0) as usize;
-    let y = reflect_pad(&y, pad_left, pad_right);
+    let y = crate::mel_utils::reflect_pad(&y, pad_left, pad_right);
     if y.len() < win_size {
         return Ok((vec![(1e-9f32).ln(); n_mels], 1));
     }
 
     let n_frames = 1 + (y.len().saturating_sub(win_size)) / hop;
     let n_freqs = n_fft / 2 + 1;
-    let window = hann_window(win_size);
-    let fb = mel_filterbank_slaney(target_sr, n_fft, n_mels, fmin, fmax);
+    let window = crate::mel_utils::hann_window(win_size);
+    let fb = crate::mel_utils::mel_filterbank_slaney(target_sr, n_fft, n_mels, fmin, fmax);
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);

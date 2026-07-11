@@ -185,7 +185,7 @@ impl ProcessingStage for WorldVocoderStage {
 pub struct HiFiGanStage;
 
 fn sample_curve_at_abs_sec(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     abs_sec: f64,
     frame_period_ms: f64,
     default_value: f32,
@@ -231,7 +231,7 @@ impl ProcessingStage for HiFiGanStage {
 
         let breath_enabled =
             crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
-        let formant_curve = cc.extra_curves.get("formant_shift_cents");
+        let formant_curve = cc.extra_curves.get("formant_shift_cents").map(|v| v.as_slice());
         if !breath_enabled {
             // ── 非 Breath 路径 ──────────────────────────────────────────────
             let render_ctx = RenderContext {
@@ -267,7 +267,7 @@ impl ProcessingStage for HiFiGanStage {
 
         // harmonic 直接走 HiFiGAN；时间拉伸已在处理器外部完成
         let processed_harmonic = if cc.clip_midi.is_empty() {
-            harmonic
+            (*harmonic).clone()
         } else {
             let render_ctx = RenderContext {
                 mono_pcm: &harmonic,
@@ -294,7 +294,7 @@ impl ProcessingStage for HiFiGanStage {
 
         let stretched_noise = noise;
 
-        let breath_curve = cc.extra_curves.get("breath_gain");
+        let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
         let out_len = processed_harmonic.len().min(stretched_noise.len());
 
         // 提取曲线存在性判断，分支走 Fast-Path

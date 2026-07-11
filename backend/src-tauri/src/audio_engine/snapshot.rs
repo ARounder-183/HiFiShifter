@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
+use lru::LruCache;
+
 use crate::state::{Clip, TimelineState, Track};
 
 use super::io::{get_resampled_stereo_cached, is_audio_path};
@@ -213,7 +215,7 @@ pub(crate) fn schedule_stretch_jobs(
 pub(crate) fn build_snapshot(
     timeline: &TimelineState,
     out_rate: u32,
-    cache: &Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
 ) -> EngineSnapshot {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
@@ -489,6 +491,8 @@ pub(crate) fn build_snapshot(
         let (rendered_pcm, breath_noise_pcm, needs_synthesis) = {
             let needs_pitch_edit =
                 crate::pitch_editing::does_clip_need_processor_render(timeline, clip, start_sec);
+
+            eprintln!("[snapshot] clip_id={} needs_pitch_edit={}", clip.id, needs_pitch_edit);
 
             if needs_pitch_edit {
                 // 优先从 pending_rendered_keys 查找渲染线程传递的 cache_key
@@ -800,7 +804,7 @@ pub(crate) fn build_snapshot_for_file(
     path: &Path,
     out_rate: u32,
     offset_sec: f64,
-    cache: &Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
 ) -> EngineSnapshot {
     let src = match get_resampled_stereo_cached(path, out_rate, cache) {
         Some(v) => v,
