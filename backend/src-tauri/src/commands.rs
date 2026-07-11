@@ -848,6 +848,11 @@ pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     onnx_status::get_onnx_diagnostic_info()
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
+    onnx_status::run_vocoder_benchmark()
+}
+
 // ===================== pitch_cache =====================
 
 #[tauri::command(rename_all = "camelCase")]

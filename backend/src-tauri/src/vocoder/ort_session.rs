@@ -212,3 +212,37 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
 
     Ok((session, selected.to_string()))
 }
+
+/// RAII guard that temporarily overrides the `HIFISHIFTER_ORT_EP` env var for
+/// the duration of a benchmark session, restoring the previous value on drop.
+///
+/// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
+/// "cuda") without permanently changing the process-wide setting.
+pub struct EpOverrideGuard {
+    prev: Option<String>,
+}
+
+impl EpOverrideGuard {
+    pub fn new(ep: String) -> Self {
+        let prev = std::env::var("HIFISHIFTER_ORT_EP").ok();
+        // Safety: benchmark serialises session creation; env mutation is
+        // single-threaded at the point this guard is held.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("HIFISHIFTER_ORT_EP", &ep);
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for EpOverrideGuard {
+    fn drop(&mut self) {
+        #[allow(unused_unsafe)]
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("HIFISHIFTER_ORT_EP", v),
+                None => std::env::remove_var("HIFISHIFTER_ORT_EP"),
+            }
+        }
+    }
+}
