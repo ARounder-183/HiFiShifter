@@ -45,7 +45,7 @@ import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
-import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
+import type { OnnxDiagnosticResult, ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
 import { MISSING_FILE_CONFIRM_EVENT } from "./features/session/thunks/missingFilePrompt";
 import {
     OPEN_PROJECT_PATH_EVENT,
@@ -477,6 +477,9 @@ function AppInner() {
         clipName: string | null;
     }>({ active: false, clipName: null });
 
+    // ONNX / CUDA 诊断状态（状态栏右侧 GPU/CPU 标识）
+    const [onnxDiag, setOnnxDiag] = useState<OnnxDiagnosticResult | null>(null);
+
     // 波形分析进度状态
     const [waveformAnalysis, setWaveformAnalysis] = useState<{
         active: boolean;
@@ -885,6 +888,11 @@ function AppInner() {
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
     }, [dispatch]);
+
+    // 获取 ONNX 诊断信息（用于状态栏 GPU/CPU 标识）
+    useEffect(() => {
+        coreApi.getOnnxDiagnostic().then(setOnnxDiag).catch(() => {});
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -1738,6 +1746,33 @@ function AppInner() {
                         {errorText}
                     </Text>
                 </Flex>
+                {/* GPU/CPU 状态标识 */}
+                {onnxDiag ? (
+                    <span
+                        className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                        style={{
+                            background:
+                                onnxDiag.ep_choice === "cuda"
+                                    ? "rgba(34,197,94,0.15)"
+                                    : "rgba(255,255,255,0.06)",
+                            color:
+                                onnxDiag.ep_choice === "cuda"
+                                    ? "rgb(34,197,94)"
+                                    : "rgba(255,255,255,0.4)",
+                            fontSize: "10px",
+                            lineHeight: "16px",
+                        }}
+                        title={
+                            onnxDiag.ep_choice === "cuda"
+                                ? "ONNX Runtime: CUDA GPU"
+                                : onnxDiag.ep_choice === "cpu"
+                                  ? "ONNX Runtime: CPU"
+                                  : `ONNX Runtime: ${onnxDiag.ep_choice}`
+                        }
+                    >
+                        {onnxDiag.ep_choice === "cuda" ? t("gpu_label") : t("cpu_label")}
+                    </span>
+                ) : null}
             </Flex>
         </Flex>
     );

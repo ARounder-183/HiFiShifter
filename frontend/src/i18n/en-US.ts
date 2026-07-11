@@ -285,6 +285,8 @@ export const enUS = {
     hide_secondary_param: "Hide secondary parameter overlay",
     onnx_compile_required: "ONNX model not compiled. Run: cargo tauri dev --features onnx",
     onnx_unavailable_label: " (unavailable)",
+    gpu_label: "GPU",
+    cpu_label: "CPU",
     solo: "Solo",
     status_analyzing_pitch: "Analyzing pitch",
     status_stretching: "Stretching",
