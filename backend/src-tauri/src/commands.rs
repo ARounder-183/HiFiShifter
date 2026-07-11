@@ -853,6 +853,12 @@ pub fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResul
     onnx_status::run_vocoder_benchmark()
 }
 
+/// Enumerate all NVIDIA GPUs via NVML (Windows) or return empty list (other platforms).
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_gpu_devices() -> crate::cuda_info::GpuEnumerationResult {
+    onnx_status::get_gpu_devices()
+}
+
 // ===================== pitch_cache =====================
 
 #[tauri::command(rename_all = "camelCase")]

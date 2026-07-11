@@ -217,6 +217,7 @@ export interface SessionState {
     /** 全局默认 HiFiGAN mel stretch 开关 */
     defaultHifiganMelStretch: boolean;
     ortEp: string;
+    cudaDeviceId: number;
 
 
     // Monotonic bump token for invalidating parameter curve caches.
@@ -982,6 +983,7 @@ const initialState: SessionState = {
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
     ortEp: "auto",
+    cudaDeviceId: 0,
 
     paramsEpoch: 0,
     playbackRateVersion: 0,
@@ -1270,6 +1272,9 @@ const sessionSlice = createSlice({
         },
         setOrtEp(state, action: PayloadAction<string>) {
             state.ortEp = action.payload;
+        },
+        setCudaDeviceId(state, action: PayloadAction<number>) {
+            state.cudaDeviceId = action.payload;
         },
         setVisibleReferenceRootTrackIds(state, action: PayloadAction<string[]>) {
             state.visibleReferenceRootTrackIds = Array.from(
@@ -1868,6 +1873,9 @@ const sessionSlice = createSlice({
                 }
                 if (s.ortEp != null) {
                     state.ortEp = s.ortEp;
+                }
+                if (s.cudaDeviceId != null) {
+                    state.cudaDeviceId = Number(s.cudaDeviceId);
                 }
                 const selectDir = (s as any).selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
@@ -3311,6 +3319,7 @@ export const {
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
     setOrtEp,
+    setCudaDeviceId,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

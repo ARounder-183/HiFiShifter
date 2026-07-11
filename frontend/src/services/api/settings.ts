@@ -38,6 +38,7 @@ export interface UiSettings {
     midiImportTargetReaperClipboard?: string;
     midiImportTargetParamEditor?: string;
     ortEp?: string;
+    cudaDeviceId?: number;
     customScalePresets?: Array<{
         id: string;
         name: string;

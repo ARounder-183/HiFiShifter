@@ -1,5 +1,6 @@
 import type {
     BenchmarkResult,
+    GpuEnumerationResult,
     ModelConfigResult,
     OnnxDiagnosticResult,
     OnnxStatusResult,
@@ -176,6 +177,7 @@ export const coreApi = {
     getOnnxStatus: () => invoke<OnnxStatusResult>("get_onnx_status"),
     getOnnxDiagnostic: () => invoke<OnnxDiagnosticResult>("get_onnx_diagnostic"),
     runVocoderBenchmark: () => invoke<BenchmarkResult>("run_vocoder_benchmark"),
+    getGpuDevices: () => invoke<GpuEnumerationResult>("get_gpu_devices"),
 
     // Async pitch refresh task system
     startPitchRefreshTask: (rootTrackId: string) =>

@@ -3,7 +3,7 @@ export const zhCN = {
     menu_edit: "编辑",
     menu_view: "视图",
     menu_track: "轨道",
-    menu_stretch: "拉伸",
+    menu_preferences: "首选项",
     menu_help: "帮助",
     menu_new_project: "新建工程",
     menu_open_project: "打开工程...",
@@ -86,8 +86,8 @@ export const zhCN = {
     quick_export_error_pick_directory_failed: "选择导出目录失败。",
     reaper_import_skipped_header: "Reaper 导入时跳过了以下音频文件（格式不支持或文件不存在）：",
     menu_pick_output: "选择导出路径",
-    stretch_project_override: "工程覆盖",
-    stretch_global_default: "全局默认",
+    stretch_project_override: "工程拉伸覆盖",
+    stretch_global_default: "全局拉伸默认",
     stretch_algorithm: "算法",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",
     stretch_inherit_global: "继承全局",
@@ -805,4 +805,54 @@ export const zhCN = {
     ctx_export_midi: "导出为 MIDI",
     menu_save_as_pitch_ref: "保存为音高参考块",
     menu_export_midi: "导出为 MIDI",
+
+    // ── 推理设备 / GPU ──────────────────────────────────────────────────
+    menu_inference_device: "推理设备",
+    menu_inference_auto: "Auto（系统默认）",
+    menu_inference_cpu: "CPU",
+    menu_inference_cuda: "GPU (CUDA)",
+    menu_select_gpu_device: "选择 GPU 设备",
+    menu_no_gpu_detected: "未检测到 NVIDIA GPU",
+    menu_run_benchmark: "运行基准测试…",
+
+    // ── 基准测试 ────────────────────────────────────────────────────────
+    benchmark_title: "推理设备基准测试",
+    benchmark_desc:
+        "在每个可用设备上运行约 12 秒的音频进行声码器推理，比较延迟。可据此选择最快的推理方案。",
+    benchmark_running: "正在运行基准测试，可能需要 20–60 秒…",
+    benchmark_results: "结果（{samples} 帧片段 · 44.1 kHz）：",
+    benchmark_device_header: "设备",
+    benchmark_latency_header: "中位延迟",
+    benchmark_rtf_header: "RTF",
+    benchmark_rtf_hint: "RTF > 1× = 快于实时。⚡ = 最快的可用设备。",
+    benchmark_recommended: "推荐：",
+    benchmark_failed: "失败 — 详见下方",
+    benchmark_run_btn: "运行基准测试",
+    benchmark_running_btn: "运行中…",
+    benchmark_close: "关闭",
+    benchmark_idle_hint: "点击「运行基准测试」开始。需要先加载模型。",
+    benchmark_error_default: "基准测试失败。请确保模型已加载。",
+    benchmark_gpu_failed_title:
+        "⚠ GPU 基准测试失败 — CUDA 已注册但无法执行",
+    benchmark_gpu_failed_desc:
+        "ONNX Runtime 已检测到 CUDA 执行提供者，但推理失败。这通常是因为可执行文件目录中缺少 CUDA 运行时 DLL（cuBLAS、cuDNN）。",
+    benchmark_gpu_dll_missing_fix: "修复方法：",
+    benchmark_gpu_broken_title:
+        "⚠ GPU 加速不可用 — 缺少 CUDA 运行时 DLL",
+    benchmark_gpu_broken_desc:
+        "ONNX Runtime 可以识别你的 NVIDIA GPU 且 CUDA 提供者可用，但可执行文件目录中缺少 cuBLAS 和 cuDNN。CUDA 将静默回退到 CPU 执行。",
+    benchmark_gpu_fix_cmd1:
+        "> .\\setup-gpu-deps.ps1   # 一次性安装（下载 ORT + cuBLAS + cuDNN）",
+    benchmark_gpu_fix_cmd2:
+        "> .\\dev-gpu.ps1          # 启动开发服务器（自动复制所有 DLL）",
+    benchmark_gpu_failed_dll_ok_title:
+        "⚠ GPU 基准测试失败，但 CUDA 和 DLL 均已就绪",
+    benchmark_gpu_failed_dll_ok_desc:
+        "CUDA EP 和运行时 DLL 均已就绪，但推理仍然失败。可能是驱动或硬件问题。",
+    benchmark_cuda_dll_label: "CUDA 运行时 DLL：",
+    benchmark_cuda_dll_yes: "已找到 ✅",
+    benchmark_cuda_dll_no: "缺失 — GPU 将无法工作 ⚠",
+    benchmark_providers_label: "可用提供者：",
+    benchmark_nvml_label: "NVML 检测到的 NVIDIA GPU：",
+    benchmark_cuda_device_label: "CUDA 设备：",
 } as const;

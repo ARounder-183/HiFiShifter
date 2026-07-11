@@ -1119,6 +1119,8 @@ pub struct OnnxDiagnosticInfo {
     pub active_ep: String,
     pub onnx_version: Option<String>,
     pub providers: Option<Vec<String>>,
+    /// Full CUDA diagnostic info (available providers, DLL status, smoke test, etc.)
+    pub cuda_diagnostic: Option<crate::vocoder_ort_session::CudaDiagnostic>,
 }
 
 pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
@@ -1134,20 +1136,87 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
             active_ep: "none".to_string(),
             onnx_version: None,
             providers: None,
+            cuda_diagnostic: None,
         };
     }
 
     let available = is_available();
     let error = if !available { model_load_error() } else { None };
 
-    // Try to get ONNX runtime version and available providers
-    let (onnx_version, providers) = if let Ok(()) = ensure_ort_init() {
-        let version = Some(format!("ort {}", env!("CARGO_PKG_VERSION")));
-        let providers_list = Some(vec![ep_choice_val.clone()]);
-        (version, providers_list)
+    // Gather provider info
+    let providers = if ensure_ort_init().is_ok() {
+        Some(crate::vocoder_ort_session::diagnose_available_providers())
     } else {
-        (None, None)
+        None
     };
+
+    let onnx_version = Some(format!("ort {}", env!("CARGO_PKG_VERSION")));
+
+    // Gather CUDA diagnostic, including smoke test if possible
+    let cuda_diagnostic = if ensure_ort_init().is_ok() {
+        let mut diag = crate::vocoder_ort_session::diagnose_cuda();
+        // Try smoke test with real model using model-appropriate input shapes
+        if diag.available_providers.iter().any(|p| p.contains("CUDA")) {
+            match try_create_cuda_smoke_session() {
+                Ok(mut session) => {
+                    match run_cuda_smoke_test(&mut session) {
+                        Ok(()) => {
+                            diag.cuda_smoke_test_passed = true;
+                            diag.cuda_smoke_test_error = None;
+                        }
+                        Err(e) => {
+                            diag.cuda_smoke_test_passed = false;
+                            diag.cuda_smoke_test_error = Some(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    diag.cuda_smoke_test_passed = false;
+                    diag.cuda_smoke_test_error = Some(format!("Cannot create CUDA session: {e}"));
+                }
+            }
+        }
+        Some(diag)
+    } else {
+        None
+    };
+
+    // Helper: run a minimal inference through a CUDA session to verify GPU execution.
+    // Uses the model's actual input shapes so ORT can't reject based on shape mismatch.
+    fn run_cuda_smoke_test(session: &mut ort::session::Session) -> Result<(), String> {
+        // Read model config to get correct input shapes
+        let (_onnx_path, cfg_path) = resolve_model_paths()?;
+        let cfg = read_config(&cfg_path)?;
+
+        let t = 2usize; // Minimal: 2 mel frames
+        let mel = vec![0.0f32; cfg.num_mels * t];
+        let f0 = vec![0.0f32; t];
+        let mel_tensor = Tensor::from_array(([1usize, cfg.num_mels, t], mel.into_boxed_slice()))
+            .map_err(|e| format!("CUDA smoke test: mel tensor build failed: {e}"))?;
+        let f0_tensor = Tensor::from_array(([1usize, t], f0.into_boxed_slice()))
+            .map_err(|e| format!("CUDA smoke test: f0 tensor build failed: {e}"))?;
+
+        let result = session.run(ort::inputs![mel_tensor, f0_tensor]);
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("cublas")
+                    || msg.contains("cudnn")
+                    || msg.contains("CUDA")
+                    || msg.contains("cuda")
+                {
+                    Err(format!(
+                        "CUDA EP registered but inference FAILED — likely missing CUDA runtime DLLs (cuBLAS/cuDNN). \
+                         Run '.\\scripts\\download-cuda-runtime.ps1' to install. \
+                         Error: {msg}"
+                    ))
+                } else {
+                    Err(format!("CUDA EP inference FAILED: {msg}"))
+                }
+            }
+        }
+    }
 
     OnnxDiagnosticInfo {
         compiled,
@@ -1157,6 +1226,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
         active_ep: active_ep(),
         onnx_version,
         providers,
+        cuda_diagnostic,
     }
 }
 
@@ -2253,21 +2323,57 @@ pub struct BenchmarkResults {
     pub gpu_median_ms: Option<f64>,
     pub gpu_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
+    /// True when CUDA EP was available and used for the GPU benchmark.
+    pub cuda_available: bool,
+    /// CUDA device ID that was used (0 if CUDA not available).
+    pub cuda_device_id: i32,
+    /// Execution providers available in the ONNX Runtime DLL.
+    pub available_providers: Vec<String>,
+    /// Whether critical CUDA runtime DLLs (cuBLAS, cuDNN) were found on disk.
+    pub cuda_dlls_found: bool,
+    /// ORT build info string.
+    pub ort_build_info: String,
+    /// All NVIDIA GPUs discovered via NVML (name, memory, device ID).
+    pub gpu_devices: Vec<crate::cuda_info::GpuDeviceInfo>,
+}
+
+/// Create a minimal CUDA session for smoke-testing GPU execution.
+///
+/// This is used by `ort_session::diagnose_cuda()` to verify that CUDA
+/// can actually execute (not just register). Uses the NSF-HiFiGAN model
+/// since we know it's available.
+pub fn try_create_cuda_smoke_session() -> Result<ort::session::Session, String> {
+    ensure_ort_init()?;
+    let (onnx_path, _cfg_path) = resolve_model_paths()?;
+    let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cuda".to_string());
+    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(
+        &onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+    )?;
+    Ok(session)
 }
 
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     ensure_ort_init()?;
     let (onnx_path, cfg_path) = resolve_model_paths()?;
     let cfg = read_config(&cfg_path)?;
-    
+
     let frames = 1024;
     let audio_sec = (frames as f64) * (cfg.hop_size as f64) / (cfg.sampling_rate as f64);
     let runs = 5;
 
+    // Collect diagnostic info before benchmark
+    let available_providers = crate::vocoder_ort_session::diagnose_available_providers();
+    let cuda_device_id = crate::vocoder_ort_session::diagnose_cuda().cuda_device_id;
+    let cuda_dll_status = crate::vocoder_ort_session::probe_cuda_dlls();
+    let cuda_dlls_found = cuda_dll_status.iter().all(|(_, found)| *found);
+    let ort_build_info = ort::info().to_string();
+    let cuda_available = available_providers.iter().any(|p| p.contains("CUDA"));
+    let gpu_devices = crate::cuda_info::enumerate_gpus().devices;
+
     // 1. Benchmark CPU
     let mut cpu_times = Vec::new();
     {
-        // Build CPU Session via the central vocoder_ort_session helper by overriding environment
         let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cpu".to_string());
         let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)?;
 
@@ -2293,7 +2399,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // 2. Benchmark GPU (CUDA) if available
     let mut gpu_median = None;
     let mut gpu_rt_factor = None;
-    
+    let mut cuda_actually_working = false;
+
     let mut gpu_times = Vec::new();
     let gpu_session_res = {
         let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cuda".to_string());
@@ -2308,6 +2415,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
             let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
             let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
             if gpu_session.run(ort::inputs![mt, ft]).is_ok() {
+                cuda_actually_working = true;
                 for _ in 0..runs {
                     let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
                     let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
@@ -2319,9 +2427,20 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                 let median = gpu_times[gpu_times.len() / 2];
                 gpu_median = Some(median);
                 gpu_rt_factor = Some(audio_sec / (median / 1000.0));
+            } else {
+                eprintln!(
+                    "[benchmark] WARNING: CUDA EP registered but warmup inference FAILED. \
+                     CUDA runtime DLLs (cuBLAS/cuDNN) may be missing. GPU benchmark skipped."
+                );
             }
         }
     }
+
+    // Log diagnostic info for debugging
+    eprintln!(
+        "[benchmark] Providers: {:?} | CUDA device_id: {} | DLLs found: {} | CUDA inference works: {}",
+        available_providers, cuda_device_id, cuda_dlls_found, cuda_actually_working
+    );
 
     Ok(BenchmarkResults {
         cpu_median_ms: cpu_median,
@@ -2329,6 +2448,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         gpu_median_ms: gpu_median,
         gpu_rt_factor,
         benchmark_samples: runs,
+        cuda_available,
+        cuda_device_id,
+        available_providers,
+        cuda_dlls_found,
+        ort_build_info,
+        gpu_devices,
     })
 }
 

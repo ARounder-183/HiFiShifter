@@ -9,6 +9,7 @@ use ort::ep;
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -21,6 +22,42 @@ pub fn set_runtime_ep_override(ep: Option<String>) {
     if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
         *guard = ep;
     }
+}
+
+/// Runtime override for CUDA device ID. Set by `set_runtime_cuda_device_id()`.
+/// Takes precedence over the `HIFISHIFTER_ORT_CUDA_DEVICE_ID` env var.
+static RUNTIME_CUDA_DEVICE_ID: OnceLock<Mutex<Option<i32>>> = OnceLock::new();
+
+/// Set the runtime CUDA device ID override. Pass `None` to clear the override.
+/// This is called when the user changes the GPU device in the UI settings.
+pub fn set_runtime_cuda_device_id(device_id: i32) {
+    if let Ok(mut guard) = RUNTIME_CUDA_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = Some(device_id);
+    }
+}
+
+/// Clear the runtime CUDA device ID override (revert to env var or default 0).
+pub fn clear_runtime_cuda_device_id() {
+    if let Ok(mut guard) = RUNTIME_CUDA_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = None;
+    }
+}
+
+/// Returns the effective CUDA device ID, checking runtime override first,
+/// then env var, then defaulting to 0.
+fn cuda_device_id() -> i32 {
+    RUNTIME_CUDA_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or_else(|| env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0))
 }
 
 /// Returns the runtime EP override if set, otherwise falls back to env var.
@@ -69,8 +106,13 @@ fn env_cuda_mem_limit_bytes() -> u64 {
 }
 
 fn build_cuda_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
-    let device_id = env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0);
+    let device_id = cuda_device_id();
     let arena_bytes = env_cuda_mem_limit_bytes();
+
+    eprintln!(
+        "ort_session: build_cuda_ep role={role:?} device_id={device_id} arena_mb={}",
+        arena_bytes / (1024 * 1024)
+    );
 
     let mut ep = ep::CUDA::default()
         .with_device_id(device_id)
@@ -95,7 +137,7 @@ fn build_cuda_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
 
 #[cfg(feature = "tensorrt")]
 fn build_trt_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
-    let device_id = env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0);
+    let device_id = cuda_device_id();
     let arena_bytes = env_cuda_mem_limit_bytes();
 
     let mut ep = ep::TensorRT::default()
@@ -236,17 +278,202 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     Ok((session, selected.to_string()))
 }
 
+// ─── CUDA Diagnostic & Provider Enumeration ────────────────────────────────
+
+/// Diagnostic info about CUDA/GPU setup for user-facing reporting.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CudaDiagnostic {
+    /// List of all ONNX Runtime execution provider names available in the DLL.
+    pub available_providers: Vec<String>,
+    /// The EP that was actually selected (e.g. "cuda", "cpu").
+    pub selected_ep: String,
+    /// CUDA device ID that was requested (from env or default 0).
+    pub cuda_device_id: i32,
+    /// Whether a CUDA smoke test passed (GPU is actually executing).
+    pub cuda_smoke_test_passed: bool,
+    /// Human-readable error if smoke test failed.
+    pub cuda_smoke_test_error: Option<String>,
+    /// The ONNX Runtime build info string.
+    pub ort_build_info: String,
+    /// Critical CUDA DLLs found on disk (cublas, cudnn). Each entry is (dll_name, found).
+    pub cuda_dll_status: Vec<(String, bool)>,
+}
+
+/// Enumerate available ONNX Runtime execution providers.
+///
+/// Checks each provider by attempting to query its availability through ORT.
+/// This is simpler and safer than using the raw C API for GetAvailableProviders.
+pub fn diagnose_available_providers() -> Vec<String> {
+    let mut providers = vec!["CPUExecutionProvider".to_string()];
+
+    // Try to register CUDA EP on a dummy session builder to check availability
+    if probe_cuda_ep_available() {
+        providers.push("CUDAExecutionProvider".to_string());
+    }
+
+    #[cfg(feature = "tensorrt")]
+    {
+        // TensorRT depends on CUDA being available
+        if probe_cuda_ep_available() {
+            providers.push("TensorrtExecutionProvider".to_string());
+        }
+    }
+
+    providers
+}
+
+/// Quick check: try registering CUDA EP on a temporary session builder.
+/// Returns true if CUDA EP is available in the loaded ORT DLL.
+fn probe_cuda_ep_available() -> bool {
+    // Try to build a minimal CUDA EP and check if the registration API is available
+    match Session::builder() {
+        Ok(builder) => {
+            let ep = ep::CUDA::default()
+                .with_device_id(0)
+                .build();
+            match builder.with_execution_providers([ep]) {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if critical CUDA DLLs can be found via the system DLL search path.
+/// Public for use in benchmarks and diagnostics.
+pub fn probe_cuda_dlls() -> Vec<(String, bool)> {
+    #[cfg(windows)]
+    {
+        let critical = [
+            "cudart64_12.dll",  // CUDA Runtime (GPU communication)
+            "cublas64_12.dll",  // cuBLAS (matrix ops)
+            "cufft64_11.dll",   // cuFFT (FFT ops)
+            "cudnn64_9.dll",    // cuDNN (deep neural network ops)
+        ];
+        critical
+            .iter()
+            .map(|name| {
+                let found = probe_dll(name);
+                (name.to_string(), found)
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        let critical = [
+            "libcublas.so.12",
+            "libcudnn.so.9",
+            "libcudart.so.12",
+        ];
+        critical
+            .iter()
+            .map(|name| {
+                let found = probe_dll(name);
+                (name.to_string(), found)
+            })
+            .collect()
+    }
+}
+
+/// Check if a DLL/SO file exists in common locations on disk.
+#[cfg(windows)]
+fn probe_dll(name: &str) -> bool {
+    // Check common locations
+    let paths: Vec<Option<std::path::PathBuf>> = vec![
+        // Next to the executable
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(name))),
+        // ORT_LIB_LOCATION
+        std::env::var("ORT_LIB_LOCATION")
+            .ok()
+            .map(|d| std::path::PathBuf::from(d).join(name)),
+        // CUDA Toolkit v12.6
+        Some(std::path::PathBuf::from(format!(
+            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\{name}"
+        ))),
+        // CUDA Toolkit v12.5
+        Some(std::path::PathBuf::from(format!(
+            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\{name}"
+        ))),
+        // CUDA Toolkit v12.4
+        Some(std::path::PathBuf::from(format!(
+            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin\\{name}"
+        ))),
+        // System32
+        Some(std::path::PathBuf::from(format!(
+            "C:\\Windows\\System32\\{name}"
+        ))),
+    ];
+    for path in paths.iter().flatten() {
+        if path.exists() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn probe_dll(name: &str) -> bool {
+    // On Linux, check common paths
+    let paths = [
+        format!("/usr/lib/x86_64-linux-gnu/{name}"),
+        format!("/usr/local/cuda/lib64/{name}"),
+        std::env::var("ORT_LIB_LOCATION")
+            .ok()
+            .map(|d| format!("{d}/{name}"))
+            .unwrap_or_default(),
+    ];
+    for path in &paths {
+        if std::path::Path::new(path).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Full CUDA diagnostic: providers, DLL status, device info.
+///
+/// Does NOT include a smoke test (that requires a model, handled by nsf_hifigan_onnx).
+pub fn diagnose_cuda() -> CudaDiagnostic {
+    let available_providers = diagnose_available_providers();
+    let selected_ep = ep_choice();
+    let dev_id = cuda_device_id();
+    let ort_build_info = ort::info().to_string();
+    let cuda_dll_status = probe_cuda_dlls();
+
+    // Smoke test must be done with an actual model — handled by the caller
+    let cuda_available = available_providers.iter().any(|p| p.contains("CUDA"));
+    let (cuda_smoke_test_passed, cuda_smoke_test_error) = if cuda_available {
+        (false, Some("Smoke test requires model — run benchmark to verify GPU execution".to_string()))
+    } else {
+        (false, Some("CUDAExecutionProvider not available in ONNX Runtime DLL".to_string()))
+    };
+
+    CudaDiagnostic {
+        available_providers,
+        selected_ep,
+        cuda_device_id: dev_id,
+        cuda_smoke_test_passed,
+        cuda_smoke_test_error,
+        ort_build_info,
+        cuda_dll_status,
+    }
+}
+
 /// RAII guard that temporarily overrides the EP choice for the duration of a
 /// benchmark session, restoring the previous value on drop.
 ///
 /// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
 /// "cuda") without permanently changing the process-wide setting.
 ///
-/// Sets both the runtime override (which takes precedence in `ep_choice()`)
-/// and the env var (for any code that reads it directly).
+/// Only sets the runtime override (mutex-protected), NOT the env var.
+/// The runtime override takes precedence in `ep_choice()` over the env var,
+/// so setting the env var is unnecessary (and would be unsafe in Rust).
 pub struct EpOverrideGuard {
     prev_override: Option<String>,
-    prev_env: Option<String>,
 }
 
 impl EpOverrideGuard {
@@ -261,14 +488,7 @@ impl EpOverrideGuard {
         // Set new runtime override
         set_runtime_ep_override(Some(ep.clone()));
 
-        // Also set env var for code that reads it directly
-        let prev_env = std::env::var("HIFISHIFTER_ORT_EP").ok();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("HIFISHIFTER_ORT_EP", &ep);
-        }
-
-        Self { prev_override, prev_env }
+        Self { prev_override }
     }
 }
 
@@ -276,14 +496,5 @@ impl Drop for EpOverrideGuard {
     fn drop(&mut self) {
         // Restore runtime override
         set_runtime_ep_override(self.prev_override.clone());
-
-        // Restore env var
-        #[allow(unused_unsafe)]
-        unsafe {
-            match &self.prev_env {
-                Some(v) => std::env::set_var("HIFISHIFTER_ORT_EP", v),
-                None => std::env::remove_var("HIFISHIFTER_ORT_EP"),
-            }
-        }
     }
 }

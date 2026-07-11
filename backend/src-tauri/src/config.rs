@@ -86,10 +86,19 @@ pub struct UiSettings {
     /// Persisted so the user's GPU/CPU choice survives restarts.
     #[serde(default = "default_ort_ep")]
     pub ort_ep: String,
+    /// Selected CUDA device ID for GPU inference.
+    /// Persisted so the user's GPU selection survives restarts.
+    /// Set to 0 by default; users with multiple GPUs can change it.
+    #[serde(default = "default_cuda_device_id")]
+    pub cuda_device_id: i32,
 }
 
 fn default_ort_ep() -> String {
     "Auto".to_string()
+}
+
+fn default_cuda_device_id() -> i32 {
+    0
 }
 
 /// 导出音频设置（持久化到 app_config.json）
@@ -264,6 +273,7 @@ impl Default for UiSettings {
             midi_close_leading_gap: true,
             midi_import_target: default_midi_import_target(),
             ort_ep: default_ort_ep(),
+            cuda_device_id: default_cuda_device_id(),
         }
     }
 }

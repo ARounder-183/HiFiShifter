@@ -17,6 +17,7 @@ dependencies = [
  "encoding_rs",
  "hound",
  "libc",
+ "libloading 0.8.9",
  "lru",
  "midly",
  "ndarray 0.16.1",

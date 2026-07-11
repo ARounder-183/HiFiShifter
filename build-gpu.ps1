@@ -48,7 +48,7 @@ cargo tauri build --features onnx
 # cublas/cudnn are resolved lazily at session.run() time.
 $releaseDir = Join-Path $PSScriptRoot "backend\src-tauri\target\x86_64-pc-windows-msvc\release"
 
-$cudaDllPatterns = @("cublas*.dll","cublasLt*.dll","cudnn*.dll","cufft*.dll","cufftw*.dll","curand*.dll")
+$cudaDllPatterns = @("cudart64_*.dll","cublas*.dll","cublasLt*.dll","cudnn*.dll","cufft*.dll","cufftw*.dll","curand*.dll")
 
 function Copy-CudaDlls($sourceDir, $label) {
     $staged = 0
@@ -85,7 +85,7 @@ if (Test-Path $cudaBase) {
 }
 
 # Verify the critical DLLs are present
-$required = @("cublas64_12.dll", "cudnn64_9.dll")
+$required = @("cudart64_12.dll", "cublas64_12.dll", "cufft64_11.dll", "cudnn64_9.dll")
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $releaseDir $_)) }
 if ($missing) {
     Write-Host ""

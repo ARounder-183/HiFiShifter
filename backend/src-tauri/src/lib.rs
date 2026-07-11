@@ -36,6 +36,14 @@ mod vocoder_ort_session {
 #[allow(unused_imports)]
 use vocoder_ort_session as ort_session;
 
+#[cfg(all(feature = "onnx", target_os = "windows"))]
+#[path = "vocoder/cuda_info.rs"]
+mod cuda_info;
+
+#[cfg(all(feature = "onnx", not(target_os = "windows")))]
+#[path = "vocoder/cuda_info_stub.rs"]
+mod cuda_info;
+
 mod vocoder_mel_utils {
     #[path = "../vocoder/mel_utils.rs"]
     mod _inner;
@@ -364,6 +372,7 @@ pub fn run() {
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
             commands::run_vocoder_benchmark,
+            commands::get_gpu_devices,
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,

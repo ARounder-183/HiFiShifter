@@ -56,14 +56,33 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Output: $DestDir" -ForegroundColor White
 Write-Host ""
 
-# Package definitions (verified NVIDIA CDN URLs, June 2026)
-# libcublas index:  https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/
-# cuDNN manifest:   https://developer.download.nvidia.com/compute/cudnn/redist/redistrib_9.8.0.json
+# Package definitions (verified NVIDIA CDN URLs, July 2026)
+# Index pages:
+#   libcublas:  https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/
+#   cuDNN:      https://developer.download.nvidia.com/compute/cudnn/redist/redistrib_9.8.0.json
+#   cuda_cudart: https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/
+#   libcufft:   https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/
+#   libcurand:  https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/
 $Packages = @(
+    @{
+        Name = "CUDA Runtime 12.6.77"
+        Url  = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.6.77-archive.zip"
+        Dlls = @("cudart64_12.dll")
+    },
     @{
         Name = "cuBLAS 12.6.4.1"
         Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.6.4.1-archive.zip"
         Dlls = @("cublas64_12.dll", "cublasLt64_12.dll")
+    },
+    @{
+        Name = "cuFFT 11.3.0.4"
+        Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.3.0.4-archive.zip"
+        Dlls = @("cufft64_11.dll", "cufftw64_11.dll")
+    },
+    @{
+        Name = "cuRAND 10.3.7.77"
+        Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.7.77-archive.zip"
+        Dlls = @("curand64_10.dll")
     },
     @{
         Name = "cuDNN 9.8.0 for CUDA 12"

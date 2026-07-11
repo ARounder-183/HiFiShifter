@@ -60,6 +60,25 @@ foreach ($File in $FilesToCopy) {
 Write-Host "Cleaning up temp files..." -ForegroundColor Yellow
 Remove-Item -Recurse -Force $TempDir | Out-Null
 
+# 6. Auto-download CUDA runtime DLLs (cuBLAS + cuDNN)
+# These are REQUIRED at runtime — without them CUDA EP silently falls back to CPU.
+Write-Host ""
+Write-Host "=== Downloading CUDA runtime DLLs (cuBLAS + cuDNN) ===" -ForegroundColor Cyan
+$downloadScript = Join-Path $PSScriptRoot "scripts\download-cuda-runtime.ps1"
+if (Test-Path $downloadScript) {
+    & $downloadScript -DestDir $CacheDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "WARNING: CUDA runtime download had errors. GPU acceleration may not work." -ForegroundColor Yellow
+        Write-Host "  Run manually: .\scripts\download-cuda-runtime.ps1" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "WARNING: download-cuda-runtime.ps1 not found. GPU acceleration will NOT work." -ForegroundColor Yellow
+    Write-Host "  Download cuBLAS 12 + cuDNN 9 manually from NVIDIA and place in:" -ForegroundColor Yellow
+    Write-Host "  $CacheDir" -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "=== Setup Completed Successfully! ===" -ForegroundColor Green
-Write-Host "ONNX Runtime GPU libraries are now placed in $CacheDir."
+Write-Host "ONNX Runtime GPU + CUDA runtime libraries are now placed in $CacheDir."
 Write-Host "You can now run: .\dev-gpu.ps1" -ForegroundColor Green

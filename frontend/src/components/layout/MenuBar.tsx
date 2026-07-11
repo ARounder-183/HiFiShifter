@@ -18,8 +18,11 @@ import {
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
+    setCudaDeviceId,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
+import { coreApi } from "../../services/api/core";
+import type { GpuDeviceInfo } from "../../types/api";
 import {
     importAudioFromDialog,
     importMultipleAudioAtPosition,
@@ -86,7 +89,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
+    const [gpuDevices, setGpuDevices] = useState<GpuDeviceInfo[]>([]);
+    const [gpuDevicesLoaded, setGpuDevicesLoaded] = useState(false);
 
+    // Load GPU devices on mount
+    useEffect(() => {
+        let cancelled = false;
+        coreApi.getGpuDevices().then((result) => {
+            if (!cancelled) {
+                setGpuDevices(result.devices ?? []);
+                setGpuDevicesLoaded(true);
+            }
+        }).catch(() => {
+            if (!cancelled) setGpuDevicesLoaded(true);
+        });
+        return () => { cancelled = true; };
+    }, []);
 
     // Edit dialog states
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
@@ -533,18 +551,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
                         {tAny("menu_appearance_settings")}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
-                        {(t as (key: string) => string)("menu_keybindings")}
-                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{tAny("menu_stretch")}</span>
+                    <span>{t("menu_preferences")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    {/* Keyboard Shortcuts — at the top */}
+                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
+                        {t("menu_keybindings")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tAny("stretch_project_override")}
@@ -720,19 +740,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* Inference Device */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {`Inference Device: ${s.ortEp === "auto" ? "Auto" : s.ortEp === "cpu" ? "CPU" : s.ortEp === "cuda" ? "GPU (CUDA)" : s.ortEp}`}
+                            {`${t("menu_inference_device")}: ${s.ortEp === "auto" ? t("menu_inference_auto") : s.ortEp === "cpu" ? t("menu_inference_cpu") : s.ortEp === "cuda" ? t("menu_inference_cuda") : s.ortEp}`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {(["auto", "cpu", "cuda"] as const).map((ep) => {
                                 const labels: Record<string, string> = {
-                                    auto: "Auto (system default)",
-                                    cpu: "CPU",
-                                    cuda: "GPU (CUDA)",
+                                    auto: t("menu_inference_auto"),
+                                    cpu: t("menu_inference_cpu"),
+                                    cuda: t("menu_inference_cuda"),
                                 };
                                 return (
                                     <DropdownMenu.Item
                                         key={ep}
-                                        onSelect={() => {
+                                        onSelect={(e) => {
+                                            e.preventDefault(); // Keep menu open so GPU list appears
                                             dispatch(setOrtEp(ep));
                                             void dispatch(persistUiSettings());
                                         }}
@@ -741,11 +762,43 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     </DropdownMenu.Item>
                                 );
                             })}
+
+                            {/* GPU device selector (appears when CUDA selected, menu stays open) */}
+                            {s.ortEp === "cuda" && gpuDevices.length > 0 && (
+                                <>
+                                    <DropdownMenu.Separator />
+                                    <DropdownMenu.Label>
+                                        {t("menu_select_gpu_device")}
+                                    </DropdownMenu.Label>
+                                    {gpuDevices.map((gpu) => (
+                                        <DropdownMenu.Item
+                                            key={gpu.deviceId}
+                                            onSelect={() => {
+                                                dispatch(setCudaDeviceId(gpu.deviceId));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.cudaDeviceId === gpu.deviceId,
+                                                `${gpu.name} (${(gpu.memoryMb / 1024).toFixed(1)} GB)`
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </>
+                            )}
+                            {s.ortEp === "cuda" && gpuDevicesLoaded && gpuDevices.length === 0 && (
+                                <DropdownMenu.Item disabled>
+                                    <span style={{ color: "var(--gray-9)" }}>
+                                        {t("menu_no_gpu_detected")}
+                                    </span>
+                                </DropdownMenu.Item>
+                            )}
+
                             <DropdownMenu.Separator />
                             <DropdownMenu.Item
                                 onSelect={() => setBenchmarkDialogOpen(true)}
                             >
-                                Run Benchmark…
+                                {t("menu_run_benchmark")}
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>

@@ -628,6 +628,7 @@ fn clean_stale_ort_dlls() {
         "onnxruntime_providers_cuda.dll",
         "onnxruntime_providers_shared.dll",
         "onnxruntime_providers_tensorrt.dll",
+        "cudart64_12.dll",
         "cublas64_12.dll",
         "cublasLt64_12.dll",
         "cudnn64_9.dll",
@@ -659,22 +660,47 @@ fn clean_stale_ort_dlls() {
                 }
             }
 
-            // Copy active ORT DLLs from ORT_LIB_LOCATION if set
+            // Copy active ORT + CUDA runtime DLLs from ORT_LIB_LOCATION if set.
+            // Without CUDA runtime DLLs (cuBLAS, cuDNN), the CUDA EP loads but
+            // silently falls back to CPU at inference time (~50x slower).
             if let Ok(ort_lib_dir) = std::env::var("ORT_LIB_LOCATION") {
                 let ort_lib_path = std::path::PathBuf::from(ort_lib_dir);
-                let active_dlls = [
-                    "onnxruntime.dll",
-                    "onnxruntime_providers_cuda.dll",
-                    "onnxruntime_providers_shared.dll",
-                ];
-                for dll in &active_dlls {
-                    let src = ort_lib_path.join(dll);
-                    let dst = profile_dir.join(dll);
-                    if src.exists() {
-                        if let Err(e) = std::fs::copy(&src, &dst) {
-                            println!("cargo:warning=[build.rs] Failed to copy active DLL {} to {}: {}", dll, dst.display(), e);
-                        } else {
-                            println!("cargo:warning=[build.rs] Staged active DLL: {}", dll);
+                // Stage all DLLs from ORT_LIB_LOCATION — this includes ORT core,
+                // CUDA provider, and any CUDA runtime DLLs placed there by
+                // setup-gpu-deps.ps1 or download-cuda-runtime.ps1.
+                if let Ok(entries) = std::fs::read_dir(&ort_lib_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) {
+                            if let Some(name) = path.file_name() {
+                                let dst = profile_dir.join(name);
+                                // Only copy if newer or not present
+                                let should_copy = if dst.exists() {
+                                    if let (Ok(src_meta), Ok(dst_meta)) =
+                                        (path.metadata(), dst.metadata())
+                                    {
+                                        src_meta.modified().ok() > dst_meta.modified().ok()
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    true
+                                };
+                                if should_copy {
+                                    if let Err(e) = std::fs::copy(&path, &dst) {
+                                        println!(
+                                            "cargo:warning=[build.rs] Failed to stage DLL {}: {}",
+                                            name.to_string_lossy(),
+                                            e
+                                        );
+                                    } else {
+                                        println!(
+                                            "cargo:warning=[build.rs] Staged: {}",
+                                            name.to_string_lossy()
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }

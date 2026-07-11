@@ -3,7 +3,7 @@ export const enUS = {
     menu_edit: "Edit",
     menu_view: "View",
     menu_track: "Track",
-    menu_stretch: "Stretch",
+    menu_preferences: "Preferences",
     menu_help: "Help",
     menu_new_project: "New Project",
     menu_open_project: "Open Project...",
@@ -94,8 +94,8 @@ export const enUS = {
     reaper_import_skipped_header:
         "Some audio files were skipped during Reaper import (unsupported format or file not found):",
     menu_pick_output: "Pick Output",
-    stretch_project_override: "Project Override",
-    stretch_global_default: "Global Default",
+    stretch_project_override: "Project Stretch Override",
+    stretch_global_default: "Global Stretch Default",
     stretch_algorithm: "Algorithm",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",
     stretch_inherit_global: "Inherit Global",
@@ -817,4 +817,54 @@ export const enUS = {
     ctx_export_midi: "Export as MIDI",
     menu_save_as_pitch_ref: "Save as Pitch Reference Clip",
     menu_export_midi: "Export as MIDI",
+
+    // ── Inference Device / GPU ──────────────────────────────────────────
+    menu_inference_device: "Inference Device",
+    menu_inference_auto: "Auto (system default)",
+    menu_inference_cpu: "CPU",
+    menu_inference_cuda: "GPU (CUDA)",
+    menu_select_gpu_device: "Select GPU Device",
+    menu_no_gpu_detected: "No NVIDIA GPUs detected",
+    menu_run_benchmark: "Run Benchmark…",
+
+    // ── Benchmark ────────────────────────────────────────────────────────
+    benchmark_title: "Inference Device Benchmark",
+    benchmark_desc:
+        "Runs ~12 s of audio through the vocoder on each available device and reports median latency. Use the result to pick the fastest provider.",
+    benchmark_running: "Running benchmark — this may take 20–60 seconds…",
+    benchmark_results: "Results ({samples} frame chunks · 44.1 kHz):",
+    benchmark_device_header: "Device",
+    benchmark_latency_header: "Median latency",
+    benchmark_rtf_header: "RTF",
+    benchmark_rtf_hint: "RTF > 1× = faster than real-time. ⚡ = fastest available device.",
+    benchmark_recommended: "Recommended:",
+    benchmark_failed: "Failed — see below",
+    benchmark_run_btn: "Run Benchmark",
+    benchmark_running_btn: "Running…",
+    benchmark_close: "Close",
+    benchmark_idle_hint: 'Click "Run Benchmark" to start. A model must be loaded first.',
+    benchmark_error_default: "Benchmark failed. Ensure a model is loaded.",
+    benchmark_gpu_failed_title:
+        "⚠ GPU benchmark failed — CUDA registered but cannot execute",
+    benchmark_gpu_failed_desc:
+        "The CUDA execution provider is available in ONNX Runtime but inference failed. This usually means CUDA runtime DLLs (cuBLAS, cuDNN) are missing from the executable directory.",
+    benchmark_gpu_dll_missing_fix: "Fix:",
+    benchmark_gpu_broken_title:
+        "⚠ GPU Acceleration BROKEN — Missing CUDA Runtime DLLs",
+    benchmark_gpu_broken_desc:
+        "ONNX Runtime can see your NVIDIA GPU and the CUDA provider is available, but cuBLAS and cuDNN are missing from the executable directory. CUDA will silently fall back to CPU.",
+    benchmark_gpu_fix_cmd1:
+        "> .\\setup-gpu-deps.ps1   # one-time setup (downloads ORT + cuBLAS + cuDNN)",
+    benchmark_gpu_fix_cmd2:
+        "> .\\dev-gpu.ps1          # start dev server (auto-copies all DLLs)",
+    benchmark_gpu_failed_dll_ok_title:
+        "⚠ GPU benchmark failed despite CUDA being available",
+    benchmark_gpu_failed_dll_ok_desc:
+        "The CUDA EP is available and DLLs are present, but inference failed. This may indicate a driver or hardware issue.",
+    benchmark_cuda_dll_label: "CUDA runtime DLLs:",
+    benchmark_cuda_dll_yes: "Found ✅",
+    benchmark_cuda_dll_no: "MISSING — GPU will not work ⚠",
+    benchmark_providers_label: "Available providers:",
+    benchmark_nvml_label: "NVIDIA GPUs detected via NVML:",
+    benchmark_cuda_device_label: "CUDA device:",
 } as const;
