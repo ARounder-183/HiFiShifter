@@ -438,8 +438,10 @@ fn build_soundtouch() {
                 } else {
                     patched
                 };
-                std::fs::write(&rc_file, &patched).expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
-                println!("cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h");
+                if patched != content {
+                    std::fs::write(&rc_file, &patched).expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
+                    println!("cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h");
+                }
             }
         }
     }
@@ -546,9 +548,10 @@ fn build_soundtouch() {
         );
     }
 
-    // Also copy to a stable path under third_party/ so tauri.conf.json can reference it
+    // Also copy to a stable path under third_party/ so tauri.conf.json can reference it.
+    // Skip if destination already exists to avoid triggering cargo's file watcher loop.
     let lib_dst_resource = st_src_path.join(&lib_filename);
-    if lib_dst_resource != lib_dst_target {
+    if lib_dst_resource != lib_dst_target && !lib_dst_resource.exists() {
         if let Err(e) = std::fs::copy(&lib_src, &lib_dst_resource) {
             println!(
                 "cargo:warning=[soundtouch] could not copy {} to resource path {}: {}",
