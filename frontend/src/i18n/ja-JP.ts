@@ -286,8 +286,6 @@ export const jaJP = {
     hide_secondary_param: "サブパラメータオーバーレイを非表示",
     onnx_compile_required: "ONNX モデルが未コンパイルです。実行：cargo tauri dev --features onnx",
     onnx_unavailable_label: "（利用不可）",
-    gpu_label: "GPU",
-    cpu_label: "CPU",
     solo: "ソロ",
     status_analyzing_pitch: "ピッチを分析中",
     status_stretching: "タイムストレッチ中",
