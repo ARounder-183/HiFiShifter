@@ -10,6 +10,36 @@ use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// Runtime override for EP choice. Set by `set_runtime_ep_override()`.
+/// Takes precedence over the `HIFISHIFTER_ORT_EP` env var.
+static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+/// Set the runtime EP override. Pass `None` to clear the override.
+pub fn set_runtime_ep_override(ep: Option<String>) {
+    if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
+        *guard = ep;
+    }
+}
+
+/// Returns the runtime EP override if set, otherwise falls back to env var.
+fn ep_choice() -> String {
+    RUNTIME_EP_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| env_ep_choice())
+}
+
+fn env_ep_choice() -> String {
+    std::env::var("HIFISHIFTER_ORT_EP")
+        .ok()
+        .unwrap_or_else(|| "auto".to_string())
+        .trim()
+        .to_ascii_lowercase()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrtSessionRole {
@@ -19,14 +49,6 @@ pub enum OrtSessionRole {
     PitchDetector,
     /// HNSEP harmonic+noise separation — medium model, share GPU with vocoder.
     Separator,
-}
-
-fn env_ep_choice() -> String {
-    std::env::var("HIFISHIFTER_ORT_EP")
-        .ok()
-        .unwrap_or_else(|| "auto".to_string())
-        .trim()
-        .to_ascii_lowercase()
 }
 
 fn env_i32(name: &str) -> Option<i32> {
@@ -106,7 +128,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     let mut builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
-    let choice = env_ep_choice();
+    let choice = ep_choice();
     let selected: &str;
 
     match choice.as_str() {
@@ -179,7 +201,8 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     }
 
     eprintln!(
-        "ort_session: role={role:?} ep={selected} (HIFISHIFTER_ORT_EP={choice:?}, cuda_mem_limit={}MB)",
+        "ort_session: role={role:?} ep={selected} (ep_choice={choice:?}, env={:?}, cuda_mem_limit={}MB)",
+        env_ep_choice(),
         env_cuda_mem_limit_bytes() / (1024 * 1024)
     );
 
@@ -213,33 +236,51 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     Ok((session, selected.to_string()))
 }
 
-/// RAII guard that temporarily overrides the `HIFISHIFTER_ORT_EP` env var for
-/// the duration of a benchmark session, restoring the previous value on drop.
+/// RAII guard that temporarily overrides the EP choice for the duration of a
+/// benchmark session, restoring the previous value on drop.
 ///
 /// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
 /// "cuda") without permanently changing the process-wide setting.
+///
+/// Sets both the runtime override (which takes precedence in `ep_choice()`)
+/// and the env var (for any code that reads it directly).
 pub struct EpOverrideGuard {
-    prev: Option<String>,
+    prev_override: Option<String>,
+    prev_env: Option<String>,
 }
 
 impl EpOverrideGuard {
     pub fn new(ep: String) -> Self {
-        let prev = std::env::var("HIFISHIFTER_ORT_EP").ok();
-        // Safety: benchmark serialises session creation; env mutation is
-        // single-threaded at the point this guard is held.
+        // Save previous runtime override
+        let prev_override = RUNTIME_EP_OVERRIDE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+
+        // Set new runtime override
+        set_runtime_ep_override(Some(ep.clone()));
+
+        // Also set env var for code that reads it directly
+        let prev_env = std::env::var("HIFISHIFTER_ORT_EP").ok();
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var("HIFISHIFTER_ORT_EP", &ep);
         }
-        Self { prev }
+
+        Self { prev_override, prev_env }
     }
 }
 
 impl Drop for EpOverrideGuard {
     fn drop(&mut self) {
+        // Restore runtime override
+        set_runtime_ep_override(self.prev_override.clone());
+
+        // Restore env var
         #[allow(unused_unsafe)]
         unsafe {
-            match &self.prev {
+            match &self.prev_env {
                 Some(v) => std::env::set_var("HIFISHIFTER_ORT_EP", v),
                 None => std::env::remove_var("HIFISHIFTER_ORT_EP"),
             }
