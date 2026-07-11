@@ -222,7 +222,9 @@ export const WaveformTrackCanvas = React.memo(
                 if (visRightPx <= visLeftPx) continue;
                 const pr = Math.max(1e-6, clip.playbackRate);
                 const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
-                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx));
+                // 减 epsilon 吸收浮点噪声，防止 Math.ceil 在整数边界振荡导致帧间闪烁
+                // 详见 docs/plans/2026-03-20-waveform-rendering-refactor.md 波形渲染链路分析
+                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx - 1e-9));
 
                 // 计算源文件时间范围
                 const sampleRate = clip.sourceSampleRate || 44100;
@@ -326,7 +328,8 @@ export const WaveformTrackCanvas = React.memo(
                 // --- 从这里开始替换 ---
 
                 // 偏移量改为相对于主屏幕，而不是裁剪视口
-                const clipPixelOffset = viewportStartPx - clipStartPx;
+                // 量化到半像素粒度，消除大浮点数相减导致的子像素漂移
+                const clipPixelOffset = Math.round((viewportStartPx - clipStartPx) * 2) / 2;
 
                 // 构建渲染参数
                 const params: WaveformRenderParams = {
