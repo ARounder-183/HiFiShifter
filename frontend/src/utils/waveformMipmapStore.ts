@@ -40,7 +40,7 @@ const LEVEL_COUNT = 3;
  * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
  * 该上限在"避免内存累积"与"频繁切换音频不需要重新解码"之间取折中。
  */
-const MAX_FILE_CACHE_SIZE = 32;
+const MAX_FILE_CACHE_SIZE = 128;
 
 // ============== 类型 ==============
 
