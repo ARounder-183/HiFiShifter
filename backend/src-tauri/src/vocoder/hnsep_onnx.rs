@@ -1,6 +1,5 @@
 use blake3::Hasher;
 use lru::LruCache;
-use ort::ep;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::num::NonZeroUsize;
@@ -26,13 +25,6 @@ fn hnsep_cache_initial_capacity() -> usize {
         .unwrap_or(HNSEP_CACHE_CAPACITY_DEFAULT)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrtExecutionProviderChoice {
-    Auto,
-    Cpu,
-    Cuda,
-}
-
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
         ort::init().with_name("hifishifter").commit();
@@ -41,23 +33,6 @@ fn ensure_ort_init() -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) => Err(e.clone()),
     }
-}
-
-fn env_ep_choice() -> OrtExecutionProviderChoice {
-    let v = std::env::var("HIFISHIFTER_ORT_EP")
-        .ok()
-        .unwrap_or_else(|| "auto".to_string());
-    match v.trim().to_ascii_lowercase().as_str() {
-        "cpu" => OrtExecutionProviderChoice::Cpu,
-        "cuda" => OrtExecutionProviderChoice::Cuda,
-        _ => OrtExecutionProviderChoice::Auto,
-    }
-}
-
-fn env_i32(name: &str) -> Option<i32> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
 }
 
 fn debug_enabled() -> bool {
@@ -86,7 +61,7 @@ fn resolve_model_path() -> Result<PathBuf, String> {
         return Ok(onnx);
     }
 
-    if let Some(dir) = env_path("HIFISHIFTER_HNSEP_MODEL_DIR").or_else(default_model_dir_guess) {
+    if let Some(dir) = crate::hnsep_model_dir().map(|p| p.to_path_buf()).or_else(default_model_dir_guess) {
         let onnx = dir.join("hnsep.onnx");
         if onnx.is_file() {
             return Ok(onnx);
@@ -100,35 +75,15 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let mut builder =
-        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
-
-    let choice = env_ep_choice();
-    let device_id = env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0);
-
-    match choice {
-        OrtExecutionProviderChoice::Cpu => {}
-        OrtExecutionProviderChoice::Cuda => {
-            builder = builder
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-                .map_err(|e| format!("enable CUDA EP failed: {e}"))?;
-        }
-        OrtExecutionProviderChoice::Auto => {
-            if let Ok(b) = builder
-                .clone()
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-            {
-                builder = b;
-            }
-        }
-    }
-
-    builder
-        .commit_from_file(onnx_path)
-        .map_err(|e| format!("load HNSEP onnx into ort session failed: {e}"))
+    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(onnx_path, crate::vocoder_ort_session::OrtSessionRole::Separator)?;
+    Ok(session)
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
+    // Fast path: session already initialised.
+    if let Some(s) = SHARED_SESSION.get() {
+        return Ok(Arc::clone(s));
+    }
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;
     let session = build_session_with_ep(&onnx_path)?;
@@ -175,29 +130,6 @@ pub fn probe_load() -> Result<String, String> {
     ))
 }
 
-fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-    if in_rate == out_rate || in_rate == 0 || out_rate == 0 {
-        return input.to_vec();
-    }
-
-    let ratio = out_rate as f64 / in_rate as f64;
-    let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
-    let mut out = vec![0.0f32; out_len];
-    for (index, sample) in out.iter_mut().enumerate() {
-        let src = index as f64 / ratio;
-        let i0 = src.floor().max(0.0) as usize;
-        let i1 = (i0 + 1).min(input.len().saturating_sub(1));
-        let frac = (src - i0 as f64).clamp(0.0, 1.0) as f32;
-        let a = input[i0];
-        let b = input[i1];
-        *sample = a + (b - a) * frac;
-    }
-    out
-}
-
 #[derive(Clone)]
 struct HnsepCacheEntry {
     harmonic: Arc<Vec<f32>>,
@@ -235,8 +167,16 @@ fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_mono: &[f32]) -> 
     hasher.update(clip_id.as_bytes());
     hasher.update(&sample_rate.to_le_bytes());
     hasher.update(&(audio_mono.len() as u64).to_le_bytes());
-    for sample in audio_mono {
+    // Hash first and last 64 samples for a fast fingerprint (sufficient for 128-entry cache).
+    let head = audio_mono.len().min(64);
+    for sample in &audio_mono[..head] {
         hasher.update(&sample.to_bits().to_le_bytes());
+    }
+    if audio_mono.len() > 64 {
+        let tail_start = audio_mono.len() - 64;
+        for sample in &audio_mono[tail_start..] {
+            hasher.update(&sample.to_bits().to_le_bytes());
+        }
     }
     let bytes = hasher.finalize();
     let mut key = [0u8; 8];
@@ -248,7 +188,7 @@ pub fn infer_harmonic_noise_mono(
     clip_id: &str,
     audio_mono: &[f32],
     sample_rate: u32,
-) -> Result<(Vec<f32>, Vec<f32>), String> {
+) -> Result<(Arc<Vec<f32>>, Arc<Vec<f32>>), String> {
     if let Err(e) = probe() {
         return Err(e.clone());
     }
@@ -259,17 +199,14 @@ pub fn infer_harmonic_noise_mono(
             .lock()
             .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
         if let Some(entry) = cache.get(&cache_key) {
-            return Ok((
-                entry.harmonic.as_ref().clone(),
-                entry.noise.as_ref().clone(),
-            ));
+            return Ok((entry.harmonic.clone(), entry.noise.clone()));
         }
     }
 
     let model_audio = if sample_rate == HNSEP_MODEL_SR {
         audio_mono.to_vec()
     } else {
-        linear_resample_mono(audio_mono, sample_rate, HNSEP_MODEL_SR)
+        crate::mel_utils::linear_resample_mono(audio_mono, sample_rate, HNSEP_MODEL_SR)
     };
 
     let waveform_tensor =
@@ -307,8 +244,8 @@ pub fn infer_harmonic_noise_mono(
     };
 
     if sample_rate != HNSEP_MODEL_SR {
-        harmonic = linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate);
-        noise = linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate);
+        harmonic = crate::mel_utils::linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate);
+        noise = crate::mel_utils::linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate);
     }
 
     harmonic.resize(audio_mono.len(), 0.0);
@@ -320,14 +257,16 @@ pub fn infer_harmonic_noise_mono(
         noise.truncate(audio_mono.len());
     }
 
+    let harmonic_arc = Arc::new(harmonic);
+    let noise_arc = Arc::new(noise);
     let entry = HnsepCacheEntry {
-        harmonic: Arc::new(harmonic.clone()),
-        noise: Arc::new(noise.clone()),
+        harmonic: harmonic_arc.clone(),
+        noise: noise_arc.clone(),
     };
     let mut cache = global_cache()
         .lock()
         .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
     cache.put(cache_key, entry);
 
-    Ok((harmonic, noise))
+    Ok((harmonic_arc, noise_arc))
 }
