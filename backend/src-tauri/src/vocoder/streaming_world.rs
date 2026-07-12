@@ -356,7 +356,9 @@ impl StreamingWorldSynthesizer {
         buffer_size: usize,
         number_of_pointers: usize,
     ) -> Self {
-        // 零初始化，避免未定义行为
+        // SAFETY: WorldSynthesizerRaw is a C FFI struct initialized by InitializeSynthesizer
+        // immediately after allocation. Zero-init is the standard pattern for C FFI types.
+        #[allow(clippy::uninit_assumed_init)]
         let mut inner: Box<WorldSynthesizerRaw> = unsafe { Box::new(std::mem::zeroed()) };
 
         unsafe {

@@ -17,6 +17,7 @@ import {
     saveProjectAsRemote,
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
+    setOrtEp,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
 import {
@@ -46,6 +47,8 @@ import {
 import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
+import { BenchmarkDialog } from "./BenchmarkDialog";
+
 import {
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
@@ -82,6 +85,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
+    const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
+
 
     // Edit dialog states
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
@@ -709,6 +714,41 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Sub>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
+
+                    <DropdownMenu.Separator />
+
+                    {/* Inference Device */}
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {`Inference Device: ${s.ortEp === "auto" ? "Auto" : s.ortEp === "cpu" ? "CPU" : s.ortEp === "cuda" ? "GPU (CUDA)" : s.ortEp}`}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            {(["auto", "cpu", "cuda"] as const).map((ep) => {
+                                const labels: Record<string, string> = {
+                                    auto: "Auto (system default)",
+                                    cpu: "CPU",
+                                    cuda: "GPU (CUDA)",
+                                };
+                                return (
+                                    <DropdownMenu.Item
+                                        key={ep}
+                                        onSelect={() => {
+                                            dispatch(setOrtEp(ep));
+                                            void dispatch(persistUiSettings());
+                                        }}
+                                    >
+                                        {withCheck(s.ortEp === ep, labels[ep])}
+                                    </DropdownMenu.Item>
+                                );
+                            })}
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item
+                                onSelect={() => setBenchmarkDialogOpen(true)}
+                            >
+                                Run Benchmark…
+                            </DropdownMenu.Item>
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -774,6 +814,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setAutoBackupDialogOpen}
                 onSettingsSaved={onAutoBackupSettingsSaved}
             />
+
+            {/* Inference device benchmark */}
+            <BenchmarkDialog
+                open={benchmarkDialogOpen}
+                onOpenChange={setBenchmarkDialogOpen}
+            />
+
 
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (

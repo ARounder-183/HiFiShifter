@@ -1,4 +1,5 @@
 import type {
+    BenchmarkResult,
     ModelConfigResult,
     OnnxDiagnosticResult,
     OnnxStatusResult,
@@ -174,6 +175,7 @@ export const coreApi = {
     // ONNX status and diagnostics
     getOnnxStatus: () => invoke<OnnxStatusResult>("get_onnx_status"),
     getOnnxDiagnostic: () => invoke<OnnxDiagnosticResult>("get_onnx_diagnostic"),
+    runVocoderBenchmark: () => invoke<BenchmarkResult>("run_vocoder_benchmark"),
 
     // Async pitch refresh task system
     startPitchRefreshTask: (rootTrackId: string) =>
