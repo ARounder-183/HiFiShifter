@@ -41,17 +41,6 @@ fn emit_chunk_progress(_local: f64) {
 /// Tracks which execution provider was actually selected during session creation.
 static ACTIVE_EP: OnceLock<String> = OnceLock::new();
 
-/// Runtime override for EP choice. Set by `update_ort_ep()`. Takes precedence over env var.
-static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-
-fn get_runtime_ep_override() -> Option<String> {
-    RUNTIME_EP_OVERRIDE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-}
-
 /// Returns the EP that was actually used for the live session (e.g. "cuda", "cpu").
 pub fn active_ep() -> String {
     ACTIVE_EP.get().cloned().unwrap_or_else(|| "unknown".to_string())
@@ -471,6 +460,15 @@ static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::
 /// 递增此 Epoch 可以促使所有 Thread Local 重新加载 ONNX 实例以同步 EP 切换。
 static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Drop the shared ORT session to release CUDA memory. Called on app exit.
+pub fn drop_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+}
+
 /// 初始化（或获取已有的）全局 Session。
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
@@ -489,10 +487,8 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
 pub fn update_ort_ep(choice: &str) {
     let ep_str = choice.trim().to_lowercase();
     
-    // 写入运行时 EP 覆盖设置
-    if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
-        *guard = Some(ep_str);
-    }
+    // 写入运行时 EP 覆盖设置（存储在 ort_session 模块中）
+    crate::vocoder_ort_session::set_runtime_ep_override(Some(ep_str));
     
     // 重置全局 Session，下一次渲染请求时将自动使用新 EP 重新创建
     if let Some(mutex) = SHARED_SESSION.get() {

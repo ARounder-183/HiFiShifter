@@ -61,6 +61,8 @@ pub fn active_ep() -> String {
 
 pub fn update_ort_ep(_choice: &str) {}
 
+pub fn drop_shared_session() {}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkResults {
