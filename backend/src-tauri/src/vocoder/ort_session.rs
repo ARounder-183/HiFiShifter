@@ -103,9 +103,9 @@ fn build_trt_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
         .with_max_workspace_size(arena_bytes as usize)
         .with_fp16(true)
         .with_engine_cache(true)
-        .with_engine_cache_path("/tmp/hifishifter/trt_engine_cache")
+        .with_engine_cache_path(std::env::temp_dir().join("hifishifter").join("trt_engine_cache"))
         .with_timing_cache(true)
-        .with_timing_cache_path("/tmp/hifishifter/trt_timing_cache")
+        .with_timing_cache_path(std::env::temp_dir().join("hifishifter").join("trt_timing_cache"))
         .with_force_timing_cache(true)
         .with_build_heuristics(true)
         .with_builder_optimization_level(3);
