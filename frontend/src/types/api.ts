@@ -314,6 +314,14 @@ export interface BenchmarkResult {
     gpuDevices: GpuDeviceInfo[];
 }
 
+export interface BenchmarkResult {
+    cpuMedianMs: number;
+    cpuRtFactor: number;
+    gpuMedianMs?: number | null;
+    gpuRtFactor?: number | null;
+    benchmarkSamples: number;
+}
+
 export interface PitchTaskStatusPayload {
     status: "running" | "completed" | "failed" | "cancelled";
     progress: number;
