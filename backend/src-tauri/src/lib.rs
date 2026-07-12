@@ -33,6 +33,7 @@ mod vocoder_ort_session {
     pub use _inner::*;
 }
 #[cfg(feature = "onnx")]
+#[allow(unused_imports)]
 use vocoder_ort_session as ort_session;
 
 mod vocoder_mel_utils {
@@ -362,6 +363,7 @@ pub fn run() {
             commands::get_pitch_analysis_progress,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
+            commands::run_vocoder_benchmark,
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,

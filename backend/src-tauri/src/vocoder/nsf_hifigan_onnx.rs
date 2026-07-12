@@ -1,9 +1,6 @@
 use ndarray::Array2;
 use num_complex::Complex32;
-use ort::ep;
-use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
 use rustfft::Fft;
 use rustfft::FftPlanner;
@@ -2251,3 +2248,91 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
         Ok(results)
     })
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkResults {
+    pub cpu_median_ms: f64,
+    pub cpu_rt_factor: f64,
+    pub gpu_median_ms: Option<f64>,
+    pub gpu_rt_factor: Option<f64>,
+    pub benchmark_samples: usize,
+}
+
+pub fn run_benchmark() -> Result<BenchmarkResults, String> {
+    ensure_ort_init()?;
+    let (onnx_path, cfg_path) = resolve_model_paths()?;
+    let cfg = read_config(&cfg_path)?;
+    
+    let frames = 1024;
+    let audio_sec = (frames as f64) * (cfg.hop_size as f64) / (cfg.sampling_rate as f64);
+    let runs = 5;
+
+    // 1. Benchmark CPU
+    let mut cpu_times = Vec::new();
+    {
+        // Build CPU Session via the central vocoder_ort_session helper by overriding environment
+        let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cpu".to_string());
+        let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)?;
+
+        // Warmup
+        let mel = vec![0.0f32; cfg.num_mels * frames];
+        let f0 = vec![440.0f32; frames];
+        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+        let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
+
+        for _ in 0..runs {
+            let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+            let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+            let t = std::time::Instant::now();
+            let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
+            cpu_times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    cpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let cpu_median = cpu_times[cpu_times.len() / 2];
+    let cpu_rt_factor = audio_sec / (cpu_median / 1000.0);
+
+    // 2. Benchmark GPU (CUDA) if available
+    let mut gpu_median = None;
+    let mut gpu_rt_factor = None;
+    
+    let mut gpu_times = Vec::new();
+    let gpu_session_res = {
+        let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cuda".to_string());
+        crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
+    };
+
+    if let Ok((mut gpu_session, ep)) = gpu_session_res {
+        if ep == "cuda" {
+            // Warmup
+            let mel = vec![0.0f32; cfg.num_mels * frames];
+            let f0 = vec![440.0f32; frames];
+            let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+            let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+            if gpu_session.run(ort::inputs![mt, ft]).is_ok() {
+                for _ in 0..runs {
+                    let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+                    let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                    let t = std::time::Instant::now();
+                    let _ = gpu_session.run(ort::inputs![mt, ft]).unwrap();
+                    gpu_times.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let median = gpu_times[gpu_times.len() / 2];
+                gpu_median = Some(median);
+                gpu_rt_factor = Some(audio_sec / (median / 1000.0));
+            }
+        }
+    }
+
+    Ok(BenchmarkResults {
+        cpu_median_ms: cpu_median,
+        cpu_rt_factor,
+        gpu_median_ms: gpu_median,
+        gpu_rt_factor,
+        benchmark_samples: runs,
+    })
+}
+
