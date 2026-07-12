@@ -13,3 +13,5 @@ pub fn infer_harmonic_noise_mono(
 ) -> Result<(std::sync::Arc<Vec<f32>>, std::sync::Arc<Vec<f32>>), String> {
     Err("onnx feature disabled".to_string())
 }
+
+pub fn drop_shared_session() {}

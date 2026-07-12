@@ -40,7 +40,7 @@ fn cent_to_hz(cent: f64) -> f64 {
 }
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static SHARED_SESSION: OnceLock<Arc<Mutex<Session>>> = OnceLock::new();
+static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
 static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
@@ -110,18 +110,26 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
-    // Fast path: session already initialised — return it without loading the model.
-    if let Some(s) = SHARED_SESSION.get() {
-        return Ok(Arc::clone(s));
+    let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    if let Some(ref session) = *guard {
+        return Ok(Arc::clone(session));
     }
-    // Slow path: load ONNX, create CUDA/CPU session, store in the OnceLock.
-    // Only one thread actually stores; the rest see the value already present and
-    // their freshly-built Arc is dropped, but the session load is rare (first call only).
     ensure_ort_init()?;
     let onnx_path = resolve_model_path()?;
     let session = build_session_with_ep(&onnx_path)?;
     let arc = Arc::new(Mutex::new(session));
-    Ok(Arc::clone(SHARED_SESSION.get_or_init(|| Arc::clone(&arc))))
+    *guard = Some(Arc::clone(&arc));
+    Ok(arc)
+}
+
+/// Drop the shared session to release CUDA memory. Called on app exit.
+pub fn drop_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn probe() -> &'static Result<(), String> {

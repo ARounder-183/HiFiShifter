@@ -388,6 +388,20 @@ pub fn run() {
             commands::get_ui_settings,
             commands::save_ui_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Shut down audio engine: stop meter thread, send Shutdown to
+                // worker threads, and drop the channel sender so all worker
+                // threads exit their recv loops.
+                let state = app_handle.state::<state::AppState>();
+                state.audio_engine.shutdown();
+
+                // Force-drop all ONNX sessions to release CUDA memory before exit.
+                crate::nsf_hifigan_onnx::drop_shared_session();
+                crate::fcpe_onnx::drop_shared_session();
+                crate::hnsep_onnx::drop_shared_session();
+            }
+        });
 }
