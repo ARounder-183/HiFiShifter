@@ -1,6 +1,7 @@
 use ndarray::Array2;
 use num_complex::Complex32;
 use ort::ep;
+use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
@@ -14,6 +15,51 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// Global progress callback for chunk rendering. Set before render, cleared after.
+static CHUNK_PROGRESS_CB: OnceLock<Mutex<Option<Box<dyn Fn(f64) + Send + Sync>>>> = OnceLock::new();
+static CHUNK_PROGRESS_TOTAL: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+static CHUNK_PROGRESS_DONE: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
+
+pub fn set_chunk_progress_callback(cb: Option<Box<dyn Fn(f64) + Send + Sync>>) {
+    let slot = CHUNK_PROGRESS_CB.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap() = cb;
+}
+
+pub fn reset_chunk_progress(total: usize) {
+    CHUNK_PROGRESS_TOTAL.get_or_init(|| std::sync::atomic::AtomicUsize::new(0)).store(total, std::sync::atomic::Ordering::Relaxed);
+    CHUNK_PROGRESS_DONE.get_or_init(|| std::sync::atomic::AtomicUsize::new(0)).store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn emit_chunk_progress(_local: f64) {
+    let done = CHUNK_PROGRESS_DONE.get().map(|a| a.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1).unwrap_or(0);
+    let total = CHUNK_PROGRESS_TOTAL.get().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(1);
+    let progress = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+    if let Some(slot) = CHUNK_PROGRESS_CB.get() {
+        if let Some(cb) = slot.lock().unwrap().as_ref() {
+            cb(progress);
+        }
+    }
+}
+
+/// Tracks which execution provider was actually selected during session creation.
+static ACTIVE_EP: OnceLock<String> = OnceLock::new();
+
+/// Runtime override for EP choice. Set by `update_ort_ep()`. Takes precedence over env var.
+static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn get_runtime_ep_override() -> Option<String> {
+    RUNTIME_EP_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+/// Returns the EP that was actually used for the live session (e.g. "cuda", "cpu").
+pub fn active_ep() -> String {
+    ACTIVE_EP.get().cloned().unwrap_or_else(|| "unknown".to_string())
+}
+
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
         ort::init().with_name("hifishifter").commit();
@@ -24,100 +70,15 @@ fn ensure_ort_init() -> Result<(), String> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrtExecutionProviderChoice {
-    Auto,
-    Cpu,
-    Cuda,
-}
-
-fn env_ep_choice() -> OrtExecutionProviderChoice {
-    let v = std::env::var("HIFISHIFTER_ORT_EP")
-        .ok()
-        .unwrap_or_else(|| "auto".to_string());
-    match v.trim().to_ascii_lowercase().as_str() {
-        "cpu" => OrtExecutionProviderChoice::Cpu,
-        "cuda" => OrtExecutionProviderChoice::Cuda,
-        "auto" | "" => OrtExecutionProviderChoice::Auto,
-        _ => OrtExecutionProviderChoice::Auto,
-    }
-}
-
-fn env_i32(name: &str) -> Option<i32> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-}
-
-fn debug_enabled() -> bool {
-    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
-}
-
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let mut builder =
-        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
-
-    let choice = env_ep_choice();
-    let device_id = env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0);
-
-    let selected: &str;
-
-    match choice {
-        OrtExecutionProviderChoice::Cpu => {
-            // Default session uses CPU EP.
-            selected = "cpu";
-        }
-        OrtExecutionProviderChoice::Cuda => {
-            builder = builder
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-                .map_err(|e| format!("enable CUDA EP failed: {e}"))?;
-            selected = "cuda";
-        }
-        OrtExecutionProviderChoice::Auto => {
-            // Try CUDA first, then fall back to CPU.
-            match builder
-                .clone()
-                .with_execution_providers([ep::CUDA::default().with_device_id(device_id).build()])
-            {
-                Ok(b) => {
-                    builder = b;
-                    selected = "cuda";
-                }
-                Err(e) => {
-                    if debug_enabled() {
-                        eprintln!(
-                            "nsf_hifigan_onnx: CUDA EP unavailable, falling back to CPU: {e}"
-                        );
-                    }
-                    selected = "cpu";
-                }
-            }
-        }
-    }
-
-    if debug_enabled() {
-        eprintln!("nsf_hifigan_onnx: ort ep={selected} (HIFISHIFTER_ORT_EP={:?}, cuda_device_id={device_id})", choice);
-    }
-
-    // 启用全图优化：算子融合、常量折叠、layout 优化
-    builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("set graph optimization level failed: {e}"))?;
-
-    // 线程配置：GPU 下减少 CPU 线程避免竞争，CPU 下用一半核心
-    let threads = if selected == "cpu" {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(2)
-    } else {
-        1
-    };
-    builder = builder
-        .with_intra_threads(threads)
-        .map_err(|e| format!("set intra op threads failed: {e}"))?;
-
-    builder
-        .commit_from_file(onnx_path)
-        .map_err(|e| format!("load onnx into ort session failed: {e}"))
+    let (session, ep) = crate::vocoder_ort_session::build_ort_session(
+        onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+    )?;
+    let _ = ACTIVE_EP.set(ep);
+    Ok(session)
 }
+
 
 #[derive(Debug, Clone, Deserialize)]
 struct NsfHifiganConfig {
@@ -506,21 +467,49 @@ fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &m
     }));
 }
 
-/// 进程级全局共享的 ORT Session。
-/// ORT Session::run() 需要 &mut self，因此用 Mutex 保护。
-static SHARED_SESSION: OnceLock<Arc<Mutex<Session>>> = OnceLock::new();
+/// 进程级全局共享的 ORT Session 容器。
+/// 使用 Mutex 允许我们在运行时修改 Session 以切换 EPs。
+static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
+
+/// 递增此 Epoch 可以促使所有 Thread Local 重新加载 ONNX 实例以同步 EP 切换。
+static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 初始化（或获取已有的）全局 Session。
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
-    if let Some(s) = SHARED_SESSION.get() {
-        return Ok(Arc::clone(s));
+    let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    if let Some(ref session) = *guard {
+        return Ok(Arc::clone(session));
     }
     ensure_ort_init()?;
     let (onnx_path, _cfg_path) = resolve_model_paths()?;
     let session = build_session_with_ep(&onnx_path)?;
     let arc = Arc::new(Mutex::new(session));
-    // get_or_init 保证只有一个线程真正写入，其余线程拿到同一个 Arc。
-    Ok(Arc::clone(SHARED_SESSION.get_or_init(|| Arc::clone(&arc))))
+    *guard = Some(Arc::clone(&arc));
+    Ok(arc)
+}
+
+pub fn update_ort_ep(choice: &str) {
+    let ep_str = choice.trim().to_lowercase();
+    
+    // 写入运行时 EP 覆盖设置
+    if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
+        *guard = Some(ep_str);
+    }
+    
+    // 重置全局 Session，下一次渲染请求时将自动使用新 EP 重新创建
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+    
+    // 更新 Epoch，这会告知所有的 TLS 缓存将他们的本地 NsfHifiganOnnx 实例作废并重新载入
+    SESSION_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    
+    // 清除全局 Active EP 状态
+    // 我们必须允许 ACTIVE_EP 被重置。但是 OnceLock 无法被重写。
+    // 在 active_ep() 中我们将利用动态逻辑或仅读取它。
 }
 
 pub struct NsfHifiganOnnx {
@@ -539,10 +528,13 @@ pub struct NsfHifiganOnnx {
     f0_scratch: Vec<f32>,
     /// mel 切片暂存，容量 = CHUNK_MAX_FRAMES * num_mels，分块循环中复用。
     mel_seg_buf: Vec<f32>,
+    /// 标记当前实例是在哪个 Epoch 加载的。用于检测重新加载。
+    epoch: usize,
 }
 
 impl NsfHifiganOnnx {
     fn load() -> Result<Self, String> {
+        let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
         let (_onnx_path, cfg_path) = resolve_model_paths()?;
         let cfg = read_config(&cfg_path)?;
 
@@ -579,6 +571,7 @@ impl NsfHifiganOnnx {
             mel_scratch: Vec::new(),
             f0_scratch: Vec::new(),
             mel_seg_buf: Vec::with_capacity(mel_seg_cap),
+            epoch: current_epoch,
         })
     }
 
@@ -784,6 +777,73 @@ impl NsfHifiganOnnx {
         Ok(result)
     }
 
+    /// Each item is (mel_vec, f0_vec, t) where t is the mel frame count.
+    /// Returns Vec of output waveforms, each trimmed to its original expected length.
+    fn run_model_batch(&mut self, items: &[(Vec<f32>, Vec<f32>, usize)]) -> Result<Vec<Vec<f32>>, String> {
+        if items.is_empty() {
+            return Ok(vec![]);
+        }
+        if items.len() == 1 {
+            let (mel, f0, t) = &items[0];
+            return self.run_model(mel.clone(), f0.clone(), *t).map(|v| vec![v]);
+        }
+
+        let n = items.len();
+        let max_t = items.iter().map(|(_, _, t)| *t).max().unwrap_or(1);
+        let n_mels = self.cfg.num_mels;
+        let hop = self.cfg.hop_size;
+
+        // Build batched mel [B, n_mels, max_t] and f0 [B, max_t], zero-padded
+        let mut mel_batch = vec![0.0f32; n * n_mels * max_t];
+        let mut f0_batch = vec![0.0f32; n * max_t];
+        let mut out_lengths = Vec::with_capacity(n);
+
+        for (i, (mel, f0, t)) in items.iter().enumerate() {
+            // mel is (n_mels, t) column-major
+            for m in 0..n_mels {
+                let src_offset = m * t;
+                let dst_offset = (i * n_mels + m) * max_t;
+                mel_batch[dst_offset..dst_offset + t].copy_from_slice(&mel[src_offset..src_offset + t]);
+            }
+            f0_batch[i * max_t..i * max_t + t].copy_from_slice(f0);
+            out_lengths.push(t * hop);
+        }
+
+        let mel_tensor = Tensor::from_array(([n, n_mels, max_t], mel_batch.into_boxed_slice()))
+            .map_err(|e| format!("build batched mel tensor failed: {e}"))?;
+        let f0_tensor = Tensor::from_array(([n, max_t], f0_batch.into_boxed_slice()))
+            .map_err(|e| format!("build batched f0 tensor failed: {e}"))?;
+
+        let all_output: Vec<f32> = {
+            let mut session_guard = self
+                .session
+                .lock()
+                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            let outputs = session_guard
+                .run(ort::inputs![mel_tensor, f0_tensor])
+                .map_err(|e| format!("ort batch run failed: {e}"))?;
+            let output0 = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "onnx returned no outputs".to_string())?;
+            let (_shape, data) = output0
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("ort output type mismatch: {e}"))?;
+            data.to_vec()
+        };
+
+        // Split batched output back into per-clip results
+        let max_out_t = max_t * hop;
+        let mut results = Vec::with_capacity(n);
+        for (i, &expected_len) in out_lengths.iter().enumerate() {
+            let start = i * max_out_t;
+            let end = (start + expected_len).min(all_output.len());
+            results.push(all_output[start..end].to_vec());
+        }
+        Ok(results)
+    }
+
     /// 从全 mel 矩阵切片并推理，复用 `mel_seg_buf` 避免 per-chunk 堆分配。
     fn run_model_chunk(&mut self, mel_full: &[f32], t: usize, frame_off: usize, chunk_t: usize, f0_slice: &[f32]) -> Result<Vec<f32>, String> {
         let n_mels = self.cfg.num_mels;
@@ -947,19 +1007,22 @@ impl NsfHifiganOnnx {
     }
 }
 
-static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+static PROBE: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static TLS_SESSION: RefCell<Option<Result<NsfHifiganOnnx, String>>> = RefCell::new(None);
 }
 
-fn probe() -> &'static Result<(), String> {
-    PROBE.get_or_init(|| {
-        // probe() 同时触发 SHARED_SESSION 的初始化，
-        // 确保后续 TLS load() 直接复用，不再重复加载 ONNX 文件。
-        get_or_init_shared_session().map(|_| ())
-    })
+fn probe() -> Result<(), String> {
+    let mutex = PROBE.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("PROBE lock poisoned: {e}"))?;
+    if let Some(ref res) = *guard {
+        return res.clone();
+    }
+    let res = get_or_init_shared_session().map(|_| ());
+    *guard = Some(res.clone());
+    res
 }
 
 pub fn is_available() -> bool {
@@ -975,6 +1038,45 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Helper to get or reload TLS_SESSION based on global SESSION_EPOCH.
+fn with_tls_session<R>(f: impl FnOnce(&mut NsfHifiganOnnx) -> Result<R, String>) -> Result<R, String> {
+    if let Err(e) = probe() {
+        return Err(e);
+    }
+    
+    let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+    
+    TLS_SESSION.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        
+        // If loaded epoch doesn't match current epoch, discard it
+        if let Some(Ok(ref sess)) = *opt {
+            if sess.epoch != current_epoch {
+                *opt = None;
+            }
+        } else if let Some(Err(_)) = *opt {
+            // Also retry if previous attempt failed but epoch has moved
+            *opt = None;
+        }
+        
+        if opt.is_none() {
+            *opt = Some(NsfHifiganOnnx::load());
+        }
+        
+        let sess = opt
+            .as_mut()
+            .expect("TLS_SESSION initialized")
+            .as_mut()
+            .map_err(|e| e.clone())?;
+            
+        f(sess)
+    })
+}
+
+pub fn model_num_mels() -> usize {
+    with_tls_session(|sess| Ok(sess.cfg.num_mels)).unwrap_or(128)
+}
+
 pub fn infer_pitch_edit_mono(
     audio_mono: &[f32],
     sample_rate: u32,
@@ -982,21 +1084,7 @@ pub fn infer_pitch_edit_mono(
     midi_at_time: impl Fn(f64) -> f64,
     formant_shift_at_time: impl Fn(f64) -> f32,
 ) -> Result<Vec<f32>, String> {
-    if let Err(e) = probe() {
-        return Err(e.clone());
-    }
-
-    TLS_SESSION.with(|cell| {
-        let mut opt = cell.borrow_mut();
-        if opt.is_none() {
-            *opt = Some(NsfHifiganOnnx::load());
-        }
-        let sess = opt
-            .as_mut()
-            .expect("TLS_SESSION just initialized")
-            .as_mut()
-            .map_err(|e| e.clone())?;
-
+    with_tls_session(|sess| {
         sess.infer_from_audio_and_midi(
             audio_mono,
             sample_rate,
@@ -1015,16 +1103,16 @@ pub fn compiled() -> bool {
 pub fn model_load_error() -> Option<String> {
     match probe() {
         Ok(()) => None,
-        Err(e) => Some(e.clone()),
+        Err(e) => Some(e),
     }
 }
 
 pub fn ep_choice() -> String {
-    match env_ep_choice() {
-        OrtExecutionProviderChoice::Auto => "auto".to_string(),
-        OrtExecutionProviderChoice::Cpu => "cpu".to_string(),
-        OrtExecutionProviderChoice::Cuda => "cuda".to_string(),
-    }
+    std::env::var("HIFISHIFTER_ORT_EP")
+        .ok()
+        .unwrap_or_else(|| "auto".to_string())
+        .trim()
+        .to_ascii_lowercase()
 }
 
 // Task 1.9: ONNX diagnostic info
@@ -1035,6 +1123,7 @@ pub struct OnnxDiagnosticInfo {
     pub available: bool,
     pub error: Option<String>,
     pub ep_choice: String,
+    pub active_ep: String,
     pub onnx_version: Option<String>,
     pub providers: Option<Vec<String>>,
 }
@@ -1049,6 +1138,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
             available: false,
             error: Some("ONNX feature not compiled".to_string()),
             ep_choice: "disabled".to_string(),
+            active_ep: "none".to_string(),
             onnx_version: None,
             providers: None,
         };
@@ -1071,6 +1161,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
         available,
         error,
         ep_choice: ep_choice_val,
+        active_ep: active_ep(),
         onnx_version,
         providers,
     }
@@ -1098,9 +1189,10 @@ pub fn env_overlap_sec() -> f64 {
 
 // ─── 帧级分块常量────────────────────────────────────────────
 
-/// 单块最大 mel 帧数：512 帧（≈5.9s @ hop=512, sr=44100）。
-/// 每个 chunk 的 mel 输入约 262KB，波形输出约 1MB，所有后端安全。
-const CHUNK_MAX_FRAMES: usize = 512;
+/// 单块最大 mel 帧数：4096 帧（≈47s @ hop=512, sr=44100）。
+/// 覆盖大多数 clip 为单 chunk，最小化 GPU 启动开销。
+/// 每个 chunk 的 mel 输入约 2MB，波形输出约 8MB，12GB GPU 轻松容纳。
+const CHUNK_MAX_FRAMES: usize = 4096;
 /// 相邻块重叠帧数：16 帧（≈186ms），线性 crossfade 足够平滑。
 const OVERLAP_FRAMES: usize = 16;
 const CHUNK_STEP: usize = CHUNK_MAX_FRAMES - OVERLAP_FRAMES;
@@ -1269,6 +1361,14 @@ pub fn infer_pitch_edit_chunked_optimized(
 
     TLS_SESSION.with(|cell| {
         let mut opt = cell.borrow_mut();
+        
+        let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(Ok(ref sess)) = *opt {
+            if sess.epoch != current_epoch {
+                *opt = None;
+            }
+        }
+        
         if opt.is_none() {
             *opt = Some(NsfHifiganOnnx::load());
         }
@@ -1325,72 +1425,74 @@ pub fn infer_pitch_edit_chunked_optimized(
             );
         }
 
-        // 短音频回退：单次推理
-        if t <= CHUNK_MAX_FRAMES {
-            return sess.run_model(mel_full, f0_full, t);
-        }
-
-        // 4. 分块迭代
+        // 4. 分块迭代 — 批量推理：收集所有未命中缓存的 chunk，一次 GPU 调用处理
         let total_samples = mono_pcm.len().max(t * hop);
         let mut out = vec![0.0f32; total_samples];
+
+        // 4a. 分离已缓存和需要推理的 chunk
+        let mut cached_chunks: Vec<(usize, Vec<f32>)> = Vec::new();
+        let mut needs_inference: Vec<usize> = Vec::new();
 
         let mut frame_off = 0usize;
         while frame_off < t {
             let chunk_end = (frame_off + CHUNK_MAX_FRAMES).min(t);
-            let chunk_t = chunk_end - frame_off;
-
-            // 4a. 查询分块缓存
-            let chunk_wf = if let Some(cached) = chunk_cache_get(frame_off, chunk_end) {
-                cached
+            if let Some(cached) = chunk_cache_get(frame_off, chunk_end) {
+                cached_chunks.push((frame_off, cached));
             } else {
-                // 4b. 切片 mel + 推理（复用 mel_seg_buf）
-                let f0_seg = &f0_full[frame_off..chunk_end];
-                let wf = sess.run_model_chunk(&mel_full, t, frame_off, chunk_t, f0_seg)?;
+                needs_inference.push(frame_off);
+            }
+            frame_off = chunk_end;
+        }
 
-                // 4c. 写入缓存
-                chunk_cache_put(frame_off, chunk_end, wf.clone());
+        let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
+        let processed_before = cached_chunks.len();
+        eprintln!("[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
+            t, total_chunks, cached_chunks.len(), needs_inference.len());
 
-                wf
-            };
+        // Report progress for cached chunks
+        if !cached_chunks.is_empty() {
+            emit_chunk_progress(cached_chunks.len() as f64 / total_chunks as f64);
+        }
 
-            let chunk_samples = chunk_wf.len();
-            let base_out = frame_off * hop;
-
-            if frame_off == 0 {
-                // 第一块：直接拷贝
-                let copy_len = chunk_samples.min(out.len() - base_out);
-                out[base_out..base_out + copy_len]
-                    .copy_from_slice(&chunk_wf[..copy_len]);
-            } else {
-                                // 后续块：线性 crossfade
-                let overlap_samples = OVERLAP_FRAMES * hop;
-                let xfade_len = overlap_samples.min(chunk_samples);
-
-                for i in 0..xfade_len {
-                    let g = base_out + i;
-                    if g >= out.len() {
-                        break;
-                    }
-                    let t_frac = i as f32 / xfade_len.max(1) as f32;
-                    let prev_val = out[g];
-                    let curr_val = chunk_wf.get(i).copied().unwrap_or(0.0);
-                    out[g] = prev_val * (1.0 - t_frac) + curr_val * t_frac;
+        // 4b. 批量推理需要推理的 chunk
+        if !needs_inference.is_empty() {
+            let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference.iter().map(|&fi| {
+                let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                let chunk_t = chunk_end - fi;
+                let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
+                for m in 0..sess.cfg.num_mels {
+                    let src = &mel_full[m * t + fi..m * t + chunk_end];
+                    let dst = &mut mel_seg[m * chunk_t..(m + 1) * chunk_t];
+                    dst.copy_from_slice(src);
                 }
+                let f0_seg = f0_full[fi..chunk_end].to_vec();
+                (mel_seg, f0_seg, chunk_t)
+            }).collect();
 
-                // 非重叠尾部直接拷贝
-                for i in xfade_len..chunk_samples {
-                    let g = base_out + i;
-                    if g >= out.len() {
-                        break;
-                    }
-                    out[g] = chunk_wf.get(i).copied().unwrap_or(0.0);
+            let t_batch = std::time::Instant::now();
+            let batch_results = sess.run_model_batch(&batch_items)?;
+            eprintln!("[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
+                t_batch.elapsed().as_millis(), batch_results.len());
+
+            for (i, wf) in batch_results.into_iter().enumerate() {
+                let fi = needs_inference[i];
+                let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                chunk_cache_put(fi, chunk_end, wf.clone());
+                cached_chunks.push((fi, wf));
+                emit_chunk_progress((processed_before + i + 1) as f64 / total_chunks as f64);
+            }
+        }
+
+        // 4c. 按帧偏移排序并合并到输出
+        cached_chunks.sort_by_key(|&(fi, _)| fi);
+        for (fi, wf) in &cached_chunks {
+            let base_out = fi * hop;
+            for (i, &sample) in wf.iter().enumerate() {
+                let g = base_out + i;
+                if g < out.len() {
+                    out[g] = sample;
                 }
             }
-
-            if chunk_end >= t {
-                break;
-            }
-            frame_off += CHUNK_STEP;
         }
 
         // 5. 重采样回原始采样率
@@ -1862,4 +1964,290 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
     }
 
     Ok(out)
+}
+
+/// Batch inference: process multiple audio clips in a single GPU dispatch.
+/// Each item provides audio, sample_rate, start_sec, and closures for MIDI/formant.
+/// Returns Vec of output waveforms, one per input clip.
+pub fn infer_pitch_edit_mono_batch(
+    clips: &[(
+        &[f32],           // audio_mono
+        u32,              // sample_rate
+        f64,              // start_sec
+        usize,            // expected_out_frames
+    )],
+    midi_at_time: impl Fn(usize, f64) -> f64,     // (clip_index, abs_time) -> midi
+    formant_shift_at_time: impl Fn(usize, f64) -> f32, // (clip_index, abs_time) -> cents
+) -> Result<Vec<Vec<f32>>, String> {
+    if clips.is_empty() {
+        return Ok(vec![]);
+    }
+
+    with_tls_session(|sess| {
+        let model_sr = sess.cfg.sampling_rate;
+        let hop = sess.cfg.hop_size;
+        let n_mels = sess.cfg.num_mels;
+
+        // Phase 1: prepare mel/f0 for each clip on CPU
+        let mut items: Vec<(Vec<f32>, Vec<f32>, usize)> = Vec::with_capacity(clips.len());
+        for (i, &(audio_mono, sample_rate, start_sec, _expected)) in clips.iter().enumerate() {
+            let mel = if sample_rate == model_sr {
+                sess.mel_from_audio_fast(audio_mono)?
+            } else {
+                let mut resample_buf = std::mem::take(&mut sess.audio_resample_buf);
+                linear_resample_mono_into(audio_mono, sample_rate, model_sr, &mut resample_buf);
+                let mel_result = sess.mel_from_audio_fast(&resample_buf);
+                sess.audio_resample_buf = resample_buf;
+                mel_result?
+            };
+            let t = mel.len() / n_mels;
+            let hop_sec = (hop as f64) / (model_sr.max(1) as f64);
+            let f0: Vec<f32> = (0..t)
+                .map(|j| {
+                    let abs_t = start_sec + (j as f64) * hop_sec;
+                    midi_to_hz(midi_at_time(i, abs_t))
+                })
+                .collect();
+            items.push((mel, f0, t));
+        }
+
+        eprintln!("[nsf_hifigan] batch: {} clips, sizes={:?}",
+            items.len(), items.iter().map(|(_, _, t)| t).collect::<Vec<_>>());
+
+        let t_batch_start = std::time::Instant::now();
+
+        // Phase 2: run batched GPU inference
+        let batch_results = sess.run_model_batch(&items)?;
+
+        eprintln!("[nsf_hifigan] batch inference: {}ms", t_batch_start.elapsed().as_millis());
+
+        // Phase 3: resample back and pad to expected lengths
+        let mut results = Vec::with_capacity(clips.len());
+        for (i, (batch_out, &(_, sample_rate, _, expected_len))) in batch_results.iter().zip(clips.iter()).enumerate() {
+            let mut out = if model_sr == sample_rate {
+                batch_out.clone()
+            } else {
+                linear_resample_mono(batch_out, model_sr, sample_rate)
+            };
+            // Pad or trim to expected length
+            while out.len() < expected_len {
+                out.push(0.0);
+            }
+            if out.len() > expected_len {
+                out.truncate(expected_len);
+            }
+            results.push(out);
+        }
+        Ok(results)
+    })
+}
+
+// ─── 帧级分块推理优化 ───
+
+/// CPU-only: 预处理单个 clip 的 mel 和 f0，不做 GPU 推理。
+/// 返回 `(mel_full, f0_full, total_mel_frames, model_sr, hop)`。
+pub fn prepare_clip_mel_f0(
+    mono_pcm: &[f32],
+    sample_rate: u32,
+    start_sec: f64,
+    midi_at_time: &dyn Fn(f64) -> f64,
+    formant_shift_at_time: &dyn Fn(f64) -> f32,
+) -> Result<(Vec<f32>, Vec<f32>, usize, u32, usize), String> {
+    with_tls_session(|sess| {
+        let model_sr = sess.cfg.sampling_rate;
+        let hop = sess.cfg.hop_size;
+        let n_mels = sess.cfg.num_mels;
+
+        let mut mel_full = if sample_rate == model_sr {
+            sess.mel_from_audio_fast(mono_pcm)?
+        } else {
+            let mut resample_buf = std::mem::take(&mut sess.audio_resample_buf);
+            linear_resample_mono_into(mono_pcm, sample_rate, model_sr, &mut resample_buf);
+            let mel = sess.mel_from_audio_fast(&resample_buf);
+            sess.audio_resample_buf = resample_buf;
+            mel?
+        };
+
+        let t = mel_full.len() / n_mels;
+        if t == 0 {
+            return Err("empty mel".into());
+        }
+
+        let hop_sec = (hop as f64) / (model_sr.max(1) as f64);
+        let f0_full: Vec<f32> = (0..t)
+            .map(|i| {
+                let abs_t = start_sec + (i as f64) * hop_sec;
+                midi_to_hz(midi_at_time(abs_t))
+            })
+            .collect();
+
+        let formant_shifts: Vec<f32> = (0..t)
+            .map(|i| {
+                let abs_t = start_sec + (i as f64) * hop_sec;
+                formant_shift_at_time(abs_t)
+            })
+            .collect();
+        if formant_shifts.iter().any(|s| s.abs() >= 0.5) {
+            shift_mel_formant(&mut mel_full, n_mels, t, &formant_shifts, sess.cfg.fmin, sess.cfg.fmax);
+        }
+
+        Ok((mel_full, f0_full, t, model_sr, hop))
+    })
+}
+
+/// 从预处理好的 mel/f0 中提取需要 GPU 推理的 uncached chunks，构建 ChunkJob 列表。
+pub fn collect_uncached_chunks(
+    clip_idx: usize,
+    mel_full: &[f32],
+    f0_full: &[f32],
+    total_t: usize,
+    num_mels: usize,
+    cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
+) -> Vec<ChunkJob> {
+    let mut jobs = Vec::new();
+    let mut frame_off = 0usize;
+    while frame_off < total_t {
+        let chunk_end = (frame_off + CHUNK_MAX_FRAMES).min(total_t);
+        if cache_get(frame_off, chunk_end).is_some() {
+            frame_off = chunk_end;
+            continue;
+        }
+        let chunk_t = chunk_end - frame_off;
+        let mut mel_seg = vec![0.0f32; num_mels * chunk_t];
+        for m in 0..num_mels {
+            mel_seg[m * chunk_t..(m + 1) * chunk_t]
+                .copy_from_slice(&mel_full[m * total_t + frame_off..m * total_t + chunk_end]);
+        }
+        let f0_seg = f0_full[frame_off..chunk_end].to_vec();
+        jobs.push(ChunkJob { clip_idx, mel_seg, f0_seg, chunk_t, frame_off, chunk_end });
+        frame_off = chunk_end;
+    }
+    jobs
+}
+
+/// 从预处理好的 mel/f0 中构建所有 chunk（含已缓存和未缓存），返回 (all_frame_offsets, uncached_jobs)。
+pub fn collect_all_chunks_for_clip(
+    clip_idx: usize,
+    mel_full: &[f32],
+    f0_full: &[f32],
+    total_t: usize,
+    num_mels: usize,
+    cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
+) -> (Vec<(usize, usize, Option<Vec<f32>>)>, Vec<ChunkJob>) {
+    let mut all_chunks = Vec::new();
+    let mut uncached_jobs = Vec::new();
+    let mut frame_off = 0usize;
+    while frame_off < total_t {
+        let chunk_end = (frame_off + CHUNK_MAX_FRAMES).min(total_t);
+        let cached = cache_get(frame_off, chunk_end);
+        if cached.is_none() {
+            let chunk_t = chunk_end - frame_off;
+            let mut mel_seg = vec![0.0f32; num_mels * chunk_t];
+            for m in 0..num_mels {
+                mel_seg[m * chunk_t..(m + 1) * chunk_t]
+                    .copy_from_slice(&mel_full[m * total_t + frame_off..m * total_t + chunk_end]);
+            }
+            let f0_seg = f0_full[frame_off..chunk_end].to_vec();
+            uncached_jobs.push(ChunkJob { clip_idx, mel_seg, f0_seg, chunk_t, frame_off, chunk_end });
+        }
+        all_chunks.push((frame_off, chunk_end, cached));
+        frame_off = chunk_end;
+    }
+    (all_chunks, uncached_jobs)
+}
+
+/// 描述一个 clip 需要 GPU 推理的 chunk 信息。
+pub struct ChunkJob {
+    pub clip_idx: usize,
+    pub mel_seg: Vec<f32>,
+    pub f0_seg: Vec<f32>,
+    pub chunk_t: usize,
+    pub frame_off: usize,
+    pub chunk_end: usize,
+}
+
+/// 描述一个 chunk 推理完成后的回写信息。
+pub struct ChunkResult {
+    pub clip_idx: usize,
+    pub frame_off: usize,
+    pub chunk_end: usize,
+    pub waveform: Vec<f32>,
+}
+
+/// 将多个 clip 的所有 uncached chunk 合并到一次 GPU 调用中处理。
+/// 返回 `Vec<ChunkResult>`，调用方负责按 clip_idx 分发回各自的缓存和输出。
+pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, String> {
+    if jobs.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    with_tls_session(|sess| {
+        let n = jobs.len();
+        let max_t = jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1);
+        let n_mels = sess.cfg.num_mels;
+        let hop = sess.cfg.hop_size;
+
+        // 构建 batched mel [B, n_mels, max_t] 和 f0 [B, max_t]
+        let mut mel_batch = vec![0.0f32; n * n_mels * max_t];
+        let mut f0_batch = vec![0.0f32; n * max_t];
+
+        for (i, job) in jobs.iter().enumerate() {
+            let ct = job.chunk_t;
+            for m in 0..n_mels {
+                let src = &job.mel_seg[m * ct..(m + 1) * ct];
+                let dst = &mut mel_batch[(i * n_mels + m) * max_t..(i * n_mels + m) * max_t + ct];
+                dst.copy_from_slice(src);
+            }
+            f0_batch[i * max_t..i * max_t + ct].copy_from_slice(&job.f0_seg[..ct]);
+        }
+
+        let t_batch = std::time::Instant::now();
+
+        let mel_tensor = Tensor::from_array(([n, n_mels, max_t], mel_batch.into_boxed_slice()))
+            .map_err(|e| format!("build batched mel tensor failed: {e}"))?;
+        let f0_tensor = Tensor::from_array(([n, max_t], f0_batch.into_boxed_slice()))
+            .map_err(|e| format!("build batched f0 tensor failed: {e}"))?;
+
+        let all_output: Vec<f32> = {
+            let mut session_guard = sess
+                .session
+                .lock()
+                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            let outputs = session_guard
+                .run(ort::inputs![mel_tensor, f0_tensor])
+                .map_err(|e| format!("ort batch run failed: {e}"))?;
+            let output0 = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "onnx returned no outputs".to_string())?;
+            let (_shape, data) = output0
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("ort output type mismatch: {e}"))?;
+            data.to_vec()
+        };
+
+        let batch_ms = t_batch.elapsed().as_millis();
+        eprintln!("[nsf_hifigan] cross_clip_batch: {} chunks, max_t={}, batch_gpu={}ms",
+            n, max_t, batch_ms);
+
+        // 拆分结果
+        let max_out_t = max_t * hop;
+        let mut results = Vec::with_capacity(n);
+        for (i, job) in jobs.iter().enumerate() {
+            let expected_len = job.chunk_t * hop;
+            let start = i * max_out_t;
+            let end = (start + expected_len).min(all_output.len());
+            let waveform = all_output[start..end].to_vec();
+            results.push(ChunkResult {
+                clip_idx: job.clip_idx,
+                frame_off: job.frame_off,
+                chunk_end: job.chunk_end,
+                waveform,
+            });
+            emit_chunk_progress((i + 1) as f64 / n as f64);
+        }
+
+        Ok(results)
+    })
 }
