@@ -440,6 +440,18 @@ fn mix_into_scratch_stereo(
     let current_ready = render_snapshot_window(frames, &snap, pos0, pos1, scratch);
 
     if !current_ready && transition.fade_from_snapshot.is_none() {
+        // 若后台预渲染激活，自动暂停播放（而非无限静音等待）。
+        // 已渲染完成的 clip 在后台渲染线程存入缓存后，
+        // 用户可手动再次按下播放键继续。
+        let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if bg_render {
+            is_playing.store(false, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "[mix] auto-paused at pos={} — pending clip encountered during background render",
+                pos0
+            );
+        }
         // cursor 暂停，不推进 position，输出静音等待
         // 调试：每隔约 1s 打印一次
         static DEBUG_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

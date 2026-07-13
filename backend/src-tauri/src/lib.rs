@@ -367,6 +367,8 @@ pub fn run() {
             commands::play_original,
             commands::stop_audio,
             commands::get_playback_state,
+            commands::start_background_render,
+            commands::cancel_background_render,
             commands::debug_realtime_render_stats,
             commands::get_pitch_analysis_progress,
             commands::get_onnx_status,

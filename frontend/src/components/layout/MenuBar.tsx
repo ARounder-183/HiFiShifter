@@ -19,6 +19,7 @@ import {
     setDefaultStretchAlgorithm,
     setOrtEp,
     setCudaDeviceId,
+    toggleAutoBackgroundRender,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
 import { coreApi } from "../../services/api/core";
@@ -556,15 +557,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
-                    <span>{t("menu_preferences")}</span>
+                    <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    {/* Keyboard Shortcuts — at the top */}
-                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
-                        {t("menu_keybindings")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tAny("stretch_project_override")}
@@ -802,6 +797,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
+
+                    {/* Background Pre-render — same level as Inference Device, no separator */}
+                    <DropdownMenu.Item
+                        onSelect={async () => {
+                            dispatch(toggleAutoBackgroundRender());
+                            await dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
+                    </DropdownMenu.Item>
+
+                    <DropdownMenu.Separator />
+
+                    {/* Keyboard Shortcuts — at the bottom */}
+                    <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
+                        {t("menu_keybindings")}
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 

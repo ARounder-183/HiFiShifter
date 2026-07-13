@@ -5,6 +5,7 @@ import { ActionBar } from "./components/layout/ActionBar";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
 import { useAppDispatch, useAppSelector } from "./app/hooks";
+import { webApi } from "./services/webviewApi";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -905,6 +906,33 @@ function AppInner() {
         };
     }, [handleAutoBackupSettingsSaved]);
 
+    // ── 后台预渲染：paramsEpoch 变更时自动触发 ──────────────────────────────────
+    const autoBackgroundRender = useAppSelector((state) => state.session.autoBackgroundRender);
+    const prevParamsEpochRef = useRef(paramsEpoch);
+    useEffect(() => {
+        if (!autoBackgroundRender) return;
+        // 跳过初始加载（prevParamsEpochRef 与当前 epoch 相同时跳过）
+        if (prevParamsEpochRef.current === paramsEpoch) return;
+        prevParamsEpochRef.current = paramsEpoch;
+
+        // 防抖：延迟 200ms 后再触发，避免连续编辑时频繁启动渲染线程
+        const timer = setTimeout(() => {
+            void (async () => {
+                try {
+                    const result = await webApi.startBackgroundRender();
+                    if ((result as any)?.skipped) {
+                        // 已在渲染中，无需重复启动
+                        return;
+                    }
+                } catch (e) {
+                    // 静默失败；后台渲染为可选增强功能
+                }
+            })();
+        }, 200);
+
+        return () => clearTimeout(timer);
+    }, [paramsEpoch, autoBackgroundRender]);
+
     useEffect(() => {
         let canceled = false;
 
@@ -1377,9 +1405,10 @@ function AppInner() {
         // Increase playhead sync frequency to ~30Hz for smoother playhead updates
         const intervalMs = 33;
         const id = window.setInterval(() => {
-            // 预渲染阶段后端还未真正进入 playing，
-            // 若此时同步会把前端“准备播放”状态误判为停止，导致 stop 锚点丢失。
-            if (rendering.active) return;
+            // 阻塞式预渲染（target=”original”）阶段后端还未真正进入 playing，
+            // 若此时同步会把前端”准备播放”状态误判为停止，导致 stop 锚点丢失。
+            // 后台预渲染（target=”background”）是独立线程，播放应正常同步。
+            if (rendering.active && rendering.target === "original") return;
             if (playbackSyncInFlightRef.current) return;
             playbackSyncInFlightRef.current = true;
             const p = dispatch(syncPlaybackState()) as unknown as Promise<unknown>;
@@ -1388,7 +1417,7 @@ function AppInner() {
             });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying, rendering.active]);
+    }, [dispatch, runtimeIsPlaying, rendering.active, rendering.target]);
 
     useEffect(() => {
         splitRatioRef.current = splitRatio;

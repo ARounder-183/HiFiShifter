@@ -15,6 +15,9 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // Apply EP and CUDA device settings on load
     crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
     crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
+    // Sync background render setting
+    crate::commands::playback::AUTO_BG_RENDER_ENABLED
+        .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
     settings
 }
 
@@ -37,6 +40,9 @@ pub(super) fn save_ui_settings(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
+    // Sync background render setting
+    crate::commands::playback::AUTO_BG_RENDER_ENABLED
+        .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
 
     let ep_changed = prev_ep != settings.ort_ep;
     let device_changed = prev_cuda_device_id != settings.cuda_device_id;

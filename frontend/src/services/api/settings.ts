@@ -39,6 +39,7 @@ export interface UiSettings {
     midiImportTargetParamEditor?: string;
     ortEp?: string;
     cudaDeviceId?: number;
+    autoBackgroundRender?: boolean;
     customScalePresets?: Array<{
         id: string;
         name: string;

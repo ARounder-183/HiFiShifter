@@ -3,7 +3,7 @@ export const zhCN = {
     menu_edit: "编辑",
     menu_view: "视图",
     menu_track: "轨道",
-    menu_preferences: "首选项",
+    menu_options: "选项",
     menu_help: "帮助",
     menu_new_project: "新建工程",
     menu_open_project: "打开工程...",
@@ -814,6 +814,9 @@ export const zhCN = {
     menu_select_gpu_device: "选择 GPU 设备",
     menu_no_gpu_detected: "未检测到 NVIDIA GPU",
     menu_run_benchmark: "运行基准测试…",
+    menu_background_prerender: "后台预渲染",
+    menu_background_prerender_desc:
+        "编辑后立即在后台预渲染。播放时优先使用已渲染内容，无需等待全部渲染完成。",
 
     // ── 基准测试 ────────────────────────────────────────────────────────
     benchmark_title: "推理设备基准测试",

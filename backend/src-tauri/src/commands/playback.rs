@@ -6,6 +6,29 @@ use tauri::State;
 
 use super::common::{guard_json_command, ok_bool, PlaybackRenderingStateEvent};
 
+/// 全局后台渲染激活标志。
+/// 当用户在"选项→推理设备"中启用"后台预渲染"后，编辑操作会触发
+/// `start_background_render`，此标志置为 true；渲染完成（或被取消）后复原。
+/// 引擎 worker 线程与音频回调均通过此标志判断是否应跳过对未渲染 clip 的暂停。
+pub(crate) static BG_RENDER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 用户是否在设置中启用了"后台预渲染"。
+/// 由 `ui_settings.rs` 在加载/保存设置时同步。
+/// 引擎 worker 在使缓存失效后检查此标志，若为 true 则自动启动后台渲染。
+pub(crate) static AUTO_BG_RENDER_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 后台渲染取消标志。当用户在渲染中重新编辑参数时，
+/// `handle_update_timeline` 设置此标志以中断旧渲染线程。
+pub(crate) static BG_RENDER_CANCEL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 后台渲染重启标志。旧渲染被取消后，若此标志为 true，
+/// 退出线程将自动启动新一轮渲染。
+pub(crate) static BG_RENDER_RESTART_NEEDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
     let state = app.state::<AppState>();
     state
@@ -53,6 +76,24 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
             return serde_json::json!({"ok": false, "error": "invalid bpm"});
         }
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
+
+        // ── 后台预渲染激活时：立即开始播放，不等待渲染 ──────────────────────
+        let bg_render = BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+        if bg_render {
+            eprintln!(
+                "[play_original] background render active — playing immediately (non-blocking)"
+            );
+            // 更新引擎 snapshot，让已渲染完成的 clip 立即可用
+            state.audio_engine.seek_sec(start_sec);
+            state.audio_engine.update_timeline(timeline);
+            state.audio_engine.set_playing(true, Some("original"));
+            return serde_json::json!({
+                "ok": true,
+                "playing": "original",
+                "start_sec": start_sec,
+                "background_render_active": true
+            });
+        }
 
         let clips_needing_render =
             collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
@@ -1202,4 +1243,391 @@ pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePay
         position_sec: pb.position_sec,
         duration_sec: pb.duration_sec,
     }
+}
+
+// ─── 后台预渲染（Background Pre-render）─────────────────────────────────────────
+
+/// 后台预渲染：编辑操作使缓存失效后立即在后台启动渲染，
+/// 而无需等待用户按下播放键。
+///
+/// 前端通过 `start_background_render` Tauri 命令调用此函数。
+/// 渲染线程完成后自动重置 `BG_RENDER_ACTIVE`。
+pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+
+    // 防止重复启动
+    if BG_RENDER_ACTIVE.swap(true, Ordering::AcqRel) {
+        eprintln!("[bg_render] already active, skipping");
+        return serde_json::json!({"ok": true, "skipped": true, "reason": "already_active"});
+    }
+    // 清除可能残留的上一轮取消标志
+    BG_RENDER_CANCEL.store(false, Ordering::Release);
+
+    // Clone app before getting state (state borrows from the clone),
+    // so the original app can be moved into the thread.
+    let app_clone = app.clone();
+    let state = app_clone.state::<AppState>();
+    let timeline = match state.timeline.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+
+    let engine_sr = state.audio_engine.sample_rate_hz();
+    let sr = if engine_sr > 0 { engine_sr } else { 44100 };
+
+    let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
+    clips_to_render.retain(|info| is_clip_pitch_analysis_ready(&timeline, &info.clip));
+    clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
+
+    // Save len before clips_to_render is moved into the thread closure
+    let total = clips_to_render.len();
+
+    if total == 0 {
+        eprintln!("[bg_render] no clips need rendering (might be waiting for pitch analysis)");
+        BG_RENDER_ACTIVE.store(false, Ordering::Release);
+        BG_RENDER_CANCEL.store(false, Ordering::Release);
+        // 不发送渲染事件，避免前端状态栏闪烁。
+        // 当前端有实质性编辑时，自然会触发下一次渲染。
+        return serde_json::json!({"ok": true, "rendered": 0});
+    }
+
+    let render_timeline_version = state
+        .timeline_version
+        .load(Ordering::Acquire);
+
+    eprintln!(
+        "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={}",
+        total, sr, render_timeline_version
+    );
+
+    // 清空上次的 pending_rendered_keys
+    crate::synth_clip_cache::clear_pending_rendered_keys();
+
+    // 动态扩容缓存
+    {
+        let mut rendered_cache = crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let required = rendered_cache.len().saturating_add(total);
+        rendered_cache.ensure_capacity(required);
+    }
+    {
+        let mut tension_cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tension_cache.ensure_capacity(total.max(1));
+    }
+    {
+        let breath_clips = total;
+        let required = (breath_clips + breath_clips / 4).max(128);
+        crate::hnsep_onnx::ensure_cache_capacity(required);
+    }
+    {
+        let mut breath_noise_cache = crate::synth_clip_cache::global_breath_noise_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        breath_noise_cache.ensure_capacity(total.max(1));
+    }
+
+    crate::nsf_hifigan_onnx::reset_chunk_progress(total);
+
+    let app_for_progress = app.clone();
+    crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(move |progress: f64| {
+        let _ = app_for_progress.emit(
+            "playback_rendering_state",
+            PlaybackRenderingStateEvent {
+                active: true,
+                progress: Some(progress),
+                target: Some("background".to_string()),
+            },
+        );
+    })));
+
+    let _ = app_clone.emit("playback_rendering_state", PlaybackRenderingStateEvent {
+        active: true,
+        progress: Some(0.0),
+        target: Some("background".to_string()),
+    });
+    // Explicitly drop app_clone's state borrow before moving app into the thread
+    drop(state);
+    drop(app_clone);
+
+    // 后台渲染线程
+    std::thread::spawn(move || {
+        let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
+            .ok()
+            .as_deref()
+            == Some("1");
+        let started_at = std::time::Instant::now();
+
+        let mut rendered_count = 0u32;
+        let mut cache_hit_count = 0u32;
+        let mut cache_miss_count = 0u32;
+        let mut render_success_count = 0u32;
+        let mut render_failed_count = 0u32;
+        let mut cache_probe_elapsed = std::time::Duration::ZERO;
+        let mut render_elapsed = std::time::Duration::ZERO;
+        let mut tension_elapsed = std::time::Duration::ZERO;
+        let mut cancelled = false;
+        let mut pending_clip_ids_written: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for clip_render_info in &clips_to_render {
+            // 检查取消标志（用户在渲染中重新编辑参数时会设置）
+            if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
+                eprintln!("[bg_render] cancel flag detected at clip {}/{}", rendered_count, total);
+                cancelled = true;
+                break;
+            }
+            // 每隔 32 个 clip 检查时间线版本是否已变更
+            if rendered_count % 32 == 0 {
+                let state = app.state::<AppState>();
+                let changed = state
+                    .timeline_version
+                    .load(Ordering::Acquire)
+                    != render_timeline_version;
+                if changed {
+                    cancelled = true;
+                    break;
+                }
+            }
+
+            let cache_probe_started_at = std::time::Instant::now();
+            let mut base_entry = {
+                let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                cache.get(&clip_render_info.cache_key).cloned()
+            };
+            cache_probe_elapsed += cache_probe_started_at.elapsed();
+
+            if base_entry.is_some() {
+                cache_hit_count += 1;
+                if cache_log {
+                    eprintln!(
+                        "[bg_render][cache] HIT clip_id={} hash={:#018x}",
+                        clip_render_info.clip.id, clip_render_info.cache_key.param_hash
+                    );
+                }
+                crate::synth_clip_cache::register_pending_rendered_key(
+                    &clip_render_info.clip.id,
+                    clip_render_info.cache_key.clone(),
+                );
+                pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
+            }
+
+            if base_entry.is_none() {
+                cache_miss_count += 1;
+                if cache_log {
+                    eprintln!(
+                        "[bg_render][cache] MISS clip_id={} hash={:#018x}",
+                        clip_render_info.clip.id, clip_render_info.cache_key.param_hash
+                    );
+                }
+                if let Ok(mut state_mgr) =
+                    crate::clip_rendering_state::global_clip_rendering_state().lock()
+                {
+                    state_mgr.set_state(
+                        &clip_render_info.clip.id,
+                        crate::clip_rendering_state::ClipRenderingState::Rendering,
+                        0.0,
+                        None,
+                    );
+                }
+
+                let render_started_at = std::time::Instant::now();
+                let state = app.state::<AppState>();
+                let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                match render_single_clip(
+                    &tl,
+                    &clip_render_info.clip,
+                    clip_render_info.sr,
+                ) {
+                    Ok(rendered) => {
+                        drop(tl);
+                        render_elapsed += render_started_at.elapsed();
+                        let stereo_pcm = rendered.rendered_stereo;
+                        let frames = (stereo_pcm.len() / 2) as u64;
+                        let entry = crate::synth_clip_cache::RenderedClipCacheEntry {
+                            pcm_stereo: std::sync::Arc::new(stereo_pcm),
+                            breath_noise_stereo: rendered
+                                .breath_noise_stereo
+                                .map(std::sync::Arc::new),
+                            frames,
+                            sample_rate: clip_render_info.sr,
+                        };
+
+                        let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        cache.insert(clip_render_info.cache_key.clone(), entry.clone());
+                        crate::synth_clip_cache::register_pending_rendered_key(
+                            &clip_render_info.clip.id,
+                            clip_render_info.cache_key.clone(),
+                        );
+                        pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
+
+                        base_entry = Some(entry);
+                        render_success_count += 1;
+                    }
+                    Err(e) => {
+                        render_elapsed += render_started_at.elapsed();
+                        eprintln!(
+                            "[bg_render] clip render failed: clip_id={} err={}",
+                            clip_render_info.clip.id, e
+                        );
+                        render_failed_count += 1;
+                        if let Ok(mut state_mgr) =
+                            crate::clip_rendering_state::global_clip_rendering_state().lock()
+                        {
+                            state_mgr.set_state(
+                                &clip_render_info.clip.id,
+                                crate::clip_rendering_state::ClipRenderingState::Failed,
+                                0.0,
+                                Some(e.clone()),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Some(base_entry) = base_entry.as_ref() {
+                let tension_started_at = std::time::Instant::now();
+                let state = app.state::<AppState>();
+                let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                match ensure_hifigan_tension_cache(
+                    &tl,
+                    &clip_render_info.clip,
+                    clip_render_info.sr,
+                    clip_render_info.cache_key.param_hash,
+                    base_entry.pcm_stereo.as_slice(),
+                ) {
+                    Ok((_, _tension_generated)) => {
+                        drop(tl);
+                        tension_elapsed += tension_started_at.elapsed();
+                        if let Ok(mut state_mgr) =
+                            crate::clip_rendering_state::global_clip_rendering_state().lock()
+                        {
+                            state_mgr.set_state(
+                                &clip_render_info.clip.id,
+                                crate::clip_rendering_state::ClipRenderingState::Ready,
+                                1.0,
+                                None,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tension_elapsed += tension_started_at.elapsed();
+                        eprintln!(
+                            "[bg_render] tension render failed: clip_id={} err={}",
+                            clip_render_info.clip.id, e
+                        );
+                        if let Ok(mut state_mgr) =
+                            crate::clip_rendering_state::global_clip_rendering_state().lock()
+                        {
+                            state_mgr.set_state(
+                                &clip_render_info.clip.id,
+                                crate::clip_rendering_state::ClipRenderingState::Failed,
+                                0.0,
+                                Some(e.clone()),
+                            );
+                        }
+                    }
+                }
+            }
+
+            rendered_count += 1;
+        }
+
+        if cancelled {
+            crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
+            for clip_id in pending_clip_ids_written {
+                crate::synth_clip_cache::remove_pending_rendered_key(&clip_id);
+            }
+            BG_RENDER_ACTIVE.store(false, Ordering::Release);
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+
+            // 检查是否需要立即重启（用户在渲染中重新编辑参数时会设置）
+            if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
+                eprintln!(
+                    "[bg_render] cancelled by new edit (rendered {}/{}), restarting with fresh params...",
+                    rendered_count, total
+                );
+                // 直接启动新一轮渲染，不发送中间完成事件，对用户无感
+                start_background_render(app.clone());
+                return;
+            }
+
+            // 真正取消（时间线版本变更等）：发出完成事件
+            if cache_log {
+                eprintln!(
+                    "[bg_render][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={}",
+                    total, cache_hit_count, cache_miss_count,
+                    render_success_count, render_failed_count
+                );
+            }
+            let _ = app.emit("playback_rendering_state", PlaybackRenderingStateEvent {
+                active: false,
+                progress: Some(1.0),
+                target: Some("background".to_string()),
+            });
+            return;
+        }
+
+        // 渲染完成：缓存已填入，下次 play_original 调用 update_timeline
+        // 时会自动通过 build_snapshot 读取缓存中的 clip。
+        // 不在此处调用 engine.update_timeline，以避免触发 handle_update_timeline
+        // 中的 auto-trigger 形成反馈循环。
+
+        if cache_log {
+            eprintln!(
+                "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                total,
+                cache_hit_count,
+                cache_miss_count,
+                render_success_count,
+                render_failed_count,
+                cache_probe_elapsed.as_secs_f64() * 1000.0,
+                render_elapsed.as_secs_f64() * 1000.0,
+                tension_elapsed.as_secs_f64() * 1000.0,
+                started_at.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        eprintln!(
+            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s",
+            total,
+            cache_hit_count,
+            cache_miss_count,
+            render_success_count,
+            render_failed_count,
+            started_at.elapsed().as_secs_f64()
+        );
+
+        crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
+        BG_RENDER_ACTIVE.store(false, Ordering::Release);
+        BG_RENDER_CANCEL.store(false, Ordering::Release);
+
+        // 若完成时恰好有新编辑触发的重启请求，立即启动新一轮渲染
+        if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
+            eprintln!("[bg_render] completed but restart was requested during finalization, starting new render");
+            start_background_render(app.clone());
+            return;
+        }
+
+        let _ = app.emit("playback_rendering_state", PlaybackRenderingStateEvent {
+            active: false,
+            progress: Some(1.0),
+            target: Some("background".to_string()),
+        });
+    });
+
+    serde_json::json!({"ok": true, "rendering": total})
+}
+
+/// 取消当前正在运行的后台预渲染（如果有）。
+pub(super) fn cancel_background_render() -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+    let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
+    eprintln!("[bg_render] cancel requested, was_active={was_active}");
+    serde_json::json!({"ok": true, "was_active": was_active})
 }

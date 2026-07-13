@@ -3,7 +3,7 @@ export const enUS = {
     menu_edit: "Edit",
     menu_view: "View",
     menu_track: "Track",
-    menu_preferences: "Preferences",
+    menu_options: "Options",
     menu_help: "Help",
     menu_new_project: "New Project",
     menu_open_project: "Open Project...",
@@ -826,6 +826,9 @@ export const enUS = {
     menu_select_gpu_device: "Select GPU Device",
     menu_no_gpu_detected: "No NVIDIA GPUs detected",
     menu_run_benchmark: "Run Benchmark…",
+    menu_background_prerender: "Background Pre-render",
+    menu_background_prerender_desc:
+        "Immediately start pre-rendering after edits. Playback uses already-rendered content without waiting for full render.",
 
     // ── Benchmark ────────────────────────────────────────────────────────
     benchmark_title: "Inference Device Benchmark",

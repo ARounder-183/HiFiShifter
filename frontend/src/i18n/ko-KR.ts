@@ -3,7 +3,7 @@ export const koKR = {
     menu_edit: "편집",
     menu_view: "보기",
     menu_track: "트랙",
-    menu_preferences: "환경 설정",
+    menu_options: "옵션",
     menu_help: "도움말",
     menu_new_project: "새 프로젝트",
     menu_open_project: "프로젝트 열기...",
@@ -845,6 +845,9 @@ export const koKR = {
     menu_select_gpu_device: "GPU 장치 선택",
     menu_no_gpu_detected: "NVIDIA GPU가 감지되지 않음",
     menu_run_benchmark: "벤치마크 실행…",
+    menu_background_prerender: "백그라운드 사전 렌더링",
+    menu_background_prerender_desc:
+        "편집 후 즉시 백그라운드에서 사전 렌더링을 시작합니다. 재생 시 이미 렌더링된 부분을 바로 사용할 수 있습니다.",
 
     benchmark_title: "추론 장치 벤치마크",
     benchmark_desc: "각 장치에서 약 12초 오디오로 보코더 추론을 실행하고 지연 시간을 비교합니다. 가장 빠른 제공자를 선택하세요.",

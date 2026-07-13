@@ -3,7 +3,7 @@ export const jaJP = {
     menu_edit: "編集",
     menu_view: "表示",
     menu_track: "トラック",
-    menu_preferences: "設定",
+    menu_options: "オプション",
     menu_help: "ヘルプ",
     menu_new_project: "新規プロジェクト",
     menu_open_project: "プロジェクトを開く...",
@@ -833,6 +833,9 @@ export const jaJP = {
     menu_select_gpu_device: "GPUデバイスを選択",
     menu_no_gpu_detected: "NVIDIA GPUが検出されません",
     menu_run_benchmark: "ベンチマークを実行…",
+    menu_background_prerender: "バックグラウンド事前レンダリング",
+    menu_background_prerender_desc:
+        "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
 
     benchmark_title: "推論デバイスベンチマーク",
     benchmark_desc: "各デバイスで約12秒の音声をボコーダー推論し、遅延を比較します。最速のプロバイダを選択してください。",

@@ -30,7 +30,7 @@ mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
 mod pitch_progress;
 #[path = "commands/playback.rs"]
-mod playback;
+pub(crate) mod playback;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -816,6 +816,19 @@ pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::PlaybackStatePayload {
     playback::get_playback_state(state)
+}
+
+/// 后台预渲染：编辑操作后立即在后台开始渲染，无需等待播放。
+/// 启用后，用户可在渲染进行中随时播放已渲染完成的内容。
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
+    playback::start_background_render(app)
+}
+
+/// 取消正在进行的后台预渲染。
+#[tauri::command(rename_all = "camelCase")]
+pub fn cancel_background_render() -> serde_json::Value {
+    playback::cancel_background_render()
 }
 
 // ===================== debug =====================

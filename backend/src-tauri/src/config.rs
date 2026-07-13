@@ -91,6 +91,15 @@ pub struct UiSettings {
     /// Set to 0 by default; users with multiple GPUs can change it.
     #[serde(default = "default_cuda_device_id")]
     pub cuda_device_id: i32,
+    /// 后台预渲染：启用后，当编辑操作使渲染缓存失效时，
+    /// 立即在后台启动预渲染，而不是等到用户按下播放时才渲染。
+    /// 用户可在渲染进行中随时开始播放已渲染完成的部分。
+    /// Background pre-render: when enabled, immediately start
+    /// rendering in the background after editing invalidates the
+    /// render cache. Users can play already-rendered content
+    /// at any time during rendering.
+    #[serde(default)]
+    pub auto_background_render: bool,
 }
 
 fn default_ort_ep() -> String {
@@ -274,6 +283,7 @@ impl Default for UiSettings {
             midi_import_target: default_midi_import_target(),
             ort_ep: default_ort_ep(),
             cuda_device_id: default_cuda_device_id(),
+            auto_background_render: false,
         }
     }
 }

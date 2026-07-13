@@ -4,7 +4,7 @@ export const zhTW = {
     menu_edit: "編輯",
     menu_view: "檢視",
     menu_track: "軌道",
-    menu_preferences: "偏好設定",
+    menu_options: "選項",
     menu_help: "說明",
     menu_new_project: "新建專案",
     menu_open_project: "開啟專案...",
@@ -815,6 +815,9 @@ export const zhTW = {
     menu_select_gpu_device: "選擇 GPU 裝置",
     menu_no_gpu_detected: "未偵測到 NVIDIA GPU",
     menu_run_benchmark: "執行基準測試…",
+    menu_background_prerender: "背景預渲染",
+    menu_background_prerender_desc:
+        "編輯後立即在背景預渲染。播放時優先使用已渲染內容，無需等待全部渲染完成。",
 
     benchmark_title: "推理裝置基準測試",
     benchmark_desc: "在每個可用裝置上以約 12 秒音訊測試聲碼器，比較延遲以選擇最快的方案。",

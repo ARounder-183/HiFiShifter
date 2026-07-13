@@ -758,6 +758,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 当某个 root_track 的 pitch_edit 曲线发生变化时，
     // 使该 track 上所有 clip 的合成缓存失效，触发下次播放时重新合成。
     // WORLD 和 ONNX 共享同一个 synth_clip_cache。
+    // 用于后台预渲染自动触发：仅当本次 update 确实使缓存失效时才触发。
+    let mut any_cache_invalidated = false;
+
     if let Some(old_tl) = s.last_timeline.as_ref() {
         use std::collections::HashSet;
 
@@ -767,6 +770,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         for old_clip in &old_tl.clips {
             if !new_clip_ids.contains(old_clip.id.as_str()) {
                 crate::synth_clip_cache::invalidate_clip_all_caches(&old_clip.id);
+                any_cache_invalidated = true;
             }
         }
 
@@ -805,9 +809,37 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             if render_shape_changed {
                 // 片段源范围/轨道归属/速率/长度等变化后，旧渲染结果不可安全复用。
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                any_cache_invalidated = true;
             } else if pitch_changed {
                 // 仅 pitch 曲线变化时保留最近一次完整渲染，允许短时无缝垫音。
                 crate::synth_clip_cache::invalidate_clip_for_pitch_edit(&clip.id);
+                any_cache_invalidated = true;
+            }
+        }
+    }
+
+    // ── 后台预渲染自动触发 ──────────────────────────────────────────────────
+    // 仅当本次 update_timeline 确实使缓存失效时才触发（避免形成反馈循环）。
+    // any_cache_invalidated 由上方的 clip 变化检测代码设置。
+    if any_cache_invalidated {
+        use std::sync::atomic::Ordering;
+        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
+            .load(Ordering::Relaxed);
+        let running = crate::commands::playback::BG_RENDER_ACTIVE
+            .load(Ordering::Relaxed);
+        if enabled && !tl.clips.is_empty() {
+            if !running {
+                // 没有渲染在运行 → 直接启动
+                if let Some(app) = s.app_handle.as_ref() {
+                    eprintln!("[engine] auto-triggering background render ({} clips invalidated)", tl.clips.len());
+                    let _ = crate::commands::playback::start_background_render(app.clone());
+                }
+            } else {
+                // 渲染已在运行 → 取消旧渲染，标记需要重启
+                // 旧渲染线程检测到取消标志后会退出，然后自动启动新一轮渲染
+                eprintln!("[engine] bg render already running, cancelling and requesting restart ({} clips invalidated)", tl.clips.len());
+                crate::commands::playback::BG_RENDER_CANCEL.store(true, Ordering::Release);
+                crate::commands::playback::BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
             }
         }
     }
@@ -1042,13 +1074,18 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     //      `needs_synthesis` (there is a one-update lag where `user_modified`
     //      hasn't propagated).  Playing during this window produces the old
     //      (un-pitched) audio, which the user perceives as "nothing changed".
+    //
+    // 如果后台预渲染（Background Pre-render）正在运行，则不暂停播放，
+    // 允许音频回调在未渲染 clip 位置输出静音（自然暂停），渲染线程在后台继续推进。
+    let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
+        .load(std::sync::atomic::Ordering::Relaxed);
     let any_need_render = !snap.clips.is_empty()
         && snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
-    let should_halt = any_need_render || track_pitch_edit_changed;
+    let should_halt = (any_need_render || track_pitch_edit_changed) && !bg_render;
     if should_halt && s.is_playing.load(Ordering::Relaxed) {
         eprintln!(
-            "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}",
-            any_need_render, track_pitch_edit_changed
+            "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}, bg_render={}",
+            any_need_render, track_pitch_edit_changed, bg_render
         );
         s.is_playing.store(false, Ordering::Relaxed);
         if let Some(app) = s.app_handle.as_ref() {
