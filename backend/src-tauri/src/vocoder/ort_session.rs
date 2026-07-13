@@ -6,6 +6,7 @@
 //! configuration so individual vocoder modules don't drift.
 
 use ort::ep;
+#[cfg(feature = "cuda")]
 use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
@@ -105,6 +106,7 @@ fn env_cuda_mem_limit_bytes() -> u64 {
     mb.saturating_mul(1024 * 1024)
 }
 
+#[cfg(feature = "cuda")]
 fn build_cuda_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
     let device_id = cuda_device_id();
     let arena_bytes = env_cuda_mem_limit_bytes();
@@ -133,6 +135,51 @@ fn build_cuda_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
     }
 
     ep.build()
+}
+
+// ── EP registration helpers (feature-gated) ──────────────────────────────
+
+/// Try to register CUDA EP on a session builder. Returns `(builder, "cuda")` on
+/// success, or an error message on failure (EP not built in or not available).
+#[cfg(feature = "cuda")]
+fn try_register_cuda_ep(
+    builder: ort::session::builder::SessionBuilder,
+    role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    builder
+        .with_execution_providers([build_cuda_ep(role)])
+        .map(|b| (b, "cuda"))
+        .map_err(|e| format!("enable CUDA EP failed: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn try_register_cuda_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let _ = (builder, _role);
+    Err("CUDA EP not compiled in this build".to_string())
+}
+
+/// Try to register TensorRT EP (with CUDA fallback) on a session builder.
+#[cfg(feature = "tensorrt")]
+fn try_register_trt_ep(
+    builder: ort::session::builder::SessionBuilder,
+    role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    builder
+        .with_execution_providers([build_trt_ep(role), build_cuda_ep(role)])
+        .map(|b| (b, "trt"))
+        .map_err(|e| format!("enable TRT EP failed: {e}"))
+}
+
+#[cfg(not(feature = "tensorrt"))]
+fn try_register_trt_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let _ = (builder, _role);
+    Err("TensorRT EP not compiled in this build".to_string())
 }
 
 #[cfg(feature = "tensorrt")]
@@ -178,64 +225,60 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
             selected = "cpu";
         }
         "cuda" => {
-            builder = builder
-                .with_execution_providers([build_cuda_ep(role)])
-                .map_err(|e| format!("enable CUDA EP failed: {e}"))?;
-            selected = "cuda";
+            // Clone so that the original builder is preserved if CUDA EP fails.
+            match try_register_cuda_ep(builder.clone(), role) {
+                Ok((b, ep)) => {
+                    builder = b;
+                    selected = ep;
+                }
+                Err(e) => {
+                    eprintln!("ort_session: {e}, falling back to CPU");
+                    selected = "cpu";
+                }
+            }
         }
-        #[cfg(feature = "tensorrt")]
         "trt" => {
-            builder = builder
-                .with_execution_providers([build_trt_ep(role), build_cuda_ep(role)])
-                .map_err(|e| format!("enable TRT EP failed: {e}"))?;
-            selected = "trt";
-        }
-        _ => {
-            // "auto": try TRT first, then CUDA, fall back to CPU.
-            #[cfg(feature = "tensorrt")]
-            {
-                match builder
-                    .clone()
-                    .with_execution_providers([build_trt_ep(role), build_cuda_ep(role)])
-                {
-                    Ok(b) => {
-                        builder = b;
-                        selected = "trt";
-                    }
-                    Err(e) => {
-                        eprintln!("ort_session: TRT EP unavailable for {role:?}, trying CUDA: {e}");
-                        match builder
-                            .clone()
-                            .with_execution_providers([build_cuda_ep(role)])
-                        {
-                            Ok(b) => {
-                                builder = b;
-                                selected = "cuda";
-                            }
-                            Err(e) => {
-                                eprintln!("ort_session: CUDA EP unavailable for {role:?}, falling back to CPU: {e}");
-                                selected = "cpu";
-                            }
+            // Clone before each attempt so we can fall back cleanly.
+            match try_register_trt_ep(builder.clone(), role) {
+                Ok((b, ep)) => {
+                    builder = b;
+                    selected = ep;
+                }
+                Err(e) => {
+                    eprintln!("ort_session: {e}, trying CUDA");
+                    match try_register_cuda_ep(builder.clone(), role) {
+                        Ok((b, ep)) => {
+                            builder = b;
+                            selected = ep;
+                        }
+                        Err(e2) => {
+                            eprintln!("ort_session: {e2}, falling back to CPU");
+                            selected = "cpu";
                         }
                     }
                 }
             }
-            #[cfg(not(feature = "tensorrt"))]
-            {
-                // TRT not available, try CUDA then CPU.
-                match builder
-                    .clone()
-                    .with_execution_providers([build_cuda_ep(role)])
-                {
-                    Ok(b) => {
-                        builder = b;
-                        selected = "cuda";
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "ort_session: CUDA EP unavailable for {role:?}, falling back to CPU: {e}"
-                        );
-                        selected = "cpu";
+        }
+        _ => {
+            // "auto": try TRT first, then CUDA, fall back to CPU.
+            match try_register_trt_ep(builder.clone(), role) {
+                Ok((b, ep)) => {
+                    builder = b;
+                    selected = ep;
+                }
+                Err(e) => {
+                    eprintln!("ort_session: TRT EP unavailable for {role:?}: {e}, trying CUDA");
+                    match try_register_cuda_ep(builder.clone(), role) {
+                        Ok((b, ep)) => {
+                            builder = b;
+                            selected = ep;
+                        }
+                        Err(e2) => {
+                            eprintln!(
+                                "ort_session: CUDA EP unavailable for {role:?}: {e2}, falling back to CPU"
+                            );
+                            selected = "cpu";
+                        }
                     }
                 }
             }
@@ -325,6 +368,7 @@ pub fn diagnose_available_providers() -> Vec<String> {
 
 /// Quick check: try registering CUDA EP on a temporary session builder.
 /// Returns true if CUDA EP is available in the loaded ORT DLL.
+#[cfg(feature = "cuda")]
 fn probe_cuda_ep_available() -> bool {
     // Try to build a minimal CUDA EP and check if the registration API is available
     match Session::builder() {
@@ -339,6 +383,12 @@ fn probe_cuda_ep_available() -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Stub: CUDA EP not compiled in.
+#[cfg(not(feature = "cuda"))]
+const fn probe_cuda_ep_available() -> bool {
+    false
 }
 
 /// Check if critical CUDA DLLs can be found via the system DLL search path.

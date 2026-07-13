@@ -283,7 +283,7 @@ impl Default for UiSettings {
             midi_import_target: default_midi_import_target(),
             ort_ep: default_ort_ep(),
             cuda_device_id: default_cuda_device_id(),
-            auto_background_render: false,
+            auto_background_render: true,
         }
     }
 }

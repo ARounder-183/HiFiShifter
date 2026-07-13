@@ -221,7 +221,6 @@ export interface SessionState {
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
 
-
     // Monotonic bump token for invalidating parameter curve caches.
     // - Not included in undo/redo snapshots.
     // - Should be bumped on any timeline/undo/redo operation that may affect param rendering.
@@ -986,7 +985,7 @@ const initialState: SessionState = {
     defaultHifiganMelStretch: true,
     ortEp: "auto",
     cudaDeviceId: 0,
-    autoBackgroundRender: false,
+    autoBackgroundRender: true,
 
     paramsEpoch: 0,
     playbackRateVersion: 0,

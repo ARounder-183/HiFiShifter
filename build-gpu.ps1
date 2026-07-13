@@ -40,7 +40,7 @@ Write-Host "[build-gpu] ORT_LIB_LOCATION = $env:ORT_LIB_LOCATION" -ForegroundCol
 Write-Host "[build-gpu] Starting Tauri build with GPU support..." -ForegroundColor Cyan
 
 Set-Location $PSScriptRoot
-cargo tauri build --features onnx
+cargo tauri build --features onnx,cuda,tensorrt
 
 # ── Post-build: stage CUDA runtime DLLs into the release directory ──────────────
 # Without these, ORT reports ep=cuda but silently executes on CPU at runtime,

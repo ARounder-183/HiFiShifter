@@ -163,4 +163,4 @@ $totalStaged += Copy-DllIfNewer $OrtLibDir "cudnn*.dll" "ORT lib"
 Write-Host "[dev-gpu] Starting Tauri dev with GPU support..." -ForegroundColor Cyan
 
 Set-Location $PSScriptRoot
-cargo tauri dev --features onnx
+cargo tauri dev --features onnx,cuda,tensorrt

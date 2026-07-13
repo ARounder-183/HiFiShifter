@@ -36,11 +36,11 @@ mod vocoder_ort_session {
 #[allow(unused_imports)]
 use vocoder_ort_session as ort_session;
 
-#[cfg(all(feature = "onnx", target_os = "windows"))]
+#[cfg(all(feature = "cuda", target_os = "windows"))]
 #[path = "vocoder/cuda_info.rs"]
 mod cuda_info;
 
-#[cfg(all(feature = "onnx", not(target_os = "windows")))]
+#[cfg(not(all(feature = "cuda", target_os = "windows")))]
 #[path = "vocoder/cuda_info_stub.rs"]
 mod cuda_info;
 

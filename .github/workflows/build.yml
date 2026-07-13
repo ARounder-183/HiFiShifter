@@ -63,6 +63,20 @@ jobs:
             cargo_features: ""
             tauri_args: --target x86_64-pc-windows-msvc
             ort_ep: ""
+            # Regular non-CUDA build (uses default features = onnx + vslib).
+            ort_lib: ""
+            bundle_suffix: ""
+
+          - name: windows-x86_64-cuda
+            os: windows-latest
+            cargo_target: x86_64-pc-windows-msvc
+            cargo_no_default_features: "0"
+            cargo_features: "cuda,onnx,vslib"
+            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,cuda,vslib
+            ort_ep: "cuda"
+            # CUDA GPU build with ONNX Runtime GPU provider.
+            ort_lib: gpu
+            bundle_suffix: -cuda
 
           - name: windows-arm64
             os: windows-11-arm
@@ -71,6 +85,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-pc-windows-msvc -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: macos-arm64
             os: macos-latest
@@ -79,6 +95,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-apple-darwin -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: macos-x86_64
             os: macos-15-intel
@@ -88,6 +106,8 @@ jobs:
             tauri_args: --target x86_64-apple-darwin -- --no-default-features --features onnx
             # x86_64 macOS uses ORT CPU provider to avoid CUDA prebuilt constraints.
             ort_ep: cpu
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: linux-x86_64
             os: ubuntu-24.04
@@ -96,6 +116,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: linux-arm64
             os: ubuntu-24.04-arm
@@ -104,6 +126,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-unknown-linux-gnu -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
     steps:
       - uses: actions/checkout@v6
@@ -302,6 +326,38 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
+      - name: Download ONNX Runtime GPU for CUDA builds (Windows)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $OrtVersion = "1.24.1"
+          $OrtUrl = "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVersion/onnxruntime-win-x64-gpu-$OrtVersion.zip"
+          $OrtDir = Join-Path $env:RUNNER_TEMP "ort-gpu"
+          $OrtZip = Join-Path $env:RUNNER_TEMP "ort-gpu.zip"
+
+          Write-Host "Downloading ONNX Runtime GPU v$OrtVersion..."
+          Invoke-WebRequest -Uri $OrtUrl -OutFile $OrtZip
+
+          Write-Host "Extracting..."
+          Expand-Archive -Path $OrtZip -DestinationPath $OrtDir -Force
+
+          # Find the lib dir (extracted structure: onnxruntime-win-x64-gpu-1.24.1/lib/)
+          $LibDir = Get-ChildItem -Path $OrtDir -Directory | Select-Object -First 1 | Join-Path -ChildPath "lib"
+          Write-Host "ORT lib dir: $LibDir"
+
+          # Set ORT_LIB_LOCATION so ort-sys can find the import library and DLLs
+          "ORT_LIB_LOCATION=$LibDir" >> $env:GITHUB_ENV
+
+          # Verify critical files
+          foreach ($f in @("onnxruntime.dll", "onnxruntime.lib", "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll")) {
+            $p = Join-Path $LibDir $f
+            if (Test-Path $p) {
+              Write-Host "  Found: $f"
+            } else {
+              Write-Host "  WARNING: $f not found!"
+            }
+          }
+
       - name: Install frontend deps
         run: |
           npm --prefix frontend ci
@@ -464,7 +520,7 @@ jobs:
             $arch = 'x86_64'
           }
 
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-installer"
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-installer"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
@@ -515,7 +571,7 @@ jobs:
             $arch = 'x86_64'
           }
 
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-portable"
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-portable"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
