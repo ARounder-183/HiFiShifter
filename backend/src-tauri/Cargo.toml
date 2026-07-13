@@ -62,6 +62,7 @@ objc2 = "0.6"
 
 [features]
 default = ["onnx", "vslib"]
+logging = []
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 cuda = ["onnx", "ort/cuda"]
 tensorrt = ["cuda", "ort/tensorrt"]

@@ -838,7 +838,8 @@ export const jaJP = {
         "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
 
     benchmark_title: "推論デバイスベンチマーク",
-    benchmark_desc: "各デバイスで約12秒の音声をボコーダー推論し、遅延を比較します。最速のプロバイダを選択してください。",
+    benchmark_desc:
+        "各デバイスで約12秒の音声をボコーダー推論し、遅延を比較します。最速のプロバイダを選択してください。",
     benchmark_running: "ベンチマーク実行中… 20～60秒かかる場合があります",
     benchmark_results: "結果（{samples} フレーム · 44.1 kHz）：",
     benchmark_device_header: "デバイス",
@@ -851,16 +852,21 @@ export const jaJP = {
     benchmark_running_btn: "実行中…",
     benchmark_close: "閉じる",
     benchmark_idle_hint: "「ベンチマークを実行」をクリックして開始。モデルをロードしてください。",
-    benchmark_error_default: "ベンチマークに失敗しました。モデルがロードされているか確認してください。",
+    benchmark_error_default:
+        "ベンチマークに失敗しました。モデルがロードされているか確認してください。",
     benchmark_gpu_failed_title: "⚠ GPUベンチマーク失敗 — CUDA登録済みだが実行不可",
-    benchmark_gpu_failed_desc: "ONNX RuntimeがCUDAプロバイダを検出しましたが、推論に失敗しました。CUDAランタイムDLL（cuBLAS、cuDNN）が不足している可能性があります。",
+    benchmark_gpu_failed_desc:
+        "ONNX RuntimeがCUDAプロバイダを検出しましたが、推論に失敗しました。CUDAランタイムDLL（cuBLAS、cuDNN）が不足している可能性があります。",
     benchmark_gpu_dll_missing_fix: "修正方法：",
     benchmark_gpu_broken_title: "⚠ GPUアクセラレーション不可 — CUDAランタイムDLL不足",
-    benchmark_gpu_broken_desc: "ONNX RuntimeがNVIDIA GPUを認識し、CUDAプロバイダも利用可能ですが、cuBLASとcuDNNが不足しています。CUDAはサイレントにCPUにフォールバックします。",
-    benchmark_gpu_fix_cmd1: "> .\\setup-gpu-deps.ps1   # 一度だけ実行（ORT + cuBLAS + cuDNNをダウンロード）",
+    benchmark_gpu_broken_desc:
+        "ONNX RuntimeがNVIDIA GPUを認識し、CUDAプロバイダも利用可能ですが、cuBLASとcuDNNが不足しています。CUDAはサイレントにCPUにフォールバックします。",
+    benchmark_gpu_fix_cmd1:
+        "> .\\setup-gpu-deps.ps1   # 一度だけ実行（ORT + cuBLAS + cuDNNをダウンロード）",
     benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 開発サーバー起動（全DLLを自動コピー）",
     benchmark_gpu_failed_dll_ok_title: "⚠ GPUベンチマーク失敗（CUDA・DLLは準備完了）",
-    benchmark_gpu_failed_dll_ok_desc: "CUDA EPとランタイムDLLは準備完了ですが、推論に失敗しました。ドライバまたはハードウェアの問題の可能性があります。",
+    benchmark_gpu_failed_dll_ok_desc:
+        "CUDA EPとランタイムDLLは準備完了ですが、推論に失敗しました。ドライバまたはハードウェアの問題の可能性があります。",
     benchmark_cuda_dll_label: "CUDAランタイムDLL：",
     benchmark_cuda_dll_yes: "検出 ✅",
     benchmark_cuda_dll_no: "不足 — GPUは動作しません ⚠",

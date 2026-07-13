@@ -22,7 +22,10 @@ fn sanitize_gtk_modules_for_appimage() {
 
 /// In release builds on Windows, redirect stderr to a log file next to the exe
 /// so that all `eprintln!` diagnostics are captured for debugging distributed builds.
-#[cfg(all(windows, not(debug_assertions)))]
+/// In release builds on Windows, redirect stderr to a log file next to the exe
+/// so that all diagnostics are captured for debugging distributed builds.
+/// Only compiled when the `logging` feature is enabled.
+#[cfg(all(feature = "logging", windows, not(debug_assertions)))]
 fn init_file_log() {
     use std::fs::File;
     use std::io::Write;
@@ -58,7 +61,7 @@ fn init_file_log() {
     }
 }
 
-#[cfg(not(all(windows, not(debug_assertions))))]
+#[cfg(not(all(feature = "logging", windows, not(debug_assertions))))]
 fn init_file_log() {}
 
 fn main() {

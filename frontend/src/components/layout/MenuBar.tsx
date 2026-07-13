@@ -96,15 +96,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     // Load GPU devices on mount
     useEffect(() => {
         let cancelled = false;
-        coreApi.getGpuDevices().then((result) => {
-            if (!cancelled) {
-                setGpuDevices(result.devices ?? []);
-                setGpuDevicesLoaded(true);
-            }
-        }).catch(() => {
-            if (!cancelled) setGpuDevicesLoaded(true);
-        });
-        return () => { cancelled = true; };
+        coreApi
+            .getGpuDevices()
+            .then((result) => {
+                if (!cancelled) {
+                    setGpuDevices(result.devices ?? []);
+                    setGpuDevicesLoaded(true);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setGpuDevicesLoaded(true);
+            });
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     // Edit dialog states
@@ -775,7 +780,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         >
                                             {withCheck(
                                                 s.cudaDeviceId === gpu.deviceId,
-                                                `${gpu.name} (${(gpu.memoryMb / 1024).toFixed(1)} GB)`
+                                                `${gpu.name} (${(gpu.memoryMb / 1024).toFixed(1)} GB)`,
                                             )}
                                         </DropdownMenu.Item>
                                     ))}
@@ -790,9 +795,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             )}
 
                             <DropdownMenu.Separator />
-                            <DropdownMenu.Item
-                                onSelect={() => setBenchmarkDialogOpen(true)}
-                            >
+                            <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>
                                 {t("menu_run_benchmark")}
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
@@ -881,11 +884,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             {/* Inference device benchmark */}
-            <BenchmarkDialog
-                open={benchmarkDialogOpen}
-                onOpenChange={setBenchmarkDialogOpen}
-            />
-
+            <BenchmarkDialog open={benchmarkDialogOpen} onOpenChange={setBenchmarkDialogOpen} />
 
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (

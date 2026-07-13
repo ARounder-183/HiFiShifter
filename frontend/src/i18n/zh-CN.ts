@@ -835,21 +835,16 @@ export const zhCN = {
     benchmark_close: "关闭",
     benchmark_idle_hint: "点击「运行基准测试」开始。需要先加载模型。",
     benchmark_error_default: "基准测试失败。请确保模型已加载。",
-    benchmark_gpu_failed_title:
-        "⚠ GPU 基准测试失败 — CUDA 已注册但无法执行",
+    benchmark_gpu_failed_title: "⚠ GPU 基准测试失败 — CUDA 已注册但无法执行",
     benchmark_gpu_failed_desc:
         "ONNX Runtime 已检测到 CUDA 执行提供者，但推理失败。这通常是因为可执行文件目录中缺少 CUDA 运行时 DLL（cuBLAS、cuDNN）。",
     benchmark_gpu_dll_missing_fix: "修复方法：",
-    benchmark_gpu_broken_title:
-        "⚠ GPU 加速不可用 — 缺少 CUDA 运行时 DLL",
+    benchmark_gpu_broken_title: "⚠ GPU 加速不可用 — 缺少 CUDA 运行时 DLL",
     benchmark_gpu_broken_desc:
         "ONNX Runtime 可以识别你的 NVIDIA GPU 且 CUDA 提供者可用，但可执行文件目录中缺少 cuBLAS 和 cuDNN。CUDA 将静默回退到 CPU 执行。",
-    benchmark_gpu_fix_cmd1:
-        "> .\\setup-gpu-deps.ps1   # 一次性安装（下载 ORT + cuBLAS + cuDNN）",
-    benchmark_gpu_fix_cmd2:
-        "> .\\dev-gpu.ps1          # 启动开发服务器（自动复制所有 DLL）",
-    benchmark_gpu_failed_dll_ok_title:
-        "⚠ GPU 基准测试失败，但 CUDA 和 DLL 均已就绪",
+    benchmark_gpu_fix_cmd1: "> .\\setup-gpu-deps.ps1   # 一次性安装（下载 ORT + cuBLAS + cuDNN）",
+    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 启动开发服务器（自动复制所有 DLL）",
+    benchmark_gpu_failed_dll_ok_title: "⚠ GPU 基准测试失败，但 CUDA 和 DLL 均已就绪",
     benchmark_gpu_failed_dll_ok_desc:
         "CUDA EP 和运行时 DLL 均已就绪，但推理仍然失败。可能是驱动或硬件问题。",
     benchmark_cuda_dll_label: "CUDA 运行时 DLL：",

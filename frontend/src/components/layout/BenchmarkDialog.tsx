@@ -110,16 +110,22 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
     }
 
     const rows = result ? buildRows(result) : [];
-    const fastestRow = rows.length > 0
-        ? rows.reduce((best, r) => (r.available && r.medianMs < best.medianMs ? r : best), rows[0])
-        : null;
+    const fastestRow =
+        rows.length > 0
+            ? rows.reduce(
+                  (best, r) => (r.available && r.medianMs < best.medianMs ? r : best),
+                  rows[0],
+              )
+            : null;
 
     return (
-        <Dialog.Root open={open} onOpenChange={(o) => { if (!o) handleClose(); }}>
-            <Dialog.Content
-                style={{ maxWidth: 520 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
+        <Dialog.Root
+            open={open}
+            onOpenChange={(o) => {
+                if (!o) handleClose();
+            }}
+        >
+            <Dialog.Content style={{ maxWidth: 520 }} onKeyDown={(e) => e.stopPropagation()}>
                 <Dialog.Title>{t("benchmark_title")}</Dialog.Title>
                 <Dialog.Description size="2" color="gray">
                     {t("benchmark_desc")}
@@ -140,7 +146,10 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                     {phase === "done" && result && rows.length > 0 && (
                         <Flex direction="column" gap="2">
                             <Text size="2" weight="medium">
-                                {t("benchmark_results").replace("{samples}", String(result.benchmarkSamples))}
+                                {t("benchmark_results").replace(
+                                    "{samples}",
+                                    String(result.benchmarkSamples),
+                                )}
                             </Text>
                             <div
                                 style={{
@@ -176,7 +185,8 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     </thead>
                                     <tbody>
                                         {rows.map((row) => {
-                                            const isFastest = row.label === fastestRow?.label && row.available;
+                                            const isFastest =
+                                                row.label === fastestRow?.label && row.available;
                                             const isUnavailable = !row.available;
                                             return (
                                                 <tr
@@ -195,8 +205,12 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                             )}
                                                             <span
                                                                 style={{
-                                                                    fontWeight: isFastest ? 600 : 400,
-                                                                    color: isUnavailable ? "var(--gray-9)" : undefined,
+                                                                    fontWeight: isFastest
+                                                                        ? 600
+                                                                        : 400,
+                                                                    color: isUnavailable
+                                                                        ? "var(--gray-9)"
+                                                                        : undefined,
                                                                 }}
                                                             >
                                                                 {row.label}
@@ -218,8 +232,8 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                             color: isUnavailable
                                                                 ? "var(--gray-9)"
                                                                 : row.rtf >= 1
-                                                                    ? "var(--green-10)"
-                                                                    : "var(--red-10)",
+                                                                  ? "var(--green-10)"
+                                                                  : "var(--red-10)",
                                                         }}
                                                     >
                                                         {isUnavailable ? "N/A" : formatRtf(row.rtf)}
@@ -235,8 +249,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                             </Text>
                             {fastestRow && fastestRow.available && (
                                 <Text size="2">
-                                    {t("benchmark_recommended")}{" "}
-                                    <strong>{fastestRow.label}</strong>
+                                    {t("benchmark_recommended")} <strong>{fastestRow.label}</strong>
                                 </Text>
                             )}
 
@@ -258,50 +271,66 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     <Text size="2" style={{ color: "var(--red-9)" }}>
                                         {t("benchmark_gpu_broken_desc")}
                                     </Text>
-                                    <Text size="2" weight="medium" style={{ color: "var(--red-10)", marginTop: 4 }}>
+                                    <Text
+                                        size="2"
+                                        weight="medium"
+                                        style={{ color: "var(--red-10)", marginTop: 4 }}
+                                    >
                                         {t("benchmark_gpu_dll_missing_fix")}
                                     </Text>
-                                    <Text size="2" style={{
-                                        fontFamily: "monospace",
-                                        background: "var(--red-4)",
-                                        padding: "4px 8px",
-                                        borderRadius: 4,
-                                        color: "var(--red-11)",
-                                    }}>
+                                    <Text
+                                        size="2"
+                                        style={{
+                                            fontFamily: "monospace",
+                                            background: "var(--red-4)",
+                                            padding: "4px 8px",
+                                            borderRadius: 4,
+                                            color: "var(--red-11)",
+                                        }}
+                                    >
                                         {t("benchmark_gpu_fix_cmd1")}
                                     </Text>
-                                    <Text size="2" style={{
-                                        fontFamily: "monospace",
-                                        background: "var(--red-4)",
-                                        padding: "4px 8px",
-                                        borderRadius: 4,
-                                        color: "var(--red-11)",
-                                    }}>
+                                    <Text
+                                        size="2"
+                                        style={{
+                                            fontFamily: "monospace",
+                                            background: "var(--red-4)",
+                                            padding: "4px 8px",
+                                            borderRadius: 4,
+                                            color: "var(--red-11)",
+                                        }}
+                                    >
                                         {t("benchmark_gpu_fix_cmd2")}
                                     </Text>
                                 </Flex>
                             )}
 
                             {/* Secondary: CUDA available but benchmark failed */}
-                            {result.cudaAvailable && result.cudaDllsFound && result.gpuMedianMs == null && (
-                                <Flex
-                                    direction="column"
-                                    gap="1"
-                                    style={{
-                                        padding: "8px 12px",
-                                        borderRadius: 6,
-                                        background: "var(--red-3)",
-                                        border: "1px solid var(--red-5)",
-                                    }}
-                                >
-                                    <Text size="2" weight="medium" style={{ color: "var(--red-10)" }}>
-                                        {t("benchmark_gpu_failed_dll_ok_title")}
-                                    </Text>
-                                    <Text size="1" style={{ color: "var(--red-9)" }}>
-                                        {t("benchmark_gpu_failed_dll_ok_desc")}
-                                    </Text>
-                                </Flex>
-                            )}
+                            {result.cudaAvailable &&
+                                result.cudaDllsFound &&
+                                result.gpuMedianMs == null && (
+                                    <Flex
+                                        direction="column"
+                                        gap="1"
+                                        style={{
+                                            padding: "8px 12px",
+                                            borderRadius: 6,
+                                            background: "var(--red-3)",
+                                            border: "1px solid var(--red-5)",
+                                        }}
+                                    >
+                                        <Text
+                                            size="2"
+                                            weight="medium"
+                                            style={{ color: "var(--red-10)" }}
+                                        >
+                                            {t("benchmark_gpu_failed_dll_ok_title")}
+                                        </Text>
+                                        <Text size="1" style={{ color: "var(--red-9)" }}>
+                                            {t("benchmark_gpu_failed_dll_ok_desc")}
+                                        </Text>
+                                    </Flex>
+                                )}
 
                             {/* Available providers */}
                             <Text size="1" style={{ color: "var(--gray-9)", marginTop: 4 }}>
@@ -309,10 +338,15 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 {result.availableProviders.join(", ") || "unknown"}
                             </Text>
                             {result.cudaAvailable && (
-                                <Text size="1" style={{
-                                    color: result.cudaDllsFound ? "var(--green-9)" : "var(--red-9)",
-                                    fontWeight: result.cudaDllsFound ? 400 : 600,
-                                }}>
+                                <Text
+                                    size="1"
+                                    style={{
+                                        color: result.cudaDllsFound
+                                            ? "var(--green-9)"
+                                            : "var(--red-9)",
+                                        fontWeight: result.cudaDllsFound ? 400 : 600,
+                                    }}
+                                >
                                     {t("benchmark_cuda_dll_label")}{" "}
                                     {result.cudaDllsFound
                                         ? t("benchmark_cuda_dll_yes")
@@ -323,13 +357,22 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                             {/* NVML GPU enumeration */}
                             {result.gpuDevices && result.gpuDevices.length > 0 && (
                                 <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
-                                    <Text size="1" weight="medium" style={{ color: "var(--gray-9)" }}>
+                                    <Text
+                                        size="1"
+                                        weight="medium"
+                                        style={{ color: "var(--gray-9)" }}
+                                    >
                                         {t("benchmark_nvml_label")}
                                     </Text>
                                     {result.gpuDevices.map((gpu) => (
-                                        <Text key={gpu.deviceId} size="1" style={{ color: "var(--gray-9)" }}>
-                                            · {t("benchmark_cuda_device_label")} {gpu.deviceId}: {gpu.name}{" "}
-                                            ({(gpu.memoryMb / 1024).toFixed(1)} GB, CC {gpu.computeMajor}.{gpu.computeMinor})
+                                        <Text
+                                            key={gpu.deviceId}
+                                            size="1"
+                                            style={{ color: "var(--gray-9)" }}
+                                        >
+                                            · {t("benchmark_cuda_device_label")} {gpu.deviceId}:{" "}
+                                            {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB, CC{" "}
+                                            {gpu.computeMajor}.{gpu.computeMinor})
                                         </Text>
                                     ))}
                                 </Flex>
@@ -356,13 +399,8 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                     <Button variant="soft" color="gray" onClick={handleClose}>
                         {t("benchmark_close")}
                     </Button>
-                    <Button
-                        onClick={() => void handleRun()}
-                        disabled={phase === "running"}
-                    >
-                        {phase === "running"
-                            ? t("benchmark_running_btn")
-                            : t("benchmark_run_btn")}
+                    <Button onClick={() => void handleRun()} disabled={phase === "running"}>
+                        {phase === "running" ? t("benchmark_running_btn") : t("benchmark_run_btn")}
                     </Button>
                 </Flex>
             </Dialog.Content>

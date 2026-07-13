@@ -847,21 +847,17 @@ export const enUS = {
     benchmark_close: "Close",
     benchmark_idle_hint: 'Click "Run Benchmark" to start. A model must be loaded first.',
     benchmark_error_default: "Benchmark failed. Ensure a model is loaded.",
-    benchmark_gpu_failed_title:
-        "⚠ GPU benchmark failed — CUDA registered but cannot execute",
+    benchmark_gpu_failed_title: "⚠ GPU benchmark failed — CUDA registered but cannot execute",
     benchmark_gpu_failed_desc:
         "The CUDA execution provider is available in ONNX Runtime but inference failed. This usually means CUDA runtime DLLs (cuBLAS, cuDNN) are missing from the executable directory.",
     benchmark_gpu_dll_missing_fix: "Fix:",
-    benchmark_gpu_broken_title:
-        "⚠ GPU Acceleration BROKEN — Missing CUDA Runtime DLLs",
+    benchmark_gpu_broken_title: "⚠ GPU Acceleration BROKEN — Missing CUDA Runtime DLLs",
     benchmark_gpu_broken_desc:
         "ONNX Runtime can see your NVIDIA GPU and the CUDA provider is available, but cuBLAS and cuDNN are missing from the executable directory. CUDA will silently fall back to CPU.",
     benchmark_gpu_fix_cmd1:
         "> .\\setup-gpu-deps.ps1   # one-time setup (downloads ORT + cuBLAS + cuDNN)",
-    benchmark_gpu_fix_cmd2:
-        "> .\\dev-gpu.ps1          # start dev server (auto-copies all DLLs)",
-    benchmark_gpu_failed_dll_ok_title:
-        "⚠ GPU benchmark failed despite CUDA being available",
+    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # start dev server (auto-copies all DLLs)",
+    benchmark_gpu_failed_dll_ok_title: "⚠ GPU benchmark failed despite CUDA being available",
     benchmark_gpu_failed_dll_ok_desc:
         "The CUDA EP is available and DLLs are present, but inference failed. This may indicate a driver or hardware issue.",
     benchmark_cuda_dll_label: "CUDA runtime DLLs:",

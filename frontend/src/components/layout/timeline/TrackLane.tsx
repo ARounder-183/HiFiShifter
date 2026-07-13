@@ -302,14 +302,17 @@ export const TrackLane = React.memo(
         );
         const beginBodyInteraction = React.useCallback(
             (event: React.PointerEvent<HTMLDivElement>, clip: ClipInfo) => {
-                const alt = Boolean(
-                    altPressed || event.altKey || event.nativeEvent.getModifierState?.("Alt"),
+                // altPressed tracks the stretch modifier (configurable).
+                // For click-selection bypass, only check physical Alt key to avoid
+                // breaking Ctrl/Shift selection when those keys are stretch modifiers.
+                const altKeyDown = Boolean(
+                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
                 const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !alt && !ctrlOrMeta;
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !alt;
-                const allowSeek = !alt && !ctrlOrMeta && !event.shiftKey;
+                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
+                const allowSeek = !altKeyDown && !ctrlOrMeta && !event.shiftKey;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const startX = event.clientX;
                 const startY = event.clientY;
@@ -347,7 +350,7 @@ export const TrackLane = React.memo(
                 window.addEventListener("pointerup", onUp, true);
                 window.addEventListener("pointercancel", onUp, true);
 
-                startClipDrag(event, clip.id, clip.startSec, alt);
+                startClipDrag(event, clip.id, clip.startSec, false);
             },
             [
                 altPressed,
@@ -367,20 +370,24 @@ export const TrackLane = React.memo(
             ) => {
                 if (event.button !== 0) return;
 
-                const alt = Boolean(
-                    altPressed || event.altKey || event.nativeEvent.getModifierState?.("Alt"),
+                // altPressed tracks the stretch modifier (configurable) — use it
+                // for edit-mode selection (stretch vs trim). For click-selection
+                // bypass, only check the physical Alt key.
+                const stretchActive = altPressed;
+                const altKeyDown = Boolean(
+                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
                 const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !alt && !ctrlOrMeta;
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !alt;
+                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const mode =
                     edge === "trim_left"
-                        ? alt
+                        ? stretchActive
                             ? "stretch_left"
                             : "trim_left"
-                        : alt
+                        : stretchActive
                           ? "stretch_right"
                           : "trim_right";
                 const startX = event.clientX;

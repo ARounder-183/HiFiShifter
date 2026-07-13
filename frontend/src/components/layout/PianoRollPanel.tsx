@@ -1918,6 +1918,13 @@ export const PianoRollPanel: React.FC = () => {
         if (!el) return;
 
         const handler = (e: WheelEvent) => {
+            // During vibrato/line drag, wheel always adjusts vibrato parameters.
+            // Defer to the scroller's wheel handler which has full vibrato drag logic.
+            if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
+                e.preventDefault();
+                return;
+            }
+
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
                 if (isNoneBinding(kb)) return noModifierPressed;

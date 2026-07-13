@@ -850,7 +850,8 @@ export const koKR = {
         "편집 후 즉시 백그라운드에서 사전 렌더링을 시작합니다. 재생 시 이미 렌더링된 부분을 바로 사용할 수 있습니다.",
 
     benchmark_title: "추론 장치 벤치마크",
-    benchmark_desc: "각 장치에서 약 12초 오디오로 보코더 추론을 실행하고 지연 시간을 비교합니다. 가장 빠른 제공자를 선택하세요.",
+    benchmark_desc:
+        "각 장치에서 약 12초 오디오로 보코더 추론을 실행하고 지연 시간을 비교합니다. 가장 빠른 제공자를 선택하세요.",
     benchmark_running: "벤치마크 실행 중… 20~60초 소요될 수 있습니다",
     benchmark_results: "결과 ({samples} 프레임 · 44.1 kHz):",
     benchmark_device_header: "장치",
@@ -862,17 +863,21 @@ export const koKR = {
     benchmark_run_btn: "벤치마크 실행",
     benchmark_running_btn: "실행 중…",
     benchmark_close: "닫기",
-    benchmark_idle_hint: "\"벤치마크 실행\"을 클릭하여 시작하세요. 모델이 로드되어 있어야 합니다.",
+    benchmark_idle_hint: '"벤치마크 실행"을 클릭하여 시작하세요. 모델이 로드되어 있어야 합니다.',
     benchmark_error_default: "벤치마크에 실패했습니다. 모델이 로드되었는지 확인하세요.",
     benchmark_gpu_failed_title: "⚠ GPU 벤치마크 실패 — CUDA 등록됐으나 실행 불가",
-    benchmark_gpu_failed_desc: "ONNX Runtime이 CUDA 제공자를 감지했지만 추론에 실패했습니다. CUDA 런타임 DLL(cuBLAS, cuDNN)이 누락되었을 수 있습니다.",
+    benchmark_gpu_failed_desc:
+        "ONNX Runtime이 CUDA 제공자를 감지했지만 추론에 실패했습니다. CUDA 런타임 DLL(cuBLAS, cuDNN)이 누락되었을 수 있습니다.",
     benchmark_gpu_dll_missing_fix: "해결 방법:",
     benchmark_gpu_broken_title: "⚠ GPU 가속 불가 — CUDA 런타임 DLL 누락",
-    benchmark_gpu_broken_desc: "ONNX Runtime이 NVIDIA GPU를 인식하고 CUDA 제공자도 사용 가능하지만, cuBLAS와 cuDNN이 누락되었습니다. CUDA는 자동으로 CPU로 폴백합니다.",
-    benchmark_gpu_fix_cmd1: "> .\\setup-gpu-deps.ps1   # 일회성 설치 (ORT + cuBLAS + cuDNN 다운로드)",
+    benchmark_gpu_broken_desc:
+        "ONNX Runtime이 NVIDIA GPU를 인식하고 CUDA 제공자도 사용 가능하지만, cuBLAS와 cuDNN이 누락되었습니다. CUDA는 자동으로 CPU로 폴백합니다.",
+    benchmark_gpu_fix_cmd1:
+        "> .\\setup-gpu-deps.ps1   # 일회성 설치 (ORT + cuBLAS + cuDNN 다운로드)",
     benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 개발 서버 시작 (모든 DLL 자동 복사)",
     benchmark_gpu_failed_dll_ok_title: "⚠ GPU 벤치마크 실패 (CUDA 및 DLL 준비 완료)",
-    benchmark_gpu_failed_dll_ok_desc: "CUDA EP와 런타임 DLL이 준비되었지만 추론에 실패했습니다. 드라이버 또는 하드웨어 문제일 수 있습니다.",
+    benchmark_gpu_failed_dll_ok_desc:
+        "CUDA EP와 런타임 DLL이 준비되었지만 추론에 실패했습니다. 드라이버 또는 하드웨어 문제일 수 있습니다.",
     benchmark_cuda_dll_label: "CUDA 런타임 DLL:",
     benchmark_cuda_dll_yes: "찾음 ✅",
     benchmark_cuda_dll_no: "누락 — GPU가 작동하지 않음 ⚠",

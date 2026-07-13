@@ -835,14 +835,17 @@ export const zhTW = {
     benchmark_idle_hint: "點擊「執行基準測試」開始。需要先載入模型。",
     benchmark_error_default: "基準測試失敗。請確保模型已載入。",
     benchmark_gpu_failed_title: "⚠ GPU 基準測試失敗 — CUDA 已註冊但無法執行",
-    benchmark_gpu_failed_desc: "ONNX Runtime 已偵測到 CUDA 提供者，但推論失敗。通常是缺少 CUDA 執行階段 DLL（cuBLAS、cuDNN）。",
+    benchmark_gpu_failed_desc:
+        "ONNX Runtime 已偵測到 CUDA 提供者，但推論失敗。通常是缺少 CUDA 執行階段 DLL（cuBLAS、cuDNN）。",
     benchmark_gpu_dll_missing_fix: "修復方法：",
     benchmark_gpu_broken_title: "⚠ GPU 加速不可用 — 缺少 CUDA 執行階段 DLL",
-    benchmark_gpu_broken_desc: "ONNX Runtime 可以識別你的 NVIDIA GPU 且 CUDA 提供者可用，但缺少 cuBLAS 與 cuDNN。CUDA 將靜默回退到 CPU 執行。",
+    benchmark_gpu_broken_desc:
+        "ONNX Runtime 可以識別你的 NVIDIA GPU 且 CUDA 提供者可用，但缺少 cuBLAS 與 cuDNN。CUDA 將靜默回退到 CPU 執行。",
     benchmark_gpu_fix_cmd1: "> .\\setup-gpu-deps.ps1   # 一次性安裝（下載 ORT + cuBLAS + cuDNN）",
     benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 啟動開發伺服器（自動複製所有 DLL）",
     benchmark_gpu_failed_dll_ok_title: "⚠ GPU 基準測試失敗，但 CUDA 與 DLL 均已就緒",
-    benchmark_gpu_failed_dll_ok_desc: "CUDA EP 與執行階段 DLL 均已就緒，但推論仍然失敗。可能是驅動或硬體問題。",
+    benchmark_gpu_failed_dll_ok_desc:
+        "CUDA EP 與執行階段 DLL 均已就緒，但推論仍然失敗。可能是驅動或硬體問題。",
     benchmark_cuda_dll_label: "CUDA 執行階段 DLL：",
     benchmark_cuda_dll_yes: "已找到 ✅",
     benchmark_cuda_dll_no: "缺失 — GPU 將無法工作 ⚠",
