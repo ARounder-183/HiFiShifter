@@ -53,6 +53,17 @@ fn default_model_dir_guess() -> Option<PathBuf> {
     if p.join("hnsep.onnx").is_file() {
         return Some(p);
     }
+
+    // 发布/便携环境：模型位于可执行文件同级的 models/ 目录中
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let p = exe_dir.join("models").join("hnsep");
+            if p.join("hnsep.onnx").is_file() {
+                return Some(p);
+            }
+        }
+    }
+
     None
 }
 

@@ -83,6 +83,16 @@ fn default_model_guess() -> Option<PathBuf> {
         return Some(root_model);
     }
 
+    // 发布/便携环境：模型位于可执行文件同级的 models/ 目录中
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let p = exe_dir.join("models").join("fcpe").join("fcpe.onnx");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
     None
 }
 

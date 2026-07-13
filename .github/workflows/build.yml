@@ -71,10 +71,10 @@ jobs:
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
             cargo_no_default_features: "0"
-            cargo_features: "cuda,onnx,vslib"
-            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,cuda,vslib
+            cargo_features: "cuda,onnx,tensorrt,vslib"
+            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,cuda,tensorrt,vslib
             ort_ep: "cuda"
-            # CUDA GPU build with ONNX Runtime GPU provider.
+            # CUDA GPU build with ONNX Runtime GPU + TensorRT providers.
             ort_lib: gpu
             bundle_suffix: -cuda
 
@@ -128,6 +128,17 @@ jobs:
             ort_ep: ""
             ort_lib: ""
             bundle_suffix: ""
+
+          - name: linux-x86_64-cuda
+            os: ubuntu-24.04
+            cargo_target: x86_64-unknown-linux-gnu
+            cargo_no_default_features: "1"
+            cargo_features: onnx,cuda
+            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx,cuda
+            ort_ep: "cuda"
+            # GPU build with ONNX Runtime CUDA provider for Linux.
+            ort_lib: gpu
+            bundle_suffix: "-cuda"
 
     steps:
       - uses: actions/checkout@v6
@@ -208,6 +219,35 @@ jobs:
           sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
 
+      - name: Install CUDA toolkit + runtime libraries (Linux GPU)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        run: |
+          set -euxo pipefail
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -y
+
+          # nvcc + CUDA runtime libraries.
+          # libonnxruntime_providers_cuda.so NEEDs libcudart.so.12, libcublas.so.12,
+          # libcublasLt.so.12, libcufft.so.11, libcurand.so.10 at LINK TIME.
+          sudo apt-get install -y \
+            cuda-compiler-12-6 \
+            libcublas-12-6 \
+            libcufft-12-6 \
+            libcurand-12-6
+
+          # Add CUDA to PATH for nvcc discovery
+          export PATH="/usr/local/cuda/bin:${PATH}"
+          echo "/usr/local/cuda/bin" >> "${GITHUB_PATH}"
+          nvcc --version
+
+          # Export the CUDA library path for the build step.
+          # /usr/local/cuda/lib64 is a symlink to /usr/local/cuda-12.6/lib64.
+          echo "CUDA_LIB_PATH=/usr/local/cuda/lib64" >> "${GITHUB_ENV}"
+
+          echo "=== Installed CUDA shared libraries ==="
+          find /usr/local/cuda/lib64 -name "libcud*.so*" -o -name "libcublas*.so*" -o -name "libcufft*.so*" -o -name "libcurand*.so*" 2>/dev/null | sort
+
           PKG_DIRS=""
           for d in /usr/lib/*-linux-gnu/pkgconfig /usr/lib/pkgconfig /usr/share/pkgconfig; do
             if [ -d "$d" ]; then
@@ -224,7 +264,7 @@ jobs:
         shell: bash
 
       - name: Ensure AppImage bundling prerequisites (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         run: |
           set -euxo pipefail
           sudo apt-get update -y
@@ -251,7 +291,7 @@ jobs:
         shell: bash
 
       - name: Generate Linux WebKit include map for AppImage
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
@@ -342,7 +382,9 @@ jobs:
           Expand-Archive -Path $OrtZip -DestinationPath $OrtDir -Force
 
           # Find the lib dir (extracted structure: onnxruntime-win-x64-gpu-1.24.1/lib/)
-          $LibDir = Get-ChildItem -Path $OrtDir -Directory | Select-Object -First 1 | Join-Path -ChildPath "lib"
+          # Use .FullName to avoid PowerShell provider path prefix (Microsoft.PowerShell.Core\FileSystem::...)
+          $ExtractedDir = (Get-ChildItem -Path $OrtDir -Directory | Select-Object -First 1).FullName
+          $LibDir = Join-Path $ExtractedDir "lib"
           Write-Host "ORT lib dir: $LibDir"
 
           # Set ORT_LIB_LOCATION so ort-sys can find the import library and DLLs
@@ -358,6 +400,199 @@ jobs:
             }
           }
 
+      - name: Download NVIDIA CUDA runtime DLLs (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $TempDir = Join-Path $env:RUNNER_TEMP "cuda-runtime-dl"
+          New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+
+          # Resolve destination: same as ORT_LIB_LOCATION so build.rs stages everything together
+          $DestDir = $env:ORT_LIB_LOCATION
+          if (-not (Test-Path $DestDir)) {
+            $DestDir = Join-Path $env:USERPROFILE ".cache\ort\lib"
+            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+          }
+          Write-Host "CUDA runtime destination: $DestDir"
+
+          # NVIDIA redistributable package URLs (same as scripts/download-cuda-runtime.ps1)
+          $Packages = @(
+            @{
+              Name = "cuda_cudart 12.6.77"
+              Url  = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.6.77-archive.zip"
+              Dlls = @("cudart64_12.dll")
+            },
+            @{
+              Name = "libcublas 12.6.4.1"
+              Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.6.4.1-archive.zip"
+              Dlls = @("cublas64_12.dll", "cublasLt64_12.dll")
+            },
+            @{
+              Name = "libcufft 11.3.0.4"
+              Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.3.0.4-archive.zip"
+              Dlls = @("cufft64_11.dll", "cufftw64_11.dll")
+            },
+            @{
+              Name = "libcurand 10.3.7.77"
+              Url  = "https://developer.download.nvidia.com/compute/cuda/redist/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.7.77-archive.zip"
+              Dlls = @("curand64_10.dll")
+            },
+            @{
+              Name = "cudnn 9.8.0"
+              Url  = "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.8.0.87_cuda12-archive.zip"
+              Dlls = @(
+                "cudnn64_9.dll",
+                "cudnn_ops64_9.dll",
+                "cudnn_cnn64_9.dll",
+                "cudnn_adv64_9.dll",
+                "cudnn_engines_precompiled64_9.dll",
+                "cudnn_engines_runtime_compiled64_9.dll",
+                "cudnn_graph64_9.dll",
+                "cudnn_heuristic64_9.dll"
+              )
+            }
+          )
+
+          $staged = 0
+          foreach ($pkg in $Packages) {
+            $allPresent = ($pkg.Dlls | Where-Object { -not (Test-Path (Join-Path $DestDir $_)) }).Count -eq 0
+            if ($allPresent) {
+              Write-Host "[$($pkg.Name)] Already present - skipping"
+              $staged += $pkg.Dlls.Count
+              continue
+            }
+
+            Write-Host "[$($pkg.Name)] Downloading..."
+            $zipFile = Join-Path $TempDir ([System.IO.Path]::GetFileName($pkg.Url))
+            $extractDir = Join-Path $TempDir ($pkg.Name -replace '[^a-zA-Z0-9]', '_')
+
+            try {
+              Invoke-WebRequest -Uri $pkg.Url -OutFile $zipFile
+              Write-Host "  Downloaded: $([math]::Round((Get-Item $zipFile).Length / 1MB, 1)) MB"
+            } catch {
+              Write-Host "  ERROR: $_" -ForegroundColor Red
+              continue
+            }
+
+            Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
+
+            foreach ($dll in $pkg.Dlls) {
+              $src = Get-ChildItem -Path $extractDir -Recurse -Filter $dll -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($src) {
+                Copy-Item $src.FullName -Destination (Join-Path $DestDir $dll) -Force
+                Write-Host "  + $dll" -ForegroundColor Green
+                $staged++
+              } else {
+                Write-Host "  ! $dll not found in archive" -ForegroundColor Yellow
+              }
+            }
+            Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+          }
+
+          Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+
+          # Verify critical CUDA DLLs (matching build-gpu.ps1 requirement list)
+          $required = @("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll", "cufft64_11.dll", "cudnn64_9.dll", "cudnn_ops64_9.dll")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $DestDir $_)) }
+          if ($missing) {
+            Write-Host "WARN: Missing CUDA DLLs: $($missing -join ', ')" -ForegroundColor Yellow
+            Write-Host "GPU inference will fall back to CPU (~50x slower)." -ForegroundColor Yellow
+          } else {
+            Write-Host "All $($required.Count) critical CUDA runtime DLLs present - GPU acceleration ready." -ForegroundColor Green
+          }
+
+      - name: Download ONNX Runtime GPU for CUDA builds (Linux)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OrtVersion="1.24.1"
+          OrtUrl="https://github.com/microsoft/onnxruntime/releases/download/v${OrtVersion}/onnxruntime-linux-x64-gpu-${OrtVersion}.tgz"
+          OrtDir="${RUNNER_TEMP}/ort-gpu"
+          OrtTgz="${RUNNER_TEMP}/ort-gpu.tgz"
+
+          echo "Downloading ONNX Runtime GPU v${OrtVersion} for Linux..."
+          curl -fSL -o "${OrtTgz}" "${OrtUrl}"
+
+          echo "Extracting..."
+          mkdir -p "${OrtDir}"
+          tar -xzf "${OrtTgz}" -C "${OrtDir}"
+
+          # Extracted structure: onnxruntime-linux-x64-gpu-1.24.1/lib/
+          LibDir="$(find "${OrtDir}" -maxdepth 2 -type d -name lib | head -1)"
+          echo "ORT lib dir: ${LibDir}"
+
+          # NVIDIA CUDA runtime libraries are installed via apt (see CUDA toolkit step).
+          # cuDNN is downloaded separately below and placed alongside ORT libs.
+          TmpDl="${RUNNER_TEMP}/cuda-redist"
+          mkdir -p "${TmpDl}"
+
+          # cuDNN 9.8.0 redistributable — not available via apt without extra repos
+          CudnnUrl="https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz"
+          CudnnArchive="${TmpDl}/cudnn.tar.xz"
+          echo "Downloading cuDNN 9.8.0..."
+          curl -fSL -o "${CudnnArchive}" "${CudnnUrl}"
+          tar -xJf "${CudnnArchive}" -C "${TmpDl}"
+          rm -f "${CudnnArchive}"
+
+          # Copy cuDNN .so files + symlinks into ORT lib dir
+          while IFS= read -r -d '' found_dir; do
+            echo "Copying cuDNN from ${found_dir}..."
+            cp -av "${found_dir}/"* "${LibDir}/" 2>/dev/null || true
+          done < <(find "${TmpDl}" -type d -name lib -print0)
+          rm -rf "${TmpDl}"
+
+          echo "ORT_LIB_LOCATION=${LibDir}" >> "${GITHUB_ENV}"
+          echo "=== ORT lib contents ==="
+          ls -la "${LibDir}/"
+
+      - name: Stage ORT/CUDA DLLs as Tauri resources (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $OrtLibDir = $env:ORT_LIB_LOCATION
+          $BundleDir = "backend\src-tauri\third_party\ort-bundle"
+          New-Item -ItemType Directory -Path $BundleDir -Force | Out-Null
+
+          # Copy all DLLs from ORT_LIB_LOCATION to the known bundle dir.
+          # NOTE: build.rs also copies all DLLs from ORT_LIB_LOCATION to the
+          # release directory, so they will be picked up by pack-portable.ps1
+          # even if they are NOT listed as Tauri bundle resources below.
+          Write-Host "Copying DLLs from $OrtLibDir to $BundleDir..."
+          $dllCount = 0
+          Get-ChildItem "$OrtLibDir\*.dll" | ForEach-Object {
+            Copy-Item $_.FullName -Destination $BundleDir -Force
+            Write-Host "  + $($_.Name)"
+            $dllCount++
+          }
+          Write-Host "Copied $dllCount DLL(s) to bundle staging"
+
+          # Build resource map for Tauri/NSIS bundling.
+          # Exclude cudnn_engines_precompiled64_9.dll (~548 MB) from the
+          # NSIS resource map to keep the installer data under the 2 GB
+          # NSIS limit. It is still staged to the release directory by
+          # build.rs and shiped in the portable ZIP.
+          $resources = [ordered]@{}
+          $resources["third_party/vslib/vslib_x64.dll"] = "vslib_x64.dll"
+          $resources["third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll"] = "SoundTouchDLL.dll"
+          Get-ChildItem "$BundleDir\*.dll" | ForEach-Object {
+            if ($_.Name -ne "cudnn_engines_precompiled64_9.dll") {
+              $resources["third_party/ort-bundle/$($_.Name)"] = $_.Name
+            } else {
+              Write-Host "  SKIP (NSIS size): $($_.Name) — still in release dir via build.rs"
+            }
+          }
+
+          # Write merged platform config (Tauri auto-merges with tauri.conf.json)
+          $config = @{ bundle = @{ resources = $resources } }
+          $config | ConvertTo-Json -Depth 3 | Out-File -FilePath "backend\src-tauri\tauri.windows.conf.json" -Encoding utf8 -NoNewline
+
+          Write-Host "=== Updated tauri.windows.conf.json ==="
+          Get-Content "backend\src-tauri\tauri.windows.conf.json"
+
       - name: Install frontend deps
         run: |
           npm --prefix frontend ci
@@ -366,11 +601,27 @@ jobs:
         run: |
           ST_DIR="backend/src-tauri/third_party/soundtouch-static"
           mkdir -p "$ST_DIR"
-          if [ ! -f "$ST_DIR/soundtouch/CMakeLists.txt" ]; then
-            git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git "$ST_DIR/soundtouch"
-          else
+          if [ -f "$ST_DIR/soundtouch/CMakeLists.txt" ]; then
             echo "SoundTouch source already exists, skipping clone"
+            exit 0
           fi
+          # Retry up to 5 times with exponential backoff (codeberg.org occasionally 504s)
+          GIT_TERMINAL_PROMPT=0
+          export GIT_TERMINAL_PROMPT
+          for i in $(seq 1 5); do
+            if git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git "$ST_DIR/soundtouch" 2>&1; then
+              echo "SoundTouch clone succeeded (attempt $i)"
+              exit 0
+            fi
+            if [ "$i" -lt 5 ]; then
+              sleep_time=$((2 ** i))
+              echo "Clone attempt $i failed, retrying in ${sleep_time}s..."
+              sleep "$sleep_time"
+              rm -rf "$ST_DIR/soundtouch"
+            fi
+          done
+          echo "ERROR: SoundTouch clone failed after 5 attempts" >&2
+          exit 1
         shell: bash
 
       - name: Build (cargo check) on Unix
@@ -409,12 +660,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
           HIFISHIFTER_ORT_EP: ${{ matrix.ort_ep }}
+          ORT_USE_CUDA: ${{ matrix.ort_lib == 'gpu' && '1' || '0' }}
         with:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
       - name: Build Linux AppImage via tauri-action (primary)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         id: linux-appimage-build
         uses: tauri-apps/tauri-action@v0.6.2
         env:
@@ -427,7 +679,50 @@ jobs:
           projectPath: backend/src-tauri
           args: --target ${{ matrix.cargo_target }} --bundles appimage -- --no-default-features --features ${{ matrix.cargo_features }}
 
-      - name: Dump linuxdeploy diagnostics on failure (Linux)
+      - name: Build Linux CUDA binary (cargo)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        working-directory: backend/src-tauri
+        env:
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+        run: |
+          set -euxo pipefail
+          echo "ORT_LIB_LOCATION=${ORT_LIB_LOCATION:-<not set>}"
+          echo "CUDA_LIB_PATH=${CUDA_LIB_PATH:-<not set>}"
+
+          # ort-sys v2.0.0-rc.12 defaults to static linking (looks for .a files),
+          # but the ONNX Runtime GPU build only ships shared libraries (.so).
+          # ORT_PREFER_DYNAMIC_LINK=1 makes ort-sys emit `rustc-link-lib=onnxruntime`
+          # instead of `rustc-link-lib=static=onnxruntime`, matching the shared-only GPU dist.
+          export ORT_PREFER_DYNAMIC_LINK=1
+
+          # Symlink CUDA runtime libs into ORT_LIB_LOCATION so the linker can
+          # resolve transitive NEEDED entries from libonnxruntime_providers_cuda.so
+          # (libcudart.so.12, libcublas.so.12, libcublasLt.so.12, libcufft.so.11, libcurand.so.10).
+          for lib in "${CUDA_LIB_PATH}"/libcudart.so* "${CUDA_LIB_PATH}"/libcublas*.so* "${CUDA_LIB_PATH}"/libcufft*.so* "${CUDA_LIB_PATH}"/libcurand*.so*; do
+            [ -e "$lib" ] && ln -sf "$lib" "${ORT_LIB_LOCATION}/" 2>/dev/null || true
+          done
+
+          # -rpath,\$ORIGIN: runtime linker searches binary's directory for .so files
+          # -rpath-link,<ORT_LIB_LOCATION>: build-time linker resolves transitive NEEDED deps
+          export RUSTFLAGS="-Awarnings -C link-args=-Wl,-rpath,\$ORIGIN -Wl,-rpath-link,${ORT_LIB_LOCATION}"
+          export LIBRARY_PATH="${ORT_LIB_LOCATION}${LIBRARY_PATH:+:}${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${ORT_LIB_LOCATION}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}"
+
+          echo "=== ORT lib directory (with CUDA symlinks) ==="
+          ls -la "${ORT_LIB_LOCATION}/"
+
+          cargo build --release --target "${{ matrix.cargo_target }}" --no-default-features --features "${{ matrix.cargo_features }}"
+
+          # Copy ORT + cuDNN shared libraries alongside the binary for distribution
+          BIN_DIR="target/${{ matrix.cargo_target }}/release"
+          if [ -n "${ORT_LIB_LOCATION:-}" ] && [ -d "${ORT_LIB_LOCATION}" ]; then
+            cp -v "${ORT_LIB_LOCATION}"/*.so* "${BIN_DIR}/" 2>/dev/null || true
+          fi
+          echo "=== Release directory contents ==="
+          ls -la "${BIN_DIR}/"
+        shell: bash
+
+      - name: Dump diagnostics on failure (Linux)
         if: runner.os == 'Linux' && failure()
         run: |
           set -euxo pipefail
@@ -472,12 +767,22 @@ jobs:
         shell: pwsh
 
       - name: Upload AppImage artifact (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Upload Linux CUDA binary artifact
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/HiFiShifter
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/*.so*
           if-no-files-found: error
 
       - name: Upload DMG artifact (macOS)
@@ -532,6 +837,35 @@ jobs:
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+      - name: Verify CUDA DLLs in release directory (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $releaseDir = "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
+          Write-Host "=== Release directory contents ==="
+          Get-ChildItem "$releaseDir\*.dll" | ForEach-Object {
+            $sizeMB = [math]::Round($_.Length / 1MB, 1)
+            Write-Host "  $($_.Name) ($sizeMB MB)"
+          }
+          Write-Host ""
+          # Verify critical CUDA DLLs are present (matching build-gpu.ps1)
+          $required = @("onnxruntime.dll", "onnxruntime_providers_cuda.dll", "cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll", "cufft64_11.dll", "cudnn64_9.dll", "cudnn_ops64_9.dll")
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $releaseDir $_)) }
+          if ($missing) {
+            Write-Host "ERROR: Missing critical DLLs: $($missing -join ', ')" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host "All $($required.Count) critical CUDA DLLs verified in release directory." -ForegroundColor Green
+
+          # Also check the NSIS bundle directory
+          $nsisDir = "backend\src-tauri\target\${{ matrix.cargo_target }}\release\bundle\nsis"
+          if (Test-Path $nsisDir) {
+            Write-Host "=== NSIS bundle DLLs ==="
+            Get-ChildItem "$nsisDir\*.dll" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "  $($_.FullName)"
+            }
+          }
 
       - name: Create portable ZIP (Windows)
         if: runner.os == 'Windows'

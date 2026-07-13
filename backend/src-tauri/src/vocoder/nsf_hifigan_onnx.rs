@@ -96,6 +96,17 @@ fn default_model_dir_guess() -> Option<PathBuf> {
         return Some(p);
     }
 
+    // 发布/便携环境：模型位于可执行文件同级的 models/ 目录中
+    // （CARGO_MANIFEST_DIR 在发布构建中指向构建机器的路径，在用户机器上不存在）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let p = exe_dir.join("models").join("nsf_hifigan");
+            if p.join("pc_nsf_hifigan.onnx").is_file() && p.join("config.json").is_file() {
+                return Some(p);
+            }
+        }
+    }
+
     None
 }
 

@@ -27,14 +27,8 @@ mod renderer;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
-mod vocoder_ort_session {
-    #[path = "../vocoder/ort_session.rs"]
-    mod _inner;
-    pub use _inner::*;
-}
-#[cfg(feature = "onnx")]
-#[allow(unused_imports)]
-use vocoder_ort_session as ort_session;
+#[path = "vocoder/ort_session.rs"]
+mod vocoder_ort_session;
 
 #[cfg(all(feature = "cuda", target_os = "windows"))]
 #[path = "vocoder/cuda_info.rs"]
@@ -44,13 +38,9 @@ mod cuda_info;
 #[path = "vocoder/cuda_info_stub.rs"]
 mod cuda_info;
 
-mod vocoder_mel_utils {
-    #[path = "../vocoder/mel_utils.rs"]
-    mod _inner;
-    pub use _inner::*;
-}
 #[cfg(feature = "onnx")]
-use vocoder_mel_utils as mel_utils;
+#[path = "vocoder/mel_utils.rs"]
+mod mel_utils;
 
 #[cfg(feature = "onnx")]
 #[path = "vocoder/nsf_hifigan_onnx.rs"]
