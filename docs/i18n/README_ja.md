@@ -143,7 +143,28 @@ cd HiFiShifter
 
 ### 2. 依存関係のインストール
 
-以下のツールがインストールされていることを確認してください：
+#### Windows
+
+HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ポータブルRustツールチェーン、ONNX Runtime、CUDAランタイムを自動的にインストールします：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+オプションのパラメータ：
+
+- `-SkipRust`：Rustのインストールをスキップ
+- `-SkipOrt`：ONNX Runtimeのダウンロードをスキップ
+- `-SkipCudaRuntime`：CUDAランタイムのダウンロードをスキップ
+- `-SkipFrontend`：フロントエンド依存関係のインストールをスキップ
+
+ローカルのRust環境を現在のシェルに読み込む場合（インストールなし）：
+
+```powershell
+. .\scripts\setup-windows.ps1 -LoadEnv
+```
+
+手動セットアップする場合、以下のツールがインストールされていることを確認してください：
 
 - **Node.js**（推奨18+）および npm
 - **Rustツールチェーン**（`rust-toolchain.toml` を参照）
@@ -156,6 +177,20 @@ cd HiFiShifter
 npm --prefix frontend install
 ```
 
+#### macOS
+
+```bash
+chmod +x ./scripts/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+```
+
+#### Linux
+
+```bash
+chmod +x ./scripts/install_deps_linux.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+```
+
 ### 3. SoundTouch ソース
 
 SoundTouch オーディオタイムストレッチライブラリはコンパイル時にソースからビルドされます。初回ビルド時に**自動クローン**されるため、手動操作は不要です。
@@ -166,6 +201,68 @@ SoundTouch オーディオタイムストレッチライブラリはコンパイ
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
+
+### 4. GPUアクセラレーションビルド（CUDA）
+
+HiFiShifterはNVIDIA CUDAによるGPUアクセラレーション推論をサポートします。
+
+#### Windows（CUDA）
+
+前提条件：
+
+- CUDA対応のNVIDIA GPU
+- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
+
+ワンクリック環境セットアップ：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+開発モード（ホットリロード）：
+
+```powershell
+.\scripts\build-gpu.ps1 -Dev
+```
+
+リリースビルド：
+
+```powershell
+# 高速ビルド（バイナリのみ、インストーラなし）
+.\scripts\build-gpu.ps1
+
+# 高速ビルド + ファイルログ（タイムスタンプ付き log.txt、exe と同じ場所）
+.\scripts\build-gpu.ps1 -Log
+
+# フルビルド（バイナリ + NSIS インストーラ、大容量 GPU コンポーネントの圧縮により低速）
+.\scripts\build-gpu.ps1 -Bundle
+```
+
+ビルド後、ポータブルZIPを作成：
+
+```powershell
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+#### Linux（CUDA）
+
+前提条件：
+
+- CUDA対応のNVIDIA GPU
+- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
+
+```bash
+# システム依存関係のインストール（CUDAツールキットを含む）
+sudo bash ./scripts/install-cuda-linux.sh
+
+# ONNX Runtime GPU + cuDNNのダウンロード
+bash ./scripts/download-ort.sh
+
+# ビルド
+bash ./scripts/build-gpu-linux.sh
+```
+
+> **注意：** macOSは現在CUDA GPUアクセラレーションをサポートしていません。
 
 ## クイックスタート
 
@@ -206,12 +303,12 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 このプロジェクトは以下のオープンソースライブラリのコードやモデルアーキテクチャを使用しています：
 
-- [WORLD](https://github.com/mmorise/World) — 高品質な音声分析・合成システム
-- [SoundTouch](https://www.surina.net/soundtouch/) — オーディオタイムストレッチ・ピッチシフトライブラリ（LGPL）
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) — 高品質なオーディオタイムストレッチライブラリ（MIT）
-- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) — 音声解析・合成ライブラリ
-- [SingingVocoders](https://github.com/openvpi/SingingVocoders) — 歌声合成ボコーダー（OpenVPI）
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) — 高忠実度GANボコーダー
+- [WORLD](https://github.com/mmorise/World) - 高品質な音声分析・合成システム
+- [SoundTouch](https://www.surina.net/soundtouch/) - オーディオタイムストレッチ・ピッチシフトライブラリ（LGPL）
+- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - 高品質なオーディオタイムストレッチライブラリ（MIT）
+- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - 音声解析・合成ライブラリ
+- [SingingVocoders](https://github.com/openvpi/SingingVocoders) - 歌声合成ボコーダー（OpenVPI）
+- [HiFi-GAN](https://github.com/jik876/hifi-gan) - 高忠実度GANボコーダー
 
 ## ライセンス
 

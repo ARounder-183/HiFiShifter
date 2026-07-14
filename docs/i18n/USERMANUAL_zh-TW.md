@@ -19,6 +19,13 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 - Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。
 
+**關於 CUDA GPU 加速**：HiFiShifter 為 Windows 和 Linux 提供了支援 NVIDIA CUDA 的 GPU 加速版本（下載檔案名稱中包含 `-cuda` 後綴）。該版本利用 NVIDIA GPU 進行推理加速。使用 CUDA 版本需要：
+
+- 一張支援 CUDA 的 NVIDIA 顯示卡（建議 GTX 10 系列或更新）
+- 較新的 [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（建議 545 版本或更新）
+
+macOS 版本暫不支援 CUDA GPU 加速。
+
 **關於 WebView 的說明**：HiFiShifter 基於 Rust + Tauri 框架開發，需要系統提供 WebView 元件來顯示介面。
 
 - **Windows**：需要 Edge WebView2。Windows 10（1803 版本及以上）和 Windows 11 已經預裝，無需額外操作。如果你使用的是更早的 Windows 版本或者系統未預裝，安裝程式會自動提示你下載安裝。你也可以參考 [Tauri 官方說明](https://tauri.app/zh-cn/start/prerequisites/#webview2) 了解詳情。一般使用者無需擔心，直接執行安裝包即可。

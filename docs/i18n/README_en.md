@@ -143,7 +143,28 @@ cd HiFiShifter
 
 ### 2. Install Dependencies
 
-Make sure the following tools are installed:
+#### Windows
+
+HiFiShifter provides a **one-click environment setup script** that automatically installs the portable Rust toolchain, ONNX Runtime, and CUDA runtime:
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+Optional parameters:
+
+- `-SkipRust`: Skip Rust installation
+- `-SkipOrt`: Skip ONNX Runtime download
+- `-SkipCudaRuntime`: Skip CUDA runtime download
+- `-SkipFrontend`: Skip frontend dependency installation
+
+To just load the local Rust environment into your current shell (no installation):
+
+```powershell
+. .\scripts\setup-windows.ps1 -LoadEnv
+```
+
+If you prefer manual setup, make sure the following tools are installed:
 
 - **Node.js** (recommended 18+) and npm
 - **Rust toolchain** (see `rust-toolchain.toml`)
@@ -156,9 +177,23 @@ Install frontend dependencies:
 npm --prefix frontend install
 ```
 
+#### macOS
+
+```bash
+chmod +x ./scripts/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+```
+
+#### Linux
+
+```bash
+chmod +x ./scripts/install_deps_linux.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+```
+
 ### 3. SoundTouch Source
 
-The SoundTouch audio time stretching library is built from source at compile time. It is **auto-cloned** on first build — no manual steps required.
+The SoundTouch audio time stretching library is built from source at compile time. It is **auto-cloned** on first build - no manual steps required.
 
 For offline builds, you can pre-clone manually:
 
@@ -166,6 +201,68 @@ For offline builds, you can pre-clone manually:
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
+
+### 4. GPU-Accelerated Build (CUDA)
+
+HiFiShifter supports GPU-accelerated inference via NVIDIA CUDA.
+
+#### Windows (CUDA)
+
+Prerequisites:
+
+- An NVIDIA GPU with CUDA support
+- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
+
+One-click environment setup:
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+Development mode (hot reload):
+
+```powershell
+.\scripts\build-gpu.ps1 -Dev
+```
+
+Release build:
+
+```powershell
+# Fast build (binary only, no installer)
+.\scripts\build-gpu.ps1
+
+# Fast build + file log (log.txt with timestamps, next to the exe)
+.\scripts\build-gpu.ps1 -Log
+
+# Full build (binary + NSIS installer, slower — ~2 GB of GPU components to compress)
+.\scripts\build-gpu.ps1 -Bundle
+```
+
+After building, create a portable ZIP:
+
+```powershell
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+#### Linux (CUDA)
+
+Prerequisites:
+
+- An NVIDIA GPU with CUDA support
+- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
+
+```bash
+# Install system dependencies (including CUDA toolkit)
+sudo bash ./scripts/install-cuda-linux.sh
+
+# Download ONNX Runtime GPU + cuDNN
+bash ./scripts/download-ort.sh
+
+# Build
+bash ./scripts/build-gpu-linux.sh
+```
+
+> **Note:** macOS does not support CUDA GPU acceleration at this time.
 
 ## Quick Start
 
@@ -206,12 +303,12 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 This project uses code or model architectures from the following open-source libraries:
 
-- [WORLD](https://github.com/mmorise/World) — High-quality speech analysis and synthesis system
-- [SoundTouch](https://www.surina.net/soundtouch/) — Audio time stretching and pitch shifting library (LGPL)
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) — High-quality audio time stretching library (MIT)
-- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) — Voice analysis and synthesis library
-- [SingingVocoders](https://github.com/openvpi/SingingVocoders) — Singing voice vocoder (OpenVPI)
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) — High-fidelity GAN vocoder
+- [WORLD](https://github.com/mmorise/World) - High-quality speech analysis and synthesis system
+- [SoundTouch](https://www.surina.net/soundtouch/) - Audio time stretching and pitch shifting library (LGPL)
+- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - High-quality audio time stretching library (MIT)
+- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - Voice analysis and synthesis library
+- [SingingVocoders](https://github.com/openvpi/SingingVocoders) - Singing voice vocoder (OpenVPI)
+- [HiFi-GAN](https://github.com/jik876/hifi-gan) - High-fidelity GAN vocoder
 
 ## License
 

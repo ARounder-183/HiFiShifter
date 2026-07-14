@@ -143,7 +143,28 @@ cd HiFiShifter
 
 ### 2. 安装依赖
 
-请确保已安装以下工具：
+#### Windows
+
+HiFiShifter 提供了**一键式环境配置脚本**，可自动安装便携 Rust 工具链、ONNX Runtime 和 CUDA 运行时：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+该脚本支持可选参数：
+
+- `-SkipRust`：跳过 Rust 安装
+- `-SkipOrt`：跳过 ONNX Runtime 下载
+- `-SkipCudaRuntime`：跳过 CUDA 运行时下载
+- `-SkipFrontend`：跳过前端依赖安装
+
+若只需加载本地 Rust 环境到当前 shell（不执行安装）：
+
+```powershell
+. .\scripts\setup-windows.ps1 -LoadEnv
+```
+
+如果希望手动安装，请确保已安装以下工具：
 
 - **Node.js**（建议 18+）及 npm
 - **Rust 工具链**（参见 `rust-toolchain.toml`）
@@ -156,6 +177,20 @@ cd HiFiShifter
 npm --prefix frontend install
 ```
 
+#### macOS
+
+```bash
+chmod +x ./scripts/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+```
+
+#### Linux
+
+```bash
+chmod +x ./scripts/install_deps_linux.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+```
+
 ### 3. SoundTouch 源码
 
 SoundTouch 音频时间拉伸库在编译时从源码构建。首次构建时会**自动克隆**，无需手动操作。
@@ -166,6 +201,68 @@ SoundTouch 音频时间拉伸库在编译时从源码构建。首次构建时会
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
+
+### 4. GPU 加速构建（CUDA）
+
+HiFiShifter 支持通过 NVIDIA CUDA 实现 GPU 加速推理。
+
+#### Windows（CUDA）
+
+前置条件：
+
+- 一台支持 CUDA 的 NVIDIA GPU
+- [NVIDIA 显卡驱动](https://www.nvidia.com/drivers)（版本 ≥ 545）
+
+一键环境搭建：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+开发模式（热更新）：
+
+```powershell
+.\scripts\build-gpu.ps1 -Dev
+```
+
+构建 Release：
+
+```powershell
+# 快速构建（仅编译二进制文件，不含安装包）
+.\scripts\build-gpu.ps1
+
+# 快速构建 + 文件日志（log.txt 带时间戳，放在 exe 旁边）
+.\scripts\build-gpu.ps1 -Log
+
+# 完整构建（二进制 + NSIS 安装包，较慢--需压缩约 2 GB 的 GPU 组件）
+.\scripts\build-gpu.ps1 -Bundle
+```
+
+构建完成后，运行以下命令创建便携版压缩包：
+
+```powershell
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+#### Linux（CUDA）
+
+前置条件：
+
+- 一台支持 CUDA 的 NVIDIA GPU
+- [NVIDIA 显卡驱动](https://www.nvidia.com/drivers)（版本 ≥ 545）
+
+```bash
+# 安装系统依赖（含 CUDA toolkit）
+sudo bash ./scripts/install-cuda-linux.sh
+
+# 下载 ONNX Runtime GPU + cuDNN
+bash ./scripts/download-ort.sh
+
+# 构建
+bash ./scripts/build-gpu-linux.sh
+```
+
+> **注意：** macOS 目前不支持 CUDA GPU 加速。
 
 ## 快速开始
 
@@ -206,12 +303,12 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 本项目使用了以下开源库的代码或模型结构：
 
-- [WORLD](https://github.com/mmorise/World) — 高质量语音分析与合成系统
-- [SoundTouch](https://www.surina.net/soundtouch/) — 音频时间拉伸与变调库（LGPL）
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) — 高质量音频时间拉伸库（MIT）
-- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) — 音声解析与合成库
-- [SingingVocoders](https://github.com/openvpi/SingingVocoders) — 歌声合成声码器（OpenVPI）
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) — 高保真生成对抗网络声码器
+- [WORLD](https://github.com/mmorise/World) - 高质量语音分析与合成系统
+- [SoundTouch](https://www.surina.net/soundtouch/) - 音频时间拉伸与变调库（LGPL）
+- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - 高质量音频时间拉伸库（MIT）
+- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - 音声解析与合成库
+- [SingingVocoders](https://github.com/openvpi/SingingVocoders) - 歌声合成声码器（OpenVPI）
+- [HiFi-GAN](https://github.com/jik876/hifi-gan) - 高保真生成对抗网络声码器
 
 ## License
 

@@ -19,6 +19,13 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 
 - For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly.
 
+**About CUDA GPU Acceleration**: HiFiShifter provides NVIDIA CUDA GPU-accelerated builds for Windows and Linux (download filenames include the `-cuda` suffix). These builds leverage NVIDIA GPUs for inference acceleration. CUDA builds require:
+
+- An NVIDIA graphics card with CUDA support (GTX 10 series or newer recommended)
+- Recent [NVIDIA display drivers](https://www.nvidia.com/drivers) (version 545 or newer recommended)
+
+macOS does not support CUDA GPU acceleration at this time.
+
 **WebView Information**: HiFiShifter is built with the Rust + Tauri framework and requires a WebView component to display its interface.
 
 - **Windows**: Requires Edge WebView2. Windows 10 (version 1803 and later) and Windows 11 have it preinstalled, so no additional action is needed. If you are using an older Windows version or the component is missing, the installer will prompt you to download it automatically. You can also refer to the [Tauri official documentation](https://tauri.app/start/prerequisites/#webview2) for details. General users can simply run the installer without worry.
@@ -241,7 +248,7 @@ Pitch Reference Clips have the following common uses:
 - Placed on a track, they serve as a general audio clip for other tracks with regular audio clips to reference pitch. On other tracks, the `Reference Track Group` feature in the Parameter Editor can be used to view this track and display its pitch curve.
 - When a Pitch Reference Clip is placed on the root track of a track group, it can change the pitch processing logic of that track group, overwriting the original pitch curve of the covered segment with the Pitch Reference Clip's pitch curve. This affects the following scenarios:
     - If a pitch curve segment within the track group has never been edited, its pitch parameters will be directly overwritten by the Pitch Reference Clip's pitch curve, triggering re-rendering of the audio pitch.
-    - When using `Initialize`-related functions — for example, right-dragging with the Draw tool in the Parameter Editor — the initialized pitch curve uses the Pitch Reference Clip's pitch curve data rather than the original pitch of the audio clips within the track group's child tracks.
+    - When using `Initialize`-related functions - for example, right-dragging with the Draw tool in the Parameter Editor - the initialized pitch curve uses the Pitch Reference Clip's pitch curve data rather than the original pitch of the audio clips within the track group's child tracks.
     - If the Pitch Reference Clip is muted, the track group will not reference that Pitch Reference Clip when processing pitch.
 
 Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to update the Pitch Reference Clip with the existing pitch parameters within its range.

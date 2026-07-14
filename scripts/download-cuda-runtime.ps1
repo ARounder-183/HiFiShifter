@@ -37,13 +37,9 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-# Resolve destination directory
+# Resolve destination directory - default to project-local ort-bundle/
 if (-not $DestDir) {
-    if ($env:ORT_LIB_LOCATION -and (Test-Path $env:ORT_LIB_LOCATION)) {
-        $DestDir = $env:ORT_LIB_LOCATION
-    } else {
-        $DestDir = Join-Path $env:USERPROFILE ".cache\ort\lib"
-    }
+    $DestDir = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) "backend\src-tauri\third_party\ort-bundle"
 }
 if (-not (Test-Path $DestDir)) {
     New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
