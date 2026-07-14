@@ -185,13 +185,23 @@ try {
         Write-Host "[build-gpu] NSIS installer : $releaseDir\bundle\nsis" -ForegroundColor Cyan
     }
     else {
-        # --- Fast build: binary only, no NSIS ---------------------------------
-        Push-Location $SrcTauri
-        cargo build --release --features $Features
-        Pop-Location
+        # --- Fast build: use cargo tauri build with empty targets ---------------
+        # `cargo build` does not set up the Tauri context the same way the CLI
+        # does - binaries built without the CLI pipeline serve `devUrl` at
+        # runtime (localhost:5173).  Workaround: let the CLI build, but override
+        # `bundle.targets` to an empty list so NSIS is skipped.
+        Write-Host "[build-gpu] Configuring Tauri to skip NSIS for fast build..." -ForegroundColor Cyan
+        $noTargets = @{ bundle = @{ targets = @() } }
+        $noJson = $noTargets | ConvertTo-Json -Depth 2 -Compress
+        $tmpConf = Join-Path $SrcTauri "tauri.windows.conf.json"
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($tmpConf, $noJson, $utf8)
 
-        # build.rs (with `cuda` feature) copies DLLs from ort-bundle/
-        # to target/release/ automatically.  Verify they landed.
+        cargo tauri build --features $Features
+
+        Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
+
+        # Verify DLLs
         $required = @("cudart64_12.dll", "cublas64_12.dll", "cufft64_11.dll", "cudnn64_9.dll")
         $missing = $required | Where-Object { -not (Test-Path (Join-Path $releaseDir $_)) }
         if ($missing) {
