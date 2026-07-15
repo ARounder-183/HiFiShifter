@@ -55,11 +55,17 @@ The `Edit` menu allows various editing operations. Besides regular track and par
     - Audio clip data: Imports as note clips in HiFiShifter, preserving various parameter curve data.
     - Track data: Imports tracks along with their audio clips into HiFiShifter. Note that HiFiShifter currently cannot distinguish whether your last copied content was an audio clip or a track. If you intend to import a track, before performing the copy track operation in VocalShifter, ensure that no audio clip is selected in the VocalShifter project; otherwise, only the selected audio clips will be imported.
 
-The `Stretch` menu allows you to modify the current project and global stretching algorithms.
+The `Options` menu allows you to modify various settings of HiFiShifter.
+
+- `Project Stretch Override`: Allows you to modify the current project's stretching algorithm.
+- `Global Stretch Default`: Allows you to modify the default global stretching algorithm.
+- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU (CUDA)`. You can run a benchmark from this menu to test the performance of each device. `GPU (CUDA)` is only available in the CUDA build of HiFiShifter.
+- `Background Pre-render`: When enabled, after opening a project or editing parameters, the edited parameters are automatically pre-rendered in the background, and you can play the already-rendered portions even while rendering is still in progress. When disabled, rendering only begins when playback starts, and you must wait for rendering to complete before the timeline plays normally. Enabled by default. Disabling it reduces rendering frequency and saves performance.
+- `Keyboard Shortcuts`: Allows you to configure HiFiShifter's keybindings. Several presets are available.
 
 ## 3. Track View
 
-The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `View -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
+The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `Options -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
 
 The track view is one of HiFiShifter's core features, allowing you to crop, splice, and edit audio clips. Its operation logic is largely based on Reaper.
 

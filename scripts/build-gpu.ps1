@@ -156,22 +156,26 @@ try {
     if ($Dev) {
         # --- Dev mode: hot-reload dev server ---------------------------------
         cargo tauri dev --features $Features
+        if ($LASTEXITCODE -ne 0) {
+            throw "[build-gpu] cargo tauri dev failed (exit code $LASTEXITCODE)"
+        }
     }
     elseif ($Bundle) {
         # --- Full build: binary + NSIS installer (SLOW - large DLLs) ---------
         Write-Host "[build-gpu] Generating GPU resource config for NSIS..." -ForegroundColor Cyan
         $stageScript = Join-Path $PSScriptRoot "stage-tauri-resources.ps1"
         if (-not (Test-Path $stageScript)) {
-            Write-Error "[build-gpu] stage-tauri-resources.ps1 not found."
-            exit 1
+            throw "[build-gpu] stage-tauri-resources.ps1 not found."
         }
         & $stageScript -ProjectRoot $ProjectRoot
         if (-not $?) {
-            Write-Error "[build-gpu] Resource config generation failed."
-            exit 1
+            throw "[build-gpu] Resource config generation failed."
         }
 
         cargo tauri build --features $Features
+        if ($LASTEXITCODE -ne 0) {
+            throw "[build-gpu] cargo tauri build failed (exit code $LASTEXITCODE)"
+        }
 
         # Verify
         $required = @("cudart64_12.dll", "cublas64_12.dll", "cufft64_11.dll", "cudnn64_9.dll")
@@ -206,6 +210,10 @@ try {
         [System.IO.File]::WriteAllText($tmpConf, $noJson, $utf8)
 
         cargo tauri build --features $Features
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
+            throw "[build-gpu] cargo tauri build failed (exit code $LASTEXITCODE)"
+        }
 
         Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
 
@@ -224,7 +232,7 @@ try {
     }
 } finally {
     Pop-Location
-    # Don't let ORT_LIB_LOCATION leak into the caller's session —
+    # Don't let ORT_LIB_LOCATION leak into the caller's session -
     # it would break plain CPU builds (cargo tauri build without CUDA).
     Remove-Item Env:ORT_LIB_LOCATION -ErrorAction SilentlyContinue
 }

@@ -1,6 +1,6 @@
 [package]
 name = "HiFiShifter"
-version = "0.1.0-beta.10"
+version = "0.1.0-beta.11"
 description = "A high-quality audio shifter"
 authors = ["ARounder"]
 edition = "2021"
@@ -74,15 +74,15 @@ vslib = []
 # `download-binaries` auto-fetches ONNX Runtime CPU prebuilts at build time;
 # when `ORT_LIB_LOCATION` is set (e.g. CUDA CI), it takes precedence silently.
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries"] }
 
 # macOS Apple Silicon (arm64) — includes CoreML for Apple Neural Engine acceleration
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml"] }
 
 # macOS Intel (x86_64)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.3.0+0.22", optional = true }
 
 [profile.release]
