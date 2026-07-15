@@ -23,7 +23,6 @@ crate-type = ["cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 cc = "1.0"
-serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
