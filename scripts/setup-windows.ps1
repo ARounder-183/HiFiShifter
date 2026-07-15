@@ -93,7 +93,8 @@ $CargoHome = Join-Path $RustDir "cargo"
 $RustupHome = Join-Path $RustDir "rustup"
 $CargoBin  = Join-Path $CargoHome "bin\cargo.exe"
 # Single canonical location for GPU DLLs - project-local, gitignored.
-# build.rs reads from here; stage-tauri-resources.ps1 reads from here.
+# build.rs stages these to the release dir; inject-gpu-dlls.ps1 reads
+# from here to inject them into the NSIS installer.
 $OrtBundleDir = Join-Path $ProjectRoot "backend\src-tauri\third_party\ort-bundle"
 
 # ============================================================

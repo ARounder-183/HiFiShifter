@@ -352,12 +352,6 @@ jobs:
           chmod +x ./scripts/download-ort.sh
           bash ./scripts/download-ort.sh
 
-      - name: Stage ORT/CUDA DLLs as Tauri resources (Windows GPU)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\stage-tauri-resources.ps1
-
       - name: Install frontend deps
         run: |
           npm --prefix frontend ci
@@ -438,19 +432,19 @@ jobs:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
-      - name: Inject precompiled engine DLL into NSIS installer (Windows GPU)
+      - name: Inject GPU DLLs into NSIS installer (Windows GPU)
         if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
         shell: pwsh
         run: |
-          $precompiled = "backend\src-tauri\third_party\ort-bundle\cudnn_engines_precompiled64_9.dll"
-          if (Test-Path $precompiled) {
-            Write-Host "Injecting cudnn_engines_precompiled64_9.dll into NSIS installer..."
-            .\scripts\inject-nsis-large-dll.ps1 -TargetTriple "${{ matrix.cargo_target }}"
+          $bundle = "backend\src-tauri\third_party\ort-bundle"
+          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
+            Write-Host "Injecting GPU DLLs into NSIS installer..."
+            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "WARNING: NSIS DLL injection failed -- cuDNN will use runtime-compiled engines instead."
+              Write-Host "WARNING: GPU DLL injection failed -- NSIS installer will lack GPU support"
             }
           } else {
-            Write-Host "Precompiled engine DLL not found -- skipping NSIS injection (cuDNN runtime fallback available)"
+            Write-Host "No GPU DLLs found in ort-bundle/ -- skipping NSIS injection"
           }
 
       - name: Build Linux AppImage via tauri-action (primary)
@@ -656,6 +650,8 @@ jobs:
     needs: backend
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
@@ -664,6 +660,17 @@ jobs:
 
       - name: Remove frontend artifact
         run: rm -rf release-artifacts/frontend-dist
+
+      - name: Remove files larger than 2 GiB
+        run: |
+          MAX_SIZE=$((2 * 1024 * 1024 * 1024))  # 2 GiB in bytes
+          find release-artifacts -type f -size +"${MAX_SIZE}"c -print0 | while IFS= read -r -d '' f; do
+            size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            if [ "$size" -gt "$MAX_SIZE" ]; then
+              echo "Skipping $(basename "$f"): $(numfmt --to=iec "$size") exceeds 2 GiB limit"
+              rm -f "$f"
+            fi
+          done
 
       - name: Upload artifacts to Release
         uses: softprops/action-gh-release@v3

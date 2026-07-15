@@ -162,16 +162,11 @@ try {
     }
     elseif ($Bundle) {
         # --- Full build: binary + NSIS installer (SLOW - large DLLs) ---------
-        Write-Host "[build-gpu] Generating GPU resource config for NSIS..." -ForegroundColor Cyan
-        $stageScript = Join-Path $PSScriptRoot "stage-tauri-resources.ps1"
-        if (-not (Test-Path $stageScript)) {
-            throw "[build-gpu] stage-tauri-resources.ps1 not found."
-        }
-        & $stageScript -ProjectRoot $ProjectRoot
-        if (-not $?) {
-            throw "[build-gpu] Resource config generation failed."
-        }
 
+        # tauri.windows.conf.json is a COMMITTED static file containing only
+        # vslib_x64.dll + SoundTouchDLL.dll.  GPU DLLs are NOT listed there —
+        # they are injected post-build by inject-gpu-dlls.ps1 (see below).
+        # Nothing modifies the committed config during the build.  Ctrl+C safe.
         cargo tauri build --features $Features
         if ($LASTEXITCODE -ne 0) {
             throw "[build-gpu] cargo tauri build failed (exit code $LASTEXITCODE)"
@@ -194,58 +189,31 @@ try {
             Write-Host "[build-gpu] All critical CUDA DLLs verified in release dir." -ForegroundColor Green
         }
 
-        # Inject the precompiled engine DLL into the NSIS installer.
-        # This DLL is excluded from tauri.windows.conf.json by stage-tauri-resources.ps1
-        # because NSIS (32-bit) crashes on mmap when solid-LZMA-compressing such a large file.
-        # inject-nsis-large-dll.ps1 adds it uncompressed and re-runs makensis.
-        $injectScript = Join-Path $PSScriptRoot "inject-nsis-large-dll.ps1"
-        $precompiledDll = Join-Path $SrcTauri "third_party\ort-bundle\cudnn_engines_precompiled64_9.dll"
+        # Inject ALL GPU DLLs (ort-bundle/) into the NSIS installer.
+        # These are NOT in tauri.windows.conf.json — the committed config is
+        # never modified.  inject-gpu-dlls.ps1 patches the generated NSIS
+        # script and re-runs makensis.
+        $injectScript = Join-Path $PSScriptRoot "inject-gpu-dlls.ps1"
         if (Test-Path $injectScript) {
-            if (Test-Path $precompiledDll) {
-                Write-Host "[build-gpu] Injecting precompiled engine DLL into NSIS installer..." -ForegroundColor Cyan
-                & $injectScript -TargetTriple "x86_64-pc-windows-msvc"
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "[build-gpu] WARN: NSIS DLL injection failed (exit code $LASTEXITCODE)" -ForegroundColor Yellow
-                    Write-Host "[build-gpu] The installer is usable - cuDNN will fall back to runtime-compiled engines." -ForegroundColor DarkGray
-                }
-            } else {
-                Write-Host "[build-gpu] Precompiled engine DLL not found - skipping NSIS injection" -ForegroundColor DarkYellow
-                Write-Host "[build-gpu] cuDNN will use runtime-compiled engines on first launch." -ForegroundColor DarkGray
+            Write-Host "[build-gpu] Injecting GPU DLLs into NSIS installer..." -ForegroundColor Cyan
+            & $injectScript -TargetTriple "x86_64-pc-windows-msvc"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[build-gpu] WARN: GPU DLL injection failed (exit code $LASTEXITCODE)" -ForegroundColor Yellow
             }
         } else {
-            Write-Host "[build-gpu] inject-nsis-large-dll.ps1 not found - skipping NSIS injection" -ForegroundColor DarkYellow
-        }
-
-        # Clean up generated config
-        $configPath = Join-Path $SrcTauri "tauri.windows.conf.json"
-        if (Test-Path $configPath) {
-            Remove-Item $configPath -Force
-            Write-Host "[build-gpu] Cleaned up $configPath" -ForegroundColor DarkGray
+            Write-Host "[build-gpu] WARN: inject-gpu-dlls.ps1 not found — NSIS will lack GPU DLLs" -ForegroundColor Yellow
         }
 
         Write-Host "[build-gpu] Release binary : $releaseDir\HiFiShifter.exe" -ForegroundColor Cyan
         Write-Host "[build-gpu] NSIS installer : $releaseDir\bundle\nsis" -ForegroundColor Cyan
     }
     else {
-        # --- Fast build: use cargo tauri build with empty targets ---------------
-        # `cargo build` does not set up the Tauri context the same way the CLI
-        # does - binaries built without the CLI pipeline serve `devUrl` at
-        # runtime (localhost:5173).  Workaround: let the CLI build, but override
-        # `bundle.targets` to an empty list so NSIS is skipped.
-        Write-Host "[build-gpu] Configuring Tauri to skip NSIS for fast build..." -ForegroundColor Cyan
-        $noTargets = @{ bundle = @{ targets = @() } }
-        $noJson = $noTargets | ConvertTo-Json -Depth 2 -Compress
-        $tmpConf = Join-Path $SrcTauri "tauri.windows.conf.json"
-        $utf8 = New-Object System.Text.UTF8Encoding $false
-        [System.IO.File]::WriteAllText($tmpConf, $noJson, $utf8)
-
-        cargo tauri build --features $Features
+        # --- Fast build: binary only, no NSIS ------------------------------
+        # Use --no-bundle to skip NSIS without touching any config file.
+        cargo tauri build --no-bundle --features $Features
         if ($LASTEXITCODE -ne 0) {
-            Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
             throw "[build-gpu] cargo tauri build failed (exit code $LASTEXITCODE)"
         }
-
-        Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
 
         # Verify DLLs
         $required = @(
