@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendDir = resolve(__dirname, "../frontend");
-const mode = (process.env.TAURI_UI_MODE || "dev").toLowerCase();
+const mode = (process.env.TAURI_UI_MODE || "build").toLowerCase();
 
 function runCommand(command) {
     return new Promise((resolvePromise, rejectPromise) => {
