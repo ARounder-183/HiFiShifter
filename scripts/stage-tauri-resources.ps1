@@ -36,10 +36,29 @@ try {
     Write-Host "  ProjectRoot : $ProjectRoot"
     Write-Host "  BundleDir   : $BundleDir"
 
-    # ---- 1. Build resource map - only files that exist on disk ------------
+    # ---- 1. Read existing config FIRST (preserve committed entries) --------
     $resources = [ordered]@{}
+    if (Test-Path $ConfigPath) {
+        try {
+            $existingRaw = [System.IO.File]::ReadAllText($ConfigPath, [System.Text.UTF8Encoding]::new($false))
+            $existing = $existingRaw | ConvertFrom-Json
+            if ($existing.bundle.resources) {
+                $existing.bundle.resources.PSObject.Properties | ForEach-Object {
+                    $resources[$_.Name] = $_.Value
+                }
+                Write-Host "  Loaded $($resources.Count) existing resource(s) from committed config"
+            }
+        } catch {
+            Write-Host "  WARNING: Could not read existing config — starting from committed base" -ForegroundColor DarkYellow
+            # If the committed file was corrupted somehow, restore the base entries.
+            $resources["third_party/vslib/vslib_x64.dll"] = "vslib_x64.dll"
+            $resources["third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll"] = "SoundTouchDLL.dll"
+        }
+    }
 
-    # Non-GPU resources (always present, committed to git)
+    # ---- 2. Refresh / add non-GPU resources -------------------------------
+    # These MUST be in the final config.  Re-adding them is idempotent
+    # (overwrites with the same key/value if already present).
     $vslib = Join-Path $ProjectRoot "backend\src-tauri\third_party\vslib\vslib_x64.dll"
     if (Test-Path $vslib) {
         $resources["third_party/vslib/vslib_x64.dll"] = "vslib_x64.dll"
@@ -49,10 +68,10 @@ try {
     if (Test-Path $stDll) {
         $resources["third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll"] = "SoundTouchDLL.dll"
     } else {
-        Write-Host "  NOTE: SoundTouchDLL.dll not yet built - will be added at build time"
+        Write-Host "  NOTE: SoundTouchDLL.dll not yet built — kept from committed config if present"
     }
 
-    # GPU DLLs from the canonical ort-bundle directory
+    # ---- 3. Add / refresh GPU DLLs from ort-bundle/ -----------------------
     $gpuCount = 0
     if (Test-Path $BundleDir) {
         $dlls = @(Get-ChildItem "$BundleDir\*.dll" -ErrorAction SilentlyContinue)
