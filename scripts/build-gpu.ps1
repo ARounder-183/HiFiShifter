@@ -178,7 +178,15 @@ try {
         }
 
         # Verify
-        $required = @("cudart64_12.dll", "cublas64_12.dll", "cufft64_11.dll", "cudnn64_9.dll")
+        $required = @(
+            "cudart64_12.dll",
+            "cublas64_12.dll",
+            "cufft64_11.dll",
+            "cudnn64_9.dll",
+            "cudnn_ops64_9.dll",
+            "cudnn_engines_precompiled64_9.dll",
+            "cudnn_engines_runtime_compiled64_9.dll"
+        )
         $missing = $required | Where-Object { -not (Test-Path (Join-Path $releaseDir $_)) }
         if ($missing) {
             Write-Host "[build-gpu] WARN: Missing DLLs in release: $($missing -join ', ')" -ForegroundColor Yellow
@@ -218,7 +226,15 @@ try {
         Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
 
         # Verify DLLs
-        $required = @("cudart64_12.dll", "cublas64_12.dll", "cufft64_11.dll", "cudnn64_9.dll")
+        $required = @(
+            "cudart64_12.dll",
+            "cublas64_12.dll",
+            "cufft64_11.dll",
+            "cudnn64_9.dll",
+            "cudnn_ops64_9.dll",
+            "cudnn_engines_precompiled64_9.dll",
+            "cudnn_engines_runtime_compiled64_9.dll"
+        )
         $missing = $required | Where-Object { -not (Test-Path (Join-Path $releaseDir $_)) }
         if ($missing) {
             Write-Host "[build-gpu] WARN: Missing DLLs in release: $($missing -join ', ')" -ForegroundColor Yellow

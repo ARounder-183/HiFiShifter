@@ -22,14 +22,29 @@ param(
 $ErrorActionPreference = "Stop"
 
 $required = @(
+    # ONNX Runtime
     "onnxruntime.dll",
+    "onnxruntime_providers_shared.dll",
     "onnxruntime_providers_cuda.dll",
+    "onnxruntime_providers_tensorrt.dll",
+    # CUDA Runtime
     "cudart64_12.dll",
+    "curand64_10.dll",
+    # cuBLAS
     "cublas64_12.dll",
     "cublasLt64_12.dll",
+    # cuFFT
     "cufft64_11.dll",
+    "cufftw64_11.dll",
+    # cuDNN 9.x
     "cudnn64_9.dll",
-    "cudnn_ops64_9.dll"
+    "cudnn_ops64_9.dll",
+    "cudnn_cnn64_9.dll",
+    "cudnn_adv64_9.dll",
+    "cudnn_graph64_9.dll",
+    "cudnn_heuristic64_9.dll",
+    "cudnn_engines_precompiled64_9.dll",
+    "cudnn_engines_runtime_compiled64_9.dll"
 )
 
 Write-Host "=== Release directory contents ==="
