@@ -50,6 +50,9 @@ export const persistUiSettings = createAsyncThunk(
             visibleReferenceRootTrackIds: s.visibleReferenceRootTrackIds,
             defaultStretchAlgorithm: s.defaultStretchAlgorithm,
             defaultHifiganMelStretch: s.defaultHifiganMelStretch,
+            ortEp: s.ortEp,
+            cudaDeviceId: s.cudaDeviceId,
+            autoBackgroundRender: s.autoBackgroundRender,
             selectDragDirection: s.selectDragDirection,
             drawDragDirection: s.drawDragDirection,
 

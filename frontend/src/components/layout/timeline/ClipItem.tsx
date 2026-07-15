@@ -156,11 +156,14 @@ export const ClipItem = React.memo(function ClipItem({
             e.stopPropagation();
             clearContextMenu();
 
-            const alt = Boolean(altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"));
+            // Only check physical Alt key for click-selection bypass.
+            // altPressed tracks the stretch modifier and must not interfere
+            // with Ctrl/Shift selection behavior.
+            const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
             const ctrlOrMeta = e.ctrlKey || e.metaKey;
-            const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-            const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+            const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
             const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
             const startX = e.clientX;
@@ -272,20 +275,22 @@ export const ClipItem = React.memo(function ClipItem({
             onPointerDown={(e) => {
                 if (e.button !== 0) return;
 
-                const alt = Boolean(
-                    altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
-                );
+                // altPressed tracks the stretch modifier (configurable), used only
+                // for edge-handle behavior. For click-selection bypass (slip-edit),
+                // we only check the physical Alt key to avoid breaking Ctrl/Shift
+                // selection when those keys are configured as stretch modifiers.
+                const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
                 const ctrlOrMeta = e.ctrlKey || e.metaKey;
 
                 // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
-                const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+                const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
-                const allowSeek = !alt && !ctrlOrMeta && !e.shiftKey;
+                const allowSeek = !altKeyDown && !ctrlOrMeta && !e.shiftKey;
                 const startX = e.clientX;
                 const startY = e.clientY;
                 let moved = false;
@@ -326,7 +331,7 @@ export const ClipItem = React.memo(function ClipItem({
                 e.stopPropagation();
                 clearContextMenu();
 
-                startClipDrag(e, clip.id, clip.startSec, alt);
+                startClipDrag(e, clip.id, clip.startSec, false);
             }}
             title={
                 clip.midiNoteCount != null

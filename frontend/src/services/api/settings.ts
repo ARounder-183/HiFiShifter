@@ -37,6 +37,9 @@ export interface UiSettings {
     midiImportTargetDragDrop?: string;
     midiImportTargetReaperClipboard?: string;
     midiImportTargetParamEditor?: string;
+    ortEp?: string;
+    cudaDeviceId?: number;
+    autoBackgroundRender?: boolean;
     customScalePresets?: Array<{
         id: string;
         name: string;

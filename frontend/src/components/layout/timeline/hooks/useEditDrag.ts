@@ -138,13 +138,7 @@ async function stretchLinkedParams(
 }
 
 export type EditDragType =
-    | "trim_left"
-    | "trim_right"
-    | "stretch_left"
-    | "stretch_right"
-    | "fade_in"
-    | "fade_out"
-    | "gain";
+    "trim_left" | "trim_right" | "stretch_left" | "stretch_right" | "fade_in" | "fade_out" | "gain";
 
 export type EditDragState = {
     type: EditDragType;

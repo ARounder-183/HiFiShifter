@@ -143,7 +143,47 @@ cd HiFiShifter
 
 ### 2. 安裝依賴
 
-請確保已安裝以下工具：
+#### Windows
+
+HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝 ONNX Runtime 和 CUDA 執行階段（Rust 工具鏈**預設跳過**，需手動添加 `-InstallRust` 啟用）：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+該腳本支援可選參數：
+
+- `-InstallRust`：安裝專案本地的可攜 Rust 工具鏈（預設跳過，使用系統全域 Rust）
+- `-SkipOrt`：跳過 ONNX Runtime 下載
+- `-SkipCudaRuntime`：跳過 CUDA 執行階段下載
+- `-SkipFrontend`：跳過前端依賴安裝
+- `-LocalOrtDir <path>`：從本地已解壓的 ORT 目錄複製（免網路下載）
+- `-LocalPackage <path>`：從本地已下載的 ORT ZIP 包解壓（免網路下載）
+
+若需使用鏡像加速下載：
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+若需從本地離線安裝 ORT：
+
+```powershell
+# 從已解壓的本地 ORT 目錄複製
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# 從本地 ZIP 包解壓
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
+
+若只需載入本地 Rust 環境到目前 shell（不執行安裝）：
+
+```powershell
+. .\scripts\setup-windows.ps1 -LoadEnv
+```
+
+如果希望手動安裝，請確保已安裝以下工具：
 
 - **Node.js**（建議 18+）及 npm
 - **Rust 工具鏈**（參見 `rust-toolchain.toml`）
@@ -156,6 +196,20 @@ cd HiFiShifter
 npm --prefix frontend install
 ```
 
+#### macOS
+
+```bash
+chmod +x ./scripts/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+```
+
+#### Linux
+
+```bash
+chmod +x ./scripts/install_deps_linux.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+```
+
 ### 3. SoundTouch 原始碼
 
 SoundTouch 音訊時間拉伸函式庫在編譯時從原始碼構建。首次構建時會**自動克隆**，無需手動操作。
@@ -166,6 +220,68 @@ SoundTouch 音訊時間拉伸函式庫在編譯時從原始碼構建。首次構
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
+
+### 4. GPU 加速構建（CUDA）
+
+HiFiShifter 支援透過 NVIDIA CUDA 實現 GPU 加速推理。
+
+#### Windows（CUDA）
+
+前置條件：
+
+- 一張支援 CUDA 的 NVIDIA GPU
+- [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（版本 ≥ 545）
+
+一鍵環境搭建：
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+開發模式（熱更新）：
+
+```powershell
+.\scripts\build-gpu.ps1 -Dev
+```
+
+構建 Release：
+
+```powershell
+# 快速構建（僅編譯二進位檔案，不含安裝包）
+.\scripts\build-gpu.ps1
+
+# 快速構建 + 檔案日誌（含時間戳的 log.txt，放在 exe 旁邊）
+.\scripts\build-gpu.ps1 -Log
+
+# 完整構建（二進位 + NSIS 安裝包，較慢——需壓縮約 2 GB 的 GPU 組件）
+.\scripts\build-gpu.ps1 -Bundle
+```
+
+構建完成後，執行以下命令建立可攜版壓縮檔：
+
+```powershell
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+#### Linux（CUDA）
+
+前置條件：
+
+- 一張支援 CUDA 的 NVIDIA GPU
+- [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（版本 ≥ 545）
+
+```bash
+# 安裝系統依賴（含 CUDA toolkit）
+sudo bash ./scripts/install-cuda-linux.sh
+
+# 下載 ONNX Runtime GPU + cuDNN
+bash ./scripts/download-ort.sh
+
+# 構建
+bash ./scripts/build-gpu-linux.sh
+```
+
+> **注意：** macOS 目前不支援 CUDA GPU 加速。
 
 ## 快速開始
 
@@ -206,12 +322,12 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 本專案使用了以下開源函式庫的程式碼或模型結構：
 
-- [WORLD](https://github.com/mmorise/World) — 高品質語音分析與合成系統
-- [SoundTouch](https://www.surina.net/soundtouch/) — 音訊時間拉伸與變調函式庫（LGPL）
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) — 高品質音訊時間拉伸函式庫（MIT）
-- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) — 語音解析與合成函式庫
-- [SingingVocoders](https://github.com/openvpi/SingingVocoders) — 歌聲合成聲碼器（OpenVPI）
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) — 高保真生成對抗網路聲碼器
+- [WORLD](https://github.com/mmorise/World) - 高品質語音分析與合成系統
+- [SoundTouch](https://www.surina.net/soundtouch/) - 音訊時間拉伸與變調函式庫（LGPL）
+- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - 高品質音訊時間拉伸函式庫（MIT）
+- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - 語音解析與合成函式庫
+- [SingingVocoders](https://github.com/openvpi/SingingVocoders) - 歌聲合成聲碼器（OpenVPI）
+- [HiFi-GAN](https://github.com/jik876/hifi-gan) - 高保真生成對抗網路聲碼器
 
 ## 授權條款
 

@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use lru::LruCache;
 
 use crate::state::TimelineState;
 use crate::time_stretch::time_stretch_interleaved;
+
+/// Maximum stretch cache entries to prevent unbounded RAM growth.
+const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
 
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
@@ -87,6 +91,8 @@ pub struct AudioEngine {
     position_frames: Arc<AtomicU64>,
     duration_frames: Arc<AtomicU64>,
     sample_rate: Arc<AtomicU32>,
+    /// Shutdown flag shared with the meter thread.
+    meter_shutdown: Arc<AtomicBool>,
 }
 
 impl Clone for AudioEngine {
@@ -100,6 +106,7 @@ impl Clone for AudioEngine {
             position_frames: self.position_frames.clone(),
             duration_frames: self.duration_frames.clone(),
             sample_rate: self.sample_rate.clone(),
+            meter_shutdown: self.meter_shutdown.clone(),
         }
     }
 }
@@ -133,6 +140,8 @@ impl AudioEngine {
         let meter_state = Arc::new(Mutex::new(HashMap::<String, TrackMeterValue>::new()));
         let meter_generation = Arc::new(AtomicU64::new(0));
         let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
+        let meter_shutdown = Arc::new(AtomicBool::new(false));
+        let meter_shutdown_for_thread = meter_shutdown.clone();
 
         let is_playing_thread = is_playing.clone();
         let target_thread = target.clone();
@@ -146,9 +155,13 @@ impl AudioEngine {
             let meter_state = meter_state.clone();
             let meter_generation = meter_generation.clone();
             let meter_app_handle = meter_app_handle.clone();
+            let meter_shutdown = meter_shutdown_for_thread.clone();
             thread::spawn(move || {
                 let mut last_generation = u64::MAX;
                 loop {
+                    if meter_shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
                     thread::sleep(Duration::from_millis(33));
                     let generation = meter_generation.load(Ordering::Relaxed);
                     if generation == last_generation {
@@ -336,6 +349,12 @@ impl AudioEngine {
                         };
 
                         if let Ok(mut m) = stretch_cache.lock() {
+                            // Evict oldest entries if cache is full.
+                            if m.len() >= MAX_STRETCH_CACHE_ENTRIES {
+                                if let Some(evict_key) = m.keys().next().cloned() {
+                                    m.remove(&evict_key);
+                                }
+                            }
                             m.insert(job.key.clone(), stretched_src);
                         }
 
@@ -573,6 +592,7 @@ impl AudioEngine {
             position_frames,
             duration_frames,
             sample_rate,
+            meter_shutdown,
         }
     }
 
@@ -587,6 +607,7 @@ impl AudioEngine {
 
     #[allow(dead_code)]
     pub fn shutdown(&self) {
+        self.meter_shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(EngineCommand::Shutdown);
     }
 
@@ -620,6 +641,13 @@ impl AudioEngine {
 
     pub fn is_playing(&self) -> bool {
         self.is_playing.load(Ordering::Relaxed)
+    }
+
+    /// Returns true if the current snapshot contains clips that need synthesis
+    /// but have no rendered PCM yet (i.e. a render is in progress or pending).
+    pub fn snapshot_has_pending_clips(&self) -> bool {
+        let snap = self.snapshot.load();
+        snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
     }
 
     pub fn snapshot_state(&self) -> AudioEngineStateSnapshot {
@@ -675,7 +703,7 @@ struct EngineWorkerState<'a> {
     position_frames: &'a Arc<AtomicU64>,
     duration_frames: &'a Arc<AtomicU64>,
     snapshot: &'a Arc<ArcSwap<EngineSnapshot>>,
-    cache: &'a Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &'a Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
     stretch_cache: &'a Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
     stretch_inflight: &'a Arc<Mutex<HashSet<StretchKey>>>,
     stretch_tx: &'a mpsc::Sender<StretchJob>,
@@ -730,6 +758,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 当某个 root_track 的 pitch_edit 曲线发生变化时，
     // 使该 track 上所有 clip 的合成缓存失效，触发下次播放时重新合成。
     // WORLD 和 ONNX 共享同一个 synth_clip_cache。
+    // 用于后台预渲染自动触发：仅当本次 update 确实使缓存失效时才触发。
+    let mut any_cache_invalidated = false;
+
     if let Some(old_tl) = s.last_timeline.as_ref() {
         use std::collections::HashSet;
 
@@ -739,6 +770,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         for old_clip in &old_tl.clips {
             if !new_clip_ids.contains(old_clip.id.as_str()) {
                 crate::synth_clip_cache::invalidate_clip_all_caches(&old_clip.id);
+                any_cache_invalidated = true;
             }
         }
 
@@ -777,9 +809,37 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             if render_shape_changed {
                 // 片段源范围/轨道归属/速率/长度等变化后，旧渲染结果不可安全复用。
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                any_cache_invalidated = true;
             } else if pitch_changed {
                 // 仅 pitch 曲线变化时保留最近一次完整渲染，允许短时无缝垫音。
                 crate::synth_clip_cache::invalidate_clip_for_pitch_edit(&clip.id);
+                any_cache_invalidated = true;
+            }
+        }
+    }
+
+    // ── 后台预渲染自动触发 ──────────────────────────────────────────────────
+    // 仅当本次 update_timeline 确实使缓存失效时才触发（避免形成反馈循环）。
+    // any_cache_invalidated 由上方的 clip 变化检测代码设置。
+    if any_cache_invalidated {
+        use std::sync::atomic::Ordering;
+        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
+            .load(Ordering::Relaxed);
+        let running = crate::commands::playback::BG_RENDER_ACTIVE
+            .load(Ordering::Relaxed);
+        if enabled && !tl.clips.is_empty() {
+            if !running {
+                // 没有渲染在运行 → 直接启动
+                if let Some(app) = s.app_handle.as_ref() {
+                    eprintln!("[engine] auto-triggering background render ({} clips invalidated)", tl.clips.len());
+                    let _ = crate::commands::playback::start_background_render(app.clone());
+                }
+            } else {
+                // 渲染已在运行 → 取消旧渲染，标记需要重启
+                // 旧渲染线程检测到取消标志后会退出，然后自动启动新一轮渲染
+                eprintln!("[engine] bg render already running, cancelling and requesting restart ({} clips invalidated)", tl.clips.len());
+                crate::commands::playback::BG_RENDER_CANCEL.store(true, Ordering::Release);
+                crate::commands::playback::BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
             }
         }
     }
@@ -812,7 +872,15 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .collect();
 
     // ── 4. 检测音高相关变化（必须在 last_timeline 更新之前）──────────────────
-    let clip_changed = tl.clips.iter().any(|clip| {
+    // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
+    let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
+        tl.params_by_root_track.iter().any(|(root_id, new_params)| {
+            old_tl.params_by_root_track.get(root_id)
+                .map_or(true, |old_params| old_params.pitch_edit != new_params.pitch_edit)
+        })
+    });
+
+    let clip_changed = track_pitch_edit_changed || tl.clips.iter().any(|clip| {
         match old_clips_map.get(clip.id.as_str()) {
             None => true, // 新增 clip
             Some(old) => clip_pitch_params_changed(old, clip),
@@ -857,8 +925,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     }
 
     let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
-    eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, needs_schedule={}",
-        tl.clips.len(), clip_changed, track_pitch_settings_changed, needs_pitch_schedule);
+    eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, pitch_edit_changed={}, needs_schedule={}",
+        tl.clips.len(), clip_changed, track_pitch_settings_changed, track_pitch_edit_changed, needs_pitch_schedule);
 
     // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
     let midi_clips_needing_emit: std::collections::HashSet<String> = tl
@@ -997,6 +1065,40 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);
+
+    // Halt playback when re-rendering is needed so the user never hears stale audio.
+    // Two triggers:
+    //   1. ALL clips need re-rendering (cache miss, no fallback PCM).
+    //   2. Pitch edit data changed — the rendered cache was just invalidated by
+    //      `invalidate_clip_for_pitch_edit`, but the snapshot may not yet mark
+    //      `needs_synthesis` (there is a one-update lag where `user_modified`
+    //      hasn't propagated).  Playing during this window produces the old
+    //      (un-pitched) audio, which the user perceives as "nothing changed".
+    //
+    // 如果后台预渲染（Background Pre-render）正在运行，则不暂停播放，
+    // 允许音频回调在未渲染 clip 位置输出静音（自然暂停），渲染线程在后台继续推进。
+    let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let any_need_render = !snap.clips.is_empty()
+        && snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
+    let should_halt = (any_need_render || track_pitch_edit_changed) && !bg_render;
+    if should_halt && s.is_playing.load(Ordering::Relaxed) {
+        eprintln!(
+            "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}, bg_render={}",
+            any_need_render, track_pitch_edit_changed, bg_render
+        );
+        s.is_playing.store(false, Ordering::Relaxed);
+        if let Some(app) = s.app_handle.as_ref() {
+            #[derive(Clone, serde::Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Evt { active: bool, progress: Option<f64>, target: Option<String> }
+            let _ = app.emit("playback_rendering_state", Evt {
+                active: false, progress: Some(0.0),
+                target: Some("original".to_string()),
+            });
+        }
+    }
+
     s.snapshot.store(Arc::new(snap));
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }

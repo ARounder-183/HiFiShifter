@@ -63,6 +63,20 @@ jobs:
             cargo_features: ""
             tauri_args: --target x86_64-pc-windows-msvc
             ort_ep: ""
+            # Regular non-CUDA build (uses default features = onnx + vslib).
+            ort_lib: ""
+            bundle_suffix: ""
+
+          - name: windows-x86_64-cuda
+            os: windows-latest
+            cargo_target: x86_64-pc-windows-msvc
+            cargo_no_default_features: "0"
+            cargo_features: "cuda,onnx,tensorrt,vslib"
+            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,cuda,tensorrt,vslib
+            ort_ep: "cuda"
+            # CUDA GPU build with ONNX Runtime GPU + TensorRT providers.
+            ort_lib: gpu
+            bundle_suffix: -cuda
 
           - name: windows-arm64
             os: windows-11-arm
@@ -71,6 +85,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-pc-windows-msvc -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: macos-arm64
             os: macos-latest
@@ -79,6 +95,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-apple-darwin -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: macos-x86_64
             os: macos-15-intel
@@ -88,6 +106,8 @@ jobs:
             tauri_args: --target x86_64-apple-darwin -- --no-default-features --features onnx
             # x86_64 macOS uses ORT CPU provider to avoid CUDA prebuilt constraints.
             ort_ep: cpu
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: linux-x86_64
             os: ubuntu-24.04
@@ -96,6 +116,8 @@ jobs:
             cargo_features: onnx
             tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
 
           - name: linux-arm64
             os: ubuntu-24.04-arm
@@ -104,6 +126,19 @@ jobs:
             cargo_features: onnx
             tauri_args: --target aarch64-unknown-linux-gnu -- --no-default-features --features onnx
             ort_ep: ""
+            ort_lib: ""
+            bundle_suffix: ""
+
+          - name: linux-x86_64-cuda
+            os: ubuntu-24.04
+            cargo_target: x86_64-unknown-linux-gnu
+            cargo_no_default_features: "1"
+            cargo_features: onnx,cuda
+            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx,cuda
+            ort_ep: "cuda"
+            # GPU build with ONNX Runtime CUDA provider for Linux.
+            ort_lib: gpu
+            bundle_suffix: "-cuda"
 
     steps:
       - uses: actions/checkout@v6
@@ -184,23 +219,15 @@ jobs:
           sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
 
-          PKG_DIRS=""
-          for d in /usr/lib/*-linux-gnu/pkgconfig /usr/lib/pkgconfig /usr/share/pkgconfig; do
-            if [ -d "$d" ]; then
-              if [ -z "$PKG_DIRS" ]; then
-                PKG_DIRS="$d"
-              else
-                PKG_DIRS="$PKG_DIRS:$d"
-              fi
-            fi
-          done
-          echo "PKG_CONFIG_PATH=$PKG_DIRS" >> "$GITHUB_ENV"
-          pkg-config --exists alsa
-          pkg-config --modversion alsa
+      - name: Install CUDA toolkit + runtime libraries (Linux GPU)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
         shell: bash
+        run: |
+          chmod +x ./scripts/install-cuda-linux.sh
+          bash ./scripts/install-cuda-linux.sh
 
       - name: Ensure AppImage bundling prerequisites (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         run: |
           set -euxo pipefail
           sudo apt-get update -y
@@ -227,7 +254,7 @@ jobs:
         shell: bash
 
       - name: Generate Linux WebKit include map for AppImage
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
@@ -302,6 +329,33 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
+      - name: Download ONNX Runtime GPU for CUDA builds (Windows)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $OrtDestDir = "backend\src-tauri\third_party\ort-bundle"
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-ort.ps1 -Gpu -DestDir $OrtDestDir
+
+      - name: Download NVIDIA CUDA runtime DLLs (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $CudaDestDir = "backend\src-tauri\third_party\ort-bundle"
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-cuda-runtime.ps1 -DestDir $CudaDestDir
+
+      - name: Download ONNX Runtime GPU for CUDA builds (Linux)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        shell: bash
+        run: |
+          chmod +x ./scripts/download-ort.sh
+          bash ./scripts/download-ort.sh
+
+      - name: Stage ORT/CUDA DLLs as Tauri resources (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\stage-tauri-resources.ps1
+
       - name: Install frontend deps
         run: |
           npm --prefix frontend ci
@@ -310,11 +364,27 @@ jobs:
         run: |
           ST_DIR="backend/src-tauri/third_party/soundtouch-static"
           mkdir -p "$ST_DIR"
-          if [ ! -f "$ST_DIR/soundtouch/CMakeLists.txt" ]; then
-            git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git "$ST_DIR/soundtouch"
-          else
+          if [ -f "$ST_DIR/soundtouch/CMakeLists.txt" ]; then
             echo "SoundTouch source already exists, skipping clone"
+            exit 0
           fi
+          # Retry up to 5 times with exponential backoff (codeberg.org occasionally 504s)
+          GIT_TERMINAL_PROMPT=0
+          export GIT_TERMINAL_PROMPT
+          for i in $(seq 1 5); do
+            if git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git "$ST_DIR/soundtouch" 2>&1; then
+              echo "SoundTouch clone succeeded (attempt $i)"
+              exit 0
+            fi
+            if [ "$i" -lt 5 ]; then
+              sleep_time=$((2 ** i))
+              echo "Clone attempt $i failed, retrying in ${sleep_time}s..."
+              sleep "$sleep_time"
+              rm -rf "$ST_DIR/soundtouch"
+            fi
+          done
+          echo "ERROR: SoundTouch clone failed after 5 attempts" >&2
+          exit 1
         shell: bash
 
       - name: Build (cargo check) on Unix
@@ -346,6 +416,14 @@ jobs:
           }
         shell: pwsh
 
+      - name: Set ORT_LIB_LOCATION (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
+          Write-Host "ORT_LIB_LOCATION=$OrtDir"
+          "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
+
       - name: Build and bundle via tauri-action
         if: runner.os != 'Linux'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -353,12 +431,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
           HIFISHIFTER_ORT_EP: ${{ matrix.ort_ep }}
+          ORT_USE_CUDA: ${{ matrix.ort_lib == 'gpu' && '1' || '0' }}
         with:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
       - name: Build Linux AppImage via tauri-action (primary)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         id: linux-appimage-build
         uses: tauri-apps/tauri-action@v0.6.2
         env:
@@ -371,7 +450,18 @@ jobs:
           projectPath: backend/src-tauri
           args: --target ${{ matrix.cargo_target }} --bundles appimage -- --no-default-features --features ${{ matrix.cargo_features }}
 
-      - name: Dump linuxdeploy diagnostics on failure (Linux)
+      - name: Build Linux CUDA binary (cargo)
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        env:
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+          CARGO_TARGET: ${{ matrix.cargo_target }}
+          CARGO_FEATURES: ${{ matrix.cargo_features }}
+        shell: bash
+        run: |
+          chmod +x ./scripts/build-gpu-linux.sh
+          bash ./scripts/build-gpu-linux.sh
+
+      - name: Dump diagnostics on failure (Linux)
         if: runner.os == 'Linux' && failure()
         run: |
           set -euxo pipefail
@@ -416,12 +506,22 @@ jobs:
         shell: pwsh
 
       - name: Upload AppImage artifact (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Upload Linux CUDA binary artifact
+        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/HiFiShifter
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/*.so*
           if-no-files-found: error
 
       - name: Upload DMG artifact (macOS)
@@ -464,7 +564,7 @@ jobs:
             $arch = 'x86_64'
           }
 
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-installer"
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-installer"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
@@ -476,6 +576,12 @@ jobs:
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+      - name: Verify CUDA DLLs in release directory (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-cuda-dlls.ps1 -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
 
       - name: Create portable ZIP (Windows)
         if: runner.os == 'Windows'
@@ -515,7 +621,7 @@ jobs:
             $arch = 'x86_64'
           }
 
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-portable"
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-portable"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 

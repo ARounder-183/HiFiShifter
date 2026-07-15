@@ -216,6 +216,10 @@ export interface SessionState {
     defaultStretchAlgorithm: StretchAlgorithmOption;
     /** 全局默认 HiFiGAN mel stretch 开关 */
     defaultHifiganMelStretch: boolean;
+    ortEp: string;
+    cudaDeviceId: number;
+    /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
+    autoBackgroundRender: boolean;
 
     // Monotonic bump token for invalidating parameter curve caches.
     // - Not included in undo/redo snapshots.
@@ -979,6 +983,9 @@ const initialState: SessionState = {
     visibleReferenceRootTrackIds: [],
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
+    ortEp: "auto",
+    cudaDeviceId: 0,
+    autoBackgroundRender: true,
 
     paramsEpoch: 0,
     playbackRateVersion: 0,
@@ -1264,6 +1271,15 @@ const sessionSlice = createSlice({
         },
         setDefaultHifiganMelStretch(state, action: PayloadAction<boolean>) {
             state.defaultHifiganMelStretch = action.payload;
+        },
+        setOrtEp(state, action: PayloadAction<string>) {
+            state.ortEp = action.payload;
+        },
+        setCudaDeviceId(state, action: PayloadAction<number>) {
+            state.cudaDeviceId = action.payload;
+        },
+        toggleAutoBackgroundRender(state) {
+            state.autoBackgroundRender = !state.autoBackgroundRender;
         },
         setVisibleReferenceRootTrackIds(state, action: PayloadAction<string[]>) {
             state.visibleReferenceRootTrackIds = Array.from(
@@ -1859,6 +1875,15 @@ const sessionSlice = createSlice({
                 }
                 if ((s as any).defaultHifiganMelStretch != null) {
                     state.defaultHifiganMelStretch = Boolean((s as any).defaultHifiganMelStretch);
+                }
+                if (s.ortEp != null) {
+                    state.ortEp = s.ortEp;
+                }
+                if (s.cudaDeviceId != null) {
+                    state.cudaDeviceId = Number(s.cudaDeviceId);
+                }
+                if ((s as any).autoBackgroundRender != null) {
+                    state.autoBackgroundRender = Boolean((s as any).autoBackgroundRender);
                 }
                 const selectDir = (s as any).selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
@@ -3301,6 +3326,9 @@ export const {
     toggleQuickSearchAutoNormalize,
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
+    setOrtEp,
+    setCudaDeviceId,
+    toggleAutoBackgroundRender,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

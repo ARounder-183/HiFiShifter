@@ -12,6 +12,12 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
+    // Apply EP and CUDA device settings on load
+    crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
+    crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
+    // Sync background render setting
+    crate::commands::playback::AUTO_BG_RENDER_ENABLED
+        .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
     settings
 }
 
@@ -19,6 +25,14 @@ pub(super) fn save_ui_settings(
     state: State<'_, AppState>,
     settings: UiSettings,
 ) -> serde_json::Value {
+    // Check if EP choice or CUDA device ID has changed
+    let (prev_ep, prev_cuda_device_id) = if let Some(dir) = state.config_dir.get() {
+        let s = crate::config::load_ui_settings(dir);
+        (s.ort_ep, s.cuda_device_id)
+    } else {
+        ("auto".to_string(), 0)
+    };
+
     if let Some(dir) = state.config_dir.get() {
         crate::config::save_ui_settings(dir, &settings);
     }
@@ -26,12 +40,26 @@ pub(super) fn save_ui_settings(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    {
+    // Sync background render setting
+    crate::commands::playback::AUTO_BG_RENDER_ENABLED
+        .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
+
+    let ep_changed = prev_ep != settings.ort_ep;
+    let device_changed = prev_cuda_device_id != settings.cuda_device_id;
+
+    // Apply CUDA device ID (always apply on save, it's cheap)
+    crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
+
+    // If EP choice or device changed, update ONNX session and clear caches
+    if ep_changed || device_changed {
+        crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
+
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for clip in &timeline.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }
         state.audio_engine.update_timeline(timeline);
     }
+    
     serde_json::json!({ "ok": true })
 }

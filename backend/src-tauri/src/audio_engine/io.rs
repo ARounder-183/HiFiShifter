@@ -1,6 +1,7 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use lru::LruCache;
 
 use super::types::ResampledStereo;
 
@@ -232,13 +233,13 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
 pub(crate) fn get_resampled_stereo_cached(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
     }
     let key = (path.to_path_buf(), out_rate);
-    if let Ok(map) = cache.lock() {
+    if let Ok(mut map) = cache.lock() {
         if let Some(v) = map.get(&key) {
             return Some(v.clone());
         }
@@ -250,14 +251,14 @@ pub(crate) fn get_resampled_stereo_cached(
 pub(crate) fn get_resampled_stereo(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<HashMap<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
     }
 
     let key = (path.to_path_buf(), out_rate);
-    if let Ok(map) = cache.lock() {
+    if let Ok(mut map) = cache.lock() {
         if let Some(v) = map.get(&key) {
             return Some(v.clone());
         }
@@ -266,7 +267,7 @@ pub(crate) fn get_resampled_stereo(
     let v = decode_resampled_stereo(path, out_rate)?;
 
     if let Ok(mut map) = cache.lock() {
-        map.insert(key, v.clone());
+        map.push(key, v.clone());
     }
 
     Some(v)

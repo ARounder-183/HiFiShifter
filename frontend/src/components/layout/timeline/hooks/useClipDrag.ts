@@ -157,7 +157,7 @@ export function useClipDrag(deps: {
         e: React.PointerEvent<HTMLDivElement>,
         clipId: string,
         clipstartSec: number,
-        altPressedHint: boolean | undefined,
+        _altPressedHint: boolean | undefined,
         startSlipDragFn: (e: React.PointerEvent<HTMLDivElement>, clipId: string) => void,
     ) {
         if (e.button !== 0) return;
@@ -165,8 +165,12 @@ export function useClipDrag(deps: {
         const anchor = sessionRef.current.clips.find((c) => c.id === clipId);
         if (!anchor) return;
 
-        const alt = Boolean(altPressedHint || isModifierActive(slipEditKb, e.nativeEvent));
-        if (alt) {
+        // Only use the slipEdit keybinding to detect slip-edit drag mode.
+        // Do NOT use altPressedHint (which carries the stretch modifier state) —
+        // that would break Ctrl/Shift selection when those keys are configured
+        // as stretch modifiers.
+        const isSlipEdit = isModifierActive(slipEditKb, e.nativeEvent);
+        if (isSlipEdit) {
             startSlipDrag(e, clipId, startSlipDragFn);
             return;
         }

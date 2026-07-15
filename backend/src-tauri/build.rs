@@ -1,4 +1,9 @@
 fn main() {
+    // Always purge stale ORT/CUDA DLLs from the cargo output directory so
+    // they don't leak from a previous GPU build into a non-GPU portable ZIP.
+    // Fresh DLLs are only staged when the `cuda` feature is active.
+    clean_stale_ort_dlls();
+
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
@@ -22,6 +27,29 @@ fn main() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::write(p, b"");
+        }
+    }
+
+    // If this is NOT a GPU build, remove any lingering GPU resource config
+    // so that tauri_build does not try to validate GPU-only resources.
+    // build-gpu.ps1 also cleans this up, but this is the belt-and-suspenders
+    // guard: even if the script crashed or the user created the file manually,
+    // a plain `cargo tauri build` stays clean.
+    if !cfg!(feature = "cuda") {
+        let gpu_conf = "tauri.windows.conf.json";
+        match std::fs::remove_file(gpu_conf) {
+            Ok(()) => println!(
+                "cargo:warning=[build.rs] Removed stale {} (non-CUDA build)",
+                gpu_conf
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already clean — nothing to do.
+            }
+            Err(e) => panic!(
+                "[build.rs] Cannot remove stale {}: {}. \
+                 Close any programs that may have locked it, then rebuild.",
+                gpu_conf, e
+            ),
         }
     }
 
@@ -284,8 +312,8 @@ fn build_signalsmith_stretch() {
 /// Link against vslib_x64.dll via its import library.
 ///
 /// The DLL and import lib live in third_party/vslib/:
-///   vslib_x64.dll  — needs to sit next to the final binary at runtime
-///   vslib_x64.lib  — import library linked at compile time
+///   vslib_x64.dll  - needs to sit next to the final binary at runtime
+///   vslib_x64.lib  - import library linked at compile time
 ///
 /// Enabled only when the `vslib` cargo feature is active.
 fn build_vslib() {
@@ -375,6 +403,9 @@ fn build_soundtouch() {
         println!(
             "cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning..."
         );
+        if st_src_path.exists() {
+            let _ = std::fs::remove_dir_all(st_src_path);
+        }
         let parent = st_src_path.parent().expect("[soundtouch] invalid source path");
         let _ = std::fs::create_dir_all(parent);
 
@@ -404,7 +435,9 @@ fn build_soundtouch() {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", st_src);
+    // Only re-run if build.rs itself changes - the SoundTouch source tree is modified
+    // during the build (cmake outputs, .rc patching) which would cause an infinite rebuild loop.
+    println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
@@ -427,7 +460,8 @@ fn build_soundtouch() {
         let rc_file = st_src_path.join("source").join("SoundTouchDLL").join("SoundTouchDLL.rc");
         if rc_file.exists() {
             let content = std::fs::read_to_string(&rc_file).expect("[soundtouch] failed to read SoundTouchDLL.rc");
-            if content.contains("afxres.h") {
+            // Only write if the file actually needs patching to avoid triggering Tauri's file watcher.
+            if content.contains("afxres.h") && !content.contains("#include <windows.h>") {
                 let patched = content.replace("#include \"afxres.h\"", "#include <windows.h>");
                 // IDC_STATIC is normally defined in afxres.h as -1
                 let patched = if !patched.contains("IDC_STATIC") {
@@ -445,13 +479,33 @@ fn build_soundtouch() {
             }
         }
     }
+
+    // Patch SoundTouch CMakeLists.txt - cmake_minimum_required(VERSION 3.1) is
+    // deprecated in CMake ≥3.27 and a hard error in CMake ≥4.0.  Bump to 3.5.
+    {
+        let cmake_file = st_src_path.join("CMakeLists.txt");
+        if cmake_file.exists() {
+            let content = std::fs::read_to_string(&cmake_file)
+                .expect("[soundtouch] failed to read CMakeLists.txt");
+            let patched = content.replace(
+                "cmake_minimum_required(VERSION 3.1)",
+                "cmake_minimum_required(VERSION 3.5)",
+            );
+            if patched != content {
+                std::fs::write(&cmake_file, &patched)
+                    .expect("[soundtouch] failed to write patched CMakeLists.txt");
+                println!("cargo:warning=[soundtouch] patched CMakeLists.txt: cmake_minimum_required 3.1 → 3.5");
+            }
+        }
+    }
+
     println!("cargo:warning=[soundtouch] is_windows={} is_apple={}", is_windows, is_apple);
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let build_dir = Path::new(&out_dir).join("soundtouch_build");
     println!("cargo:warning=[soundtouch] build_dir={}", build_dir.display());
 
-    // Step 1: CMake configure — build SoundTouchDLL as a shared library.
+    // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     // Use the path as-is (cmake handles relative paths fine, and canonicalize
     // produces \\?\ extended paths on Windows which break CMake/MSBuild).
     println!("cargo:warning=[soundtouch] running cmake configure...");
@@ -475,7 +529,7 @@ fn build_soundtouch() {
     }
     println!("cargo:warning=[soundtouch] cmake configure succeeded");
 
-    // Step 2: CMake build — build SoundTouchDLL target
+    // Step 2: CMake build - build SoundTouchDLL target
     let mut bld = Command::new("cmake");
     bld.arg("--build").arg(&build_dir);
     bld.arg("--config").arg("Release");
@@ -526,7 +580,7 @@ fn build_soundtouch() {
     }
 
     // Step 5: Copy shared library to target dir (for runtime linking) AND to
-    // source tree (for Tauri resource bundling on all platforms)
+    // source tree (for Tauri resource bundling / tauri_build validation).
     let target_dir = Path::new(&out_dir)
         .ancestors()
         .nth(3)
@@ -548,19 +602,31 @@ fn build_soundtouch() {
         );
     }
 
-    // Also copy to a stable path under third_party/ so tauri.conf.json can reference it.
-    // Skip if destination already exists to avoid triggering cargo's file watcher loop.
+    // Also copy to source tree path for tauri_build resource validation.
+    // IMPORTANT: only write if bytes differ - writing unconditionally updates the
+    // file timestamp every build, which triggers Tauri's dev watcher and causes
+    // an infinite rebuild loop.
     let lib_dst_resource = st_src_path.join(&lib_filename);
-    if lib_dst_resource != lib_dst_target && !lib_dst_resource.exists() {
-        if let Err(e) = std::fs::copy(&lib_src, &lib_dst_resource) {
+    let src_bytes = std::fs::read(&lib_src).unwrap_or_default();
+    let dst_bytes = std::fs::read(&lib_dst_resource).unwrap_or_default();
+    if src_bytes != dst_bytes {
+        if let Err(e) = std::fs::write(&lib_dst_resource, &src_bytes) {
             println!(
                 "cargo:warning=[soundtouch] could not copy {} to resource path {}: {}",
                 lib_src.display(),
                 lib_dst_resource.display(),
                 e
             );
+        } else {
+            println!(
+                "cargo:warning=[soundtouch] updated resource DLL at {}",
+                lib_dst_resource.display()
+            );
         }
+    } else {
+        println!("cargo:warning=[soundtouch] resource DLL unchanged, skipping write");
     }
+
 }
 
 /// Recursively search for a file by name under `dir`.
@@ -593,4 +659,92 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+/// Remove stale ORT/CUDA DLLs from the cargo output directory and stage
+/// fresh GPU DLLs from `third_party/ort-bundle/`.
+///
+/// This function ONLY runs for CUDA builds.  For plain CPU builds, the
+/// `ort` crate's own `download-binaries` feature handles fetching ONNX
+/// Runtime — we must not interfere by deleting the DLLs it places.
+///
+/// `cargo build` never cleans the output dir, so DLLs from a previous GPU
+/// build could otherwise persist and leak into a subsequent non-GPU portable
+/// ZIP.  By scoping the purge to CUDA builds only we eliminate that risk
+/// without breaking CPU-only compilation.
+fn clean_stale_ort_dlls() {
+    // For CPU builds, ort-sys handles everything via download-binaries.
+    if !cfg!(feature = "cuda") {
+        return;
+    }
+
+    let stale_dlls = [
+        "onnxruntime.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+        "onnxruntime_providers_tensorrt.dll",
+        "cudart64_12.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudnn64_9.dll",
+        "cudnn_adv64_9.dll",
+        "cudnn_cnn64_9.dll",
+        "cudnn_ops64_9.dll",
+        "cudnn_graph64_9.dll",
+        "cudnn_engines_precompiled64_9.dll",
+        "cudnn_engines_runtime_compiled64_9.dll",
+        "cudnn_heuristic64_9.dll",
+        "cufft64_11.dll",
+        "cufftw64_11.dll",
+        "curand64_10.dll",
+    ];
+
+    // OUT_DIR is target/<triple>/<profile>/build/<crate>-<hash>/out
+    // Navigate up to the profile dir (target/<triple>/<profile>/)
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let path = std::path::PathBuf::from(&out_dir);
+        if let Some(profile_dir) = path.ancestors().find(|p| {
+            p.join("build").is_dir() && p.join("deps").is_dir()
+        }) {
+            // -- remove any stale GPU DLLs from a previous build ----------
+            for dll in &stale_dlls {
+                let dll_path = profile_dir.join(dll);
+                if dll_path.exists() {
+                    let _ = std::fs::remove_file(&dll_path);
+                    println!("cargo:warning=[build.rs] Removed stale DLL: {}", dll);
+                }
+            }
+
+            // -- stage fresh DLLs from ort-bundle ----------
+            if cfg!(feature = "cuda") {
+                let bundle = std::path::Path::new("third_party/ort-bundle");
+                if bundle.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(bundle) {
+                        for entry in entries.flatten() {
+                            let src = entry.path();
+                            if src.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) {
+                                if let Some(name) = src.file_name() {
+                                    let dst = profile_dir.join(name);
+                                    let should_copy = if dst.exists() {
+                                        if let (Ok(sm), Ok(dm)) = (src.metadata(), dst.metadata()) {
+                                            sm.modified().ok() > dm.modified().ok()
+                                        } else { false }
+                                    } else { true };
+                                    if should_copy {
+                                        if let Err(e) = std::fs::copy(&src, &dst) {
+                                            println!("cargo:warning=[build.rs] Failed to stage {}: {}",
+                                                name.to_string_lossy(), e);
+                                        } else {
+                                            println!("cargo:warning=[build.rs] Staged: {}",
+                                                name.to_string_lossy());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

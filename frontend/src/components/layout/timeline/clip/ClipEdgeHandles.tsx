@@ -54,22 +54,26 @@ export const ClipEdgeHandles: React.FC<{
                     e.preventDefault();
                     e.stopPropagation();
 
-                    const alt = Boolean(
-                        altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
-                    );
+                    // altPressed tracks the stretch modifier (configurable) — use it
+                    // for edit-mode selection (stretch vs trim) and cursor display.
+                    // For click-selection bypass, only check the physical Alt key
+                    // to avoid breaking Ctrl/Shift selection when those keys are
+                    // configured as stretch modifiers.
+                    const stretchActive = altPressed;
+                    const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
                     const ctrlOrMeta = e.ctrlKey || e.metaKey;
-                    const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
                     const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
                     const startX = e.clientX;
                     const startY = e.clientY;
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
-                    const mode = alt ? "stretch_left" : "trim_left";
+                    const mode = stretchActive ? "stretch_left" : "trim_left";
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {
@@ -130,22 +134,23 @@ export const ClipEdgeHandles: React.FC<{
                     e.preventDefault();
                     e.stopPropagation();
 
-                    const alt = Boolean(
-                        altPressed || e.altKey || e.nativeEvent.getModifierState?.("Alt"),
-                    );
+                    // Same separation as left edge: stretchActive for edit mode,
+                    // altKeyDown for click-selection bypass only.
+                    const stretchActive = altPressed;
+                    const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
                     const ctrlOrMeta = e.ctrlKey || e.metaKey;
-                    const doShiftRangeSelect = e.shiftKey && !alt && !ctrlOrMeta;
+                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !alt;
+                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
                     const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
                     const startX = e.clientX;
                     const startY = e.clientY;
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
-                    const mode = alt ? "stretch_right" : "trim_right";
+                    const mode = stretchActive ? "stretch_right" : "trim_right";
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {

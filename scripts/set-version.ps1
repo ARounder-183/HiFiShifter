@@ -86,9 +86,9 @@ function Set-JsonVersion {
         throw "Could not find a JSON version field in $FilePath."
     }
 
-    $updated = [regex]::Replace(
+    $regex = [regex]::new($pattern)
+    $updated = $regex.Replace(
         $raw,
-        $pattern,
         { param($m) $m.Groups[1].Value + $TargetVersion + $m.Groups[3].Value },
         1
     )
@@ -130,11 +130,20 @@ function Set-PackageLockVersions {
     )
 
     $raw = Read-TextFile -FilePath $FilePath
-    $pattern = '(?m)^(\s*"version"\s*:\s*")([^"]+)(",?)$'
-    $updated = [regex]::Replace(
+    # Replace the first TWO "version" fields only.  In package-lock.json
+    # these are always:
+    #   1) the top-level project version
+    #   2) the root package entry under "packages".""
+    # Every subsequent "version" belongs to a dependency and must stay.
+    #
+    # IMPORTANT: the static [regex]::Replace(input, pattern, evaluator, N)
+    # treats N as RegexOptions (where 2 = Multiline).  To limit count we
+    # must use an INSTANCE method on a Regex object.
+    $regex = [regex]::new('(?m)("version"\s*:\s*")([^"]+)(")')
+    $updated = $regex.Replace(
         $raw,
-        $pattern,
-        { param($m) $m.Groups[1].Value + $TargetVersion + $m.Groups[3].Value }
+        { param($m) $m.Groups[1].Value + $TargetVersion + $m.Groups[3].Value },
+        2
     )
 
     if ($updated -ne $raw) {
