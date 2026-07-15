@@ -352,12 +352,6 @@ jobs:
           chmod +x ./scripts/download-ort.sh
           bash ./scripts/download-ort.sh
 
-      - name: Stage ORT/CUDA DLLs as Tauri resources (Windows GPU)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\stage-tauri-resources.ps1
-
       - name: Install frontend deps
         run: |
           npm --prefix frontend ci
@@ -438,19 +432,19 @@ jobs:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
-      - name: Inject precompiled engine DLL into NSIS installer (Windows GPU)
+      - name: Inject GPU DLLs into NSIS installer (Windows GPU)
         if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
         shell: pwsh
         run: |
-          $precompiled = "backend\src-tauri\third_party\ort-bundle\cudnn_engines_precompiled64_9.dll"
-          if (Test-Path $precompiled) {
-            Write-Host "Injecting cudnn_engines_precompiled64_9.dll into NSIS installer..."
-            .\scripts\inject-nsis-large-dll.ps1 -TargetTriple "${{ matrix.cargo_target }}"
+          $bundle = "backend\src-tauri\third_party\ort-bundle"
+          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
+            Write-Host "Injecting GPU DLLs into NSIS installer..."
+            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
             if ($LASTEXITCODE -ne 0) {
-              Write-Host "WARNING: NSIS DLL injection failed -- cuDNN will use runtime-compiled engines instead."
+              Write-Host "WARNING: GPU DLL injection failed -- NSIS installer will lack GPU support"
             }
           } else {
-            Write-Host "Precompiled engine DLL not found -- skipping NSIS injection (cuDNN runtime fallback available)"
+            Write-Host "No GPU DLLs found in ort-bundle/ -- skipping NSIS injection"
           }
 
       - name: Build Linux AppImage via tauri-action (primary)
