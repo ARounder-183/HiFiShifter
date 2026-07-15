@@ -30,28 +30,11 @@ fn main() {
         }
     }
 
-    // If this is NOT a GPU build, remove any lingering GPU resource config
-    // so that tauri_build does not try to validate GPU-only resources.
-    // build-gpu.ps1 also cleans this up, but this is the belt-and-suspenders
-    // guard: even if the script crashed or the user created the file manually,
-    // a plain `cargo tauri build` stays clean.
-    if !cfg!(feature = "cuda") {
-        let gpu_conf = "tauri.windows.conf.json";
-        match std::fs::remove_file(gpu_conf) {
-            Ok(()) => println!(
-                "cargo:warning=[build.rs] Removed stale {} (non-CUDA build)",
-                gpu_conf
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Already clean — nothing to do.
-            }
-            Err(e) => panic!(
-                "[build.rs] Cannot remove stale {}: {}. \
-                 Close any programs that may have locked it, then rebuild.",
-                gpu_conf, e
-            ),
-        }
-    }
+    // Write or update tauri.windows.conf.json so that Tauri/NSIS bundles
+    // SoundTouchDLL.dll and other runtime DLLs for all Windows builds.
+    // On GPU builds this also preserves the ort-bundle/ entries written
+    // earlier by stage-tauri-resources.ps1.
+    update_windows_bundle_config();
 
     // tauri_build validates resources, so soundtouch must run first to populate
     // the shared library at the resource path.
@@ -627,6 +610,90 @@ fn build_soundtouch() {
         println!("cargo:warning=[soundtouch] resource DLL unchanged, skipping write");
     }
 
+}
+
+/// Write or update `tauri.windows.conf.json` with the correct resource entries
+/// for DLLs that are NOT auto-detected by Tauri (SoundTouch, vslib).
+///
+/// This runs AFTER `build_soundtouch()` and `build_vslib()` have populated the
+/// DLL files, so they exist on disk for resource validation.
+///
+/// IMPORTANT: This MERGES with any existing `tauri.windows.conf.json` (e.g.,
+/// written earlier by `stage-tauri-resources.ps1` for GPU builds) rather than
+/// overwriting it.  This ensures GPU-only DLL entries from `ort-bundle/` are
+/// preserved alongside the SoundTouch / vslib entries added here.
+fn update_windows_bundle_config() {
+    // Only for Windows targets — other platforms use their own configs.
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    let config_path = Path::new("tauri.windows.conf.json");
+
+    // --- 1. Read existing config if present (preserve GPU entries etc.) ---
+    let mut resources: BTreeMap<String, String> = BTreeMap::new();
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(config_path) {
+            if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(res_obj) = config
+                    .get("bundle")
+                    .and_then(|b| b.get("resources"))
+                    .and_then(|r| r.as_object())
+                {
+                    for (k, v) in res_obj {
+                        if let Some(s) = v.as_str() {
+                            resources.insert(k.clone(), s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 2. Add vslib_x64.dll (if the `vslib` feature is active) ---
+    if cfg!(feature = "vslib") {
+        let target = std::env::var("TARGET").unwrap_or_default();
+        let target_lc = target.to_lowercase();
+        let is_x86_64_windows =
+            target_lc.contains("windows") && target_lc.contains("x86_64");
+        if is_x86_64_windows {
+            let vslib_src = Path::new("third_party/vslib/vslib_x64.dll");
+            if vslib_src.exists() {
+                resources.insert(
+                    "third_party/vslib/vslib_x64.dll".to_string(),
+                    "vslib_x64.dll".to_string(),
+                );
+            }
+        }
+    }
+
+    // --- 3. Add SoundTouchDLL.dll ---
+    let st_dll = Path::new("third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll");
+    if st_dll.exists() {
+        resources.insert(
+            "third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll".to_string(),
+            "SoundTouchDLL.dll".to_string(),
+        );
+    }
+
+    // --- 4. Write the merged config ---
+    let config = serde_json::json!({
+        "bundle": {
+            "resources": resources
+        }
+    });
+
+    let json = serde_json::to_string_pretty(&config)
+        .expect("[build.rs] failed to serialize tauri.windows.conf.json");
+    std::fs::write(config_path, &json)
+        .expect("[build.rs] failed to write tauri.windows.conf.json");
+    println!(
+        "cargo:warning=[build.rs] Wrote tauri.windows.conf.json with {} resource(s)",
+        resources.len()
+    );
 }
 
 /// Recursively search for a file by name under `dir`.
