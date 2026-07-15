@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main]
+  release:
+    types: [published]
 
 jobs:
   frontend-build:
@@ -436,6 +438,21 @@ jobs:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
+      - name: Inject precompiled engine DLL into NSIS installer (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $precompiled = "backend\src-tauri\third_party\ort-bundle\cudnn_engines_precompiled64_9.dll"
+          if (Test-Path $precompiled) {
+            Write-Host "Injecting cudnn_engines_precompiled64_9.dll into NSIS installer..."
+            .\scripts\inject-nsis-large-dll.ps1 -TargetTriple "${{ matrix.cargo_target }}"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "WARNING: NSIS DLL injection failed -- cuDNN will use runtime-compiled engines instead."
+            }
+          } else {
+            Write-Host "Precompiled engine DLL not found -- skipping NSIS injection (cuDNN runtime fallback available)"
+          }
+
       - name: Build Linux AppImage via tauri-action (primary)
         if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
         id: linux-appimage-build
@@ -633,3 +650,24 @@ jobs:
           path: |
             dist/*portable-win-*.zip
           if-no-files-found: warn
+
+  release-upload:
+    name: Upload to GitHub Release
+    needs: backend
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-artifacts
+
+      - name: Remove frontend artifact
+        run: rm -rf release-artifacts/frontend-dist
+
+      - name: Upload artifacts to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release-artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

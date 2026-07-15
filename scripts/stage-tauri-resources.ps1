@@ -58,6 +58,28 @@ try {
         $dlls = @(Get-ChildItem "$BundleDir\*.dll" -ErrorAction SilentlyContinue)
         Write-Host "  GPU DLLs found: $($dlls.Count)"
         foreach ($dll in $dlls) {
+            # cudnn_engines_precompiled64_9.dll is the cuDNN 9.x precompiled
+            # engine cache - typically 500–800 MB.  Including it in the NSIS
+            # installer causes a makensis INTERNAL COMPILER ERROR:
+            #   "Internal compiler error #12345: error mmapping datablock to …"
+            #
+            # NSIS is a 32-bit process; its solid LZMA compressor needs to
+            # memory-map the entire compressed data block, and a multi-GB
+            # payload overflows the 32-bit virtual address space.
+            #
+            # cuDNN 9.x gracefully falls back to RUNTIME compilation via
+            # cudnn_engines_runtime_compiled64_9.dll (included below), so
+            # CUDA functionality is not affected - only the very first
+            # convolution operation incurs a small one-time compilation delay.
+            #
+            # The precompiled engine DLL IS included in the portable ZIP
+            # (see pack-portable.ps1), which is the recommended distribution
+            # format for GPU users who want the fastest cold-start experience.
+            if ($dll.Name -eq "cudnn_engines_precompiled64_9.dll") {
+                Write-Host "    SKIP (NSIS 32-bit mmap limit): $($dll.Name)" -ForegroundColor DarkYellow
+                Write-Host "          cuDNN will use runtime-compiled engines as fallback." -ForegroundColor DarkGray
+                continue
+            }
             $resources["third_party/ort-bundle/$($dll.Name)"] = $dll.Name
             $gpuCount++
         }

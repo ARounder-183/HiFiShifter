@@ -194,6 +194,28 @@ try {
             Write-Host "[build-gpu] All critical CUDA DLLs verified in release dir." -ForegroundColor Green
         }
 
+        # Inject the precompiled engine DLL into the NSIS installer.
+        # This DLL is excluded from tauri.windows.conf.json by stage-tauri-resources.ps1
+        # because NSIS (32-bit) crashes on mmap when solid-LZMA-compressing such a large file.
+        # inject-nsis-large-dll.ps1 adds it uncompressed and re-runs makensis.
+        $injectScript = Join-Path $PSScriptRoot "inject-nsis-large-dll.ps1"
+        $precompiledDll = Join-Path $SrcTauri "third_party\ort-bundle\cudnn_engines_precompiled64_9.dll"
+        if (Test-Path $injectScript) {
+            if (Test-Path $precompiledDll) {
+                Write-Host "[build-gpu] Injecting precompiled engine DLL into NSIS installer..." -ForegroundColor Cyan
+                & $injectScript -TargetTriple "x86_64-pc-windows-msvc"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "[build-gpu] WARN: NSIS DLL injection failed (exit code $LASTEXITCODE)" -ForegroundColor Yellow
+                    Write-Host "[build-gpu] The installer is usable - cuDNN will fall back to runtime-compiled engines." -ForegroundColor DarkGray
+                }
+            } else {
+                Write-Host "[build-gpu] Precompiled engine DLL not found - skipping NSIS injection" -ForegroundColor DarkYellow
+                Write-Host "[build-gpu] cuDNN will use runtime-compiled engines on first launch." -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "[build-gpu] inject-nsis-large-dll.ps1 not found - skipping NSIS injection" -ForegroundColor DarkYellow
+        }
+
         # Clean up generated config
         $configPath = Join-Path $SrcTauri "tauri.windows.conf.json"
         if (Test-Path $configPath) {
