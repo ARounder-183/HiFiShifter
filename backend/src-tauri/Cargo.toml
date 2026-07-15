@@ -1,6 +1,6 @@
 [package]
 name = "HiFiShifter"
-version = "0.1.0-beta.10"
+version = "0.1.0-beta.11"
 description = "A high-quality audio shifter"
 authors = ["ARounder"]
 edition = "2021"
@@ -18,7 +18,7 @@ path = "src/main.rs"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "backend_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -35,7 +35,6 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.15"
 hound = "3"
-rodio = "0.20"
 cpal = "0.15"
 arc-swap = "1.7"
 symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
@@ -53,6 +52,8 @@ ndarray = { version = "0.16", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
+libc = "0.2"
+libloading = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
@@ -61,18 +62,47 @@ objc2 = "0.6"
 
 [features]
 default = ["onnx", "vslib"]
+logging = []
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
+cuda = ["onnx", "ort/cuda"]
+tensorrt = ["cuda", "ort/tensorrt"]
 vslib = []
 
 # Linux / Windows
+# NOTE: `cuda` and `tensorrt` ort features are NOT enabled here by default —
+# they are opt-in via the Cargo feature flags `cuda` and `tensorrt` above.
+# `download-binaries` auto-fetches ONNX Runtime CPU prebuilts at build time;
+# when `ORT_LIB_LOCATION` is set (e.g. CUDA CI), it takes precedence silently.
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries"] }
 
-# macOS Apple Silicon (arm64)
+# macOS Apple Silicon (arm64) — includes CoreML for Apple Neural Engine acceleration
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "cuda"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml"] }
 
 # macOS Intel (x86_64)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-ort = { version = "2.0.0-rc.11", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.3.0+0.22", optional = true }
+
+[profile.release]
+lto = false
+codegen-units = 16
+strip = true
+opt-level = 3
+panic = "abort"
+
+# Official shipping profile: thin LTO for smaller/faster binaries.
+# Use `cargo build --profile release-ship` for release builds.
+[profile.release-ship]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+
+# Fast iteration profile: opt-level=2 for ORT/CUDA, no LTO, fast compile
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false

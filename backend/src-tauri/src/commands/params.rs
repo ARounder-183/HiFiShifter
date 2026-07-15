@@ -135,7 +135,7 @@ fn resolve_param_reference_kind(param: &str) -> crate::models::ParamReferenceKin
 }
 
 fn resolve_extra_curve_frame_pair(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     default_value: f32,
     idx: usize,
 ) -> (f32, f32) {
@@ -298,7 +298,7 @@ pub(super) fn get_param_frames(
         _ => {
             // Extra automation curve: dashed orig should stay at the processor default,
             // while solid edit reflects the user-authored curve.
-            let curve = entry.extra_curves.get(&param);
+            let curve = entry.extra_curves.get(&param).map(|v| v.as_slice());
             let default_value = param_reference_value;
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));

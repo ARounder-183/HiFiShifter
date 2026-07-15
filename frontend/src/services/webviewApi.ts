@@ -45,6 +45,8 @@ export const webApi = {
     exportAudioAdvanced: coreApi.exportAudioAdvanced,
     playOriginal: coreApi.playOriginal,
     stopAudio: coreApi.stopAudio,
+    startBackgroundRender: coreApi.startBackgroundRender,
+    cancelBackgroundRender: coreApi.cancelBackgroundRender,
 
     // Undo/Redo (backend-authoritative)
     undoTimeline: timelineApi.undoTimeline,

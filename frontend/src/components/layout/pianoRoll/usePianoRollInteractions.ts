@@ -1443,33 +1443,33 @@ export function usePianoRollInteractions(args: {
                     frequencyRequested: freqRequested,
                 });
 
-                if (wheelTarget !== "none") {
-                    e.preventDefault();
-                    const controlDelta =
-                        wheelTarget === "frequency" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
-                            ? e.deltaX
-                            : e.deltaY;
-                    const steps = Math.max(1, Math.round(Math.abs(controlDelta) / 100));
-                    const direction =
-                        wheelTarget === "amplitude"
-                            ? controlDelta < 0
-                                ? 1
-                                : -1
-                            : controlDelta < 0
-                              ? -1
-                              : 1;
-                    applyVibratoDragAdjustment({
-                        target: wheelTarget,
-                        direction,
-                        steps,
-                        shiftHeld: e.shiftKey,
-                        fineEvent: e,
-                    });
-                    return;
-                }
+                // During vibrato drag, wheel always adjusts vibrato (amplitude by default,
+                // frequency via modifier or horizontal scroll). If no modifier is held and
+                // neither binding is "None", fall back to amplitude adjustment so the wheel
+                // never gets blocked or interpreted as zoom/scroll.
+                const resolvedTarget = wheelTarget !== "none" ? wheelTarget : "amplitude";
 
-                // 颤音拖拽期间默认屏蔽滚轮，防止画布缩放/滚动。
                 e.preventDefault();
+                const controlDelta =
+                    resolvedTarget === "frequency" && Math.abs(e.deltaX) > Math.abs(e.deltaY)
+                        ? e.deltaX
+                        : e.deltaY;
+                const steps = Math.max(1, Math.round(Math.abs(controlDelta) / 100));
+                const direction =
+                    resolvedTarget === "amplitude"
+                        ? controlDelta < 0
+                            ? 1
+                            : -1
+                        : controlDelta < 0
+                          ? -1
+                          : 1;
+                applyVibratoDragAdjustment({
+                    target: resolvedTarget,
+                    direction,
+                    steps,
+                    shiftHeld: e.shiftKey,
+                    fineEvent: e,
+                });
                 return;
             }
 

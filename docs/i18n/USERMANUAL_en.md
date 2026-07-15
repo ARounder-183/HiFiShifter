@@ -19,6 +19,13 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 
 - For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly.
 
+**About CUDA GPU Acceleration**: HiFiShifter provides NVIDIA CUDA GPU-accelerated builds for Windows and Linux (download filenames include the `-cuda` suffix). These builds leverage NVIDIA GPUs for inference acceleration. CUDA builds require:
+
+- An NVIDIA graphics card with CUDA support (GTX 10 series or newer recommended)
+- Recent [NVIDIA display drivers](https://www.nvidia.com/drivers) (version 545 or newer recommended)
+
+macOS does not support CUDA GPU acceleration at this time.
+
 **WebView Information**: HiFiShifter is built with the Rust + Tauri framework and requires a WebView component to display its interface.
 
 - **Windows**: Requires Edge WebView2. Windows 10 (version 1803 and later) and Windows 11 have it preinstalled, so no additional action is needed. If you are using an older Windows version or the component is missing, the installer will prompt you to download it automatically. You can also refer to the [Tauri official documentation](https://tauri.app/start/prerequisites/#webview2) for details. General users can simply run the installer without worry.
@@ -48,11 +55,17 @@ The `Edit` menu allows various editing operations. Besides regular track and par
     - Audio clip data: Imports as note clips in HiFiShifter, preserving various parameter curve data.
     - Track data: Imports tracks along with their audio clips into HiFiShifter. Note that HiFiShifter currently cannot distinguish whether your last copied content was an audio clip or a track. If you intend to import a track, before performing the copy track operation in VocalShifter, ensure that no audio clip is selected in the VocalShifter project; otherwise, only the selected audio clips will be imported.
 
-The `Stretch` menu allows you to modify the current project and global stretching algorithms.
+The `Options` menu allows you to modify various settings of HiFiShifter.
+
+- `Project Stretch Override`: Allows you to modify the current project's stretching algorithm.
+- `Global Stretch Default`: Allows you to modify the default global stretching algorithm.
+- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU (CUDA)`. You can run a benchmark from this menu to test the performance of each device. `GPU (CUDA)` is only available in the CUDA build of HiFiShifter.
+- `Background Pre-render`: When enabled, after opening a project or editing parameters, the edited parameters are automatically pre-rendered in the background, and you can play the already-rendered portions even while rendering is still in progress. When disabled, rendering only begins when playback starts, and you must wait for rendering to complete before the timeline plays normally. Enabled by default. Disabling it reduces rendering frequency and saves performance.
+- `Keyboard Shortcuts`: Allows you to configure HiFiShifter's keybindings. Several presets are available.
 
 ## 3. Track View
 
-The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `View -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
+The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `Options -> Keyboard Shortcuts`. The following descriptions are based on default shortcuts.
 
 The track view is one of HiFiShifter's core features, allowing you to crop, splice, and edit audio clips. Its operation logic is largely based on Reaper.
 
@@ -241,7 +254,7 @@ Pitch Reference Clips have the following common uses:
 - Placed on a track, they serve as a general audio clip for other tracks with regular audio clips to reference pitch. On other tracks, the `Reference Track Group` feature in the Parameter Editor can be used to view this track and display its pitch curve.
 - When a Pitch Reference Clip is placed on the root track of a track group, it can change the pitch processing logic of that track group, overwriting the original pitch curve of the covered segment with the Pitch Reference Clip's pitch curve. This affects the following scenarios:
     - If a pitch curve segment within the track group has never been edited, its pitch parameters will be directly overwritten by the Pitch Reference Clip's pitch curve, triggering re-rendering of the audio pitch.
-    - When using `Initialize`-related functions — for example, right-dragging with the Draw tool in the Parameter Editor — the initialized pitch curve uses the Pitch Reference Clip's pitch curve data rather than the original pitch of the audio clips within the track group's child tracks.
+    - When using `Initialize`-related functions - for example, right-dragging with the Draw tool in the Parameter Editor - the initialized pitch curve uses the Pitch Reference Clip's pitch curve data rather than the original pitch of the audio clips within the track group's child tracks.
     - If the Pitch Reference Clip is muted, the track group will not reference that Pitch Reference Clip when processing pitch.
 
 Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to update the Pitch Reference Clip with the existing pitch parameters within its range.

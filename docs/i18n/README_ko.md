@@ -143,7 +143,47 @@ cd HiFiShifter
 
 ### 2. 종속성 설치
 
-다음 도구가 설치되어 있는지 확인하십시오:
+#### Windows
+
+HiFiShifter는 ONNX Runtime과 CUDA 런타임을 자동으로 설치하는 **원클릭 환경 설정 스크립트**를 제공합니다 (Rust 도구 체인은 **기본적으로 건너뜁니다**. `-InstallRust`로 활성화하세요):
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+선택적 매개변수:
+
+- `-InstallRust`: 프로젝트 로컬 휴대용 Rust 도구 체인 설치 (기본값: 건너뜀, 시스템 전역 Rust 사용)
+- `-SkipOrt`: ONNX Runtime 다운로드 건너뛰기
+- `-SkipCudaRuntime`: CUDA 런타임 다운로드 건너뛰기
+- `-SkipFrontend`: 프론트엔드 종속성 설치 건너뛰기
+- `-LocalOrtDir <path>`: 미리 압축 해제된 ORT 디렉토리에서 복사 (네트워크 불필요)
+- `-LocalPackage <path>`: 로컬에 다운로드된 ORT ZIP 아카이브에서 압축 해제 (네트워크 불필요)
+
+미러를 사용하여 다운로드 속도를 높이려면:
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+로컬 소스에서 ORT를 오프라인으로 설치하려면:
+
+```powershell
+# 미리 압축 해제된 ORT 디렉토리에서 복사
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# 로컬 ZIP 아카이브에서 압축 해제
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
+
+로컬 Rust 환경을 현재 셸에 로드만 하려면:
+
+```powershell
+. .\scripts\setup-windows.ps1 -LoadEnv
+```
+
+수동 설정을 선호하는 경우 다음 도구가 설치되어 있는지 확인하십시오:
 
 - **Node.js** (18+ 권장) 및 npm
 - **Rust 도구 체인** (`rust-toolchain.toml` 참조)
@@ -156,6 +196,20 @@ cd HiFiShifter
 npm --prefix frontend install
 ```
 
+#### macOS
+
+```bash
+chmod +x ./scripts/install_deps_macos.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
+```
+
+#### Linux
+
+```bash
+chmod +x ./scripts/install_deps_linux.sh
+SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+```
+
 ### 3. SoundTouch 소스
 
 SoundTouch 오디오 타임 스트레치 라이브러리는 컴파일 시점에 소스에서 빌드됩니다. 첫 빌드 시 **자동 클론**되므로 수동 작업이 필요하지 않습니다.
@@ -166,6 +220,68 @@ SoundTouch 오디오 타임 스트레치 라이브러리는 컴파일 시점에 
 cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
+
+### 4. GPU 가속 빌드 (CUDA)
+
+HiFiShifter는 NVIDIA CUDA를 통한 GPU 가속 추론을 지원합니다.
+
+#### Windows (CUDA)
+
+필수 조건:
+
+- CUDA를 지원하는 NVIDIA GPU
+- [NVIDIA 디스플레이 드라이버](https://www.nvidia.com/drivers) (버전 ≥ 545)
+
+원클릭 환경 설정:
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+개발 모드 (핫 리로드):
+
+```powershell
+.\scripts\build-gpu.ps1 -Dev
+```
+
+릴리스 빌드:
+
+```powershell
+# 빠른 빌드 (바이너리만, 설치 프로그램 없음)
+.\scripts\build-gpu.ps1
+
+# 빠른 빌드 + 파일 로그 (타임스탬프가 있는 log.txt, exe 옆에 위치)
+.\scripts\build-gpu.ps1 -Log
+
+# 전체 빌드 (바이너리 + NSIS 설치 프로그램, 대용량 GPU 구성 요소 압축으로 인해 느림)
+.\scripts\build-gpu.ps1 -Bundle
+```
+
+빌드 후 휴대용 ZIP 생성:
+
+```powershell
+.\scripts\pack-portable.ps1 -SkipBuild
+```
+
+#### Linux (CUDA)
+
+필수 조건:
+
+- CUDA를 지원하는 NVIDIA GPU
+- [NVIDIA 디스플레이 드라이버](https://www.nvidia.com/drivers) (버전 ≥ 545)
+
+```bash
+# 시스템 종속성 설치 (CUDA 툴킷 포함)
+sudo bash ./scripts/install-cuda-linux.sh
+
+# ONNX Runtime GPU + cuDNN 다운로드
+bash ./scripts/download-ort.sh
+
+# 빌드
+bash ./scripts/build-gpu-linux.sh
+```
+
+> **참고:** macOS는 현재 CUDA GPU 가속을 지원하지 않습니다.
 
 ## 빠른 시작
 
@@ -206,12 +322,12 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 이 프로젝트는 다음 오픈 소스 라이브러리의 코드 또는 모델 아키텍처를 사용합니다:
 
-- [WORLD](https://github.com/mmorise/World) — 고품질 음성 분석 및 합성 시스템
-- [SoundTouch](https://www.surina.net/soundtouch/) — 오디오 타임 스트레치 및 피치 시프트 라이브러리 (LGPL)
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) — 고품질 오디오 타임 스트레치 라이브러리 (MIT)
-- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) — 음성 분석 및 합성 라이브러리
-- [SingingVocoders](https://github.com/openvpi/SingingVocoders) — 노래 합성 보코더 (OpenVPI)
-- [HiFi-GAN](https://github.com/jik876/hifi-gan) — 고충실도 GAN 보코더
+- [WORLD](https://github.com/mmorise/World) - 고품질 음성 분석 및 합성 시스템
+- [SoundTouch](https://www.surina.net/soundtouch/) - 오디오 타임 스트레치 및 피치 시프트 라이브러리 (LGPL)
+- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) - 고품질 오디오 타임 스트레치 라이브러리 (MIT)
+- [VocalShifter Library (vslib)](https://ackiesound.ifdef.jp/) - 음성 분석 및 합성 라이브러리
+- [SingingVocoders](https://github.com/openvpi/SingingVocoders) - 노래 합성 보코더 (OpenVPI)
+- [HiFi-GAN](https://github.com/jik876/hifi-gan) - 고충실도 GAN 보코더
 
 ## 라이선스
 

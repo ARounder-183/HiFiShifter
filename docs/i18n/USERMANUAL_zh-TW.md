@@ -19,6 +19,13 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 - Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。
 
+**關於 CUDA GPU 加速**：HiFiShifter 為 Windows 和 Linux 提供了支援 NVIDIA CUDA 的 GPU 加速版本（下載檔案名稱中包含 `-cuda` 後綴）。該版本利用 NVIDIA GPU 進行推理加速。使用 CUDA 版本需要：
+
+- 一張支援 CUDA 的 NVIDIA 顯示卡（建議 GTX 10 系列或更新）
+- 較新的 [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（建議 545 版本或更新）
+
+macOS 版本暫不支援 CUDA GPU 加速。
+
 **關於 WebView 的說明**：HiFiShifter 基於 Rust + Tauri 框架開發，需要系統提供 WebView 元件來顯示介面。
 
 - **Windows**：需要 Edge WebView2。Windows 10（1803 版本及以上）和 Windows 11 已經預裝，無需額外操作。如果你使用的是更早的 Windows 版本或者系統未預裝，安裝程式會自動提示你下載安裝。你也可以參考 [Tauri 官方說明](https://tauri.app/zh-cn/start/prerequisites/#webview2) 了解詳情。一般使用者無需擔心，直接執行安裝包即可。
@@ -48,11 +55,17 @@ HiFiShifter 的專案檔副檔名為 `.hshp` 或 `.hsp`。除此以外，`另存
     - 音訊塊資料：匯入為 HiFiShifter 中的音符塊，同時允許保留各種參數線資料。
     - 軌道資料：連同軌道中的音訊塊，匯入為 HiFiShifter 中的軌道。注意，HiFiShifter 目前無法區分你上一次複製的內容是音訊塊還是軌道。如果你打算匯入軌道，在 VocalShifter 執行複製軌道操作前，請先保證 VocalShifter 專案中，沒有音訊塊處於選中狀態，這樣才能正常匯入軌道；否則，只有被選中的音訊塊會被匯入。
 
-`拉伸` 選單允許你修改目前專案和全域的拉伸演算法。
+`選項` 選單允許你修改 HiFiShifter 的各個選項。
+
+- `工程拉伸覆寫`：允許你修改目前專案的拉伸演算法。
+- `全域拉伸預設`：允許你修改全域預設的拉伸演算法。
+- `推理裝置`：允許你設定渲染所使用的推理裝置。目前分為 `Auto`、`CPU`、`GPU (CUDA)` 這 3 種。可以透過該選單執行基準測試，以檢測各推理裝置的效能。`GPU (CUDA)` 只有在使用 CUDA 版本的 HiFiShifter 才有效。
+- `背景預渲染`：當被啟用時，每次開啟專案或者編輯完參數以後，均會自動在背景對已編輯的參數進行預渲染，且即使仍然在渲染狀態中，也可以播放已渲染的部分；否則，只有在進行播放操作時，才會進入渲染流程，且需要等待渲染完畢，才可以正常播放時間軸。預設為啟用。禁用後可以降低渲染頻率，節省效能。
+- `快捷鍵設定`：允許你設定 HiFiShifter 的快捷鍵對應。有多種預設可以選擇。
 
 ## 三、軌道介面
 
-軟體的大致操作邏輯和快捷鍵可以參考 Reaper、VocalShifter、VEGAS Pro 等 DAW 軟體。可以透過 `檢視 -> 快捷鍵設定` 來調整自己的快捷鍵偏好。以下介紹均以預設快捷鍵為基礎。
+軟體的大致操作邏輯和快捷鍵可以參考 Reaper、VocalShifter、VEGAS Pro 等 DAW 軟體。可以透過 `選項 -> 快捷鍵設定` 來調整自己的快捷鍵偏好。以下介紹均以預設快捷鍵為基礎。
 
 軌道介面是 HiFiShifter 最核心的功能之一，允許你對音訊塊進行裁切、拼接等操作。其操作邏輯，基本可以參考 Reaper。
 

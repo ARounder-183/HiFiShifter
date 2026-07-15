@@ -38,3 +38,12 @@ pub(super) fn get_onnx_status() -> OnnxStatusPayload {
 pub(super) fn get_onnx_diagnostic_info() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     crate::nsf_hifigan_onnx::diagnose_onnx_availability()
 }
+
+pub(super) fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
+    crate::nsf_hifigan_onnx::run_benchmark()
+}
+
+/// Enumerate all NVIDIA GPUs in the system (via NVML on Windows, empty on other platforms).
+pub(super) fn get_gpu_devices() -> crate::cuda_info::GpuEnumerationResult {
+    crate::cuda_info::enumerate_gpus()
+}

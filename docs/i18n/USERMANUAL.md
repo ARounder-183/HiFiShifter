@@ -19,6 +19,13 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 
 - Linux 版本提供的是 AppImage 程序包。AppImage 程序包需要在文件的 `属性 -> 权限` 中，勾选 `允许将文件作为程序运行`，之后便可以直接运行。
 
+**关于 CUDA GPU 加速**：HiFiShifter 为 Windows 和 Linux 提供了支持 NVIDIA CUDA 的 GPU 加速版本（下载文件名中包含 `-cuda` 后缀）。该版本利用 NVIDIA GPU 进行推理加速。使用 CUDA 版本需要：
+
+- 一张支持 CUDA 的 NVIDIA 显卡（建议 GTX 10 系列或更新）
+- 较新的 [NVIDIA 显卡驱动](https://www.nvidia.com/drivers)（建议 545 版本或更新）
+
+macOS 版本暂不支持 CUDA GPU 加速。
+
 **关于 WebView 的说明**：HiFiShifter 基于 Rust + Tauri 框架开发，需要系统提供 WebView 组件来显示界面。
 
 - **Windows**：需要 Edge WebView2。Windows 10（1803 版本及以上）和 Windows 11 已经预装，无需额外操作。如果你使用的是更早的 Windows 版本或者系统未预装，安装程序会自动提示你下载安装。你也可以参考 [Tauri 官方说明](https://tauri.app/zh-cn/start/prerequisites/#webview2) 了解详情。一般用户无需担心，直接运行安装包即可。
@@ -48,11 +55,17 @@ HiFiShifter 的工程文件后缀名为 `.hshp` 或 `.hsp`。除此以外，`另
     - 音频块数据：导入为 HiFiShifter 中的音符块，同时允许保留各种参数线数据。
     - 轨道数据：连同轨道中的音频块，导入为 HiFiShifter 中的轨道。注意，HiFiShifter 目前无法区分你上一次复制的内容是音频块还是轨道。如果你打算导入轨道，在 VocalShifter 执行复制轨道操作前，请先保证 VocalShifter 工程中，没有音频块处于选中状态，这样才能正常导入轨道；否则，只有被选中的音频块会被导入。
 
-`拉伸` 菜单允许你修改当前工程和全局的拉伸算法。
+`选项` 菜单允许你修改 HiFiShifter 的各个选项。
+
+- `工程拉伸覆盖`：允许你修改当前工程的拉伸算法。
+- `全局拉伸默认`：允许你修改全局默认的拉伸算法。
+- `推理设备`：允许你设置渲染所使用的推理设备。目前分为 `Auto`、`CPU`、`GPU (CUDA)` 这 3 种。可以通过该菜单运行基准测试，以检测各推理设备的性能。`GPU (CUDA)` 只有在使用 CUDA 版本的 HiFiShifter 才有效。
+- `后台预渲染`：当被启用时，每次打开工程或者编辑完参数以后，均会自动在后台对已编辑的参数进行预渲染，且即使仍然在渲染状态中，也可以播放已渲染的部分；否则，只有在进行播放操作时，才会进入渲染流程，且需要等待渲染完毕，才可以正常播放时间轴。默认为启用。禁用后可以降低渲染频率，节省性能。
+- `快捷键设置`：允许你设置 HiFiShifter 的快捷键映射。有多种预设可以选择。
 
 ## 三、轨道界面
 
-软件的大致操作逻辑和快捷键可以参考 Reaper、VocalShifter、VEGAS Pro 等 DAW 软件。可以通过 `视图 -> 快捷键设置` 来调整自己的快捷键偏好。以下介绍均以默认快捷键为基础。
+软件的大致操作逻辑和快捷键可以参考 Reaper、VocalShifter、VEGAS Pro 等 DAW 软件。可以通过 `选项 -> 快捷键设置` 来调整自己的快捷键偏好。以下介绍均以默认快捷键为基础。
 
 轨道界面是 HiFiShifter 最核心的功能之一，允许你对音频块进行裁切、拼接等操作。其操作逻辑，基本可以参考 Reaper。
 

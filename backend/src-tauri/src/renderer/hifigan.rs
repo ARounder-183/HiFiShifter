@@ -22,14 +22,14 @@ use std::sync::{Mutex, OnceLock};
 
 // ─── 分块缓存（独立于 SynthClipCache，靠 hash 比对自然失效）───────────────────
 
-struct ChunkCacheEntry {
-    param_hash: u64,
-    waveform: Vec<f32>,
+pub struct ChunkCacheEntry {
+    pub param_hash: u64,
+    pub waveform: Vec<f32>,
 }
 
 static CHUNK_CACHE: OnceLock<Mutex<HashMap<(String, usize), ChunkCacheEntry>>> = OnceLock::new();
 
-fn global_chunk_cache() -> &'static Mutex<HashMap<(String, usize), ChunkCacheEntry>> {
+pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), ChunkCacheEntry>> {
     CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -84,12 +84,15 @@ impl HiFiGanRenderer {
     pub fn render_with_formant(
         &self,
         ctx: &RenderContext<'_>,
-        formant_shift_curve: Option<&Vec<f32>>,
+        formant_shift_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let fp = ctx.frame_period_ms;
         let clip_start = ctx.clip_start_sec;
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
+
+        eprintln!("[hifigan] render_with_formant: clip_id={} samples={} seg=[{:.3},{:.3})",
+            ctx.clip_id, ctx.mono_pcm.len(), ctx.seg_start_sec, ctx.seg_end_sec);
 
         // clip_midi 为空时明确跳过，与 WORLD 链路行为一致。
         // Harvest 分析尚未完成时 clip_midi 可能为空，此时返回原始 PCM。
@@ -118,7 +121,7 @@ impl HiFiGanRenderer {
 
         // 构建元组数组，不再 new() HashMap 并 clone() 大数组
         let extra_curves = formant_shift_curve
-            .map(|c| vec![("formant_shift_cents", c.as_slice())])
+            .map(|c| vec![("formant_shift_cents", c)])
             .unwrap_or_default();
 
         let param_hash = crate::synth_clip_cache::compute_param_hash(
@@ -196,22 +199,17 @@ impl HiFiGanRenderer {
             }
         };
 
-        // ── 长音频阈值判断 ─────────────────────────────────────────────────
-        // PC-NSF-HiFiGAN hop_size = 512, CHUNK_MAX_FRAMES = 512
-        // > 512*512 = 262,144 样本（≈5.9s @ 44.1kHz）时走优化分块路径
-        const LONG_CHUNK_SAMPLES: usize = 512 * 512;
+        // ── 所有音频统一走分块优化路径（支持 per-chunk 缓存）─────────────
         let model_hop: u64 = 512;
+        let clip_id = ctx.clip_id.to_string();
 
-        if ctx.mono_pcm.len() > LONG_CHUNK_SAMPLES {
-            // 长音频：帧级分块 + 逐块缓存（独立 cache，不受 clip 级失效影响）
-            let clip_id = ctx.clip_id.to_string();
-            let seg_start = seg_start_frame;
-            chunk_debug(&format!(
-                "long audio path: clip={} samples={} seg_start_frame={}",
-                clip_id,
-                ctx.mono_pcm.len(),
-                seg_start
-            ));
+        let seg_start = seg_start_frame;
+        chunk_debug(&format!(
+            "chunked_opt path: clip={} samples={} seg_start_frame={}",
+            clip_id,
+            ctx.mono_pcm.len(),
+            seg_start
+        ));
 
             let result = crate::nsf_hifigan_onnx::infer_pitch_edit_chunked_optimized(
                 ctx.mono_pcm,
@@ -220,103 +218,65 @@ impl HiFiGanRenderer {
                 midi_fn,
                 formant_shift_fn,
                 &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
-                    let chunk_start = seg_start + mel_start as u64 * model_hop;
-                    let chunk_end = seg_start + mel_end as u64 * model_hop;
-                    let hash = crate::synth_clip_cache::compute_param_hash(
-                        &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
-                        &curves_snapshot,
-                        extra_curves.iter().map(|(k, v)| (*k, *v)),
-                        &std::collections::HashMap::new(),
-                    );
-                    let cache_key = (clip_id.clone(), mel_start);
+                let chunk_start = seg_start + mel_start as u64 * model_hop;
+                let chunk_end = seg_start + mel_end as u64 * model_hop;
+                let hash = crate::synth_clip_cache::compute_param_hash(
+                    &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
+                    &curves_snapshot,
+                    extra_curves.iter().map(|(k, v)| (*k, *v)),
+                    &std::collections::HashMap::new(),
+                );
+                let cache_key = (clip_id.clone(), mel_start);
 
-                    let mut cache = global_chunk_cache()
-                        .lock().unwrap_or_else(|e| e.into_inner());
-                    match cache.get(&cache_key) {
-                        Some(entry) if entry.param_hash == hash => {
-                            chunk_debug(&format!(
-                                "  chunk [{mel_start}..{mel_end}) HIT (hash={hash:016x})",
-                            ));
-                            Some(entry.waveform.clone())
-                        }
-                        Some(entry) => {
-                            chunk_debug(&format!(
-                                "  chunk [{mel_start}..{mel_end}) STALE (cached={:016x} current={hash:016x})",
-                                entry.param_hash,
-                            ));
-                            cache.remove(&cache_key);
-                            None
-                        }
-                        None => {
-                            chunk_debug(&format!(
-                                "  chunk [{mel_start}..{mel_end}) MISS",
-                            ));
-                            None
-                        }
+                let mut cache = global_chunk_cache_ref()
+                    .lock().unwrap_or_else(|e| e.into_inner());
+                match cache.get(&cache_key) {
+                    Some(entry) if entry.param_hash == hash => {
+                        chunk_debug(&format!(
+                            "  chunk [{mel_start}..{mel_end}) HIT (hash={hash:016x})",
+                        ));
+                        Some(entry.waveform.clone())
                     }
-                },
-                &|mel_start: usize, mel_end: usize, wf: Vec<f32>| {
-                    let chunk_start = seg_start + mel_start as u64 * model_hop;
-                    let chunk_end = seg_start + mel_end as u64 * model_hop;
-                    let hash = crate::synth_clip_cache::compute_param_hash(
-                        &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
-                        &curves_snapshot,
-                        extra_curves.iter().map(|(k, v)| (*k, *v)),
-                        &std::collections::HashMap::new(),
-                    );
-                    let cache_key = (clip_id.clone(), mel_start);
+                    Some(entry) => {
+                        chunk_debug(&format!(
+                            "  chunk [{mel_start}..{mel_end}) STALE (cached={:016x} current={hash:016x})",
+                            entry.param_hash,
+                        ));
+                        cache.remove(&cache_key);
+                        None
+                    }
+                    None => {
+                        chunk_debug(&format!(
+                            "  chunk [{mel_start}..{mel_end}) MISS",
+                        ));
+                        None
+                    }
+                }
+            },
+            &|mel_start: usize, mel_end: usize, wf: Vec<f32>| {
+                let chunk_start = seg_start + mel_start as u64 * model_hop;
+                let chunk_end = seg_start + mel_end as u64 * model_hop;
+                let hash = crate::synth_clip_cache::compute_param_hash(
+                    &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
+                    &curves_snapshot,
+                    extra_curves.iter().map(|(k, v)| (*k, *v)),
+                    &std::collections::HashMap::new(),
+                );
+                let cache_key = (clip_id.clone(), mel_start);
 
-                    chunk_debug(&format!(
-                        "  chunk [{mel_start}..{mel_end}) PUT (hash={hash:016x} samples={})",
-                        wf.len(),
-                    ));
+                chunk_debug(&format!(
+                    "  chunk [{mel_start}..{mel_end}) PUT (hash={hash:016x} samples={})",
+                    wf.len(),
+                ));
 
-                    let mut cache = global_chunk_cache()
-                        .lock().unwrap_or_else(|e| e.into_inner());
-                    cache.insert(cache_key, ChunkCacheEntry {
-                        param_hash: hash,
-                        waveform: wf,
-                    });
-                },
-            )?;
-            return Ok(result);
-        }
-
-        // 短音频：现有分块路径 + 全段缓存
-        let chunk_sec = crate::nsf_hifigan_onnx::env_chunk_sec();
-        let overlap_sec = crate::nsf_hifigan_onnx::env_overlap_sec();
-
-        let result = crate::nsf_hifigan_onnx::infer_pitch_edit_chunked(
-            ctx.mono_pcm,
-            sr,
-            ctx.seg_start_sec,
-            midi_fn,
-            formant_shift_fn,
-            chunk_sec,
-            overlap_sec,
+                let mut cache = global_chunk_cache_ref()
+                    .lock().unwrap_or_else(|e| e.into_inner());
+                cache.insert(cache_key, ChunkCacheEntry {
+                    param_hash: hash,
+                    waveform: wf,
+                });
+            },
         )?;
-
-        // 写入缓存（stereo = mono 复制到双声道）
-        if !result.is_empty() {
-            let mut stereo = Vec::with_capacity(result.len() * 2);
-            for &v in &result {
-                stereo.push(v);
-                stereo.push(v);
-            }
-            let frames = result.len() as u64;
-            let mut cache = crate::synth_clip_cache::global_synth_clip_cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cache.insert(
-                cache_key,
-                crate::synth_clip_cache::SynthClipCacheEntry {
-                    pcm_stereo: std::sync::Arc::new(stereo),
-                    frames,
-                    sample_rate: sr,
-                },
-            );
-        }
-
         Ok(result)
     }
 
@@ -324,12 +284,15 @@ impl HiFiGanRenderer {
         &self,
         ctx: &RenderContext<'_>,
         playback_rate: f64,
-        formant_shift_curve: Option<&Vec<f32>>,
+        formant_shift_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let fp = ctx.frame_period_ms;
         let clip_start = ctx.clip_start_sec;
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
+
+        eprintln!("[hifigan] render_mel_stretch: clip_id={} samples={} rate={:.3}",
+            ctx.clip_id, ctx.mono_pcm.len(), playback_rate);
 
         if clip_midi.is_empty() {
             return Ok(ctx.mono_pcm.to_vec());

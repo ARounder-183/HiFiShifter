@@ -20,11 +20,11 @@ pub(crate) struct SnapshotTransitionState {
 #[derive(Default)]
 pub(crate) struct TrackMeterScratch {
     per_track_mix: std::collections::HashMap<String, Vec<f32>>,
-    active_track_ids: Vec<String>,
+    active_track_ids: std::collections::HashSet<String>,
 }
 
 fn sample_automation_curve(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     abs_frame: u64,
     sample_rate: u32,
     frame_period_ms: f64,
@@ -64,7 +64,7 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             if let Some(ref breath_noise) = clip.breath_noise_pcm {
                 if idx + 1 < breath_noise.len() {
                     let gain = sample_automation_curve(
-                        clip.breath_curve.as_deref(),
+                        clip.breath_curve.as_deref().map(|v| v.as_slice()),
                         clip.start_frame.saturating_add(local),
                         clip.src.sample_rate,
                         clip.breath_curve_frame_period_ms,
@@ -76,7 +76,7 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             }
             // 应用 volume 曲线（不触发重渲染，实时乘到最终输出）
             let vol = sample_automation_curve(
-                clip.volume_curve.as_deref(),
+                clip.volume_curve.as_deref().map(|v| v.as_slice()),
                 clip.start_frame.saturating_add(local),
                 clip.src.sample_rate,
                 clip.volume_curve_frame_period_ms,
@@ -88,8 +88,9 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
         return None;
     }
 
-    // 若该 clip 需要合成（pitch edit）但尚未渲染完成，静音等待
-    if clip.needs_synthesis {
+    // 若该 clip 需要合成（pitch edit）但尚未渲染完成，回退到源音频而非静音
+    // rendered_pcm=None 时才走到这里（有 rendered_pcm 已在上面 return）
+    if clip.needs_synthesis && clip.rendered_pcm.is_some() {
         return None;
     }
 
@@ -144,7 +145,7 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
 ) {
     let mut meter_scratch = meter_scratch;
     if let Some(ms) = meter_scratch.as_deref_mut() {
-        for track_id in ms.active_track_ids.drain(..) {
+        for track_id in ms.active_track_ids.drain() {
             if let Some(buf) = ms.per_track_mix.get_mut(&track_id) {
                 buf.resize(frames * 2, 0.0);
                 buf.fill(0.0);
@@ -206,8 +207,7 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             scratch[oi] += mixed_l;
             scratch[oi + 1] += mixed_r;
             if let Some(ms) = meter_scratch.as_deref_mut() {
-                let first_use_this_block =
-                    !ms.active_track_ids.iter().any(|id| id == &clip.track_id);
+                let first_use_this_block = !ms.active_track_ids.contains(&clip.track_id);
                 let track_buf = ms
                     .per_track_mix
                     .entry(clip.track_id.clone())
@@ -216,7 +216,7 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
                     track_buf.resize(frames * 2, 0.0);
                 }
                 if first_use_this_block {
-                    ms.active_track_ids.push(clip.track_id.clone());
+                    ms.active_track_ids.insert(clip.track_id.clone());
                 }
                 track_buf[oi] += mixed_l;
                 track_buf[oi + 1] += mixed_r;
@@ -260,12 +260,18 @@ fn collect_track_meter_block(
     pos1: u64,
     meter_scratch: &mut TrackMeterScratch,
 ) {
-    for track_id in meter_scratch.active_track_ids.drain(..) {
-        if let Some(buf) = meter_scratch.per_track_mix.get_mut(&track_id) {
-            buf.resize(frames * 2, 0.0);
-            buf.fill(0.0);
+    // Reuse existing buffers: only clear, don't drain/reallocate.
+    for track_id in &meter_scratch.active_track_ids {
+        if let Some(buf) = meter_scratch.per_track_mix.get_mut(track_id) {
+            if buf.len() == frames * 2 {
+                buf.fill(0.0);
+            } else {
+                buf.resize(frames * 2, 0.0);
+                buf.fill(0.0);
+            }
         }
     }
+    meter_scratch.active_track_ids.clear();
 
     for clip in snap.clips.iter() {
         let clip_start = clip.start_frame;
@@ -284,20 +290,16 @@ fn collect_track_meter_block(
         let clip_off = overlap_start - clip_start;
         let mix_frames = (overlap_end - overlap_start) as usize;
 
-        let first_use_this_block = !meter_scratch
-            .active_track_ids
-            .iter()
-            .any(|id| id == &clip.track_id);
         let track_buf = meter_scratch
             .per_track_mix
             .entry(clip.track_id.clone())
             .or_insert_with(|| vec![0.0; frames * 2]);
         if track_buf.len() != frames * 2 {
             track_buf.resize(frames * 2, 0.0);
+            track_buf.fill(0.0);
         }
-        if first_use_this_block {
-            meter_scratch.active_track_ids.push(clip.track_id.clone());
-        }
+        // Track first use by checking if this track_id is already active.
+        let _is_new = meter_scratch.active_track_ids.insert(clip.track_id.clone());
 
         for f in 0..mix_frames {
             let local = clip_off + f as u64;
@@ -438,6 +440,18 @@ fn mix_into_scratch_stereo(
     let current_ready = render_snapshot_window(frames, &snap, pos0, pos1, scratch);
 
     if !current_ready && transition.fade_from_snapshot.is_none() {
+        // 若后台预渲染激活，自动暂停播放（而非无限静音等待）。
+        // 已渲染完成的 clip 在后台渲染线程存入缓存后，
+        // 用户可手动再次按下播放键继续。
+        let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if bg_render {
+            is_playing.store(false, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "[mix] auto-paused at pos={} — pending clip encountered during background render",
+                pos0
+            );
+        }
         // cursor 暂停，不推进 position，输出静音等待
         // 调试：每隔约 1s 打印一次
         static DEBUG_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

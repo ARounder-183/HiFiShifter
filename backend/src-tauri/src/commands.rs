@@ -30,7 +30,7 @@ mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
 mod pitch_progress;
 #[path = "commands/playback.rs"]
-mod playback;
+pub(crate) mod playback;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -51,9 +51,6 @@ mod vocalshifter;
 mod vocalshifter_clipboard;
 #[path = "commands/waveform.rs"]
 mod waveform;
-// TODO: 异步音高刷新功能未完成，缺少必要的状态管理和依赖
-// #[path = "commands/pitch_refresh_async.rs"]
-// mod pitch_refresh_async;
 
 use crate::state::AppState;
 use tauri::{Manager, State, Window};
@@ -86,6 +83,13 @@ pub fn set_ui_locale(state: State<'_, AppState>, locale: String) -> serde_json::
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_timeline_state(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
     core::get_timeline_state(state)
+}
+
+/// Lightweight timeline state for regular polls — skips waveform_preview,
+/// pitch_range, and midi_note_data to reduce clone+serialize overhead.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_timeline_state_lite(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
+    core::get_timeline_state_lite(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -814,6 +818,19 @@ pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::Playback
     playback::get_playback_state(state)
 }
 
+/// 后台预渲染：编辑操作后立即在后台开始渲染，无需等待播放。
+/// 启用后，用户可在渲染进行中随时播放已渲染完成的内容。
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
+    playback::start_background_render(app)
+}
+
+/// 取消正在进行的后台预渲染。
+#[tauri::command(rename_all = "camelCase")]
+pub fn cancel_background_render() -> serde_json::Value {
+    playback::cancel_background_render()
+}
+
 // ===================== debug =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -842,6 +859,17 @@ pub fn get_onnx_status() -> onnx_status::OnnxStatusPayload {
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
     onnx_status::get_onnx_diagnostic_info()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
+    onnx_status::run_vocoder_benchmark()
+}
+
+/// Enumerate all NVIDIA GPUs via NVML (Windows) or return empty list (other platforms).
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_gpu_devices() -> crate::cuda_info::GpuEnumerationResult {
+    onnx_status::get_gpu_devices()
 }
 
 // ===================== pitch_cache =====================
@@ -1086,33 +1114,3 @@ pub fn save_ui_settings(
     ui_settings::save_ui_settings(state, settings)
 }
 
-// ===================== pitch_refresh_async (暂时禁用) =====================
-// TODO: 需要实现以下功能才能启用：
-// 1. 在 state.rs 中添加 PitchTaskInfo 和 PitchTaskStatus 类型
-// 2. 在 AppState 中添加 pitch_refresh_tasks 字段
-// 3. 在 Cargo.toml 中添加 tokio 依赖
-// 4. 将 pitch_analysis.rs 中的相关函数改为 pub
-//
-// #[tauri::command(rename_all = "camelCase")]
-// pub async fn start_pitch_refresh_task(
-//     root_track_id: String,
-//     state: State<'_, AppState>,
-// ) -> Result<String, String> {
-//     pitch_refresh_async::start_pitch_refresh_task(root_track_id, state).await
-// }
-//
-// #[tauri::command(rename_all = "camelCase")]
-// pub fn get_pitch_refresh_status(
-//     task_id: String,
-//     state: State<'_, AppState>,
-// ) -> Result<pitch_refresh_async::PitchTaskStatusPayload, String> {
-//     pitch_refresh_async::get_pitch_refresh_status(task_id, state)
-// }
-//
-// #[tauri::command(rename_all = "camelCase")]
-// pub fn cancel_pitch_task(
-//     task_id: String,
-//     state: State<'_, AppState>,
-// ) -> Result<(), String> {
-//     pitch_refresh_async::cancel_pitch_task(task_id, state)
-// }

@@ -3,7 +3,7 @@ export const jaJP = {
     menu_edit: "編集",
     menu_view: "表示",
     menu_track: "トラック",
-    menu_stretch: "ストレッチ",
+    menu_options: "オプション",
     menu_help: "ヘルプ",
     menu_new_project: "新規プロジェクト",
     menu_open_project: "プロジェクトを開く...",
@@ -92,8 +92,8 @@ export const jaJP = {
         "Reaper インポート時に以下のオーディオファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
     menu_pick_output: "出力先を選択",
     language: "言語",
-    stretch_project_override: "プロジェクト上書き",
-    stretch_global_default: "グローバル既定",
+    stretch_project_override: "プロジェクトストレッチ上書き",
+    stretch_global_default: "グローバルストレッチ既定",
     stretch_algorithm: "アルゴリズム",
     stretch_hifigan_mel: "HiFiGAN Mel Stretch",
     stretch_inherit_global: "グローバルを継承",
@@ -824,4 +824,53 @@ export const jaJP = {
     ctx_export_midi: "MIDIとしてエクスポート",
     menu_save_as_pitch_ref: "音高リファレンスクリップとして保存",
     menu_export_midi: "MIDIとしてエクスポート",
+
+    // ── 推論デバイス / GPU ──────────────────────────────────────────────
+    menu_inference_device: "推論デバイス",
+    menu_inference_auto: "Auto（システム既定）",
+    menu_inference_cpu: "CPU",
+    menu_inference_cuda: "GPU (CUDA)",
+    menu_select_gpu_device: "GPUデバイスを選択",
+    menu_no_gpu_detected: "NVIDIA GPUが検出されません",
+    menu_run_benchmark: "ベンチマークを実行…",
+    menu_background_prerender: "バックグラウンド事前レンダリング",
+    menu_background_prerender_desc:
+        "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
+
+    benchmark_title: "推論デバイスベンチマーク",
+    benchmark_desc:
+        "各デバイスで約12秒の音声をボコーダー推論し、遅延を比較します。最速のプロバイダを選択してください。",
+    benchmark_running: "ベンチマーク実行中… 20～60秒かかる場合があります",
+    benchmark_results: "結果（{samples} フレーム · 44.1 kHz）：",
+    benchmark_device_header: "デバイス",
+    benchmark_latency_header: "中央遅延",
+    benchmark_rtf_header: "RTF",
+    benchmark_rtf_hint: "RTF > 1× = リアルタイムより高速。⚡ = 最速のデバイス。",
+    benchmark_recommended: "推奨：",
+    benchmark_failed: "失敗 — 下記参照",
+    benchmark_run_btn: "ベンチマークを実行",
+    benchmark_running_btn: "実行中…",
+    benchmark_close: "閉じる",
+    benchmark_idle_hint: "「ベンチマークを実行」をクリックして開始。モデルをロードしてください。",
+    benchmark_error_default:
+        "ベンチマークに失敗しました。モデルがロードされているか確認してください。",
+    benchmark_gpu_failed_title: "⚠ GPUベンチマーク失敗 — CUDA登録済みだが実行不可",
+    benchmark_gpu_failed_desc:
+        "ONNX RuntimeがCUDAプロバイダを検出しましたが、推論に失敗しました。CUDAランタイムDLL（cuBLAS、cuDNN）が不足している可能性があります。",
+    benchmark_gpu_dll_missing_fix: "修正方法：",
+    benchmark_gpu_broken_title: "⚠ GPUアクセラレーション不可 — CUDAランタイムDLL不足",
+    benchmark_gpu_broken_desc:
+        "ONNX RuntimeがNVIDIA GPUを認識し、CUDAプロバイダも利用可能ですが、cuBLASとcuDNNが不足しています。CUDAはサイレントにCPUにフォールバックします。",
+    benchmark_gpu_fix_cmd1:
+        "> .\\setup-gpu-deps.ps1   # 一度だけ実行（ORT + cuBLAS + cuDNNをダウンロード）",
+    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 開発サーバー起動（全DLLを自動コピー）",
+    benchmark_gpu_failed_dll_ok_title: "⚠ GPUベンチマーク失敗（CUDA・DLLは準備完了）",
+    benchmark_gpu_failed_dll_ok_desc:
+        "CUDA EPとランタイムDLLは準備完了ですが、推論に失敗しました。ドライバまたはハードウェアの問題の可能性があります。",
+    benchmark_cuda_dll_label: "CUDAランタイムDLL：",
+    benchmark_cuda_dll_yes: "検出 ✅",
+    benchmark_cuda_dll_no: "不足 — GPUは動作しません ⚠",
+    benchmark_providers_label: "利用可能なプロバイダ：",
+    benchmark_nvml_label: "NVMLで検出されたNVIDIA GPU：",
+    benchmark_cuda_device_label: "CUDAデバイス：",
 } as const;

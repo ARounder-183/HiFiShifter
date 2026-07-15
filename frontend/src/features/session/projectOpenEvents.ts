@@ -5,10 +5,7 @@
 export const OPEN_PROJECT_PATH_EVENT = "hifi:open-project-path";
 
 export type ExternalFileActionKind =
-    | "openProject"
-    | "importVocalShifter"
-    | "importReaper"
-    | "importAudio";
+    "openProject" | "importVocalShifter" | "importReaper" | "importAudio";
 
 export type ExternalFileActionDetail = {
     kind: ExternalFileActionKind;

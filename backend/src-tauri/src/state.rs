@@ -9,7 +9,7 @@ use crate::models::{
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use uuid::Uuid;
@@ -358,9 +358,11 @@ pub struct TimelineState {
     pub disabled_group_ids: HashSet<String>,
 }
 
+const MAX_UNDO_HISTORY: usize = 100;
+
 #[derive(Debug, Clone, Default)]
 pub struct TimelineHistory {
-    pub undo: Vec<TimelineState>,
+    pub undo: VecDeque<TimelineState>,
     pub redo: Vec<TimelineState>,
 }
 
@@ -1242,9 +1244,9 @@ impl AppState {
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        h.undo.push(snapshot.clone());
-        if h.undo.len() > 100 {
-            h.undo.remove(0);
+        h.undo.push_back(snapshot.clone());
+        if h.undo.len() > MAX_UNDO_HISTORY {
+            h.undo.pop_front();
         }
         h.redo.clear();
         drop(h);
@@ -1306,13 +1308,13 @@ impl AppState {
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(prev) = h.undo.pop() else {
+        let Some(prev) = h.undo.pop_back() else {
             let mut payload = tl.to_payload();
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
-        h.redo.push(tl.clone());
-        *tl = prev;
+        let current = std::mem::replace(&mut *tl, prev);
+        h.redo.push(current);
         drop(h);
         self.bump_timeline_version();
         self.audio_engine.update_timeline(tl.clone());
@@ -1332,8 +1334,8 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
-        h.undo.push(tl.clone());
-        *tl = next;
+        let current = std::mem::replace(&mut *tl, next);
+        h.undo.push_back(current);
         drop(h);
         self.bump_timeline_version();
         self.audio_engine.update_timeline(tl.clone());
@@ -1891,6 +1893,76 @@ impl TimelineState {
                     .map(crate::models::ClipFormantMorphPayload::from),
                 midi_note_count: c.midi_note_data.as_ref().map(|n| n.len()),
                 midi_note_data: c.midi_note_data.clone(),
+                midi_fill_gaps: if c.midi_note_data.is_some() {
+                    Some(c.midi_fill_gaps)
+                } else {
+                    None
+                },
+            })
+            .collect::<Vec<_>>();
+
+        TimelineStatePayload {
+            ok: true,
+            tracks: tracks_payload,
+            clips: clips_payload,
+            created_clip_ids: None,
+            created_track_ids: None,
+            selected_track_id: self.selected_track_id.clone(),
+            selected_clip_id: self.selected_clip_id.clone(),
+            bpm: self.bpm,
+            playhead_sec: self.playhead_sec,
+            project_sec: Some(self.project_sec),
+            project: None,
+            missing_files: None,
+            disabled_group_ids: {
+                let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+        }
+    }
+
+    /// Lightweight version of `to_payload()` for regular frontend polls.
+    ///
+    /// Skips expensive per-clip fields (waveform_preview, pitch_range, midi_note_data)
+    /// that the frontend caches separately. Reduces clone+serialize cost for
+    /// projects with many clips.
+    pub fn to_payload_lite(&self) -> TimelineStatePayload {
+        let tracks_payload = build_track_payload(&self.tracks);
+        let clips_payload = self
+            .clips
+            .iter()
+            .map(|c| TimelineClip {
+                id: c.id.clone(),
+                group_id: c.group_id.clone(),
+                track_id: c.track_id.clone(),
+                name: c.name.clone(),
+                start_sec: c.start_sec,
+                length_sec: c.length_sec,
+                color: c.color.clone(),
+                source_path: c.source_path.clone(),
+                source_path_relative: c.source_path_relative.clone(),
+                duration_sec: c.duration_sec,
+                duration_frames: c.duration_frames,
+                source_sample_rate: c.source_sample_rate,
+                waveform_preview: None, // skip — frontend caches separately
+                pitch_range: None,      // skip — frontend caches separately
+                gain: Some(c.gain),
+                muted: Some(c.muted),
+                source_start_sec: Some(c.source_start_sec),
+                source_end_sec: Some(c.source_end_sec),
+                playback_rate: Some(c.playback_rate),
+                reversed: Some(c.reversed),
+                fade_in_sec: Some(c.fade_in_sec),
+                fade_out_sec: Some(c.fade_out_sec),
+                fade_in_curve: Some(c.fade_in_curve.clone()),
+                fade_out_curve: Some(c.fade_out_curve.clone()),
+                formant_morph: c
+                    .formant_morph
+                    .as_ref()
+                    .map(crate::models::ClipFormantMorphPayload::from),
+                midi_note_count: c.midi_note_data.as_ref().map(|n| n.len()),
+                midi_note_data: None, // skip — frontend caches separately
                 midi_fill_gaps: if c.midi_note_data.is_some() {
                     Some(c.midi_fill_gaps)
                 } else {

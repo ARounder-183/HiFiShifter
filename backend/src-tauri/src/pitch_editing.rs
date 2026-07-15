@@ -134,7 +134,7 @@ pub(crate) fn extra_param_enabled(extra_params: &HashMap<String, f64>, key: &str
 }
 
 fn curve_differs_from_default_in_range(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     frame_period_ms: f64,
     start_sec: f64,
     end_sec: f64,
@@ -151,7 +151,7 @@ fn curve_differs_from_default_in_range(
 }
 
 fn curve_differs_from_default_in_range_with_tolerance(
-    curve: Option<&Vec<f32>>,
+    curve: Option<&[f32]>,
     frame_period_ms: f64,
     start_sec: f64,
     end_sec: f64,
@@ -178,11 +178,12 @@ fn curve_differs_from_default_in_range_with_tolerance(
 pub(crate) fn hifigan_tension_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
     clip: &'a crate::state::Clip,
-) -> Option<&'a Vec<f32>> {
+) -> Option<&'a [f32]> {
     clip.extra_curves
         .as_ref()
         .and_then(|curves| curves.get("hifigan_tension"))
         .or_else(|| entry.extra_curves.get("hifigan_tension"))
+        .map(|v| v.as_slice())
 }
 
 pub(crate) fn hifigan_tension_active_for_clip(
@@ -203,11 +204,12 @@ pub(crate) fn hifigan_tension_active_for_clip(
 pub(crate) fn hifigan_formant_shift_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
     clip: &'a crate::state::Clip,
-) -> Option<&'a Vec<f32>> {
+) -> Option<&'a [f32]> {
     clip.extra_curves
         .as_ref()
         .and_then(|curves| curves.get("formant_shift_cents"))
         .or_else(|| entry.extra_curves.get("formant_shift_cents"))
+        .map(|v| v.as_slice())
 }
 
 pub(crate) fn hifigan_formant_shift_active_for_clip(
@@ -354,8 +356,8 @@ enum ChildPitchOffsetParamMode {
 struct ChildPitchOffsetLayer<'a> {
     cents: f64,
     degree_steps: f64,
-    cents_curve: Option<&'a Vec<f32>>,
-    degree_steps_curve: Option<&'a Vec<f32>>,
+    cents_curve: Option<&'a [f32]>,
+    degree_steps_curve: Option<&'a [f32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -520,13 +522,13 @@ fn active_child_pitch_offset_config<'a>(
                 ChildPitchOffsetParamMode::Cents,
                 track_id,
             ))
-        });
+        }).map(|v| v.as_slice());
         let degree_steps_curve = entry.and_then(|state| {
             state.extra_curves.get(&child_pitch_offset_curve_key(
                 ChildPitchOffsetParamMode::Degrees,
                 track_id,
             ))
-        });
+        }).map(|v| v.as_slice());
 
         let static_cents = CHILD_PITCH_OFFSET_CENTS_DEFAULT;
         let static_degree_steps = CHILD_PITCH_OFFSET_DEGREES_DEFAULT;
@@ -1179,21 +1181,30 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     };
 
     if processed.len() != expected_out_frames {
-        return Err(format!(
-            "pitch_edit: output length mismatch (got {}, expected {})",
+        eprintln!(
+            "pitch_edit: output length mismatch (got {}, expected {}), adjusting",
             processed.len(),
             expected_out_frames
-        ));
+        );
     }
 
     // 若输出尺寸与输入不同，调整 Vec 大小并写入
-    let stereo_out = expected_out_frames * 2;
+    let actual_frames = processed.len();
+    let stereo_out = actual_frames * 2;
     pcm_stereo.clear();
     pcm_stereo.reserve(stereo_out);
     // 消除索引越界检查，批量写入双声道
-    for &v in processed.iter().take(expected_out_frames) {
+    for &v in processed.iter().take(actual_frames) {
         pcm_stereo.push(v);
         pcm_stereo.push(v);
+    }
+    // Pad or trim to expected length if needed
+    while pcm_stereo.len() < expected_out_frames * 2 {
+        pcm_stereo.push(0.0);
+        pcm_stereo.push(0.0);
+    }
+    if pcm_stereo.len() > expected_out_frames * 2 {
+        pcm_stereo.truncate(expected_out_frames * 2);
     }
 
     Ok(true)
@@ -1282,10 +1293,11 @@ pub fn does_clip_need_processor_render(
     };
     // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
     // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
-    if !track.compose_enabled && !entry.has_pitch_adjustment_active {
+    // 同样，用户手动绘制了 pitch 曲线时也必须触发渲染。
+    if !track.compose_enabled && !entry.has_pitch_adjustment_active && !entry.pitch_edit_user_modified {
         return false;
     }
-    if !pitch_edit_backend_available_for_track(track) {
+    if !pitch_edit_backend_available_for_track(track) && !entry.pitch_edit_user_modified {
         return false;
     }
 
@@ -1318,6 +1330,9 @@ pub fn does_clip_need_processor_render(
     // 例外：needs_processor_stretch 时必须触发预渲染以执行其内部拉伸。
     // 例外：has_pitch_adjustment_active 时，音高参考块提供的 MIDI 音高数据已写入 pitch_edit，
     //       即使 pitch_edit_user_modified 为 false 也应触发渲染。
+    eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} stretch={}",
+        clip.id, entry.pitch_edit_user_modified, entry.has_pitch_adjustment_active,
+        extra_processing, tension_processing, formant_processing, has_child_pitch_offset, needs_processor_stretch);
     if !entry.pitch_edit_user_modified
         && !entry.has_pitch_adjustment_active
         && !extra_processing

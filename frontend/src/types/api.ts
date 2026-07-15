@@ -263,8 +263,63 @@ export interface OnnxDiagnosticResult {
     available: boolean;
     error: string | null;
     ep_choice: string;
+    active_ep?: string;
     onnx_version?: string;
     providers?: string[];
+    cudaDiagnostic?: CudaDiagnostic | null;
+}
+
+export interface CudaDiagnostic {
+    availableProviders: string[];
+    selectedEp: string;
+    cudaDeviceId: number;
+    cudaSmokeTestPassed: boolean;
+    cudaSmokeTestError?: string | null;
+    ortBuildInfo: string;
+    cudaDllStatus: [string, boolean][];
+}
+
+/** Info about a single NVIDIA GPU discovered via NVML. */
+export interface GpuDeviceInfo {
+    deviceId: number;
+    name: string;
+    memoryMb: number;
+    computeMajor: number;
+    computeMinor: number;
+    cudaCapable: boolean;
+}
+
+export interface GpuEnumerationResult {
+    devices: GpuDeviceInfo[];
+    note?: string | null;
+}
+
+export interface BenchmarkResult {
+    cpuMedianMs: number;
+    cpuRtFactor: number;
+    gpuMedianMs?: number | null;
+    gpuRtFactor?: number | null;
+    benchmarkSamples: number;
+    /** True when CUDA EP was available and used for GPU benchmark. */
+    cudaAvailable: boolean;
+    /** CUDA device ID that was used. */
+    cudaDeviceId: number;
+    /** All execution providers available in the ONNX Runtime DLL. */
+    availableProviders: string[];
+    /** Whether critical CUDA DLLs (cuBLAS, cuDNN) were found on disk. */
+    cudaDllsFound: boolean;
+    /** ORT build info string for debugging. */
+    ortBuildInfo: string;
+    /** All NVIDIA GPUs discovered via NVML (name, memory, device ID). */
+    gpuDevices: GpuDeviceInfo[];
+}
+
+export interface BenchmarkResult {
+    cpuMedianMs: number;
+    cpuRtFactor: number;
+    gpuMedianMs?: number | null;
+    gpuRtFactor?: number | null;
+    benchmarkSamples: number;
 }
 
 export interface PitchTaskStatusPayload {

@@ -22,7 +22,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
@@ -30,6 +30,7 @@ use crate::pitch_editing::PitchCurvesSnapshot;
 
 // 导入 clip 渲染状态管理器
 use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
+use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
 
 // ─── 缓存容量 ──────────────────────────────────────────────────────────────────
 
@@ -57,84 +58,45 @@ pub struct SynthClipCacheEntry {
 
 // ─── Cache ─────────────────────────────────────────────────────────────────────
 
-/// LRU 缓存，存储 per-clip 合成结果（WORLD 和 ONNX 共享）。
+/// Byte-budgeted LRU cache for per-clip synthesis results (WORLD and ONNX share).
 pub struct SynthClipCache {
-    inner: HashMap<SynthClipCacheKey, SynthClipCacheEntry>,
-    /// 按访问顺序排列的 key 列表（front = 最近使用，back = 最久未使用）。
-    order: VecDeque<SynthClipCacheKey>,
-    capacity: usize,
+    inner: ByteBudgetCache<SynthClipCacheKey, SynthClipCacheEntry>,
 }
 
 impl SynthClipCache {
-    /// 创建指定容量的缓存。
-    pub fn new(capacity: usize) -> Self {
+    /// 创建指定容量和字节预算的缓存。
+    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
-            inner: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(1),
+            inner: ByteBudgetCache::new(capacity, budget_bytes),
         }
     }
 
     /// 查询缓存。命中时将 key 移到 front（最近使用）。
     pub fn get(&mut self, key: &SynthClipCacheKey) -> Option<&SynthClipCacheEntry> {
-        if !self.inner.contains_key(key) {
-            return None;
-        }
-        // 将命中的 key 移到 front
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let k = self.order.remove(pos).unwrap();
-            self.order.push_front(k);
-        }
         self.inner.get(key)
     }
 
-    /// 插入缓存。若已满则淘汰最久未使用的 entry。
+    /// 插入缓存。字节预算自动管理淘汰。
     pub fn insert(&mut self, key: SynthClipCacheKey, entry: SynthClipCacheEntry) {
-        if self.inner.contains_key(&key) {
-            // 更新已有 entry，移到 front
-            self.inner.insert(key.clone(), entry);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                let k = self.order.remove(pos).unwrap();
-                self.order.push_front(k);
-            }
-            return;
-        }
-
-        // 容量已满时淘汰 back（最久未使用）
-        while self.inner.len() >= self.capacity {
-            if let Some(evict_key) = self.order.pop_back() {
-                self.inner.remove(&evict_key);
-            } else {
-                break;
-            }
-        }
-
-        self.order.push_front(key.clone());
-        self.inner.insert(key, entry);
+        let weight = entry.pcm_stereo.len() as u64 * 4; // f32 = 4 bytes
+        self.inner.insert(key, entry, weight);
     }
 
     /// 使指定 clip_id 的所有缓存失效（不论 param_hash）。
     pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.retain(|k, _| k.clip_id != clip_id);
-        self.order.retain(|k| k.clip_id != clip_id);
+        self.inner.invalidate_where(|k| k.clip_id == clip_id);
     }
 
     /// 清空所有缓存。
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
-        self.order.clear();
     }
 
     /// 清空所有缓存并返回估算释放的字节数（仅 PCM 数据部分）。
     pub fn clear_and_estimate_bytes(&mut self) -> u64 {
-        let bytes: u64 = self
-            .inner
-            .values()
-            .map(|e| e.pcm_stereo.len() as u64 * 4) // f32 = 4 字节
-            .sum();
+        let bytes = self.inner.total_bytes();
         self.inner.clear();
-        self.order.clear();
         bytes
     }
 
@@ -142,6 +104,11 @@ impl SynthClipCache {
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// 当前缓存总字节数。
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
     }
 }
 
@@ -154,7 +121,10 @@ static GLOBAL_SYNTH_CLIP_CACHE: OnceLock<Mutex<SynthClipCache>> = OnceLock::new(
 /// 首次调用时初始化，容量为 [`DEFAULT_CAPACITY`]（64）。
 /// WORLD 和 ONNX 共享同一个缓存实例。
 pub fn global_synth_clip_cache() -> &'static Mutex<SynthClipCache> {
-    GLOBAL_SYNTH_CLIP_CACHE.get_or_init(|| Mutex::new(SynthClipCache::new(DEFAULT_CAPACITY)))
+    GLOBAL_SYNTH_CLIP_CACHE.get_or_init(|| {
+        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4; // 1/4 of total budget
+        Mutex::new(SynthClipCache::new(DEFAULT_CAPACITY, budget))
+    })
 }
 
 // ─── Clip 渲染状态集成 ──────────────────────────────────────────────────────────
@@ -361,73 +331,49 @@ pub struct RenderedClipCacheEntry {
     pub sample_rate: u32,
 }
 
-/// 整 Clip 渲染结果的 LRU 缓存。
+/// 整 Clip 渲染结果的 byte-budgeted LRU 缓存。
 ///
 /// 与 [`SynthClipCache`]（per-segment）共存，用于 Clip 级预渲染缓存。
 /// audio callback 中通过 `EngineClip.rendered_pcm` 直接读取，不经过此缓存。
 /// 此缓存主要在 `build_snapshot` 阶段查询并填充 `rendered_pcm`。
 pub struct RenderedClipCache {
-    inner: HashMap<RenderedClipCacheKey, RenderedClipCacheEntry>,
-    order: VecDeque<RenderedClipCacheKey>,
-    capacity: usize,
+    inner: ByteBudgetCache<RenderedClipCacheKey, RenderedClipCacheEntry>,
 }
 
 impl RenderedClipCache {
-    /// 创建指定容量的缓存。
-    pub fn new(capacity: usize) -> Self {
+    /// 创建指定容量和字节预算的缓存。
+    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
-            inner: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(1),
+            inner: ByteBudgetCache::new(capacity, budget_bytes),
         }
     }
 
     /// 查询缓存。命中时将 key 移到 front（最近使用）。
     pub fn get(&mut self, key: &RenderedClipCacheKey) -> Option<&RenderedClipCacheEntry> {
-        if !self.inner.contains_key(key) {
-            return None;
-        }
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let k = self.order.remove(pos).unwrap();
-            self.order.push_front(k);
-        }
         self.inner.get(key)
     }
 
-    /// 插入缓存。若已满则淘汰最久未使用的 entry。
+    /// 插入缓存。字节预算自动管理淘汰。
     pub fn insert(&mut self, key: RenderedClipCacheKey, entry: RenderedClipCacheEntry) {
-        if self.inner.contains_key(&key) {
-            self.inner.insert(key.clone(), entry);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                let k = self.order.remove(pos).unwrap();
-                self.order.push_front(k);
-            }
-            return;
-        }
-
-        while self.inner.len() >= self.capacity {
-            if let Some(evict_key) = self.order.pop_back() {
-                self.inner.remove(&evict_key);
-            } else {
-                break;
-            }
-        }
-
-        self.order.push_front(key.clone());
-        self.inner.insert(key, entry);
+        let pcm_bytes = entry.pcm_stereo.len() as u64 * 4;
+        let noise_bytes = entry
+            .breath_noise_stereo
+            .as_ref()
+            .map(|n| n.len() as u64 * 4)
+            .unwrap_or(0);
+        let weight = pcm_bytes + noise_bytes;
+        self.inner.insert(key, entry, weight);
     }
 
     /// 使指定 clip_id 的所有缓存失效（不论 param_hash）。
     pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.retain(|k, _| k.clip_id != clip_id);
-        self.order.retain(|k| k.clip_id != clip_id);
+        self.inner.invalidate_where(|k| k.clip_id == clip_id);
     }
 
     /// 清空所有缓存。
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
-        self.order.clear();
     }
 
     /// 当前缓存条目数。
@@ -436,16 +382,14 @@ impl RenderedClipCache {
         self.inner.len()
     }
 
+    /// 当前缓存总字节数。
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
+    }
+
     /// 确保缓存容量不小于给定值（仅增不减）。
     pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        let next = min_capacity.max(1);
-        if next > self.capacity {
-            self.capacity = next;
-            self.inner
-                .reserve(self.capacity.saturating_sub(self.inner.len()));
-            self.order
-                .reserve(self.capacity.saturating_sub(self.order.len()));
-        }
+        self.inner.ensure_capacity(min_capacity);
     }
 }
 
@@ -457,8 +401,10 @@ static GLOBAL_RENDERED_CLIP_CACHE: OnceLock<Mutex<RenderedClipCache>> = OnceLock
 ///
 /// 首次调用时初始化，容量为 `rendered_clip_capacity()`。
 pub fn global_rendered_clip_cache() -> &'static Mutex<RenderedClipCache> {
-    GLOBAL_RENDERED_CLIP_CACHE
-        .get_or_init(|| Mutex::new(RenderedClipCache::new(rendered_clip_capacity())))
+    GLOBAL_RENDERED_CLIP_CACHE.get_or_init(|| {
+        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 2; // 1/2 of total budget
+        Mutex::new(RenderedClipCache::new(rendered_clip_capacity(), budget))
+    })
 }
 
 // ─── Pending Rendered Keys（渲染线程 → snapshot 的 cache_key 传递）──────────
@@ -584,7 +530,7 @@ pub fn compute_rendered_clip_hash(
     }
 
     // 混入 extra_curves，并且【只 Hash 当前时间切片的片段】，避免性能问题与错误缓存失效
-    let mut sorted_curves: Vec<(&String, &Vec<f32>)> = extra_curves.iter().collect();
+    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves.iter().map(|(k, v)| (k, v.as_slice())).collect();
     sorted_curves.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted_curves {
         // 调用已定义好的过滤函数，防止后处理参数改变引发灾难级的底层重渲染
@@ -640,8 +586,11 @@ pub fn compute_breath_noise_hash(
     extra_params: &std::collections::HashMap<String, f64>,
     formant_morph: Option<&crate::state::ClipFormantMorph>,
 ) -> u64 {
-    let mut filtered_curves = extra_curves.clone();
-    filtered_curves.remove("formant_shift_cents");
+    let filtered_curves: std::collections::HashMap<String, Vec<f32>> = extra_curves
+        .iter()
+        .filter(|(k, _)| k.as_str() != "formant_shift_cents")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     compute_rendered_clip_hash(
         clip_id,
         source_path,
@@ -682,7 +631,7 @@ pub fn compute_hifigan_tension_hash(
     sr: u32,
     frame_period_ms: f64,
     pitch_orig: &[f32],
-    tension_curve: Option<&Vec<f32>>,
+    tension_curve: Option<&[f32]>,
 ) -> u64 {
     let mut h: u64 = 14695981039346656037u64;
 
@@ -741,17 +690,13 @@ pub struct TensionRenderedClipCacheEntry {
 }
 
 pub struct TensionRenderedClipCache {
-    inner: HashMap<TensionRenderedClipCacheKey, TensionRenderedClipCacheEntry>,
-    order: VecDeque<TensionRenderedClipCacheKey>,
-    capacity: usize,
+    inner: ByteBudgetCache<TensionRenderedClipCacheKey, TensionRenderedClipCacheEntry>,
 }
 
 impl TensionRenderedClipCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
-            inner: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(1),
+            inner: ByteBudgetCache::new(capacity, budget_bytes),
         }
     }
 
@@ -759,13 +704,6 @@ impl TensionRenderedClipCache {
         &mut self,
         key: &TensionRenderedClipCacheKey,
     ) -> Option<&TensionRenderedClipCacheEntry> {
-        if !self.inner.contains_key(key) {
-            return None;
-        }
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let hit = self.order.remove(pos).unwrap();
-            self.order.push_front(hit);
-        }
         self.inner.get(key)
     }
 
@@ -774,42 +712,27 @@ impl TensionRenderedClipCache {
         key: TensionRenderedClipCacheKey,
         entry: TensionRenderedClipCacheEntry,
     ) {
-        if self.inner.contains_key(&key) {
-            self.inner.insert(key.clone(), entry);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                let hit = self.order.remove(pos).unwrap();
-                self.order.push_front(hit);
-            }
-            return;
-        }
-
-        while self.inner.len() >= self.capacity {
-            if let Some(evict_key) = self.order.pop_back() {
-                self.inner.remove(&evict_key);
-            } else {
-                break;
-            }
-        }
-
-        self.order.push_front(key.clone());
-        self.inner.insert(key, entry);
+        let weight = entry.pcm_stereo.len() as u64 * 4;
+        self.inner.insert(key, entry, weight);
     }
 
     pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.retain(|k, _| k.clip_id != clip_id);
-        self.order.retain(|k| k.clip_id != clip_id);
+        self.inner.invalidate_where(|k| k.clip_id == clip_id);
+    }
+
+    /// 当前缓存条目数。
+    pub fn len(&self) -> usize {
+        self.inner.len()
     }
 
     /// 确保缓存容量不小于给定值（仅增不减）。
     pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        let next = min_capacity.max(1);
-        if next > self.capacity {
-            self.capacity = next;
-            self.inner
-                .reserve(self.capacity.saturating_sub(self.inner.len()));
-            self.order
-                .reserve(self.capacity.saturating_sub(self.order.len()));
-        }
+        self.inner.ensure_capacity(min_capacity);
+    }
+
+    /// 当前缓存总字节数。
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
     }
 }
 
@@ -817,8 +740,10 @@ static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCac
     OnceLock::new();
 
 pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
-    GLOBAL_TENSION_RENDERED_CLIP_CACHE
-        .get_or_init(|| Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity())))
+    GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
+        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
+        Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity(), budget))
+    })
 }
 
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────
@@ -842,74 +767,48 @@ pub struct BreathNoiseCacheEntry {
     pub sample_rate: u32,
 }
 
-/// Breath Noise 独立 LRU 缓存。
+/// Breath Noise 独立 byte-budgeted LRU 缓存。
 ///
 /// 在 Breath 路径中，`breath_noise_stereo`（= unity_mix - harmonic_only）不受 formant 影响。
 /// 当仅 formant 变化时，可直接复用此缓存中的 noise stem，跳过第二次 render_variant 调用，
 /// 从而避免每个 clip 的两次 HNSEP 推理变为一次。
 pub struct BreathNoiseCache {
-    inner: HashMap<BreathNoiseCacheKey, BreathNoiseCacheEntry>,
-    order: VecDeque<BreathNoiseCacheKey>,
-    capacity: usize,
+    inner: ByteBudgetCache<BreathNoiseCacheKey, BreathNoiseCacheEntry>,
 }
 
 impl BreathNoiseCache {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
-            inner: HashMap::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity: capacity.max(1),
+            inner: ByteBudgetCache::new(capacity, budget_bytes),
         }
     }
 
     pub fn get(&mut self, key: &BreathNoiseCacheKey) -> Option<&BreathNoiseCacheEntry> {
-        if !self.inner.contains_key(key) {
-            return None;
-        }
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let hit = self.order.remove(pos).unwrap();
-            self.order.push_front(hit);
-        }
         self.inner.get(key)
     }
 
     pub fn insert(&mut self, key: BreathNoiseCacheKey, entry: BreathNoiseCacheEntry) {
-        if self.inner.contains_key(&key) {
-            self.inner.insert(key.clone(), entry);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                let hit = self.order.remove(pos).unwrap();
-                self.order.push_front(hit);
-            }
-            return;
-        }
-
-        while self.inner.len() >= self.capacity {
-            if let Some(evict_key) = self.order.pop_back() {
-                self.inner.remove(&evict_key);
-            } else {
-                break;
-            }
-        }
-
-        self.order.push_front(key.clone());
-        self.inner.insert(key, entry);
+        let weight = entry.noise_stereo.len() as u64 * 4;
+        self.inner.insert(key, entry, weight);
     }
 
     pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.retain(|k, _| k.clip_id != clip_id);
-        self.order.retain(|k| k.clip_id != clip_id);
+        self.inner.invalidate_where(|k| k.clip_id == clip_id);
+    }
+
+    /// 当前缓存条目数。
+    pub fn len(&self) -> usize {
+        self.inner.len()
     }
 
     /// 确保缓存容量不小于给定值（仅增不减）。
     pub fn ensure_capacity(&mut self, min_capacity: usize) {
-        let next = min_capacity.max(1);
-        if next > self.capacity {
-            self.capacity = next;
-            self.inner
-                .reserve(self.capacity.saturating_sub(self.inner.len()));
-            self.order
-                .reserve(self.capacity.saturating_sub(self.order.len()));
-        }
+        self.inner.ensure_capacity(min_capacity);
+    }
+
+    /// 当前缓存总字节数。
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
     }
 }
 
@@ -917,8 +816,10 @@ static GLOBAL_BREATH_NOISE_CACHE: OnceLock<Mutex<BreathNoiseCache>> = OnceLock::
 
 /// 获取进程级全局 Breath Noise 缓存。
 pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
-    GLOBAL_BREATH_NOISE_CACHE
-        .get_or_init(|| Mutex::new(BreathNoiseCache::new(rendered_clip_capacity())))
+    GLOBAL_BREATH_NOISE_CACHE.get_or_init(|| {
+        let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 8;
+        Mutex::new(BreathNoiseCache::new(rendered_clip_capacity(), budget))
+    })
 }
 
 /// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + TensionRenderedClipCache + BreathNoiseCache）。
@@ -934,9 +835,9 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let mut cache = global_synth_clip_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let had_entry = cache.inner.keys().any(|k| k.clip_id == clip_id);
+        let before = cache.len();
         cache.invalidate(clip_id);
-        if had_entry {
+        if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} SynthClipCache invalidated",
                 clip_id
@@ -949,13 +850,13 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let mut cache = global_rendered_clip_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let had_entry = cache.inner.keys().any(|k| k.clip_id == clip_id);
+        let before = cache.len();
         cache.invalidate(clip_id);
-        if had_entry {
+        if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
                 clip_id,
-                cache.order.len()
+                before
             );
         }
     }
@@ -965,9 +866,9 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let mut cache = global_tension_rendered_clip_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let had_entry = cache.inner.keys().any(|k| k.clip_id == clip_id);
+        let before = cache.len();
         cache.invalidate(clip_id);
-        if had_entry {
+        if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} TensionRenderedClipCache invalidated",
                 clip_id
@@ -980,9 +881,9 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let mut cache = global_breath_noise_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let had_entry = cache.inner.keys().any(|k| k.clip_id == clip_id);
+        let before = cache.len();
         cache.invalidate(clip_id);
-        if had_entry {
+        if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} BreathNoiseCache invalidated",
                 clip_id
@@ -1012,6 +913,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
 /// 专门为音高编辑提供的“柔性”缓存失效策略，仅失效片段级合成缓存和解除旧 Hash 绑定，
 /// 保留 RenderedClipCache，使得在新的预渲染完成前，系统可以无缝回退播放上一次渲染的音频！
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
+    eprintln!("[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared)");
     // 1. SynthClipCache 失效
     {
         let mut cache = global_synth_clip_cache()
@@ -1026,6 +928,13 @@ pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
             .unwrap_or_else(|e| e.into_inner());
         map.remove(clip_id);
     }
+    // 3. RenderedClipCache 也失效，强制下次播放时重新合成
+    {
+        let mut cache = global_rendered_clip_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.invalidate(clip_id);
+    }
 }
 
 /// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）
@@ -1033,8 +942,11 @@ pub fn get_latest_rendered_pcm(clip_id: &str) -> Option<(Arc<Vec<f32>>, Option<A
     let cache = global_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let found_key = cache.order.iter().find(|k| k.clip_id == clip_id).cloned()?;
-    let entry = cache.inner.get(&found_key)?;
+    let entry = cache
+        .inner
+        .iter()
+        .find(|(k, _)| k.clip_id == clip_id)
+        .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
 }
 
@@ -1043,8 +955,11 @@ pub fn get_latest_tension_rendered_pcm(clip_id: &str) -> Option<Arc<Vec<f32>>> {
     let cache = global_tension_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let found_key = cache.order.iter().find(|k| k.clip_id == clip_id).cloned()?;
-    let entry = cache.inner.get(&found_key)?;
+    let entry = cache
+        .inner
+        .iter()
+        .find(|(k, _)| k.clip_id == clip_id)
+        .map(|(_, v)| v)?;
     Some(entry.pcm_stereo.clone())
 }
 
