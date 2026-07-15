@@ -224,4 +224,7 @@ try {
     }
 } finally {
     Pop-Location
+    # Don't let ORT_LIB_LOCATION leak into the caller's session —
+    # it would break plain CPU builds (cargo tauri build without CUDA).
+    Remove-Item Env:ORT_LIB_LOCATION -ErrorAction SilentlyContinue
 }

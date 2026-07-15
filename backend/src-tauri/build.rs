@@ -661,16 +661,23 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Remove stale ORT/CUDA DLLs from the cargo output directory.
+/// Remove stale ORT/CUDA DLLs from the cargo output directory and stage
+/// fresh GPU DLLs from `third_party/ort-bundle/`.
+///
+/// This function ONLY runs for CUDA builds.  For plain CPU builds, the
+/// `ort` crate's own `download-binaries` feature handles fetching ONNX
+/// Runtime — we must not interfere by deleting the DLLs it places.
 ///
 /// `cargo build` never cleans the output dir, so DLLs from a previous GPU
-/// build persist and leak into non-GPU portable builds.  This function ALWAYS
-/// purges them so a plain `cargo tauri build` stays clean.
-///
-/// When `cuda` is active, fresh DLLs are staged from `third_party/ort-bundle/`
-/// (the project-local canonical location for GPU DLLs — populated by
-/// `setup-windows.ps1`).
+/// build could otherwise persist and leak into a subsequent non-GPU portable
+/// ZIP.  By scoping the purge to CUDA builds only we eliminate that risk
+/// without breaking CPU-only compilation.
 fn clean_stale_ort_dlls() {
+    // For CPU builds, ort-sys handles everything via download-binaries.
+    if !cfg!(feature = "cuda") {
+        return;
+    }
+
     let stale_dlls = [
         "onnxruntime.dll",
         "onnxruntime_providers_cuda.dll",
@@ -699,7 +706,7 @@ fn clean_stale_ort_dlls() {
         if let Some(profile_dir) = path.ancestors().find(|p| {
             p.join("build").is_dir() && p.join("deps").is_dir()
         }) {
-            // -- always: remove any stale GPU DLLs from a previous build ----------
+            // -- remove any stale GPU DLLs from a previous build ----------
             for dll in &stale_dlls {
                 let dll_path = profile_dir.join(dll);
                 if dll_path.exists() {
@@ -708,7 +715,7 @@ fn clean_stale_ort_dlls() {
                 }
             }
 
-            // -- only for GPU builds: stage fresh DLLs from ort-bundle -----------
+            // -- stage fresh DLLs from ort-bundle ----------
             if cfg!(feature = "cuda") {
                 let bundle = std::path::Path::new("third_party/ort-bundle");
                 if bundle.is_dir() {
