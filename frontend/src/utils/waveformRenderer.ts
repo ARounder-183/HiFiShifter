@@ -21,6 +21,11 @@
 
 import type { FadeCurveType } from "../components/layout/timeline/paths";
 import { fadeCurveGain } from "../components/layout/timeline/paths";
+import {
+    wfDiag_poolAcquire,
+    wfDiag_poolRelease,
+    wfDiag_poolRegister,
+} from "./waveformDebug";
 
 // ============================================================================
 // 类型定义
@@ -86,23 +91,30 @@ export interface WaveformRenderParams {
  * 避免每帧 new Float32Array 导致 GC 压力
  */
 let _gainBufferPool: Float32Array[] = [];
-const _GAIN_POOL_MAX = 4;
+const _GAIN_POOL_MAX = 32;
 
 function acquireGainBuffer(len: number): Float32Array {
     for (let i = 0; i < _gainBufferPool.length; i++) {
         if (_gainBufferPool[i].length === len) {
+            wfDiag_poolAcquire("gain", true);
             return _gainBufferPool.splice(i, 1)[0];
         }
     }
+    wfDiag_poolAcquire("gain", false);
     return new Float32Array(len);
 }
 
 /** 归还增益 buffer 到池中 */
 export function releaseGainBuffer(buf: Float32Array): void {
-    if (buf.length > 0 && _gainBufferPool.length < _GAIN_POOL_MAX) {
+    const accepted = buf.length > 0 && _gainBufferPool.length < _GAIN_POOL_MAX;
+    if (accepted) {
         _gainBufferPool.push(buf);
     }
+    wfDiag_poolRelease("gain", accepted);
 }
+
+// 注册增益池
+wfDiag_poolRegister("gain", () => _gainBufferPool.length);
 
 /**
  * 将音量增益和淡入淡出曲线应用到波形 peaks 数据上

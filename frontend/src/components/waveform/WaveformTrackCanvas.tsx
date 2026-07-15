@@ -34,6 +34,16 @@ import {
     renderWaveform,
     type WaveformRenderParams,
 } from "../../utils/waveformRenderer";
+import {
+    wfDiag_frameStart,
+    wfDiag_frameEnd,
+    wfDiag_invalidateBus,
+    wfDiag_invalidateMipmap,
+    wfDiag_invalidateProps,
+    wfDiag_dataHit,
+    wfDiag_dataMissNull,
+    wfDiag_dataMissShort,
+} from "../../utils/waveformDebug";
 // ========================================
 // 局部 Buffer 复用池
 // ========================================
@@ -143,6 +153,7 @@ export const WaveformTrackCanvas = React.memo(
         // 核心绘制函数（存入 drawRef，由 invalidate 调度）
         // ========================================
         drawRef.current = () => {
+            wfDiag_frameStart();
             const canvas = canvasRef.current;
             if (!canvas) return;
 
@@ -289,8 +300,11 @@ export const WaveformTrackCanvas = React.memo(
                 const __tSlice1 = __perfDebug ? performance.now() : 0;
 
                 if (!result || result.interleaved.length < 4) {
+                    if (!result) wfDiag_dataMissNull();
+                    else wfDiag_dataMissShort();
                     continue;
                 }
+                wfDiag_dataHit();
 
                 // ========================================
                 // 方案2：限制数据量 — 当原始数据点数远超可视像素时，快速预降采样
@@ -470,6 +484,10 @@ export const WaveformTrackCanvas = React.memo(
             // ========================================
             // 性能诊断输出
             // ========================================
+            {
+                const totalMs = performance.now() - __t0;
+                wfDiag_frameEnd(totalMs);
+            }
             if (__perfDebug) {
                 const totalMs = performance.now() - __t0;
                 const clipCount = __clipTimings.length;
@@ -504,6 +522,7 @@ export const WaveformTrackCanvas = React.memo(
 
             const unsub = waveformMipmapStore.addListener((sourcePath, status) => {
                 if (status === "done" && neededPaths.has(sourcePath)) {
+                    wfDiag_invalidateMipmap();
                     invalidate();
                 }
             });
@@ -529,6 +548,7 @@ export const WaveformTrackCanvas = React.memo(
                     canvasRef.current.style.transform = `translate3d(${scrollLeft}px,0,0)`;
                 }
 
+                wfDiag_invalidateBus();
                 invalidate();
             });
             return unsub;
@@ -540,6 +560,7 @@ export const WaveformTrackCanvas = React.memo(
         // 高频视口参数（pxPerSec / viewportStartSec / viewportEndSec）已由事件总线处理
         // ========================================
         React.useEffect(() => {
+            wfDiag_invalidateProps();
             invalidate();
         }, [clips, waveformHeight, strokeColor, strokeWidth, viewportWidthPx, invalidate]);
 

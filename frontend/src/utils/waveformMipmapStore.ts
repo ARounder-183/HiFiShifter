@@ -20,6 +20,12 @@
 
 import { waveformApi } from "../services/api/waveform";
 import { decodeWaveformFromBase64, type WaveformMipmapBinary } from "./waveformBinaryCodec";
+import {
+    wfDiag_poolAcquire,
+    wfDiag_poolRelease,
+    wfDiag_poolRegister,
+    wfDiag_setMipmapSizeFn,
+} from "./waveformDebug";
 
 // ============== 常量 ==============
 
@@ -40,7 +46,7 @@ const LEVEL_COUNT = 3;
  * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
  * 该上限在"避免内存累积"与"频繁切换音频不需要重新解码"之间取折中。
  */
-const MAX_FILE_CACHE_SIZE = 128;
+const MAX_FILE_CACHE_SIZE = 512;
 
 // ============== 类型 ==============
 
@@ -94,23 +100,27 @@ class WaveformMipmapStoreImpl {
      */
     private interleavedPool: Float32Array[] = [];
     /** 池的最大容量（条目数） */
-    private static readonly POOL_MAX = 8;
+    private static readonly POOL_MAX = 32;
 
     private acquireInterleaved(minLen: number): Float32Array {
         for (let i = 0; i < this.interleavedPool.length; i++) {
             if (this.interleavedPool[i].buffer.byteLength / 4 >= minLen) {
                 const buf = this.interleavedPool[i];
                 this.interleavedPool.splice(i, 1);
+                wfDiag_poolAcquire("interleaved", true);
                 return new Float32Array(buf.buffer, 0, minLen);
             }
         }
+        wfDiag_poolAcquire("interleaved", false);
         return new Float32Array(minLen);
     }
 
     releaseInterleaved(buf: Float32Array): void {
-        if (buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX) {
+        const accepted = buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX;
+        if (accepted) {
             this.interleavedPool.push(new Float32Array(buf.buffer));
         }
+        wfDiag_poolRelease("interleaved", accepted);
     }
 
     // ---------- LRU 缓存 helper ----------
@@ -469,10 +479,11 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
-     * 批量预加载多个文件的所有三级 mipmap 数据
+     * 批量预加载多个文件的 mipmap 数据（仅 L2 轻量级，L0/L1 按需加载）
      *
-     * 将 N 个文件 × (1 preload + 3 loadLevel) = 4N 次 IPC 合并为 1 次。
-     * 项目打开/重新打开时调用，大幅减少 IPC 往返开销。
+     * L2 数据量约为 L0 的 1/250，500 文件仅需 ~13MB。
+     * 用户缩放时 getPeaks 按需触发 L0/L1 的 loadLevel。
+     * 加载期间通过 getNearestLoadedLevel 回落已有数据，避免闪烁。
      *
      * @param sourcePaths 需要预加载的音频文件路径数组
      */
@@ -482,12 +493,13 @@ class WaveformMipmapStoreImpl {
         const needed = sourcePaths.filter((sp) => {
             const entry = this.cache.get(sp);
             if (!entry) return true;
-            return entry.levels.some((l) => l == null);
+            // 至少 L2 未加载则需要
+            return entry.levels[2] == null;
         });
 
         if (needed.length === 0) return;
 
-        // 通知所有需要加载的文件进入 loading 状态，并强制加锁
+        // 通知进入 loading 状态（仅标记 L2）
         for (const sp of needed) {
             let entry = this.cache.get(sp);
             if (!entry) {
@@ -500,8 +512,6 @@ class WaveformMipmapStoreImpl {
             } else {
                 this.touchLru(sp);
             }
-            entry.loadingLevels.add(0);
-            entry.loadingLevels.add(1);
             entry.loadingLevels.add(2);
             this.notify(sp, "loading");
         }
@@ -511,23 +521,22 @@ class WaveformMipmapStoreImpl {
 
             for (const [sourcePath, levels] of Object.entries(batchResult)) {
                 let hasError = false;
-                for (let level = 0; level < LEVEL_COUNT; level++) {
-                    const base64 = levels[level];
-                    if (!base64) {
-                        hasError = true;
-                        continue;
-                    }
-                    const decoded = decodeWaveformFromBase64(base64);
+                // 仅解码 L2（索引 2），L0/L1 丢弃
+                const l2Base64 = levels[2];
+                if (l2Base64) {
+                    const decoded = decodeWaveformFromBase64(l2Base64);
                     if (decoded) {
-                        this.applyDecoded(sourcePath, level, decoded);
+                        this.applyDecoded(sourcePath, 2, decoded);
                     } else {
                         hasError = true;
                     }
+                } else {
+                    hasError = true;
                 }
                 this.notify(
                     sourcePath,
                     hasError ? "error" : "done",
-                    hasError ? "batch decode partial failure" : undefined,
+                    hasError ? "batch decode L2 failure" : undefined,
                 );
             }
         } catch (err) {
@@ -538,12 +547,9 @@ class WaveformMipmapStoreImpl {
             const promises = needed.map((sp) => this.preload(sp));
             await Promise.allSettled(promises);
         } finally {
-            // 无论成功失败，释放锁，防止 UI 死锁
             for (const sp of needed) {
                 const entry = this.cache.get(sp);
                 if (entry) {
-                    entry.loadingLevels.delete(0);
-                    entry.loadingLevels.delete(1);
                     entry.loadingLevels.delete(2);
                 }
             }
@@ -732,6 +738,12 @@ class WaveformMipmapStoreImpl {
 
 /** 全局单例 */
 export const waveformMipmapStore = new WaveformMipmapStoreImpl();
+
+// ── 诊断：注册 mipmap 文件缓存大小 ──
+wfDiag_setMipmapSizeFn(() => waveformMipmapStore.size);
+
+// ── 诊断：注册 interleaved 池 ──
+wfDiag_poolRegister("interleaved", () => waveformMipmapStore["interleavedPool"].length);
 
 /**
  * 获取三级 mipmap 的除数因子表
