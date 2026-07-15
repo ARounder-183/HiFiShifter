@@ -58,10 +58,6 @@ try {
         $dlls = @(Get-ChildItem "$BundleDir\*.dll" -ErrorAction SilentlyContinue)
         Write-Host "  GPU DLLs found: $($dlls.Count)"
         foreach ($dll in $dlls) {
-            if ($dll.Name -eq "cudnn_engines_precompiled64_9.dll") {
-                Write-Host "    SKIP (NSIS size): $($dll.Name)"
-                continue
-            }
             $resources["third_party/ort-bundle/$($dll.Name)"] = $dll.Name
             $gpuCount++
         }
