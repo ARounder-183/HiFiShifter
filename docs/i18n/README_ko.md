@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter는 휴대용 Rust 도구 체인, ONNX Runtime, CUDA 런타임을 자동으로 설치하는 **원클릭 환경 설정 스크립트**를 제공합니다:
+HiFiShifter는 ONNX Runtime과 CUDA 런타임을 자동으로 설치하는 **원클릭 환경 설정 스크립트**를 제공합니다 (Rust 도구 체인은 **기본적으로 건너뜁니다**. `-InstallRust`로 활성화하세요):
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -153,10 +153,29 @@ HiFiShifter는 휴대용 Rust 도구 체인, ONNX Runtime, CUDA 런타임을 자
 
 선택적 매개변수:
 
-- `-SkipRust`: Rust 설치 건너뛰기
+- `-InstallRust`: 프로젝트 로컬 휴대용 Rust 도구 체인 설치 (기본값: 건너뜀, 시스템 전역 Rust 사용)
 - `-SkipOrt`: ONNX Runtime 다운로드 건너뛰기
 - `-SkipCudaRuntime`: CUDA 런타임 다운로드 건너뛰기
 - `-SkipFrontend`: 프론트엔드 종속성 설치 건너뛰기
+- `-LocalOrtDir <path>`: 미리 압축 해제된 ORT 디렉토리에서 복사 (네트워크 불필요)
+- `-LocalPackage <path>`: 로컬에 다운로드된 ORT ZIP 아카이브에서 압축 해제 (네트워크 불필요)
+
+미러를 사용하여 다운로드 속도를 높이려면:
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+로컬 소스에서 ORT를 오프라인으로 설치하려면:
+
+```powershell
+# 미리 압축 해제된 ORT 디렉토리에서 복사
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# 로컬 ZIP 아카이브에서 압축 해제
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
 
 로컬 Rust 환경을 현재 셸에 로드만 하려면:
 

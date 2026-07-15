@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ポータブルRustツールチェーン、ONNX Runtime、CUDAランタイムを自動的にインストールします：
+HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ONNX RuntimeとCUDAランタイムを自動的にインストールします（Rustツールチェーンは**デフォルトでスキップ**されます。`-InstallRust` で有効化してください）：
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -153,10 +153,29 @@ HiFiShifterは**ワンクリック環境セットアップスクリプト**を�
 
 オプションのパラメータ：
 
-- `-SkipRust`：Rustのインストールをスキップ
+- `-InstallRust`：プロジェクトローカルのポータブルRustツールチェーンをインストール（デフォルトではスキップ、システム全体のRustを使用）
 - `-SkipOrt`：ONNX Runtimeのダウンロードをスキップ
 - `-SkipCudaRuntime`：CUDAランタイムのダウンロードをスキップ
 - `-SkipFrontend`：フロントエンド依存関係のインストールをスキップ
+- `-LocalOrtDir <path>`：事前に展開されたORTディレクトリからコピー（ネットワーク不要）
+- `-LocalPackage <path>`：ローカルにダウンロードしたORT ZIPアーカイブから展開（ネットワーク不要）
+
+ミラーを使用してダウンロードを高速化する場合：
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+ローカルソースからORTをオフラインでインストールする場合：
+
+```powershell
+# 事前に展開されたORTディレクトリからコピー
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# ローカルZIPアーカイブから展開
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
 
 ローカルのRust環境を現在のシェルに読み込む場合（インストールなし）：
 

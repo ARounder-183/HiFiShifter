@@ -416,6 +416,14 @@ jobs:
           }
         shell: pwsh
 
+      - name: Set ORT_LIB_LOCATION (Windows GPU)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
+        shell: pwsh
+        run: |
+          $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
+          Write-Host "ORT_LIB_LOCATION=$OrtDir"
+          "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
+
       - name: Build and bundle via tauri-action
         if: runner.os != 'Linux'
         uses: tauri-apps/tauri-action@v0.6.2

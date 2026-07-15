@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter provides a **one-click environment setup script** that automatically installs the portable Rust toolchain, ONNX Runtime, and CUDA runtime:
+HiFiShifter provides a **one-click environment setup script** that automatically installs ONNX Runtime and the CUDA runtime (Rust toolchain is **disabled by default** — add `-InstallRust` to opt in):
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -153,10 +153,29 @@ HiFiShifter provides a **one-click environment setup script** that automatically
 
 Optional parameters:
 
-- `-SkipRust`: Skip Rust installation
+- `-InstallRust`: Install a project-local portable Rust toolchain (disabled by default; uses system-wide Rust)
 - `-SkipOrt`: Skip ONNX Runtime download
 - `-SkipCudaRuntime`: Skip CUDA runtime download
 - `-SkipFrontend`: Skip frontend dependency installation
+- `-LocalOrtDir <path>`: Copy from a pre-extracted ORT installation (no network required)
+- `-LocalPackage <path>`: Extract from a locally-downloaded ORT ZIP archive (no network required)
+
+To use a mirror for faster downloads:
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+To install ORT from a local source (offline):
+
+```powershell
+# Copy from a pre-extracted ORT directory
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# Extract from a local ZIP archive
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
 
 To just load the local Rust environment into your current shell (no installation):
 

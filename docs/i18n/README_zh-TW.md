@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝可攜 Rust 工具鏈、ONNX Runtime 和 CUDA 執行階段：
+HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝 ONNX Runtime 和 CUDA 執行階段（Rust 工具鏈**預設跳過**，需手動添加 `-InstallRust` 啟用）：
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -153,10 +153,29 @@ HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝可攜 Rus
 
 該腳本支援可選參數：
 
-- `-SkipRust`：跳過 Rust 安裝
+- `-InstallRust`：安裝專案本地的可攜 Rust 工具鏈（預設跳過，使用系統全域 Rust）
 - `-SkipOrt`：跳過 ONNX Runtime 下載
 - `-SkipCudaRuntime`：跳過 CUDA 執行階段下載
 - `-SkipFrontend`：跳過前端依賴安裝
+- `-LocalOrtDir <path>`：從本地已解壓的 ORT 目錄複製（免網路下載）
+- `-LocalPackage <path>`：從本地已下載的 ORT ZIP 包解壓（免網路下載）
+
+若需使用鏡像加速下載：
+
+```powershell
+$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+.\scripts\setup-windows.ps1
+```
+
+若需從本地離線安裝 ORT：
+
+```powershell
+# 從已解壓的本地 ORT 目錄複製
+.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+
+# 從本地 ZIP 包解壓
+.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+```
 
 若只需載入本地 Rust 環境到目前 shell（不執行安裝）：
 

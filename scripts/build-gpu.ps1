@@ -97,7 +97,7 @@ if (-not (Test-Path $primaryDll)) {
     Write-Host "[build-gpu] Attempting auto-download..." -ForegroundColor Cyan
     $setupScript = Join-Path $PSScriptRoot "setup-windows.ps1"
     if (Test-Path $setupScript) {
-        & $setupScript -SkipRust -SkipFrontend
+        & $setupScript -SkipFrontend
         if (-not (Test-Path $primaryDll)) {
             Write-Error "Auto-download failed."
             exit 1
@@ -109,6 +109,14 @@ if (-not (Test-Path $primaryDll)) {
 }
 
 $env:ORT_USE_CUDA = "1"
+
+# Tell ort-sys to link against the SAME ONNX Runtime that will be staged
+# to the binary directory by build.rs.  Without this, ort-sys falls back to
+# its `download-binaries` feature and may fetch a different ORT version,
+# causing an FFI-version mismatch that manifests as a main-thread hang
+# during CUDA EP initialization.
+$env:ORT_LIB_LOCATION = $BundleDir
+
 if ($Dev) {
     $env:ORT_PREFER_DYNAMIC_LINK = "1"
     $env:HIFISHIFTER_DEBUG_COMMANDS = "1"

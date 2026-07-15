@@ -4,10 +4,14 @@
 
 .DESCRIPTION
     Installs and configures everything needed for HiFiShifter development on Windows:
-    - Portable Rust toolchain (project-local at .rust/)
-    - ONNX Runtime GPU (downloaded to ~/.cache/ort/lib)
+    - Portable Rust toolchain (opt-in: -InstallRust, project-local at .rust/)
+    - ONNX Runtime GPU (downloaded from GitHub, or from a local source)
     - CUDA runtime DLLs (cuBLAS, cuDNN, etc.)
     - Frontend npm dependencies
+
+    Rust installation is DISABLED by default - the script assumes you already
+    have a system-wide Rust installation.  Pass -InstallRust to set up a
+    project-local portable toolchain instead.
 
     This script is designed to be safe to re-run - already-installed components
     are detected and skipped. Also supports being dot-sourced to just load the
@@ -17,8 +21,9 @@
     Replaces the old root-level scripts:
         setup-rust-env.ps1, env-rust.ps1, setup-gpu-deps.ps1
 
-.PARAMETER SkipRust
-    Skip installation of the portable Rust toolchain and tauri-cli.
+.PARAMETER InstallRust
+    Install a project-local portable Rust toolchain into .rust/.
+    Disabled by default - assumes a system-wide Rust installation is available.
 
 .PARAMETER SkipOrt
     Skip download of ONNX Runtime GPU binaries.
@@ -33,13 +38,35 @@
     Only load environment variables into the current shell (dot-source mode).
     Sets CARGO_HOME, RUSTUP_HOME, and updates PATH.
 
-.EXAMPLE
-    .\scripts\setup-windows.ps1
-    # Full setup: Rust + ORT + CUDA + frontend
+.PARAMETER LocalOrtDir
+    Path to a pre-extracted ONNX Runtime installation (must contain lib/ and
+    include/ subdirectories).  Files are copied locally - no network access.
+    Equivalent to the old ORT_LIB_LOCATION workflow.
+
+.PARAMETER LocalPackage
+    Path to a locally-downloaded ONNX Runtime ZIP archive.  Extracted and
+    copied locally - no network access required.
 
 .EXAMPLE
-    .\scripts\setup-windows.ps1 -SkipRust -SkipCudaRuntime
+    .\scripts\setup-windows.ps1 -InstallRust
+    # Full setup including project-local Rust toolchain
+
+.EXAMPLE
+    .\scripts\setup-windows.ps1 -SkipCudaRuntime
     # Only download ORT and install frontend deps
+
+.EXAMPLE
+    .\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
+    # Use a pre-extracted local ORT installation (no GitHub access needed)
+
+.EXAMPLE
+    .\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip" -SkipCudaRuntime
+    # Use a locally-downloaded ORT ZIP archive
+
+.EXAMPLE
+    $env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
+    .\scripts\setup-windows.ps1
+    # Download through a mirror for faster access
 
 .EXAMPLE
     . .\scripts\setup-windows.ps1 -LoadEnv
@@ -48,11 +75,13 @@
 
 [CmdletBinding()]
 param(
-    [switch]$SkipRust,
-    [switch]$SkipOrt,
-    [switch]$SkipCudaRuntime,
-    [switch]$SkipFrontend,
-    [switch]$LoadEnv
+    [Parameter()][switch]$InstallRust,
+    [Parameter()][switch]$SkipOrt,
+    [Parameter()][switch]$SkipCudaRuntime,
+    [Parameter()][switch]$SkipFrontend,
+    [Parameter()][switch]$LoadEnv,
+    [Parameter()][string]$LocalOrtDir,
+    [Parameter()][string]$LocalPackage
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,8 +129,8 @@ Write-Host ""
 # ============================================================
 # Step 1: Portable Rust Toolchain
 # ============================================================
-if (-not $SkipRust) {
-    Write-Host "── [1/4] Portable Rust Toolchain ──" -ForegroundColor Cyan
+if ($InstallRust) {
+    Write-Host "-- [1/4] Portable Rust Toolchain --" -ForegroundColor Cyan
 
     $env:CARGO_HOME  = $CargoHome
     $env:RUSTUP_HOME = $RustupHome
@@ -157,18 +186,26 @@ if (-not $SkipRust) {
 
     Write-Host ""
 } else {
-    Write-Host "── [1/4] Portable Rust Toolchain (skipped) ──" -ForegroundColor DarkGray
+    Write-Host "-- [1/4] Portable Rust Toolchain (skipped - use -InstallRust to enable) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
 # Step 2: ONNX Runtime GPU
 # ============================================================
 if (-not $SkipOrt) {
-    Write-Host "── [2/4] ONNX Runtime GPU ──" -ForegroundColor Cyan
+    Write-Host "-- [2/4] ONNX Runtime GPU --" -ForegroundColor Cyan
 
     $downloadOrtScript = Join-Path $PSScriptRoot "download-ort.ps1"
     if (Test-Path $downloadOrtScript) {
-        & $downloadOrtScript -Gpu -DestDir $OrtBundleDir
+        # Use direct named-parameter invocation rather than splatting (@args)
+        # to avoid a PowerShell parameter-binding bug with array-based splatting.
+        if ($LocalOrtDir) {
+            & $downloadOrtScript -LocalOrtDir $LocalOrtDir -DestDir $OrtBundleDir
+        } elseif ($LocalPackage) {
+            & $downloadOrtScript -LocalPackage $LocalPackage -DestDir $OrtBundleDir
+        } else {
+            & $downloadOrtScript -Gpu -DestDir $OrtBundleDir
+        }
         if ($LASTEXITCODE -ne 0) {
             Write-Error "ONNX Runtime download failed."
             exit 1
@@ -180,14 +217,14 @@ if (-not $SkipOrt) {
 
     Write-Host ""
 } else {
-    Write-Host "── [2/4] ONNX Runtime GPU (skipped) ──" -ForegroundColor DarkGray
+    Write-Host "-- [2/4] ONNX Runtime GPU (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
 # Step 3: CUDA Runtime DLLs
 # ============================================================
 if (-not $SkipCudaRuntime) {
-    Write-Host "── [3/4] CUDA Runtime DLLs (cuBLAS + cuDNN) ──" -ForegroundColor Cyan
+    Write-Host "-- [3/4] CUDA Runtime DLLs (cuBLAS + cuDNN) --" -ForegroundColor Cyan
 
     # Resolve destination (same as ORT lib dir by default)
     $cudaDestDir = $OrtBundleDir
@@ -205,14 +242,14 @@ if (-not $SkipCudaRuntime) {
 
     Write-Host ""
 } else {
-    Write-Host "── [3/4] CUDA Runtime DLLs (skipped) ──" -ForegroundColor DarkGray
+    Write-Host "-- [3/4] CUDA Runtime DLLs (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
 # Step 4: Frontend Dependencies
 # ============================================================
 if (-not $SkipFrontend) {
-    Write-Host "── [4/4] Frontend Dependencies (npm) ──" -ForegroundColor Cyan
+    Write-Host "-- [4/4] Frontend Dependencies (npm) --" -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectRoot "frontend")
     try {
         npm ci
@@ -226,7 +263,7 @@ if (-not $SkipFrontend) {
     Write-Host "  Frontend dependencies installed." -ForegroundColor Green
     Write-Host ""
 } else {
-    Write-Host "── [4/4] Frontend Dependencies (skipped) ──" -ForegroundColor DarkGray
+    Write-Host "-- [4/4] Frontend Dependencies (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================

@@ -47,8 +47,10 @@ fn init_file_log() {
     }
 
     // Anonymous pipe — the CRT's _pipe creates a pair of fds.
+    // Use a 1 MB buffer so that even verbose ORT init output does not block
+    // the main thread while the background reader is still getting started.
     let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr(), 65536, libc::O_BINARY) } != 0 {
+    if unsafe { libc::pipe(fds.as_mut_ptr(), 1048576, libc::O_BINARY) } != 0 {
         unsafe { libc::close(saved); }
         return;
     }
