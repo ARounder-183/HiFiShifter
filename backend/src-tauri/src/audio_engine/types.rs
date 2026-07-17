@@ -159,6 +159,10 @@ pub(crate) enum EngineCommand {
     SetAppHandle {
         handle: tauri::AppHandle,
     },
+    /// 使指定源路径的解码缓存和拉伸缓存失效（源文件被替换时调用）。
+    EvictSourcePath {
+        path: String,
+    },
     Stop,
     Shutdown,
 }

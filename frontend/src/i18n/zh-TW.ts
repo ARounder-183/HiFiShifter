@@ -320,6 +320,13 @@ export const zhTW = {
     missing_file_replace_desc: "找不到以下音訊檔案。是否手動指定替代檔案？",
     missing_file_replace_pick: "選擇替代檔案",
 
+    // 源文件變更檢測（窗口重新獲得焦點時觸發）
+    source_file_changed_title: "源文件已變更",
+    source_file_changed_modified_desc: "以下音訊檔案已在外部被修改。是否重新載入到工程中？",
+    source_file_changed_deleted_desc: "以下音訊檔案已被移動或刪除。是否選擇替代檔案？",
+    source_file_changed_reload: "重新載入",
+    source_file_changed_ignore: "忽略",
+
     fade_curve_linear: "線性",
     fade_curve_sine: "正弦",
     fade_curve_exponential: "指數",

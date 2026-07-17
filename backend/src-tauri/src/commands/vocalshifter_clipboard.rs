@@ -417,7 +417,9 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         }
 
         for clip in &result.timeline.clips {
-            tl.clips.push(clip.clone());
+            let mut c = clip.clone();
+            crate::state::TimelineState::populate_clip_file_metadata(&mut c);
+            tl.clips.push(c);
         }
 
         for (track_id, new_params) in &result.timeline.params_by_root_track {

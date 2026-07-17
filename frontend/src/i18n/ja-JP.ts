@@ -333,6 +333,15 @@ export const jaJP = {
         "以下の音声ファイルが見つかりません。代替ファイルを手動で指定しますか？",
     missing_file_replace_pick: "代替ファイルを選択",
 
+    // ソースファイル変更検出（ウィンドウがフォーカスを取得した時にトリガー）
+    source_file_changed_title: "ソースファイルが変更されました",
+    source_file_changed_modified_desc:
+        "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",
+    source_file_changed_deleted_desc:
+        "以下の音声ファイルが移動または削除されました。代替ファイルを選択しますか？",
+    source_file_changed_reload: "再読み込み",
+    source_file_changed_ignore: "無視",
+
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",
     fade_curve_exponential: "エクスポネンシャル",

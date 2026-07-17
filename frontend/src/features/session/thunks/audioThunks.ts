@@ -3,6 +3,7 @@ import { webApi } from "../../../services/webviewApi";
 import type { AdvancedExportRequest } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
 import { requestMissingFileReplacement } from "./missingFilePrompt";
+import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 async function resolveMissingFilesInteractively(timeline: any, missingFiles: string[] | undefined) {
     let latestTimeline = timeline;
@@ -30,6 +31,7 @@ async function resolveMissingFilesInteractively(timeline: any, missingFiles: str
             replaceSameSource: true,
         });
         if (replaced?.ok) {
+            waveformMipmapStore.invalidate(picked.path);
             latestTimeline = replaced;
         }
     }

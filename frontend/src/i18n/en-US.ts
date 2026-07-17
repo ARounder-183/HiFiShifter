@@ -332,6 +332,15 @@ export const enUS = {
         "The following audio file cannot be found. Do you want to pick a replacement file?",
     missing_file_replace_pick: "Pick Replacement",
 
+    // Source file change detection (triggered on window focus regain)
+    source_file_changed_title: "Source File Changed",
+    source_file_changed_modified_desc:
+        "The following audio file(s) have been modified externally. Do you want to reload them into the project?",
+    source_file_changed_deleted_desc:
+        "The following audio file(s) have been moved or deleted. Do you want to pick replacement files?",
+    source_file_changed_reload: "Reload Files",
+    source_file_changed_ignore: "Ignore",
+
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",
     fade_curve_exponential: "Exponential",

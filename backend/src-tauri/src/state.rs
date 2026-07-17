@@ -264,6 +264,19 @@ pub struct Clip {
     pub duration_sec: Option<f64>,       // 兼容性保留
     pub duration_frames: Option<u64>,    // 精确的frame总数
     pub source_sample_rate: Option<u32>, // 源文件采样率
+    /// 文件导入时的 mtime（Unix 时间戳，秒），用于检测外部文件替换/删除。
+    /// None 表示运行时从字节流导入（无磁盘文件）或尚未初始化。
+    /// 仅在程序运行期间有效，不持久化到工程文件。
+    #[serde(skip)]
+    pub source_file_mtime: Option<u64>,
+    /// 源文件大小（字节），与 mtime 一起作为第一层元数据比对。
+    /// 仅在程序运行期间有效，不持久化到工程文件。
+    #[serde(skip)]
+    pub source_file_size: Option<u64>,
+    /// 源文件内容指纹（头 64KB + 尾 64KB FNV-1a 64-bit）。
+    /// 用于元数据变化后的第二层内容确认。仅在程序运行期间有效，不持久化。
+    #[serde(skip)]
+    pub source_file_fingerprint: Option<u64>,
     pub waveform_preview: Option<Vec<f32>>,
     pub pitch_range: Option<PitchRange>,
 
@@ -967,6 +980,22 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.take()
+    }
+
+    /// 使指定源路径的波形峰值缓存失效（内存缓存 + inflight 标记）。
+    ///
+    /// 当源文件被替换（即使路径相同但内容变化）时调用，确保下次请求波形
+    /// 数据时重新从磁盘/文件计算，而非返回旧文件的缓存峰值。
+    pub fn invalidate_waveform_cache_for_path(&self, source_path: &str) {
+        {
+            let mut cache_v2 = self
+                .waveform_cache_v2
+                .lock()
+                .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+            cache_v2.remove(source_path);
+        }
+        // 同时移除 inflight 标记（如果正在计算中，也让它失效重新计算）
+        self.remove_waveform_inflight(source_path);
     }
 
     pub fn clear_waveform_cache(&self) -> crate::hfspeaks_v2::ClearStats {
@@ -2293,6 +2322,30 @@ impl TimelineState {
         }
     }
 
+    /// 根据 clip 的 source_path 从磁盘读取文件元数据 + 内容指纹，
+    /// 填充 `source_file_size`、`source_file_mtime`、`source_file_fingerprint`。
+    /// 仅在 source_path 存在且文件可访问时生效。
+    pub fn populate_clip_file_metadata(clip: &mut Clip) {
+        let Some(ref source_path) = clip.source_path else {
+            return;
+        };
+        let p = std::path::Path::new(source_path);
+        if !p.exists() {
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(p) {
+            clip.source_file_size = Some(meta.len());
+            clip.source_file_mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+        }
+        if let Some(fp) = crate::audio_utils::compute_file_fingerprint(p) {
+            clip.source_file_fingerprint = Some(fp);
+        }
+    }
+
     pub fn add_clip(
         &mut self,
         track_id: Option<String>,
@@ -2353,11 +2406,24 @@ impl TimelineState {
         let mut computed_duration_frames = inherited.as_ref().and_then(|v| v.1);
         let mut computed_source_sr = inherited.as_ref().and_then(|v| v.2);
         let mut computed_waveform = inherited.as_ref().and_then(|v| v.3.clone());
+        let mut computed_mtime: Option<u64> = None;
+        let mut computed_size: Option<u64> = None;
+        let mut computed_fp: Option<u64> = None;
 
         if computed_waveform.is_none() {
             if let Some(sp) = source_path.as_deref() {
                 let p = std::path::Path::new(sp);
                 if p.exists() {
+                    // 记录文件元数据 + 内容指纹，用于检测外部修改
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        computed_size = Some(meta.len());
+                        computed_mtime = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs());
+                    }
+                    computed_fp = crate::audio_utils::compute_file_fingerprint(p);
                     if let Some(info) = crate::audio_utils::try_read_wav_info(p, 4096) {
                         computed_duration_sec = Some(info.duration_sec);
                         computed_duration_frames = Some(info.total_frames);
@@ -2381,6 +2447,9 @@ impl TimelineState {
             duration_sec: computed_duration_sec,
             duration_frames: computed_duration_frames,
             source_sample_rate: computed_source_sr,
+            source_file_mtime: computed_mtime,
+            source_file_size: computed_size,
+            source_file_fingerprint: computed_fp,
             waveform_preview: computed_waveform,
             pitch_range: inherited
                 .as_ref()
@@ -2406,6 +2475,10 @@ impl TimelineState {
             midi_fill_gaps: false,
         };
         self.clips.push(clip);
+        // 确保文件元数据始终被填充（包括继承 waveform 但未计算 metadata 的情况）
+        if let Some(last) = self.clips.last_mut() {
+            Self::populate_clip_file_metadata(last);
+        }
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
@@ -3854,10 +3927,25 @@ impl TimelineState {
             );
         }
 
+        // 记录文件元数据 + 内容指纹，用于后续检测外部文件替换/删除
+        let file_mtime = std::fs::metadata(audio_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let file_size = std::fs::metadata(audio_path).ok().map(|m| m.len());
+        let file_fp = crate::audio_utils::compute_file_fingerprint(std::path::Path::new(audio_path));
+
         if let Some(c) = self.clips.iter_mut().find(|c| c.id == clip_id) {
             c.duration_sec = duration_sec;
             c.duration_frames = duration_frames;
             c.source_sample_rate = source_sample_rate;
+            c.source_file_mtime = file_mtime;
+            c.source_file_size = file_size;
+            // 仅在新指纹成功计算时才更新
+            if let Some(fp) = file_fp {
+                c.source_file_fingerprint = Some(fp);
+            }
             c.waveform_preview = waveform_preview;
         }
     }
@@ -3888,6 +3976,22 @@ impl TimelineState {
         let source_sample_rate = info.as_ref().map(|v| v.sample_rate);
         let waveform_preview = info.map(|v| v.waveform_preview);
 
+        // 记录新源文件的元数据 + 内容指纹
+        let new_meta = std::fs::metadata(new_source_path).ok();
+        let new_mtime = new_meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let new_size = new_meta.as_ref().map(|m| m.len());
+        let new_fp = crate::audio_utils::compute_file_fingerprint(Path::new(new_source_path));
+        if new_fp.is_none() {
+            eprintln!(
+                "[replace_clip_sources] WARNING: compute_file_fingerprint failed for path={} (file may be locked), keeping old fingerprint",
+                new_source_path
+            );
+        }
+
         let mut changed = 0usize;
         for clip in &mut self.clips {
             let direct_match = target_id_set.contains(clip.id.as_str());
@@ -3907,11 +4011,100 @@ impl TimelineState {
             clip.duration_sec = duration_sec;
             clip.duration_frames = duration_frames;
             clip.source_sample_rate = source_sample_rate;
+            clip.source_file_mtime = new_mtime;
+            clip.source_file_size = new_size;
+            // 仅在新指纹成功计算时才更新，避免因文件锁等原因丢失指纹数据
+            if let Some(fp) = new_fp {
+                clip.source_file_fingerprint = Some(fp);
+            }
             clip.waveform_preview = waveform_preview.clone();
             changed += 1;
         }
 
         changed
+    }
+
+    /// 检查所有有 source_path 的 clip，使用分层策略检测外部文件变更。
+    ///
+    /// 第 1 层：存在性检查。
+    /// 第 2 层：元数据比对（文件大小 + 修改时间），均未变 → 跳过。
+    /// 第 3 层：内容指纹验证（头 64KB + 尾 64KB FNV-1a），
+    ///          若指纹一致 → 仅元数据变化（如云同步/touch），静默更新；
+    ///          若指纹不一致 → 内容确实被修改 → 报告 "modified"。
+    ///
+    /// 对 GB 级音频文件也只读取最多 128KB，IO 开销可忽略。
+    pub fn check_source_files_changed(
+        &self,
+    ) -> crate::models::CheckSourceFilesChangedPayload {
+        let mut changed: Vec<crate::models::SourceFileChangePayload> = Vec::new();
+        let mut reported_paths: HashSet<String> = HashSet::new();
+
+        for clip in &self.clips {
+            let source_path = match clip.source_path.as_ref() {
+                Some(p) => p,
+                None => continue,
+            };
+            if reported_paths.contains(source_path) {
+                continue;
+            }
+
+            let path = std::path::Path::new(source_path);
+
+            // ── 第 1 层：存在性检查 ──────────────────────────────────────
+            if !path.exists() {
+                reported_paths.insert(source_path.to_string());
+                changed.push(crate::models::SourceFileChangePayload {
+                    clip_id: clip.id.clone(),
+                    clip_name: clip.name.clone(),
+                    source_path: source_path.to_string(),
+                    change: "deleted".to_string(),
+                });
+                continue;
+            }
+
+            // ── 第 2 层：元数据快速比对 ─────────────────────────────────
+            let current_meta = std::fs::metadata(path).ok();
+            let current_size = current_meta.as_ref().map(|m| m.len());
+            let current_mtime = current_meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+
+            let old_mtime = clip.source_file_mtime;
+            let old_size = clip.source_file_size;
+            let old_fp = clip.source_file_fingerprint;
+
+            // 若大小和 mtime 均与记录一致 → 未修改，跳过
+            if current_size == old_size && current_mtime == old_mtime {
+                continue;
+            }
+
+            // 旧工程无元数据 → 跳过检测（无法判断是否变更）
+            if old_mtime.is_none() && old_size.is_none() {
+                continue;
+            }
+
+            // ── 第 3 层：内容指纹验证 ────────────────────────────────────
+            let current_fp = crate::audio_utils::compute_file_fingerprint(path);
+            if current_fp.is_some() && current_fp == old_fp {
+                // 内容未变，仅元数据被修改（touch、云同步等）→ 静默更新记录，不打扰用户
+                // Note: 此处为只读引用，无法原地更新 clip 的元数据。
+                //       元数据将在下次 reload/replace 时自然更新。
+                continue;
+            }
+
+            // 内容确实发生变化
+            reported_paths.insert(source_path.to_string());
+            changed.push(crate::models::SourceFileChangePayload {
+                clip_id: clip.id.clone(),
+                clip_name: clip.name.clone(),
+                source_path: source_path.to_string(),
+                change: "modified".to_string(),
+            });
+        }
+
+        crate::models::CheckSourceFilesChangedPayload { changed }
     }
 }
 

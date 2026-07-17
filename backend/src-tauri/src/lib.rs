@@ -333,6 +333,7 @@ pub fn run() {
             commands::set_clips_state_bulk,
             commands::duplicate_clips_bulk,
             commands::replace_clip_source,
+            commands::check_source_files_changed,
             commands::split_clip,
             commands::split_clips_at,
             commands::glue_clips,

@@ -567,6 +567,14 @@ pub fn replace_clip_source(
 ) -> crate::models::TimelineStatePayload {
     timeline::replace_clip_source(state, clip_ids, new_source_path, replace_same_source)
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn check_source_files_changed(
+    state: State<'_, AppState>,
+) -> crate::models::CheckSourceFilesChangedPayload {
+    timeline::check_source_files_changed(state)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn split_clip(
     state: State<'_, AppState>,

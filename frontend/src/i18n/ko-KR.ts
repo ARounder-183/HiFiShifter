@@ -404,6 +404,15 @@ export const koKR = {
         "다음 오디오 파일을 찾을 수 없습니다. 대체 파일을 수동으로 지정하시겠습니까?",
     missing_file_replace_pick: "대체 파일 선택",
 
+    // 소스 파일 변경 감지 (창이 포커스를 다시 얻을 때 트리거)
+    source_file_changed_title: "소스 파일 변경됨",
+    source_file_changed_modified_desc:
+        "다음 오디오 파일이 외부에서 수정되었습니다. 프로젝트에 다시 로드하시겠습니까?",
+    source_file_changed_deleted_desc:
+        "다음 오디오 파일이 이동 또는 삭제되었습니다. 대체 파일을 선택하시겠습니까?",
+    source_file_changed_reload: "다시 로드",
+    source_file_changed_ignore: "무시",
+
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",
     fade_curve_exponential: "지수",

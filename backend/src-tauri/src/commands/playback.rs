@@ -818,6 +818,7 @@ fn collect_clips_needing_render(
             &entry.extra_params,
             clip.formant_morph.as_ref().filter(|params| params.enabled),
             None,
+            clip.source_file_mtime,
         );
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
@@ -1108,6 +1109,7 @@ fn render_single_clip(
                     &entry.extra_curves,
                     &entry.extra_params,
                     clip.formant_morph.as_ref().filter(|params| params.enabled),
+                    clip.source_file_mtime,
                 );
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),

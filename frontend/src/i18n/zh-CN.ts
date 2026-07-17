@@ -319,6 +319,13 @@ export const zhCN = {
     missing_file_replace_desc: "找不到以下音频文件。是否手动指定替代文件？",
     missing_file_replace_pick: "选择替代文件",
 
+    // 源文件变更检测（窗口重新获得焦点时触发）
+    source_file_changed_title: "源文件已变更",
+    source_file_changed_modified_desc: "以下音频文件已在外部被修改。是否重新加载到工程中？",
+    source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",
+    source_file_changed_reload: "重新加载",
+    source_file_changed_ignore: "忽略",
+
     fade_curve_linear: "线性",
     fade_curve_sine: "正弦",
     fade_curve_exponential: "指数",
