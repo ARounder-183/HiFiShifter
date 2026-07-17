@@ -1658,7 +1658,7 @@ function AppInner() {
                                             : "text-amber-500"
                                     }
                                 >
-                                    [{item.change === "deleted" ? "DELETED" : "MODIFIED"}]
+                                    [{item.change === "deleted" ? t("source_file_changed_status_deleted") : t("source_file_changed_status_modified")}]
                                 </span>{" "}
                                 {item.clip_name} — {item.source_path}
                             </div>

@@ -326,6 +326,8 @@ export const zhTW = {
     source_file_changed_deleted_desc: "以下音訊檔案已被移動或刪除。是否選擇替代檔案？",
     source_file_changed_reload: "重新載入",
     source_file_changed_ignore: "忽略",
+    source_file_changed_status_deleted: "已刪除",
+    source_file_changed_status_modified: "已修改",
 
     fade_curve_linear: "線性",
     fade_curve_sine: "正弦",

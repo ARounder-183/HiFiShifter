@@ -340,6 +340,8 @@ export const enUS = {
         "The following audio file(s) have been moved or deleted. Do you want to pick replacement files?",
     source_file_changed_reload: "Reload Files",
     source_file_changed_ignore: "Ignore",
+    source_file_changed_status_deleted: "DELETED",
+    source_file_changed_status_modified: "MODIFIED",
 
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",

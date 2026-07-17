@@ -325,6 +325,8 @@ export const zhCN = {
     source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",
     source_file_changed_reload: "重新加载",
     source_file_changed_ignore: "忽略",
+    source_file_changed_status_deleted: "已删除",
+    source_file_changed_status_modified: "已修改",
 
     fade_curve_linear: "线性",
     fade_curve_sine: "正弦",

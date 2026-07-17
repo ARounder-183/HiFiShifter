@@ -412,6 +412,8 @@ export const koKR = {
         "다음 오디오 파일이 이동 또는 삭제되었습니다. 대체 파일을 선택하시겠습니까?",
     source_file_changed_reload: "다시 로드",
     source_file_changed_ignore: "무시",
+    source_file_changed_status_deleted: "삭제됨",
+    source_file_changed_status_modified: "수정됨",
 
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",

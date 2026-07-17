@@ -341,6 +341,8 @@ export const jaJP = {
         "以下の音声ファイルが移動または削除されました。代替ファイルを選択しますか？",
     source_file_changed_reload: "再読み込み",
     source_file_changed_ignore: "無視",
+    source_file_changed_status_deleted: "削除済み",
+    source_file_changed_status_modified: "変更済み",
 
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",
