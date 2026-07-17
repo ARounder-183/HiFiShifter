@@ -861,15 +861,14 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
 
             // ── 清理路径级缓存（解码缓存 + stretch 缓存 + inflight）──────────
             // 当源文件变更时（包括同路径替换），必须使所有以文件路径为 key 的缓存失效。
+            // 使用字符串比较（与 handle_evict_source_path 保持一致），兼容不同 PathBuf 表示形式。
             for stale_path in &stale_source_paths {
-                let stale_path_buf = std::path::PathBuf::from(stale_path);
 
                 // 1. 解码缓存（ResourceManager LRU）
                 if let Ok(mut cache) = s.cache.lock() {
-                    // 收集所有匹配该路径的 key
                     let keys_to_evict: Vec<(std::path::PathBuf, u32)> = cache
                         .iter()
-                        .filter(|((p, _), _)| p == &stale_path_buf)
+                        .filter(|((p, _), _)| p.to_string_lossy().as_ref() == stale_path.as_str())
                         .map(|(k, _)| k.clone())
                         .collect();
                     for k in keys_to_evict {
@@ -881,7 +880,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 if let Ok(mut sc) = s.stretch_cache.lock() {
                     let stretch_keys: Vec<StretchKey> = sc
                         .keys()
-                        .filter(|k| k.path == stale_path_buf)
+                        .filter(|k| k.path.to_string_lossy().as_ref() == stale_path.as_str())
                         .cloned()
                         .collect();
                     for k in stretch_keys {
@@ -893,7 +892,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 if let Ok(mut si) = s.stretch_inflight.lock() {
                     let inflight_keys: Vec<StretchKey> = si
                         .iter()
-                        .filter(|k| k.path == stale_path_buf)
+                        .filter(|k| k.path.to_string_lossy().as_ref() == stale_path.as_str())
                         .cloned()
                         .collect();
                     for k in inflight_keys {

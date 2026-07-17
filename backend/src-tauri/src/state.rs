@@ -3927,26 +3927,13 @@ impl TimelineState {
             );
         }
 
-        // 记录文件元数据 + 内容指纹，用于后续检测外部文件替换/删除
-        let file_mtime = std::fs::metadata(audio_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        let file_size = std::fs::metadata(audio_path).ok().map(|m| m.len());
-        let file_fp = crate::audio_utils::compute_file_fingerprint(std::path::Path::new(audio_path));
-
         if let Some(c) = self.clips.iter_mut().find(|c| c.id == clip_id) {
             c.duration_sec = duration_sec;
             c.duration_frames = duration_frames;
             c.source_sample_rate = source_sample_rate;
-            c.source_file_mtime = file_mtime;
-            c.source_file_size = file_size;
-            // 仅在新指纹成功计算时才更新
-            if let Some(fp) = file_fp {
-                c.source_file_fingerprint = Some(fp);
-            }
             c.waveform_preview = waveform_preview;
+            // 文件元数据 + 内容指纹已由 add_clip → populate_clip_file_metadata 填充，
+            // 此处只需确保 waveform_preview 等音频信息正确落盘即可。
         }
     }
 

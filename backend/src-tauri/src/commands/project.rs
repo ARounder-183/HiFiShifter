@@ -878,21 +878,7 @@ pub(super) fn open_project(
         // 打开工程时为所有含 source_path 的 clip 初始化文件元数据 + 内容指纹，
         // 用于本会话中的外部文件变更检测。此数据仅在程序运行期间有效，不持久化。
         for clip in &mut tl.clips {
-            if let Some(ref source_path) = clip.source_path {
-                let p = std::path::Path::new(source_path);
-                if p.exists() {
-                    if let Ok(meta) = std::fs::metadata(p) {
-                        clip.source_file_size = Some(meta.len());
-                        clip.source_file_mtime = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs());
-                    }
-                    clip.source_file_fingerprint =
-                        crate::audio_utils::compute_file_fingerprint(p);
-                }
-            }
+            crate::state::TimelineState::populate_clip_file_metadata(clip);
         }
         let normalized_base_scale = normalize_scale_key(&pf.base_scale);
         let normalized_custom_scale = normalize_custom_scale(pf.custom_scale.clone());
