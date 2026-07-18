@@ -1266,12 +1266,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }}
                     onMouseDown={(e) => {
                         if (e.button !== 0) return;
+                        // Guard scrollbar interactions first — avoid clearing
+                        // multi-selection when dragging the native scrollbar.
+                        const scroller = scrollRef.current;
+                        if (scroller && isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)) return;
                         setContextMenu(null);
                         setTrackAreaMenu(null);
                         setMultiSelectedClipIds([]);
-                        const scroller = scrollRef.current;
                         if (!scroller) return;
-                        if (isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)) return;
                         const trackId = trackIdFromClientY(e.clientY);
                         if (trackId && trackId !== sessionRef.current.selectedTrackId) {
                             void dispatch(selectTrackRemote(trackId));
