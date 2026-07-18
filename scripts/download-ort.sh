@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # download-ort.sh
-# Download and extract ONNX Runtime GPU for Linux, including cuDNN.
+# Download and extract ONNX Runtime GPU for Linux.
 #
 # Usage:
 #   ./scripts/download-ort.sh
@@ -33,24 +33,6 @@ tar -xzf "${OrtTgz}" -C "${OrtDir}"
 
 LibDir="$(find "${OrtDir}" -maxdepth 2 -type d -name lib | head -1)"
 echo "ORT lib dir: ${LibDir}"
-
-# Download cuDNN 9.8.0 redistributable
-TmpDl="${TEMP_DIR}/cuda-redist"
-mkdir -p "${TmpDl}"
-
-CudnnUrl="https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz"
-CudnnArchive="${TmpDl}/cudnn.tar.xz"
-echo "Downloading cuDNN 9.8.0..."
-curl -fSL -o "${CudnnArchive}" "${CudnnUrl}"
-tar -xJf "${CudnnArchive}" -C "${TmpDl}"
-rm -f "${CudnnArchive}"
-
-# Copy cuDNN .so files into ORT lib dir
-while IFS= read -r -d '' found_dir; do
-    echo "Copying cuDNN from ${found_dir}..."
-    cp -av "${found_dir}/"* "${LibDir}/" 2>/dev/null || true
-done < <(find "${TmpDl}" -type d -name lib -print0)
-rm -rf "${TmpDl}"
 
 # Export ORT_LIB_LOCATION
 export ORT_LIB_LOCATION="${LibDir}"

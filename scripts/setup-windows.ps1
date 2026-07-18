@@ -5,15 +5,11 @@
 .DESCRIPTION
     Installs and configures everything needed for HiFiShifter development on Windows:
     - Portable Rust toolchain (opt-in: -InstallRust, project-local at .rust/)
-    - ONNX Runtime GPU package (DirectML baseline; CUDA + TensorRT included)
-    - CUDA runtime DLLs (opt-in: -CUDA)
+    - ONNX Runtime GPU package (DirectML, DirectX 12)
     - Frontend npm dependencies
 
-    By default, downloads the ORT GPU package (DirectML + CUDA + TensorRT)
-    without the CUDA runtime DLLs.  Use -CUDA to also pull in cuBLAS + cuDNN.
-
     DirectML works on any DirectX 12 GPU (NVIDIA, AMD, Intel Arc) and is always
-    available.  CUDA builds (build-gpu.ps1 -CUDA) require the extra runtime DLLs.
+    available on Windows.  OpenCL provides cross-platform GPU acceleration.
 
     Rust installation is DISABLED by default - the script assumes a system-wide
     Rust installation.  Pass -InstallRust for a project-local portable toolchain.
@@ -26,19 +22,8 @@
     Install a project-local portable Rust toolchain into .rust/.
     Disabled by default - assumes a system-wide Rust installation is available.
 
-.PARAMETER CUDA
-    Also download CUDA runtime DLLs (cuBLAS, cuDNN, cuFFT, cuRAND).
-    Only needed for `build-gpu.ps1 -CUDA` builds.
-
-.PARAMETER DirectML
-    (Default - flag kept for backward compatibility.)
-    The baseline GPU package always includes DirectML.
-
 .PARAMETER SkipOrt
     Skip download of ONNX Runtime binaries.
-
-.PARAMETER SkipCudaRuntime
-    Skip download of CUDA runtime DLLs.  Default for non-CUDA setups.
 
 .PARAMETER SkipFrontend
     Skip npm ci for frontend dependencies.
@@ -56,15 +41,11 @@
 
 .EXAMPLE
     .\scripts\setup-windows.ps1
-    # Default: ORT GPU package (DirectML baseline), no CUDA runtime
+    # Default: ORT GPU package (DirectML + OpenCL baseline)
 
 .EXAMPLE
-    .\scripts\setup-windows.ps1 -CUDA
-    # GPU package + CUDA runtime DLLs for NVIDIA GPU builds
-
-.EXAMPLE
-    .\scripts\setup-windows.ps1 -InstallRust -CUDA
-    # Full CUDA setup including project-local Rust
+    .\scripts\setup-windows.ps1 -InstallRust
+    # Full setup including project-local Rust
 
 .EXAMPLE
     .\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
@@ -78,10 +59,7 @@
 [CmdletBinding()]
 param(
     [Parameter()][switch]$InstallRust,
-    [Parameter()][switch]$CUDA,
-    [Parameter()][switch]$DirectML,
     [Parameter()][switch]$SkipOrt,
-    [Parameter()][switch]$SkipCudaRuntime,
     [Parameter()][switch]$SkipFrontend,
     [Parameter()][switch]$LoadEnv,
     [Parameter()][string]$LocalOrtDir,
@@ -132,7 +110,7 @@ Write-Host ""
 # Step 1: Portable Rust Toolchain
 # ============================================================
 if ($InstallRust) {
-    Write-Host "-- [1/4] Portable Rust Toolchain --" -ForegroundColor Cyan
+    Write-Host "-- [1/3] Portable Rust Toolchain --" -ForegroundColor Cyan
 
     $env:CARGO_HOME  = $CargoHome
     $env:RUSTUP_HOME = $RustupHome
@@ -186,18 +164,17 @@ if ($InstallRust) {
 
     Write-Host ""
 } else {
-    Write-Host "-- [1/4] Portable Rust Toolchain (skipped - use -InstallRust to enable) --" -ForegroundColor DarkGray
+    Write-Host "-- [1/3] Portable Rust Toolchain (skipped - use -InstallRust to enable) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
 # Step 2: ONNX Runtime (GPU package is the default)
 # ============================================================
 if (-not $SkipOrt) {
-    Write-Host "-- [2/4] ONNX Runtime GPU (DirectML + CUDA + TensorRT) --" -ForegroundColor Cyan
+    Write-Host "-- [2/3] ONNX Runtime GPU (DirectML, DirectX 12) --" -ForegroundColor Cyan
 
     $downloadOrtScript = Join-Path $PSScriptRoot "download-ort.ps1"
     if (Test-Path $downloadOrtScript) {
-        # download-ort.ps1 defaults to GPU package.  -CPU flag for CPU-only.
         if ($LocalOrtDir) {
             & $downloadOrtScript -LocalOrtDir $LocalOrtDir -DestDir $OrtBundleDir
         } elseif ($LocalPackage) {
@@ -216,38 +193,14 @@ if (-not $SkipOrt) {
 
     Write-Host ""
 } else {
-    Write-Host "-- [2/4] ONNX Runtime (skipped) --" -ForegroundColor DarkGray
+    Write-Host "-- [2/3] ONNX Runtime (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
-# Step 3: CUDA Runtime DLLs (opt-in with -CUDA)
-# ============================================================
-if ($CUDA -and -not $SkipCudaRuntime) {
-    Write-Host "-- [3/4] CUDA Runtime DLLs (cuBLAS + cuDNN) --" -ForegroundColor Cyan
-
-    $downloadCudaScript = Join-Path $PSScriptRoot "download-cuda-runtime.ps1"
-    if (Test-Path $downloadCudaScript) {
-        & $downloadCudaScript -DestDir $OrtBundleDir
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "WARNING: CUDA runtime download had errors. CUDA GPU builds may not work." -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "WARNING: download-cuda-runtime.ps1 not found. CUDA GPU builds will NOT work." -ForegroundColor Yellow
-        Write-Host "  CUDA runtime DLLs (cuBLAS 12 + cuDNN 9) are REQUIRED for CUDA GPU inference." -ForegroundColor Yellow
-    }
-
-    Write-Host ""
-} elseif ($SkipCudaRuntime) {
-    Write-Host "-- [3/4] CUDA Runtime DLLs (skipped) --" -ForegroundColor DarkGray
-} else {
-    Write-Host "-- [3/4] CUDA Runtime DLLs (skipped - DirectML is the default; use -CUDA to include) --" -ForegroundColor DarkGray
-}
-
-# ============================================================
-# Step 4: Frontend Dependencies
+# Step 3: Frontend Dependencies
 # ============================================================
 if (-not $SkipFrontend) {
-    Write-Host "-- [4/4] Frontend Dependencies (npm) --" -ForegroundColor Cyan
+    Write-Host "-- [3/3] Frontend Dependencies (npm) --" -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectRoot "frontend")
     try {
         npm ci
@@ -261,7 +214,7 @@ if (-not $SkipFrontend) {
     Write-Host "  Frontend dependencies installed." -ForegroundColor Green
     Write-Host ""
 } else {
-    Write-Host "-- [4/4] Frontend Dependencies (skipped) --" -ForegroundColor DarkGray
+    Write-Host "-- [3/3] Frontend Dependencies (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
@@ -272,8 +225,7 @@ Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor Cyan
-Write-Host "    .\scripts\build-gpu.ps1              - DirectML build (default)" -ForegroundColor White
-Write-Host "    .\scripts\build-gpu.ps1 -CUDA        - CUDA GPU build" -ForegroundColor White
+Write-Host "    .\scripts\build-gpu.ps1              - DirectML GPU build" -ForegroundColor White
 Write-Host "    .\scripts\build-gpu.ps1 -Dev         - Dev server with hot reload" -ForegroundColor White
 Write-Host "    .\scripts\pack-portable.ps1          - Create portable ZIP" -ForegroundColor White
 Write-Host ""

@@ -44,104 +44,61 @@ jobs:
     needs: frontend-build
     runs-on: ${{ matrix.os }}
     env:
-      # Prevent CI environment from converting warnings into errors.
       RUSTFLAGS: "-Awarnings"
-      # Set to '1' to skip cargo check steps for faster CI.
       HIFISHIFTER_SKIP_CARGO_CHECK: "1"
-      # Frontend dist is provided via artifact and should not be rebuilt by build.rs.
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-      # Keep Linux WebKit ABI consistent with the dependency script and AppImage runtime.
       HIFISHIFTER_WEBKIT_ABI: "4.1"
-      # Helps AppImage tools run in CI environments without FUSE mounts.
       APPIMAGE_EXTRACT_AND_RUN: "1"
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ── Windows x86_64: CPU + DirectML ──────────────────────────────
           - name: windows-x86_64
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
-            cargo_no_default_features: "0"
-            cargo_features: ""
-            tauri_args: --target x86_64-pc-windows-msvc
-            ort_ep: ""
-            # Base Windows build: default features include onnx + vslib + directml.
-            # DirectML uses any DirectX 12-capable GPU (NVIDIA, AMD, Intel Arc).
-            ort_lib: ""
-            bundle_suffix: ""
+            cargo_features: onnx,vslib,directml
+            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,vslib,directml
+            ort_lib: gpu   # download ORT GPU package for DirectML onnxruntime.dll
+            # DirectML is compiled into onnxruntime.dll — works on any DX12 GPU.
 
-          - name: windows-x86_64-cuda
-            os: windows-latest
-            cargo_target: x86_64-pc-windows-msvc
-            cargo_no_default_features: "0"
-            cargo_features: "cuda,tensorrt"
-            tauri_args: --target x86_64-pc-windows-msvc -- --features cuda,tensorrt
-            ort_ep: "cuda"
-            # CUDA GPU build with ONNX Runtime GPU + TensorRT providers.
-            ort_lib: gpu
-            bundle_suffix: -cuda
-
+          # ── Windows ARM64: CPU + DirectML ──────────────────────────────
           - name: windows-arm64
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
-            cargo_no_default_features: "1"
-            cargo_features: onnx
-            tauri_args: --target aarch64-pc-windows-msvc -- --no-default-features --features onnx
-            ort_ep: ""
-            ort_lib: ""
-            bundle_suffix: ""
+            cargo_features: onnx,directml
+            tauri_args: --target aarch64-pc-windows-msvc -- --no-default-features --features onnx,directml
+            ort_lib: gpu   # DirectML supports Windows on ARM64
 
+          # ── macOS ARM64: CPU + CoreML ──────────────────────────────────
           - name: macos-arm64
             os: macos-latest
             cargo_target: aarch64-apple-darwin
-            cargo_no_default_features: "1"
-            cargo_features: onnx
-            tauri_args: --target aarch64-apple-darwin -- --no-default-features --features onnx
-            ort_ep: ""
-            ort_lib: ""
-            bundle_suffix: ""
+            cargo_features: onnx,coreml
+            tauri_args: --target aarch64-apple-darwin -- --no-default-features --features onnx,coreml
 
+          # ── macOS x86_64: CPU (CoreML not available on Intel Macs) ─────
           - name: macos-x86_64
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
-            cargo_no_default_features: "1"
             cargo_features: onnx
             tauri_args: --target x86_64-apple-darwin -- --no-default-features --features onnx
-            # x86_64 macOS uses ORT CPU provider to avoid CUDA prebuilt constraints.
-            ort_ep: cpu
-            ort_lib: ""
-            bundle_suffix: ""
 
+          # ── Linux x86_64: CPU + OpenCL ─────────────────────────────────
           - name: linux-x86_64
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
-            cargo_no_default_features: "1"
-            cargo_features: onnx
-            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx
-            ort_ep: ""
-            ort_lib: ""
-            bundle_suffix: ""
+            cargo_features: onnx,opencl
+            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx,opencl
+            ort_lib: gpu
 
+          # ── Linux ARM64: CPU + OpenCL ──────────────────────────────────
           - name: linux-arm64
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
-            cargo_no_default_features: "1"
-            cargo_features: onnx
-            tauri_args: --target aarch64-unknown-linux-gnu -- --no-default-features --features onnx
-            ort_ep: ""
-            ort_lib: ""
-            bundle_suffix: ""
-
-          - name: linux-x86_64-cuda
-            os: ubuntu-24.04
-            cargo_target: x86_64-unknown-linux-gnu
-            cargo_no_default_features: "1"
-            cargo_features: onnx,cuda
-            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx,cuda
-            ort_ep: "cuda"
-            # GPU build with ONNX Runtime CUDA provider for Linux.
+            cargo_features: onnx,opencl
+            tauri_args: --target aarch64-unknown-linux-gnu -- --no-default-features --features onnx,opencl
             ort_lib: gpu
-            bundle_suffix: "-cuda"
 
     steps:
       - uses: actions/checkout@v6
@@ -175,7 +132,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo registry (Windows)
         if: runner.os == 'Windows'
@@ -184,27 +141,12 @@ jobs:
           path: |
             %USERPROFILE%\.cargo\registry
             %USERPROFILE%\.cargo\git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Setup Rust toolchain (Windows x86_64)
-        if: runner.os == 'Windows' && runner.arch == 'X64'
+      - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
-          cache: false
-
-      - name: Setup Rust toolchain (Windows ARM64)
-        if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable-aarch64-pc-windows-msvc
-          cache: false
-
-      - name: Setup Rust toolchain (non-Windows)
-        if: runner.os != 'Windows'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+          toolchain: stable-${{ matrix.cargo_target }}
           cache: false
 
       - name: Setup Node.js
@@ -214,6 +156,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # ── System dependencies ───────────────────────────────────────────
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -221,83 +165,36 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
-
-      - name: Install CUDA toolkit + runtime libraries (Linux GPU)
-        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
-        shell: bash
-        run: |
-          chmod +x ./scripts/install-cuda-linux.sh
-          bash ./scripts/install-cuda-linux.sh
+          # OpenCL runtime for Linux GPU builds
+          if echo "${{ matrix.cargo_features }}" | grep -q opencl; then
+            sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
+          fi
 
       - name: Ensure AppImage bundling prerequisites (Linux)
-        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
+        if: runner.os == 'Linux'
         run: |
           set -euxo pipefail
           sudo apt-get update -y
           sudo apt-get install -y zsync desktop-file-utils libglib2.0-bin libgtk-3-bin librsvg2-bin appstream xdg-utils
-          command -v pkg-config
-          command -v patchelf
-          command -v mksquashfs
-          command -v glib-compile-schemas
-          command -v desktop-file-validate
-          command -v appstreamcli
-          command -v gtk-update-icon-cache
-          command -v xdg-open
-          if [ ! -x /usr/bin/xdg-open ]; then
-            XDG_OPEN_PATH="$(command -v xdg-open || true)"
-            if [ -n "$XDG_OPEN_PATH" ]; then
-              sudo mkdir -p /usr/bin
-              sudo ln -sf "$XDG_OPEN_PATH" /usr/bin/xdg-open
-            fi
-          fi
           test -x /usr/bin/xdg-open
-          if [ "${{ matrix.name }}" = "linux-x86_64" ]; then
-            command -v zsyncmake
-          fi
-        shell: bash
 
       - name: Generate Linux WebKit include map for AppImage
-        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
+        if: runner.os == 'Linux'
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
-
           mapfile -t WEBKIT_FILES < <(
-            {
-              dpkg -L libwebkit2gtk-4.1-0 2>/dev/null || true
-              dpkg -L libjavascriptcoregtk-4.1-0 2>/dev/null || true
-            } | grep -E '^/usr/lib/.+/(libwebkit2gtk-4.1\.so\.0|libjavascriptcoregtk-4.1\.so\.0|webkit2gtk-4.1($|/))' | sort -u
+            { dpkg -L libwebkit2gtk-4.1-0 2>/dev/null || true
+              dpkg -L libjavascriptcoregtk-4.1-0 2>/dev/null || true; } \
+            | grep -E '^/usr/lib/.+/(libwebkit2gtk-4.1\.so\.0|libjavascriptcoregtk-4.1\.so\.0|webkit2gtk-4.1($|/))' | sort -u
           )
-
           FILES_JSON='{}'
-          COUNT=0
           for src in "${WEBKIT_FILES[@]}"; do
-            if [ -e "$src" ]; then
-              dest="${src#/}"
-              FILES_JSON="$(jq -c --arg k "$dest" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
-              COUNT=$((COUNT + 1))
-            fi
+            [ -e "$src" ] && FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
           done
-
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No WebKit runtime files discovered for AppImage bundling."
-            exit 1
-          fi
-          
-
-          # Add SoundTouch shared library to AppImage files (built later by cargo build)
-          # NOTE: working-directory for this step is backend/src-tauri, so use GITHUB_WORKSPACE
           ST_SO_PATH="$GITHUB_WORKSPACE/backend/src-tauri/third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so"
           FILES_JSON="$(jq -c --arg k "usr/bin/libSoundTouchDLL.so" --arg v "$ST_SO_PATH" '. + {($k): $v}' <<<"$FILES_JSON")"
-
-          jq -n --argjson files "$FILES_JSON" '{
-            bundle: {
-              linux: { appimage: { files: $files } }
-            }
-          }' > tauri.linux.conf.json
-
-          echo "Generated tauri.linux.conf.json with $COUNT WebKit entries + SoundTouch"
-          jq '.bundle.linux.appimage.files | keys' tauri.linux.conf.json
+          jq -n --argjson files "$FILES_JSON" '{ bundle: { linux: { appimage: { files: $files } } } }' > tauri.linux.conf.json
         shell: bash
 
       - name: Install system dependencies (macOS)
@@ -307,126 +204,70 @@ jobs:
           SKIP_FRONTEND=1 bash ./scripts/install_deps_macos.sh
         shell: bash
 
-      - name: Ensure DMG toolchain availability (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          set -euxo pipefail
-          # tauri-bundler's bundle_dmg.sh invokes SetFile for volume icon metadata.
-          if ! command -v SetFile >/dev/null 2>&1; then
-            SETFILE_PATH="$(xcrun --find SetFile || true)"
-            if [ -n "$SETFILE_PATH" ]; then
-              echo "$(dirname "$SETFILE_PATH")" >> "$GITHUB_PATH"
-            else
-              echo '#!/usr/bin/env bash' | sudo tee /usr/local/bin/SetFile >/dev/null
-              echo 'exit 0' | sudo tee -a /usr/local/bin/SetFile >/dev/null
-              sudo chmod +x /usr/local/bin/SetFile
-            fi
-          fi
-          command -v hdiutil
-          command -v SetFile
-        shell: bash
-
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
-      - name: Download ONNX Runtime for Windows base build (DirectML support)
-        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+      # ── ONNX Runtime download ──────────────────────────────────────────
+
+      - name: Download ONNX Runtime (Windows — GPU with DirectML)
+        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
         shell: pwsh
         run: |
           $OrtDestDir = "backend\src-tauri\third_party\ort-bundle"
-          # Download the ORT GPU package which includes onnxruntime_providers_dml.dll
-          # (DirectML is bundled with the GPU package since ORT 1.17+).
+          # The ORT GPU package includes DirectML (compiled into onnxruntime.dll).
+          # CUDA/TensorRT DLLs are also downloaded but ignored by the build pipeline.
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-ort.ps1 -Gpu -DestDir $OrtDestDir
-          # Remove CUDA-specific DLLs that aren't needed for the DirectML-only build.
-          # This keeps the portable ZIP and build artifacts lean.
-          Get-ChildItem -Path $OrtDestDir -Filter "*.dll" | Where-Object {
-            $_.Name -match '^(cudart|cublas|cudnn|cufft|curand).*\.dll$' -or
-            $_.Name -match 'providers_(cuda|tensorrt)'
-          } | Remove-Item -Force
-          Get-ChildItem -Path $OrtDestDir -Filter "*.lib" | Where-Object {
-            $_.Name -match 'providers_(cuda|tensorrt)'
-          } | Remove-Item -Force
 
-      - name: Set ORT_LIB_LOCATION (Windows base, DirectML)
-        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+      - name: Set ORT_LIB_LOCATION (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
-          Write-Host "ORT_LIB_LOCATION=$OrtDir (DirectML build)"
           "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
 
-      - name: Download ONNX Runtime GPU for CUDA builds (Windows)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          $OrtDestDir = "backend\src-tauri\third_party\ort-bundle"
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-ort.ps1 -Gpu -DestDir $OrtDestDir
-
-      - name: Download NVIDIA CUDA runtime DLLs (Windows GPU)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          $CudaDestDir = "backend\src-tauri\third_party\ort-bundle"
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-cuda-runtime.ps1 -DestDir $CudaDestDir
-
-      - name: Download ONNX Runtime GPU for CUDA builds (Linux)
+      - name: Download ONNX Runtime (Linux — GPU)
         if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
         shell: bash
         run: |
           chmod +x ./scripts/download-ort.sh
           bash ./scripts/download-ort.sh
 
-      - name: Install frontend deps
-        run: |
-          npm --prefix frontend ci
+      # ── SoundTouch source ──────────────────────────────────────────────
 
       - name: Clone SoundTouch source
         run: |
           ST_DIR="backend/src-tauri/third_party/soundtouch-static"
           mkdir -p "$ST_DIR"
-          if [ -f "$ST_DIR/soundtouch/CMakeLists.txt" ]; then
-            echo "SoundTouch source already exists, skipping clone"
-            exit 0
-          fi
-          # Retry up to 5 times with exponential backoff (codeberg.org occasionally 504s)
+          [ -f "$ST_DIR/soundtouch/CMakeLists.txt" ] && { echo "SoundTouch already present"; exit 0; }
           GIT_TERMINAL_PROMPT=0
           export GIT_TERMINAL_PROMPT
           for i in $(seq 1 5); do
             if git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git "$ST_DIR/soundtouch" 2>&1; then
-              echo "SoundTouch clone succeeded (attempt $i)"
-              exit 0
+              echo "SoundTouch clone succeeded (attempt $i)"; exit 0
             fi
-            if [ "$i" -lt 5 ]; then
-              sleep_time=$((2 ** i))
-              echo "Clone attempt $i failed, retrying in ${sleep_time}s..."
-              sleep "$sleep_time"
-              rm -rf "$ST_DIR/soundtouch"
-            fi
+            [ "$i" -lt 5 ] && sleep $((2 ** i)) && rm -rf "$ST_DIR/soundtouch"
           done
-          echo "ERROR: SoundTouch clone failed after 5 attempts" >&2
-          exit 1
+          echo "ERROR: SoundTouch clone failed after 5 attempts" >&2; exit 1
         shell: bash
+
+      # ── Frontend deps ──────────────────────────────────────────────────
+
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
+
+      # ── cargo check (PR fast path) ─────────────────────────────────────
 
       - name: Build (cargo check) on Unix
         if: ${{ runner.os != 'Windows' && env.HIFISHIFTER_SKIP_CARGO_CHECK != '1' }}
         working-directory: backend/src-tauri
         env:
           HIFISHIFTER_SKIP_NATIVE_BUILD: "1"
-          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-          RUST_BACKTRACE: "1"
         run: |
-          if [ "${{ matrix.cargo_no_default_features }}" = "1" ]; then
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --no-default-features --features "${{ matrix.cargo_features }}" --verbose
-          else
-            EXTRA_FEATURES=""
-            if [ -n "${{ matrix.cargo_features }}" ]; then
-              EXTRA_FEATURES="--features ${{ matrix.cargo_features }}"
-            fi
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" $EXTRA_FEATURES --verbose
-          fi
+          cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" \
+            --no-default-features --features "${{ matrix.cargo_features }}" --verbose
         shell: bash
 
       - name: Build (cargo check) on Windows
@@ -434,221 +275,71 @@ jobs:
         working-directory: backend/src-tauri
         env:
           HIFISHIFTER_SKIP_NATIVE_BUILD: "1"
-          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         run: |
-          if ("${{ matrix.cargo_no_default_features }}" -eq "1") {
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --no-default-features --features "${{ matrix.cargo_features }}" --verbose
-          } else {
-            $extra = ""
-            if ("${{ matrix.cargo_features }}" -ne "") {
-              $extra = "--features ${{ matrix.cargo_features }}"
-            }
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" $extra --verbose
-          }
+          cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" \
+            --no-default-features --features "${{ matrix.cargo_features }}" --verbose
         shell: pwsh
 
-      - name: Set ORT_LIB_LOCATION (Windows GPU)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
-          Write-Host "ORT_LIB_LOCATION=$OrtDir"
-          "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
+      # ── Build + bundle ─────────────────────────────────────────────────
 
-      - name: Build and bundle via tauri-action
-        if: runner.os != 'Linux'
+      - name: Build and bundle (Windows)
+        if: runner.os == 'Windows'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-          HIFISHIFTER_ORT_EP: ${{ matrix.ort_ep }}
-          ORT_USE_CUDA: ${{ matrix.ort_lib == 'gpu' && '1' || '0' }}
         with:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
-      - name: Inject DLLs into NSIS installer (Windows base, DirectML)
-        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
-        shell: pwsh
-        run: |
-          $bundle = "backend\src-tauri\third_party\ort-bundle"
-          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
-            Write-Host "Injecting DirectML DLLs into NSIS installer..."
-            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "WARNING: DLL injection failed -- NSIS installer will lack DirectML support"
-            }
-          } else {
-            Write-Host "No DLLs found in ort-bundle/ -- skipping NSIS injection"
-          }
-
-      - name: Inject GPU DLLs into NSIS installer (Windows CUDA)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          $bundle = "backend\src-tauri\third_party\ort-bundle"
-          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
-            Write-Host "Injecting GPU DLLs into NSIS installer..."
-            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "WARNING: GPU DLL injection failed -- NSIS installer will lack GPU support"
-            }
-          } else {
-            Write-Host "No GPU DLLs found in ort-bundle/ -- skipping NSIS injection"
-          }
-
-      - name: Build Linux AppImage via tauri-action (primary)
-        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
-        id: linux-appimage-build
+      - name: Build and bundle (macOS)
+        if: runner.os == 'macOS'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-          HIFISHIFTER_ORT_EP: ${{ matrix.ort_ep }}
-          APPIMAGE_EXTRACT_AND_RUN: "1"
+        with:
+          projectPath: backend/src-tauri
+          args: ${{ matrix.tauri_args }}
+
+      # ── Linux AppImage ────────────────────────────────────────────────
+
+      - name: Build Linux AppImage
+        if: runner.os == 'Linux'
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} --bundles appimage -- --no-default-features --features ${{ matrix.cargo_features }}
+          args: --target ${{ matrix.cargo_target }} --bundles appimage -- ${{ matrix.tauri_args }}
 
-      - name: Build Linux CUDA binary (cargo)
-        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
-        env:
-          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
-          CARGO_TARGET: ${{ matrix.cargo_target }}
-          CARGO_FEATURES: ${{ matrix.cargo_features }}
-        shell: bash
-        run: |
-          chmod +x ./scripts/build-gpu-linux.sh
-          bash ./scripts/build-gpu-linux.sh
+      # ── Inject DLLs into NSIS installer (Windows) ─────────────────────
 
-      - name: Dump diagnostics on failure (Linux)
-        if: runner.os == 'Linux' && failure()
-        run: |
-          set -euxo pipefail
-          echo "==== Linux env ===="
-          uname -a || true
-          ldd --version || true
-          echo "==== Generated AppImage WebKit config ===="
-          cat backend/src-tauri/tauri.linux.conf.json || true
-          echo "==== Candidate bundle dirs ===="
-          find backend/src-tauri/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
-          echo "==== Candidate logs/files ===="
-          find backend/src-tauri/target -maxdepth 8 -type f | grep -E 'linuxdeploy|appimage|\.desktop|\.log$' || true
-        shell: bash
-
-      - name: Determine bundles artifact name (non-Windows)
-        if: runner.os != 'Windows'
-        id: determine-non-windows-bundles-name
-        run: |
-          $prod = 'HiFiShifter'
-          $ver = '0.0.0'
-          $conf = 'backend/src-tauri/tauri.conf.json'
-          if (Test-Path $conf) {
-            try {
-              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
-              if ($j.productName) { $prod = $j.productName }
-              if ($j.version) { $ver = $j.version }
-              if ($j.package) {
-                if (-not $j.productName -and $j.package.productName) { $prod = $j.package.productName }
-                if (-not $j.productName -and -not $j.package.productName -and $j.package.name) { $prod = $j.package.name }
-                if (-not $j.version -and $j.package.version) { $ver = $j.package.version }
-              }
-            } catch { }
-          }
-
-          $prod = $prod -replace '["\\/:*?<>|]', ''
-          $ver = $ver -replace '["\\/:*?<>|]', ''
-          $prodSafe = $prod -replace '\s+', '_'
-          $verSafe = $ver -replace '^v', ''
-
-          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-bundles"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
-        shell: pwsh
-
-      - name: Upload AppImage artifact (Linux)
-        if: runner.os == 'Linux' && matrix.ort_lib != 'gpu'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
-          path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
-
-      - name: Upload Linux CUDA binary artifact
-        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
-          path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/HiFiShifter
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/*.so*
-          if-no-files-found: error
-
-      - name: Upload DMG artifact (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.determine-non-windows-bundles-name.outputs.artifact-name }}
-          path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/dmg/*.dmg
-          if-no-files-found: error
-
-      - name: Determine Windows installer artifact name
+      - name: Inject DLLs into NSIS installer (Windows)
         if: runner.os == 'Windows'
-        id: determine-windows-installer-name
+        shell: pwsh
         run: |
-          $prod = 'HiFiShifter'
-          $ver = '0.0.0'
-          $conf = 'backend/src-tauri/tauri.conf.json'
-          if (Test-Path $conf) {
-            try {
-              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
-              if ($j.productName) { $prod = $j.productName }
-              if ($j.version) { $ver = $j.version }
-              if ($j.package) {
-                if (-not $j.productName -and $j.package.productName) { $prod = $j.package.productName }
-                if (-not $j.productName -and -not $j.package.productName -and $j.package.name) { $prod = $j.package.name }
-                if (-not $j.version -and $j.package.version) { $ver = $j.package.version }
-              }
-            } catch { }
-          }
-
-          $prod = $prod -replace '["\\/:*?<>|]', ''
-          $ver = $ver -replace '["\\/:*?<>|]', ''
-          $prodSafe = $prod -replace '\s+', '_'
-          $verSafe = $ver -replace '^v', ''
-
-          if ($env:RUNNER_ARCH -eq 'ARM64') {
-            $arch = 'arm64'
+          $bundle = "backend\src-tauri\third_party\ort-bundle"
+          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
+            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "WARNING: DLL injection failed"
+            }
           } else {
-            $arch = 'x86_64'
+            Write-Host "No DLLs found — skipping NSIS injection"
           }
 
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-installer"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
-        shell: pwsh
+      # ── Verify DLLs (Windows) ─────────────────────────────────────────
 
-      - name: Upload installer package (Windows)
+      - name: Verify GPU DLLs in release (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.determine-windows-installer-name.outputs.artifact-name }}
-          path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
-          if-no-files-found: error
-
-      - name: Verify DLLs in release directory (Windows base, DirectML)
-        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
         shell: pwsh
         run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-cuda-dlls.ps1 -DirectML -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-gpu-dlls.ps1 -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
 
-      - name: Verify CUDA DLLs in release directory (Windows GPU)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-cuda-dlls.ps1 -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
+      # ── Portable ZIP (Windows) ────────────────────────────────────────
 
       - name: Create portable ZIP (Windows)
         if: runner.os == 'Windows'
@@ -657,9 +348,10 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild
         shell: pwsh
 
-      - name: Determine Windows portable artifact name
-        if: runner.os == 'Windows'
-        id: determine-windows-portable-name
+      # ── Artifact naming ───────────────────────────────────────────────
+
+      - name: Determine artifact name
+        id: artifact-name
         run: |
           $prod = 'HiFiShifter'
           $ver = '0.0.0'
@@ -668,38 +360,64 @@ jobs:
             try {
               $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
               if ($j.productName) { $prod = $j.productName }
-              if ($j.version) { $ver = $j.version }
-              if ($j.package) {
-                if (-not $j.productName -and $j.package.productName) { $prod = $j.package.productName }
-                if (-not $j.productName -and -not $j.package.productName -and $j.package.name) { $prod = $j.package.name }
-                if (-not $j.version -and $j.package.version) { $ver = $j.package.version }
-              }
+              if ($j.package -and $j.package.version) { $ver = $j.package.version }
+              elseif ($j.version) { $ver = $j.version }
             } catch { }
           }
-
-          $prod = $prod -replace '["\\/:*?<>|]', ''
-          $ver = $ver -replace '["\\/:*?<>|]', ''
-          $prodSafe = $prod -replace '\s+', '_'
-          $verSafe = $ver -replace '^v', ''
-
-          if ($env:RUNNER_ARCH -eq 'ARM64') {
-            $arch = 'arm64'
-          } else {
-            $arch = 'x86_64'
-          }
-
-          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}${{ matrix.bundle_suffix }}-portable"
+          $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
+          $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
+          $artifactName = "${prodSafe}_v${verSafe}_${{ matrix.name }}-bundles"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
+
+      # ── Upload artifacts ───────────────────────────────────────────────
+
+      - name: Upload installer (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
 
       - name: Upload portable ZIP (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.determine-windows-portable-name.outputs.artifact-name }}
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
           path: |
             dist/*portable-win-*.zip
           if-no-files-found: warn
+
+      - name: Upload DMG (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - name: Upload AppImage (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          path: |
+            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Dump diagnostics on failure (Linux)
+        if: runner.os == 'Linux' && failure()
+        run: |
+          set -euxo pipefail
+          echo "==== Linux env ===="
+          uname -a || true
+          ldd --version || true
+          echo "==== Candidate bundle dirs ===="
+          find backend/src-tauri/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
+        shell: bash
 
   release-upload:
     name: Upload to GitHub Release
@@ -719,13 +437,10 @@ jobs:
 
       - name: Remove files larger than 2 GiB
         run: |
-          MAX_SIZE=$((2 * 1024 * 1024 * 1024))  # 2 GiB in bytes
+          MAX_SIZE=$((2 * 1024 * 1024 * 1024))
           find release-artifacts -type f -size +"${MAX_SIZE}"c -print0 | while IFS= read -r -d '' f; do
-            size=$(stat -c%s "$f" 2>/dev/null || echo 0)
-            if [ "$size" -gt "$MAX_SIZE" ]; then
-              echo "Skipping $(basename "$f"): $(numfmt --to=iec "$size") exceeds 2 GiB limit"
-              rm -f "$f"
-            fi
+            echo "Skipping $(basename "$f"): $(numfmt --to=iec "$(stat -c%s "$f")") exceeds 2 GiB limit"
+            rm -f "$f"
           done
 
       - name: Upload artifacts to Release

@@ -1,13 +1,10 @@
 //! Shared ORT session builder with consistent optimization policy.
 //!
 //! All three ONNX models (NSF-HiFiGAN, FCPE, HNSEP) should use the same
-//! optimization stack: Level3 graph opt, memory pattern, CUDA EP with arena
-//! limits, TF32, and heuristic conv search. This module centralizes that
-//! configuration so individual vocoder modules don't drift.
+//! optimization stack: Level3 graph opt, memory pattern, OpenCL/DirectML EP with
+//! limits, and fallback to CPU. This module centralizes that configuration so
+//! individual vocoder modules don't drift.
 
-use ort::ep;
-#[cfg(feature = "cuda")]
-use ort::ep::ExecutionProviderDispatch;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use serde::Serialize;
@@ -23,69 +20,6 @@ pub fn set_runtime_ep_override(ep: Option<String>) {
     if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
         *guard = ep;
     }
-}
-
-/// Runtime override for CUDA device ID. Set by `set_runtime_cuda_device_id()`.
-/// Takes precedence over the `HIFISHIFTER_ORT_CUDA_DEVICE_ID` env var.
-static RUNTIME_CUDA_DEVICE_ID: OnceLock<Mutex<Option<i32>>> = OnceLock::new();
-
-/// Set the runtime CUDA device ID override. Pass `None` to clear the override.
-/// This is called when the user changes the GPU device in the UI settings.
-pub fn set_runtime_cuda_device_id(device_id: i32) {
-    if let Ok(mut guard) = RUNTIME_CUDA_DEVICE_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    {
-        *guard = Some(device_id);
-    }
-}
-
-/// Clear the runtime CUDA device ID override (revert to env var or default 0).
-pub fn clear_runtime_cuda_device_id() {
-    if let Ok(mut guard) = RUNTIME_CUDA_DEVICE_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    {
-        *guard = None;
-    }
-}
-
-/// Returns the effective CUDA device ID, checking runtime override first,
-/// then env var, then defaulting to 0.
-fn cuda_device_id() -> i32 {
-    RUNTIME_CUDA_DEVICE_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or_else(|| env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0))
-}
-
-/// Runtime override for DirectML device ID. Set by `set_runtime_dml_device_id()`.
-/// Takes precedence over the `HIFISHIFTER_ORT_DML_DEVICE_ID` env var.
-/// `None` means "auto-select" (let DirectML pick the best device).
-static RUNTIME_DML_DEVICE_ID: OnceLock<Mutex<Option<Option<i32>>>> = OnceLock::new();
-
-/// Set the runtime DirectML device ID override. Pass `None` to auto-select.
-/// Pass `Some(id)` to force a specific adapter index.
-pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
-    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    {
-        *guard = Some(device_id);
-    }
-}
-
-/// Returns the effective DirectML device ID.
-/// `None` means auto-select (let DirectML pick).
-fn directml_device_id() -> Option<i32> {
-    RUNTIME_DML_DEVICE_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or_else(|| env_i32("HIFISHIFTER_ORT_DML_DEVICE_ID"))
 }
 
 /// Returns the runtime EP override if set, otherwise falls back to env var.
@@ -116,125 +50,57 @@ pub enum OrtSessionRole {
     Separator,
 }
 
-fn env_i32(name: &str) -> Option<i32> {
-    std::env::var(name)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-}
-
-/// Read `HIFISHIFTER_ORT_CUDA_MEM_LIMIT_MB` (default 8192 = 8 GB).
-/// Returns bytes.
-fn env_cuda_mem_limit_bytes() -> u64 {
-    let mb = std::env::var("HIFISHIFTER_ORT_CUDA_MEM_LIMIT_MB")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(8192);
-    mb.saturating_mul(1024 * 1024)
-}
-
-#[cfg(feature = "cuda")]
-fn build_cuda_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
-    let device_id = cuda_device_id();
-    let arena_bytes = env_cuda_mem_limit_bytes();
-
-    eprintln!(
-        "ort_session: build_cuda_ep role={role:?} device_id={device_id} arena_mb={}",
-        arena_bytes / (1024 * 1024)
-    );
-
-    let mut ep = ep::CUDA::default()
-        .with_device_id(device_id)
-        .with_memory_limit(arena_bytes as usize)
-        .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic)
-        .with_tf32(true);
-
-    // For the main vocoder, use larger arena; for analysis models, cap lower
-    // to avoid VRAM contention when all sessions are alive.
-    if matches!(role, OrtSessionRole::PitchDetector | OrtSessionRole::Separator) {
-        // Analysis models are smaller; halve the arena to leave room for the vocoder.
-        let reduced = arena_bytes / 2;
-        ep = ep::CUDA::default()
-            .with_device_id(device_id)
-            .with_memory_limit(reduced as usize)
-            .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic)
-            .with_tf32(true);
-    }
-
-    ep.build()
-}
-
 // ── EP registration helpers (feature-gated) ──────────────────────────────
 
-/// Try to register CUDA EP on a session builder. Returns `(builder, "cuda")` on
-/// success, or an error message on failure (EP not built in or not available).
-#[cfg(feature = "cuda")]
-fn try_register_cuda_ep(
-    builder: ort::session::builder::SessionBuilder,
-    role: OrtSessionRole,
-) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    builder
-        .with_execution_providers([build_cuda_ep(role)])
-        .map(|b| (b, "cuda"))
-        .map_err(|e| format!("enable CUDA EP failed: {e}"))
-}
-
-#[cfg(not(feature = "cuda"))]
-fn try_register_cuda_ep(
+/// Try to register OpenCL EP on a session builder.
+/// Uses ONNX Runtime's generic `SessionOptionsAppendExecutionProvider` API
+/// to register "OpenCLExecutionProvider" by name.  Works if the ORT DLL has
+/// the OpenCL provider compiled in; returns a clear error otherwise.
+#[cfg(feature = "opencl")]
+fn try_register_opencl_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let _ = (builder, _role);
-    Err("CUDA EP not compiled in this build".to_string())
-}
+    use ort::AsPointer;
+    use std::ffi::CString;
 
-/// Try to register TensorRT EP (with CUDA fallback) on a session builder.
-#[cfg(feature = "tensorrt")]
-fn try_register_trt_ep(
-    builder: ort::session::builder::SessionBuilder,
-    role: OrtSessionRole,
-) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    builder
-        .with_execution_providers([build_trt_ep(role), build_cuda_ep(role)])
-        .map(|b| (b, "trt"))
-        .map_err(|e| format!("enable TRT EP failed: {e}"))
-}
+    eprintln!("ort_session: try_register_opencl_ep");
 
-#[cfg(not(feature = "tensorrt"))]
-fn try_register_trt_ep(
-    builder: ort::session::builder::SessionBuilder,
-    _role: OrtSessionRole,
-) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let _ = (builder, _role);
-    Err("TensorRT EP not compiled in this build".to_string())
-}
+    let mut builder = builder;
+    let api = ort::api();
+    let provider_name =
+        CString::new("OpenCLExecutionProvider").map_err(|e| format!("invalid provider name: {e}"))?;
 
-#[cfg(feature = "tensorrt")]
-fn build_trt_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
-    let device_id = cuda_device_id();
-    let arena_bytes = env_cuda_mem_limit_bytes();
+    // Call the generic provider registration API.  This registers by name
+    // rather than requiring a specific symbol.  No provider options needed.
+    let status = unsafe {
+        (api.SessionOptionsAppendExecutionProvider)(
+            builder.ptr_mut(),
+            provider_name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        )
+    };
 
-    let mut ep = ep::TensorRT::default()
-        .with_device_id(device_id)
-        .with_max_workspace_size(arena_bytes as usize)
-        .with_fp16(true)
-        .with_engine_cache(true)
-        .with_engine_cache_path("K:\\REALAI\\dev\\trt_engine_cache")
-        .with_timing_cache(true)
-        .with_timing_cache_path("K:\\REALAI\\dev\\trt_timing_cache")
-        .with_force_timing_cache(true)
-        .with_build_heuristics(true)
-        .with_builder_optimization_level(3);
-
-    // For analysis models, cap workspace lower
-    if matches!(role, OrtSessionRole::PitchDetector | OrtSessionRole::Separator) {
-        ep = ep.with_max_workspace_size(arena_bytes as usize / 2);
+    if status.0.is_null() {
+        Ok((builder, "opencl"))
+    } else {
+        Err(
+            "OpenCL EP not available in this ONNX Runtime build (ORT was not compiled with --use_opencl)"
+                .to_string(),
+        )
     }
-
-    ep.build()
 }
 
-// ── DirectML EP registration (feature-gated) ─────────────────────────────
+#[cfg(not(feature = "opencl"))]
+fn try_register_opencl_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let _ = (builder, _role);
+    Err("OpenCL EP not compiled in this build".to_string())
+}
 
 /// Try to register DirectML EP on a session builder.
 /// DirectML uses DirectX 12 to accelerate ONNX models on any GPU (NVIDIA, AMD, Intel Arc).
@@ -244,18 +110,8 @@ fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let dml_device_id = directml_device_id();
-    eprintln!(
-        "ort_session: try_register_directml_ep device_id={}",
-        dml_device_id.map_or_else(|| "auto".to_string(), |id| id.to_string())
-    );
-
-    let ep = if let Some(device_id) = dml_device_id {
-        ep::DirectML::default().with_device_id(device_id).build()
-    } else {
-        ep::DirectML::default().build()
-    };
-
+    eprintln!("ort_session: try_register_directml_ep");
+    let ep = ort::ep::DirectML::default().build();
     builder
         .with_execution_providers([ep])
         .map(|b| (b, "directml"))
@@ -282,100 +138,39 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
     let choice = ep_choice();
-    let selected: &str;
+    let mut selected: &str = "cpu";
 
     match choice.as_str() {
         "cpu" => {
             selected = "cpu";
         }
-        "cuda" => {
-            // Clone so that the original builder is preserved if CUDA EP fails.
-            match try_register_cuda_ep(builder.clone(), role) {
-                Ok((b, ep)) => {
-                    builder = b;
-                    selected = ep;
-                }
-                Err(e) => {
-                    eprintln!("ort_session: {e}, falling back to CPU");
-                    selected = "cpu";
-                }
-            }
-        }
-        "directml" | "dml" => {
-            match try_register_directml_ep(builder.clone(), role) {
-                Ok((b, ep)) => {
-                    builder = b;
-                    selected = ep;
-                }
-                Err(e) => {
-                    eprintln!("ort_session: {e}, falling back to CPU");
-                    selected = "cpu";
-                }
-            }
-        }
-        "trt" => {
-            // Clone before each attempt so we can fall back cleanly.
-            match try_register_trt_ep(builder.clone(), role) {
-                Ok((b, ep)) => {
-                    builder = b;
-                    selected = ep;
-                }
-                Err(e) => {
-                    eprintln!("ort_session: {e}, trying CUDA");
-                    match try_register_cuda_ep(builder.clone(), role) {
-                        Ok((b, ep)) => {
-                            builder = b;
-                            selected = ep;
-                        }
-                        Err(e2) => {
-                            eprintln!("ort_session: {e2}, falling back to CPU");
-                            selected = "cpu";
-                        }
-                    }
-                }
-            }
-        }
         _ => {
-            // "auto": try TRT first, then CUDA, then DirectML, fall back to CPU.
-            match try_register_trt_ep(builder.clone(), role) {
-                Ok((b, ep)) => {
-                    builder = b;
-                    selected = ep;
+            // "auto" / "gpu" / "directml" / "opencl" / "cuda" →
+            // try the platform-specific GPU backend, fall back to CPU.
+            let mut tried = false;
+            #[cfg(feature = "directml")]
+            {
+                match try_register_directml_ep(builder.clone(), role) {
+                    Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
+                    Err(e) => { eprintln!("ort_session: {e}"); }
                 }
-                Err(e) => {
-                    eprintln!("ort_session: TRT EP unavailable for {role:?}: {e}, trying CUDA");
-                    match try_register_cuda_ep(builder.clone(), role) {
-                        Ok((b, ep)) => {
-                            builder = b;
-                            selected = ep;
-                        }
-                        Err(e2) => {
-                            eprintln!(
-                                "ort_session: CUDA EP unavailable for {role:?}: {e2}, trying DirectML"
-                            );
-                            match try_register_directml_ep(builder.clone(), role) {
-                                Ok((b, ep)) => {
-                                    builder = b;
-                                    selected = ep;
-                                }
-                                Err(e3) => {
-                                    eprintln!(
-                                        "ort_session: DirectML EP unavailable for {role:?}: {e3}, falling back to CPU"
-                                    );
-                                    selected = "cpu";
-                                }
-                            }
-                        }
-                    }
+            }
+            #[cfg(feature = "opencl")]
+            if !tried {
+                match try_register_opencl_ep(builder.clone(), role) {
+                    Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
+                    Err(e) => { eprintln!("ort_session: {e}"); }
                 }
+            }
+            if !tried {
+                selected = "cpu";
             }
         }
     }
 
     eprintln!(
-        "ort_session: role={role:?} ep={selected} (ep_choice={choice:?}, env={:?}, cuda_mem_limit={}MB)",
+        "ort_session: role={role:?} ep={selected} (ep_choice={choice:?}, env={:?})",
         env_ep_choice(),
-        env_cuda_mem_limit_bytes() / (1024 * 1024)
     );
 
     // Level3: full graph optimization (operator fusion, constant folding, layout opt).
@@ -408,26 +203,20 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     Ok((session, selected.to_string()))
 }
 
-// ─── CUDA Diagnostic & Provider Enumeration ────────────────────────────────
+// ─── GPU Diagnostic & Provider Enumeration ────────────────────────────────
 
-/// Diagnostic info about CUDA/GPU setup for user-facing reporting.
+/// Diagnostic info about GPU setup for user-facing reporting.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CudaDiagnostic {
+pub struct GpuDiagnostic {
     /// List of all ONNX Runtime execution provider names available in the DLL.
     pub available_providers: Vec<String>,
-    /// The EP that was actually selected (e.g. "cuda", "cpu").
+    /// The EP that was actually selected (e.g. "directml", "opencl", "cpu").
     pub selected_ep: String,
-    /// CUDA device ID that was requested (from env or default 0).
-    pub cuda_device_id: i32,
-    /// Whether a CUDA smoke test passed (GPU is actually executing).
-    pub cuda_smoke_test_passed: bool,
-    /// Human-readable error if smoke test failed.
-    pub cuda_smoke_test_error: Option<String>,
+    /// GPU device ID that was requested (from env or default 0).
+    pub gpu_device_id: i32,
     /// The ONNX Runtime build info string.
     pub ort_build_info: String,
-    /// Critical CUDA DLLs found on disk (cublas, cudnn). Each entry is (dll_name, found).
-    pub cuda_dll_status: Vec<(String, bool)>,
 }
 
 /// Enumerate available ONNX Runtime execution providers.
@@ -437,50 +226,17 @@ pub struct CudaDiagnostic {
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
-    // Try to register CUDA EP on a dummy session builder to check availability
-    if probe_cuda_ep_available() {
-        providers.push("CUDAExecutionProvider".to_string());
-    }
-
-    #[cfg(feature = "tensorrt")]
-    {
-        // TensorRT depends on CUDA being available
-        if probe_cuda_ep_available() {
-            providers.push("TensorrtExecutionProvider".to_string());
-        }
-    }
-
-    // DirectML is Windows-only and independent of CUDA
+    // DirectML is Windows-only
     if probe_directml_ep_available() {
         providers.push("DmlExecutionProvider".to_string());
     }
 
-    providers
-}
-
-/// Quick check: try registering CUDA EP on a temporary session builder.
-/// Returns true if CUDA EP is available in the loaded ORT DLL.
-#[cfg(feature = "cuda")]
-fn probe_cuda_ep_available() -> bool {
-    // Try to build a minimal CUDA EP and check if the registration API is available
-    match Session::builder() {
-        Ok(builder) => {
-            let ep = ep::CUDA::default()
-                .with_device_id(0)
-                .build();
-            match builder.with_execution_providers([ep]) {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        }
-        Err(_) => false,
+    // OpenCL works across platforms
+    if probe_opencl_ep_available() {
+        providers.push("OpenCLExecutionProvider".to_string());
     }
-}
 
-/// Stub: CUDA EP not compiled in.
-#[cfg(not(feature = "cuda"))]
-const fn probe_cuda_ep_available() -> bool {
-    false
+    providers
 }
 
 /// Quick check: try registering DirectML EP on a temporary session builder.
@@ -489,7 +245,7 @@ const fn probe_cuda_ep_available() -> bool {
 fn probe_directml_ep_available() -> bool {
     match Session::builder() {
         Ok(builder) => {
-            let ep = ep::DirectML::default().build();
+            let ep = ort::ep::DirectML::default().build();
             match builder.with_execution_providers([ep]) {
                 Ok(_) => true,
                 Err(_) => false,
@@ -505,125 +261,64 @@ const fn probe_directml_ep_available() -> bool {
     false
 }
 
-/// Check if critical CUDA DLLs can be found via the system DLL search path.
-/// Public for use in benchmarks and diagnostics.
-pub fn probe_cuda_dlls() -> Vec<(String, bool)> {
-    #[cfg(windows)]
-    {
-        let critical = [
-            "cudart64_12.dll",  // CUDA Runtime (GPU communication)
-            "cublas64_12.dll",  // cuBLAS (matrix ops)
-            "cufft64_11.dll",   // cuFFT (FFT ops)
-            "cudnn64_9.dll",    // cuDNN (deep neural network ops)
-        ];
-        critical
-            .iter()
-            .map(|name| {
-                let found = probe_dll(name);
-                (name.to_string(), found)
-            })
-            .collect()
-    }
-    #[cfg(not(windows))]
-    {
-        let critical = [
-            "libcublas.so.12",
-            "libcudnn.so.9",
-            "libcudart.so.12",
-        ];
-        critical
-            .iter()
-            .map(|name| {
-                let found = probe_dll(name);
-                (name.to_string(), found)
-            })
-            .collect()
-    }
+/// Quick check: try registering "OpenCLExecutionProvider" by name via the
+/// generic `SessionOptionsAppendExecutionProvider` API.  Returns true if
+/// the provider registered successfully (meaning ORT was compiled with
+/// OpenCL support and the provider DLL/backend is available).
+#[cfg(feature = "opencl")]
+fn probe_opencl_ep_available() -> bool {
+    use ort::AsPointer;
+    use std::ffi::CString;
+
+    // Safety: ort::api() panics if called before ort::init().  This probe is
+    // only called from diagnose_available_providers() which is only reached
+    // after ensure_ort_init() succeeds.
+    let Ok(builder) = Session::builder() else {
+        return false;
+    };
+    let Ok(provider_name) = CString::new("OpenCLExecutionProvider") else {
+        return false;
+    };
+    let api = ort::api();
+    let append_fn = api.SessionOptionsAppendExecutionProvider;
+    let mut builder = builder;
+    let status = unsafe {
+        append_fn(
+            builder.ptr_mut(),
+            provider_name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        )
+    };
+    let ok = status.0.is_null();
+    eprintln!(
+        "ort_session: probe_opencl_ep — {}",
+        if ok { "AVAILABLE" } else { "NOT available (ORT built without --use_opencl)" }
+    );
+    ok
 }
 
-/// Check if a DLL/SO file exists in common locations on disk.
-#[cfg(windows)]
-fn probe_dll(name: &str) -> bool {
-    // Check common locations
-    let paths: Vec<Option<std::path::PathBuf>> = vec![
-        // Next to the executable
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join(name))),
-        // ORT_LIB_LOCATION
-        std::env::var("ORT_LIB_LOCATION")
-            .ok()
-            .map(|d| std::path::PathBuf::from(d).join(name)),
-        // CUDA Toolkit v12.6
-        Some(std::path::PathBuf::from(format!(
-            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\{name}"
-        ))),
-        // CUDA Toolkit v12.5
-        Some(std::path::PathBuf::from(format!(
-            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\{name}"
-        ))),
-        // CUDA Toolkit v12.4
-        Some(std::path::PathBuf::from(format!(
-            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin\\{name}"
-        ))),
-        // System32
-        Some(std::path::PathBuf::from(format!(
-            "C:\\Windows\\System32\\{name}"
-        ))),
-    ];
-    for path in paths.iter().flatten() {
-        if path.exists() {
-            return true;
-        }
-    }
+/// Stub: OpenCL EP not compiled in.
+#[cfg(not(feature = "opencl"))]
+const fn probe_opencl_ep_available() -> bool {
     false
 }
 
-#[cfg(not(windows))]
-fn probe_dll(name: &str) -> bool {
-    // On Linux, check common paths
-    let paths = [
-        format!("/usr/lib/x86_64-linux-gnu/{name}"),
-        format!("/usr/local/cuda/lib64/{name}"),
-        std::env::var("ORT_LIB_LOCATION")
-            .ok()
-            .map(|d| format!("{d}/{name}"))
-            .unwrap_or_default(),
-    ];
-    for path in &paths {
-        if std::path::Path::new(path).exists() {
-            return true;
-        }
-    }
-    false
-}
-
-/// Full CUDA diagnostic: providers, DLL status, device info.
+/// Full GPU diagnostic: providers, device info.
 ///
 /// Does NOT include a smoke test (that requires a model, handled by nsf_hifigan_onnx).
-pub fn diagnose_cuda() -> CudaDiagnostic {
+pub fn diagnose_gpu() -> GpuDiagnostic {
     let available_providers = diagnose_available_providers();
     let selected_ep = ep_choice();
-    let dev_id = cuda_device_id();
+    let gpu_device_id = 0;
     let ort_build_info = ort::info().to_string();
-    let cuda_dll_status = probe_cuda_dlls();
 
-    // Smoke test must be done with an actual model — handled by the caller
-    let cuda_available = available_providers.iter().any(|p| p.contains("CUDA"));
-    let (cuda_smoke_test_passed, cuda_smoke_test_error) = if cuda_available {
-        (false, Some("Smoke test requires model — run benchmark to verify GPU execution".to_string()))
-    } else {
-        (false, Some("CUDAExecutionProvider not available in ONNX Runtime DLL".to_string()))
-    };
-
-    CudaDiagnostic {
+    GpuDiagnostic {
         available_providers,
         selected_ep,
-        cuda_device_id: dev_id,
-        cuda_smoke_test_passed,
-        cuda_smoke_test_error,
+        gpu_device_id,
         ort_build_info,
-        cuda_dll_status,
     }
 }
 
@@ -631,7 +326,7 @@ pub fn diagnose_cuda() -> CudaDiagnostic {
 /// benchmark session, restoring the previous value on drop.
 ///
 /// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
-/// "cuda") without permanently changing the process-wide setting.
+/// "opencl") without permanently changing the process-wide setting.
 ///
 /// Only sets the runtime override (mutex-protected), NOT the env var.
 /// The runtime override takes precedence in `ep_choice()` over the env var,

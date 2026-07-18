@@ -4194,6 +4194,13 @@ impl AppState {
         let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let pb = self.audio_engine.snapshot_state();
 
+        let gpu_backend = {
+            #[cfg(feature = "directml")] { "DirectML" }
+            #[cfg(all(feature = "opencl", not(feature = "directml")))] { "OpenCL" }
+            #[cfg(all(feature = "coreml", not(any(feature = "directml", feature = "opencl"))))] { "CoreML" }
+            #[cfg(not(any(feature = "directml", feature = "opencl", feature = "coreml")))] { "" }
+        };
+
         RuntimeInfoPayload {
             ok: true,
             device: rt.device.clone(),
@@ -4203,6 +4210,7 @@ impl AppState {
             is_playing: Some(pb.is_playing),
             playback_target: pb.target.clone(),
             timeline: None,
+            gpu_backend: gpu_backend.to_string(),
         }
     }
 

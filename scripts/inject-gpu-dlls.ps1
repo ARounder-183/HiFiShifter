@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Inject ALL GPU DLLs (CUDA or DirectML) from ort-bundle/ into a
+    Inject ALL GPU DLLs (OpenCL or DirectML) from ort-bundle/ into a
     Tauri-generated NSIS installer script, then re-run makensis.
 
 .DESCRIPTION
@@ -11,9 +11,7 @@
     this script injects every DLL from ort-bundle/ directly into the
     generated NSIS script.
 
-    Works for both CUDA and DirectML builds:
-      - CUDA: injects onnxruntime + CUDA + cuDNN + cuBLAS + DirectML DLLs
-      - DirectML: injects onnxruntime + DirectML DLLs (no CUDA runtime)
+    Works for both OpenCL and DirectML builds.
 
     Why not use Tauri resources for GPU DLLs?
       1. ort-bundle/ DLLs only exist after a GPU dependency download.
@@ -21,9 +19,9 @@
          on fresh clones / CPU builds).
       3. NSIS injection is Ctrl+C safe - the NSIS script lives in
          target/, not in the git working tree.
-      4. The precompiled engine DLL (~500 MB) needs SetCompress off
-         to avoid NSIS 32-bit mmap crashes, which requires post-hoc
-         NSIS script patching anyway.
+      4. Large DLLs (>400 MB) need SetCompress off to avoid NSIS
+         32-bit mmap crashes, which requires post-hoc NSIS script
+         patching anyway.
 
 .DEPENDENCY
     makensis - Tauri downloads its own NSIS to %LOCALAPPDATA%\tauri\NSIS\
@@ -34,10 +32,8 @@
     The Rust target triple (e.g., x86_64-pc-windows-msvc).
 
 .EXAMPLE
-    .\scripts\inject-gpu-dlls.ps1                           # CUDA installer
+    .\scripts\inject-gpu-dlls.ps1
     .\scripts\inject-gpu-dlls.ps1 -TargetTriple aarch64-pc-windows-msvc
-
-    # For DirectML: run build-gpu.ps1 -DirectML -Bundle (which calls this script)
 #>
 
 [CmdletBinding()]
@@ -76,11 +72,18 @@ if (-not (Test-Path $NsisScript)) {
 
 if (-not (Test-Path $BundleDir)) {
     Write-Error "ort-bundle/ directory not found: $BundleDir"
-    Write-Error "Run setup-windows.ps1 (CUDA) or setup-windows.ps1 -DirectML first."
+    Write-Error "Run setup-windows.ps1 first."
     exit 1
 }
 
 $allDlls = @(Get-ChildItem "$BundleDir\*.dll" -ErrorAction SilentlyContinue)
+# Filter out CUDA/TensorRT DLLs — HiFiShifter does not use them.
+# They come from the ORT GPU package and are left on disk but never included in builds.
+$allDlls = @($allDlls | Where-Object {
+    $n = $_.Name.ToLower()
+    $n -notmatch '^(cudart|cublas|cudnn|cufft|curand)' -and
+    $n -notmatch 'providers_(cuda|tensorrt)'
+})
 if ($allDlls.Count -eq 0) {
     Write-Error "No DLLs found in $BundleDir"
     Write-Error "Run setup-windows.ps1 to populate ort-bundle/."
@@ -108,7 +111,7 @@ Write-Host "[1/4] Patching NSIS script..." -ForegroundColor Yellow
 $script = [System.IO.File]::ReadAllText($NsisScript, [System.Text.UTF8Encoding]::new($false))
 
 # ---- 2a. Switch from solid to non-solid compression ----------------------
-# Solid mode compressors mmap the entire output data block → overflows
+# Solid mode compressors mmap the entire output data block -> overflows
 # NSIS's 32-bit address space when large files are included.  Non-solid
 # compresses each file independently and respects SetCompress off.
 $solidMarker  = 'SetCompressor /SOLID "lzma"'
@@ -125,12 +128,12 @@ if ($script.IndexOf($solidMarker) -ge 0) {
 # Uninstall section: Delete for each GPU DLL
 $installLines   = ""
 $uninstallLines = ""
-$precompiledName = "cudnn_engines_precompiled64_9.dll"
+$largeDllThreshold = 400 * 1024 * 1024  # 400 MB - SetCompress off threshold
 
 foreach ($dll in $allDlls) {
     $absPath = $dll.FullName
-    if ($dll.Name -eq $precompiledName) {
-        # Store UNCOMPRESSED - NSIS 32-bit cannot mmap this 500+ MB file
+    if ($dll.Length -gt $largeDllThreshold) {
+        # Store UNCOMPRESSED - NSIS 32-bit cannot mmap this large file
         $installLines += @"
 
   ; $($dll.Name) - stored UNCOMPRESSED (NSIS 32-bit mmap limit)

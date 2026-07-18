@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ONNX RuntimeとCUDAランタイムを自動的にインストールします（Rustツールチェーンは**デフォルトでスキップ**されます。`-InstallRust` で有効化してください）：
+HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ONNX Runtimeを自動的にインストールします（Rustツールチェーンは**デフォルトでスキップ**されます。`-InstallRust` で有効化してください）：
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -155,7 +155,6 @@ HiFiShifterは**ワンクリック環境セットアップスクリプト**を�
 
 - `-InstallRust`：プロジェクトローカルのポータブルRustツールチェーンをインストール（デフォルトではスキップ、システム全体のRustを使用）
 - `-SkipOrt`：ONNX Runtimeのダウンロードをスキップ
-- `-SkipCudaRuntime`：CUDAランタイムのダウンロードをスキップ
 - `-SkipFrontend`：フロントエンド依存関係のインストールをスキップ
 - `-LocalOrtDir <path>`：事前に展開されたORTディレクトリからコピー（ネットワーク不要）
 - `-LocalPackage <path>`：ローカルにダウンロードしたORT ZIPアーカイブから展開（ネットワーク不要）
@@ -221,67 +220,52 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPUアクセラレーションビルド（CUDA）
+### 4. GPUアクセラレーションビルド
 
-HiFiShifterはNVIDIA CUDAによるGPUアクセラレーション推論をサポートします。
+| プラットフォーム | GPU技術 | 説明 |
+|------|---------|------|
+| Windows x86_64 / ARM64 | DirectML (DirectX 12) | onnxruntime.dllにコンパイル済み、NVIDIA / AMD / Intel Arcに対応 |
+| macOS ARM64 (Apple Silicon) | CoreML | Apple Neural Engine、自動有効化 |
+| macOS x86_64 (Intel) | — | CPUのみ |
+| Linux x86_64 / ARM64 | OpenCL | クロスプラットフォームGPUアクセラレーション |
 
-#### Windows（CUDA）
+詳細なビルド手順は各プラットフォームの説明を参照してください。
 
-前提条件：
-
-- CUDA対応のNVIDIA GPU
-- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
-
-ワンクリック環境セットアップ：
+#### Windows
 
 ```powershell
+# ワンクリック環境セットアップ
 .\scripts\setup-windows.ps1
-```
 
-開発モード（ホットリロード）：
-
-```powershell
+# 開発モード（ホットリロード）
 .\scripts\build-gpu.ps1 -Dev
-```
 
-リリースビルド：
-
-```powershell
-# 高速ビルド（バイナリのみ、インストーラなし）
+# リリースビルド
 .\scripts\build-gpu.ps1
 
-# 高速ビルド + ファイルログ（タイムスタンプ付き log.txt、exe と同じ場所）
-.\scripts\build-gpu.ps1 -Log
-
-# フルビルド（バイナリ + NSIS インストーラ、大容量 GPU コンポーネントの圧縮により低速）
+# フルビルド（NSISインストーラー）
 .\scripts\build-gpu.ps1 -Bundle
-```
 
-ビルド後、ポータブルZIPを作成：
-
-```powershell
+# ポータブルZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
 
-#### Linux（CUDA）
-
-前提条件：
-
-- CUDA対応のNVIDIA GPU
-- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
+#### Linux
 
 ```bash
-# システム依存関係のインストール（CUDAツールキットを含む）
-sudo bash ./scripts/install-cuda-linux.sh
+# OpenCLランタイムのインストール
+sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
 
-# ONNX Runtime GPU + cuDNNのダウンロード
+# ONNX Runtime GPUのダウンロード
 bash ./scripts/download-ort.sh
 
 # ビルド
 bash ./scripts/build-gpu-linux.sh
 ```
 
-> **注意：** macOSは現在CUDA GPUアクセラレーションをサポートしていません。
+#### macOS
+
+追加設定は不要です。macOS ARM64はCoreMLアクセラレーションを自動的に有効化します。
 
 ## クイックスタート
 

@@ -12,11 +12,10 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    // Apply EP and CUDA device settings on load — all three ONNX models
+    // Apply EP settings on load — all three ONNX models
     crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
     crate::hnsep_onnx::update_ort_ep(&settings.ort_ep);
     crate::fcpe_onnx::update_ort_ep(&settings.ort_ep);
-    crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
     // Sync background render setting
     crate::commands::playback::AUTO_BG_RENDER_ENABLED
         .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
@@ -27,12 +26,11 @@ pub(super) fn save_ui_settings(
     state: State<'_, AppState>,
     settings: UiSettings,
 ) -> serde_json::Value {
-    // Check if EP choice or CUDA device ID has changed
-    let (prev_ep, prev_cuda_device_id) = if let Some(dir) = state.config_dir.get() {
-        let s = crate::config::load_ui_settings(dir);
-        (s.ort_ep, s.cuda_device_id)
+    // Check if EP choice has changed
+    let prev_ep = if let Some(dir) = state.config_dir.get() {
+        crate::config::load_ui_settings(dir).ort_ep
     } else {
-        ("auto".to_string(), 0)
+        "auto".to_string()
     };
 
     if let Some(dir) = state.config_dir.get() {
@@ -42,18 +40,12 @@ pub(super) fn save_ui_settings(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    // Sync background render setting
     crate::commands::playback::AUTO_BG_RENDER_ENABLED
         .store(settings.auto_background_render, std::sync::atomic::Ordering::Relaxed);
 
     let ep_changed = prev_ep != settings.ort_ep;
-    let device_changed = prev_cuda_device_id != settings.cuda_device_id;
 
-    // Apply CUDA device ID (always apply on save, it's cheap)
-    crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
-
-    // If EP choice or device changed, rebuild all three ONNX sessions
-    if ep_changed || device_changed {
+    if ep_changed {
         crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
         crate::hnsep_onnx::update_ort_ep(&settings.ort_ep);
         crate::fcpe_onnx::update_ort_ep(&settings.ort_ep);

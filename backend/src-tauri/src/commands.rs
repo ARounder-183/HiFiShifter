@@ -870,13 +870,17 @@ pub fn get_onnx_diagnostic() -> crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
-    onnx_status::run_vocoder_benchmark()
+pub async fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::BenchmarkResults, String> {
+    // Offload the CPU/GPU-intensive benchmark to a blocking thread so the
+    // async runtime stays responsive and the UI doesn't freeze.
+    tauri::async_runtime::spawn_blocking(move || onnx_status::run_vocoder_benchmark())
+        .await
+        .map_err(|e| format!("benchmark task panicked: {e}"))?
 }
 
-/// Enumerate all NVIDIA GPUs via NVML (Windows) or return empty list (other platforms).
+/// Enumerate all GPUs via NVML (Windows) or return empty list (other platforms).
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_gpu_devices() -> crate::cuda_info::GpuEnumerationResult {
+pub fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
     onnx_status::get_gpu_devices()
 }
 

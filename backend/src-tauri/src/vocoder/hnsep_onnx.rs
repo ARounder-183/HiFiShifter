@@ -114,7 +114,7 @@ pub fn drop_shared_session() {
 }
 
 /// Reset the shared session so the next inference rebuilds it with the
-/// current EP choice (e.g. after user switches from CUDA to DirectML).
+/// current EP choice (e.g. after user switches from OpenCL to DirectML).
 pub fn update_ort_ep(_choice: &str) {
     if let Some(mutex) = SHARED_SESSION.get() {
         if let Ok(mut guard) = mutex.lock() {

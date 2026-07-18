@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter는 ONNX Runtime과 CUDA 런타임을 자동으로 설치하는 **원클릭 환경 설정 스크립트**를 제공합니다 (Rust 도구 체인은 **기본적으로 건너뜁니다**. `-InstallRust`로 활성화하세요):
+HiFiShifter는 ONNX Runtime을 자동으로 설치하는 **원클릭 환경 설정 스크립트**를 제공합니다 (Rust 도구 체인은 **기본적으로 건너뜁니다**. `-InstallRust`로 활성화하세요):
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -155,7 +155,6 @@ HiFiShifter는 ONNX Runtime과 CUDA 런타임을 자동으로 설치하는 **원
 
 - `-InstallRust`: 프로젝트 로컬 휴대용 Rust 도구 체인 설치 (기본값: 건너뜀, 시스템 전역 Rust 사용)
 - `-SkipOrt`: ONNX Runtime 다운로드 건너뛰기
-- `-SkipCudaRuntime`: CUDA 런타임 다운로드 건너뛰기
 - `-SkipFrontend`: 프론트엔드 종속성 설치 건너뛰기
 - `-LocalOrtDir <path>`: 미리 압축 해제된 ORT 디렉토리에서 복사 (네트워크 불필요)
 - `-LocalPackage <path>`: 로컬에 다운로드된 ORT ZIP 아카이브에서 압축 해제 (네트워크 불필요)
@@ -221,67 +220,52 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 가속 빌드 (CUDA)
+### 4. GPU 가속 빌드
 
-HiFiShifter는 NVIDIA CUDA를 통한 GPU 가속 추론을 지원합니다.
+| 플랫폼 | GPU 기술 | 설명 |
+|------|---------|------|
+| Windows x86_64 / ARM64 | DirectML (DirectX 12) | onnxruntime.dll에 내장, NVIDIA / AMD / Intel Arc 지원 |
+| macOS ARM64 (Apple Silicon) | CoreML | Apple Neural Engine, 자동 활성화 |
+| macOS x86_64 (Intel) | — | CPU only |
+| Linux x86_64 / ARM64 | OpenCL | 크로스 플랫폼 GPU 가속 |
 
-#### Windows (CUDA)
+상세 빌드 방법은 각 플랫폼 설명을 참조하세요.
 
-필수 조건:
-
-- CUDA를 지원하는 NVIDIA GPU
-- [NVIDIA 디스플레이 드라이버](https://www.nvidia.com/drivers) (버전 ≥ 545)
-
-원클릭 환경 설정:
+#### Windows
 
 ```powershell
+# 원클릭 환경 설정
 .\scripts\setup-windows.ps1
-```
 
-개발 모드 (핫 리로드):
-
-```powershell
+# 개발 모드 (핫 리로드)
 .\scripts\build-gpu.ps1 -Dev
-```
 
-릴리스 빌드:
-
-```powershell
-# 빠른 빌드 (바이너리만, 설치 프로그램 없음)
+# 릴리스 빌드
 .\scripts\build-gpu.ps1
 
-# 빠른 빌드 + 파일 로그 (타임스탬프가 있는 log.txt, exe 옆에 위치)
-.\scripts\build-gpu.ps1 -Log
-
-# 전체 빌드 (바이너리 + NSIS 설치 프로그램, 대용량 GPU 구성 요소 압축으로 인해 느림)
+# 전체 빌드 (NSIS 설치 프로그램)
 .\scripts\build-gpu.ps1 -Bundle
-```
 
-빌드 후 휴대용 ZIP 생성:
-
-```powershell
+# 휴대용 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
 
-#### Linux (CUDA)
-
-필수 조건:
-
-- CUDA를 지원하는 NVIDIA GPU
-- [NVIDIA 디스플레이 드라이버](https://www.nvidia.com/drivers) (버전 ≥ 545)
+#### Linux
 
 ```bash
-# 시스템 종속성 설치 (CUDA 툴킷 포함)
-sudo bash ./scripts/install-cuda-linux.sh
+# OpenCL 런타임 설치
+sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
 
-# ONNX Runtime GPU + cuDNN 다운로드
+# ONNX Runtime GPU 다운로드
 bash ./scripts/download-ort.sh
 
 # 빌드
 bash ./scripts/build-gpu-linux.sh
 ```
 
-> **참고:** macOS는 현재 CUDA GPU 가속을 지원하지 않습니다.
+#### macOS
+
+추가 설정이 필요하지 않습니다. macOS ARM64는 CoreML 가속을 자동으로 활성화합니다.
 
 ## 빠른 시작
 

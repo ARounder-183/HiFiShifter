@@ -1,7 +1,7 @@
 fn main() {
-    // Always purge stale ORT/CUDA DLLs from the cargo output directory so
+    // Always purge stale ORT/GPU DLLs from the cargo output directory so
     // they don't leak from a previous GPU build into a non-GPU portable ZIP.
-    // Fresh DLLs are only staged when the `cuda` feature is active.
+    // Fresh DLLs are only staged when a `gpu` feature is active.
     clean_stale_ort_dlls();
 
     build_frontend();
@@ -641,43 +641,27 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Remove stale ORT/CUDA DLLs from the cargo output directory and stage
+/// Remove stale ORT/GPU DLLs from the cargo output directory and stage
 /// fresh GPU DLLs from `third_party/ort-bundle/`.
 ///
-/// This function ONLY runs for CUDA builds.  For plain CPU builds, the
+/// This function ONLY runs for GPU builds.  For plain CPU builds, the
 /// `ort` crate's own `download-binaries` feature handles fetching ONNX
 /// Runtime — we must not interfere by deleting the DLLs it places.
 ///
 /// `cargo build` never cleans the output dir, so DLLs from a previous GPU
 /// build could otherwise persist and leak into a subsequent non-GPU portable
-/// ZIP.  By scoping the purge to CUDA builds only we eliminate that risk
+/// ZIP.  By scoping the purge to GPU builds only we eliminate that risk
 /// without breaking CPU-only compilation.
 fn clean_stale_ort_dlls() {
     // For CPU builds, ort-sys handles everything via download-binaries.
-    if !cfg!(feature = "cuda") && !cfg!(feature = "directml") {
+    if !cfg!(feature = "opencl") && !cfg!(feature = "directml") {
         return;
     }
 
     let stale_dlls = [
         "onnxruntime.dll",
-        "onnxruntime_providers_cuda.dll",
-        "onnxruntime_providers_dml.dll",
+        "onnxruntime_providers_opencl.dll",
         "onnxruntime_providers_shared.dll",
-        "onnxruntime_providers_tensorrt.dll",
-        "cudart64_12.dll",
-        "cublas64_12.dll",
-        "cublasLt64_12.dll",
-        "cudnn64_9.dll",
-        "cudnn_adv64_9.dll",
-        "cudnn_cnn64_9.dll",
-        "cudnn_ops64_9.dll",
-        "cudnn_graph64_9.dll",
-        "cudnn_engines_precompiled64_9.dll",
-        "cudnn_engines_runtime_compiled64_9.dll",
-        "cudnn_heuristic64_9.dll",
-        "cufft64_11.dll",
-        "cufftw64_11.dll",
-        "curand64_10.dll",
     ];
 
     // OUT_DIR is target/<triple>/<profile>/build/<crate>-<hash>/out
@@ -697,7 +681,7 @@ fn clean_stale_ort_dlls() {
             }
 
             // -- stage fresh DLLs from ort-bundle ----------
-            if cfg!(feature = "cuda") || cfg!(feature = "directml") {
+            if cfg!(feature = "opencl") || cfg!(feature = "directml") {
                 let bundle = std::path::Path::new("third_party/ort-bundle");
                 if bundle.is_dir() {
                     if let Ok(entries) = std::fs::read_dir(bundle) {
@@ -706,17 +690,23 @@ fn clean_stale_ort_dlls() {
                             if src.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) {
                                 if let Some(name) = src.file_name() {
                                     let name_str = name.to_string_lossy().to_ascii_lowercase();
-                                    // Skip CUDA-specific DLLs when only DirectML is enabled
-                                    // (no CUDA feature compiled in — these DLLs would be unused bloat).
-                                    if !cfg!(feature = "cuda") && cfg!(feature = "directml") {
-                                        if name_str.starts_with("cudart")
-                                            || name_str.starts_with("cublas")
-                                            || name_str.starts_with("cudnn")
-                                            || name_str.starts_with("cufft")
-                                            || name_str.starts_with("curand")
-                                            || name_str.contains("providers_cuda")
-                                            || name_str.contains("providers_tensorrt")
-                                        {
+                                    // ALWAYS skip CUDA/TensorRT DLLs — HiFiShifter does not
+                                    // use CUDA or TensorRT in any configuration.  These DLLs
+                                    // come from the ORT GPU package and sit unused on disk.
+                                    if name_str.contains("providers_cuda")
+                                        || name_str.contains("providers_tensorrt")
+                                        || name_str.starts_with("cudart")
+                                        || name_str.starts_with("cublas")
+                                        || name_str.starts_with("cudnn")
+                                        || name_str.starts_with("cufft")
+                                        || name_str.starts_with("curand")
+                                    {
+                                        continue;
+                                    }
+                                    // Skip OpenCL provider DLL when OpenCL feature is
+                                    // not compiled in.
+                                    if !cfg!(feature = "opencl") {
+                                        if name_str.contains("providers_opencl") {
                                             continue;
                                         }
                                     }

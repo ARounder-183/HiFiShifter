@@ -1,10 +1,10 @@
-﻿<#
+<#
 .SYNOPSIS
     将 HiFiShifter 打包为便携版压缩包（Portable ZIP）
 
 .DESCRIPTION
     此脚本在 `cargo tauri build` 构建完成后，从产物目录中收集 exe、
-    资源文件、模型和 GPU 依赖 DLL（CUDA/DirectML），打成一个免安装的
+    资源文件、模型和 GPU 依赖 DLL（OpenCL/DirectML），打成一个免安装的
     .zip 便携包。所有位于 release 目录下的 DLL 都会被自动收集。
 
 .PARAMETER SkipBuild

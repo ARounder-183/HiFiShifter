@@ -165,6 +165,8 @@ pub struct RuntimeInfoPayload {
     pub is_playing: Option<bool>,
     pub playback_target: Option<String>,
     pub timeline: Option<TimelineStatePayload>,
+    /// The GPU backend name for this build, e.g. "DirectML", "OpenCL", "CoreML", or "".
+    pub gpu_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

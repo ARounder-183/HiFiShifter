@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter provides a **one-click environment setup script** that automatically installs ONNX Runtime and the CUDA runtime (Rust toolchain is **disabled by default** — add `-InstallRust` to opt in):
+HiFiShifter provides a **one-click environment setup script** that automatically installs ONNX Runtime (Rust toolchain is **disabled by default** — add `-InstallRust` to opt in):
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -155,7 +155,6 @@ Optional parameters:
 
 - `-InstallRust`: Install a project-local portable Rust toolchain (disabled by default; uses system-wide Rust)
 - `-SkipOrt`: Skip ONNX Runtime download
-- `-SkipCudaRuntime`: Skip CUDA runtime download
 - `-SkipFrontend`: Skip frontend dependency installation
 - `-LocalOrtDir <path>`: Copy from a pre-extracted ORT installation (no network required)
 - `-LocalPackage <path>`: Extract from a locally-downloaded ORT ZIP archive (no network required)
@@ -221,67 +220,52 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU-Accelerated Build (CUDA)
+### 4. GPU-Accelerated Build
 
-HiFiShifter supports GPU-accelerated inference via NVIDIA CUDA.
+| Platform | GPU Technology | Description |
+|------|---------|------|
+| Windows x86_64 / ARM64 | DirectML (DirectX 12) | Bundled into onnxruntime.dll, supports NVIDIA / AMD / Intel Arc |
+| macOS ARM64 (Apple Silicon) | CoreML | Apple Neural Engine, auto-enabled |
+| macOS x86_64 (Intel) | — | CPU only |
+| Linux x86_64 / ARM64 | OpenCL | Cross-platform GPU acceleration |
 
-#### Windows (CUDA)
+See platform-specific sections for detailed build instructions.
 
-Prerequisites:
-
-- An NVIDIA GPU with CUDA support
-- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
-
-One-click environment setup:
+#### Windows
 
 ```powershell
+# One-click environment setup
 .\scripts\setup-windows.ps1
-```
 
-Development mode (hot reload):
-
-```powershell
+# Development mode (hot reload)
 .\scripts\build-gpu.ps1 -Dev
-```
 
-Release build:
-
-```powershell
-# Fast build (binary only, no installer)
+# Build Release
 .\scripts\build-gpu.ps1
 
-# Fast build + file log (log.txt with timestamps, next to the exe)
-.\scripts\build-gpu.ps1 -Log
-
-# Full build (binary + NSIS installer, slower — ~2 GB of GPU components to compress)
+# Full build (NSIS installer)
 .\scripts\build-gpu.ps1 -Bundle
-```
 
-After building, create a portable ZIP:
-
-```powershell
+# Portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
 
-#### Linux (CUDA)
-
-Prerequisites:
-
-- An NVIDIA GPU with CUDA support
-- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
+#### Linux
 
 ```bash
-# Install system dependencies (including CUDA toolkit)
-sudo bash ./scripts/install-cuda-linux.sh
+# Install OpenCL runtime
+sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
 
-# Download ONNX Runtime GPU + cuDNN
+# Download ONNX Runtime GPU
 bash ./scripts/download-ort.sh
 
 # Build
 bash ./scripts/build-gpu-linux.sh
 ```
 
-> **Note:** macOS does not support CUDA GPU acceleration at this time.
+#### macOS
+
+No additional configuration needed. macOS ARM64 auto-enables CoreML acceleration.
 
 ## Quick Start
 

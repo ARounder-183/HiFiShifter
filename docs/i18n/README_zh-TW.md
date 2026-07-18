@@ -145,7 +145,7 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝 ONNX Runtime 和 CUDA 執行階段（Rust 工具鏈**預設跳過**，需手動添加 `-InstallRust` 啟用）：
+HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝 ONNX Runtime（Rust 工具鏈**預設跳過**，需手動添加 `-InstallRust` 啟用）：
 
 ```powershell
 .\scripts\setup-windows.ps1
@@ -155,7 +155,6 @@ HiFiShifter 提供了**一鍵式環境配置腳本**，可自動安裝 ONNX Runt
 
 - `-InstallRust`：安裝專案本地的可攜 Rust 工具鏈（預設跳過，使用系統全域 Rust）
 - `-SkipOrt`：跳過 ONNX Runtime 下載
-- `-SkipCudaRuntime`：跳過 CUDA 執行階段下載
 - `-SkipFrontend`：跳過前端依賴安裝
 - `-LocalOrtDir <path>`：從本地已解壓的 ORT 目錄複製（免網路下載）
 - `-LocalPackage <path>`：從本地已下載的 ORT ZIP 包解壓（免網路下載）
@@ -221,67 +220,52 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速構建（CUDA）
+### 4. GPU 加速構建
 
-HiFiShifter 支援透過 NVIDIA CUDA 實現 GPU 加速推理。
+| 平台 | GPU 技術 | 說明 |
+|------|---------|------|
+| Windows x86_64 / ARM64 | DirectML (DirectX 12) | 編譯進 onnxruntime.dll，支援 NVIDIA / AMD / Intel Arc |
+| macOS ARM64 (Apple Silicon) | CoreML | Apple Neural Engine，自動啟用 |
+| macOS x86_64 (Intel) | — | 僅 CPU |
+| Linux x86_64 / ARM64 | OpenCL | 跨平台 GPU 加速 |
 
-#### Windows（CUDA）
+詳細構建指令見各平台說明。
 
-前置條件：
-
-- 一張支援 CUDA 的 NVIDIA GPU
-- [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（版本 ≥ 545）
-
-一鍵環境搭建：
+#### Windows
 
 ```powershell
+# 一鍵環境搭建
 .\scripts\setup-windows.ps1
-```
 
-開發模式（熱更新）：
-
-```powershell
+# 開發模式（熱更新）
 .\scripts\build-gpu.ps1 -Dev
-```
 
-構建 Release：
-
-```powershell
-# 快速構建（僅編譯二進位檔案，不含安裝包）
+# 構建 Release
 .\scripts\build-gpu.ps1
 
-# 快速構建 + 檔案日誌（含時間戳的 log.txt，放在 exe 旁邊）
-.\scripts\build-gpu.ps1 -Log
-
-# 完整構建（二進位 + NSIS 安裝包，較慢——需壓縮約 2 GB 的 GPU 組件）
+# 完整構建（含 NSIS 安裝程式）
 .\scripts\build-gpu.ps1 -Bundle
-```
 
-構建完成後，執行以下命令建立可攜版壓縮檔：
-
-```powershell
+# 可攜版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
 
-#### Linux（CUDA）
-
-前置條件：
-
-- 一張支援 CUDA 的 NVIDIA GPU
-- [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（版本 ≥ 545）
+#### Linux
 
 ```bash
-# 安裝系統依賴（含 CUDA toolkit）
-sudo bash ./scripts/install-cuda-linux.sh
+# 安裝 OpenCL 執行階段
+sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
 
-# 下載 ONNX Runtime GPU + cuDNN
+# 下載 ONNX Runtime GPU
 bash ./scripts/download-ort.sh
 
 # 構建
 bash ./scripts/build-gpu-linux.sh
 ```
 
-> **注意：** macOS 目前不支援 CUDA GPU 加速。
+#### macOS
+
+無需額外設定。macOS ARM64 自動啟用 CoreML 加速。
 
 ## 快速開始
 

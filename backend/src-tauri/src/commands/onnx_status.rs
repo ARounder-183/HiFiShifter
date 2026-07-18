@@ -9,7 +9,7 @@ pub struct OnnxStatusPayload {
     pub available: bool,
     /// Human-readable error string when unavailable, null otherwise.
     pub error: Option<String>,
-    /// Requested execution provider choice (cpu/cuda/auto/disabled).
+    /// Requested execution provider choice (cpu/opencl/directml/auto/disabled).
     pub ep_choice: String,
 }
 
@@ -43,7 +43,7 @@ pub(super) fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::Benchma
     crate::nsf_hifigan_onnx::run_benchmark()
 }
 
-/// Enumerate all NVIDIA GPUs in the system (via NVML on Windows, empty on other platforms).
-pub(super) fn get_gpu_devices() -> crate::cuda_info::GpuEnumerationResult {
-    crate::cuda_info::enumerate_gpus()
+/// Enumerate all GPUs in the system (via NVML on Windows, empty on other platforms).
+pub(super) fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
+    crate::gpu_info::enumerate_gpus()
 }

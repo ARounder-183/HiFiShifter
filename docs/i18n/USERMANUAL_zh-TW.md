@@ -19,12 +19,14 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 - Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。
 
-**關於 CUDA GPU 加速**：HiFiShifter 為 Windows 和 Linux 提供了支援 NVIDIA CUDA 的 GPU 加速版本（下載檔案名稱中包含 `-cuda` 後綴）。該版本利用 NVIDIA GPU 進行推理加速。使用 CUDA 版本需要：
+**關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
-- 一張支援 CUDA 的 NVIDIA 顯示卡（建議 GTX 10 系列或更新）
-- 較新的 [NVIDIA 顯示驅動](https://www.nvidia.com/drivers)（建議 545 版本或更新）
+- **Windows**：DirectML（DirectX 12），支援 NVIDIA、AMD、Intel Arc GPU
+- **macOS（Apple Silicon）**：CoreML，利用 Apple Neural Engine 加速
+- **macOS（Intel）**：僅 CPU 推理
+- **Linux**：OpenCL，跨平台 GPU 加速
 
-macOS 版本暫不支援 CUDA GPU 加速。
+在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可查看各裝置的推理效能。
 
 **關於 WebView 的說明**：HiFiShifter 基於 Rust + Tauri 框架開發，需要系統提供 WebView 元件來顯示介面。
 
@@ -59,7 +61,7 @@ HiFiShifter 的專案檔副檔名為 `.hshp` 或 `.hsp`。除此以外，`另存
 
 - `工程拉伸覆寫`：允許你修改目前專案的拉伸演算法。
 - `全域拉伸預設`：允許你修改全域預設的拉伸演算法。
-- `推理裝置`：允許你設定渲染所使用的推理裝置。目前分為 `Auto`、`CPU`、`GPU (CUDA)` 這 3 種。可以透過該選單執行基準測試，以檢測各推理裝置的效能。`GPU (CUDA)` 只有在使用 CUDA 版本的 HiFiShifter 才有效。
+- `推理裝置`：允許你設定渲染所使用的推理裝置。目前分為 `Auto`、`CPU`、`GPU` 三種。可以透過該選單執行基準測試，以檢測各推理裝置的效能（基準測試中會顯示具體後端，如 GPU (DirectML)、GPU (OpenCL) 等）。GPU 選項僅在對應的 GPU 版本 HiFiShifter 中有效。
 - `背景預渲染`：當被啟用時，每次開啟專案或者編輯完參數以後，均會自動在背景對已編輯的參數進行預渲染，且即使仍然在渲染狀態中，也可以播放已渲染的部分；否則，只有在進行播放操作時，才會進入渲染流程，且需要等待渲染完畢，才可以正常播放時間軸。預設為啟用。禁用後可以降低渲染頻率，節省效能。
 - `快捷鍵設定`：允許你設定 HiFiShifter 的快捷鍵對應。有多種預設可以選擇。
 

@@ -818,20 +818,18 @@ export const zhTW = {
 
     // ── 推理裝置 / GPU ──────────────────────────────────────────────────
     menu_inference_device: "推理裝置",
-    menu_inference_auto: "Auto（系統預設）",
+    menu_inference_auto: "自動",
     menu_inference_cpu: "CPU",
-    menu_inference_directml: "GPU (DirectML)",
-    menu_inference_cuda: "GPU (CUDA)",
-    menu_select_gpu_device: "選擇 GPU 裝置",
-    menu_no_gpu_detected: "未偵測到 NVIDIA GPU",
+    menu_inference_gpu: "GPU",
     menu_run_benchmark: "執行基準測試…",
     menu_background_prerender: "背景預渲染",
     menu_background_prerender_desc:
         "編輯後立即在背景預渲染。播放時優先使用已渲染內容，無需等待全部渲染完成。",
 
     benchmark_title: "推理裝置基準測試",
-    benchmark_desc: "在每個可用裝置上以約 12 秒音訊測試聲碼器，比較延遲以選擇最快的方案。",
-    benchmark_running: "正在執行基準測試，可能需要 20–60 秒…",
+    benchmark_desc:
+        "將約 12 秒的音訊透過各個可用裝置的聲碼器進行推理，報告中位延遲。使用測試結果來選擇最快的推理裝置。",
+    benchmark_running: "正在執行基準測試 — 可能需要 20–60 秒…",
     benchmark_results: "結果（{samples} 幀片段 · 44.1 kHz）：",
     benchmark_device_header: "裝置",
     benchmark_latency_header: "中位延遲",
@@ -844,22 +842,11 @@ export const zhTW = {
     benchmark_close: "關閉",
     benchmark_idle_hint: "點擊「執行基準測試」開始。需要先載入模型。",
     benchmark_error_default: "基準測試失敗。請確保模型已載入。",
-    benchmark_gpu_failed_title: "⚠ GPU 基準測試失敗 — CUDA 已註冊但無法執行",
+    benchmark_gpu_failed_title: "⚠ GPU 基準測試失敗",
     benchmark_gpu_failed_desc:
-        "ONNX Runtime 已偵測到 CUDA 提供者，但推論失敗。通常是缺少 CUDA 執行階段 DLL（cuBLAS、cuDNN）。",
-    benchmark_gpu_dll_missing_fix: "修復方法：",
-    benchmark_gpu_broken_title: "⚠ GPU 加速不可用 — 缺少 CUDA 執行階段 DLL",
-    benchmark_gpu_broken_desc:
-        "ONNX Runtime 可以識別你的 NVIDIA GPU 且 CUDA 提供者可用，但缺少 cuBLAS 與 cuDNN。CUDA 將靜默回退到 CPU 執行。",
-    benchmark_gpu_fix_cmd1: "> .\\setup-gpu-deps.ps1   # 一次性安裝（下載 ORT + cuBLAS + cuDNN）",
-    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 啟動開發伺服器（自動複製所有 DLL）",
-    benchmark_gpu_failed_dll_ok_title: "⚠ GPU 基準測試失敗，但 CUDA 與 DLL 均已就緒",
-    benchmark_gpu_failed_dll_ok_desc:
-        "CUDA EP 與執行階段 DLL 均已就緒，但推論仍然失敗。可能是驅動或硬體問題。",
-    benchmark_cuda_dll_label: "CUDA 執行階段 DLL：",
-    benchmark_cuda_dll_yes: "已找到 ✅",
-    benchmark_cuda_dll_no: "缺失 — GPU 將無法工作 ⚠",
+        "GPU 推理失敗。請檢查 GPU 驅動是否正確安裝，以及 ONNX Runtime 提供者 DLL 是否就緒。",
+    benchmark_gpu_device_label: "GPU 裝置",
+    benchmark_ort_info_label: "ONNX Runtime：",
+    benchmark_gpu_label: "GPU",
     benchmark_providers_label: "可用提供者：",
-    benchmark_nvml_label: "NVML 偵測到的 NVIDIA GPU：",
-    benchmark_cuda_device_label: "CUDA 裝置：",
 } as const;
