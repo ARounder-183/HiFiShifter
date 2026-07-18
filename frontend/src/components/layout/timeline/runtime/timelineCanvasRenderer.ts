@@ -121,7 +121,7 @@ export function drawTimelineCanvas(
         }
 
         ctx.strokeStyle = visualStyle.borderStroke;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = visualStyle.borderLineWidth;
         ctx.strokeRect(
             clipLeft + 0.5,
             bodyTop + 0.5,
