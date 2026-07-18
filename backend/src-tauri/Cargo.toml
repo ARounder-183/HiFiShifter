@@ -64,23 +64,26 @@ objc2 = "0.6"
 default = ["onnx", "vslib"]
 logging = []
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
-opencl = ["onnx"]         # Linux: cross-platform GPU via OpenCL EP (requires custom ORT build)
-directml = ["onnx", "ort/directml"]  # Windows: DirectX 12 GPU (included in standard ORT)
-coreml = ["onnx", "ort/coreml"]      # macOS ARM64: Apple Neural Engine
 vslib = []
 
-# Linux / Windows / macOS (all non-macOS targets)
-# `download-binaries` auto-fetches ONNX Runtime CPU prebuilts at build time;
-# when `ORT_LIB_LOCATION` is set, it takes precedence.
-# GPU features (directml, opencl, coreml) are enabled per-platform via --features.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# GPU providers are baked into the platform-specific ort dependency below.
+# `cargo tauri build` produces GPU-accelerated binaries without extra --features.
+# ORT binaries are automatically downloaded by ort-sys at build time
+# via the `download-binaries` feature.
+
+# Windows — DirectML (DirectX 12 GPU, works on any DX12-capable GPU)
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml"] }
+
+# Linux — OpenCL (loaded at runtime via ORT generic EP API, no special ort feature needed)
+[target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries"] }
 
-# macOS Apple Silicon (arm64) — CoreML via coreml feature flag
+# macOS Apple Silicon — CoreML (Apple Neural Engine)
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml"] }
 
-# macOS Intel (x86_64) — CPU + optional OpenCL
+# macOS Intel — CPU only (no hardware GPU acceleration available)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.3.0+0.22", optional = true }

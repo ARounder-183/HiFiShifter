@@ -1,37 +1,47 @@
 #!/usr/bin/env bash
 # build-gpu-linux.sh
-# Build the HiFiShifter Linux GPU binary with OpenCL support.
+# Build the HiFiShifter Linux binary with OpenCL GPU support.
+#
+# GPU acceleration is baked into the Linux build target — no extra
+# Cargo features are needed.  OpenCL is accessed at runtime via the
+# ONNX Runtime generic execution provider API.
 #
 # Usage:
 #   ./scripts/build-gpu-linux.sh
 #
+# Prerequisites:
+#   ./scripts/download-ort.sh          # download ONNX Runtime GPU package
+#   sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
+#
 # Environment (required):
 #   ORT_LIB_LOCATION  - Path to ONNX Runtime library directory
+#                       (set automatically by download-ort.sh)
 #
 # Environment (optional):
 #   CARGO_TARGET      - Rust target triple (default: x86_64-unknown-linux-gnu)
-#   CARGO_FEATURES    - Cargo features (default: onnx,opencl)
 
 set -euxo pipefail
 
 CARGO_TARGET="${CARGO_TARGET:-x86_64-unknown-linux-gnu}"
-CARGO_FEATURES="${CARGO_FEATURES:-onnx,opencl}"
 SRC_TAURI="backend/src-tauri"
 
-echo "=== Build Linux GPU (OpenCL) Binary ==="
+echo "=== Build Linux (OpenCL GPU) Binary ==="
 echo "  Target:   ${CARGO_TARGET}"
-echo "  Features: ${CARGO_FEATURES}"
 echo "  ORT_LIB:  ${ORT_LIB_LOCATION:-<not set>}"
 
+# Auto-detect ORT lib directory if not set (download-ort.sh extracts to /tmp/ort-gpu/).
 if [ -z "${ORT_LIB_LOCATION:-}" ]; then
-    echo "ERROR: ORT_LIB_LOCATION is not set" >&2
-    exit 1
+    ORT_LIB_LOCATION="$(find /tmp/ort-gpu -maxdepth 3 -type d -name lib 2>/dev/null | head -1 || true)"
+    if [ -z "${ORT_LIB_LOCATION:-}" ]; then
+        echo "ERROR: ORT_LIB_LOCATION is not set and could not auto-detect" >&2
+        echo "Run ./scripts/download-ort.sh first, or set ORT_LIB_LOCATION manually." >&2
+        exit 1
+    fi
+    echo "  Auto-detected ORT lib: ${ORT_LIB_LOCATION}"
 fi
 
-# ort-sys v2.0.0-rc.12 defaults to static linking (looks for .a files),
-# but the ONNX Runtime build only ships shared libraries (.so).
-# ORT_PREFER_DYNAMIC_LINK=1 makes ort-sys emit `rustc-link-lib=onnxruntime`
-# instead of `rustc-link-lib=static=onnxruntime`.
+# ort-sys v2.0.0-rc.12 defaults to static linking (.a), but the ONNX Runtime
+# package only ships shared libraries (.so).  Force dynamic linking.
 export ORT_PREFER_DYNAMIC_LINK=1
 
 # -rpath,$ORIGIN: runtime linker searches binary's directory for .so files
@@ -44,7 +54,7 @@ echo "=== ORT lib directory ==="
 ls -la "${ORT_LIB_LOCATION}/"
 
 cd "${SRC_TAURI}"
-cargo build --release --target "${CARGO_TARGET}" --no-default-features --features "${CARGO_FEATURES}"
+cargo build --release --target "${CARGO_TARGET}" --no-default-features --features onnx
 
 # Copy ORT shared libraries alongside the binary for distribution
 BIN_DIR="target/${CARGO_TARGET}/release"

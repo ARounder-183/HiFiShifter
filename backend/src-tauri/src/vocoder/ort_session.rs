@@ -82,7 +82,7 @@ pub enum OrtSessionRole {
 /// Uses ONNX Runtime's generic `SessionOptionsAppendExecutionProvider` API
 /// to register "OpenCLExecutionProvider" by name.  Works if the ORT DLL has
 /// the OpenCL provider compiled in; returns a clear error otherwise.
-#[cfg(feature = "opencl")]
+#[cfg(target_os = "linux")]
 fn try_register_opencl_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -119,7 +119,7 @@ fn try_register_opencl_ep(
     }
 }
 
-#[cfg(not(feature = "opencl"))]
+#[cfg(not(target_os = "linux"))]
 fn try_register_opencl_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -131,7 +131,7 @@ fn try_register_opencl_ep(
 /// Try to register DirectML EP on a session builder.
 /// DirectML uses DirectX 12 to accelerate ONNX models on any GPU (NVIDIA, AMD, Intel Arc).
 /// It is Windows-only and requires no additional SDK or runtime DLLs beyond the ORT provider DLL.
-#[cfg(feature = "directml")]
+#[cfg(target_os = "windows")]
 fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -144,7 +144,7 @@ fn try_register_directml_ep(
         .map_err(|e| format!("enable DirectML EP failed: {e}"))
 }
 
-#[cfg(not(feature = "directml"))]
+#[cfg(not(target_os = "windows"))]
 fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -175,14 +175,14 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
             // try the platform-specific GPU backend, fall back to CPU.
             #[allow(unused_assignments)]
             let mut tried = false;
-            #[cfg(feature = "directml")]
+            #[cfg(target_os = "windows")]
             {
                 match try_register_directml_ep(builder.clone(), role) {
                     Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
                     Err(e) => { eprintln!("ort_session[{role:?}]: DirectML — {e}"); }
                 }
             }
-            #[cfg(feature = "opencl")]
+            #[cfg(target_os = "linux")]
             if !tried {
                 match try_register_opencl_ep(builder.clone(), role) {
                     Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
@@ -285,7 +285,7 @@ pub fn diagnose_available_providers() -> Vec<String> {
 
 /// Quick check: try registering DirectML EP on a temporary session builder.
 /// Returns true if DirectML EP is available in the loaded ORT DLL.
-#[cfg(feature = "directml")]
+#[cfg(target_os = "windows")]
 fn probe_directml_ep_available() -> bool {
     match Session::builder() {
         Ok(builder) => {
@@ -300,7 +300,7 @@ fn probe_directml_ep_available() -> bool {
 }
 
 /// Stub: DirectML EP not compiled in.
-#[cfg(not(feature = "directml"))]
+#[cfg(not(target_os = "windows"))]
 const fn probe_directml_ep_available() -> bool {
     false
 }
@@ -309,7 +309,7 @@ const fn probe_directml_ep_available() -> bool {
 /// generic `SessionOptionsAppendExecutionProvider` API.  Returns true if
 /// the provider registered successfully (meaning ORT was compiled with
 /// OpenCL support and the provider DLL/backend is available).
-#[cfg(feature = "opencl")]
+#[cfg(target_os = "linux")]
 fn probe_opencl_ep_available() -> bool {
     use ort::AsPointer;
     use std::ffi::CString;
@@ -344,7 +344,7 @@ fn probe_opencl_ep_available() -> bool {
 }
 
 /// Stub: OpenCL EP not compiled in.
-#[cfg(not(feature = "opencl"))]
+#[cfg(not(target_os = "linux"))]
 const fn probe_opencl_ep_available() -> bool {
     false
 }

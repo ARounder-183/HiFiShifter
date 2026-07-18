@@ -53,52 +53,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── Windows x86_64: CPU + DirectML ──────────────────────────────
+          # Windows — DirectML baked into ort dependency
           - name: windows-x86_64
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
-            cargo_features: onnx,vslib,directml
-            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,vslib,directml
-            ort_lib: gpu   # download ORT GPU package for DirectML onnxruntime.dll
-            # DirectML is compiled into onnxruntime.dll — works on any DX12 GPU.
-
-          # ── Windows ARM64: CPU + DirectML ──────────────────────────────
+            cargo_extra: ""                      # default features: onnx + vslib
           - name: windows-arm64
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
-            cargo_features: onnx,directml
-            tauri_args: --target aarch64-pc-windows-msvc -- --no-default-features --features onnx,directml
-            ort_lib: gpu   # DirectML supports Windows on ARM64
+            cargo_extra: "-- --no-default-features --features onnx"   # vslib is x86_64-only
 
-          # ── macOS ARM64: CPU + CoreML ──────────────────────────────────
+          # macOS — CoreML on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
             os: macos-latest
             cargo_target: aarch64-apple-darwin
-            cargo_features: onnx,coreml
-            tauri_args: --target aarch64-apple-darwin -- --no-default-features --features onnx,coreml
-
-          # ── macOS x86_64: CPU (CoreML not available on Intel Macs) ─────
+            cargo_extra: "-- --no-default-features --features onnx"
           - name: macos-x86_64
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
-            cargo_features: onnx
-            tauri_args: --target x86_64-apple-darwin -- --no-default-features --features onnx
+            cargo_extra: "-- --no-default-features --features onnx"
 
-          # ── Linux x86_64: CPU + OpenCL ─────────────────────────────────
+          # Linux — OpenCL via generic ORT EP API; vslib excluded
           - name: linux-x86_64
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
-            cargo_features: onnx,opencl
-            tauri_args: --target x86_64-unknown-linux-gnu -- --no-default-features --features onnx,opencl
-            ort_lib: gpu
-
-          # ── Linux ARM64: CPU + OpenCL ──────────────────────────────────
+            cargo_extra: "-- --no-default-features --features onnx"
           - name: linux-arm64
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
-            cargo_features: onnx,opencl
-            tauri_args: --target aarch64-unknown-linux-gnu -- --no-default-features --features onnx,opencl
-            ort_lib: gpu
+            cargo_extra: "-- --no-default-features --features onnx"
 
     steps:
       - uses: actions/checkout@v6
@@ -165,10 +148,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
-          # OpenCL runtime for Linux GPU builds
-          if echo "${{ matrix.cargo_features }}" | grep -q opencl; then
-            sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
-          fi
 
       - name: Ensure AppImage bundling prerequisites (Linux)
         if: runner.os == 'Linux'
@@ -210,31 +189,6 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
-      # ── ONNX Runtime download ──────────────────────────────────────────
-
-      - name: Download ONNX Runtime (Windows — GPU with DirectML)
-        if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
-        shell: pwsh
-        run: |
-          $OrtDestDir = "backend\src-tauri\third_party\ort-bundle"
-          # The ORT GPU package includes DirectML (compiled into onnxruntime.dll).
-          # CUDA/TensorRT DLLs are also downloaded but ignored by the build pipeline.
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-ort.ps1 -Gpu -DestDir $OrtDestDir
-
-      - name: Set ORT_LIB_LOCATION (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
-          "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
-
-      - name: Download ONNX Runtime (Linux — GPU)
-        if: runner.os == 'Linux' && matrix.ort_lib == 'gpu'
-        shell: bash
-        run: |
-          chmod +x ./scripts/download-ort.sh
-          bash ./scripts/download-ort.sh
-
       # ── SoundTouch source ──────────────────────────────────────────────
 
       - name: Clone SoundTouch source
@@ -258,28 +212,6 @@ jobs:
       - name: Install frontend deps
         run: npm --prefix frontend ci
 
-      # ── cargo check (PR fast path) ─────────────────────────────────────
-
-      - name: Build (cargo check) on Unix
-        if: ${{ runner.os != 'Windows' && env.HIFISHIFTER_SKIP_CARGO_CHECK != '1' }}
-        working-directory: backend/src-tauri
-        env:
-          HIFISHIFTER_SKIP_NATIVE_BUILD: "1"
-        run: |
-          cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" \
-            --no-default-features --features "${{ matrix.cargo_features }}" --verbose
-        shell: bash
-
-      - name: Build (cargo check) on Windows
-        if: ${{ runner.os == 'Windows' && env.HIFISHIFTER_SKIP_CARGO_CHECK != '1' }}
-        working-directory: backend/src-tauri
-        env:
-          HIFISHIFTER_SKIP_NATIVE_BUILD: "1"
-        run: |
-          cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" \
-            --no-default-features --features "${{ matrix.cargo_features }}" --verbose
-        shell: pwsh
-
       # ── Build + bundle ─────────────────────────────────────────────────
 
       - name: Build and bundle (Windows)
@@ -290,7 +222,7 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: ${{ matrix.tauri_args }}
+          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -300,9 +232,7 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: ${{ matrix.tauri_args }}
-
-      # ── Linux AppImage ────────────────────────────────────────────────
+          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
 
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
@@ -313,45 +243,22 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} --bundles appimage -- ${{ matrix.tauri_args }}
+          args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
 
-      # ── Inject DLLs into NSIS installer (Windows) ─────────────────────
+      # ── Portable directory (Windows) ─────────────────────────────────
 
-      - name: Inject DLLs into NSIS installer (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bundle = "backend\src-tauri\third_party\ort-bundle"
-          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
-            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "WARNING: DLL injection failed"
-            }
-          } else {
-            Write-Host "No DLLs found — skipping NSIS injection"
-          }
-
-      # ── Verify DLLs (Windows) ─────────────────────────────────────────
-
-      - name: Verify GPU DLLs in release (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-gpu-dlls.ps1 -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
-
-      # ── Portable ZIP (Windows) ────────────────────────────────────────
-
-      - name: Create portable ZIP (Windows)
+      - name: Stage portable directory (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
 
       # ── Artifact naming ───────────────────────────────────────────────
 
-      - name: Determine artifact name
-        id: artifact-name
+      - name: Determine bundles artifact name (non-Windows)
+        if: runner.os != 'Windows'
+        id: artifact-name-nonwindows
         run: |
           $prod = 'HiFiShifter'
           $ver = '0.0.0'
@@ -370,31 +277,83 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
         shell: pwsh
 
+      - name: Determine Windows installer artifact name
+        if: runner.os == 'Windows'
+        id: artifact-name-win-installer
+        run: |
+          $prod = 'HiFiShifter'
+          $ver = '0.0.0'
+          $conf = 'backend/src-tauri/tauri.conf.json'
+          if (Test-Path $conf) {
+            try {
+              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
+              if ($j.productName) { $prod = $j.productName }
+              if ($j.package -and $j.package.version) { $ver = $j.package.version }
+              elseif ($j.version) { $ver = $j.version }
+            } catch { }
+          }
+          $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
+          $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            $arch = 'arm64'
+          } else {
+            $arch = 'x86_64'
+          }
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-installer"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
+        shell: pwsh
+
+      - name: Determine Windows portable artifact name
+        if: runner.os == 'Windows'
+        id: artifact-name-win-portable
+        run: |
+          $prod = 'HiFiShifter'
+          $ver = '0.0.0'
+          $conf = 'backend/src-tauri/tauri.conf.json'
+          if (Test-Path $conf) {
+            try {
+              $j = Get-Content $conf -Raw | ConvertFrom-Json -ErrorAction Stop
+              if ($j.productName) { $prod = $j.productName }
+              if ($j.package -and $j.package.version) { $ver = $j.package.version }
+              elseif ($j.version) { $ver = $j.version }
+            } catch { }
+          }
+          $prodSafe = ($prod -replace '["\\/:*?<>|]', '') -replace '\s+', '_'
+          $verSafe = ($ver -replace '["\\/:*?<>|]', '') -replace '^v', ''
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            $arch = 'arm64'
+          } else {
+            $arch = 'x86_64'
+          }
+          $artifactName = "${prodSafe}_v${verSafe}_windows-${arch}-portable"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact-name=$artifactName"
+        shell: pwsh
+
       # ── Upload artifacts ───────────────────────────────────────────────
 
       - name: Upload installer (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
-      - name: Upload portable ZIP (Windows)
+      - name: Upload portable (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          name: ${{ steps.artifact-name-win-portable.outputs.artifact-name }}
           path: |
-            dist/*portable-win-*.zip
+            HiFiShifter/**
           if-no-files-found: warn
 
       - name: Upload DMG (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
@@ -403,7 +362,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.artifact-name.outputs.artifact-name }}
+          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
           if-no-files-found: error

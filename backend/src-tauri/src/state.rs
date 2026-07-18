@@ -4195,10 +4195,10 @@ impl AppState {
         let pb = self.audio_engine.snapshot_state();
 
         let gpu_backend = {
-            #[cfg(feature = "directml")] { "DirectML" }
-            #[cfg(all(feature = "opencl", not(feature = "directml")))] { "OpenCL" }
-            #[cfg(all(feature = "coreml", not(any(feature = "directml", feature = "opencl"))))] { "CoreML" }
-            #[cfg(not(any(feature = "directml", feature = "opencl", feature = "coreml")))] { "" }
+            #[cfg(target_os = "windows")] { "DirectML" }
+            #[cfg(target_os = "linux")] { "OpenCL" }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))] { "CoreML" }
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))] { "" }
         };
 
         RuntimeInfoPayload {

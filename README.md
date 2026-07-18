@@ -145,49 +145,14 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter 提供了**一键式环境配置脚本**，可自动安装 ONNX Runtime 运行时与 DirectML GPU 支持（Rust 工具链**默认跳过**，需手动添加 `-InstallRust` 启用）：
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-该脚本支持可选参数：
-
-- `-InstallRust`：安装项目本地的便携 Rust 工具链（默认跳过，使用系统全局 Rust）
-- `-SkipOrt`：跳过 ONNX Runtime 下载
-- `-SkipFrontend`：跳过前端依赖安装
-- `-LocalOrtDir <path>`：从本地已解压的 ORT 目录复制（免网络下载）
-- `-LocalPackage <path>`：从本地已下载的 ORT ZIP 包解压（免网络下载）
-
-若需使用镜像加速下载：
-
-```powershell
-$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-.\scripts\setup-windows.ps1
-```
-
-若需从本地离线安装 ORT：
-
-```powershell
-# 从已解压的本地 ORT 目录复制
-.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
-
-# 从本地 ZIP 包解压
-.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
-```
-
-若只需加载本地 Rust 环境到当前 shell（不执行安装）：
-
-```powershell
-. .\scripts\setup-windows.ps1 -LoadEnv
-```
-
-如果希望手动安装，请确保已安装以下工具：
+请确保已安装以下工具：
 
 - **Node.js**（建议 18+）及 npm
 - **Rust 工具链**（参见 `rust-toolchain.toml`）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**（用于编译 SoundTouch 库）
+
+ONNX Runtime (DirectML) 由 ort crate 在编译时自动下载，无需额外配置。
 
 安装前端依赖：
 
@@ -222,50 +187,27 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 
 ### 4. GPU 加速构建
 
-| 平台 | GPU 技术 | 说明 |
-|------|---------|------|
-| Windows x86_64 / ARM64 | DirectML (DirectX 12) | 编译进 onnxruntime.dll，支持 NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML | Apple Neural Engine，自动启用 |
-| macOS x86_64 (Intel) | — | CPU only |
-| Linux x86_64 / ARM64 | OpenCL | 跨平台 GPU 加速 |
+| 平台                        | GPU 技术              | 说明                                              |
+| --------------------------- | --------------------- | ------------------------------------------------- |
+| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自动下载，支持 NVIDIA / AMD / Intel Arc |
+| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自动启用                     |
+| macOS x86_64 (Intel)        | —                     | CPU only                                          |
+| Linux x86_64 / ARM64        | —                     | CPU only（ONNX Runtime 不原生支持 OpenCL）        |
 
-详细构建指令见各平台说明。
+#### 所有平台
 
-#### Windows
+ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries` 特性自动下载，无需手动安装。
 
 ```powershell
-# 一键环境搭建
-.\scripts\setup-windows.ps1
-
 # 开发模式（热更新）
-.\scripts\build-gpu.ps1 -Dev
+cargo tauri dev
 
 # 构建 Release
-.\scripts\build-gpu.ps1
+cargo tauri build
 
-# 完整构建（含 NSIS 安装包）
-.\scripts\build-gpu.ps1 -Bundle
-
-# 便携版 ZIP
+# Windows 便携版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
-
-#### Linux
-
-```bash
-# 安装 OpenCL 运行时
-sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
-
-# 下载 ONNX Runtime GPU
-bash ./scripts/download-ort.sh
-
-# 构建
-bash ./scripts/build-gpu-linux.sh
-```
-
-#### macOS
-
-无需额外配置。macOS ARM64 自动启用 CoreML 加速。
 
 ## 快速开始
 
