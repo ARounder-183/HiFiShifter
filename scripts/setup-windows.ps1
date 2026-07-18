@@ -5,31 +5,40 @@
 .DESCRIPTION
     Installs and configures everything needed for HiFiShifter development on Windows:
     - Portable Rust toolchain (opt-in: -InstallRust, project-local at .rust/)
-    - ONNX Runtime GPU (downloaded from GitHub, or from a local source)
-    - CUDA runtime DLLs (cuBLAS, cuDNN, etc.)
+    - ONNX Runtime GPU package (DirectML baseline; CUDA + TensorRT included)
+    - CUDA runtime DLLs (opt-in: -CUDA)
     - Frontend npm dependencies
 
-    Rust installation is DISABLED by default - the script assumes you already
-    have a system-wide Rust installation.  Pass -InstallRust to set up a
-    project-local portable toolchain instead.
+    By default, downloads the ORT GPU package (DirectML + CUDA + TensorRT)
+    without the CUDA runtime DLLs.  Use -CUDA to also pull in cuBLAS + cuDNN.
 
-    This script is designed to be safe to re-run - already-installed components
-    are detected and skipped. Also supports being dot-sourced to just load the
-    Rust environment into the current shell:
+    DirectML works on any DirectX 12 GPU (NVIDIA, AMD, Intel Arc) and is always
+    available.  CUDA builds (build-gpu.ps1 -CUDA) require the extra runtime DLLs.
+
+    Rust installation is DISABLED by default - the script assumes a system-wide
+    Rust installation.  Pass -InstallRust for a project-local portable toolchain.
+
+    Safe to re-run - already-installed components are detected and skipped.
+    To just load the Rust environment without installing anything:
         . .\scripts\setup-windows.ps1 -LoadEnv
-
-    Replaces the old root-level scripts:
-        setup-rust-env.ps1, env-rust.ps1, setup-gpu-deps.ps1
 
 .PARAMETER InstallRust
     Install a project-local portable Rust toolchain into .rust/.
     Disabled by default - assumes a system-wide Rust installation is available.
 
+.PARAMETER CUDA
+    Also download CUDA runtime DLLs (cuBLAS, cuDNN, cuFFT, cuRAND).
+    Only needed for `build-gpu.ps1 -CUDA` builds.
+
+.PARAMETER DirectML
+    (Default - flag kept for backward compatibility.)
+    The baseline GPU package always includes DirectML.
+
 .PARAMETER SkipOrt
-    Skip download of ONNX Runtime GPU binaries.
+    Skip download of ONNX Runtime binaries.
 
 .PARAMETER SkipCudaRuntime
-    Skip download of CUDA runtime DLLs (cuBLAS, cuDNN, etc.).
+    Skip download of CUDA runtime DLLs.  Default for non-CUDA setups.
 
 .PARAMETER SkipFrontend
     Skip npm ci for frontend dependencies.
@@ -40,42 +49,37 @@
 
 .PARAMETER LocalOrtDir
     Path to a pre-extracted ONNX Runtime installation (must contain lib/ and
-    include/ subdirectories).  Files are copied locally - no network access.
-    Equivalent to the old ORT_LIB_LOCATION workflow.
+    include/ subdirectories).
 
 .PARAMETER LocalPackage
-    Path to a locally-downloaded ONNX Runtime ZIP archive.  Extracted and
-    copied locally - no network access required.
+    Path to a locally-downloaded ONNX Runtime ZIP archive.
 
 .EXAMPLE
-    .\scripts\setup-windows.ps1 -InstallRust
-    # Full setup including project-local Rust toolchain
+    .\scripts\setup-windows.ps1
+    # Default: ORT GPU package (DirectML baseline), no CUDA runtime
 
 .EXAMPLE
-    .\scripts\setup-windows.ps1 -SkipCudaRuntime
-    # Only download ORT and install frontend deps
+    .\scripts\setup-windows.ps1 -CUDA
+    # GPU package + CUDA runtime DLLs for NVIDIA GPU builds
+
+.EXAMPLE
+    .\scripts\setup-windows.ps1 -InstallRust -CUDA
+    # Full CUDA setup including project-local Rust
 
 .EXAMPLE
     .\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
-    # Use a pre-extracted local ORT installation (no GitHub access needed)
-
-.EXAMPLE
-    .\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip" -SkipCudaRuntime
-    # Use a locally-downloaded ORT ZIP archive
-
-.EXAMPLE
-    $env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-    .\scripts\setup-windows.ps1
-    # Download through a mirror for faster access
+    # Use a pre-extracted local ORT installation (no network)
 
 .EXAMPLE
     . .\scripts\setup-windows.ps1 -LoadEnv
-    # Just load environment variables into current shell
+    # Just load Rust environment variables into current shell
 #>
 
 [CmdletBinding()]
 param(
     [Parameter()][switch]$InstallRust,
+    [Parameter()][switch]$CUDA,
+    [Parameter()][switch]$DirectML,
     [Parameter()][switch]$SkipOrt,
     [Parameter()][switch]$SkipCudaRuntime,
     [Parameter()][switch]$SkipFrontend,
@@ -92,9 +96,6 @@ $RustDir   = Join-Path $ProjectRoot ".rust"
 $CargoHome = Join-Path $RustDir "cargo"
 $RustupHome = Join-Path $RustDir "rustup"
 $CargoBin  = Join-Path $CargoHome "bin\cargo.exe"
-# Single canonical location for GPU DLLs - project-local, gitignored.
-# build.rs stages these to the release dir; inject-gpu-dlls.ps1 reads
-# from here to inject them into the NSIS installer.
 $OrtBundleDir = Join-Path $ProjectRoot "backend\src-tauri\third_party\ort-bundle"
 
 # ============================================================
@@ -164,13 +165,11 @@ if ($InstallRust) {
         & $CargoBin --version
     }
 
-    # Add cargo/bin to PATH for this session
     $binPath = Join-Path $CargoHome "bin"
     if ($env:PATH -notlike "*$binPath*") {
         $env:PATH = "$binPath;$env:PATH"
     }
 
-    # Install tauri-cli
     $CargoTauri = Join-Path $CargoHome "bin\cargo-tauri.exe"
     if (Test-Path $CargoTauri) {
         Write-Host "  tauri-cli:  Already installed" -ForegroundColor Green
@@ -191,21 +190,20 @@ if ($InstallRust) {
 }
 
 # ============================================================
-# Step 2: ONNX Runtime GPU
+# Step 2: ONNX Runtime (GPU package is the default)
 # ============================================================
 if (-not $SkipOrt) {
-    Write-Host "-- [2/4] ONNX Runtime GPU --" -ForegroundColor Cyan
+    Write-Host "-- [2/4] ONNX Runtime GPU (DirectML + CUDA + TensorRT) --" -ForegroundColor Cyan
 
     $downloadOrtScript = Join-Path $PSScriptRoot "download-ort.ps1"
     if (Test-Path $downloadOrtScript) {
-        # Use direct named-parameter invocation rather than splatting (@args)
-        # to avoid a PowerShell parameter-binding bug with array-based splatting.
+        # download-ort.ps1 defaults to GPU package.  -CPU flag for CPU-only.
         if ($LocalOrtDir) {
             & $downloadOrtScript -LocalOrtDir $LocalOrtDir -DestDir $OrtBundleDir
         } elseif ($LocalPackage) {
             & $downloadOrtScript -LocalPackage $LocalPackage -DestDir $OrtBundleDir
         } else {
-            & $downloadOrtScript -Gpu -DestDir $OrtBundleDir
+            & $downloadOrtScript -DestDir $OrtBundleDir
         }
         if ($LASTEXITCODE -ne 0) {
             Write-Error "ONNX Runtime download failed."
@@ -218,32 +216,31 @@ if (-not $SkipOrt) {
 
     Write-Host ""
 } else {
-    Write-Host "-- [2/4] ONNX Runtime GPU (skipped) --" -ForegroundColor DarkGray
+    Write-Host "-- [2/4] ONNX Runtime (skipped) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
-# Step 3: CUDA Runtime DLLs
+# Step 3: CUDA Runtime DLLs (opt-in with -CUDA)
 # ============================================================
-if (-not $SkipCudaRuntime) {
+if ($CUDA -and -not $SkipCudaRuntime) {
     Write-Host "-- [3/4] CUDA Runtime DLLs (cuBLAS + cuDNN) --" -ForegroundColor Cyan
-
-    # Resolve destination (same as ORT lib dir by default)
-    $cudaDestDir = $OrtBundleDir
 
     $downloadCudaScript = Join-Path $PSScriptRoot "download-cuda-runtime.ps1"
     if (Test-Path $downloadCudaScript) {
-        & $downloadCudaScript -DestDir $cudaDestDir
+        & $downloadCudaScript -DestDir $OrtBundleDir
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "WARNING: CUDA runtime download had errors. GPU acceleration may not work." -ForegroundColor Yellow
+            Write-Host "WARNING: CUDA runtime download had errors. CUDA GPU builds may not work." -ForegroundColor Yellow
         }
     } else {
-        Write-Host "WARNING: download-cuda-runtime.ps1 not found. GPU acceleration will NOT work." -ForegroundColor Yellow
-        Write-Host "  CUDA runtime DLLs (cuBLAS 12 + cuDNN 9) are REQUIRED for GPU inference." -ForegroundColor Yellow
+        Write-Host "WARNING: download-cuda-runtime.ps1 not found. CUDA GPU builds will NOT work." -ForegroundColor Yellow
+        Write-Host "  CUDA runtime DLLs (cuBLAS 12 + cuDNN 9) are REQUIRED for CUDA GPU inference." -ForegroundColor Yellow
     }
 
     Write-Host ""
-} else {
+} elseif ($SkipCudaRuntime) {
     Write-Host "-- [3/4] CUDA Runtime DLLs (skipped) --" -ForegroundColor DarkGray
+} else {
+    Write-Host "-- [3/4] CUDA Runtime DLLs (skipped - DirectML is the default; use -CUDA to include) --" -ForegroundColor DarkGray
 }
 
 # ============================================================
@@ -275,7 +272,8 @@ Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Next steps:" -ForegroundColor Cyan
-Write-Host "    .\scripts\build-gpu.ps1           - Build release with GPU" -ForegroundColor White
-Write-Host "    .\scripts\build-gpu.ps1 -Dev      - Run dev server with GPU" -ForegroundColor White
-Write-Host "    .\scripts\pack-portable.ps1       - Create portable ZIP" -ForegroundColor White
+Write-Host "    .\scripts\build-gpu.ps1              - DirectML build (default)" -ForegroundColor White
+Write-Host "    .\scripts\build-gpu.ps1 -CUDA        - CUDA GPU build" -ForegroundColor White
+Write-Host "    .\scripts\build-gpu.ps1 -Dev         - Dev server with hot reload" -ForegroundColor White
+Write-Host "    .\scripts\pack-portable.ps1          - Create portable ZIP" -ForegroundColor White
 Write-Host ""

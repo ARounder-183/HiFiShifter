@@ -7,6 +7,10 @@
     libraries (DLLs, .lib) and C headers (include/) so that both ort-sys
     (linking) and build.rs (runtime staging) use the same ORT build.
 
+    The ort-bundle/ directory is a shared development environment -
+    CUDA and DirectML DLLs can coexist side by side.  This script only
+    adds files; it never removes them.
+
     Three acquisition modes, tried in order:
 
     1. -LocalOrtDir <path>   Copy from a pre-extracted ORT installation.
@@ -18,9 +22,21 @@
     3. Default (online)      Download from GitHub Releases.  Set the $env:ORT_MIRROR
                               variable to a mirror base URL to override the default.
 
+    GPU backend flags:
+      (default)  Download the GPU package (CUDA + TensorRT + DirectML).
+                 This is the baseline - DirectML support is always included.
+      -CPU       Download the CPU-only package (no GPU providers).
+
 .PARAMETER Gpu
-    Download the GPU (CUDA) variant instead of the CPU variant.
-    Ignored when -LocalPackage or -LocalOrtDir is used.
+    (Default behavior - flag kept for backward compatibility.)
+    Download the GPU variant (CUDA + TensorRT + DirectML providers).
+
+.PARAMETER DirectML
+    (Default behavior - flag kept for backward compatibility.)
+    Same as default; the GPU package includes DirectML by default.
+
+.PARAMETER CPU
+    Download the CPU-only package (no GPU providers).
 
 .PARAMETER DestDir
     Directory to place the extracted library files.
@@ -43,17 +59,21 @@
     This is equivalent to the old ORT_LIB_LOCATION workflow.
 
 .EXAMPLE
-    # Default: download GPU build from GitHub
+    # Full CUDA GPU build from GitHub
     .\scripts\download-ort.ps1 -Gpu
+
+.EXAMPLE
+    # Same GPU package, but expressed as DirectML intent
+    .\scripts\download-ort.ps1 -DirectML
 
 .EXAMPLE
     # Use a mirror for faster downloads in China
     $env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-    .\scripts\download-ort.ps1 -Gpu
+    .\scripts\download-ort.ps1 -DirectML
 
 .EXAMPLE
     # Use a pre-downloaded ZIP (no network)
-    .\scripts\download-ort.ps1 -Gpu -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
+    .\scripts\download-ort.ps1 -DirectML -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
 
 .EXAMPLE
     # Copy from a pre-extracted ORT installation (no network)
@@ -63,6 +83,8 @@
 [CmdletBinding()]
 param(
     [switch]$Gpu,
+    [switch]$DirectML,
+    [switch]$CPU,
     [string]$DestDir = "",
     [string]$Version = "1.24.1",
     [string]$LocalPackage,
@@ -73,6 +95,61 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 # ---- helpers ----
+
+function Copy-DirectMLProvider {
+    param([string]$Destination)
+    # ONNX Runtime 1.24 does not ship a standalone DirectML provider DLL.
+    # Instead, DirectML is compiled INTO onnxruntime.dll by the
+    # Microsoft.ML.OnnxRuntime.DirectML NuGet package.  We download it
+    # and use its onnxruntime.dll + onnxruntime_providers_shared.dll,
+    # keeping the GPU package's CUDA/TensorRT provider DLLs intact.
+    #
+    # Idempotency: check if the DirectML-enabled onnxruntime.dll is
+    # already present.  We use the file size as a heuristic — the NuGet
+    # DLL is ~16.5 MB vs. the standard GPU DLL (~22+ MB).
+    $ortDll = Join-Path $Destination "onnxruntime.dll"
+    $markerFile = Join-Path $Destination ".dml-installed"
+    if ((Test-Path $markerFile) -and (Test-Path $ortDll)) {
+        Write-Host "  DirectML onnxruntime.dll: already present (.dml-installed marker)" -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host "  Fetching DirectML-enabled onnxruntime.dll from NuGet..." -ForegroundColor Yellow
+    $nupkgUrl = "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/$Version"
+    $TempDir = Join-Path $env:TEMP "hifishifter-dml-$PID"
+    $nupkg = Join-Path $TempDir "dml.nupkg"
+    New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+
+    try {
+        Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkg -UseBasicParsing
+        # .nupkg is a ZIP; Expand-Archive requires .zip extension.
+        $nupkgZip = Join-Path $TempDir "dml.zip"
+        Rename-Item $nupkg $nupkgZip
+        $dmlExtract = Join-Path $TempDir "extract"
+        Expand-Archive -Path $nupkgZip -DestinationPath $dmlExtract -Force
+
+        $nativeDir = Join-Path $dmlExtract "runtimes\win-x64\native"
+        if (Test-Path $nativeDir) {
+            # Copy the DirectML build's onnxruntime.dll + provider_shared.dll.
+            # These OVERWRITE the standard ORT DLLs but CUDA/TensorRT provider
+            # DLLs (onnxruntime_providers_cuda.dll, etc.) are left untouched.
+            Get-ChildItem -Path $nativeDir -File | ForEach-Object {
+                Copy-Item $_.FullName -Destination (Join-Path $Destination $_.Name) -Force
+                $sz = [math]::Round($_.Length / 1MB, 1)
+                Write-Host "    + $($_.Name) ($sz MB, DirectML build)" -ForegroundColor DarkGreen
+            }
+            # Write a marker so subsequent runs can detect DirectML is installed.
+            "" | Out-File -FilePath $markerFile -Encoding utf8 -Force
+        } else {
+            Write-Host "  WARNING: DirectML native DLLs not found in NuGet package" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  WARNING: Failed to download DirectML onnxruntime.dll: $_" -ForegroundColor Yellow
+        Write-Host "  The build will fall back to CPU if DirectML is unavailable at runtime." -ForegroundColor DarkGray
+    } finally {
+        Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Copy-OrtFiles {
     param(
@@ -133,10 +210,25 @@ if (-not (Test-Path $DestDir)) {
     New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
 }
 
-# Check if already fully present
+# ---- idempotency check ----
+# DirectML is compiled into onnxruntime.dll (from the NuGet package), not a
+# separate provider DLL.  We use a .dml-installed marker file as the canary.
 $primaryDll = Join-Path $DestDir "onnxruntime.dll"
 $headerFile = Join-Path $DestDir "include\onnxruntime_c_api.h"
+$dmlMarker = Join-Path $DestDir ".dml-installed"
+
+$needsGpuPackage = -not $CPU
+$gpuPackagePresent = (Test-Path $dmlMarker)
+
 if ((Test-Path $primaryDll) -and (Test-Path $headerFile)) {
+    if ($needsGpuPackage -and -not $gpuPackagePresent) {
+        Write-Host "=== ONNX Runtime ===" -ForegroundColor Cyan
+        Write-Host "  Dest:      $DestDir" -ForegroundColor White
+        Write-Host "  Status:    ORT present, DirectML provider missing - fetching from NuGet" -ForegroundColor Yellow
+        Copy-DirectMLProvider -Destination $DestDir
+        Write-Host "  Done!" -ForegroundColor Green
+        exit 0
+    }
     Write-Host "=== ONNX Runtime ===" -ForegroundColor Cyan
     Write-Host "  Dest:      $DestDir" -ForegroundColor White
     Write-Host "  Status:    Already present - skipping" -ForegroundColor Green
@@ -172,6 +264,7 @@ if ($LocalOrtDir) {
     }
 
     Copy-OrtFiles -SourceRoot $sourceRoot -Destination $DestDir
+    if (-not $CPU) { Copy-DirectMLProvider -Destination $DestDir }
     Write-Host "  Done!" -ForegroundColor Green
     exit 0
 }
@@ -207,6 +300,7 @@ if ($LocalPackage) {
     } finally {
         Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    if (-not $CPU) { Copy-DirectMLProvider -Destination $DestDir }
     Write-Host "  Done!" -ForegroundColor Green
     exit 0
 }
@@ -214,12 +308,16 @@ if ($LocalPackage) {
 # =====================================================================
 # Mode 3: Download - fetch from GitHub Releases (or mirror)
 # =====================================================================
-$variant = if ($Gpu) { "gpu" } else { "cpu" }
-if ($Gpu) {
+# Default to GPU package (includes DirectML baseline).  Use -CPU for CPU-only.
+$isGpuDownload = -not $CPU
+$variantLabel = if ($isGpuDownload) { "GPU (CUDA + DirectML + TensorRT)" } else { "CPU" }
+if ($isGpuDownload) {
     $archiveName = "onnxruntime-win-x64-gpu-$Version.zip"
 } else {
     $archiveName = "onnxruntime-win-x64-$Version.zip"
 }
+
+# `-Gpu` and `-DirectML` are now default behavior - kept for backward compat.
 
 $BaseUrl = if ($env:ORT_MIRROR) {
     $env:ORT_MIRROR.TrimEnd('/')
@@ -229,7 +327,7 @@ $BaseUrl = if ($env:ORT_MIRROR) {
 $Url = "$BaseUrl/microsoft/onnxruntime/releases/download/v$Version/$archiveName"
 
 Write-Host "=== ONNX Runtime Download ===" -ForegroundColor Cyan
-Write-Host "  Version:   $Version ($variant)" -ForegroundColor White
+Write-Host "  Version:   $Version ($variantLabel)" -ForegroundColor White
 Write-Host "  URL:       $Url" -ForegroundColor DarkGray
 Write-Host "  Dest:      $DestDir" -ForegroundColor White
 

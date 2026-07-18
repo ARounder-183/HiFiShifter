@@ -61,6 +61,33 @@ fn cuda_device_id() -> i32 {
         .unwrap_or_else(|| env_i32("HIFISHIFTER_ORT_CUDA_DEVICE_ID").unwrap_or(0))
 }
 
+/// Runtime override for DirectML device ID. Set by `set_runtime_dml_device_id()`.
+/// Takes precedence over the `HIFISHIFTER_ORT_DML_DEVICE_ID` env var.
+/// `None` means "auto-select" (let DirectML pick the best device).
+static RUNTIME_DML_DEVICE_ID: OnceLock<Mutex<Option<Option<i32>>>> = OnceLock::new();
+
+/// Set the runtime DirectML device ID override. Pass `None` to auto-select.
+/// Pass `Some(id)` to force a specific adapter index.
+pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
+    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = Some(device_id);
+    }
+}
+
+/// Returns the effective DirectML device ID.
+/// `None` means auto-select (let DirectML pick).
+fn directml_device_id() -> Option<i32> {
+    RUNTIME_DML_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or_else(|| env_i32("HIFISHIFTER_ORT_DML_DEVICE_ID"))
+}
+
 /// Returns the runtime EP override if set, otherwise falls back to env var.
 fn ep_choice() -> String {
     RUNTIME_EP_OVERRIDE
@@ -207,6 +234,43 @@ fn build_trt_ep(role: OrtSessionRole) -> ExecutionProviderDispatch {
     ep.build()
 }
 
+// ── DirectML EP registration (feature-gated) ─────────────────────────────
+
+/// Try to register DirectML EP on a session builder.
+/// DirectML uses DirectX 12 to accelerate ONNX models on any GPU (NVIDIA, AMD, Intel Arc).
+/// It is Windows-only and requires no additional SDK or runtime DLLs beyond the ORT provider DLL.
+#[cfg(feature = "directml")]
+fn try_register_directml_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let dml_device_id = directml_device_id();
+    eprintln!(
+        "ort_session: try_register_directml_ep device_id={}",
+        dml_device_id.map_or_else(|| "auto".to_string(), |id| id.to_string())
+    );
+
+    let ep = if let Some(device_id) = dml_device_id {
+        ep::DirectML::default().with_device_id(device_id).build()
+    } else {
+        ep::DirectML::default().build()
+    };
+
+    builder
+        .with_execution_providers([ep])
+        .map(|b| (b, "directml"))
+        .map_err(|e| format!("enable DirectML EP failed: {e}"))
+}
+
+#[cfg(not(feature = "directml"))]
+fn try_register_directml_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let _ = (builder, _role);
+    Err("DirectML EP not compiled in this build".to_string())
+}
+
 /// Build an ORT session with the full optimization policy.
 ///
 /// All three models (NSF-HiFiGAN, FCPE, HNSEP) should call this instead of
@@ -227,6 +291,18 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         "cuda" => {
             // Clone so that the original builder is preserved if CUDA EP fails.
             match try_register_cuda_ep(builder.clone(), role) {
+                Ok((b, ep)) => {
+                    builder = b;
+                    selected = ep;
+                }
+                Err(e) => {
+                    eprintln!("ort_session: {e}, falling back to CPU");
+                    selected = "cpu";
+                }
+            }
+        }
+        "directml" | "dml" => {
+            match try_register_directml_ep(builder.clone(), role) {
                 Ok((b, ep)) => {
                     builder = b;
                     selected = ep;
@@ -260,7 +336,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
             }
         }
         _ => {
-            // "auto": try TRT first, then CUDA, fall back to CPU.
+            // "auto": try TRT first, then CUDA, then DirectML, fall back to CPU.
             match try_register_trt_ep(builder.clone(), role) {
                 Ok((b, ep)) => {
                     builder = b;
@@ -275,9 +351,20 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
                         }
                         Err(e2) => {
                             eprintln!(
-                                "ort_session: CUDA EP unavailable for {role:?}: {e2}, falling back to CPU"
+                                "ort_session: CUDA EP unavailable for {role:?}: {e2}, trying DirectML"
                             );
-                            selected = "cpu";
+                            match try_register_directml_ep(builder.clone(), role) {
+                                Ok((b, ep)) => {
+                                    builder = b;
+                                    selected = ep;
+                                }
+                                Err(e3) => {
+                                    eprintln!(
+                                        "ort_session: DirectML EP unavailable for {role:?}: {e3}, falling back to CPU"
+                                    );
+                                    selected = "cpu";
+                                }
+                            }
                         }
                     }
                 }
@@ -363,6 +450,11 @@ pub fn diagnose_available_providers() -> Vec<String> {
         }
     }
 
+    // DirectML is Windows-only and independent of CUDA
+    if probe_directml_ep_available() {
+        providers.push("DmlExecutionProvider".to_string());
+    }
+
     providers
 }
 
@@ -388,6 +480,28 @@ fn probe_cuda_ep_available() -> bool {
 /// Stub: CUDA EP not compiled in.
 #[cfg(not(feature = "cuda"))]
 const fn probe_cuda_ep_available() -> bool {
+    false
+}
+
+/// Quick check: try registering DirectML EP on a temporary session builder.
+/// Returns true if DirectML EP is available in the loaded ORT DLL.
+#[cfg(feature = "directml")]
+fn probe_directml_ep_available() -> bool {
+    match Session::builder() {
+        Ok(builder) => {
+            let ep = ep::DirectML::default().build();
+            match builder.with_execution_providers([ep]) {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Stub: DirectML EP not compiled in.
+#[cfg(not(feature = "directml"))]
+const fn probe_directml_ep_available() -> bool {
     false
 }
 

@@ -840,6 +840,7 @@ export const jaJP = {
     menu_inference_device: "推論デバイス",
     menu_inference_auto: "Auto（システム既定）",
     menu_inference_cpu: "CPU",
+    menu_inference_directml: "GPU (DirectML)",
     menu_inference_cuda: "GPU (CUDA)",
     menu_select_gpu_device: "GPUデバイスを選択",
     menu_no_gpu_detected: "NVIDIA GPUが検出されません",

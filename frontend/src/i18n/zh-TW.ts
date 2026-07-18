@@ -820,6 +820,7 @@ export const zhTW = {
     menu_inference_device: "推理裝置",
     menu_inference_auto: "Auto（系統預設）",
     menu_inference_cpu: "CPU",
+    menu_inference_directml: "GPU (DirectML)",
     menu_inference_cuda: "GPU (CUDA)",
     menu_select_gpu_device: "選擇 GPU 裝置",
     menu_no_gpu_detected: "未偵測到 NVIDIA GPU",

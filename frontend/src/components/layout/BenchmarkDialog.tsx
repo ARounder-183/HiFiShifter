@@ -53,6 +53,23 @@ function buildRows(result: BenchmarkResult): EpRow[] {
             available: true,
         },
     ];
+    // DirectML (DX12 GPU)
+    if (result.dmlMedianMs != null && result.dmlRtFactor != null) {
+        rows.push({
+            label: "GPU (DirectML)",
+            medianMs: result.dmlMedianMs,
+            rtf: result.dmlRtFactor,
+            available: true,
+        });
+    } else if (result.dmlAvailable) {
+        rows.push({
+            label: "GPU (DirectML)",
+            medianMs: -1,
+            rtf: -1,
+            available: false,
+        });
+    }
+    // CUDA GPU
     if (result.gpuMedianMs != null && result.gpuRtFactor != null) {
         rows.push({
             label: resolveGpuName(result),

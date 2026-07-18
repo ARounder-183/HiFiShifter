@@ -299,9 +299,13 @@ export interface BenchmarkResult {
     cpuRtFactor: number;
     gpuMedianMs?: number | null;
     gpuRtFactor?: number | null;
+    dmlMedianMs?: number | null;
+    dmlRtFactor?: number | null;
     benchmarkSamples: number;
     /** True when CUDA EP was available and used for GPU benchmark. */
     cudaAvailable: boolean;
+    /** True when DirectML EP was available and used for benchmark. */
+    dmlAvailable: boolean;
     /** CUDA device ID that was used. */
     cudaDeviceId: number;
     /** All execution providers available in the ONNX Runtime DLL. */
@@ -314,11 +318,13 @@ export interface BenchmarkResult {
     gpuDevices: GpuDeviceInfo[];
 }
 
-export interface BenchmarkResult {
+export interface BenchmarkResult_simple {
     cpuMedianMs: number;
     cpuRtFactor: number;
     gpuMedianMs?: number | null;
     gpuRtFactor?: number | null;
+    dmlMedianMs?: number | null;
+    dmlRtFactor?: number | null;
     benchmarkSamples: number;
 }
 

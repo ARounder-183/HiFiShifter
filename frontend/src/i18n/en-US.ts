@@ -833,6 +833,7 @@ export const enUS = {
     menu_inference_device: "Inference Device",
     menu_inference_auto: "Auto (system default)",
     menu_inference_cpu: "CPU",
+    menu_inference_directml: "GPU (DirectML)",
     menu_inference_cuda: "GPU (CUDA)",
     menu_select_gpu_device: "Select GPU Device",
     menu_no_gpu_detected: "No NVIDIA GPUs detected",

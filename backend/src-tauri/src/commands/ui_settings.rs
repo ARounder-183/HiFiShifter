@@ -12,8 +12,10 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    // Apply EP and CUDA device settings on load
+    // Apply EP and CUDA device settings on load — all three ONNX models
     crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
+    crate::hnsep_onnx::update_ort_ep(&settings.ort_ep);
+    crate::fcpe_onnx::update_ort_ep(&settings.ort_ep);
     crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
     // Sync background render setting
     crate::commands::playback::AUTO_BG_RENDER_ENABLED
@@ -50,9 +52,11 @@ pub(super) fn save_ui_settings(
     // Apply CUDA device ID (always apply on save, it's cheap)
     crate::vocoder_ort_session::set_runtime_cuda_device_id(settings.cuda_device_id);
 
-    // If EP choice or device changed, update ONNX session and clear caches
+    // If EP choice or device changed, rebuild all three ONNX sessions
     if ep_changed || device_changed {
         crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep);
+        crate::hnsep_onnx::update_ort_ep(&settings.ort_ep);
+        crate::fcpe_onnx::update_ort_ep(&settings.ort_ep);
 
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for clip in &timeline.clips {

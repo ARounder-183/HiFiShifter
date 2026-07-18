@@ -2333,9 +2333,13 @@ pub struct BenchmarkResults {
     pub cpu_rt_factor: f64,
     pub gpu_median_ms: Option<f64>,
     pub gpu_rt_factor: Option<f64>,
+    pub dml_median_ms: Option<f64>,
+    pub dml_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
     /// True when CUDA EP was available and used for the GPU benchmark.
     pub cuda_available: bool,
+    /// True when DirectML EP was available and used for the benchmark.
+    pub dml_available: bool,
     /// CUDA device ID that was used (0 if CUDA not available).
     pub cuda_device_id: i32,
     /// Execution providers available in the ONNX Runtime DLL.
@@ -2447,10 +2451,62 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         }
     }
 
+    // 3. Benchmark DirectML if available
+    let dml_available = available_providers.iter().any(|p| p.contains("Dml"));
+    let mut dml_median = None;
+    let mut dml_rt_factor = None;
+
+    if dml_available {
+        let dml_session_res = {
+            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("directml".to_string());
+            crate::vocoder_ort_session::build_ort_session(
+                &onnx_path,
+                crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+            )
+        };
+
+        if let Ok((mut dml_session, ep)) = dml_session_res {
+            if ep == "directml" {
+                let mut dml_times = Vec::new();
+                let mel = vec![0.0f32; cfg.num_mels * frames];
+                let f0 = vec![440.0f32; frames];
+
+                // Warmup
+                let mt = Tensor::from_array(
+                    ([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()),
+                )
+                .unwrap();
+                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                if dml_session.run(ort::inputs![mt, ft]).is_ok() {
+                    for _ in 0..runs {
+                        let mt = Tensor::from_array(
+                            ([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()),
+                        )
+                        .unwrap();
+                        let ft =
+                            Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+                                .unwrap();
+                        let t = std::time::Instant::now();
+                        let _ = dml_session.run(ort::inputs![mt, ft]).unwrap();
+                        dml_times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    dml_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let median = dml_times[dml_times.len() / 2];
+                    dml_median = Some(median);
+                    dml_rt_factor = Some(audio_sec / (median / 1000.0));
+                } else {
+                    eprintln!(
+                        "[benchmark] WARNING: DirectML EP registered but warmup inference FAILED."
+                    );
+                }
+            }
+        }
+    }
+
     // Log diagnostic info for debugging
     eprintln!(
-        "[benchmark] Providers: {:?} | CUDA device_id: {} | DLLs found: {} | CUDA inference works: {}",
-        available_providers, cuda_device_id, cuda_dlls_found, cuda_actually_working
+        "[benchmark] Providers: {:?} | CUDA device_id: {} | DLLs found: {} | CUDA works: {} | DirectML available: {}",
+        available_providers, cuda_device_id, cuda_dlls_found, cuda_actually_working, dml_available
     );
 
     Ok(BenchmarkResults {
@@ -2458,8 +2514,11 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         cpu_rt_factor,
         gpu_median_ms: gpu_median,
         gpu_rt_factor,
+        dml_median_ms: dml_median,
+        dml_rt_factor,
         benchmark_samples: runs,
         cuda_available,
+        dml_available,
         cuda_device_id,
         available_providers,
         cuda_dlls_found,

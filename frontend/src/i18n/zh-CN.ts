@@ -819,6 +819,7 @@ export const zhCN = {
     menu_inference_device: "推理设备",
     menu_inference_auto: "Auto（系统默认）",
     menu_inference_cpu: "CPU",
+    menu_inference_directml: "GPU (DirectML)",
     menu_inference_cuda: "GPU (CUDA)",
     menu_select_gpu_device: "选择 GPU 设备",
     menu_no_gpu_detected: "未检测到 NVIDIA GPU",

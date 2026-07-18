@@ -654,13 +654,14 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
 /// without breaking CPU-only compilation.
 fn clean_stale_ort_dlls() {
     // For CPU builds, ort-sys handles everything via download-binaries.
-    if !cfg!(feature = "cuda") {
+    if !cfg!(feature = "cuda") && !cfg!(feature = "directml") {
         return;
     }
 
     let stale_dlls = [
         "onnxruntime.dll",
         "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_dml.dll",
         "onnxruntime_providers_shared.dll",
         "onnxruntime_providers_tensorrt.dll",
         "cudart64_12.dll",
@@ -696,7 +697,7 @@ fn clean_stale_ort_dlls() {
             }
 
             // -- stage fresh DLLs from ort-bundle ----------
-            if cfg!(feature = "cuda") {
+            if cfg!(feature = "cuda") || cfg!(feature = "directml") {
                 let bundle = std::path::Path::new("third_party/ort-bundle");
                 if bundle.is_dir() {
                     if let Ok(entries) = std::fs::read_dir(bundle) {
@@ -704,6 +705,21 @@ fn clean_stale_ort_dlls() {
                             let src = entry.path();
                             if src.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) {
                                 if let Some(name) = src.file_name() {
+                                    let name_str = name.to_string_lossy().to_ascii_lowercase();
+                                    // Skip CUDA-specific DLLs when only DirectML is enabled
+                                    // (no CUDA feature compiled in — these DLLs would be unused bloat).
+                                    if !cfg!(feature = "cuda") && cfg!(feature = "directml") {
+                                        if name_str.starts_with("cudart")
+                                            || name_str.starts_with("cublas")
+                                            || name_str.starts_with("cudnn")
+                                            || name_str.starts_with("cufft")
+                                            || name_str.starts_with("curand")
+                                            || name_str.contains("providers_cuda")
+                                            || name_str.contains("providers_tensorrt")
+                                        {
+                                            continue;
+                                        }
+                                    }
                                     let dst = profile_dir.join(name);
                                     let should_copy = if dst.exists() {
                                         if let (Ok(sm), Ok(dm)) = (src.metadata(), dst.metadata()) {

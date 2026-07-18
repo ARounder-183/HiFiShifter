@@ -104,8 +104,18 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     Ok(arc)
 }
 
-/// Drop the shared session to release CUDA memory. Called on app exit.
+/// Drop the shared session to release GPU/CPU memory. Called on app exit.
 pub fn drop_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Reset the shared session so the next inference rebuilds it with the
+/// current EP choice (e.g. after user switches from CUDA to DirectML).
+pub fn update_ort_ep(_choice: &str) {
     if let Some(mutex) = SHARED_SESSION.get() {
         if let Ok(mut guard) = mutex.lock() {
             *guard = None;

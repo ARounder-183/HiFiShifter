@@ -65,7 +65,8 @@ jobs:
             cargo_features: ""
             tauri_args: --target x86_64-pc-windows-msvc
             ort_ep: ""
-            # Regular non-CUDA build (uses default features = onnx + vslib).
+            # Base Windows build: default features include onnx + vslib + directml.
+            # DirectML uses any DirectX 12-capable GPU (NVIDIA, AMD, Intel Arc).
             ort_lib: ""
             bundle_suffix: ""
 
@@ -73,8 +74,8 @@ jobs:
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
             cargo_no_default_features: "0"
-            cargo_features: "cuda,onnx,tensorrt,vslib"
-            tauri_args: --target x86_64-pc-windows-msvc -- --features onnx,cuda,tensorrt,vslib
+            cargo_features: "cuda,tensorrt"
+            tauri_args: --target x86_64-pc-windows-msvc -- --features cuda,tensorrt
             ort_ep: "cuda"
             # CUDA GPU build with ONNX Runtime GPU + TensorRT providers.
             ort_lib: gpu
@@ -331,6 +332,32 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
+      - name: Download ONNX Runtime for Windows base build (DirectML support)
+        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+        shell: pwsh
+        run: |
+          $OrtDestDir = "backend\src-tauri\third_party\ort-bundle"
+          # Download the ORT GPU package which includes onnxruntime_providers_dml.dll
+          # (DirectML is bundled with the GPU package since ORT 1.17+).
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\download-ort.ps1 -Gpu -DestDir $OrtDestDir
+          # Remove CUDA-specific DLLs that aren't needed for the DirectML-only build.
+          # This keeps the portable ZIP and build artifacts lean.
+          Get-ChildItem -Path $OrtDestDir -Filter "*.dll" | Where-Object {
+            $_.Name -match '^(cudart|cublas|cudnn|cufft|curand).*\.dll$' -or
+            $_.Name -match 'providers_(cuda|tensorrt)'
+          } | Remove-Item -Force
+          Get-ChildItem -Path $OrtDestDir -Filter "*.lib" | Where-Object {
+            $_.Name -match 'providers_(cuda|tensorrt)'
+          } | Remove-Item -Force
+
+      - name: Set ORT_LIB_LOCATION (Windows base, DirectML)
+        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+        shell: pwsh
+        run: |
+          $OrtDir = Join-Path "${{ github.workspace }}" "backend\src-tauri\third_party\ort-bundle"
+          Write-Host "ORT_LIB_LOCATION=$OrtDir (DirectML build)"
+          "ORT_LIB_LOCATION=$OrtDir" >> $env:GITHUB_ENV
+
       - name: Download ONNX Runtime GPU for CUDA builds (Windows)
         if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
         shell: pwsh
@@ -394,7 +421,11 @@ jobs:
           if [ "${{ matrix.cargo_no_default_features }}" = "1" ]; then
             cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --no-default-features --features "${{ matrix.cargo_features }}" --verbose
           else
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --verbose
+            EXTRA_FEATURES=""
+            if [ -n "${{ matrix.cargo_features }}" ]; then
+              EXTRA_FEATURES="--features ${{ matrix.cargo_features }}"
+            fi
+            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" $EXTRA_FEATURES --verbose
           fi
         shell: bash
 
@@ -408,7 +439,11 @@ jobs:
           if ("${{ matrix.cargo_no_default_features }}" -eq "1") {
             cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --no-default-features --features "${{ matrix.cargo_features }}" --verbose
           } else {
-            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" --verbose
+            $extra = ""
+            if ("${{ matrix.cargo_features }}" -ne "") {
+              $extra = "--features ${{ matrix.cargo_features }}"
+            }
+            cargo check --lib --all-targets --target "${{ matrix.cargo_target }}" $extra --verbose
           }
         shell: pwsh
 
@@ -432,7 +467,22 @@ jobs:
           projectPath: backend/src-tauri
           args: ${{ matrix.tauri_args }}
 
-      - name: Inject GPU DLLs into NSIS installer (Windows GPU)
+      - name: Inject DLLs into NSIS installer (Windows base, DirectML)
+        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+        shell: pwsh
+        run: |
+          $bundle = "backend\src-tauri\third_party\ort-bundle"
+          if ((Test-Path $bundle) -and (Get-ChildItem "$bundle\*.dll" -ErrorAction SilentlyContinue)) {
+            Write-Host "Injecting DirectML DLLs into NSIS installer..."
+            .\scripts\inject-gpu-dlls.ps1 -TargetTriple "${{ matrix.cargo_target }}"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "WARNING: DLL injection failed -- NSIS installer will lack DirectML support"
+            }
+          } else {
+            Write-Host "No DLLs found in ort-bundle/ -- skipping NSIS injection"
+          }
+
+      - name: Inject GPU DLLs into NSIS installer (Windows CUDA)
         if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'
         shell: pwsh
         run: |
@@ -587,6 +637,12 @@ jobs:
           path: |
             backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+      - name: Verify DLLs in release directory (Windows base, DirectML)
+        if: runner.os == 'Windows' && matrix.ort_lib != 'gpu'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\verify-cuda-dlls.ps1 -DirectML -ReleaseDir "backend\src-tauri\target\${{ matrix.cargo_target }}\release"
 
       - name: Verify CUDA DLLs in release directory (Windows GPU)
         if: runner.os == 'Windows' && matrix.ort_lib == 'gpu'

@@ -852,6 +852,7 @@ export const koKR = {
     menu_inference_device: "추론 장치",
     menu_inference_auto: "Auto (시스템 기본)",
     menu_inference_cpu: "CPU",
+    menu_inference_directml: "GPU (DirectML)",
     menu_inference_cuda: "GPU (CUDA)",
     menu_select_gpu_device: "GPU 장치 선택",
     menu_no_gpu_detected: "NVIDIA GPU가 감지되지 않음",

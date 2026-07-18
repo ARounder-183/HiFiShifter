@@ -1,28 +1,32 @@
 <#
 .SYNOPSIS
-    Inject ALL GPU DLLs from ort-bundle/ into a Tauri-generated NSIS
-    installer script, then re-run makensis to produce the final installer.
+    Inject ALL GPU DLLs (CUDA or DirectML) from ort-bundle/ into a
+    Tauri-generated NSIS installer script, then re-run makensis.
 
 .DESCRIPTION
     This is a POST-BUILD step that runs AFTER `cargo tauri build`.
 
-    GPU DLLs are NOT listed in tauri.windows.conf.json — that file is
+    GPU DLLs are NOT listed in tauri.windows.conf.json - that file is
     committed to git and NEVER modified by any build step.  Instead,
     this script injects every DLL from ort-bundle/ directly into the
     generated NSIS script.
+
+    Works for both CUDA and DirectML builds:
+      - CUDA: injects onnxruntime + CUDA + cuDNN + cuBLAS + DirectML DLLs
+      - DirectML: injects onnxruntime + DirectML DLLs (no CUDA runtime)
 
     Why not use Tauri resources for GPU DLLs?
       1. ort-bundle/ DLLs only exist after a GPU dependency download.
       2. They must not appear in the committed config (validation fails
          on fresh clones / CPU builds).
-      3. NSIS injection is Ctrl+C safe — the NSIS script lives in
+      3. NSIS injection is Ctrl+C safe - the NSIS script lives in
          target/, not in the git working tree.
       4. The precompiled engine DLL (~500 MB) needs SetCompress off
          to avoid NSIS 32-bit mmap crashes, which requires post-hoc
          NSIS script patching anyway.
 
 .DEPENDENCY
-    makensis — Tauri downloads its own NSIS to %LOCALAPPDATA%\tauri\NSIS\
+    makensis - Tauri downloads its own NSIS to %LOCALAPPDATA%\tauri\NSIS\
     during the first `cargo tauri build`.  This script locates it
     automatically; no manual NSIS installation is needed.
 
@@ -30,8 +34,10 @@
     The Rust target triple (e.g., x86_64-pc-windows-msvc).
 
 .EXAMPLE
-    .\scripts\inject-gpu-dlls.ps1
+    .\scripts\inject-gpu-dlls.ps1                           # CUDA installer
     .\scripts\inject-gpu-dlls.ps1 -TargetTriple aarch64-pc-windows-msvc
+
+    # For DirectML: run build-gpu.ps1 -DirectML -Bundle (which calls this script)
 #>
 
 [CmdletBinding()]
@@ -69,14 +75,15 @@ if (-not (Test-Path $NsisScript)) {
 }
 
 if (-not (Test-Path $BundleDir)) {
-    Write-Error "GPU bundle directory not found: $BundleDir"
-    Write-Error "Run download-ort.ps1 and download-cuda-runtime.ps1 first."
+    Write-Error "ort-bundle/ directory not found: $BundleDir"
+    Write-Error "Run setup-windows.ps1 (CUDA) or setup-windows.ps1 -DirectML first."
     exit 1
 }
 
 $allDlls = @(Get-ChildItem "$BundleDir\*.dll" -ErrorAction SilentlyContinue)
 if ($allDlls.Count -eq 0) {
-    Write-Error "No GPU DLLs found in $BundleDir"
+    Write-Error "No DLLs found in $BundleDir"
+    Write-Error "Run setup-windows.ps1 to populate ort-bundle/."
     exit 1
 }
 
@@ -84,7 +91,7 @@ Write-Host "=== inject-gpu-dlls ===" -ForegroundColor Cyan
 Write-Host "  Target:      $TargetTriple"
 Write-Host "  Product:     $ProductName v$Version"
 Write-Host "  NSIS script: $NsisScript"
-Write-Host "  GPU DLLs:    $($allDlls.Count) found in ort-bundle/"
+Write-Host "  DLLs:        $($allDlls.Count) found in ort-bundle/"
 foreach ($d in $allDlls) {
     $sz = [math]::Round($d.Length / 1MB, 1)
     Write-Host "    $($d.Name) ($sz MB)"
@@ -110,7 +117,7 @@ if ($script.IndexOf($solidMarker) -ge 0) {
     $script = $script.Replace($solidMarker, $nonSolidLine)
     Write-Host "  Switched: /SOLID lzma -> lzma (non-solid)"
 } else {
-    Write-Host "  NOTE: /SOLID marker not found — may already be non-solid"
+    Write-Host "  NOTE: /SOLID marker not found - may already be non-solid"
 }
 
 # ---- 2b. Build injection strings ----------------------------------------
@@ -123,10 +130,10 @@ $precompiledName = "cudnn_engines_precompiled64_9.dll"
 foreach ($dll in $allDlls) {
     $absPath = $dll.FullName
     if ($dll.Name -eq $precompiledName) {
-        # Store UNCOMPRESSED — NSIS 32-bit cannot mmap this 500+ MB file
+        # Store UNCOMPRESSED - NSIS 32-bit cannot mmap this 500+ MB file
         $installLines += @"
 
-  ; $($dll.Name) — stored UNCOMPRESSED (NSIS 32-bit mmap limit)
+  ; $($dll.Name) - stored UNCOMPRESSED (NSIS 32-bit mmap limit)
   SetCompress off
   File /a "/oname=$($dll.Name)" "$absPath"
   SetCompress auto
