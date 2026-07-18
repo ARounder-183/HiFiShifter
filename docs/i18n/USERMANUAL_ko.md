@@ -19,12 +19,14 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 
 - Linux 버전은 AppImage 패키지를 제공합니다. AppImage 패키지는 파일의 `속성 -> 권한`에서 `파일을 프로그램으로 실행 허용`을 체크한 후 직접 실행할 수 있습니다.
 
-**CUDA GPU 가속 정보**: HiFiShifter는 Windows와 Linux용 NVIDIA CUDA GPU 가속 빌드를 제공합니다 (다운로드 파일명에 `-cuda` 접미사가 포함됨). 이 빌드는 NVIDIA GPU를 추론에 활용합니다. CUDA 빌드를 사용하려면:
+**GPU 가속 정보**: HiFiShifter는 각 플랫폼별로 다양한 GPU 가속 옵션을 제공합니다:
 
-- CUDA를 지원하는 NVIDIA 그래픽 카드 (GTX 10 시리즈 이상 권장)
-- 최신 [NVIDIA 디스플레이 드라이버](https://www.nvidia.com/drivers) (버전 545 이상 권장)
+- **Windows**: DirectML (DirectX 12), NVIDIA, AMD, Intel Arc GPU 지원
+- **macOS (Apple Silicon)**: CoreML, Apple Neural Engine 가속 사용
+- **macOS (Intel)**: CPU 추론만 가능
+- **Linux**: OpenCL, 크로스 플랫폼 GPU 가속
 
-macOS는 현재 CUDA GPU 가속을 지원하지 않습니다.
+메뉴 `옵션 → 추론 장치`에서 `Auto`(자동), `CPU`, `GPU`를 선택할 수 있습니다. 벤치마크를 실행하여 각 장치의 추론 성능을 확인할 수 있습니다.
 
 **WebView 정보**: HiFiShifter 는 Rust + Tauri 프레임워크로 구축되었으며, 인터페이스를 표시하려면 WebView 구성 요소가 필요합니다.
 
@@ -59,7 +61,7 @@ HiFiShifter 프로젝트 파일의 확장자는 `.hshp` 또는 `.hsp`입니다. 
 
 - `프로젝트 스트레치 재정의`：현재 프로젝트의 스트레치 알고리즘을 수정할 수 있습니다.
 - `전역 스트레치 기본값`：전역 기본 스트레치 알고리즘을 수정할 수 있습니다.
-- `추론 장치`：렌더링에 사용할 추론 장치를 설정할 수 있습니다. 현재 `Auto`、`CPU`、`GPU (CUDA)`의 3가지가 있습니다. 이 메뉴에서 벤치마크를 실행하여 각 장치의 성능을 테스트할 수 있습니다. `GPU (CUDA)`는 CUDA 버전의 HiFiShifter에서만 유효합니다.
+- `추론 장치`：렌더링에 사용할 추론 장치를 설정할 수 있습니다. 현재 `Auto`、`CPU`、`GPU` 세 가지가 있습니다. 이 메뉴에서 벤치마크를 실행하여 각 장치의 성능을 테스트할 수 있습니다(벤치마크에서는 GPU (DirectML), GPU (OpenCL) 등 구체적인 백엔드가 표시됩니다). `GPU`는 해당 GPU 버전의 HiFiShifter에서만 유효합니다.
 - `백그라운드 사전 렌더링`：활성화하면 프로젝트를 열거나 파라미터를 편집한 후, 편집된 파라미터가 자동으로 백그라운드에서 사전 렌더링되며, 렌더링 중에도 이미 렌더링된 부분을 재생할 수 있습니다. 비활성화하면 재생 시작 시에만 렌더링이 진행되며, 타임라인을 정상적으로 재생하려면 렌더링이 완료될 때까지 기다려야 합니다. 기본값은 활성화입니다. 비활성화하면 렌더링 빈도를 낮춰 성능을 절약할 수 있습니다.
 - `키보드 단축키`：HiFiShifter의 키 바인딩을 설정할 수 있습니다. 여러 프리셋을 선택할 수 있습니다.
 

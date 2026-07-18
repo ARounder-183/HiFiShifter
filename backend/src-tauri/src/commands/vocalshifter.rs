@@ -95,7 +95,8 @@ pub(super) fn import_vocalshifter_project(
         tl.next_track_order = order_offset;
 
         // 合并 clips
-        for clip in result.timeline.clips {
+        for mut clip in result.timeline.clips {
+            crate::state::TimelineState::populate_clip_file_metadata(&mut clip);
             tl.clips.push(clip);
         }
 

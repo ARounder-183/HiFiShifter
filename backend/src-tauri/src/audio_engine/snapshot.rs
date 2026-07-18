@@ -6,7 +6,7 @@ use lru::LruCache;
 
 use crate::state::{Clip, TimelineState, Track};
 
-use super::io::{get_resampled_stereo_cached, is_audio_path};
+use super::io::{decode_resampled_stereo, get_resampled_stereo_cached, is_audio_path};
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
 use super::util::{quantize_i64, quantize_u32};
 
@@ -298,7 +298,45 @@ pub(crate) fn build_snapshot(
             .unwrap_or(false);
 
         let src = match get_resampled_stereo_cached(path, out_rate, cache) {
-            Some(v) => v,
+            Some(v) => {
+                // ★ 运行时缓存有效性校验：对比 clip 记录的文件 mtime 与磁盘当前 mtime。
+                // 若不一致说明文件已被外部替换，缓存的解码数据已过时，需同步重新解码。
+                let cache_valid = clip.source_file_mtime.map_or(true, |expected_mtime| {
+                    std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        == Some(expected_mtime)
+                });
+                if cache_valid {
+                    v
+                } else {
+                    // 文件已变更 → 同步重新解码并更新缓存
+                    if debug {
+                        eprintln!(
+                            "[snapshot] clip_id={} source_file_mtime mismatch — forcing re-decode path={}",
+                            clip.id,
+                            path.display()
+                        );
+                    }
+                    match decode_resampled_stereo(path, out_rate) {
+                        Some(fresh) => {
+                            let key = (path.to_path_buf(), out_rate);
+                            if let Ok(mut map) = cache.lock() {
+                                map.put(key, fresh.clone());
+                            }
+                            fresh
+                        }
+                        None => {
+                            if debug {
+                                eprintln!("[snapshot] clip_id={} re-decode failed, using cached data as fallback", clip.id);
+                            }
+                            v
+                        }
+                    }
+                }
+            }
             None => {
                 if debug {
                     eprintln!(
@@ -533,6 +571,7 @@ pub(crate) fn build_snapshot(
                             extra_params,
                             clip.formant_morph.as_ref().filter(|params| params.enabled),
                             None,
+                            clip.source_file_mtime,
                         );
                         if debug {
                             eprintln!(

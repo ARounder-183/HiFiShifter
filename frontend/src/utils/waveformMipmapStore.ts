@@ -116,7 +116,8 @@ class WaveformMipmapStoreImpl {
     }
 
     releaseInterleaved(buf: Float32Array): void {
-        const accepted = buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX;
+        const accepted =
+            buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX;
         if (accepted) {
             this.interleavedPool.push(new Float32Array(buf.buffer));
         }

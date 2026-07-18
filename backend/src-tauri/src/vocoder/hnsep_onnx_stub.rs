@@ -15,3 +15,7 @@ pub fn infer_harmonic_noise_mono(
 }
 
 pub fn drop_shared_session() {}
+
+pub fn update_ort_ep(_choice: &str) {}
+
+pub fn ensure_cache_capacity(_min_capacity: usize) {}

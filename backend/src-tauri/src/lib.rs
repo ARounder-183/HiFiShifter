@@ -30,13 +30,13 @@ mod synth_clip_cache;
 #[path = "vocoder/ort_session.rs"]
 mod vocoder_ort_session;
 
-#[cfg(all(feature = "cuda", target_os = "windows"))]
-#[path = "vocoder/cuda_info.rs"]
-mod cuda_info;
+#[cfg(target_os = "windows")]
+#[path = "vocoder/gpu_info.rs"]
+mod gpu_info;
 
-#[cfg(not(all(feature = "cuda", target_os = "windows")))]
-#[path = "vocoder/cuda_info_stub.rs"]
-mod cuda_info;
+#[cfg(not(target_os = "windows"))]
+#[path = "vocoder/gpu_info_stub.rs"]
+mod gpu_info;
 
 #[cfg(feature = "onnx")]
 #[path = "vocoder/mel_utils.rs"]
@@ -333,6 +333,7 @@ pub fn run() {
             commands::set_clips_state_bulk,
             commands::duplicate_clips_bulk,
             commands::replace_clip_source,
+            commands::check_source_files_changed,
             commands::split_clip,
             commands::split_clips_at,
             commands::glue_clips,
@@ -399,7 +400,7 @@ pub fn run() {
                 let state = app_handle.state::<state::AppState>();
                 state.audio_engine.shutdown();
 
-                // Force-drop all ONNX sessions to release CUDA memory before exit.
+                // Force-drop all ONNX sessions to release GPU memory before exit.
                 crate::nsf_hifigan_onnx::drop_shared_session();
                 crate::fcpe_onnx::drop_shared_session();
                 crate::hnsep_onnx::drop_shared_session();

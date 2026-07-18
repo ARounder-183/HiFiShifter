@@ -404,6 +404,17 @@ export const koKR = {
         "다음 오디오 파일을 찾을 수 없습니다. 대체 파일을 수동으로 지정하시겠습니까?",
     missing_file_replace_pick: "대체 파일 선택",
 
+    // 소스 파일 변경 감지 (창이 포커스를 다시 얻을 때 트리거)
+    source_file_changed_title: "소스 파일 변경됨",
+    source_file_changed_modified_desc:
+        "다음 오디오 파일이 외부에서 수정되었습니다. 프로젝트에 다시 로드하시겠습니까?",
+    source_file_changed_deleted_desc:
+        "다음 오디오 파일이 이동 또는 삭제되었습니다. 대체 파일을 선택하시겠습니까?",
+    source_file_changed_reload: "다시 로드",
+    source_file_changed_ignore: "무시",
+    source_file_changed_status_deleted: "삭제됨",
+    source_file_changed_status_modified: "수정됨",
+
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",
     fade_curve_exponential: "지수",
@@ -839,11 +850,9 @@ export const koKR = {
 
     // ── 추론 장치 / GPU ──────────────────────────────────────────────────
     menu_inference_device: "추론 장치",
-    menu_inference_auto: "Auto (시스템 기본)",
+    menu_inference_auto: "자동",
     menu_inference_cpu: "CPU",
-    menu_inference_cuda: "GPU (CUDA)",
-    menu_select_gpu_device: "GPU 장치 선택",
-    menu_no_gpu_detected: "NVIDIA GPU가 감지되지 않음",
+    menu_inference_gpu: "GPU",
     menu_run_benchmark: "벤치마크 실행…",
     menu_background_prerender: "백그라운드 사전 렌더링",
     menu_background_prerender_desc:
@@ -851,8 +860,8 @@ export const koKR = {
 
     benchmark_title: "추론 장치 벤치마크",
     benchmark_desc:
-        "각 장치에서 약 12초 오디오로 보코더 추론을 실행하고 지연 시간을 비교합니다. 가장 빠른 제공자를 선택하세요.",
-    benchmark_running: "벤치마크 실행 중… 20~60초 소요될 수 있습니다",
+        "약 12초의 오디오를 각 사용 가능한 장치의 보코더로 추론하여 중간 지연 시간을 보고합니다. 결과로 가장 빠른 추론 장치를 선택하세요.",
+    benchmark_running: "벤치마크 실행 중 — 20~60초 소요될 수 있습니다…",
     benchmark_results: "결과 ({samples} 프레임 · 44.1 kHz):",
     benchmark_device_header: "장치",
     benchmark_latency_header: "중간 지연",
@@ -865,23 +874,11 @@ export const koKR = {
     benchmark_close: "닫기",
     benchmark_idle_hint: '"벤치마크 실행"을 클릭하여 시작하세요. 모델이 로드되어 있어야 합니다.',
     benchmark_error_default: "벤치마크에 실패했습니다. 모델이 로드되었는지 확인하세요.",
-    benchmark_gpu_failed_title: "⚠ GPU 벤치마크 실패 — CUDA 등록됐으나 실행 불가",
+    benchmark_gpu_failed_title: "⚠ GPU 벤치마크 실패",
     benchmark_gpu_failed_desc:
-        "ONNX Runtime이 CUDA 제공자를 감지했지만 추론에 실패했습니다. CUDA 런타임 DLL(cuBLAS, cuDNN)이 누락되었을 수 있습니다.",
-    benchmark_gpu_dll_missing_fix: "해결 방법:",
-    benchmark_gpu_broken_title: "⚠ GPU 가속 불가 — CUDA 런타임 DLL 누락",
-    benchmark_gpu_broken_desc:
-        "ONNX Runtime이 NVIDIA GPU를 인식하고 CUDA 제공자도 사용 가능하지만, cuBLAS와 cuDNN이 누락되었습니다. CUDA는 자동으로 CPU로 폴백합니다.",
-    benchmark_gpu_fix_cmd1:
-        "> .\\setup-gpu-deps.ps1   # 일회성 설치 (ORT + cuBLAS + cuDNN 다운로드)",
-    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # 개발 서버 시작 (모든 DLL 자동 복사)",
-    benchmark_gpu_failed_dll_ok_title: "⚠ GPU 벤치마크 실패 (CUDA 및 DLL 준비 완료)",
-    benchmark_gpu_failed_dll_ok_desc:
-        "CUDA EP와 런타임 DLL이 준비되었지만 추론에 실패했습니다. 드라이버 또는 하드웨어 문제일 수 있습니다.",
-    benchmark_cuda_dll_label: "CUDA 런타임 DLL:",
-    benchmark_cuda_dll_yes: "찾음 ✅",
-    benchmark_cuda_dll_no: "누락 — GPU가 작동하지 않음 ⚠",
+        "GPU 추론에 실패했습니다. GPU 드라이버가 올바르게 설치되어 있고 ONNX Runtime 제공자 DLL이 있는지 확인하세요.",
+    benchmark_gpu_device_label: "GPU 장치",
+    benchmark_ort_info_label: "ONNX Runtime:",
+    benchmark_gpu_label: "GPU",
     benchmark_providers_label: "사용 가능한 제공자:",
-    benchmark_nvml_label: "NVML로 감지된 NVIDIA GPU:",
-    benchmark_cuda_device_label: "CUDA 장치:",
 } as const;

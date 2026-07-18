@@ -1,4 +1,3 @@
-use blake3::Hasher;
 use lru::LruCache;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -9,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
+/// Cached EP name selected at session build time (for diagnostic reporting).
+static SELECTED_EP: OnceLock<String> = OnceLock::new();
 static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
@@ -86,8 +87,19 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(onnx_path, crate::vocoder_ort_session::OrtSessionRole::Separator)?;
+    let (session, ep) = crate::vocoder_ort_session::build_ort_session(
+        onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::Separator,
+    )?;
+    // Cache the EP name so diagnostics can report whether HNSEP is on GPU.
+    let _ = SELECTED_EP.set(ep);
     Ok(session)
+}
+
+/// Returns the EP that was actually selected for the HNSEP session (for diagnostics).
+#[allow(dead_code)]
+pub fn selected_ep_name() -> Option<&'static str> {
+    SELECTED_EP.get().map(|s| s.as_str())
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
@@ -104,8 +116,18 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     Ok(arc)
 }
 
-/// Drop the shared session to release CUDA memory. Called on app exit.
+/// Drop the shared session to release GPU/CPU memory. Called on app exit.
 pub fn drop_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Reset the shared session so the next inference rebuilds it with the
+/// current EP choice (e.g. after user switches from OpenCL to DirectML).
+pub fn update_ort_ep(_choice: &str) {
     if let Some(mutex) = SHARED_SESSION.get() {
         if let Ok(mut guard) = mutex.lock() {
             *guard = None;
@@ -184,26 +206,68 @@ pub fn ensure_cache_capacity(min_capacity: usize) {
     }
 }
 
-fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_mono: &[f32]) -> u64 {
-    let mut hasher = Hasher::new();
-    hasher.update(clip_id.as_bytes());
-    hasher.update(&sample_rate.to_le_bytes());
-    hasher.update(&(audio_mono.len() as u64).to_le_bytes());
-    // Hash first and last 64 samples for a fast fingerprint (sufficient for 128-entry cache).
-    let head = audio_mono.len().min(64);
-    for sample in &audio_mono[..head] {
-        hasher.update(&sample.to_bits().to_le_bytes());
+/// Compute a clip-level cache key using only identity fields (not audio content).
+///
+/// Uses FNV-1a 64-bit for low overhead. The key is based on `clip_id` + `sample_rate` +
+/// `audio_len`, which is sufficient for per-clip HNSEP separation caching — two calls
+/// for the same clip with the same clipped audio length will produce the same separation
+/// output, regardless of which segment is being rendered.
+fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize) -> u64 {
+    // FNV-1a 64-bit initial value
+    let mut h: u64 = 14695981039346656037u64;
+
+    for &b in clip_id.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
     }
-    if audio_mono.len() > 64 {
-        let tail_start = audio_mono.len() - 64;
-        for sample in &audio_mono[tail_start..] {
-            hasher.update(&sample.to_bits().to_le_bytes());
-        }
+    for &b in &sample_rate.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
     }
-    let bytes = hasher.finalize();
-    let mut key = [0u8; 8];
-    key.copy_from_slice(&bytes.as_bytes()[..8]);
-    u64::from_le_bytes(key)
+    for &b in &(audio_len as u64).to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
+    }
+
+    h
+}
+
+/// Get the noise stem for a clip, for use in computing breath_noise_stereo
+/// without a second full ProcessorChain pass.
+///
+/// This is a convenience wrapper around [`infer_harmonic_noise_mono`] that
+/// only returns the noise component. Used by `render_single_clip` to avoid
+/// double HiFiGAN rendering in the breath path.
+pub fn infer_noise_mono(
+    clip_id: &str,
+    audio_mono: &[f32],
+    sample_rate: u32,
+) -> Result<Arc<Vec<f32>>, String> {
+    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate).map(|(_, noise)| noise)
+}
+
+/// Pre-populate the HNSEP cache with a harmonic+noise pair for a given clip.
+///
+/// This allows the caller to perform HNSEP separation once at the clip level
+/// and ensure subsequent per-segment ProcessorChain calls hit the cache,
+/// avoiding redundant HNSEP inference for every segment of the same clip.
+#[allow(dead_code)]
+pub fn cache_separation(
+    clip_id: &str,
+    sample_rate: u32,
+    audio_len: usize,
+    harmonic: Arc<Vec<f32>>,
+    noise: Arc<Vec<f32>>,
+) {
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
+    let entry = HnsepCacheEntry {
+        harmonic,
+        noise,
+    };
+    let mut cache = global_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.put(cache_key, entry);
 }
 
 pub fn infer_harmonic_noise_mono(
@@ -215,13 +279,21 @@ pub fn infer_harmonic_noise_mono(
         return Err(e.clone());
     }
 
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_mono);
+    let audio_len = audio_mono.len();
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
     {
         let mut cache = global_cache()
             .lock()
             .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
         if let Some(entry) = cache.get(&cache_key) {
-            return Ok((entry.harmonic.clone(), entry.noise.clone()));
+            // Verify length consistency before returning cached result.
+            // If the cached audio differs in length from the request, treat as miss
+            // (can happen when clip is trimmed/stretched after caching).
+            if entry.harmonic.len().max(entry.noise.len()) >= audio_len {
+                return Ok((entry.harmonic.clone(), entry.noise.clone()));
+            }
+            // Cached result too short → remove and re-infer below.
+            cache.pop(&cache_key);
         }
     }
 
@@ -264,19 +336,25 @@ pub fn infer_harmonic_noise_mono(
             .map_err(|e| format!("hnsep noise output extract failed: {e}"))?;
         (harmonic_tensor.to_vec(), noise_tensor.to_vec())
     };
+    // Drop session lock before resampling (CPU work)
 
     if sample_rate != HNSEP_MODEL_SR {
         harmonic = crate::mel_utils::linear_resample_mono(&harmonic, HNSEP_MODEL_SR, sample_rate);
         noise = crate::mel_utils::linear_resample_mono(&noise, HNSEP_MODEL_SR, sample_rate);
     }
 
-    harmonic.resize(audio_mono.len(), 0.0);
-    noise.resize(audio_mono.len(), 0.0);
-    if harmonic.len() > audio_mono.len() {
-        harmonic.truncate(audio_mono.len());
+    // Length normalization: ensure output matches input length exactly.
+    // Resampling can produce ±1 sample drift; truncate or zero-pad as needed.
+    let target_len = audio_mono.len();
+    if harmonic.len() < target_len {
+        harmonic.resize(target_len, 0.0);
+    } else if harmonic.len() > target_len {
+        harmonic.truncate(target_len);
     }
-    if noise.len() > audio_mono.len() {
-        noise.truncate(audio_mono.len());
+    if noise.len() < target_len {
+        noise.resize(target_len, 0.0);
+    } else if noise.len() > target_len {
+        noise.truncate(target_len);
     }
 
     let harmonic_arc = Arc::new(harmonic);

@@ -1,13 +1,13 @@
-//! NVIDIA GPU enumeration via NVML (NVIDIA Management Library).
+//! GPU enumeration via NVML (NVIDIA Management Library).
 //!
 //! Dynamically loads `nvml.dll` to discover all NVIDIA GPUs, their names,
-//! memory sizes, and CUDA compute capabilities. NVML device indices match
-//! CUDA device indices on standard Windows/WDDM configurations (which
+//! memory sizes, and compute capabilities. NVML device indices match
+//! GPU device indices on standard Windows/WDDM configurations (which
 //! covers all laptop and most desktop setups).
 //!
 //! This is used by the frontend to let users select which GPU to use for
-//! ONNX Runtime CUDA inference, and by the benchmark to report which
-//! physical GPU participated in the test.
+//! ONNX Runtime GPU inference (DirectML, OpenCL, etc.), and by the benchmark
+//! to report which physical GPU participated in the test.
 
 use serde::Serialize;
 use std::ffi::CStr;
@@ -45,17 +45,17 @@ type NvmlDeviceGetCudaComputeCapabilityFn =
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuDeviceInfo {
-    /// NVML device index (matches CUDA device ID on standard configs).
+    /// NVML device index (matches GPU device ID on standard configs).
     pub device_id: u32,
     /// Human-readable GPU name, e.g. "NVIDIA GeForce RTX 3050 Laptop GPU".
     pub name: String,
     /// Total GPU memory in megabytes.
     pub memory_mb: u64,
-    /// CUDA compute capability major version (e.g. 8 for Ampere).
+    /// Compute capability major version (e.g. 8 for Ampere).
     pub compute_major: i32,
-    /// CUDA compute capability minor version (e.g. 6 for RTX 3050: 8.6).
+    /// Compute capability minor version (e.g. 6 for RTX 3050: 8.6).
     pub compute_minor: i32,
-    /// Whether this device supports CUDA (based on NVML compute capability query).
+    /// Whether this device supports GPU compute (based on NVML compute capability query).
     pub cuda_capable: bool,
 }
 
@@ -176,7 +176,7 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
         let _ = unsafe { nvml_device_get_memory_info(handle, &mut mem) };
         let memory_mb = mem.total / (1024 * 1024);
 
-        // Get CUDA compute capability
+        // Get compute capability
         let mut major: i32 = 0;
         let mut minor: i32 = 0;
         let cc_ret = unsafe { nvml_device_get_cuda_cc(handle, &mut major, &mut minor) };

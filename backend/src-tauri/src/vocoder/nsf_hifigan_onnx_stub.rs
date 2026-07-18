@@ -29,8 +29,8 @@ pub struct OnnxDiagnosticInfo {
     pub active_ep: String,
     pub onnx_version: Option<String>,
     pub providers: Option<Vec<String>>,
-    /// Always None in stub (ONNX not compiled). Real type: CudaDiagnostic.
-    pub cuda_diagnostic: Option<serde_json::Value>,
+    /// Always None in stub (ONNX not compiled). Real type: GpuDiagnostic.
+    pub gpu_diagnostic: Option<serde_json::Value>,
 }
 
 pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
@@ -42,7 +42,7 @@ pub fn diagnose_onnx_availability() -> OnnxDiagnosticInfo {
         active_ep: "none".to_string(),
         onnx_version: None,
         providers: None,
-        cuda_diagnostic: None,
+        gpu_diagnostic: None,
     }
 }
 
@@ -73,17 +73,15 @@ pub struct BenchmarkResults {
     pub cpu_rt_factor: f64,
     pub gpu_median_ms: Option<f64>,
     pub gpu_rt_factor: Option<f64>,
+    pub dml_median_ms: Option<f64>,
+    pub dml_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
-    pub cuda_available: bool,
-    pub cuda_device_id: i32,
+    pub gpu_available: bool,
+    pub dml_available: bool,
+    pub gpu_device_id: i32,
     pub available_providers: Vec<String>,
-    pub cuda_dlls_found: bool,
     pub ort_build_info: String,
     pub gpu_devices: Vec<serde_json::Value>,
-}
-
-pub fn try_create_cuda_smoke_session() -> Result<(), String> {
-    Err("ONNX feature not compiled".to_string())
 }
 
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {

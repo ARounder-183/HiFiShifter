@@ -21,11 +21,7 @@
 
 import type { FadeCurveType } from "../components/layout/timeline/paths";
 import { fadeCurveGain } from "../components/layout/timeline/paths";
-import {
-    wfDiag_poolAcquire,
-    wfDiag_poolRelease,
-    wfDiag_poolRegister,
-} from "./waveformDebug";
+import { wfDiag_poolAcquire, wfDiag_poolRelease, wfDiag_poolRegister } from "./waveformDebug";
 
 // ============================================================================
 // 类型定义

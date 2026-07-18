@@ -145,50 +145,14 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifterは**ワンクリック環境セットアップスクリプト**を提供しており、ONNX RuntimeとCUDAランタイムを自動的にインストールします（Rustツールチェーンは**デフォルトでスキップ**されます。`-InstallRust` で有効化してください）：
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-オプションのパラメータ：
-
-- `-InstallRust`：プロジェクトローカルのポータブルRustツールチェーンをインストール（デフォルトではスキップ、システム全体のRustを使用）
-- `-SkipOrt`：ONNX Runtimeのダウンロードをスキップ
-- `-SkipCudaRuntime`：CUDAランタイムのダウンロードをスキップ
-- `-SkipFrontend`：フロントエンド依存関係のインストールをスキップ
-- `-LocalOrtDir <path>`：事前に展開されたORTディレクトリからコピー（ネットワーク不要）
-- `-LocalPackage <path>`：ローカルにダウンロードしたORT ZIPアーカイブから展開（ネットワーク不要）
-
-ミラーを使用してダウンロードを高速化する場合：
-
-```powershell
-$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-.\scripts\setup-windows.ps1
-```
-
-ローカルソースからORTをオフラインでインストールする場合：
-
-```powershell
-# 事前に展開されたORTディレクトリからコピー
-.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
-
-# ローカルZIPアーカイブから展開
-.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
-```
-
-ローカルのRust環境を現在のシェルに読み込む場合（インストールなし）：
-
-```powershell
-. .\scripts\setup-windows.ps1 -LoadEnv
-```
-
-手動セットアップする場合、以下のツールがインストールされていることを確認してください：
+以下のツールがインストールされていることを確認してください：
 
 - **Node.js**（推奨18+）および npm
 - **Rustツールチェーン**（`rust-toolchain.toml` を参照）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**（SoundTouchライブラリのビルドに必要）
+
+ONNX Runtime (DirectML) は ort crate がビルド時に自動的にダウンロードします。追加設定は不要です。
 
 フロントエンドの依存関係をインストールします：
 
@@ -221,67 +185,29 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPUアクセラレーションビルド（CUDA）
+### 4. GPUアクセラレーションビルド
 
-HiFiShifterはNVIDIA CUDAによるGPUアクセラレーション推論をサポートします。
+| プラットフォーム            | GPU技術               | 説明                                                            |
+| --------------------------- | --------------------- | --------------------------------------------------------------- |
+| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crateが自動ダウンロード、NVIDIA / AMD / Intel Arcに対応     |
+| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine、自動有効化                                 |
+| macOS x86_64 (Intel)        | —                     | CPUのみ                                                         |
+| Linux x86_64 / ARM64        | —                     | CPUのみ（ONNX RuntimeはOpenCLをネイティブサポートしていません） |
 
-#### Windows（CUDA）
+#### 全プラットフォーム
 
-前提条件：
-
-- CUDA対応のNVIDIA GPU
-- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
-
-ワンクリック環境セットアップ：
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-開発モード（ホットリロード）：
+ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。
 
 ```powershell
-.\scripts\build-gpu.ps1 -Dev
-```
+# 開発モード（ホットリロード）
+cargo tauri dev
 
-リリースビルド：
+# リリースビルド
+cargo tauri build
 
-```powershell
-# 高速ビルド（バイナリのみ、インストーラなし）
-.\scripts\build-gpu.ps1
-
-# 高速ビルド + ファイルログ（タイムスタンプ付き log.txt、exe と同じ場所）
-.\scripts\build-gpu.ps1 -Log
-
-# フルビルド（バイナリ + NSIS インストーラ、大容量 GPU コンポーネントの圧縮により低速）
-.\scripts\build-gpu.ps1 -Bundle
-```
-
-ビルド後、ポータブルZIPを作成：
-
-```powershell
+# Windows ポータブルZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
-
-#### Linux（CUDA）
-
-前提条件：
-
-- CUDA対応のNVIDIA GPU
-- [NVIDIAディスプレイドライバ](https://www.nvidia.com/drivers)（バージョン ≥ 545）
-
-```bash
-# システム依存関係のインストール（CUDAツールキットを含む）
-sudo bash ./scripts/install-cuda-linux.sh
-
-# ONNX Runtime GPU + cuDNNのダウンロード
-bash ./scripts/download-ort.sh
-
-# ビルド
-bash ./scripts/build-gpu-linux.sh
-```
-
-> **注意：** macOSは現在CUDA GPUアクセラレーションをサポートしていません。
 
 ## クイックスタート
 

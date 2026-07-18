@@ -875,6 +875,11 @@ pub(super) fn open_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = pf.timeline.clone();
+        // 打开工程时为所有含 source_path 的 clip 初始化文件元数据 + 内容指纹，
+        // 用于本会话中的外部文件变更检测。此数据仅在程序运行期间有效，不持久化。
+        for clip in &mut tl.clips {
+            crate::state::TimelineState::populate_clip_file_metadata(clip);
+        }
         let normalized_base_scale = normalize_scale_key(&pf.base_scale);
         let normalized_custom_scale = normalize_custom_scale(pf.custom_scale.clone());
         let normalized_use_custom_scale = pf.use_custom_scale && normalized_custom_scale.is_some();

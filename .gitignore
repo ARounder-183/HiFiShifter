@@ -181,6 +181,3 @@ backend/src-tauri/third_party/soundtouch-static/soundtouch/
 # Temp directory created by setup-gpu-deps.ps1
 temp_ort_setup/
 
-# Generated GPU resource bundle - binaries downloaded at build time,
-# never committed.  stage-tauri-resources.ps1 regenerates this.
-backend/src-tauri/third_party/ort-bundle/
