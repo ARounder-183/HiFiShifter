@@ -123,6 +123,9 @@ export const webApi = {
     updatePitchReference: timelineApi.updatePitchReference,
     selectClip: timelineApi.selectClip,
 
+    // 检查已导入音频源文件是否被外部修改或删除
+    checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,
+
     setTransport: timelineApi.setTransport,
     setProjectLength: timelineApi.setProjectLength,
 };

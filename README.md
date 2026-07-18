@@ -145,50 +145,14 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter 提供了**一键式环境配置脚本**，可自动安装 ONNX Runtime 和 CUDA 运行时（Rust 工具链**默认跳过**，需手动添加 `-InstallRust` 启用）：
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-该脚本支持可选参数：
-
-- `-InstallRust`：安装项目本地的便携 Rust 工具链（默认跳过，使用系统全局 Rust）
-- `-SkipOrt`：跳过 ONNX Runtime 下载
-- `-SkipCudaRuntime`：跳过 CUDA 运行时下载
-- `-SkipFrontend`：跳过前端依赖安装
-- `-LocalOrtDir <path>`：从本地已解压的 ORT 目录复制（免网络下载）
-- `-LocalPackage <path>`：从本地已下载的 ORT ZIP 包解压（免网络下载）
-
-若需使用镜像加速下载：
-
-```powershell
-$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-.\scripts\setup-windows.ps1
-```
-
-若需从本地离线安装 ORT：
-
-```powershell
-# 从已解压的本地 ORT 目录复制
-.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
-
-# 从本地 ZIP 包解压
-.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
-```
-
-若只需加载本地 Rust 环境到当前 shell（不执行安装）：
-
-```powershell
-. .\scripts\setup-windows.ps1 -LoadEnv
-```
-
-如果希望手动安装，请确保已安装以下工具：
+请确保已安装以下工具：
 
 - **Node.js**（建议 18+）及 npm
 - **Rust 工具链**（参见 `rust-toolchain.toml`）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**（用于编译 SoundTouch 库）
+
+ONNX Runtime (DirectML) 由 ort crate 在编译时自动下载，无需额外配置。
 
 安装前端依赖：
 
@@ -221,67 +185,29 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速构建（CUDA）
+### 4. GPU 加速构建
 
-HiFiShifter 支持通过 NVIDIA CUDA 实现 GPU 加速推理。
+| 平台                        | GPU 技术              | 说明                                              |
+| --------------------------- | --------------------- | ------------------------------------------------- |
+| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自动下载，支持 NVIDIA / AMD / Intel Arc |
+| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自动启用                     |
+| macOS x86_64 (Intel)        | —                     | CPU only                                          |
+| Linux x86_64 / ARM64        | —                     | CPU only（ONNX Runtime 不原生支持 OpenCL）        |
 
-#### Windows（CUDA）
+#### 所有平台
 
-前置条件：
-
-- 一台支持 CUDA 的 NVIDIA GPU
-- [NVIDIA 显卡驱动](https://www.nvidia.com/drivers)（版本 ≥ 545）
-
-一键环境搭建：
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-开发模式（热更新）：
+ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries` 特性自动下载，无需手动安装。
 
 ```powershell
-.\scripts\build-gpu.ps1 -Dev
-```
+# 开发模式（热更新）
+cargo tauri dev
 
-构建 Release：
+# 构建 Release
+cargo tauri build
 
-```powershell
-# 快速构建（仅编译二进制文件，不含安装包）
-.\scripts\build-gpu.ps1
-
-# 快速构建 + 文件日志（log.txt 带时间戳，放在 exe 旁边）
-.\scripts\build-gpu.ps1 -Log
-
-# 完整构建（二进制 + NSIS 安装包，较慢--需压缩约 2 GB 的 GPU 组件）
-.\scripts\build-gpu.ps1 -Bundle
-```
-
-构建完成后，运行以下命令创建便携版压缩包：
-
-```powershell
+# Windows 便携版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
-
-#### Linux（CUDA）
-
-前置条件：
-
-- 一台支持 CUDA 的 NVIDIA GPU
-- [NVIDIA 显卡驱动](https://www.nvidia.com/drivers)（版本 ≥ 545）
-
-```bash
-# 安装系统依赖（含 CUDA toolkit）
-sudo bash ./scripts/install-cuda-linux.sh
-
-# 下载 ONNX Runtime GPU + cuDNN
-bash ./scripts/download-ort.sh
-
-# 构建
-bash ./scripts/build-gpu-linux.sh
-```
-
-> **注意：** macOS 目前不支持 CUDA GPU 加速。
 
 ## 快速开始
 

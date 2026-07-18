@@ -29,6 +29,7 @@ import {
     setToolMode,
     checkpointHistory,
     addTrackRemote,
+    replaceClipSourceRemote,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
@@ -141,6 +142,10 @@ function AppInner() {
         projectDirtyRef.current = projectDirty;
     }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
+    // 当工程路径变更时（新建/打开/关闭工程），重置已忽略的源文件路径集合
+    useEffect(() => {
+        ignoredSourcePathsRef.current = new Set();
+    }, [projectPath]);
     const vocalShifterSkippedFilesDialog = useAppSelector(
         (state) => state.session.vocalShifterSkippedFilesDialog,
     );
@@ -168,10 +173,17 @@ function AppInner() {
         open: boolean;
         missingPath: string;
     }>({ open: false, missingPath: "" });
+    // 源文件变更检测对话框（窗口重新获得焦点时触发）
+    const [sourceFileChangedDialog, setSourceFileChangedDialog] = useState<{
+        open: boolean;
+        changes: Array<{ clip_id: string; clip_name: string; source_path: string; change: string }>;
+    }>({ open: false, changes: [] });
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
     const missingFileResolverRef = useRef<((shouldPick: boolean) => void) | null>(null);
     const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
+    // 当前会话中已忽略的源文件变更路径集合（用户点击"忽略"后不再重复弹窗）
+    const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
 
     // MIDI clip import dialog state (lifted from TimelinePanel)
     const [midiClipDialogOpen, setMidiClipDialogOpen] = useState(false);
@@ -1036,6 +1048,45 @@ function AppInner() {
         };
     }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
 
+    // 窗口重新获得焦点时，检测已导入的音频源文件是否被外部修改或删除
+    useEffect(() => {
+        let checking = false;
+
+        async function onFocus() {
+            if (checking) return;
+            checking = true;
+            try {
+                const result = await webApi.checkSourceFilesChanged();
+                const allChanges =
+                    (
+                        result as {
+                            changed?: Array<{
+                                clip_id: string;
+                                clip_name: string;
+                                source_path: string;
+                                change: string;
+                            }>;
+                        }
+                    )?.changed ?? [];
+                // 过滤掉用户已在本会话中"忽略"的路径
+                const ignored = ignoredSourcePathsRef.current;
+                const changes = allChanges.filter((c) => !ignored.has(c.source_path));
+                if (changes.length > 0) {
+                    setSourceFileChangedDialog({ open: true, changes });
+                }
+            } catch {
+                // 静默失败；此检测为可选增强功能
+            } finally {
+                checking = false;
+            }
+        }
+
+        window.addEventListener("focus", onFocus);
+        return () => {
+            window.removeEventListener("focus", onFocus);
+        };
+    }, []);
+
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
         (actionId: ActionId) => {
@@ -1572,6 +1623,138 @@ function AppInner() {
                             }}
                         >
                             {t("missing_file_replace_pick")}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* Source file changed dialog — triggered on window focus regain */}
+            <Dialog.Root
+                open={sourceFileChangedDialog.open}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setSourceFileChangedDialog((prev) => ({ ...prev, open: false }));
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="620px">
+                    <Dialog.Title>{t("source_file_changed_title")}</Dialog.Title>
+                    <Dialog.Description>
+                        {sourceFileChangedDialog.changes.some((c) => c.change === "deleted")
+                            ? t("source_file_changed_deleted_desc")
+                            : t("source_file_changed_modified_desc")}
+                    </Dialog.Description>
+                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                        {sourceFileChangedDialog.changes.map((item) => (
+                            <div
+                                key={item.clip_id}
+                                className="truncate py-0.5"
+                                title={item.source_path}
+                            >
+                                <span
+                                    className={
+                                        item.change === "deleted"
+                                            ? "text-red-500"
+                                            : "text-amber-500"
+                                    }
+                                >
+                                    [{item.change === "deleted" ? t("source_file_changed_status_deleted") : t("source_file_changed_status_modified")}]
+                                </span>{" "}
+                                {item.clip_name} — {item.source_path}
+                            </div>
+                        ))}
+                    </div>
+                    <Flex justify="end" gap="2" mt="4">
+                        <Button
+                            variant="soft"
+                            color="gray"
+                            onClick={() => {
+                                // 将当前变更列表中的所有源路径加入忽略集合，
+                                // 本次打开工程期间不再弹出相关提示
+                                for (const c of sourceFileChangedDialog.changes) {
+                                    ignoredSourcePathsRef.current.add(c.source_path);
+                                }
+                                setSourceFileChangedDialog((prev) => ({
+                                    ...prev,
+                                    open: false,
+                                }));
+                            }}
+                        >
+                            {t("source_file_changed_ignore")}
+                        </Button>
+                        <Button
+                            onClick={async () => {
+                                const changes = sourceFileChangedDialog.changes;
+                                setSourceFileChangedDialog((prev) => ({
+                                    ...prev,
+                                    open: false,
+                                }));
+
+                                // 重新加载被修改的文件：
+                                // 按 source_path 去重，使用 replaceSameSource: true
+                                // 确保工程中所有引用同一源文件的 clip 全部统一更新，
+                                // 避免其他同源 clip 因 mtime 未更新而在下次切屏时错误弹窗。
+                                const modifiedPaths = new Set<string>();
+                                for (const c of changes) {
+                                    if (c.change === "modified") {
+                                        modifiedPaths.add(c.source_path);
+                                    }
+                                }
+                                for (const path of modifiedPaths) {
+                                    try {
+                                        // 找出该路径对应的任意一个 clip_id 即可；
+                                        // replaceSameSource: true 会让后端自动扩展至所有同源 clip
+                                        const anyClipId =
+                                            changes.find(
+                                                (c) =>
+                                                    c.change === "modified" &&
+                                                    c.source_path === path,
+                                            )?.clip_id ?? "";
+                                        await dispatch(
+                                            replaceClipSourceRemote({
+                                                clipIds: anyClipId ? [anyClipId] : [],
+                                                newSourcePath: path,
+                                                replaceSameSource: true,
+                                            }),
+                                        ).unwrap();
+                                    } catch {
+                                        // continue with remaining files
+                                    }
+                                }
+
+                                // 提示用户为已删除的文件选择替代文件
+                                const deletedItems = changes.filter((c) => c.change === "deleted");
+                                if (deletedItems.length > 0) {
+                                    for (const item of deletedItems) {
+                                        try {
+                                            const picked = await coreApi.openAudioDialog();
+                                            if (
+                                                (
+                                                    picked as {
+                                                        ok?: boolean;
+                                                        canceled?: boolean;
+                                                    }
+                                                )?.canceled ||
+                                                !(picked as { path?: string })?.path
+                                            ) {
+                                                continue;
+                                            }
+                                            const newPath = (picked as { path: string }).path;
+                                            await dispatch(
+                                                replaceClipSourceRemote({
+                                                    clipIds: [item.clip_id],
+                                                    newSourcePath: newPath,
+                                                    replaceSameSource: false,
+                                                }),
+                                            ).unwrap();
+                                        } catch {
+                                            // continue with remaining files
+                                        }
+                                    }
+                                }
+                            }}
+                        >
+                            {t("source_file_changed_reload")}
                         </Button>
                     </Flex>
                 </Dialog.Content>

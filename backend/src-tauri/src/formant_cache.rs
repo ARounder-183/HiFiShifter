@@ -49,6 +49,11 @@ impl FormantCache {
         let weight = entry.pcm_stereo.len() as u64 * 4;
         self.inner.insert(key, entry, weight);
     }
+
+    /// 使指定 clip_id 的所有缓存失效。
+    pub fn invalidate(&mut self, clip_id: &str) {
+        self.inner.invalidate_where(|k| k.clip_id == clip_id);
+    }
 }
 
 static GLOBAL_FORMANT_CACHE: OnceLock<Mutex<FormantCache>> = OnceLock::new();
@@ -147,6 +152,13 @@ pub fn is_current_formant_rebuild_generation(clip_id: &str, generation: u64) -> 
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     generations.get(clip_id).copied().unwrap_or(0) == generation
+}
+
+/// 使指定 clip 的所有 formant 缓存失效（例如源文件被替换时）。
+pub fn invalidate_formant_cache_for_clip(clip_id: &str) {
+    if let Ok(mut cache) = global_formant_cache().lock() {
+        cache.invalidate(clip_id);
+    }
 }
 
 pub fn cancel_formant_rebuild_generation(clip_id: &str) {

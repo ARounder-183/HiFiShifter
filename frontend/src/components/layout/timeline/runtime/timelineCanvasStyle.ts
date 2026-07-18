@@ -239,6 +239,7 @@ export function buildTimelineClipVisualStyle(args: {
     showGainKnob: boolean;
     showGainLabel: boolean;
     showName: boolean;
+    borderLineWidth: number;
 } {
     const fontFamily = args.fontFamily || resolveFontFamily();
     const trackColor = args.trackColor ?? "#68839d";
@@ -349,7 +350,12 @@ export function buildTimelineClipVisualStyle(args: {
     return {
         headerFill: rgba(headerRgb, 0.95),
         bodyFill: rgba(bodyRgb, 0.74),
-        borderStroke: rgba(borderRgb, 0.74),
+        borderStroke: args.selected
+            ? getComputedStyle(document.documentElement)
+                .getPropertyValue("--qt-clip-selected-border")
+                .trim() || rgba(borderRgb, 1)
+            : rgba(borderRgb, 0.74),
+        borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(241, 245, 249, 0.94)",
         muteBadgeFill: rgba(args.muted ? controlActiveRgb : controlRgb, args.muted ? 0.96 : 0.9),
         muteBadgeStroke: rgba(

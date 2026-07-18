@@ -44,6 +44,7 @@ lru = "0.12"
 encoding_rs = "0.8"
 midly = "0.5"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+libloading = "0.8"
 
 rustfft = "6"
 num-complex = "0.4"
@@ -53,7 +54,6 @@ ndarray = { version = "0.16", optional = true }
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
 libc = "0.2"
-libloading = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
@@ -64,23 +64,26 @@ objc2 = "0.6"
 default = ["onnx", "vslib"]
 logging = []
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
-cuda = ["onnx", "ort/cuda"]
-tensorrt = ["cuda", "ort/tensorrt"]
 vslib = []
 
-# Linux / Windows
-# NOTE: `cuda` and `tensorrt` ort features are NOT enabled here by default —
-# they are opt-in via the Cargo feature flags `cuda` and `tensorrt` above.
-# `download-binaries` auto-fetches ONNX Runtime CPU prebuilts at build time;
-# when `ORT_LIB_LOCATION` is set (e.g. CUDA CI), it takes precedence silently.
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# GPU providers are baked into the platform-specific ort dependency below.
+# `cargo tauri build` produces GPU-accelerated binaries without extra --features.
+# ORT binaries are automatically downloaded by ort-sys at build time
+# via the `download-binaries` feature.
+
+# Windows — DirectML (DirectX 12 GPU, works on any DX12-capable GPU)
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml"] }
+
+# Linux — OpenCL (loaded at runtime via ORT generic EP API, no special ort feature needed)
+[target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries"] }
 
-# macOS Apple Silicon (arm64) — includes CoreML for Apple Neural Engine acceleration
+# macOS Apple Silicon — CoreML (Apple Neural Engine)
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml"] }
 
-# macOS Intel (x86_64)
+# macOS Intel — CPU only (no hardware GPU acceleration available)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ort-tract = { version = "0.3.0+0.22", optional = true }
@@ -99,7 +102,7 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 
-# Fast iteration profile: opt-level=2 for ORT/CUDA, no LTO, fast compile
+# Fast iteration profile: opt-level=2 for ORT/GPU, no LTO, fast compile
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 2

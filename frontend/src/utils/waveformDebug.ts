@@ -56,7 +56,10 @@ function ensureTimer(): void {
     if (_timer != null) return;
     _timer = setInterval(() => {
         if (!isEnabled()) {
-            if (_timer != null) { clearInterval(_timer); _timer = null; }
+            if (_timer != null) {
+                clearInterval(_timer);
+                _timer = null;
+            }
             reset();
             return;
         }
@@ -65,20 +68,30 @@ function ensureTimer(): void {
 }
 
 function reset(): void {
-    _frameTotal = 0; _frameSlow = 0; _frameTimeSum = 0; _frameTimeMax = 0;
-    _invalidateBusCalls = 0; _invalidateMipmapCalls = 0; _invalidatePropCalls = 0; _drawCount = 0;
-    _missNullCount = 0; _missShortCount = 0; _hitCount = 0;
+    _frameTotal = 0;
+    _frameSlow = 0;
+    _frameTimeSum = 0;
+    _frameTimeMax = 0;
+    _invalidateBusCalls = 0;
+    _invalidateMipmapCalls = 0;
+    _invalidatePropCalls = 0;
+    _drawCount = 0;
+    _missNullCount = 0;
+    _missShortCount = 0;
+    _hitCount = 0;
     for (const s of Object.values(_poolStats)) {
-        s.acquire = 0; s.miss = 0; s.release = 0; s.discard = 0;
+        s.acquire = 0;
+        s.miss = 0;
+        s.release = 0;
+        s.discard = 0;
     }
 }
 
 function dump(): void {
     const avg = _frameTotal > 0 ? (_frameTimeSum / _frameTotal).toFixed(1) : "0";
     const missTotal = _missNullCount + _missShortCount;
-    const missPct = (_hitCount + missTotal) > 0
-        ? ((missTotal / (_hitCount + missTotal)) * 100).toFixed(1)
-        : "0";
+    const missPct =
+        _hitCount + missTotal > 0 ? ((missTotal / (_hitCount + missTotal)) * 100).toFixed(1) : "0";
 
     console.log(
         `%c[WaveformDiag]──────── ${new Date().toLocaleTimeString()} ────────`,
@@ -111,7 +124,10 @@ function dump(): void {
 // ── 公开 API ────────────────────────────────────────
 
 export function wfDiag_frameStart(): void {
-    if (!_enabled) { _enabled = isEnabled(); if (!_enabled) return; }
+    if (!_enabled) {
+        _enabled = isEnabled();
+        if (!_enabled) return;
+    }
     ensureTimer();
 }
 
@@ -125,17 +141,26 @@ export function wfDiag_frameEnd(totalMs: number): void {
 }
 
 export function wfDiag_invalidateBus(): void {
-    if (!_enabled) { _enabled = isEnabled(); if (!_enabled) return; }
+    if (!_enabled) {
+        _enabled = isEnabled();
+        if (!_enabled) return;
+    }
     _invalidateBusCalls++;
 }
 
 export function wfDiag_invalidateMipmap(): void {
-    if (!_enabled) { _enabled = isEnabled(); if (!_enabled) return; }
+    if (!_enabled) {
+        _enabled = isEnabled();
+        if (!_enabled) return;
+    }
     _invalidateMipmapCalls++;
 }
 
 export function wfDiag_invalidateProps(): void {
-    if (!_enabled) { _enabled = isEnabled(); if (!_enabled) return; }
+    if (!_enabled) {
+        _enabled = isEnabled();
+        if (!_enabled) return;
+    }
     _invalidatePropCalls++;
 }
 
@@ -156,17 +181,17 @@ export function wfDiag_dataMissShort(): void {
 
 // ── Buffer 池跟踪 ───────────────────────────────────
 
-export function wfDiag_poolRegister(
-    name: string,
-    currentSize: () => number,
-): void {
+export function wfDiag_poolRegister(name: string, currentSize: () => number): void {
     if (!_poolStats[name]) {
         _poolStats[name] = { acquire: 0, miss: 0, release: 0, discard: 0, currentSize };
     }
 }
 
 export function wfDiag_poolAcquire(name: string, hit: boolean): void {
-    if (!_enabled) { _enabled = isEnabled(); if (!_enabled) return; }
+    if (!_enabled) {
+        _enabled = isEnabled();
+        if (!_enabled) return;
+    }
     const s = _poolStats[name];
     if (!s) return;
     s.acquire++;

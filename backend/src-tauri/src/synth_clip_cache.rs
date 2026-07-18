@@ -479,6 +479,9 @@ pub fn compute_rendered_clip_hash(
     extra_params: &std::collections::HashMap<String, f64>,
     formant_morph: Option<&crate::state::ClipFormantMorph>,
     input_pitch_curve: Option<&[f32]>,
+    // 源文件的 mtime（Unix 秒），用于区分同路径不同内容的文件版本。
+    // 当文件被外部替换后，此值变化 → hash 变化 → 旧渲染缓存自动失效。
+    source_file_mtime: Option<u64>,
 ) -> u64 {
     let mut h: u64 = 14695981039346656037u64;
 
@@ -501,6 +504,10 @@ pub fn compute_rendered_clip_hash(
 
     mix_bytes!(clip_id.as_bytes());
     mix_bytes!(source_path.as_bytes());
+    // 混入 source_file_mtime：同路径不同文件内容 → 不同 mtime → 不同 hash → 缓存自动失效
+    if let Some(mtime) = source_file_mtime {
+        mix_bytes!(&mtime.to_le_bytes());
+    }
     mix_bytes!(renderer_id.as_bytes());
     mix_bytes!(&start_frame.to_le_bytes());
     mix_bytes!(&end_frame.to_le_bytes());
@@ -585,6 +592,7 @@ pub fn compute_breath_noise_hash(
     extra_curves: &std::collections::HashMap<String, Vec<f32>>,
     extra_params: &std::collections::HashMap<String, f64>,
     formant_morph: Option<&crate::state::ClipFormantMorph>,
+    source_file_mtime: Option<u64>,
 ) -> u64 {
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = extra_curves
         .iter()
@@ -605,6 +613,7 @@ pub fn compute_breath_noise_hash(
         extra_params,
         formant_morph,
         None,
+        source_file_mtime,
     )
 }
 
@@ -904,6 +913,10 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         }
     }
 
+    // 6. HiFiGAN 推理 chunk 缓存失效（按 clip_id 索引）
+    //    当源文件被替换后，旧的推理输出不再有效，必须使 chunk 缓存失效。
+    crate::renderer::hifigan::invalidate_chunk_cache_for_clip(clip_id);
+
     eprintln!(
         "[cache:invalidate] clip_id={} all caches invalidated",
         clip_id
@@ -994,6 +1007,7 @@ mod tests {
             &std::collections::HashMap::new(),
             Some(&formant_a),
             None,
+            None, // source_file_mtime
         );
         let hash_b = compute_rendered_clip_hash(
             "clip-1",
@@ -1009,6 +1023,7 @@ mod tests {
             &std::collections::HashMap::new(),
             Some(&formant_b),
             None,
+            None, // source_file_mtime
         );
 
         assert_ne!(hash_a, hash_b);
@@ -1048,6 +1063,7 @@ mod tests {
                 &std::collections::HashMap::new(),
                 Some(formant),
                 None,
+                None, // source_file_mtime
             )
         };
 

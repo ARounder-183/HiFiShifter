@@ -480,3 +480,46 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
         waveform_preview: preview,
     })
 }
+
+// ─── 文件内容指纹（用于检测外部修改）─────────────────────────────────────────
+
+/// 源文件的轻量内容指纹（FNV-1a 64-bit）。
+///
+/// 对文件头部 64KB + 尾部 64KB（若文件 < 128KB 则读取全文）计算哈希。
+/// 用于在窗口聚焦时快速验证文件内容是否真正被外部修改，
+/// 避免因云同步回写时间戳等纯元数据变更而产生误报。
+pub fn compute_file_fingerprint(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+
+    const HEAD_TAIL_BYTES: u64 = 64 * 1024; // 64 KB
+
+    let mut h: u64 = 14695981039346656037u64;
+    let mut buf = vec![0u8; HEAD_TAIL_BYTES as usize];
+    let mut hasher = |data: &[u8]| {
+        for &b in data {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211u64);
+        }
+    };
+
+    // 混入文件总长度
+    hasher(&file_len.to_le_bytes());
+
+    if file_len <= HEAD_TAIL_BYTES * 2 {
+        let mut full = Vec::new();
+        file.read_to_end(&mut full).ok()?;
+        hasher(&full);
+    } else {
+        let n = file.read(&mut buf).ok()?;
+        hasher(&buf[..n]);
+
+        let seek_pos = file_len.saturating_sub(HEAD_TAIL_BYTES);
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(seek_pos)).ok()?;
+        let n = file.read(&mut buf).ok()?;
+        hasher(&buf[..n]);
+    }
+
+    Some(h)
+}

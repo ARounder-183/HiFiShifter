@@ -930,6 +930,9 @@ fn process_item(
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
                 waveform_preview: None,
                 pitch_range: Some(PitchRange {
                     min: -24.0,
@@ -1063,6 +1066,9 @@ fn process_item(
             duration_sec,
             duration_frames,
             source_sample_rate: source_sr,
+            source_file_mtime: None,
+            source_file_size: None,
+            source_file_fingerprint: None,
             waveform_preview: None,
             pitch_range: Some(PitchRange {
                 min: -24.0,
@@ -1452,6 +1458,9 @@ fn process_midi_item(
         duration_sec: None,
         duration_frames: None,
         source_sample_rate: None,
+        source_file_mtime: None,
+        source_file_size: None,
+        source_file_fingerprint: None,
         waveform_preview: None,
         pitch_range: Some(PitchRange {
             min: min_note,

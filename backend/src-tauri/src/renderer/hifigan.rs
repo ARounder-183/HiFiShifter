@@ -33,6 +33,28 @@ pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), Chunk
     CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 使指定 clip_id 的所有 chunk 推理缓存失效。
+/// 当源文件被替换时调用，避免 HiFiGAN 推理复用旧文件的输出。
+pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {
+    if let Ok(mut cache) = global_chunk_cache_ref().lock() {
+        let keys: Vec<(String, usize)> = cache
+            .keys()
+            .filter(|(id, _)| id == clip_id)
+            .cloned()
+            .collect();
+        for k in &keys {
+            cache.remove(k);
+        }
+        if !keys.is_empty() {
+            eprintln!(
+                "[hifigan:cache] invalidated {} chunk(s) for clip_id={}",
+                keys.len(),
+                clip_id
+            );
+        }
+    }
+}
+
 fn debug_enabled() -> bool {
     std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
 }

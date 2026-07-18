@@ -679,15 +679,52 @@ pub(super) fn replace_clip_source(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
+
+    // 收集被替换 clip 的旧源路径
+    let old_paths: Vec<String> = tl
+        .clips
+        .iter()
+        .filter(|c| clip_ids.contains(&c.id) && c.source_path.is_some())
+        .map(|c| c.source_path.clone().unwrap())
+        .collect();
+
+    // ★ 关键：先发送缓存失效命令到引擎，再发送 update_timeline。
+    // 引擎按 FIFO 顺序处理，确保 build_snapshot 之前解码/拉伸缓存已被清空，
+    // 避免 snapshot 中使用旧文件的解码数据。
+    state.audio_engine.evict_source_path(&new_source_path);
+    for old_path in &old_paths {
+        if old_path != &new_source_path {
+            state.audio_engine.evict_source_path(old_path);
+        }
+    }
+
     tl.replace_clip_sources(
         &clip_ids,
         &new_source_path,
         replace_same_source.unwrap_or(false),
     );
     state.audio_engine.update_timeline(tl.clone());
+
+    // 使波形峰值内存缓存失效：新路径和所有旧路径都需要清理
+    state.invalidate_waveform_cache_for_path(&new_source_path);
+    for old_path in &old_paths {
+        if old_path != &new_source_path {
+            state.invalidate_waveform_cache_for_path(old_path);
+        }
+    }
+
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     payload
+}
+
+/// 检查所有已导入的音频源文件是否被外部修改或删除。
+/// 前端在窗口重新获得焦点时调用此命令，以便提示用户做出相应处理。
+pub(super) fn check_source_files_changed(
+    state: State<'_, AppState>,
+) -> crate::models::CheckSourceFilesChangedPayload {
+    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    tl.check_source_files_changed()
 }
 
 pub(super) fn split_clip(

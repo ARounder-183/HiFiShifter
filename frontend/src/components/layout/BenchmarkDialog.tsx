@@ -1,9 +1,9 @@
 /**
  * Inference Device Benchmark Dialog
  *
- * Runs the backend run_vocoder_benchmark command which tests CPU and GPU
- * inference latency (median over 1024 frames / ~12 s of audio) and displays
- * the results so the user can pick the fastest provider for their system.
+ * Runs the backend run_vocoder_benchmark command which tests CPU, GPU (OpenCL),
+ * and GPU (DirectML) inference latency (median over 1024 frames / ~12 s of audio)
+ * and displays the results so the user can pick the fastest provider for their system.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -24,7 +24,6 @@ function formatMs(ms: number): string {
 }
 
 function formatRtf(rtf: number): string {
-    // RTF = audio_duration / inference_time.  RTF > 1 = faster than real-time.
     return `${rtf.toFixed(3)}×`;
 }
 
@@ -33,15 +32,6 @@ interface EpRow {
     medianMs: number;
     rtf: number;
     available: boolean;
-}
-
-/** Resolve GPU device name from NVML enumeration by device ID. */
-function resolveGpuName(result: BenchmarkResult): string {
-    const gpu = result.gpuDevices?.find((d) => d.deviceId === result.cudaDeviceId);
-    if (gpu) {
-        return `${gpu.name} (${(gpu.memoryMb / 1024).toFixed(1)} GB)`;
-    }
-    return `GPU (CUDA · device ${result.cudaDeviceId})`;
 }
 
 function buildRows(result: BenchmarkResult): EpRow[] {
@@ -53,21 +43,41 @@ function buildRows(result: BenchmarkResult): EpRow[] {
             available: true,
         },
     ];
+
+    // GPU (OpenCL)
     if (result.gpuMedianMs != null && result.gpuRtFactor != null) {
         rows.push({
-            label: resolveGpuName(result),
+            label: "GPU (OpenCL)",
             medianMs: result.gpuMedianMs,
             rtf: result.gpuRtFactor,
             available: true,
         });
-    } else if (result.cudaAvailable) {
+    } else if (result.gpuAvailable) {
         rows.push({
-            label: resolveGpuName(result),
+            label: "GPU (OpenCL)",
             medianMs: -1,
             rtf: -1,
             available: false,
         });
     }
+
+    // GPU (DirectML)
+    if (result.dmlMedianMs != null && result.dmlRtFactor != null) {
+        rows.push({
+            label: "GPU (DirectML)",
+            medianMs: result.dmlMedianMs,
+            rtf: result.dmlRtFactor,
+            available: true,
+        });
+    } else if (result.dmlAvailable) {
+        rows.push({
+            label: "GPU (DirectML)",
+            medianMs: -1,
+            rtf: -1,
+            available: false,
+        });
+    }
+
     return rows;
 }
 
@@ -117,6 +127,9 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                   rows[0],
               )
             : null;
+
+    const gpuFailed = result?.gpuAvailable && result.gpuMedianMs == null;
+    const dmlFailed = result?.dmlAvailable && result.dmlMedianMs == null;
 
     return (
         <Dialog.Root
@@ -253,108 +266,67 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 </Text>
                             )}
 
-                            {/* CUDA diagnostic warnings — PRIMARY: missing DLLs */}
-                            {result.cudaAvailable && !result.cudaDllsFound && (
+                            {/* GPU (OpenCL) available but benchmark failed */}
+                            {gpuFailed && (
                                 <Flex
                                     direction="column"
                                     gap="2"
                                     style={{
-                                        padding: "12px 14px",
+                                        padding: "8px 12px",
                                         borderRadius: 6,
                                         background: "var(--red-3)",
-                                        border: "2px solid var(--red-8)",
+                                        border: "1px solid var(--red-5)",
                                     }}
                                 >
-                                    <Text size="3" weight="bold" style={{ color: "var(--red-10)" }}>
-                                        {t("benchmark_gpu_broken_title")}
-                                    </Text>
-                                    <Text size="2" style={{ color: "var(--red-9)" }}>
-                                        {t("benchmark_gpu_broken_desc")}
-                                    </Text>
                                     <Text
                                         size="2"
                                         weight="medium"
-                                        style={{ color: "var(--red-10)", marginTop: 4 }}
+                                        style={{ color: "var(--red-10)" }}
                                     >
-                                        {t("benchmark_gpu_dll_missing_fix")}
+                                        {t("benchmark_gpu_failed_title")}
                                     </Text>
-                                    <Text
-                                        size="2"
-                                        style={{
-                                            fontFamily: "monospace",
-                                            background: "var(--red-4)",
-                                            padding: "4px 8px",
-                                            borderRadius: 4,
-                                            color: "var(--red-11)",
-                                        }}
-                                    >
-                                        {t("benchmark_gpu_fix_cmd1")}
-                                    </Text>
-                                    <Text
-                                        size="2"
-                                        style={{
-                                            fontFamily: "monospace",
-                                            background: "var(--red-4)",
-                                            padding: "4px 8px",
-                                            borderRadius: 4,
-                                            color: "var(--red-11)",
-                                        }}
-                                    >
-                                        {t("benchmark_gpu_fix_cmd2")}
+                                    <Text size="1" style={{ color: "var(--red-9)" }}>
+                                        {t("benchmark_gpu_failed_desc")}
                                     </Text>
                                 </Flex>
                             )}
 
-                            {/* Secondary: CUDA available but benchmark failed */}
-                            {result.cudaAvailable &&
-                                result.cudaDllsFound &&
-                                result.gpuMedianMs == null && (
-                                    <Flex
-                                        direction="column"
-                                        gap="1"
-                                        style={{
-                                            padding: "8px 12px",
-                                            borderRadius: 6,
-                                            background: "var(--red-3)",
-                                            border: "1px solid var(--red-5)",
-                                        }}
+                            {/* DirectML available but benchmark failed */}
+                            {dmlFailed && (
+                                <Flex
+                                    direction="column"
+                                    gap="2"
+                                    style={{
+                                        padding: "8px 12px",
+                                        borderRadius: 6,
+                                        background: "var(--red-3)",
+                                        border: "1px solid var(--red-5)",
+                                    }}
+                                >
+                                    <Text
+                                        size="2"
+                                        weight="medium"
+                                        style={{ color: "var(--red-10)" }}
                                     >
-                                        <Text
-                                            size="2"
-                                            weight="medium"
-                                            style={{ color: "var(--red-10)" }}
-                                        >
-                                            {t("benchmark_gpu_failed_dll_ok_title")}
-                                        </Text>
-                                        <Text size="1" style={{ color: "var(--red-9)" }}>
-                                            {t("benchmark_gpu_failed_dll_ok_desc")}
-                                        </Text>
-                                    </Flex>
-                                )}
+                                        {t("benchmark_gpu_failed_title")}
+                                    </Text>
+                                    <Text size="1" style={{ color: "var(--red-9)" }}>
+                                        {t("benchmark_gpu_failed_desc")}
+                                    </Text>
+                                </Flex>
+                            )}
 
                             {/* Available providers */}
                             <Text size="1" style={{ color: "var(--gray-9)", marginTop: 4 }}>
                                 {t("benchmark_providers_label")}{" "}
                                 {result.availableProviders.join(", ") || "unknown"}
                             </Text>
-                            {result.cudaAvailable && (
-                                <Text
-                                    size="1"
-                                    style={{
-                                        color: result.cudaDllsFound
-                                            ? "var(--green-9)"
-                                            : "var(--red-9)",
-                                        fontWeight: result.cudaDllsFound ? 400 : 600,
-                                    }}
-                                >
-                                    {t("benchmark_cuda_dll_label")}{" "}
-                                    {result.cudaDllsFound
-                                        ? t("benchmark_cuda_dll_yes")
-                                        : t("benchmark_cuda_dll_no")}
-                                </Text>
-                            )}
+                            <Text size="1" style={{ color: "var(--gray-9)" }}>
+                                {t("benchmark_ort_info_label")}{" "}
+                                {result.ortBuildInfo || "unknown"}
+                            </Text>
 
-                            {/* NVML GPU enumeration */}
+                            {/* GPU enumeration */}
                             {result.gpuDevices && result.gpuDevices.length > 0 && (
                                 <Flex direction="column" gap="1" style={{ marginTop: 4 }}>
                                     <Text
@@ -362,7 +334,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                         weight="medium"
                                         style={{ color: "var(--gray-9)" }}
                                     >
-                                        {t("benchmark_nvml_label")}
+                                        {t("benchmark_gpu_label")}:
                                     </Text>
                                     {result.gpuDevices.map((gpu) => (
                                         <Text
@@ -370,9 +342,8 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                             size="1"
                                             style={{ color: "var(--gray-9)" }}
                                         >
-                                            · {t("benchmark_cuda_device_label")} {gpu.deviceId}:{" "}
-                                            {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB, CC{" "}
-                                            {gpu.computeMajor}.{gpu.computeMinor})
+                                            · {t("benchmark_gpu_device_label")} {gpu.deviceId}:{" "}
+                                            {gpu.name} ({(gpu.memoryMb / 1024).toFixed(1)} GB)
                                         </Text>
                                     ))}
                                 </Flex>

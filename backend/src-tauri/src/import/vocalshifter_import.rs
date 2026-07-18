@@ -589,6 +589,9 @@ fn create_midi_clip_from_file(
         duration_sec: None,
         duration_frames: None,
         source_sample_rate: None,
+        source_file_mtime: None,
+        source_file_size: None,
+        source_file_fingerprint: None,
         waveform_preview: None,
         pitch_range: Some(PitchRange {
             min: min_note,
@@ -973,6 +976,9 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
+                    source_file_mtime: None,
+                    source_file_size: None,
+                    source_file_fingerprint: None,
                     waveform_preview: waveform_preview.clone(),
                     pitch_range: Some(PitchRange {
                         min: -24.0,
@@ -1078,6 +1084,9 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
                 waveform_preview,
                 pitch_range: Some(PitchRange {
                     min: -24.0,
@@ -1696,6 +1705,9 @@ pub fn import_vsp_clipboard(
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
+                    source_file_mtime: None,
+                    source_file_size: None,
+                    source_file_fingerprint: None,
                     waveform_preview: waveform_preview.clone(),
                     pitch_range: Some(PitchRange {
                         min: -24.0,
@@ -1800,6 +1812,9 @@ pub fn import_vsp_clipboard(
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
                 waveform_preview,
                 pitch_range: Some(PitchRange {
                     min: -24.0,
@@ -2240,6 +2255,9 @@ fn import_vsp_clipboard_selected_tracks(
                     duration_sec,
                     duration_frames,
                     source_sample_rate: source_sr,
+                    source_file_mtime: None,
+                    source_file_size: None,
+                    source_file_fingerprint: None,
                     waveform_preview: waveform_preview.clone(),
                     pitch_range: Some(PitchRange {
                         min: -24.0,
@@ -2342,6 +2360,9 @@ fn import_vsp_clipboard_selected_tracks(
                 duration_sec,
                 duration_frames,
                 source_sample_rate: source_sr,
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
                 waveform_preview,
                 pitch_range: Some(PitchRange {
                     min: -24.0,

@@ -145,50 +145,14 @@ cd HiFiShifter
 
 #### Windows
 
-HiFiShifter provides a **one-click environment setup script** that automatically installs ONNX Runtime and the CUDA runtime (Rust toolchain is **disabled by default** — add `-InstallRust` to opt in):
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-Optional parameters:
-
-- `-InstallRust`: Install a project-local portable Rust toolchain (disabled by default; uses system-wide Rust)
-- `-SkipOrt`: Skip ONNX Runtime download
-- `-SkipCudaRuntime`: Skip CUDA runtime download
-- `-SkipFrontend`: Skip frontend dependency installation
-- `-LocalOrtDir <path>`: Copy from a pre-extracted ORT installation (no network required)
-- `-LocalPackage <path>`: Extract from a locally-downloaded ORT ZIP archive (no network required)
-
-To use a mirror for faster downloads:
-
-```powershell
-$env:ORT_MIRROR = "https://ghproxy.com/https://github.com"
-.\scripts\setup-windows.ps1
-```
-
-To install ORT from a local source (offline):
-
-```powershell
-# Copy from a pre-extracted ORT directory
-.\scripts\setup-windows.ps1 -LocalOrtDir "D:\ort\onnxruntime-win-x64-gpu-1.24.1"
-
-# Extract from a local ZIP archive
-.\scripts\setup-windows.ps1 -LocalPackage "D:\Downloads\onnxruntime-win-x64-gpu-1.24.1.zip"
-```
-
-To just load the local Rust environment into your current shell (no installation):
-
-```powershell
-. .\scripts\setup-windows.ps1 -LoadEnv
-```
-
-If you prefer manual setup, make sure the following tools are installed:
+Make sure the following tools are installed:
 
 - **Node.js** (recommended 18+) and npm
 - **Rust toolchain** (see `rust-toolchain.toml`)
 - **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
 - **CMake** (required to build the SoundTouch library)
+
+ONNX Runtime (DirectML) is automatically downloaded by the ort crate at build time — no extra configuration needed.
 
 Install frontend dependencies:
 
@@ -221,67 +185,29 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU-Accelerated Build (CUDA)
+### 4. GPU-Accelerated Build
 
-HiFiShifter supports GPU-accelerated inference via NVIDIA CUDA.
+| Platform                    | GPU Technology        | Description                                                     |
+| --------------------------- | --------------------- | --------------------------------------------------------------- |
+| Windows x86_64 / ARM64      | DirectML (DirectX 12) | Auto-downloaded by ort crate, supports NVIDIA / AMD / Intel Arc |
+| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine, auto-enabled                               |
+| macOS x86_64 (Intel)        | —                     | CPU only                                                        |
+| Linux x86_64 / ARM64        | —                     | CPU only (ONNX Runtime has no native OpenCL support)            |
 
-#### Windows (CUDA)
+#### All Platforms
 
-Prerequisites:
-
-- An NVIDIA GPU with CUDA support
-- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
-
-One-click environment setup:
-
-```powershell
-.\scripts\setup-windows.ps1
-```
-
-Development mode (hot reload):
+ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed.
 
 ```powershell
-.\scripts\build-gpu.ps1 -Dev
-```
+# Development mode (hot reload)
+cargo tauri dev
 
-Release build:
+# Build Release
+cargo tauri build
 
-```powershell
-# Fast build (binary only, no installer)
-.\scripts\build-gpu.ps1
-
-# Fast build + file log (log.txt with timestamps, next to the exe)
-.\scripts\build-gpu.ps1 -Log
-
-# Full build (binary + NSIS installer, slower — ~2 GB of GPU components to compress)
-.\scripts\build-gpu.ps1 -Bundle
-```
-
-After building, create a portable ZIP:
-
-```powershell
+# Windows portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
 ```
-
-#### Linux (CUDA)
-
-Prerequisites:
-
-- An NVIDIA GPU with CUDA support
-- [NVIDIA display driver](https://www.nvidia.com/drivers) (version ≥ 545)
-
-```bash
-# Install system dependencies (including CUDA toolkit)
-sudo bash ./scripts/install-cuda-linux.sh
-
-# Download ONNX Runtime GPU + cuDNN
-bash ./scripts/download-ort.sh
-
-# Build
-bash ./scripts/build-gpu-linux.sh
-```
-
-> **Note:** macOS does not support CUDA GPU acceleration at this time.
 
 ## Quick Start
 

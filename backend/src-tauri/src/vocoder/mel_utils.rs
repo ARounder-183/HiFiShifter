@@ -200,6 +200,9 @@ pub fn stft_magnitude(signal: &[f32], n_fft: usize, win_size: usize, hop: usize,
 }
 
 /// Linear resample mono audio from `in_rate` to `out_rate`.
+///
+/// Uses pre-computed inverse ratio (multiply instead of divide in the hot loop)
+/// and chunked processing to enable auto-vectorization by LLVM.
 pub fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if input.is_empty() || in_rate == 0 || out_rate == 0 || in_rate == out_rate {
         return input.to_vec();
@@ -210,15 +213,37 @@ pub fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f
 
     let ratio = out_rate as f64 / in_rate as f64;
     let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for idx in 0..out_len {
-        let src = idx as f64 / ratio;
-        let i0 = src.floor().max(0.0) as usize;
-        let i1 = (i0 + 1).min(input.len() - 1);
-        let frac = (src - i0 as f64) as f32;
-        let a = input[i0];
-        let b = input[i1];
-        out.push(a + (b - a) * frac);
+    let inv_ratio = 1.0 / ratio;
+    let input_last = input.len() - 1;
+
+    let mut out = vec![0.0f32; out_len];
+
+    // Process in chunks of 8 for compiler auto-vectorization.
+    // LLVM can emit SIMD instructions (SSE/AVX on x86_64, NEON on ARM)
+    // for this pattern when the loop body is simple enough.
+    let chunk_size = 8usize;
+    let num_chunks = out_len / chunk_size;
+
+    for chunk in 0..num_chunks {
+        let base = chunk * chunk_size;
+        for k in 0..chunk_size {
+            let idx = base + k;
+            let src = idx as f64 * inv_ratio;
+            let i0 = (src as usize).min(input_last.saturating_sub(1));
+            let i1 = (i0 + 1).min(input_last);
+            let frac = (src - i0 as f64) as f32;
+            out[idx] = input[i0] + (input[i1] - input[i0]) * frac;
+        }
     }
+
+    // Tail: process remaining samples
+    for idx in (num_chunks * chunk_size)..out_len {
+        let src = idx as f64 * inv_ratio;
+        let i0 = (src as usize).min(input_last.saturating_sub(1));
+        let i1 = (i0 + 1).min(input_last);
+        let frac = (src - i0 as f64) as f32;
+        out[idx] = input[i0] + (input[i1] - input[i0]) * frac;
+    }
+
     out
 }

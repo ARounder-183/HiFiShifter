@@ -1,50 +1,48 @@
 #!/usr/bin/env bash
 # build-gpu-linux.sh
-# Build the HiFiShifter Linux CUDA binary and stage shared libraries.
+# Build the HiFiShifter Linux binary with OpenCL GPU support.
+#
+# GPU acceleration is baked into the Linux build target — no extra
+# Cargo features are needed.  OpenCL is accessed at runtime via the
+# ONNX Runtime generic execution provider API.
 #
 # Usage:
 #   ./scripts/build-gpu-linux.sh
 #
+# Prerequisites:
+#   ./scripts/download-ort.sh          # download ONNX Runtime GPU package
+#   sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
+#
 # Environment (required):
-#   ORT_LIB_LOCATION  - Path to ONNX Runtime GPU lib directory
-#   CUDA_LIB_PATH     - Path to CUDA runtime library directory
+#   ORT_LIB_LOCATION  - Path to ONNX Runtime library directory
+#                       (set automatically by download-ort.sh)
 #
 # Environment (optional):
 #   CARGO_TARGET      - Rust target triple (default: x86_64-unknown-linux-gnu)
-#   CARGO_FEATURES    - Cargo features (default: onnx,cuda)
 
 set -euxo pipefail
 
 CARGO_TARGET="${CARGO_TARGET:-x86_64-unknown-linux-gnu}"
-CARGO_FEATURES="${CARGO_FEATURES:-onnx,cuda}"
 SRC_TAURI="backend/src-tauri"
 
-echo "=== Build Linux CUDA Binary ==="
+echo "=== Build Linux (OpenCL GPU) Binary ==="
 echo "  Target:   ${CARGO_TARGET}"
-echo "  Features: ${CARGO_FEATURES}"
 echo "  ORT_LIB:  ${ORT_LIB_LOCATION:-<not set>}"
-echo "  CUDA_LIB: ${CUDA_LIB_PATH:-<not set>}"
 
+# Auto-detect ORT lib directory if not set (download-ort.sh extracts to /tmp/ort-gpu/).
 if [ -z "${ORT_LIB_LOCATION:-}" ]; then
-    echo "ERROR: ORT_LIB_LOCATION is not set" >&2
-    exit 1
-fi
-if [ -z "${CUDA_LIB_PATH:-}" ]; then
-    echo "ERROR: CUDA_LIB_PATH is not set" >&2
-    exit 1
+    ORT_LIB_LOCATION="$(find /tmp/ort-gpu -maxdepth 3 -type d -name lib 2>/dev/null | head -1 || true)"
+    if [ -z "${ORT_LIB_LOCATION:-}" ]; then
+        echo "ERROR: ORT_LIB_LOCATION is not set and could not auto-detect" >&2
+        echo "Run ./scripts/download-ort.sh first, or set ORT_LIB_LOCATION manually." >&2
+        exit 1
+    fi
+    echo "  Auto-detected ORT lib: ${ORT_LIB_LOCATION}"
 fi
 
-# ort-sys v2.0.0-rc.12 defaults to static linking (looks for .a files),
-# but the ONNX Runtime GPU build only ships shared libraries (.so).
-# ORT_PREFER_DYNAMIC_LINK=1 makes ort-sys emit `rustc-link-lib=onnxruntime`
-# instead of `rustc-link-lib=static=onnxruntime`.
+# ort-sys v2.0.0-rc.12 defaults to static linking (.a), but the ONNX Runtime
+# package only ships shared libraries (.so).  Force dynamic linking.
 export ORT_PREFER_DYNAMIC_LINK=1
-
-# Symlink CUDA runtime libs into ORT_LIB_LOCATION so the linker can
-# resolve transitive NEEDED entries from libonnxruntime_providers_cuda.so
-for lib in "${CUDA_LIB_PATH}"/libcudart.so* "${CUDA_LIB_PATH}"/libcublas*.so* "${CUDA_LIB_PATH}"/libcufft*.so* "${CUDA_LIB_PATH}"/libcurand*.so*; do
-    [ -e "$lib" ] && ln -sf "$lib" "${ORT_LIB_LOCATION}/" 2>/dev/null || true
-done
 
 # -rpath,$ORIGIN: runtime linker searches binary's directory for .so files
 # -rpath-link,<ORT_LIB_LOCATION>: build-time linker resolves transitive NEEDED deps
@@ -52,13 +50,13 @@ export RUSTFLAGS="-Awarnings -C link-args=-Wl,-rpath,\$ORIGIN -Wl,-rpath-link,${
 export LIBRARY_PATH="${ORT_LIB_LOCATION}${LIBRARY_PATH:+:}${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="${ORT_LIB_LOCATION}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}"
 
-echo "=== ORT lib directory (with CUDA symlinks) ==="
+echo "=== ORT lib directory ==="
 ls -la "${ORT_LIB_LOCATION}/"
 
 cd "${SRC_TAURI}"
-cargo build --release --target "${CARGO_TARGET}" --no-default-features --features "${CARGO_FEATURES}"
+cargo build --release --target "${CARGO_TARGET}" --no-default-features --features onnx
 
-# Copy ORT + cuDNN shared libraries alongside the binary for distribution
+# Copy ORT shared libraries alongside the binary for distribution
 BIN_DIR="target/${CARGO_TARGET}/release"
 if [ -n "${ORT_LIB_LOCATION:-}" ] && [ -d "${ORT_LIB_LOCATION}" ]; then
     cp -v "${ORT_LIB_LOCATION}"/*.so* "${BIN_DIR}/" 2>/dev/null || true

@@ -332,6 +332,17 @@ export const enUS = {
         "The following audio file cannot be found. Do you want to pick a replacement file?",
     missing_file_replace_pick: "Pick Replacement",
 
+    // Source file change detection (triggered on window focus regain)
+    source_file_changed_title: "Source File Changed",
+    source_file_changed_modified_desc:
+        "The following audio file(s) have been modified externally. Do you want to reload them into the project?",
+    source_file_changed_deleted_desc:
+        "The following audio file(s) have been moved or deleted. Do you want to pick replacement files?",
+    source_file_changed_reload: "Reload Files",
+    source_file_changed_ignore: "Ignore",
+    source_file_changed_status_deleted: "DELETED",
+    source_file_changed_status_modified: "MODIFIED",
+
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",
     fade_curve_exponential: "Exponential",
@@ -820,11 +831,9 @@ export const enUS = {
 
     // ── Inference Device / GPU ──────────────────────────────────────────
     menu_inference_device: "Inference Device",
-    menu_inference_auto: "Auto (system default)",
+    menu_inference_auto: "Auto",
     menu_inference_cpu: "CPU",
-    menu_inference_cuda: "GPU (CUDA)",
-    menu_select_gpu_device: "Select GPU Device",
-    menu_no_gpu_detected: "No NVIDIA GPUs detected",
+    menu_inference_gpu: "GPU",
     menu_run_benchmark: "Run Benchmark…",
     menu_background_prerender: "Background Pre-render",
     menu_background_prerender_desc:
@@ -847,23 +856,11 @@ export const enUS = {
     benchmark_close: "Close",
     benchmark_idle_hint: 'Click "Run Benchmark" to start. A model must be loaded first.',
     benchmark_error_default: "Benchmark failed. Ensure a model is loaded.",
-    benchmark_gpu_failed_title: "⚠ GPU benchmark failed — CUDA registered but cannot execute",
+    benchmark_gpu_failed_title: "⚠ GPU benchmark failed",
     benchmark_gpu_failed_desc:
-        "The CUDA execution provider is available in ONNX Runtime but inference failed. This usually means CUDA runtime DLLs (cuBLAS, cuDNN) are missing from the executable directory.",
-    benchmark_gpu_dll_missing_fix: "Fix:",
-    benchmark_gpu_broken_title: "⚠ GPU Acceleration BROKEN — Missing CUDA Runtime DLLs",
-    benchmark_gpu_broken_desc:
-        "ONNX Runtime can see your NVIDIA GPU and the CUDA provider is available, but cuBLAS and cuDNN are missing from the executable directory. CUDA will silently fall back to CPU.",
-    benchmark_gpu_fix_cmd1:
-        "> .\\setup-gpu-deps.ps1   # one-time setup (downloads ORT + cuBLAS + cuDNN)",
-    benchmark_gpu_fix_cmd2: "> .\\dev-gpu.ps1          # start dev server (auto-copies all DLLs)",
-    benchmark_gpu_failed_dll_ok_title: "⚠ GPU benchmark failed despite CUDA being available",
-    benchmark_gpu_failed_dll_ok_desc:
-        "The CUDA EP is available and DLLs are present, but inference failed. This may indicate a driver or hardware issue.",
-    benchmark_cuda_dll_label: "CUDA runtime DLLs:",
-    benchmark_cuda_dll_yes: "Found ✅",
-    benchmark_cuda_dll_no: "MISSING — GPU will not work ⚠",
+        "GPU inference failed. Check that GPU drivers are installed and ONNX Runtime provider DLLs are present.",
+    benchmark_gpu_device_label: "GPU Device",
+    benchmark_ort_info_label: "ONNX Runtime:",
+    benchmark_gpu_label: "GPU",
     benchmark_providers_label: "Available providers:",
-    benchmark_nvml_label: "NVIDIA GPUs detected via NVML:",
-    benchmark_cuda_device_label: "CUDA device:",
 } as const;

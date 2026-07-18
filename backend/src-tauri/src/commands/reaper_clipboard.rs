@@ -284,7 +284,9 @@ pub(super) fn paste_reaper_clipboard(
 
         // 合并 clips
         for clip in &result.timeline.clips {
-            tl.clips.push(clip.clone());
+            let mut c = clip.clone();
+            crate::state::TimelineState::populate_clip_file_metadata(&mut c);
+            tl.clips.push(c);
         }
 
         // 合并 pitch params（pending_pitch_offset 需要合并到已有的 entry）

@@ -2,6 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import type { TimelineState } from "../../../types/api";
 import type { ClipTemplate } from "../sessionTypes";
+import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 // 注意：这�?thunk 依赖 SessionState（目前仍�?sessionSlice.ts 内部定义）�?
 // 我们在此处用 type-only import，避免运行时循环依赖�?
@@ -323,7 +324,12 @@ export const duplicateClipsBulkRemote = createAsyncThunk<
 export const replaceClipSourceRemote = createAsyncThunk(
     "session/replaceClipSourceRemote",
     async (payload: { clipIds: string[]; newSourcePath: string; replaceSameSource?: boolean }) => {
-        return webApi.replaceClipSource(payload);
+        const result = await webApi.replaceClipSource(payload);
+        // 使前端的波形 mipmap 缓存失效，确保下次渲染时重新从后端拉取新文件的波形数据
+        if (result?.ok) {
+            waveformMipmapStore.invalidate(payload.newSourcePath);
+        }
+        return result;
     },
 );
 

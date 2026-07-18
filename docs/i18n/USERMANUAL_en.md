@@ -19,12 +19,14 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 
 - For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly.
 
-**About CUDA GPU Acceleration**: HiFiShifter provides NVIDIA CUDA GPU-accelerated builds for Windows and Linux (download filenames include the `-cuda` suffix). These builds leverage NVIDIA GPUs for inference acceleration. CUDA builds require:
+**About GPU Acceleration**: HiFiShifter provides multiple GPU acceleration options across platforms:
 
-- An NVIDIA graphics card with CUDA support (GTX 10 series or newer recommended)
-- Recent [NVIDIA display drivers](https://www.nvidia.com/drivers) (version 545 or newer recommended)
+- **Windows**: DirectML (DirectX 12), supports NVIDIA, AMD, Intel Arc GPUs
+- **macOS (Apple Silicon)**: CoreML, using Apple Neural Engine acceleration
+- **macOS (Intel)**: CPU inference only
+- **Linux**: OpenCL, cross-platform GPU acceleration
 
-macOS does not support CUDA GPU acceleration at this time.
+In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GPU`. Run the benchmark to view the inference performance of each device.
 
 **WebView Information**: HiFiShifter is built with the Rust + Tauri framework and requires a WebView component to display its interface.
 
@@ -59,7 +61,7 @@ The `Options` menu allows you to modify various settings of HiFiShifter.
 
 - `Project Stretch Override`: Allows you to modify the current project's stretching algorithm.
 - `Global Stretch Default`: Allows you to modify the default global stretching algorithm.
-- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU (CUDA)`. You can run a benchmark from this menu to test the performance of each device. `GPU (CUDA)` is only available in the CUDA build of HiFiShifter.
+- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU`. You can run a benchmark from this menu to test the performance of each device (the benchmark will show specific backends such as GPU (DirectML), GPU (OpenCL), etc.). `GPU` is only available in the corresponding GPU build of HiFiShifter.
 - `Background Pre-render`: When enabled, after opening a project or editing parameters, the edited parameters are automatically pre-rendered in the background, and you can play the already-rendered portions even while rendering is still in progress. When disabled, rendering only begins when playback starts, and you must wait for rendering to complete before the timeline plays normally. Enabled by default. Disabling it reduces rendering frequency and saves performance.
 - `Keyboard Shortcuts`: Allows you to configure HiFiShifter's keybindings. Several presets are available.
 

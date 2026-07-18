@@ -111,6 +111,23 @@ impl From<&ClipFormantMorph> for ClipFormantMorphPayload {
     }
 }
 
+/// 源文件变更检测结果：当用户切换回窗口时，检测导入的音频文件是否被外部替换或删除。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceFileChangePayload {
+    pub clip_id: String,
+    pub clip_name: String,
+    pub source_path: String,
+    /// "deleted" | "modified"
+    pub change: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckSourceFilesChangedPayload {
+    pub changed: Vec<SourceFileChangePayload>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TimelineStatePayload {
@@ -148,6 +165,8 @@ pub struct RuntimeInfoPayload {
     pub is_playing: Option<bool>,
     pub playback_target: Option<String>,
     pub timeline: Option<TimelineStatePayload>,
+    /// The GPU backend name for this build, e.g. "DirectML", "OpenCL", "CoreML", or "".
+    pub gpu_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
