@@ -292,26 +292,35 @@ impl ProcessingStage for HiFiGanStage {
             }
         };
 
-        let stretched_noise = noise;
-
         let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
-        let out_len = processed_harmonic.len().min(stretched_noise.len());
 
-        // 提取曲线存在性判断，分支走 Fast-Path
-        let has_valid_curve = breath_curve.map_or(false, |c| !c.is_empty());
+        // Fast path: if breath_gain is uniformly zero (e.g. when computing harmonic_only
+        // for BreathNoiseCache), skip noise mixing entirely and return processed_harmonic.
+        let gain_is_zero = breath_curve.map_or(true, |c| {
+            c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON)
+        });
+        if gain_is_zero {
+            return Ok(processed_harmonic);
+        }
 
-        let mixed: Vec<f32> = if has_valid_curve {
-            // 将除法转化为乘法，移出循环
+        let out_len = processed_harmonic.len().min(noise.len());
+
+        let has_varying_curve = breath_curve.map_or(false, |c| {
+            if c.len() <= 1 {
+                return false;
+            }
+            let first = c[0];
+            c.iter().any(|&v| (v - first).abs() > f32::EPSILON)
+        });
+
+        let mixed: Vec<f32> = if has_varying_curve {
             let inv_sample_rate = 1.0 / cc.sample_rate.max(1) as f64;
-
-            // 使用迭代器消除 memset 和 越界检查
             processed_harmonic
                 .iter()
-                .zip(stretched_noise.iter())
+                .zip(noise.iter())
                 .take(out_len)
                 .enumerate()
                 .map(|(index, (&h, &n))| {
-                    // 使用乘法替代除法
                     let abs_sec = cc.seg_start_sec + index as f64 * inv_sample_rate;
                     let gain =
                         sample_curve_at_abs_sec(breath_curve, abs_sec, cc.frame_period_ms, 1.0);
@@ -319,13 +328,24 @@ impl ProcessingStage for HiFiGanStage {
                 })
                 .collect()
         } else {
-            // 无曲线时，直接 SIMD 向量化相加，gain 默认为 1.0
-            processed_harmonic
-                .iter()
-                .zip(stretched_noise.iter())
-                .take(out_len)
-                .map(|(&h, &n)| h + n)
-                .collect()
+            // Constant gain (typically 1.0): use uniform multiplier, auto-vectorizable
+            let gain = breath_curve.and_then(|c| c.first().copied()).unwrap_or(1.0);
+            if (gain - 1.0).abs() < f32::EPSILON {
+                // gain == 1.0: simple addition, most common case for unity_breath
+                processed_harmonic
+                    .iter()
+                    .zip(noise.iter())
+                    .take(out_len)
+                    .map(|(&h, &n)| h + n)
+                    .collect()
+            } else {
+                processed_harmonic
+                    .iter()
+                    .zip(noise.iter())
+                    .take(out_len)
+                    .map(|(&h, &n)| h + n * gain)
+                    .collect()
+            }
         };
 
         Ok(mixed)

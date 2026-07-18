@@ -1183,33 +1183,61 @@ fn render_single_clip(
         // fall through to miss path 下方
     }
 
-    // ── BreathNoiseCache 未命中（或长度不匹配已失效）：完整的两次 render_variant ──
+    // ── BreathNoiseCache 未命中（或长度不匹配已失效）：单次 HNSEP + 单次 HiFiGAN ──
+    //
+    // 优化（2026-07-18）：消除双重 render_variant。
+    // 旧代码：两次完整 render_variant（harmonic_only + unity_breath）→ 2x HNSEP + 2x HiFiGAN。
+    // 新代码：一次 HNSEP 分离 → 一次 HiFiGAN → noise = HNSEP_noise（无需第二次 HiFiGAN）。
+    //
+    // 原理：unity_mix = hifigan(harmonic) + noise×1.0, harmonic_only = hifigan(harmonic) + noise×0.0
+    //       → unity_mix = harmonic_only + noise_stereo
+    //       → breath_noise_stereo = noise_stereo
+    // 直接使用 HNSEP 的 noise 输出作为 breath_noise，省去第二次完整的 ProcessorChain + HiFiGAN。
     if debug {
         eprintln!(
-            "render_single_clip: breath_noise_cache MISS for clip_id={}, doing full 2-pass render",
+            "render_single_clip: breath_noise_cache MISS for clip_id={}, optimized 1-pass render",
             clip.id
         );
     }
 
-    let mut harmonic_only_clip = clip.clone();
-    merged_extra_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
-    harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
-    harmonic_only_clip.extra_curves = Some(merged_extra_curves.clone());
-    let mut harmonic_only = render_variant(&harmonic_only_clip);
-
-    let mut unity_breath_clip = clip.clone();
-    merged_extra_curves.insert("breath_gain".to_string(), vec![1.0; curve_len]);
-    unity_breath_clip.extra_params = Some(merged_extra_params);
-    unity_breath_clip.extra_curves = Some(merged_extra_curves);
-    let unity_mix = render_variant(&unity_breath_clip);
-
-    let out_len = harmonic_only.len().min(unity_mix.len());
-    harmonic_only.truncate(out_len);
-    let breath_noise_stereo: Vec<f32> = unity_mix[..out_len]
-        .iter()
-        .zip(&harmonic_only[..out_len])
-        .map(|(u, h)| u - h)
+    // Step 1: Extract mono from the (already time-stretched) stereo segment
+    let mono: Vec<f32> = segment
+        .chunks_exact(2)
+        .map(|ch| (ch[0] + ch[1]) * 0.5f32)
         .collect();
+
+    // Step 2: Pre-populate HNSEP cache by doing separation once.
+    // This ensures the subsequent render_variant(harmonic_only) hits the cache
+    // and only runs HiFiGAN, skipping HNSEP.
+    let noise_mono = crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate)?;
+
+    // Step 3: Render harmonic_only through ProcessorChain (HNSEP cache hits → HiFiGAN only)
+    let mut harmonic_only_clip = clip.clone();
+    let mut harmonic_curves = merged_extra_curves.clone();
+    harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
+    harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
+    harmonic_only_clip.extra_curves = Some(harmonic_curves);
+    let harmonic_only = render_variant(&harmonic_only_clip);
+
+    // Step 4: Convert noise mono to stereo, matching harmonic_only length
+    let out_len = harmonic_only.len();
+    let noise_stereo: Vec<f32> = {
+        let noise_mono_raw = noise_mono.as_ref();
+        let mut stereo = Vec::with_capacity(out_len);
+        let noise_len = noise_mono_raw.len();
+        // Duplicate each mono sample to L/R channels
+        let sample_count = (out_len / 2).min(noise_len);
+        for &s in &noise_mono_raw[..sample_count] {
+            stereo.push(s);
+            stereo.push(s);
+        }
+        // Pad with silence if noise is shorter than harmonic
+        if stereo.len() < out_len {
+            stereo.resize(out_len, 0.0f32);
+        }
+        stereo
+    };
+    let breath_noise_stereo = noise_stereo;
 
     // 将 noise stem 存入 BreathNoiseCache，后续 formant 编辑时可直接复用
     if let Some(key) = breath_noise_cache_key {

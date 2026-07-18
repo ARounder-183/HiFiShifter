@@ -22,14 +22,40 @@ pub fn set_runtime_ep_override(ep: Option<String>) {
     }
 }
 
-/// Returns the runtime EP override if set, otherwise falls back to env var.
-fn ep_choice() -> String {
-    RUNTIME_EP_OVERRIDE
+/// Returns the runtime EP override if set, otherwise falls back to per-role env var,
+/// then global env var.
+fn ep_choice_for_role(role: OrtSessionRole) -> String {
+    // HNSEP (Separator) 强制使用 CPU。
+    // GPU (DirectML/OpenCL) 对该模型的算子支持不完整，ORT 会将不支持的算子
+    // 回退到 CPU 并插入 GPU↔CPU 数据搬运节点，导致推理反而比纯 CPU 更慢。
+    // 这是一个临时方案，待 HNSEP 模型升级或 ORT 算子覆盖完善后可移除。
+    if matches!(role, OrtSessionRole::Separator) {
+        return "cpu".to_string();
+    }
+
+    // 1. Runtime override (set via UI or benchmark) — highest priority
+    if let Some(ov) = RUNTIME_EP_OVERRIDE
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
         .and_then(|g| g.clone())
-        .unwrap_or_else(|| env_ep_choice())
+    {
+        return ov;
+    }
+    // 2. Per-model env var (e.g. HIFISHIFTER_HNSEP_ORT_EP=cpu)
+    let role_env = match role {
+        OrtSessionRole::Vocoder => "HIFISHIFTER_HIFIGAN_ORT_EP",
+        OrtSessionRole::PitchDetector => "HIFISHIFTER_FCPE_ORT_EP",
+        OrtSessionRole::Separator => "HIFISHIFTER_HNSEP_ORT_EP",
+    };
+    if let Ok(val) = std::env::var(role_env) {
+        let v = val.trim().to_ascii_lowercase();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    // 3. Global env var fallback
+    env_ep_choice()
 }
 
 fn env_ep_choice() -> String {
@@ -137,7 +163,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     let mut builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
-    let choice = ep_choice();
+    let choice = ep_choice_for_role(role);
     let mut selected: &str = "cpu";
 
     match choice.as_str() {
@@ -147,29 +173,34 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         _ => {
             // "auto" / "gpu" / "directml" / "opencl" / "cuda" →
             // try the platform-specific GPU backend, fall back to CPU.
+            #[allow(unused_assignments)]
             let mut tried = false;
             #[cfg(feature = "directml")]
             {
                 match try_register_directml_ep(builder.clone(), role) {
                     Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
-                    Err(e) => { eprintln!("ort_session: {e}"); }
+                    Err(e) => { eprintln!("ort_session[{role:?}]: DirectML — {e}"); }
                 }
             }
             #[cfg(feature = "opencl")]
             if !tried {
                 match try_register_opencl_ep(builder.clone(), role) {
                     Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
-                    Err(e) => { eprintln!("ort_session: {e}"); }
+                    Err(e) => { eprintln!("ort_session[{role:?}]: OpenCL — {e}"); }
                 }
             }
             if !tried {
                 selected = "cpu";
+                eprintln!(
+                    "ort_session[{role:?}]: no GPU EP available, falling back to CPU (choice={choice})"
+                );
             }
         }
     }
 
     eprintln!(
-        "ort_session: role={role:?} ep={selected} (ep_choice={choice:?}, env={:?})",
+        "ort_session[{role:?}]: model={} ep={selected} (choice={choice}, global_env={})",
+        onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         env_ep_choice(),
     );
 
@@ -183,14 +214,23 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         .with_memory_pattern(true)
         .map_err(|e| format!("set memory pattern failed: {e}"))?;
 
-    // Thread config: GPU path uses 1 thread (GPU parallelism), CPU path uses half cores.
+    // Thread config: GPU path uses min threads (GPU parallelism handles the heavy lifting,
+    // but we keep 2 threads to avoid stalling on CPU-fallback ops within GPU-accelerated graphs).
+    // CPU path uses half cores. Separator (HNSEP) gets more threads than Vocoder since it
+    // is a lighter model that benefits more from CPU parallelism when GPU is unavailable.
     let threads = if selected == "cpu" {
-        std::thread::available_parallelism()
+        let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
-            .max(2)
+            .max(2);
+        match role {
+            OrtSessionRole::Separator => cores,           // HNSEP: use all available cores on CPU
+            OrtSessionRole::Vocoder => (cores / 2).max(2), // HiFiGAN: half cores (heavy model)
+            OrtSessionRole::PitchDetector => (cores / 2).max(2), // FCPE: half cores
+        }
     } else {
-        1
+        // GPU path: keep 2 threads for CPU-fallback ops (ORT partitions unsupported ops to CPU)
+        2
     };
     builder = builder
         .with_intra_threads(threads)
@@ -199,6 +239,10 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     let session = builder
         .commit_from_file(onnx_path)
         .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+
+    eprintln!(
+        "ort_session[{role:?}]: created session ep={selected} intra_threads={threads}",
+    );
 
     Ok((session, selected.to_string()))
 }
@@ -310,7 +354,7 @@ const fn probe_opencl_ep_available() -> bool {
 /// Does NOT include a smoke test (that requires a model, handled by nsf_hifigan_onnx).
 pub fn diagnose_gpu() -> GpuDiagnostic {
     let available_providers = diagnose_available_providers();
-    let selected_ep = ep_choice();
+    let selected_ep = env_ep_choice();
     let gpu_device_id = 0;
     let ort_build_info = ort::info().to_string();
 
