@@ -47,3 +47,8 @@ pub(super) fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::Benchma
 pub(super) fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
     crate::gpu_info::enumerate_gpus()
 }
+
+/// Enumerate all DirectML-compatible GPU adapters via DXGI (Windows only).
+pub(super) fn get_dml_adapters() -> crate::dml_adapters::DmlAdapterList {
+    crate::dml_adapters::enumerate_dml_adapters()
+}

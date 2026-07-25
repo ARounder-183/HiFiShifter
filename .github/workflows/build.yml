@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main]
-  release:
-    types: [published]
 
 jobs:
   frontend-build:
@@ -377,34 +375,3 @@ jobs:
           echo "==== Candidate bundle dirs ===="
           find backend/src-tauri/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
         shell: bash
-
-  release-upload:
-    name: Upload to GitHub Release
-    needs: backend
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-artifacts
-
-      - name: Remove frontend artifact
-        run: rm -rf release-artifacts/frontend-dist
-
-      - name: Remove files larger than 2 GiB
-        run: |
-          MAX_SIZE=$((2 * 1024 * 1024 * 1024))
-          find release-artifacts -type f -size +"${MAX_SIZE}"c -print0 | while IFS= read -r -d '' f; do
-            echo "Skipping $(basename "$f"): $(numfmt --to=iec "$(stat -c%s "$f")") exceeds 2 GiB limit"
-            rm -f "$f"
-          done
-
-      - name: Upload artifacts to Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: release-artifacts/**/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

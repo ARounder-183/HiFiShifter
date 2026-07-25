@@ -127,7 +127,9 @@ pub fn drop_shared_session() {
 
 /// Reset the shared session so the next inference rebuilds it with the
 /// current EP choice (e.g. after user switches from OpenCL to DirectML).
-pub fn update_ort_ep(_choice: &str) {
+pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
+    crate::vocoder_ort_session::set_runtime_ep_override(Some(_choice.to_string()));
+    crate::vocoder_ort_session::set_runtime_dml_device_id(_device_id);
     if let Some(mutex) = SHARED_SESSION.get() {
         if let Ok(mut guard) = mutex.lock() {
             *guard = None;

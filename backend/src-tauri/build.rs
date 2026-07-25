@@ -29,6 +29,13 @@ fn main() {
     // so tauri_build resource validation passes.
     create_vslib_placeholder();
 
+    // Copy DirectML.dll from the ORT build output to the resources directory
+    // so Tauri can bundle it into the NSIS installer. DirectML.dll is loaded
+    // dynamically by ONNX Runtime (not linked at compile time), so Tauri's
+    // dependency scanner does not detect it. Explicit resource listing in
+    // tauri.windows.conf.json handles the bundling.
+    copy_directml_dll();
+
     // tauri_build validates resources listed in tauri.conf.json and its
     // platform-specific merges (tauri.windows.conf.json, tauri.macos.conf.json).
     // All resource files must exist before this call.
@@ -656,5 +663,60 @@ fn create_vslib_placeholder() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(p, b"");
+    }
+}
+
+/// Copy DirectML.dll from the ORT build output (placed by ort-sys copy-dylibs)
+/// to the resources directory so Tauri can validate and bundle it into the
+/// NSIS installer. DirectML.dll is loaded dynamically by ONNX Runtime, so
+/// Tauri's dependency scanner does not detect it; explicit resource listing
+/// in tauri.windows.conf.json compensates for this.
+///
+/// Only runs on Windows x86_64 (DirectML is Windows-only, and aarch64 uses
+/// a different build path).
+fn copy_directml_dll() {
+    use std::path::Path;
+
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    // OUT_DIR = .../target/<triple>/<profile>/build/<crate>-<hash>/out
+    // DLL is at   .../target/<triple>/<profile>/DirectML.dll
+    let target_dir = Path::new(&out_dir).ancestors().nth(3).unwrap();
+    let dll_src = target_dir.join("DirectML.dll");
+
+    if !dll_src.exists() {
+        println!(
+            "cargo:warning=[ort] DirectML.dll not found at {}",
+            dll_src.display()
+        );
+        return;
+    }
+
+    let resource_dir = Path::new("resources");
+    let _ = std::fs::create_dir_all(resource_dir);
+    let dll_dst = resource_dir.join("DirectML.dll");
+
+    // Only write if bytes differ to avoid infinite dev rebuild loops.
+    let src_bytes = std::fs::read(&dll_src).unwrap_or_default();
+    let dst_bytes = std::fs::read(&dll_dst).unwrap_or_default();
+    if src_bytes != dst_bytes {
+        if let Err(e) = std::fs::write(&dll_dst, &src_bytes) {
+            println!(
+                "cargo:warning=[ort] could not copy DirectML.dll to {}: {}",
+                dll_dst.display(),
+                e
+            );
+        } else {
+            println!(
+                "cargo:warning=[ort] copied DirectML.dll ({} bytes) to {}",
+                src_bytes.len(),
+                dll_dst.display()
+            );
+        }
+    } else {
+        println!("cargo:warning=[ort] DirectML.dll resource unchanged, skipping write");
     }
 }

@@ -295,6 +295,21 @@ export interface GpuEnumerationResult {
     note?: string | null;
 }
 
+/** DirectML-compatible GPU adapter info from DXGI enumeration. */
+export interface DmlAdapterInfo {
+    deviceId: number;
+    name: string;
+    dedicatedVideoMemoryMb: number;
+    sharedSystemMemoryMb: number;
+    vendorId: number;
+    deviceIdPci: number;
+}
+
+export interface DmlAdapterList {
+    adapters: DmlAdapterInfo[];
+    note?: string | null;
+}
+
 export interface BenchmarkResult {
     cpuMedianMs: number;
     cpuRtFactor: number;

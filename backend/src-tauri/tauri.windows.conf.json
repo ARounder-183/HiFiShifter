@@ -2,7 +2,8 @@
     "bundle": {
         "resources": {
             "third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll": "SoundTouchDLL.dll",
-            "third_party/vslib/vslib_x64.dll": "vslib_x64.dll"
+            "third_party/vslib/vslib_x64.dll": "vslib_x64.dll",
+            "resources/DirectML.dll": "DirectML.dll"
         }
     }
 }

@@ -853,6 +853,8 @@ export const koKR = {
     menu_inference_auto: "자동",
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
+    menu_gpu_device: "GPU 장치",
+    menu_gpu_auto_select: "자동 선택 (권장)",
     menu_run_benchmark: "벤치마크 실행…",
     menu_background_prerender: "백그라운드 사전 렌더링",
     menu_background_prerender_desc:

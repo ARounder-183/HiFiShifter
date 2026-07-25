@@ -54,7 +54,7 @@ if ($Version) {
     if ($LASTEXITCODE -ne 0) {
         throw "Version update failed, exit code: $LASTEXITCODE"
     }
-    Write-Host "[Preprocessing] Version update completed ✓" -ForegroundColor Green
+    Write-Host "[Preprocessing] Version update completed [OK]" -ForegroundColor Green
 }
 
 # Detect target triple: prefer x86_64 but fall back to aarch64 if present.
@@ -145,7 +145,7 @@ if (-not $SkipBuild) {
     finally {
         Pop-Location
     }
-    Write-Host "[1/5] Build completed ✓" -ForegroundColor Green
+    Write-Host "[1/5] Build completed [OK]" -ForegroundColor Green
 }
 else {
     Write-Host "[1/5] Skipping build step (-SkipBuild)" -ForegroundColor DarkGray
@@ -185,7 +185,7 @@ if ($Missing.Count -gt 0) {
     throw "Resource files are incomplete, cannot package."
 }
 
-Write-Host "[2/5] Artifacts check passed ✓" -ForegroundColor Green
+Write-Host "[2/5] Artifacts check passed [OK]" -ForegroundColor Green
 
 # ===== Step 3: Assemble directory =====
 Write-Host "[3/5] Assembling portable package directory..." -ForegroundColor Yellow
@@ -203,7 +203,7 @@ New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
 # Copy exe
 Copy-Item $ExePath -Destination $TempDir
-Write-Host "  ✓ $ProductName.exe" -ForegroundColor DarkGreen
+Write-Host "  [OK] $ProductName.exe" -ForegroundColor DarkGreen
 
 # Copy resource files
 foreach ($res in $Resources) {
@@ -213,14 +213,14 @@ foreach ($res in $Resources) {
         New-Item -ItemType Directory -Path $DstDir -Force | Out-Null
     }
     Copy-Item $res.Src -Destination $DstFull
-    Write-Host "  ✓ $($res.Dst)" -ForegroundColor DarkGreen
+    Write-Host "  [OK] $($res.Dst)" -ForegroundColor DarkGreen
 }
 
 # Copy LICENSE
 $LicensePath = Join-Path $ProjectRoot "LICENSE"
 if (Test-Path $LicensePath) {
     Copy-Item $LicensePath -Destination $TempDir
-    Write-Host "  ✓ LICENSE" -ForegroundColor DarkGreen
+    Write-Host "  [OK] LICENSE" -ForegroundColor DarkGreen
 }
 
 # Copy any DLLs from the release directory (SoundTouchDLL, ORT, etc.).
@@ -228,7 +228,7 @@ if (Test-Path $LicensePath) {
 Get-ChildItem -Path $TargetRelease -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.Name -ne "vslib_x64.dll") {
         Copy-Item $_.FullName -Destination $TempDir
-        Write-Host "  ✓ $($_.Name)" -ForegroundColor DarkGreen
+        Write-Host "  [OK] $($_.Name)" -ForegroundColor DarkGreen
     }
 }
 
@@ -236,10 +236,10 @@ Get-ChildItem -Path $TargetRelease -Filter "*.dll" -ErrorAction SilentlyContinue
 $Wv2Dll = Join-Path $TargetRelease "WebView2Loader.dll"
 if (Test-Path $Wv2Dll) {
     Copy-Item $Wv2Dll -Destination $TempDir
-    Write-Host "  ✓ WebView2Loader.dll" -ForegroundColor DarkGreen
+    Write-Host "  [OK] WebView2Loader.dll" -ForegroundColor DarkGreen
 }
 
-Write-Host "[3/5] Directory assembly completed ✓" -ForegroundColor Green
+Write-Host "[3/5] Directory assembly completed [OK]" -ForegroundColor Green
 
 # ===== Step 4: Compress =====
 if (-not $NoZip) {
@@ -253,7 +253,7 @@ if (-not $NoZip) {
     $ZipSize = (Get-Item $ZipPath).Length
     $ZipSizeMB = [math]::Round($ZipSize / 1MB, 2)
 
-    Write-Host "[4/5] Compression completed ✓" -ForegroundColor Green
+    Write-Host "[4/5] Compression completed [OK]" -ForegroundColor Green
 }
 else {
     Write-Host "[4/5] Skipping ZIP compression (-NoZip)" -ForegroundColor DarkGray
@@ -278,7 +278,7 @@ if (-not $NoZip) {
         Copy-Item $NsisExePath -Destination $OutputDir
         $NsisSize = (Get-Item (Join-Path $OutputDir $NsisPattern)).Length
         $NsisSizeMB = [math]::Round($NsisSize / 1MB, 2)
-        Write-Host "[5/5] NSIS installer copied ✓ ($NsisSizeMB MB)" -ForegroundColor Green
+        Write-Host "[5/5] NSIS installer copied [OK] ($($NsisSizeMB) MB)" -ForegroundColor Green
     }
     else {
         Write-Host "[5/5] NSIS installer not found, skipping (path: $NsisExePath)" -ForegroundColor DarkGray
@@ -293,10 +293,10 @@ Write-Host "============================================" -ForegroundColor Cyan
 if (-not $NoZip) {
     Write-Host "  Packaging successful!" -ForegroundColor Green
     Write-Host "  Portable: $ZipPath" -ForegroundColor Green
-    Write-Host "  Size:     $ZipSizeMB MB" -ForegroundColor Green
+    Write-Host "  Size:     $($ZipSizeMB) MB" -ForegroundColor Green
     if (Test-Path (Join-Path $OutputDir $NsisPattern)) {
         Write-Host "  Installer: $(Join-Path $OutputDir $NsisPattern)" -ForegroundColor Green
-        Write-Host "  Size:      $NsisSizeMB MB" -ForegroundColor Green
+        Write-Host "  Size:      $($NsisSizeMB) MB" -ForegroundColor Green
     }
 }
 else {

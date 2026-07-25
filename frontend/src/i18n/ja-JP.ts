@@ -841,6 +841,8 @@ export const jaJP = {
     menu_inference_auto: "自動",
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
+    menu_gpu_device: "GPU デバイス",
+    menu_gpu_auto_select: "自動選択（推奨）",
     menu_run_benchmark: "ベンチマークを実行…",
     menu_background_prerender: "バックグラウンド事前レンダリング",
     menu_background_prerender_desc:
@@ -867,7 +869,7 @@ export const jaJP = {
     benchmark_gpu_failed_desc:
         "GPU推論に失敗しました。GPUドライバが正しくインストールされ、ONNX RuntimeプロバイダDLLが存在するか確認してください。",
     benchmark_gpu_device_label: "GPU デバイス",
-    benchmark_ort_info_label: "ONNX Runtime：",
+    benchmark_ort_info_label: "ONNX Runtime:",
     benchmark_gpu_label: "GPU",
-    benchmark_providers_label: "利用可能なプロバイダ：",
+    benchmark_providers_label: "利用可能なプロバイダ:",
 } as const;

@@ -1,6 +1,6 @@
 [package]
 name = "HiFiShifter"
-version = "0.1.0-beta.12"
+version = "0.1.0-beta.13"
 description = "A high-quality audio shifter"
 authors = ["ARounder"]
 edition = "2021"
@@ -73,7 +73,9 @@ vslib = []
 
 # Windows — DirectML (DirectX 12 GPU, works on any DX12-capable GPU)
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
+# DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
+windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
 
 # Linux — OpenCL (loaded at runtime via ORT generic EP API, no special ort feature needed)
 [target.'cfg(target_os = "linux")'.dependencies]
