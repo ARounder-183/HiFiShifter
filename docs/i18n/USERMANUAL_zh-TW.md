@@ -24,7 +24,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 - **Windows**：DirectML（DirectX 12），支援 NVIDIA、AMD、Intel Arc GPU
 - **macOS（Apple Silicon）**：CoreML，利用 Apple Neural Engine 加速
 - **macOS（Intel）**：僅 CPU 推理
-- **Linux**：OpenCL，跨平台 GPU 加速
+- **Linux**：暫無
 
 在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可查看各裝置的推理效能。
 

@@ -24,7 +24,7 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 - **Windows**: DirectML (DirectX 12), supports NVIDIA, AMD, Intel Arc GPUs
 - **macOS (Apple Silicon)**: CoreML, using Apple Neural Engine acceleration
 - **macOS (Intel)**: CPU inference only
-- **Linux**: OpenCL, cross-platform GPU acceleration
+- **Linux**: Not available yet
 
 In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GPU`. Run the benchmark to view the inference performance of each device.
 

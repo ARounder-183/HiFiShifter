@@ -24,7 +24,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 - **Windows**：DirectML（DirectX 12）、NVIDIA、AMD、Intel Arc GPUに対応
 - **macOS（Apple Silicon）**：CoreML、Apple Neural Engineによるアクセラレーション
 - **macOS（Intel）**：CPU推論のみ
-- **Linux**：OpenCL、クロスプラットフォームGPUアクセラレーション
+- **Linux**：なし
 
 メニュー `オプション → 推論デバイス` で `Auto`（自動）、`CPU`、`GPU` を選択できます。ベンチマークを実行すると各デバイスの推論パフォーマンスを確認できます。
 
