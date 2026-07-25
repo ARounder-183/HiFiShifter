@@ -24,7 +24,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 - **Windows**: DirectML (DirectX 12), NVIDIA, AMD, Intel Arc GPU 지원
 - **macOS (Apple Silicon)**: CoreML, Apple Neural Engine 가속 사용
 - **macOS (Intel)**: CPU 추론만 가능
-- **Linux**: OpenCL, 크로스 플랫폼 GPU 가속
+- **Linux**: 없음
 
 메뉴 `옵션 → 추론 장치`에서 `Auto`(자동), `CPU`, `GPU`를 선택할 수 있습니다. 벤치마크를 실행하여 각 장치의 추론 성능을 확인할 수 있습니다.
 
