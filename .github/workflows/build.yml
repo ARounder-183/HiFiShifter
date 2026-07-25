@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main]
-  release:
-    types: [published]
 
 jobs:
   frontend-build:
@@ -377,71 +375,3 @@ jobs:
           echo "==== Candidate bundle dirs ===="
           find backend/src-tauri/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
         shell: bash
-
-  release-upload:
-    name: Upload to GitHub Release
-    needs: backend
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-artifacts
-
-      - name: Remove frontend artifact
-        run: rm -rf release-artifacts/frontend-dist
-
-      - name: Remove files larger than 2 GiB
-        run: |
-          MAX_SIZE=$((2 * 1024 * 1024 * 1024))
-          find release-artifacts -type f -size +"${MAX_SIZE}"c -print0 | while IFS= read -r -d '' f; do
-            echo "Skipping $(basename "$f"): $(numfmt --to=iec "$(stat -c%s "$f")") exceeds 2 GiB limit"
-            rm -f "$f"
-          done
-
-      - name: Repackage artifacts preserving directory structure
-        run: |
-          set -euxo pipefail
-          mkdir -p release-assets
-          for dir in release-artifacts/*/; do
-            name="$(basename "$dir")"
-            # If the directory contains a single .zip or single .exe/.dmg/.AppImage,
-            # upload it directly.  Otherwise, zip the directory.
-            file_count=$(find "$dir" -type f | wc -l)
-            if [ "$file_count" -eq 0 ]; then
-              echo "Skipping empty directory: $name"
-              continue
-            fi
-            # Check for common single-file artifacts
-            exe=$(find "$dir" -maxdepth 1 -name "*-setup.exe" | head -1)
-            dmg=$(find "$dir" -maxdepth 1 -name "*.dmg" | head -1)
-            appimage=$(find "$dir" -maxdepth 1 -name "*.AppImage" | head -1)
-            # Portable ZIP artifact — contains a single .zip, upload it directly
-            zip_in_dir=$(find "$dir" -maxdepth 1 -name "*.zip" | head -1)
-            if [ -n "$zip_in_dir" ]; then
-              cp "$zip_in_dir" "release-assets/$(basename "$zip_in_dir")"
-            elif [ -n "$exe" ]; then
-              cp "$exe" "release-assets/$(basename "$exe")"
-            elif [ -n "$dmg" ]; then
-              cp "$dmg" "release-assets/$(basename "$dmg")"
-            elif [ -n "$appimage" ]; then
-              cp "$appimage" "release-assets/$(basename "$appimage")"
-            else
-              # Multi-file artifact (e.g. Linux GPU binary + .so libs)
-              # — zip it back up under its original artifact name.
-              (cd release-artifacts && zip -r "../release-assets/${name}.zip" "$name")
-            fi
-          done
-          echo "=== Release assets ==="
-          ls -la release-assets/
-        shell: bash
-
-      - name: Upload assets to Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: release-assets/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
