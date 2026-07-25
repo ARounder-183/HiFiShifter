@@ -181,3 +181,6 @@ backend/src-tauri/third_party/soundtouch-static/soundtouch/
 # Temp directory created by setup-gpu-deps.ps1
 temp_ort_setup/
 
+# DirectML.dll copied by build.rs from ORT build output for Tauri bundling
+backend/src-tauri/resources/DirectML.dll
+
