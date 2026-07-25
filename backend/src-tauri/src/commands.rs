@@ -884,6 +884,12 @@ pub fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
     onnx_status::get_gpu_devices()
 }
 
+/// Enumerate DirectML-compatible GPU adapters via DXGI (Windows only).
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_dml_adapters() -> crate::dml_adapters::DmlAdapterList {
+    onnx_status::get_dml_adapters()
+}
+
 // ===================== pitch_cache =====================
 
 #[tauri::command(rename_all = "camelCase")]

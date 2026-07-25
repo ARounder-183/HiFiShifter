@@ -18,8 +18,7 @@ import {
     setDefaultHifiganMelStretch,
     setDefaultStretchAlgorithm,
     setOrtEp,
-
-
+    setOrtDeviceId,
     toggleAutoBackgroundRender,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
@@ -92,8 +91,29 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
+    const [dmlAdapters, setDmlAdapters] = useState<
+        { deviceId: number; name: string; memoryMb: number }[]
+    >([]);
 
-
+    // Fetch DML adapters on mount for GPU device selector
+    useEffect(() => {
+        import("../../services/api/core")
+            .then(({ coreApi }) => coreApi.getDmlAdapters())
+            .then((result) => {
+                if (result.adapters && result.adapters.length > 0) {
+                    setDmlAdapters(
+                        result.adapters.map((a) => ({
+                            deviceId: a.deviceId,
+                            name: a.name,
+                            memoryMb: a.dedicatedVideoMemoryMb,
+                        })),
+                    );
+                }
+            })
+            .catch(() => {
+                // DML adapters unavailable — device selector won't show
+            });
+    }, []);
 
     // Edit dialog states
     const [transposeCentsOpen, setTransposeCentsOpen] = useState(false);
@@ -744,6 +764,41 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     </DropdownMenu.Item>
                                 );
                             })}
+
+                            {/* GPU Device Selector — shown when GPU EP is selected */}
+                            {s.ortEp === "gpu" && dmlAdapters.length > 0 && (
+                                <>
+                                    <DropdownMenu.Separator />
+                                    <DropdownMenu.Label>
+                                        {tAny("menu_gpu_device")}
+                                    </DropdownMenu.Label>
+                                    <DropdownMenu.Item
+                                        onSelect={() => {
+                                            dispatch(setOrtDeviceId(null));
+                                            void dispatch(persistUiSettings());
+                                        }}
+                                    >
+                                        {withCheck(
+                                            s.ortDeviceId == null,
+                                            tAny("menu_gpu_auto_select"),
+                                        )}
+                                    </DropdownMenu.Item>
+                                    {dmlAdapters.map((adapter) => (
+                                        <DropdownMenu.Item
+                                            key={adapter.deviceId}
+                                            onSelect={() => {
+                                                dispatch(setOrtDeviceId(adapter.deviceId));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.ortDeviceId === adapter.deviceId,
+                                                `${adapter.name} (${adapter.memoryMb} MB)`,
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </>
+                            )}
 
                             <DropdownMenu.Separator />
                             <DropdownMenu.Item onSelect={() => setBenchmarkDialogOpen(true)}>

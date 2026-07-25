@@ -218,6 +218,7 @@ export interface SessionState {
     defaultHifiganMelStretch: boolean;
     ortEp: string;
     gpuDeviceId: number;
+    ortDeviceId: number | null;
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
 
@@ -986,6 +987,7 @@ const initialState: SessionState = {
     defaultHifiganMelStretch: true,
     ortEp: "auto",
     gpuDeviceId: 0,
+    ortDeviceId: null,
     autoBackgroundRender: true,
 
     paramsEpoch: 0,
@@ -1279,6 +1281,9 @@ const sessionSlice = createSlice({
         },
         setGpuDeviceId(state, action: PayloadAction<number>) {
             state.gpuDeviceId = action.payload;
+        },
+        setOrtDeviceId(state, action: PayloadAction<number | null>) {
+            state.ortDeviceId = action.payload;
         },
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
@@ -1881,10 +1886,15 @@ const sessionSlice = createSlice({
                     state.defaultHifiganMelStretch = Boolean((s as any).defaultHifiganMelStretch);
                 }
                 if (s.ortEp != null) {
-                    state.ortEp = s.ortEp;
+                    const normalized = String(s.ortEp).toLowerCase();
+                    state.ortEp = ["auto", "cpu", "gpu"].includes(normalized) ? normalized : "auto";
                 }
                 if (s.gpuDeviceId != null) {
                     state.gpuDeviceId = Number(s.gpuDeviceId);
+                }
+                if ((s as any).ortDeviceId !== undefined) {
+                    const val = (s as any).ortDeviceId;
+                    state.ortDeviceId = val == null ? null : Number(val);
                 }
                 if ((s as any).autoBackgroundRender != null) {
                     state.autoBackgroundRender = Boolean((s as any).autoBackgroundRender);
@@ -3332,6 +3342,7 @@ export const {
     setDefaultHifiganMelStretch,
     setOrtEp,
     setGpuDeviceId,
+    setOrtDeviceId,
     toggleAutoBackgroundRender,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,

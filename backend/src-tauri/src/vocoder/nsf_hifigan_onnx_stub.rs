@@ -62,7 +62,7 @@ pub fn active_ep() -> String {
     "none".to_string()
 }
 
-pub fn update_ort_ep(_choice: &str) {}
+pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
 
 pub fn drop_shared_session() {}
 

@@ -15,11 +15,68 @@ use std::sync::{Mutex, OnceLock};
 /// Takes precedence over the `HIFISHIFTER_ORT_EP` env var.
 static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
+/// Runtime override for DirectML device ID. Set by `set_runtime_dml_device_id()`.
+/// Takes precedence over the `HIFISHIFTER_DML_DEVICE_ID` env var.
+static RUNTIME_DML_DEVICE_ID: OnceLock<Mutex<Option<i32>>> = OnceLock::new();
+
 /// Set the runtime EP override. Pass `None` to clear the override.
 pub fn set_runtime_ep_override(ep: Option<String>) {
     if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
         *guard = ep;
     }
+}
+
+/// Set the runtime DirectML device ID override. Pass `None` to clear.
+pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
+    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID.get_or_init(|| Mutex::new(None)).lock() {
+        *guard = device_id;
+    }
+}
+
+/// Resolve the DirectML device ID to use, in priority order:
+/// 1. Runtime override (set via UI/settings)
+/// 2. `HIFISHIFTER_DML_DEVICE_ID` env var
+/// 3. Auto-detect via DXGI: pick the GPU with most VRAM
+///
+/// Always returns an explicit device_id. This uses `with_device_id(n)`
+/// which calls `SessionOptionsAppendExecutionProvider_DML` (old API).
+/// The newer `SessionOptionsAppendExecutionProvider_DML2` (used by
+/// filter/preference options when device_id is None) has been observed
+/// to create DML devices with significantly worse performance on
+/// Ada Lovelace (RTX 4060) GPUs despite passing HighPerformance hints.
+/// The old API with explicit device_id performs consistently across
+/// all GPU architectures tested (Ampere, Ada, Pascal).
+fn resolve_dml_device_id() -> Option<i32> {
+    // 1. Runtime override (set via UI/settings) — user explicitly chose
+    if let Some(id) = RUNTIME_DML_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+    {
+        return Some(id);
+    }
+    // 2. Env var — explicit override
+    if let Ok(val) = std::env::var("HIFISHIFTER_DML_DEVICE_ID") {
+        if let Ok(id) = val.trim().parse::<i32>() {
+            return Some(id);
+        }
+    }
+    // 3. Auto-detect: pick the GPU with most VRAM.
+    //    Always use explicit device_id (old DML API) regardless of
+    //    whether the GPU is device 0 or not. The old API consistently
+    //    outperforms DML2 across architectures.
+    let adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
+    if let Some(best) = adapters.first() {
+        let device_id = best.device_id as i32;
+        eprintln!(
+            "ort_session: auto-detected DML device_id={device_id} name='{}' vram={}MB",
+            best.name, best.dedicated_video_memory_mb
+        );
+        return Some(device_id);
+    }
+    // 4. No DXGI adapters — must rely on DML2 as last resort
+    None
 }
 
 /// Returns the runtime EP override if set, otherwise falls back to per-role env var,
@@ -40,7 +97,7 @@ fn ep_choice_for_role(role: OrtSessionRole) -> String {
         .ok()
         .and_then(|g| g.clone())
     {
-        return ov;
+        return ov.to_ascii_lowercase();
     }
     // 2. Per-model env var (e.g. HIFISHIFTER_HNSEP_ORT_EP=cpu)
     let role_env = match role {
@@ -131,15 +188,34 @@ fn try_register_opencl_ep(
 /// Try to register DirectML EP on a session builder.
 /// DirectML uses DirectX 12 to accelerate ONNX models on any GPU (NVIDIA, AMD, Intel Arc).
 /// It is Windows-only and requires no additional SDK or runtime DLLs beyond the ORT provider DLL.
+///
+/// Registers BOTH DirectML AND CPU EP explicitly. When only DirectML is registered,
+/// ORT implicitly adds CPU as a fallback but the graph partitioner may not make
+/// optimal partitioning decisions — it doesn't "know" CPU is available as a target
+/// until after the first partitioning pass. Explicit registration of both EPs lets
+/// the partitioner plan the full EP assignment upfront, reducing partition boundaries.
 #[cfg(target_os = "windows")]
 fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
-    _role: OrtSessionRole,
+    role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
     eprintln!("ort_session: try_register_directml_ep");
-    let ep = ort::ep::DirectML::default().build();
+    let device_id = resolve_dml_device_id();
+    let dml = if let Some(id) = device_id {
+        eprintln!("ort_session[{role:?}]: DirectML device_id={id} (old API)");
+        ort::ep::DirectML::default()
+            .with_device_id(id)
+            .build()
+    } else {
+        // Last resort: no DXGI adapters found, fall back to DML2
+        eprintln!("ort_session[{role:?}]: DirectML auto-select (DML2 fallback)");
+        ort::ep::DirectML::default()
+            .with_performance_preference(ort::ep::directml::PerformancePreference::HighPerformance)
+            .with_device_filter(ort::ep::directml::DeviceFilter::Gpu)
+            .build()
+    };
     builder
-        .with_execution_providers([ep])
+        .with_execution_providers([dml])
         .map(|b| (b, "directml"))
         .map_err(|e| format!("enable DirectML EP failed: {e}"))
 }
@@ -160,91 +236,216 @@ fn try_register_directml_ep(
 ///
 /// Returns `(Session, selected_ep_name)`.
 pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Session, String), String> {
-    let mut builder =
-        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
-
     let choice = ep_choice_for_role(role);
-    let mut selected: &str = "cpu";
 
-    match choice.as_str() {
-        "cpu" => {
-            selected = "cpu";
+    if choice == "cpu" || matches!(role, OrtSessionRole::Separator) {
+        return build_cpu_session(onnx_path, role, &choice);
+    }
+
+    // ── GPU path: try DirectML first (Windows) ──────────────────────────
+    #[cfg(target_os = "windows")]
+    {
+        // Attempt 1: strict DirectML (no CPU fallback).
+        // If all operators in the model have native DirectML support,
+        // the entire graph runs on GPU with ZERO partition boundaries.
+        match build_dml_session_inner(onnx_path, role, &choice, true) {
+            Ok((session, ep)) => return Ok((session, ep)),
+            Err(e) => eprintln!(
+                "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+            ),
         }
-        _ => {
-            // "auto" / "gpu" / "directml" / "opencl" / "cuda" →
-            // try the platform-specific GPU backend, fall back to CPU.
-            #[allow(unused_assignments)]
-            let mut tried = false;
-            #[cfg(target_os = "windows")]
-            {
-                match try_register_directml_ep(builder.clone(), role) {
-                    Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
-                    Err(e) => { eprintln!("ort_session[{role:?}]: DirectML — {e}"); }
-                }
-            }
-            #[cfg(target_os = "linux")]
-            if !tried {
-                match try_register_opencl_ep(builder.clone(), role) {
-                    Ok((b, ep)) => { builder = b; selected = ep; tried = true; }
-                    Err(e) => { eprintln!("ort_session[{role:?}]: OpenCL — {e}"); }
-                }
-            }
-            if !tried {
-                selected = "cpu";
-                eprintln!(
-                    "ort_session[{role:?}]: no GPU EP available, falling back to CPU (choice={choice})"
-                );
-            }
+        // Attempt 2: DirectML with CPU fallback.
+        match build_dml_session_inner(onnx_path, role, &choice, false) {
+            Ok((session, ep)) => return Ok((session, ep)),
+            Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
         }
     }
 
+    // ── GPU path: try OpenCL (Linux) ───────────────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        let mut builder =
+            Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
+        match try_register_opencl_ep(builder, role) {
+            Ok((b, ep)) => {
+                builder = b;
+                builder = builder
+                    .with_optimization_level(GraphOptimizationLevel::Level3)
+                    .map_err(|e| format!("set graph optimization level failed: {e}"))?
+                    .with_memory_pattern(true)
+                    .map_err(|e| format!("set memory pattern failed: {e}"))?;
+                let cores = std::thread::available_parallelism()
+                    .map(|n| n.get()).unwrap_or(4).max(2);
+                let threads = match role {
+                    OrtSessionRole::Separator => cores,
+                    OrtSessionRole::Vocoder => (cores / 2).max(2),
+                    OrtSessionRole::PitchDetector => (cores / 2).max(2),
+                };
+                builder = builder
+                    .with_intra_threads(threads)
+                    .map_err(|e| format!("set intra op threads failed: {e}"))?;
+                let session = builder
+                    .commit_from_file(onnx_path)
+                    .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+                return Ok((session, ep.to_string()));
+            }
+            Err(e) => eprintln!("ort_session[{role:?}]: OpenCL — {e}"),
+        }
+    }
+
+    // ── Fallback: CPU ──────────────────────────────────────────────────
+    build_cpu_session(onnx_path, role, &choice)
+}
+
+/// Build a DirectML session with optional strict mode (no CPU fallback).
+#[cfg(target_os = "windows")]
+fn build_dml_session_inner(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    choice: &str,
+    strict: bool,
+) -> Result<(Session, String), String> {
+    let mut builder =
+        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
+
+    let (builder, selected) = try_register_directml_ep(builder, role)?;
+
     eprintln!(
-        "ort_session[{role:?}]: model={} ep={selected} (choice={choice}, global_env={})",
+        "ort_session[{role:?}]: model={} ep={selected} strict={strict} (choice={choice}, global_env={})",
         onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         env_ep_choice(),
     );
 
-    // Level3: full graph optimization (operator fusion, constant folding, layout opt).
+    // ── DirectML-specific config ────────────────────────────────────────
+    let mut builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Disable)
+        .map_err(|e| format!("set graph optimization level failed: {e}"))?
+        .with_memory_pattern(false)
+        .map_err(|e| format!("set memory pattern failed: {e}"))?
+        .with_device_allocated_initializers()
+        .map_err(|e| format!("enable device allocated initializers failed: {e}"))?
+        .with_flush_to_zero()
+        .map_err(|e| format!("enable flush-to-zero failed: {e}"))?
+        .with_prepacking(false)
+        .map_err(|e| format!("disable prepacking failed: {e}"))?
+        // Override dynamic dimensions to fixed values. DirectML performs
+        // best when shapes are known at session creation time because it
+        // can pre-compile shaders and optimize GPU memory layouts. Dynamic
+        // dimensions force DML to use less-optimized generic kernels.
+        .with_dimension_override("batch", 1)
+        .map_err(|e| format!("override batch dim failed: {e}"))?
+        .with_dimension_override_by_denotation("time", 4096)
+        .map_err(|e| format!("override time dim failed: {e}"))?;
+
+    if strict {
+        // Disable CPU fallback: if ANY op can't run on DirectML, session
+        // creation FAILS. If it succeeds, the ENTIRE graph runs on GPU
+        // with ZERO partition boundaries → no GPU↔CPU copies → maximum
+        // throughput. This is the key to unlocking Pascal (GTX 10xx)
+        // performance where ORT's partitioner otherwise sends too many
+        // ops to CPU.
+        builder = builder
+            .with_disable_cpu_fallback()
+            .map_err(|e| format!("disable cpu fallback failed: {e}"))?;
+    } else {
+        builder = builder
+            .with_parallel_execution(true)
+            .map_err(|e| format!("enable parallel execution failed: {e}"))?
+            .with_inter_threads(2)
+            .map_err(|e| format!("set inter threads failed: {e}"))?;
+    }
+
+    // ── Thread config ───────────────────────────────────────────────────
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(2);
+    let threads = if strict {
+        // Strict mode: ALL ops on GPU. CPU threads are irrelevant —
+        // keep 2 to avoid overhead.
+        2
+    } else {
+        // Fallback mode: CPU handles unsupported ops.
+        // Max threads for fastest CPU fallback throughput.
+        cores.max(4)
+    };
+
+    builder = builder
+        .with_intra_threads(threads)
+        .map_err(|e| format!("set intra op threads failed: {e}"))?;
+
+    let t_create = std::time::Instant::now();
+    let session = builder
+        .commit_from_file(onnx_path)
+        .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+    let create_ms = t_create.elapsed().as_millis();
+
+    // ── Detailed diagnostic logging ────────────────────────────────────
+    eprintln!(
+        "ort_session[{role:?}]: created session ep={selected} strict={strict} intra_threads={threads} commit_ms={create_ms}",
+    );
+    // Log session I/O metadata (names, shapes, types)
+    for input in session.inputs() {
+        eprintln!(
+            "ort_session[{:?}]:   input name='{}' dtype={:?}",
+            role, input.name(), input.dtype()
+        );
+    }
+    for output in session.outputs() {
+        eprintln!(
+            "ort_session[{:?}]:   output name='{}' dtype={:?}",
+            role, output.name(), output.dtype()
+        );
+    }
+
+    Ok((session, selected.to_string()))
+}
+
+/// Build a pure CPU session (used for "cpu" choice or fallback).
+fn build_cpu_session(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+    choice: &str,
+) -> Result<(Session, String), String> {
+    let mut builder =
+        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
+
+    eprintln!(
+        "ort_session[{role:?}]: model={} ep=cpu (choice={choice}, global_env={})",
+        onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        env_ep_choice(),
+    );
+
     builder = builder
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("set graph optimization level failed: {e}"))?;
-
-    // Pre-allocate tensor memory to avoid per-inference realloc.
-    builder = builder
+        .map_err(|e| format!("set graph optimization level failed: {e}"))?
         .with_memory_pattern(true)
         .map_err(|e| format!("set memory pattern failed: {e}"))?;
 
-    // Thread config: GPU path uses min threads (GPU parallelism handles the heavy lifting,
-    // but we keep 2 threads to avoid stalling on CPU-fallback ops within GPU-accelerated graphs).
-    // CPU path uses half cores. Separator (HNSEP) gets more threads than Vocoder since it
-    // is a lighter model that benefits more from CPU parallelism when GPU is unavailable.
-    let threads = if selected == "cpu" {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .max(2);
-        match role {
-            OrtSessionRole::Separator => cores,           // HNSEP: use all available cores on CPU
-            OrtSessionRole::Vocoder => (cores / 2).max(2), // HiFiGAN: half cores (heavy model)
-            OrtSessionRole::PitchDetector => (cores / 2).max(2), // FCPE: half cores
-        }
-    } else {
-        // GPU path: keep 2 threads for CPU-fallback ops (ORT partitions unsupported ops to CPU)
-        2
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(2);
+    let threads = match role {
+        OrtSessionRole::Separator => cores,
+        OrtSessionRole::Vocoder => (cores / 2).max(2),
+        OrtSessionRole::PitchDetector => (cores / 2).max(2),
     };
     builder = builder
         .with_intra_threads(threads)
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
+    let t_create = std::time::Instant::now();
     let session = builder
         .commit_from_file(onnx_path)
         .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+    let create_ms = t_create.elapsed().as_millis();
 
     eprintln!(
-        "ort_session[{role:?}]: created session ep={selected} intra_threads={threads}",
+        "ort_session[{role:?}]: created session ep=cpu intra_threads={threads} commit_ms={create_ms}",
     );
 
-    Ok((session, selected.to_string()))
+    Ok((session, "cpu".to_string()))
 }
 
 // ─── GPU Diagnostic & Provider Enumeration ────────────────────────────────

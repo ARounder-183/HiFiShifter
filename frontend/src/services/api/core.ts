@@ -1,5 +1,6 @@
 import type {
     BenchmarkResult,
+    DmlAdapterList,
     GpuEnumerationResult,
     ModelConfigResult,
     OnnxDiagnosticResult,
@@ -178,6 +179,7 @@ export const coreApi = {
     getOnnxDiagnostic: () => invoke<OnnxDiagnosticResult>("get_onnx_diagnostic"),
     runVocoderBenchmark: () => invoke<BenchmarkResult>("run_vocoder_benchmark"),
     getGpuDevices: () => invoke<GpuEnumerationResult>("get_gpu_devices"),
+    getDmlAdapters: () => invoke<DmlAdapterList>("get_dml_adapters"),
 
     // Background pre-render
     startBackgroundRender: () =>

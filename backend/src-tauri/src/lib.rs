@@ -38,6 +38,14 @@ mod gpu_info;
 #[path = "vocoder/gpu_info_stub.rs"]
 mod gpu_info;
 
+#[cfg(target_os = "windows")]
+#[path = "vocoder/dml_adapters.rs"]
+mod dml_adapters;
+
+#[cfg(not(target_os = "windows"))]
+#[path = "vocoder/dml_adapters_stub.rs"]
+mod dml_adapters;
+
 #[cfg(feature = "onnx")]
 #[path = "vocoder/mel_utils.rs"]
 mod mel_utils;
@@ -366,6 +374,7 @@ pub fn run() {
             commands::get_onnx_diagnostic,
             commands::run_vocoder_benchmark,
             commands::get_gpu_devices,
+            commands::get_dml_adapters,
             commands::clear_pitch_cache,
             commands::get_pitch_cache_stats,
             commands::list_directory,

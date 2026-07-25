@@ -821,6 +821,8 @@ export const zhTW = {
     menu_inference_auto: "自動",
     menu_inference_cpu: "CPU",
     menu_inference_gpu: "GPU",
+    menu_gpu_device: "GPU 裝置",
+    menu_gpu_auto_select: "自動選擇（推薦）",
     menu_run_benchmark: "執行基準測試…",
     menu_background_prerender: "背景預渲染",
     menu_background_prerender_desc:
@@ -846,7 +848,7 @@ export const zhTW = {
     benchmark_gpu_failed_desc:
         "GPU 推理失敗。請檢查 GPU 驅動是否正確安裝，以及 ONNX Runtime 提供者 DLL 是否就緒。",
     benchmark_gpu_device_label: "GPU 裝置",
-    benchmark_ort_info_label: "ONNX Runtime：",
+    benchmark_ort_info_label: "ONNX Runtime:",
     benchmark_gpu_label: "GPU",
-    benchmark_providers_label: "可用提供者：",
+    benchmark_providers_label: "可用提供者:",
 } as const;

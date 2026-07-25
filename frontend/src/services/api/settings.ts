@@ -39,6 +39,7 @@ export interface UiSettings {
     midiImportTargetParamEditor?: string;
     ortEp?: string;
     gpuDeviceId?: number;
+    ortDeviceId?: number | null;
     autoBackgroundRender?: boolean;
     customScalePresets?: Array<{
         id: string;
