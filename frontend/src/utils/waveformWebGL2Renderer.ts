@@ -107,7 +107,9 @@ in float v_alphaFactor;
 out vec4 fragColor;
 
 void main() {
-    fragColor = u_color * u_alpha * v_alphaFactor;
+    // 输出预乘 alpha 格式（rgb * a），匹配 premultipliedAlpha: true 和 blendFunc(ONE, ONE_MINUS_SRC_ALPHA)
+    float a = u_color.a * u_alpha * v_alphaFactor;
+    fragColor = vec4(u_color.rgb * a, a);
 }
 `;
 
@@ -395,7 +397,6 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         } = params;
 
         const totalSamples = Math.floor(peaksLength / 2);
-        void canvasWidth; // canvasWidth 不直接使用，segmentLeftPx/RightPx 已包含视口信息
 
         const clipTotalW = clipTotalWidthPx ?? canvasWidth;
         const amplitudeScale = zeroDbHalfHeight ?? canvasHeight / 2;
