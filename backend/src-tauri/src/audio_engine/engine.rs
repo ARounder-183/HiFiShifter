@@ -901,6 +901,32 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 }
             }
         }
+
+        // ── extra_params 变更检测 ──────────────────────────────────────────
+        // 当 track 级别的 extra_params（如 breath_enabled、synth_mode 等）发生变化时，
+        // 使该 root track 及其子轨道上所有 clip 的合成缓存失效，并触发后台预渲染。
+        // 场景：用户切换"气声"功能开关，或更改其他静态声码器参数。
+        // 此检测必须放在 clip 循环之后，以确保每个 root track 只检查一次。
+        for (root_id, new_params) in &tl.params_by_root_track {
+            let old_extra_params = old_tl
+                .params_by_root_track
+                .get(root_id)
+                .map(|p| &p.extra_params);
+            if old_extra_params != Some(&new_params.extra_params) {
+                eprintln!(
+                    "[engine] extra_params changed for root_track={}, invalidating all clips on this track group",
+                    root_id
+                );
+                for clip in &tl.clips {
+                    if tl.resolve_root_track_id(&clip.track_id).as_deref()
+                        == Some(root_id.as_str())
+                    {
+                        crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                        any_cache_invalidated = true;
+                    }
+                }
+            }
+        }
     }
 
     // ── 后台预渲染自动触发 ──────────────────────────────────────────────────
