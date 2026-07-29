@@ -12,11 +12,12 @@
  *   canvas 本地像素 → clip 全局像素 → timeline 时间 → 源文件时间 → peaks 数据索引
  *
  * ## 导出
- * - {@link WaveformRenderParams}    — 渲染参数接口
- * - {@link applyGainsToPeaks}       — 增益应用（音量 × 淡入淡出曲线）
- * - {@link renderWaveform}          — Canvas 绘制（line 竖线 / jitter 抖动线）
- * - {@link DrawClipWaveformParams}  — 单次 drawClipWaveform 调用参数（抽象接口用）
- * - {@link WaveformRenderer}        — 波形渲染器抽象接口（WebGL2 / Canvas 2D / WebGPU 共用）
+ * - {@link WaveformRenderParams}         — 渲染参数接口
+ * - {@link applyGainsToPeaks}            — 增益应用（音量 × 淡入淡出曲线）
+ * - {@link renderWaveform}               — Canvas 绘制（line 竖线 / jitter 抖动线）
+ * - {@link DrawClipWaveformParams}       — 单次 drawClipWaveform 调用参数（抽象接口用）
+ * - {@link WaveformRenderer}             — 波形渲染器抽象接口（WebGL2 / Canvas 2D / WebGPU 共用）
+ * - {@link Canvas2DWaveformRenderer}     — Canvas 2D fallback 实现（封装 renderWaveform）
  *
  * @module waveformRenderer
  */
@@ -522,4 +523,94 @@ export interface WaveformRenderer {
 
     /** 释放资源（WebGL2 实现 destroy program/buffer/texture） */
     dispose(): void;
+}
+
+// ============================================================================
+// Canvas2DWaveformRenderer — Canvas 2D fallback 实现
+// ============================================================================
+//
+// 封装现有 renderWaveform，行为与原 renderWaveform 完全一致。
+// 用于 WebGL2 不可用时的自动降级，以及通过 localStorage 强制切换的对比测试。
+// ============================================================================
+
+/**
+ * Canvas 2D 波形渲染器
+ *
+ * 流程：
+ *   - resize：仅在物理尺寸真正变化时设置 canvas.width/height（避免强制清空）
+ *   - clear：clearRect 整个画布
+ *   - drawClipWaveform：save → clip 矩形 → globalAlpha → renderWaveform → restore
+ *
+ * 特殊说明：
+ *   - 行为与原 renderWaveform 完全一致，不引入任何视觉差异
+ *   - 用于 WebGL2 不可用场景的自动降级
+ */
+export class Canvas2DWaveformRenderer implements WaveformRenderer {
+    readonly backend = "canvas2d" as const;
+
+    private dpr = 1;
+    private displayW = 0;
+    private displayH = 0;
+    private physicalW = 0;
+    private physicalH = 0;
+    private lastCanvasDims = { w: 0, h: 0 };
+
+    constructor(
+        private canvas: HTMLCanvasElement,
+        private ctx: CanvasRenderingContext2D,
+    ) {}
+
+    resize(displayW: number, displayH: number, dpr: number): void {
+        this.displayW = displayW;
+        this.displayH = displayH;
+        this.dpr = dpr;
+        const internalW = Math.max(1, Math.round(displayW * dpr));
+        const internalH = Math.max(1, Math.round(displayH * dpr));
+
+        const dimsChanged =
+            this.lastCanvasDims.w !== internalW || this.lastCanvasDims.h !== internalH;
+        if (dimsChanged) {
+            this.canvas.width = internalW;
+            this.canvas.height = internalH;
+            this.lastCanvasDims = { w: internalW, h: internalH };
+        }
+        this.physicalW = internalW;
+        this.physicalH = internalH;
+
+        // setTransform 仅在尺寸变化时重设（避免每帧重设）
+        if (dimsChanged) {
+            const scaleX = internalW / Math.max(1, displayW);
+            const scaleY = internalH / Math.max(1, displayH);
+            this.ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+        }
+
+        // CSS 尺寸只在变化时写入
+        if (this.canvas.style.width !== `${displayW}px`) {
+            this.canvas.style.width = `${displayW}px`;
+        }
+        if (this.canvas.style.height !== `${displayH}px`) {
+            this.canvas.style.height = `${displayH}px`;
+        }
+    }
+
+    clear(): void {
+        this.ctx.clearRect(0, 0, this.displayW, this.displayH);
+    }
+
+    drawClipWaveform(params: DrawClipWaveformParams): void {
+        const { peaks, renderParams, segmentLeftPx, segmentRightPx, strokeColor, strokeWidth, alpha } = params;
+        if (segmentRightPx - segmentLeftPx <= 1e-6) return;
+
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, this.displayH);
+        this.ctx.clip();
+        this.ctx.globalAlpha = alpha;
+        renderWaveform(this.ctx, peaks, renderParams, strokeColor, strokeWidth, "line");
+        this.ctx.restore();
+    }
+
+    dispose(): void {
+        // Canvas 2D 无需显式释放
+    }
 }
