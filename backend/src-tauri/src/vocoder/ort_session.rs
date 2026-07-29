@@ -139,6 +139,11 @@ pub enum OrtSessionRole {
 /// Uses ONNX Runtime's generic `SessionOptionsAppendExecutionProvider` API
 /// to register "OpenCLExecutionProvider" by name.  Works if the ORT DLL has
 /// the OpenCL provider compiled in; returns a clear error otherwise.
+///
+/// # Safety
+///
+/// `ort::api()` panics if `ort::init()` has not been called.  Callers must
+/// ensure `ensure_ort_init()` has succeeded before calling this function.
 #[cfg(target_os = "linux")]
 fn try_register_opencl_ep(
     builder: ort::session::builder::SessionBuilder,
@@ -147,15 +152,19 @@ fn try_register_opencl_ep(
     use ort::AsPointer;
     use std::ffi::CString;
 
-    eprintln!("ort_session: try_register_opencl_ep");
-
-    let mut builder = builder;
+    // Safety: caller must have called ort::init() successfully first.
     let api = ort::api();
     let provider_name =
         CString::new("OpenCLExecutionProvider").map_err(|e| format!("invalid provider name: {e}"))?;
 
     // Call the generic provider registration API.  This registers by name
     // rather than requiring a specific symbol.  No provider options needed.
+    // NOTE: The standard ONNX Runtime Linux binary from the ort crate's
+    // `download-binaries` feature is CPU-only — it does NOT include the
+    // OpenCL provider.  This call will fail gracefully on default builds.
+    // GPU acceleration on Linux requires either:
+    //   a) A custom ORT build with --use_opencl, or
+    //   b) The CUDA ort feature (requires NVIDIA GPU + CUDA Toolkit at runtime).
     let status = unsafe {
         (api.SessionOptionsAppendExecutionProvider)(
             builder.ptr_mut(),
@@ -167,10 +176,12 @@ fn try_register_opencl_ep(
     };
 
     if status.0.is_null() {
+        eprintln!("ort_session: OpenCL EP registered successfully");
         Ok((builder, "opencl"))
     } else {
         Err(
-            "OpenCL EP not available in this ONNX Runtime build (ORT was not compiled with --use_opencl)"
+            "OpenCL EP not available in this ONNX Runtime build (ORT was not compiled with --use_opencl). \
+             Falling back to CPU."
                 .to_string(),
         )
     }
@@ -264,32 +275,38 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     // ── GPU path: try OpenCL (Linux) ───────────────────────────────────
     #[cfg(target_os = "linux")]
     {
-        let mut builder =
-            Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
-        match try_register_opencl_ep(builder, role) {
-            Ok((b, ep)) => {
-                builder = b;
-                builder = builder
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .map_err(|e| format!("set graph optimization level failed: {e}"))?
-                    .with_memory_pattern(true)
-                    .map_err(|e| format!("set memory pattern failed: {e}"))?;
-                let cores = std::thread::available_parallelism()
-                    .map(|n| n.get()).unwrap_or(4).max(2);
-                let threads = match role {
-                    OrtSessionRole::Separator => cores,
-                    OrtSessionRole::Vocoder => (cores / 2).max(2),
-                    OrtSessionRole::PitchDetector => (cores / 2).max(2),
-                };
-                builder = builder
-                    .with_intra_threads(threads)
-                    .map_err(|e| format!("set intra op threads failed: {e}"))?;
-                let session = builder
-                    .commit_from_file(onnx_path)
-                    .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
-                return Ok((session, ep.to_string()));
+        match Session::builder() {
+            Ok(mut builder) => {
+                match try_register_opencl_ep(builder, role) {
+                    Ok((b, ep)) => {
+                        builder = b;
+                        builder = builder
+                            .with_optimization_level(GraphOptimizationLevel::Level3)
+                            .map_err(|e| format!("set graph optimization level failed: {e}"))?
+                            .with_memory_pattern(true)
+                            .map_err(|e| format!("set memory pattern failed: {e}"))?;
+                        let cores = std::thread::available_parallelism()
+                            .map(|n| n.get()).unwrap_or(4).max(2);
+                        let threads = match role {
+                            OrtSessionRole::Separator => cores,
+                            OrtSessionRole::Vocoder => (cores / 2).max(2),
+                            OrtSessionRole::PitchDetector => (cores / 2).max(2),
+                        };
+                        builder = builder
+                            .with_intra_threads(threads)
+                            .map_err(|e| format!("set intra op threads failed: {e}"))?;
+                        let session = builder
+                            .commit_from_file(onnx_path)
+                            .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+                        eprintln!("ort_session[{role:?}]: OpenCL session created successfully");
+                        return Ok((session, ep.to_string()));
+                    }
+                    Err(e) => eprintln!("ort_session[{role:?}]: OpenCL unavailable — {e}"),
+                }
             }
-            Err(e) => eprintln!("ort_session[{role:?}]: OpenCL — {e}"),
+            Err(e) => eprintln!(
+                "ort_session[{role:?}]: failed to create session builder for OpenCL — {e}; falling back to CPU"
+            ),
         }
     }
 

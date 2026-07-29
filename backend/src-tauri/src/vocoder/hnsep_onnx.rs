@@ -28,7 +28,10 @@ fn hnsep_cache_initial_capacity() -> usize {
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
-        ort::init().with_name("hifishifter").commit();
+        ort::init()
+            .with_name("hifishifter")
+            .commit()
+            .map_err(|e| format!("ort init failed: {e}"))?;
         Ok(())
     }) {
         Ok(()) => Ok(()),

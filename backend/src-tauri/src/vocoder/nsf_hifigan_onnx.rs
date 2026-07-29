@@ -48,7 +48,10 @@ pub fn active_ep() -> String {
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
-        ort::init().with_name("hifishifter").commit();
+        ort::init()
+            .with_name("hifishifter")
+            .commit()
+            .map_err(|e| format!("ort init failed: {e}"))?;
         eprintln!("[ort] initialized: {}", ort::info());
         let providers = crate::vocoder_ort_session::diagnose_available_providers();
         eprintln!("[ort] available providers: {providers:?}");
@@ -130,8 +133,10 @@ fn resolve_model_paths() -> Result<(PathBuf, PathBuf), String> {
         return Ok((onnx, cfg));
     }
 
-    if let Some(dir) =
-        env_path("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR").or_else(default_model_dir_guess)
+    if let Some(dir) = crate::nsf_hifigan_model_dir()
+        .map(|p| p.to_path_buf())
+        .or_else(|| env_path("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR"))
+        .or_else(default_model_dir_guess)
     {
         let onnx = dir.join("pc_nsf_hifigan.onnx");
         let cfg = dir.join("config.json");
@@ -2315,7 +2320,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // Collect diagnostic info before benchmark
     let available_providers = crate::vocoder_ort_session::diagnose_available_providers();
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
-    let ort_build_info = ort::info().to_string();
+    let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
+        .unwrap_or_else(|_| "ort::info() unavailable".to_string());
     let gpu_available = available_providers.iter().any(|p| p.contains("OpenCL"));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
