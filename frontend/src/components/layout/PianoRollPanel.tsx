@@ -74,6 +74,8 @@ import {
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
+import { createWaveformRenderer } from "../../utils/waveformRendererFactory";
+import type { WaveformRenderer } from "../../utils/waveformRenderer";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
 import {
     buildReferencePitchStrokeColor,
@@ -958,6 +960,27 @@ export const PianoRollPanel: React.FC = () => {
 
     const scrollerRef = useRef<HTMLDivElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+    // ========================================
+    // 背景波形 canvas + renderer（WebGL2 优先，Canvas 2D fallback）
+    // 独立 canvas 用于绘制 PianoRoll 背景波形，主 canvas 保持 Canvas 2D 画参数曲线
+    // ========================================
+    const bgWaveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const bgWaveformRendererRef = useRef<WaveformRenderer | null>(null);
+
+    // canvas 挂载时创建 renderer（工厂自动检测 WebGL2 能力）
+    // 使用 ref callback 而非直接 ref，以便在 canvas 挂载时立即创建 renderer
+    const setBgWaveformCanvasRef = useCallback((canvas: HTMLCanvasElement | null) => {
+        bgWaveformCanvasRef.current = canvas;
+        if (canvas && !bgWaveformRendererRef.current) {
+            try {
+                bgWaveformRendererRef.current = createWaveformRenderer(canvas);
+            } catch (e) {
+                console.error("[PianoRoll] create bg waveform renderer failed:", e);
+            }
+        }
+    }, []);
+
     const axisCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const axisWrapRef = useRef<HTMLDivElement | null>(null);
     const lastScrollLeftRef = useRef<number | null>(null);
@@ -1075,6 +1098,14 @@ export const PianoRollPanel: React.FC = () => {
                 cancelAnimationFrame(scrollStateRafRef.current);
                 scrollStateRafRef.current = null;
             }
+        };
+    }, []);
+
+    // 卸载时释放背景波形 renderer 资源（WebGL context 等）
+    useEffect(() => {
+        return () => {
+            bgWaveformRendererRef.current?.dispose();
+            bgWaveformRendererRef.current = null;
         };
     }, []);
 
@@ -4106,10 +4137,16 @@ export const PianoRollPanel: React.FC = () => {
                                     boundaryRef={gridBoundaryRef}
                                 />
 
+                                {/* 背景波形 canvas（WebGL2，z-index 在主 canvas 之下） */}
+                                <canvas
+                                    ref={setBgWaveformCanvasRef}
+                                    className="absolute inset-0"
+                                    style={{ pointerEvents: "none", zIndex: 0 }}
+                                />
                                 <canvas
                                     ref={canvasRef}
                                     className="absolute inset-0"
-                                    style={{ cursor: canvasCursor }}
+                                    style={{ cursor: canvasCursor, zIndex: 1 }}
                                     onPointerMove={interactions.onCanvasPointerMove}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}
