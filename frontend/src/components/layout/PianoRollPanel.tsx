@@ -73,7 +73,7 @@ import {
 } from "./timeline";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
-import { drawPianoRoll } from "./pianoRoll/render";
+import { drawPianoRoll, drawPianoRollBackgroundWaveform } from "./pianoRoll/render";
 import { createWaveformRenderer } from "../../utils/waveformRendererFactory";
 import type { WaveformRenderer } from "../../utils/waveformRenderer";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
@@ -1725,6 +1725,29 @@ export const PianoRollPanel: React.FC = () => {
 
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
+        // 先绘制背景波形到独立的 WebGL2 canvas（在主 canvas 之下）
+        const bgRenderer = bgWaveformRendererRef.current;
+        const viewSize = viewSizeRef.current;
+        if (bgRenderer && viewSize.w > 0 && viewSize.h > 0) {
+            const dpr = Math.max(1, window.devicePixelRatio || 1);
+            const pxPerSec = pxPerSecRef.current;
+            const scrollLeft = scrollLeftRef.current;
+            const visibleStartSec = scrollLeft / Math.max(1e-9, pxPerSec);
+            const visibleDurSec = viewSize.w / Math.max(1e-9, pxPerSec);
+            drawPianoRollBackgroundWaveform(
+                bgRenderer,
+                viewSize.w,
+                viewSize.h,
+                dpr,
+                clipPeaks,
+                pxPerSec,
+                scrollLeft,
+                visibleStartSec,
+                visibleDurSec,
+                waveformColors,
+            );
+        }
+
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
             canvas: canvasRef.current,
