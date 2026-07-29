@@ -49,6 +49,9 @@ interface PoolStats {
 }
 const _poolStats: Record<string, PoolStats> = {};
 
+// ── 渲染后端标识 ────────────────────────────────────
+let _currentBackend: "webgl2" | "canvas2d" | "webgpu" | "unknown" = "unknown";
+
 // ── 定时器 ──────────────────────────────────────────
 let _timer: ReturnType<typeof setInterval> | null = null;
 
@@ -98,6 +101,9 @@ function dump(): void {
         "font-weight:bold;color:#0af",
     );
     console.log(
+        `  backend: ${_currentBackend}`,
+    );
+    console.log(
         `  frames: ${_frameTotal} total | ${_frameSlow} slow(>16ms) | avg=${avg}ms | max=${_frameTimeMax.toFixed(1)}ms | draws=${_drawCount}`,
     );
     console.log(
@@ -122,6 +128,20 @@ function dump(): void {
 }
 
 // ── 公开 API ────────────────────────────────────────
+
+/**
+ * 设置当前渲染后端标识（由 WaveformRenderer 实例创建时调用）
+ *
+ * 特殊说明：用于诊断输出中标识当前使用的渲染后端
+ */
+export function wfDiag_setBackend(backend: "webgl2" | "canvas2d" | "webgpu"): void {
+    _currentBackend = backend;
+}
+
+/** 获取当前渲染后端标识 */
+export function wfDiag_getBackend(): string {
+    return _currentBackend;
+}
 
 export function wfDiag_frameStart(): void {
     if (!_enabled) {

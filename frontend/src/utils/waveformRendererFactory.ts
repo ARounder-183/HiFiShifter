@@ -20,6 +20,7 @@
 
 import { Canvas2DWaveformRenderer, type WaveformRenderer } from "./waveformRenderer";
 import { WebGL2WaveformRenderer } from "./waveformWebGL2Renderer";
+import { wfDiag_setBackend } from "./waveformDebug";
 
 /** localStorage 强制走 Canvas 2D 的开关 key */
 const FORCE_CANVAS2D_KEY = "hifishifter.forceCanvas2DWaveform";
@@ -97,6 +98,7 @@ export function createWaveformRenderer(
 
         if (gl) {
             try {
+                wfDiag_setBackend("webgl2");
                 return new WebGL2WaveformRenderer(canvas, gl);
             } catch (e) {
                 console.warn(
@@ -119,5 +121,6 @@ export function createWaveformRenderer(
     if (!ctx) {
         throw new Error("WaveformRenderer: neither WebGL2 nor Canvas2D available");
     }
+    wfDiag_setBackend("canvas2d");
     return new Canvas2DWaveformRenderer(canvas, ctx);
 }
