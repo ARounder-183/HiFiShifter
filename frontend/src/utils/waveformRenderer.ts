@@ -548,22 +548,20 @@ export interface WaveformRenderer {
 export class Canvas2DWaveformRenderer implements WaveformRenderer {
     readonly backend = "canvas2d" as const;
 
-    private dpr = 1;
     private displayW = 0;
     private displayH = 0;
-    private physicalW = 0;
-    private physicalH = 0;
     private lastCanvasDims = { w: 0, h: 0 };
+    private canvas: HTMLCanvasElement;
+    private ctx: CanvasRenderingContext2D;
 
-    constructor(
-        private canvas: HTMLCanvasElement,
-        private ctx: CanvasRenderingContext2D,
-    ) {}
+    constructor(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) {
+        this.canvas = canvas;
+        this.ctx = ctx;
+    }
 
     resize(displayW: number, displayH: number, dpr: number): void {
         this.displayW = displayW;
         this.displayH = displayH;
-        this.dpr = dpr;
         const internalW = Math.max(1, Math.round(displayW * dpr));
         const internalH = Math.max(1, Math.round(displayH * dpr));
 
@@ -574,8 +572,6 @@ export class Canvas2DWaveformRenderer implements WaveformRenderer {
             this.canvas.height = internalH;
             this.lastCanvasDims = { w: internalW, h: internalH };
         }
-        this.physicalW = internalW;
-        this.physicalH = internalH;
 
         // setTransform 仅在尺寸变化时重设（避免每帧重设）
         if (dimsChanged) {
