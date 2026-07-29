@@ -7,6 +7,12 @@
  * - 参数曲线绘制（音高、音量等）
  * - 选区、播放头等交互元素
  *
+ * 2026-07-29 变更：
+ *   - 背景波形绘制抽取为 drawPianoRollBackgroundWaveform 独立函数
+ *   - 通过 WaveformRenderer 接口渲染（WebGL2 优先，Canvas 2D fallback）
+ *   - 主 canvas 仍用 Canvas 2D 画参数曲线，背景波形在独立 canvas 上
+ *   - 由 PianoRollPanel.tsx 负责调用 drawPianoRollBackgroundWaveform
+ *
  * @module render
  */
 
@@ -19,8 +25,8 @@ import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import {
     applyGainsToPeaks,
     releaseGainBuffer,
-    renderWaveform,
     type WaveformRenderParams,
+    type WaveformRenderer,
 } from "../../../utils/waveformRenderer";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
@@ -337,7 +343,6 @@ export function drawPianoRoll(args: {
         pitchView,
         paramViews,
         valueToY,
-        clipPeaks,
         paramView,
         secondaryParamViews,
         secondaryParamIds,
@@ -350,10 +355,6 @@ export function drawPianoRoll(args: {
         secPerBeat,
         playheadSec,
         pitchAnalysisPending,
-        waveformColors = {
-            fill: "rgba(255,255,255,0.2)",
-            stroke: "rgba(255,255,255,0.5)",
-        },
         referencePitchOverlays,
         detectedPitchCurves,
         isDark = true,
@@ -716,126 +717,6 @@ export function drawPianoRoll(args: {
         }
     }
 
-    // ========================================
-    // 废弃离屏 Canvas，保留 mipmap 级数状态即可
-    // ========================================
-    const drawPianoRollRef = drawPianoRoll as unknown as {
-        _lastLevelByClip?: Record<string, 0 | 1 | 2>;
-    };
-    if (!drawPianoRollRef._lastLevelByClip) {
-        drawPianoRollRef._lastLevelByClip = {};
-    }
-    const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
-
-    // Background waveform: per-clip 叠加绘制
-    // 与 WaveformTrackCanvas 保持一致的数据路径：
-    // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform
-    for (const entry of clipPeaks) {
-        if (!entry.sourcePath) continue;
-        if (entry.muted) continue;
-
-        const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
-        const sourceStartSec = entry.sourceStartSec ?? 0;
-        const sourceDurSec = entry.sourceDurationSec;
-        if (sourceDurSec <= 0) continue;
-
-        const clipStartSec = entry.startSec;
-        const clipEndSec = clipStartSec + entry.lengthSec;
-        const clipWidthPx = entry.lengthSec * pxPerSec;
-        if (clipWidthPx <= 0) continue;
-
-        // 只渲染当前视口内的片段
-        const visStartSec = Math.max(clipStartSec, visibleStartSec);
-        const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
-        if (visEndSec <= visStartSec) continue;
-
-        const viewportStartPx = Math.round(scrollLeft);
-        const clipStartPx = Math.round(clipStartSec * pxPerSec);
-        const clipEndPx = Math.round(clipEndSec * pxPerSec);
-        const clipVisLeft = Math.max(0, clipStartPx - viewportStartPx);
-        const clipVisRight = Math.min(w, clipEndPx - viewportStartPx);
-        const visibleClipWidthPx = Math.max(1, clipVisRight - clipVisLeft);
-
-        const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
-        const clipSourceSpanSec = Math.max(
-            0,
-            Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-        );
-        const sourceTimeStart = sourceStartSec;
-        const sourceDuration = Math.max(0.001, clipSourceSpanSec);
-
-        // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
-        const sampleRate = entry.sourceSampleRate || 44100;
-        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
-        const previousLevel = lastLevelByClip[levelKey];
-        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
-        lastLevelByClip[levelKey] = stableLevel;
-
-        // 从 mipmap 缓存获取 interleaved 数据
-        const result = waveformMipmapStore.getInterleavedSlice(
-            entry.sourcePath,
-            stableLevel,
-            sourceTimeStart,
-            sourceDuration,
-        );
-        if (!result || result.interleaved.length < 4) {
-            continue;
-        }
-        // clip 内的像素偏移（整像素稳定路径）
-        const clipPixelOffset = viewportStartPx + clipVisLeft - clipStartPx;
-
-        // 构建渲染参数
-        const params: WaveformRenderParams = {
-            canvasWidth: visibleClipWidthPx,
-            canvasHeight: h, // 直接使用主画布高度
-            centerY: h / 2,
-            zeroDbHalfHeight: h / 2,
-            sourceStartSec,
-            clipDuration: entry.lengthSec,
-            playbackRate: pr,
-            sourceDurationSec: sourceDurSec,
-            volumeGain: Number(entry.gain ?? 1) || 1,
-            fadeInSec: Number(entry.fadeInSec ?? 0) || 0,
-            fadeOutSec: Number(entry.fadeOutSec ?? 0) || 0,
-            fadeInCurve: entry.fadeInCurve ?? "linear",
-            fadeOutCurve: entry.fadeOutCurve ?? "linear",
-            dataStartSec: result.dataStartSec,
-            dataDurationSec: result.dataDurationSec,
-            clipPixelOffset,
-            clipTotalWidthPx: Math.max(1, clipWidthPx),
-        };
-
-        // 应用增益（音量 + 淡入淡出）
-        const withGains = applyGainsToPeaks(result.interleaved, params);
-        ctx.save();
-
-        // 严格裁剪在 clip 实际可见范围内，防止溢出
-        ctx.beginPath();
-        if (clipVisRight <= clipVisLeft) {
-            waveformMipmapStore.releaseInterleaved(result.interleaved);
-            if (withGains !== result.interleaved) {
-                releaseGainBuffer(withGains);
-            }
-            ctx.restore();
-            continue;
-        }
-        ctx.rect(clipVisLeft, 0, clipVisRight - clipVisLeft, h);
-        ctx.clip();
-
-        // 静音 clip 半透明
-        ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
-        // 因为 renderWaveform 内部是从 x=0 开始画的，所以我们把画布的原点平移到 Clip 的可视起始点
-        ctx.translate(clipVisLeft, 0);
-        renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
-
-        ctx.restore();
-        if (withGains !== result.interleaved) {
-            releaseGainBuffer(withGains);
-        }
-        waveformMipmapStore.releaseInterleaved(result.interleaved);
-    }
-
     // Selection (time band)
     if (selection) {
         const a = Math.min(selection.aBeat, selection.bBeat);
@@ -1154,4 +1035,146 @@ export function drawPianoRoll(args: {
     ctx.moveTo(phx + 0.5, 0);
     ctx.lineTo(phx + 0.5, h);
     ctx.stroke();
+}
+
+// ============================================================================
+// drawPianoRollBackgroundWaveform — PianoRoll 背景波形独立绘制函数
+// ============================================================================
+//
+// 从 drawPianoRoll 内的背景波形循环（原 render.ts:730-837）抽取，
+// 改为通过 WaveformRenderer 接口渲染（WebGL2 优先，Canvas 2D fallback）。
+// 主 canvas 的参数曲线绘制仍用 Canvas 2D，不受此函数影响。
+// ============================================================================
+
+/** drawPianoRollBackgroundWaveform 用的 lastLevelByClip 持久化状态 */
+const _bgWaveformLastLevel = new Map<string, 0 | 1 | 2>();
+
+/**
+ * 绘制 PianoRoll 背景波形（通过 WaveformRenderer 接口）
+ *
+ * 流程：
+ *   1. resize + clear 背景 canvas
+ *   2. 遍历 clipPeaks，对每个可见 clip：
+ *      a. waveformMipmapStore.getInterleavedSlice 获取 peaks
+ *      b. applyGainsToPeaks 应用增益
+ *      c. renderer.drawClipWaveform 绘制
+ *
+ * 特殊说明：
+ *   - 与原 drawPianoRoll 内的逻辑等价，仅切换渲染后端
+ *   - clip 裁剪通过 segmentLeftPx/segmentRightPx 传入 renderer
+ *   - muted clip 被跳过（与原版一致）
+ *
+ * @param renderer 背景波形 renderer 实例
+ * @param canvasW  canvas CSS 宽度
+ * @param canvasH  canvas CSS 高度
+ * @param dpr      设备像素比
+ * @param clipPeaks 可见 clip 列表
+ * @param pxPerSec 每秒像素数
+ * @param scrollLeft 滚动偏移（像素）
+ * @param visibleStartSec 可视区起始时间（秒）
+ * @param visibleDurSec 可视区时长（秒）
+ * @param waveformColors 颜色配置
+ */
+export function drawPianoRollBackgroundWaveform(
+    renderer: WaveformRenderer,
+    canvasW: number,
+    canvasH: number,
+    dpr: number,
+    clipPeaks: ClipPeaksEntry[],
+    pxPerSec: number,
+    scrollLeft: number,
+    visibleStartSec: number,
+    visibleDurSec: number,
+    waveformColors: { fill: string; stroke: string },
+): void {
+    renderer.resize(canvasW, canvasH, dpr);
+    renderer.clear();
+
+    for (const entry of clipPeaks) {
+        if (!entry.sourcePath) continue;
+        if (entry.muted) continue;
+
+        const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
+        const sourceStartSec = entry.sourceStartSec ?? 0;
+        const sourceDurSec = entry.sourceDurationSec;
+        if (sourceDurSec <= 0) continue;
+
+        const clipStartSec = entry.startSec;
+        const clipEndSec = clipStartSec + entry.lengthSec;
+        const clipWidthPx = entry.lengthSec * pxPerSec;
+        if (clipWidthPx <= 0) continue;
+
+        const visStartSec = Math.max(clipStartSec, visibleStartSec);
+        const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
+        if (visEndSec <= visStartSec) continue;
+
+        const viewportStartPx = Math.round(scrollLeft);
+        const clipStartPx = Math.round(clipStartSec * pxPerSec);
+        const clipEndPx = Math.round(clipEndSec * pxPerSec);
+        const clipVisLeft = Math.max(0, clipStartPx - viewportStartPx);
+        const clipVisRight = Math.min(canvasW, clipEndPx - viewportStartPx);
+        if (clipVisRight <= clipVisLeft) continue;
+
+        const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
+        const clipSourceSpanSec = Math.max(
+            0,
+            Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
+        );
+        const sourceTimeStart = sourceStartSec;
+        const sourceDuration = Math.max(0.001, clipSourceSpanSec);
+
+        const sampleRate = entry.sourceSampleRate || 44100;
+        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
+        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
+        const previousLevel = _bgWaveformLastLevel.get(levelKey);
+        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+        _bgWaveformLastLevel.set(levelKey, stableLevel);
+
+        const result = waveformMipmapStore.getInterleavedSlice(
+            entry.sourcePath,
+            stableLevel,
+            sourceTimeStart,
+            sourceDuration,
+        );
+        if (!result || result.interleaved.length < 4) continue;
+
+        const clipPixelOffset = viewportStartPx + clipVisLeft - clipStartPx;
+
+        const params: WaveformRenderParams = {
+            canvasWidth: clipVisRight - clipVisLeft,
+            canvasHeight: canvasH,
+            centerY: canvasH / 2,
+            zeroDbHalfHeight: canvasH / 2,
+            sourceStartSec,
+            clipDuration: entry.lengthSec,
+            playbackRate: pr,
+            sourceDurationSec: sourceDurSec,
+            volumeGain: Number(entry.gain ?? 1) || 1,
+            fadeInSec: Number(entry.fadeInSec ?? 0) || 0,
+            fadeOutSec: Number(entry.fadeOutSec ?? 0) || 0,
+            fadeInCurve: entry.fadeInCurve ?? "linear",
+            fadeOutCurve: entry.fadeOutCurve ?? "linear",
+            dataStartSec: result.dataStartSec,
+            dataDurationSec: result.dataDurationSec,
+            clipPixelOffset,
+            clipTotalWidthPx: Math.max(1, clipWidthPx),
+        };
+
+        const withGains = applyGainsToPeaks(result.interleaved, params);
+
+        renderer.drawClipWaveform({
+            peaks: withGains,
+            renderParams: params,
+            segmentLeftPx: clipVisLeft,
+            segmentRightPx: clipVisRight,
+            strokeColor: waveformColors.stroke,
+            strokeWidth: 0.5,
+            alpha: 0.86,
+        });
+
+        if (withGains !== result.interleaved) {
+            releaseGainBuffer(withGains);
+        }
+        waveformMipmapStore.releaseInterleaved(result.interleaved);
+    }
 }
