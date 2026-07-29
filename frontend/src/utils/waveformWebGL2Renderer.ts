@@ -58,6 +58,8 @@ void main() {
 
     float pixelMin = 1e38;
     float pixelMax = -1e38;
+    // 循环上限 4096 覆盖典型场景（65536 samples / 1920px ≈ 34 per pixel）
+    // 极端情况（极窄视口 + 极大数据量）可能截断，但实际应用中罕见
     for (int i = 0; i < 4096; i++) {
         if (i > iEnd) break;
         if (i < iStart) continue;
@@ -123,9 +125,11 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
 
     private canvas: HTMLCanvasElement;
     private gl: WebGL2RenderingContext;
-    private program: WebGLProgram;
-    private vao: WebGLVertexArrayObject;
-    private peaksTex: WebGLTexture;
+    // 允许 null 以便 dispose() 在构造失败的清理路径中安全调用；
+    // 构造成功后这三个字段必然非空，使用处用 `!` 断言
+    private program: WebGLProgram | null = null;
+    private vao: WebGLVertexArrayObject | null = null;
+    private peaksTex: WebGLTexture | null = null;
     private texCapacity = 0;
 
     private dpr = 1;
@@ -139,39 +143,64 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
 
     /** 颜色解析缓存，避免重复 getImageData */
     private colorCache = new Map<string, [number, number, number, number]>();
-    private colorParseCanvas: HTMLCanvasElement;
-    private colorParseCtx: CanvasRenderingContext2D;
+    // 这两个字段在构造 try 块内赋值，用 `!` 告知 TS 严格初始化检查
+    private colorParseCanvas!: HTMLCanvasElement;
+    private colorParseCtx!: CanvasRenderingContext2D;
 
     constructor(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext) {
         this.canvas = canvas;
         this.gl = gl;
 
-        // 编译 shader 与链接 program
-        this.program = this.createProgram(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE);
-        this.cacheUniformLocations();
+        // 构造过程涉及多个 GL 资源分配，任一失败都需清理已分配的资源，避免泄漏。
+        // 这里用 try/catch 包裹，失败时调用 dispose() 释放已分配字段后重新抛出。
+        try {
+            // 编译 shader 与链接 program
+            this.program = this.createProgram(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE);
+            this.cacheUniformLocations();
 
-        // 创建空 VAO（顶点全在 shader 里生成）
-        const vao = gl.createVertexArray();
-        if (!vao) throw new Error("WebGL2: createVertexArray failed");
-        this.vao = vao;
+            // 创建空 VAO（顶点全在 shader 里生成）
+            const vao = gl.createVertexArray();
+            if (!vao) throw new Error("WebGL2: createVertexArray failed");
+            this.vao = vao;
 
-        // 创建纹理
-        const tex = gl.createTexture();
-        if (!tex) throw new Error("WebGL2: createTexture failed");
-        this.peaksTex = tex;
+            // 创建纹理
+            const tex = gl.createTexture();
+            if (!tex) throw new Error("WebGL2: createTexture failed");
+            this.peaksTex = tex;
 
-        // 颜色解析用的辅助 canvas
-        this.colorParseCanvas = document.createElement("canvas");
-        this.colorParseCanvas.width = 1;
-        this.colorParseCanvas.height = 1;
-        const colorCtx = this.colorParseCanvas.getContext("2d");
-        if (!colorCtx) throw new Error("WebGL2: color parse canvas 2d context unavailable");
-        this.colorParseCtx = colorCtx;
+            // 颜色解析用的辅助 canvas
+            this.colorParseCanvas = document.createElement("canvas");
+            this.colorParseCanvas.width = 1;
+            this.colorParseCanvas.height = 1;
+            const colorCtx = this.colorParseCanvas.getContext("2d");
+            if (!colorCtx) throw new Error("WebGL2: color parse canvas 2d context unavailable");
+            this.colorParseCtx = colorCtx;
 
-        // 初始纹理分配
-        this.ensureTextureCapacity(MAX_PEAK_SAMPLES);
+            // 初始纹理分配
+            this.ensureTextureCapacity(MAX_PEAK_SAMPLES);
+        } catch (e) {
+            // 清理已分配的资源，避免泄漏
+            this.dispose();
+            throw e;
+        }
     }
 
+    /**
+     * 编译并链接一个 WebGL2 program
+     *
+     * 流程：
+     *   1. 编译 vertex / fragment shader
+     *   2. attach + link
+     *   3. 链接完成后立即 deleteShader（shader 已附着到 program，删除只会 detach，
+     *      不影响已链接的 program；这样无论链接成功与否都不会泄漏 shader 对象）
+     *   4. 检查 LINK_STATUS，失败则删除 program 并抛错
+     *
+     * 参数说明：
+     *   - vsSource: 顶点着色器 GLSL 源码
+     *   - fsSource: 片元着色器 GLSL 源码
+     *
+     * 返回：成功链接的 WebGLProgram
+     */
     private createProgram(vsSource: string, fsSource: string): WebGLProgram {
         const gl = this.gl;
         const vs = this.compileShader(gl.VERTEX_SHADER, vsSource);
@@ -181,16 +210,30 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         gl.attachShader(program, vs);
         gl.attachShader(program, fs);
         gl.linkProgram(program);
+        // shader 已附着到 program，删除只 detach 不影响已链接的 program；
+        // 放在 link 检查之前，保证链接失败路径也不会泄漏 shader 对象
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
         if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
             const info = gl.getProgramInfoLog(program);
             gl.deleteProgram(program);
             throw new Error(`WebGL2: program link failed: ${info}`);
         }
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
         return program;
     }
 
+    /**
+     * 编译单个 GLSL shader
+     *
+     * 流程：创建 shader → 灌入源码 → 编译 → 检查 COMPILE_STATUS
+     * 特殊说明：编译失败时删除 shader 对象后再抛错，避免泄漏
+     *
+     * 参数说明：
+     *   - type: gl.VERTEX_SHADER 或 gl.FRAGMENT_SHADER
+     *   - source: GLSL 源码字符串
+     *
+     * 返回：编译成功的 WebGLShader
+     */
     private compileShader(type: number, source: string): WebGLShader {
         const gl = this.gl;
         const shader = gl.createShader(type);
@@ -224,7 +267,7 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
             "u_alpha",
         ];
         for (const name of names) {
-            this.uniforms[name] = gl.getUniformLocation(this.program, name);
+            this.uniforms[name] = gl.getUniformLocation(this.program!, name);
         }
     }
 
@@ -240,7 +283,7 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         if (this.texCapacity >= sampleCount) return;
 
         const newCapacity = Math.max(sampleCount, MAX_PEAK_SAMPLES);
-        gl.bindTexture(gl.TEXTURE_2D, this.peaksTex);
+        gl.bindTexture(gl.TEXTURE_2D, this.peaksTex!);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -291,14 +334,19 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         void params;
     }
 
+    /**
+     * 释放 GPU 资源
+     *
+     * 特殊说明：
+     *   - 只删除本实例拥有的 program/vao/texture，不调用 loseContext ——
+     *     canvas 由消费者持有，强行 loseContext 会永久破坏画布
+     *   - 对每个字段做 null 检查，以便构造失败的清理路径也能安全调用
+     */
     dispose(): void {
         const gl = this.gl;
-        gl.deleteProgram(this.program);
-        gl.deleteVertexArray(this.vao);
-        gl.deleteTexture(this.peaksTex);
+        if (this.program) gl.deleteProgram(this.program);
+        if (this.vao) gl.deleteVertexArray(this.vao);
+        if (this.peaksTex) gl.deleteTexture(this.peaksTex);
         this.colorCache.clear();
-
-        const ext = gl.getExtension("WEBGL_lose_context");
-        ext?.loseContext();
     }
 }
