@@ -1,15 +1,23 @@
 /**
- * WaveformTrackCanvas - 轨道级波形 Canvas 组件（v3 rAF+invalidate 架构）
+ * WaveformTrackCanvas - 轨道级波形 Canvas 组件（v4 WaveformRenderer 架构）
  *
  * 核心思想：每条轨道只有一个 Canvas，负责绘制该轨道上所有可见 clip 的波形。
  * 相比之前「每 clip 一个 Canvas」的方案，大幅减少 Canvas 上下文数量（从 O(clip) 降为 O(track)）。
  *
- * v3 性能优化（对齐 PianoRoll 架构）：
- *   - rAF + invalidate() 帧合并：同一帧内多次 invalidate 只绘制一次
- *   - 高频参数（viewportStartSec / pxPerSec / viewportEndSec）存 ref，避免 React re-render 触发重绘
- *   - 数据获取切换为 getInterleavedSlice per-pixel 聚合（与 PianoRoll 完全一致）
+ * v4 变更（2026-07-29）：
+ *   - 渲染后端切换为 WaveformRenderer 接口（WebGL2 优先，Canvas 2D fallback）
+ *   - 由 createWaveformRenderer 工厂在 canvas 挂载时自动选择实现
+ *   - drawSegment 改为调用 renderer.drawClipWaveform
+ *   - 通过 localStorage.hifishifter.forceCanvas2DWaveform=1 可强制走 Canvas 2D
  *
- * 渲染流程（通过 WaveformRenderer 抽象接口）：
+ * v3 架构保留不变：
+ *   - rAF + invalidate() 帧合并：同一帧内多次 invalidate 只绘制一次
+ *   - 高频参数（viewportStartSec / pxPerSec）存 ref，避免 React re-render
+ *   - timelineViewportBus 事件总线订阅
+ *   - mipmap 三级缓存 + spp 滞后防抖
+ *   - buffer 复用池
+ *
+ * 渲染流程（v4）：
  *   1. Canvas 物理宽度 = viewportWidthPx，固定不变
  *   2. Canvas 通过 left = viewportStartSec * pxPerSec 定位在视口左边缘
  *   3. 每帧开始：renderer.resize(displayW, displayH, dpr) → renderer.clear()
@@ -17,14 +25,10 @@
  *      a. waveformMipmapStore.getInterleavedSlice() 获取原始 interleaved 数据（不 resample）
  *      b. applyGainsToPeaks 应用增益/淡入淡出（带 buffer 复用池）
  *      c. renderer.drawClipWaveform() 绘制 clip 的可视段（内部处理裁剪与 alpha 混合）
+ *   5. canvas 卸载 → renderer.dispose
  *
  * 数据流：
  *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderer.drawClipWaveform
- *
- * WaveformRenderer 集成：
- *   - 组件挂载时通过 createWaveformRenderer 工厂创建 renderer 实例（自动检测 WebGL2 能力）
- *   - 绘制路径完全走 renderer 抽象接口（resize / clear / drawClipWaveform）
- *   - 工厂按环境自动选择 WebGL2 / Canvas 2D 后端，Canvas 2D 作为 fallback
  */
 
 import React from "react";

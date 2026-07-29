@@ -1,12 +1,18 @@
 /**
- * 波形渲染工具模块（Canvas per-pixel 渲染）
+ * 波形渲染工具模块（Canvas per-pixel 渲染 + WaveformRenderer 抽象接口）
  *
  * 本模块负责将已降采样的 peaks 数据绘制到 Canvas 上，是波形可视化的最后一环。
  *
  * ## 数据流
  *   waveformMipmapStore（降采样 / resample）
  *     → applyGainsToPeaks（叠加音量 + 淡入淡出增益）
- *       → renderWaveform（Canvas per-pixel 绘制）
+ *       → renderWaveform（Canvas per-pixel 绘制，用于 Canvas2DWaveformRenderer）
+ *       → WaveformRenderer.drawClipWaveform（抽象接口，WebGL2 / Canvas 2D）
+ *
+ * ## 渲染后端
+ *   - Canvas2DWaveformRenderer：封装 renderWaveform，作为 WebGL2 不可用时的 fallback
+ *   - WebGL2WaveformRenderer：见 waveformWebGL2Renderer.ts，instanced quad + RG32F 纹理
+ *   - 由 waveformRendererFactory.ts 工厂函数根据浏览器能力选择
  *
  * ## 坐标系映射链
  *   canvas 本地像素 → clip 全局像素 → timeline 时间 → 源文件时间 → peaks 数据索引
@@ -14,7 +20,7 @@
  * ## 导出
  * - {@link WaveformRenderParams}         — 渲染参数接口
  * - {@link applyGainsToPeaks}            — 增益应用（音量 × 淡入淡出曲线）
- * - {@link renderWaveform}               — Canvas 绘制（line 竖线 / jitter 抖动线）
+ * - {@link renderWaveform}               — Canvas 2D 绘制（line 竖线 / jitter 抖动线）
  * - {@link DrawClipWaveformParams}       — 单次 drawClipWaveform 调用参数（抽象接口用）
  * - {@link WaveformRenderer}             — 波形渲染器抽象接口（WebGL2 / Canvas 2D / WebGPU 共用）
  * - {@link Canvas2DWaveformRenderer}     — Canvas 2D fallback 实现（封装 renderWaveform）
