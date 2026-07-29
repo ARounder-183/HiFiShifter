@@ -21,7 +21,7 @@
  *   - 纹理容量动态扩展（ensureTextureCapacity）
  */
 
-import type { DrawClipWaveformParams, WaveformRenderer } from "./waveformRenderer";
+import type { DrawClipWaveformParams, WaveformRenderParams, WaveformRenderer } from "./waveformRenderer";
 
 /** RG32F 纹理最大采样对数（128KB，覆盖一首 5 分钟歌 L0 级别可见窗口） */
 const MAX_PEAK_SAMPLES = 65536;
@@ -323,14 +323,122 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         gl.clear(gl.COLOR_BUFFER_BIT);
     }
 
+    /**
+     * 解析 CSS 颜色字符串为 RGBA 浮点数组
+     *
+     * 流程：通过辅助 canvas 的 fillStyle + getImageData 解析
+     * 特殊说明：使用 Map 缓存，避免重复解析同一颜色字符串
+     *
+     * @param css CSS 颜色字符串（如 "#7c9eff" 或 "rgba(124,158,255,0.86)"）
+     * @returns [r, g, b, a]，范围 0~1
+     */
+    private parseColor(css: string): [number, number, number, number] {
+        const cached = this.colorCache.get(css);
+        if (cached) return cached;
+
+        this.colorParseCtx.clearRect(0, 0, 1, 1);
+        this.colorParseCtx.fillStyle = css;
+        this.colorParseCtx.fillRect(0, 0, 1, 1);
+        const data = this.colorParseCtx.getImageData(0, 0, 1, 1).data;
+        const result: [number, number, number, number] = [
+            data[0] / 255,
+            data[1] / 255,
+            data[2] / 255,
+            data[3] / 255,
+        ];
+        this.colorCache.set(css, result);
+        return result;
+    }
+
+    /**
+     * 从 WaveformRenderParams 计算 vertex shader 需要的 uniform 值
+     *
+     * 流程：与现有 waveformRenderer.ts 的 pxToIdxScale/pxToIdxBase/halfPixelIdx 公式完全一致
+     * 特殊说明：
+     *   - reversed 影响符号
+     *   - 视口裁剪由调用方通过 segmentLeftPx/segmentRightPx 指定
+     *   - totalSamples 从 peaksLength 推算（WaveformRenderParams 不含 peaks 字段）
+     *
+     * @param params 渲染参数
+     * @param peaksLength peaks 数组长度（interleaved，除以 2 得采样对数）
+     * @param segmentLeftPx 可视段左边界（CSS 像素）
+     * @param segmentRightPx 可视段右边界（CSS 像素）
+     */
+    private computeUniforms(
+        params: WaveformRenderParams,
+        peaksLength: number,
+        segmentLeftPx: number,
+        segmentRightPx: number,
+    ): {
+        visibleStartPx: number;
+        visibleEndPx: number;
+        pxToIdxScale: number;
+        pxToIdxBase: number;
+        halfPixelIdx: number;
+        totalSamples: number;
+        amplitudeScale: number;
+        centerY: number;
+    } {
+        const {
+            canvasWidth,
+            canvasHeight,
+            centerY,
+            sourceStartSec,
+            clipDuration,
+            playbackRate,
+            reversed = false,
+            dataStartSec,
+            dataDurationSec,
+            clipPixelOffset = 0,
+            clipTotalWidthPx,
+            zeroDbHalfHeight,
+        } = params;
+
+        const totalSamples = Math.floor(peaksLength / 2);
+        void canvasWidth; // canvasWidth 不直接使用，segmentLeftPx/RightPx 已包含视口信息
+
+        const clipTotalW = clipTotalWidthPx ?? canvasWidth;
+        const amplitudeScale = zeroDbHalfHeight ?? canvasHeight / 2;
+
+        const effectiveDataStartSec = dataStartSec ?? sourceStartSec;
+        const effectiveDataDurationSec = dataDurationSec ?? clipDuration * playbackRate;
+
+        const pxToTimeScale = (clipDuration * playbackRate) / clipTotalW;
+        const invDataDuration = 1 / effectiveDataDurationSec;
+        const timeToIdxScale = (totalSamples - 1) * invDataDuration;
+        const pxToIdxScale = (reversed ? -1 : 1) * pxToTimeScale * timeToIdxScale;
+
+        const clipSourceEndSec = sourceStartSec + clipDuration * playbackRate;
+        const pxToIdxBase = reversed
+            ? (clipSourceEndSec - clipPixelOffset * pxToTimeScale - effectiveDataStartSec) *
+              timeToIdxScale
+            : (clipPixelOffset * pxToTimeScale + sourceStartSec - effectiveDataStartSec) *
+              timeToIdxScale;
+
+        const halfPixelIdx = Math.abs(0.5 * pxToIdxScale);
+
+        return {
+            visibleStartPx: Math.round(segmentLeftPx),
+            visibleEndPx: Math.round(segmentRightPx),
+            pxToIdxScale,
+            pxToIdxBase,
+            halfPixelIdx,
+            totalSamples,
+            amplitudeScale,
+            centerY,
+        };
+    }
+
     drawClipWaveform(params: DrawClipWaveformParams): void {
         // 实现在 Task 6。
-        // 以下字段在此 stub 中被引用以通过 noUnusedLocals 检查；
+        // 以下字段/方法在此 stub 中被引用以通过 noUnusedLocals 检查；
         // Task 6 实现 drawClipWaveform 时会移除这些 void 引用并真正使用它们。
         void this.dpr;
         void this.displayW;
         void this.displayH;
         void this.colorParseCtx;
+        void this.parseColor;
+        void this.computeUniforms;
         void params;
     }
 
