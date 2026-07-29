@@ -7,25 +7,24 @@
  * v3 性能优化（对齐 PianoRoll 架构）：
  *   - rAF + invalidate() 帧合并：同一帧内多次 invalidate 只绘制一次
  *   - 高频参数（viewportStartSec / pxPerSec / viewportEndSec）存 ref，避免 React re-render 触发重绘
- *   - 数据获取切换为 getInterleavedSlice + renderWaveform per-pixel 聚合（与 PianoRoll 完全一致）
- *   - 离屏 Canvas 缓存：每个 clip 先绘制到离屏 Canvas，再 drawImage 到主 Canvas
+ *   - 数据获取切换为 getInterleavedSlice per-pixel 聚合（与 PianoRoll 完全一致）
  *
- * 渲染流程：
+ * 渲染流程（通过 WaveformRenderer 抽象接口）：
  *   1. Canvas 物理宽度 = viewportWidthPx，固定不变
  *   2. Canvas 通过 left = viewportStartSec * pxPerSec 定位在视口左边缘
- *   3. 遍历所有可见 clip，对每个 clip：
+ *   3. 每帧开始：renderer.resize(displayW, displayH, dpr) → renderer.clear()
+ *   4. 遍历所有可见 clip，对每个 clip：
  *      a. waveformMipmapStore.getInterleavedSlice() 获取原始 interleaved 数据（不 resample）
  *      b. applyGainsToPeaks 应用增益/淡入淡出（带 buffer 复用池）
- *      c. 在离屏 Canvas 上调用 renderWaveform() 绘制波形
- *      d. ctx.drawImage() 将离屏结果绘制到主 Canvas
+ *      c. renderer.drawClipWaveform() 绘制 clip 的可视段（内部处理裁剪与 alpha 混合）
  *
- * 数据流（v3 架构）：
- *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderWaveform（离屏） → drawImage
+ * 数据流：
+ *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderer.drawClipWaveform
  *
- * WaveformRenderer 集成（Task 8）：
+ * WaveformRenderer 集成：
  *   - 组件挂载时通过 createWaveformRenderer 工厂创建 renderer 实例（自动检测 WebGL2 能力）
- *   - 当前任务仅管理 renderer 生命周期（创建 / dispose），绘制路径仍走 Canvas 2D
- *   - Task 9 将切换绘制调用为 renderer.draw()，届时 Canvas 2D 路径将成为 fallback
+ *   - 绘制路径完全走 renderer 抽象接口（resize / clear / drawClipWaveform）
+ *   - 工厂按环境自动选择 WebGL2 / Canvas 2D 后端，Canvas 2D 作为 fallback
  */
 
 import React from "react";
@@ -36,7 +35,6 @@ import { timelineViewportBus } from "../../utils/timelineViewportBus";
 import {
     applyGainsToPeaks,
     releaseGainBuffer,
-    renderWaveform,
     type WaveformRenderParams,
     type WaveformRenderer,
 } from "../../utils/waveformRenderer";
@@ -117,12 +115,10 @@ export const WaveformTrackCanvas = React.memo(
         const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
         const lastLevelByClipRef = React.useRef<Record<string, 0 | 1 | 2>>({});
         const rafRef = React.useRef<number | null>(null);
-        // 缓存 canvas 上次物理尺寸，避免设置 canvas.width/height 属性导致强制清空
-        const lastCanvasDimsRef = React.useRef({ w: 0, h: 0 });
 
         // ========================================
         // WaveformRenderer 实例（由工厂按 WebGL2 能力自动创建）
-        // 本任务仅管理生命周期，绘制路径仍走 Canvas 2D；Task 9 将切换为调用 renderer.draw()
+        // 绘制路径完全走 renderer 抽象接口（resize / clear / drawClipWaveform）
         // ========================================
         const rendererRef = React.useRef<WaveformRenderer | null>(null);
 
@@ -181,8 +177,6 @@ export const WaveformTrackCanvas = React.memo(
         // ========================================
         drawRef.current = () => {
             wfDiag_frameStart();
-            const canvas = canvasRef.current;
-            if (!canvas) return;
 
             // ========================================
             // 性能诊断探针（通过 localStorage 开关）
@@ -217,37 +211,15 @@ export const WaveformTrackCanvas = React.memo(
             const currentViewportWidthPx = viewportWidthPxRef.current;
             const displayW = Math.max(1, Math.ceil(currentViewportWidthPx));
             const displayH = currentWaveformHeight;
-
-            // 取消限制 dpr 为 1
             const dpr = window.devicePixelRatio || 1;
-            // 用 Math.round 代替 Math.floor，消除浮点累积误差导致的帧间尺寸振荡
-            const internalW = Math.max(1, Math.round(displayW * dpr));
-            const internalH = Math.max(1, Math.round(displayH * dpr));
 
-            // 仅当物理尺寸真正变化时才设置 canvas.width/height（设置即清空画布）
-            const lastDims = lastCanvasDimsRef.current;
-            const dimsChanged = lastDims.w !== internalW || lastDims.h !== internalH;
-            if (dimsChanged) {
-                canvas.width = internalW;
-                canvas.height = internalH;
-                lastCanvasDimsRef.current = { w: internalW, h: internalH };
-            }
+            // 通过 WaveformRenderer 抽象接口管理 canvas 尺寸与清空
+            // renderer 内部仅在物理尺寸真正变化时才设置 canvas.width/height
+            const renderer = rendererRef.current;
+            if (!renderer) return;
 
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-
-            if (dimsChanged) {
-                // 尺寸变化后重设 scale
-                const scaleX = internalW / Math.max(1, displayW);
-                const scaleY = internalH / Math.max(1, displayH);
-                ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-            }
-
-            ctx.clearRect(0, 0, displayW, displayH);
-
-            // CSS 尺寸也只在变化时写入，避免触发不必要的 layout
-            if (canvas.style.width !== `${displayW}px`) canvas.style.width = `${displayW}px`;
-            if (canvas.style.height !== `${displayH}px`) canvas.style.height = `${displayH}px`;
+            renderer.resize(displayW, displayH, dpr);
+            renderer.clear();
 
             if (__perfDebug) __tSetup = performance.now() - __t0;
 
@@ -440,21 +412,15 @@ export const WaveformTrackCanvas = React.memo(
                     alpha: number,
                 ) => {
                     if (segmentRightPx - segmentLeftPx <= 1e-6) return;
-                    ctx.save();
-                    ctx.beginPath();
-                    // 严格裁剪在片段实际可见范围内，防止越界绘制到其他片段上
-                    ctx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, displayH);
-                    ctx.clip();
-                    ctx.globalAlpha = alpha;
-                    renderWaveform(
-                        ctx,
-                        withGains,
-                        params,
-                        currentStrokeColor,
-                        currentStrokeWidth,
-                        "line",
-                    );
-                    ctx.restore();
+                    renderer.drawClipWaveform({
+                        peaks: withGains,
+                        renderParams: params,
+                        segmentLeftPx,
+                        segmentRightPx,
+                        strokeColor: currentStrokeColor,
+                        strokeWidth: currentStrokeWidth,
+                        alpha,
+                    });
                 };
 
                 if (leadingOverlapVisibleRight > visLeftPx + 1e-6) {
@@ -502,10 +468,6 @@ export const WaveformTrackCanvas = React.memo(
                         downsampledTo: renderInterleaved.length / 2,
                     });
                 }
-            }
-
-            if (ctx.globalAlpha !== 1) {
-                ctx.globalAlpha = 1;
             }
 
             // ========================================
