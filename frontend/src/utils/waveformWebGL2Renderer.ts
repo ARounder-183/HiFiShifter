@@ -19,6 +19,8 @@
  *   - 每个 renderer 实例持有一套 GL 资源（program/vao/texture）
  *   - dispose 时显式释放，避免 GPU 内存泄漏
  *   - 纹理容量动态扩展（ensureTextureCapacity）
+ *   - 监听 webglcontextlost 事件，触发时将 GL 资源引用置 null（不主动恢复，
+ *     由消费方重新创建 renderer；dispose 时移除监听器避免泄漏）
  */
 
 import type { DrawClipWaveformParams, WaveformRenderParams, WaveformRenderer } from "./waveformRenderer";
@@ -180,6 +182,9 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
 
             // 初始纹理分配
             this.ensureTextureCapacity(MAX_PEAK_SAMPLES);
+
+            // 监听 context lost 事件（不主动恢复，由消费方重新创建 renderer）
+            this.canvas.addEventListener("webglcontextlost", this.handleContextLost, false);
         } catch (e) {
             // 清理已分配的资源，避免泄漏
             this.dispose();
@@ -545,14 +550,30 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
     }
 
     /**
+     * WebGL context lost 事件处理
+     *
+     * 流程：preventDefault 阻止默认行为，标记资源已失效
+     * 特殊说明：不主动恢复，由消费方监听同一事件后重新调用 createWaveformRenderer
+     */
+    private handleContextLost = (event: Event): void => {
+        event.preventDefault();
+        // 标记资源已失效，避免后续 drawCall 报错
+        this.program = null;
+        this.vao = null;
+        this.peaksTex = null;
+    };
+
+    /**
      * 释放 GPU 资源
      *
      * 特殊说明：
      *   - 只删除本实例拥有的 program/vao/texture，不调用 loseContext ——
      *     canvas 由消费者持有，强行 loseContext 会永久破坏画布
      *   - 对每个字段做 null 检查，以便构造失败的清理路径也能安全调用
+     *   - 移除 context lost 事件监听，避免泄漏
      */
     dispose(): void {
+        this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
         const gl = this.gl;
         if (this.program) gl.deleteProgram(this.program);
         if (this.vao) gl.deleteVertexArray(this.vao);
