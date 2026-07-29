@@ -21,6 +21,11 @@
  *
  * 数据流（v3 架构）：
  *   waveformMipmapStore.getInterleavedSlice() → interleaved Float32Array → applyGainsToPeaks → renderWaveform（离屏） → drawImage
+ *
+ * WaveformRenderer 集成（Task 8）：
+ *   - 组件挂载时通过 createWaveformRenderer 工厂创建 renderer 实例（自动检测 WebGL2 能力）
+ *   - 当前任务仅管理 renderer 生命周期（创建 / dispose），绘制路径仍走 Canvas 2D
+ *   - Task 9 将切换绘制调用为 renderer.draw()，届时 Canvas 2D 路径将成为 fallback
  */
 
 import React from "react";
@@ -33,7 +38,9 @@ import {
     releaseGainBuffer,
     renderWaveform,
     type WaveformRenderParams,
+    type WaveformRenderer,
 } from "../../utils/waveformRenderer";
+import { createWaveformRenderer } from "../../utils/waveformRendererFactory";
 import {
     wfDiag_frameStart,
     wfDiag_frameEnd,
@@ -112,6 +119,26 @@ export const WaveformTrackCanvas = React.memo(
         const rafRef = React.useRef<number | null>(null);
         // 缓存 canvas 上次物理尺寸，避免设置 canvas.width/height 属性导致强制清空
         const lastCanvasDimsRef = React.useRef({ w: 0, h: 0 });
+
+        // ========================================
+        // WaveformRenderer 实例（由工厂按 WebGL2 能力自动创建）
+        // 本任务仅管理生命周期，绘制路径仍走 Canvas 2D；Task 9 将切换为调用 renderer.draw()
+        // ========================================
+        const rendererRef = React.useRef<WaveformRenderer | null>(null);
+
+        // canvas 挂载后创建 renderer（工厂自动检测 WebGL2 能力）
+        // 使用 ref callback 而非直接 ref，以便在 canvas 挂载时立即创建 renderer
+        const setCanvasRef = React.useCallback((canvas: HTMLCanvasElement | null) => {
+            canvasRef.current = canvas;
+            if (canvas && !rendererRef.current) {
+                try {
+                    rendererRef.current = createWaveformRenderer(canvas);
+                } catch (e) {
+                    console.error("[WaveformTrackCanvas] create renderer failed:", e);
+                    rendererRef.current = null;
+                }
+            }
+        }, []);
 
         // 高频参数用 ref 存储，避免依赖数组变化触发 useLayoutEffect
         const pxPerSecRef = React.useRef(props.pxPerSec);
@@ -564,20 +591,22 @@ export const WaveformTrackCanvas = React.memo(
             invalidate();
         }, [clips, waveformHeight, strokeColor, strokeWidth, viewportWidthPx, invalidate]);
 
-        // 组件卸载时取消待执行的 rAF
+        // 组件卸载时取消待执行的 rAF，并释放 renderer 资源（WebGL context 等）
         React.useEffect(() => {
             return () => {
                 if (rafRef.current != null) {
                     cancelAnimationFrame(rafRef.current);
                     rafRef.current = null;
                 }
+                rendererRef.current?.dispose();
+                rendererRef.current = null;
             };
         }, []);
 
         // 移除原有的 canvasWidthPx 和 canvasLeftPx 的计算，直接替换 return
         return (
             <canvas
-                ref={canvasRef}
+                ref={setCanvasRef}
                 style={{
                     position: "absolute",
                     top: waveformTop,
