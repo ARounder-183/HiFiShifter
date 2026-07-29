@@ -429,17 +429,118 @@ export class WebGL2WaveformRenderer implements WaveformRenderer {
         };
     }
 
+    /**
+     * 绘制单个 clip 的波形（核心渲染入口）
+     *
+     * 流程：
+     *   1. 上传 peaks 数据到 RG32F 纹理（texSubImage2D，纹理容量由 ensureTextureCapacity 保证）
+     *   2. 通过 computeUniforms 计算 pxToIdxScale / pxToIdxBase / halfPixelIdx 等 uniform
+     *   3. 启用 scissor rect 裁剪到 clip 可视段（物理像素坐标，乘 dpr）
+     *   4. 绑定 program / VAO，写入所有 uniform，绑定纹理到 unit 0
+     *   5. 启用 premultiplied alpha blending
+     *   6. drawArraysInstanced(TRIANGLE_STRIP, 0, 4, instanceCount) —— 每像素列一个 instance
+     *   7. 清理 scissor / blend / VAO 状态，避免影响后续渲染
+     *
+     * 特殊说明：
+     *   - instanceCount = round(segmentRightPx) - round(segmentLeftPx)，每 instance 渲染 1 CSS 像素列
+     *   - scissor 使用物理像素（乘 dpr），viewport 由 clear() 全画布设置
+     *   - peaks.length < 4（即不足 2 个采样对）直接跳过，避免纹理上传异常
+     *   - 颜色通过 parseColor 解析并缓存；alpha 在片元着色器内乘到 fragColor
+     *
+     * 参数说明：
+     *   - params.peaks: interleaved [min0,max0,min1,max1,...]，已应用增益
+     *   - params.renderParams: 视口/中心线/振幅等渲染参数
+     *   - params.segmentLeftPx / segmentRightPx: 可视段左右边界（CSS 像素）
+     *   - params.strokeColor: CSS 颜色字符串
+     *   - params.strokeWidth: 描边宽度（CSS 像素）
+     *   - params.alpha: 整体透明度（0~1）
+     */
     drawClipWaveform(params: DrawClipWaveformParams): void {
-        // 实现在 Task 6。
-        // 以下字段/方法在此 stub 中被引用以通过 noUnusedLocals 检查；
-        // Task 6 实现 drawClipWaveform 时会移除这些 void 引用并真正使用它们。
-        void this.dpr;
-        void this.displayW;
-        void this.displayH;
-        void this.colorParseCtx;
-        void this.parseColor;
-        void this.computeUniforms;
-        void params;
+        const {
+            peaks,
+            renderParams,
+            segmentLeftPx,
+            segmentRightPx,
+            strokeColor,
+            strokeWidth,
+            alpha,
+        } = params;
+
+        const gl = this.gl;
+        const visibleStartPx = Math.round(segmentLeftPx);
+        const visibleEndPx = Math.round(segmentRightPx);
+        const instanceCount = visibleEndPx - visibleStartPx;
+        if (instanceCount <= 0) return;
+        if (peaks.length < 4) return;
+
+        // 1. 上传 peaks 数据到纹理
+        const sampleCount = peaks.length / 2;
+        this.ensureTextureCapacity(sampleCount);
+        gl.bindTexture(gl.TEXTURE_2D, this.peaksTex!);
+        gl.texSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            sampleCount,
+            1,
+            gl.RG,
+            gl.FLOAT,
+            peaks,
+        );
+
+        // 2. 计算 uniform
+        const u = this.computeUniforms(
+            renderParams,
+            peaks.length,
+            segmentLeftPx,
+            segmentRightPx,
+        );
+
+        // 3. 设置 scissor rect（物理像素，裁剪到可视段）
+        const scissorX = visibleStartPx * this.dpr;
+        const scissorW = instanceCount * this.dpr;
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(scissorX, 0, scissorW, this.physicalH);
+
+        // 4. 绑定 program 和 VAO
+        gl.useProgram(this.program!);
+        gl.bindVertexArray(this.vao!);
+
+        // 5. 设置 uniform
+        gl.uniform1i(this.uniforms["u_visibleStartPx"]!, u.visibleStartPx);
+        gl.uniform1i(this.uniforms["u_visibleEndPx"]!, u.visibleEndPx);
+        gl.uniform1f(this.uniforms["u_pxToIdxScale"]!, u.pxToIdxScale);
+        gl.uniform1f(this.uniforms["u_pxToIdxBase"]!, u.pxToIdxBase);
+        gl.uniform1f(this.uniforms["u_halfPixelIdx"]!, u.halfPixelIdx);
+        gl.uniform1i(this.uniforms["u_totalSamples"]!, u.totalSamples);
+        gl.uniform1f(this.uniforms["u_amplitudeScale"]!, u.amplitudeScale);
+        gl.uniform1f(this.uniforms["u_centerY"]!, u.centerY);
+        gl.uniform1f(this.uniforms["u_displayW"]!, this.displayW);
+        gl.uniform1f(this.uniforms["u_displayH"]!, this.displayH);
+        gl.uniform1f(this.uniforms["u_strokeWidth"]!, strokeWidth);
+
+        // 绑定纹理到 unit 0
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.peaksTex!);
+        gl.uniform1i(this.uniforms["u_peaksTex"]!, 0);
+
+        // 颜色与 alpha
+        const color = this.parseColor(strokeColor);
+        gl.uniform4f(this.uniforms["u_color"]!, color[0], color[1], color[2], color[3]);
+        gl.uniform1f(this.uniforms["u_alpha"]!, alpha);
+
+        // 6. 启用 blending（premultiplied alpha）
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+        // 7. instanced draw
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instanceCount);
+
+        // 8. 清理状态
+        gl.disable(gl.SCISSOR_TEST);
+        gl.disable(gl.BLEND);
+        gl.bindVertexArray(null);
     }
 
     /**
