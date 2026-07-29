@@ -12,9 +12,11 @@
  *   canvas 本地像素 → clip 全局像素 → timeline 时间 → 源文件时间 → peaks 数据索引
  *
  * ## 导出
- * - {@link WaveformRenderParams} — 渲染参数接口
- * - {@link applyGainsToPeaks}    — 增益应用（音量 × 淡入淡出曲线）
- * - {@link renderWaveform}       — Canvas 绘制（line 竖线 / jitter 抖动线）
+ * - {@link WaveformRenderParams}    — 渲染参数接口
+ * - {@link applyGainsToPeaks}       — 增益应用（音量 × 淡入淡出曲线）
+ * - {@link renderWaveform}          — Canvas 绘制（line 竖线 / jitter 抖动线）
+ * - {@link DrawClipWaveformParams}  — 单次 drawClipWaveform 调用参数（抽象接口用）
+ * - {@link WaveformRenderer}        — 波形渲染器抽象接口（WebGL2 / Canvas 2D / WebGPU 共用）
  *
  * @module waveformRenderer
  */
@@ -434,4 +436,90 @@ export function renderWaveform(
     if (mode === "jitter") {
         ctx.stroke();
     }
+}
+
+// ============================================================================
+// WaveformRenderer 抽象接口（WebGL2 / Canvas 2D / 未来 WebGPU 共用）
+// ============================================================================
+//
+// 设计目标：
+//   - 消费方（WaveformTrackCanvas / PianoRoll 背景波形）通过此接口消费，不感知底层实现
+//   - 运行时由工厂函数 waveformRendererFactory 根据浏览器能力选择实现
+//   - 接口兼容 WebGPU，未来可平替实现
+//
+// 生命周期：
+//   1. createWaveformRenderer(canvas) → renderer   工厂检测能力
+//   2. renderer.resize(displayW, displayH, dpr)     尺寸变化时
+//   3. renderer.clear()                             每帧开始清空
+//   4. renderer.drawClipWaveform(params) × N        每可见 clip 调用一次
+//   5. renderer.dispose()                           canvas 卸载时
+// ============================================================================
+
+/**
+ * 单次 drawClipWaveform 调用参数
+ *
+ * 字段对应现有 WaveformRenderParams + 颜色 + alpha + 可视段裁剪
+ */
+export interface DrawClipWaveformParams {
+    /** peaks 数据，interleaved [min0,max0,min1,max1,...]，已应用增益 */
+    peaks: Float32Array;
+
+    /** 渲染参数（与现有 WaveformRenderParams 完全一致） */
+    renderParams: WaveformRenderParams;
+
+    /** 可视段左边界（CSS 像素，相对 canvas 左上角） */
+    segmentLeftPx: number;
+
+    /** 可视段右边界（CSS 像素） */
+    segmentRightPx: number;
+
+    /** 描边颜色（CSS 颜色字符串，内部解析为 RGBA） */
+    strokeColor: string;
+
+    /** 描边宽度（CSS 像素） */
+    strokeWidth: number;
+
+    /** 整体透明度（用于 muted / leadingOverlap 混合） */
+    alpha: number;
+}
+
+/**
+ * 波形渲染器抽象接口
+ *
+ * 实现类：
+ *   - WebGL2WaveformRenderer：WebGL2 instanced quad + RG32F 纹理
+ *   - Canvas2DWaveformRenderer：封装现有 renderWaveform
+ *   - （未来）WebGPUWaveformRenderer：预留接口兼容性
+ */
+export interface WaveformRenderer {
+    /** 标识实现类型，用于诊断与日志 */
+    readonly backend: "webgl2" | "canvas2d" | "webgpu";
+
+    /**
+     * 调整 canvas 物理尺寸
+     *
+     * @param displayW CSS 像素宽度
+     * @param displayH CSS 像素高度
+     * @param dpr 设备像素比
+     */
+    resize(displayW: number, displayH: number, dpr: number): void;
+
+    /** 清空画布（每帧开始调用） */
+    clear(): void;
+
+    /**
+     * 绘制单个 clip 的一个可视段
+     *
+     * 流程：
+     *   1. 上传 peaks 数据到 GPU（WebGL2 路径）或直接调用 renderWaveform（Canvas 2D 路径）
+     *   2. 设置 scissor rect / clip 区域裁剪到 [segmentLeftPx, segmentRightPx]
+     *   3. 应用 alpha 透明度（muted / leadingOverlap）
+     *   4. 绘制波形
+     *
+     * @param params 见 DrawClipWaveformParams
+     */
+    drawClipWaveform(params: DrawClipWaveformParams): void;
+
+    /** 释放资源（WebGL2 实现 destroy program/buffer/texture） */
+    dispose(): void;
 }
