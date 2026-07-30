@@ -21,12 +21,15 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
-- **Windows**：DirectML（DirectX 12），支援 NVIDIA、AMD、Intel Arc GPU
-- **macOS（Apple Silicon）**：CoreML，利用 Apple Neural Engine 加速
-- **macOS（Intel）**：僅 CPU 推理
-- **Linux**：暫無
+- **Windows（x86_64 / ARM64）**：DirectML（DirectX 12）—— 成熟穩定，支援 NVIDIA / AMD / Intel Arc GPU
+- **macOS（Apple Silicon）**：CoreML + WebGPU（Dawn/Metal）—— CoreML 利用 Apple Neural Engine，WebGPU 作為補充後端
+- **macOS（Intel）**：僅 CPU 推理（使用 ort-tract 替代後端，無 GPU 加速）
+- **Linux（x86_64）**：WebGPU（Dawn/Vulkan）—— Dawn 透過 Vulkan API 使用 GPU，無 GPU 時自動回退至 CPU
+- **Linux（ARM64）**：僅 CPU 推理（尚無預編譯的 WebGPU ONNX Runtime 二進位檔案）
 
-在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可查看各裝置的推理效能。
+> **注意**：WSL2 不向 Linux 子環境暴露硬體 Vulkan，WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本（DirectML）。
+
+在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可比較各裝置的推理延遲，幫助你選擇最快的裝置。
 
 **關於 WebView 的說明**：HiFiShifter 基於 Rust + Tauri 框架開發，需要系統提供 WebView 元件來顯示介面。
 

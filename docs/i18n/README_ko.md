@@ -221,18 +221,25 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 가속 빌드
+### 4. GPU 가속
 
-| 플랫폼                      | GPU 기술              | 설명                                                      |
-| --------------------------- | --------------------- | --------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 자동 다운로드, NVIDIA / AMD / Intel Arc 지원    |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine, 자동 활성화                          |
-| macOS x86_64 (Intel)        | —                     | CPU only                                                  |
-| Linux x86_64 / ARM64        | —                     | WebGPU (Dawn/Vulkan), CPU 폴백                       |
+HiFiShifter는 지원되는 플랫폼에서 자동으로 GPU 추론 가속을 활성화합니다. 메뉴 바의 **추론 장치(Inference Device)** 메뉴에서 Auto / CPU / GPU를 선택할 수 있으며, **벤치마크 실행(Run Benchmark)**을 통해 각 장치별 추론 지연 시간을 비교할 수 있습니다.
+
+| 플랫폼                          | GPU 기술                              | 설명                                                                              |
+| ------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------- |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | 검증된 안정적인 GPU 경로, NVIDIA / AMD / Intel Arc 지원                           |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML은 Apple Neural Engine을 활용, WebGPU는 보조 GPU 백엔드로 사용 가능         |
+| macOS x86_64 (Intel)            | —                                     | CPU only (ort-tract 대체 백엔드 사용)                                             |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn이 Vulkan API를 통해 GPU에 접근, GPU가 없으면 CPU로 폴백                      |
+| Linux ARM64                     | —                                     | CPU only (이 타겟용 WebGPU ONNX Runtime 사전 빌드 바이너리가 없음)                |
+
+> **참고**: Windows에서는 WebGPU가 비활성화되어 있습니다. Dawn/D3D12 백엔드가 일부 GPU/드라이버 조합에서 네이티브 크래시를 일으킬 수 있습니다. DirectML이 Windows의 검증된 안정적 GPU 경로입니다.
+>
+> **WSL2 사용자**: WSL2는 Linux 하위 환경에 하드웨어 Vulkan을 노출하지 않습니다. WebGPU/Dawn은 Lavapipe(CPU 소프트웨어 렌더링)만 사용할 수 있어 매우 느립니다. WSL2에서 GPU 가속이 필요하면 Windows 네이티브 빌드의 DirectML을 사용하세요.
 
 #### 모든 플랫폼
 
-ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌드 시 자동 다운로드됩니다. 수동 설정이 필요하지 않습니다.
+ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌드 시 자동 다운로드됩니다. 수동 설정이 필요하지 않습니다. GPU 제공자(DirectML / WebGPU / CoreML)는 각 타겟 플랫폼에 대해 컴파일 시 자동으로 활성화되며, 추가 `--features` 플래그가 필요하지 않습니다.
 
 ```bash
 # 개발 모드 (핫 리로드)

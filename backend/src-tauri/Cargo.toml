@@ -89,9 +89,13 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 # DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
 windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
 
-# Linux — WebGPU (Dawn/Vulkan backend)
-[target.'cfg(target_os = "linux")'.dependencies]
+# Linux x86_64 — WebGPU (Dawn/Vulkan backend, prebuilt binaries available)
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "webgpu", "copy-dylibs"] }
+
+# Linux ARM64 — CPU only (no WebGPU prebuilt binary for aarch64)
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "copy-dylibs"] }
 
 # macOS Apple Silicon — CoreML (Apple Neural Engine) + WebGPU (Dawn/Metal)
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]

@@ -152,7 +152,7 @@ pub enum OrtSessionRole {
 /// Mesa's Lavapipe software renderer may work but with poor performance.
 /// The EP will gracefully fall back to CPU if Dawn cannot find a
 /// usable Vulkan device.
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -233,9 +233,9 @@ fn try_register_webgpu_ep(
     }
 }
 
-/// Stub: WebGPU EP not compiled on this platform (Windows, macOS x86_64).
+/// Stub: WebGPU EP not compiled on this platform (Windows, Linux ARM64, macOS x86_64).
 /// On these platforms, DirectML (Windows) or CPU fallback is used instead.
-#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -374,8 +374,10 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         // Fall through to CPU below.
     }
 
-    // ── Linux: WebGPU first, then CPU ──────────────────────────────────
-    #[cfg(target_os = "linux")]
+    // ── Linux x86_64: WebGPU first, then CPU ───────────────────────────
+    // NOTE: Linux ARM64 does NOT have the webgpu feature (no prebuilt
+    // ORT binary for aarch64+wgpu), so this block is excluded there.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if choice == "auto" || choice == "webgpu" || choice == "gpu" {
         match Session::builder() {
             Ok(builder) => {
@@ -404,7 +406,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
 }
 
 /// Finalize a WebGPU session with appropriate optimization settings.
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
 fn build_webgpu_session_finalize(
     mut builder: ort::session::builder::SessionBuilder,
     onnx_path: &Path,
@@ -644,10 +646,9 @@ pub struct GpuDiagnostic {
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
-    // WebGPU — compiled on Linux/macOS ARM only (Dawn/Vulkan, Dawn/Metal).
-    // Windows is excluded because the Dawn/D3D12 backend in the +wgpu ORT
-    // static binary can cause native crashes during device initialization.
-    #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+    // WebGPU — compiled on Linux x86_64 / macOS ARM64 only.
+    // Excluded: Windows (Dawn/D3D12 crash risk), Linux ARM64 (no prebuilt binary).
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
     if probe_webgpu_ep_available() {
         providers.push("WebGpuExecutionProvider".to_string());
     }
@@ -666,7 +667,7 @@ pub fn diagnose_available_providers() -> Vec<String> {
 /// Wrapped in catch_unwind because Dawn native code (Vulkan init)
 /// can crash on some platforms. Only compiled on Linux/macOS ARM
 /// where Dawn/Vulkan and Dawn/Metal are stable backends.
-#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
 fn probe_webgpu_ep_available() -> bool {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match Session::builder() {

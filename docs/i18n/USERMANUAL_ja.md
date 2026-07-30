@@ -21,12 +21,15 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 
 **GPUアクセラレーションについて**：HiFiShifterは各プラットフォーム向けに複数のGPUアクセラレーションオプションを提供しています：
 
-- **Windows**：DirectML（DirectX 12）、NVIDIA、AMD、Intel Arc GPUに対応
-- **macOS（Apple Silicon）**：CoreML、Apple Neural Engineによるアクセラレーション
-- **macOS（Intel）**：CPU推論のみ
-- **Linux**：なし
+- **Windows（x86_64 / ARM64）**：DirectML（DirectX 12） — 成熟した安定パス、NVIDIA / AMD / Intel Arc GPUに対応
+- **macOS（Apple Silicon）**：CoreML + WebGPU（Dawn/Metal） — CoreMLはApple Neural Engineを活用、WebGPUは補助バックエンドとして利用可能
+- **macOS（Intel）**：CPU推論のみ（ort-tract代替バックエンドを使用、GPUアクセラレーションなし）
+- **Linux（x86_64）**：WebGPU（Dawn/Vulkan） — DawnがVulkan APIを通じてGPUにアクセス、GPUがない場合はCPUにフォールバック
+- **Linux（ARM64）**：CPU推論のみ（このターゲット向けのWebGPU ONNX Runtimeプリビルドバイナリなし）
 
-メニュー `オプション → 推論デバイス` で `Auto`（自動）、`CPU`、`GPU` を選択できます。ベンチマークを実行すると各デバイスの推論パフォーマンスを確認できます。
+> **注意**：WSL2はLinuxサブ環境にハードウェアVulkanを公開しません。WebGPU/DawnはLavapipe（CPUソフトウェアレンダリング）しか使用できず、非常に低速です。WSL2でGPUアクセラレーションが必要な場合は、WindowsネイティブビルドのDirectMLを使用してください。
+
+メニュー `オプション → 推論デバイス` で `Auto`（自動）、`CPU`、`GPU` を選択できます。ベンチマークを実行して各デバイスの推論遅延を比較し、最速のデバイスを選択できます。
 
 **WebViewについて**：HiFiShifterはRust + Tauriフレームワークで構築されており、インターフェースを表示するためにWebViewコンポーネントが必要です。
 

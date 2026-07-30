@@ -221,18 +221,25 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速构建
+### 4. GPU 加速
 
-| 平台                        | GPU 技术              | 说明                                              |
-| --------------------------- | --------------------- | ------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自动下载，支持 NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自动启用                     |
-| macOS x86_64 (Intel)        | —                     | CPU only                                          |
-| Linux x86_64 / ARM64        | —                     | WebGPU（Dawn/Vulkan 跨平台 GPU 加速）        |
+HiFiShifter 在支持的平台上自动启用 GPU 推理加速。你可以在菜单栏中的 **推理设备（Inference Device）** 里选择 Auto / CPU / GPU，并通过 **运行基准测试（Run Benchmark）** 比较各设备的推理延迟。
+
+| 平台                            | GPU 技术                        | 说明                                                         |
+| ------------------------------- | ------------------------------- | ------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)           | 成熟稳定的 GPU 路径，支持 NVIDIA / AMD / Intel Arc           |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)    | CoreML 利用 Apple Neural Engine；WebGPU 作为补充 GPU 后端    |
+| macOS x86_64 (Intel)            | —                               | CPU only（使用 ort-tract 替代后端）                          |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)            | Dawn 通过 Vulkan API 使用 GPU；无 GPU 时自动回退到 CPU       |
+| Linux ARM64                     | —                               | CPU only（暂无预编译 WebGPU ONNX Runtime 二进制文件）        |
+
+> **注意**：Windows 平台暂不启用 WebGPU。其 Dawn/D3D12 后端在部分 GPU/驱动组合上存在原生崩溃风险。DirectML 是 Windows 上成熟稳定的 GPU 路径。
+>
+> **WSL2 用户**：WSL2 不向 Linux 子环境暴露硬件 Vulkan。WebGPU/Dawn 只能使用 Lavapipe（CPU 软件渲染），性能极差。如需 GPU 加速，请使用 Windows 原生版本（DirectML）。
 
 #### 所有平台
 
-ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries` 特性自动下载，无需手动安装。
+ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries` 特性自动下载，无需手动安装。GPU 提供程序（DirectML / WebGPU / CoreML）的代码在编译时根据目标平台自动启用，无需额外的 `--features` 标志。
 
 ```bash
 # 开发模式（热更新）

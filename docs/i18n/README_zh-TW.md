@@ -221,18 +221,25 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速構建
+### 4. GPU 加速
 
-| 平台                        | GPU 技術              | 說明                                              |
-| --------------------------- | --------------------- | ------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自動下載，支援 NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自動啟用                     |
-| macOS x86_64 (Intel)        | —                     | 僅 CPU                                            |
-| Linux x86_64 / ARM64        | —                     | WebGPU（Dawn/Vulkan），CPU 回退                    |
+HiFiShifter 在支援的平台上自動啟用 GPU 推理加速。你可以在選單列的**推理裝置（Inference Device）**中選擇 Auto / CPU / GPU，並透過**執行基準測試（Run Benchmark）**比較各裝置的推理延遲。
+
+| 平台                            | GPU 技術                             | 說明                                                                           |
+| ------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                | 成熟穩定的 GPU 路徑，支援 NVIDIA / AMD / Intel Arc                             |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)         | CoreML 利用 Apple Neural Engine；WebGPU 作為補充 GPU 後端                      |
+| macOS x86_64 (Intel)            | —                                    | 僅 CPU（使用 ort-tract 替代後端）                                              |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                 | Dawn 透過 Vulkan API 存取 GPU；無 GPU 時自動回退到 CPU                         |
+| Linux ARM64                     | —                                    | 僅 CPU（此目標尚無預編譯的 WebGPU ONNX Runtime 二進位檔案）                    |
+
+> **注意**：Windows 平台未啟用 WebGPU。其 Dawn/D3D12 後端在部分 GPU/驅動組合上存在原生崩潰風險。DirectML 是 Windows 上成熟穩定的 GPU 路徑。
+>
+> **WSL2 使用者**：WSL2 不向 Linux 子環境暴露硬體 Vulkan。WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本的 DirectML。
 
 #### 所有平台
 
-ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。
+ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。GPU 提供程序（DirectML / WebGPU / CoreML）在編譯時根據目標平台自動啟用，無需額外的 `--features` 標誌。
 
 ```bash
 # 開發模式（熱更新）

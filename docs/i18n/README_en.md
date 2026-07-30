@@ -221,18 +221,25 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU-Accelerated Build
+### 4. GPU Acceleration
 
-| Platform                    | GPU Technology        | Description                                                     |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | Auto-downloaded by ort crate, supports NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine, auto-enabled                               |
-| macOS x86_64 (Intel)        | —                     | CPU only                                                        |
-| Linux x86_64 / ARM64        | —                     | WebGPU (Dawn/Vulkan), CPU fallback                              |
+HiFiShifter automatically enables GPU-accelerated inference on supported platforms. You can choose between Auto / CPU / GPU from the **Inference Device** menu in the menu bar, and compare per-device latency using **Run Benchmark**.
+
+| Platform                        | GPU Technology                        | Description                                                               |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | Proven, stable GPU path; supports NVIDIA / AMD / Intel Arc                |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML leverages the Apple Neural Engine; WebGPU as a supplementary GPU backend |
+| macOS x86_64 (Intel)            | —                                     | CPU only (uses the ort-tract alternative backend)                         |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present |
+| Linux ARM64                     | —                                     | CPU only (no prebuilt WebGPU ONNX Runtime binary for this target)        |
+
+> **Note**: WebGPU is not enabled on Windows. Its Dawn/D3D12 backend can cause native crashes on some GPU/driver combinations. DirectML is the mature, stable GPU path for Windows.
+>
+> **WSL2 users**: WSL2 does not expose hardware Vulkan to Linux guests. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration on WSL2, use the Windows native build with DirectML instead.
 
 #### All Platforms
 
-ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed.
+ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed. GPU providers (DirectML / WebGPU / CoreML) are enabled automatically at compile time for each target platform; no extra `--features` flags are required.
 
 ```bash
 # Development mode (hot reload)

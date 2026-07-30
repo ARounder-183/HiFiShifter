@@ -221,18 +221,25 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPUアクセラレーションビルド
+### 4. GPUアクセラレーション
 
-| プラットフォーム            | GPU技術               | 説明                                                            |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crateが自動ダウンロード、NVIDIA / AMD / Intel Arcに対応     |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine、自動有効化                                 |
-| macOS x86_64 (Intel)        | —                     | CPUのみ                                                         |
-| Linux x86_64 / ARM64        | —                     | WebGPU（Dawn/Vulkan）、CPUフォールバック          |
+HiFiShifterは、サポートされているプラットフォームで自動的にGPU推論アクセラレーションを有効にします。メニューバーの**推論デバイス（Inference Device）**から Auto / CPU / GPU を選択でき、**ベンチマークを実行（Run Benchmark）** で各デバイスの推論遅延を比較できます。
+
+| プラットフォーム                | GPU技術                               | 説明                                                                           |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | 成熟した安定GPUパス、NVIDIA / AMD / Intel Arcに対応                            |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreMLはApple Neural Engineを活用；WebGPUは補助GPUバックエンドとして利用可能   |
+| macOS x86_64 (Intel)            | —                                     | CPUのみ（ort-tract代替バックエンドを使用）                                     |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | DawnがVulkan APIを通じてGPUにアクセス；GPUがない場合はCPUにフォールバック      |
+| Linux ARM64                     | —                                     | CPUのみ（このターゲット向けのWebGPU ONNX Runtimeプリビルドバイナリがないため） |
+
+> **注意**：WindowsではWebGPUは無効です。Dawn/D3D12バックエンドが一部のGPU/ドライバの組み合わせでネイティブクラッシュを引き起こす可能性があります。DirectMLはWindows向けの成熟した安定GPUパスです。
+>
+> **WSL2ユーザー**：WSL2はLinuxサブ環境にハードウェアVulkanを公開しません。WebGPU/DawnはLavapipe（CPUソフトウェアレンダリング）しか使用できず、非常に低速です。WSL2でGPUアクセラレーションが必要な場合は、WindowsネイティブビルドのDirectMLを使用してください。
 
 #### 全プラットフォーム
 
-ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。
+ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。GPUプロバイダ（DirectML / WebGPU / CoreML）は、各ターゲットプラットフォーム向けにコンパイル時に自動的に有効化されます。追加の `--features` フラグは不要です。
 
 ```bash
 # 開発モード（ホットリロード）

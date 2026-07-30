@@ -21,12 +21,15 @@ Download the HiFiShifter installer corresponding to your operating system and ar
 
 **About GPU Acceleration**: HiFiShifter provides multiple GPU acceleration options across platforms:
 
-- **Windows**: DirectML (DirectX 12), supports NVIDIA, AMD, Intel Arc GPUs
-- **macOS (Apple Silicon)**: CoreML, using Apple Neural Engine acceleration
-- **macOS (Intel)**: CPU inference only
-- **Linux**: Not available yet
+- **Windows (x86_64 / ARM64)**: DirectML (DirectX 12) — proven and stable, supports NVIDIA / AMD / Intel Arc GPUs
+- **macOS (Apple Silicon)**: CoreML + WebGPU (Dawn/Metal) — CoreML leverages the Apple Neural Engine; WebGPU serves as a supplementary backend
+- **macOS (Intel)**: CPU inference only (uses the ort-tract alternative backend, no GPU acceleration)
+- **Linux (x86_64)**: WebGPU (Dawn/Vulkan) — Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present
+- **Linux (ARM64)**: CPU inference only (no prebuilt WebGPU ONNX Runtime binary for this target)
 
-In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GPU`. Run the benchmark to view the inference performance of each device.
+> **Note**: WSL2 does not expose hardware Vulkan to Linux guests. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration on WSL2, use the Windows native build with DirectML instead.
+
+In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GPU`. Run the benchmark to compare per-device inference latency and pick the fastest option.
 
 **WebView Information**: HiFiShifter is built with the Rust + Tauri framework and requires a WebView component to display its interface.
 

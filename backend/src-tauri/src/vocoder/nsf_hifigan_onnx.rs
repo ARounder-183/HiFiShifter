@@ -2331,10 +2331,13 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
-    // WebGPU is only compiled on Linux and macOS ARM64 (Dawn/Vulkan, Dawn/Metal).
-    // Windows uses DirectML instead (Dawn/D3D12 can cause native crashes).
-    // macOS x86_64 uses ort-tract (no GPU acceleration).
-    let gpu_available = cfg!(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")));
+    // WebGPU is compiled on Linux x86_64 and macOS ARM64 only.
+    // Excluded: Windows (Dawn/D3D12 crash), Linux ARM64 (no prebuilt ORT binary),
+    // macOS x86_64 (ort-tract, no GPU).
+    let gpu_available = cfg!(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
