@@ -145,6 +145,19 @@ pub fn run() {
         .manage(state::AppState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // ── AppImage Mesa/EGL driver path ──────────────────────────
+            // When running inside an AppImage, Mesa's libEGL is bundled
+            // along with its DRI drivers under usr/lib/dri/.  Tell Mesa
+            // where to find them so WebKit2GTK can create its EGL display.
+            #[cfg(target_os = "linux")]
+            if let Ok(appdir) = std::env::var("APPDIR") {
+                let dri_dir = format!("{appdir}/usr/lib/dri");
+                if std::path::Path::new(&dri_dir).is_dir() {
+                    std::env::set_var("LIBGL_DRIVERS_PATH", &dri_dir);
+                    eprintln!("[setup] LIBGL_DRIVERS_PATH={dri_dir}");
+                }
+            }
+
             // 打包后的应用：从 resource_dir 查找内嵌的 ONNX 模型
             if let Ok(res_dir) = app.path().resource_dir() {
                 let p = res_dir.join("models").join("nsf_hifigan");
