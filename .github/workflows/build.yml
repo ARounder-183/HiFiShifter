@@ -232,6 +232,15 @@ jobs:
           projectPath: backend/src-tauri
           args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
 
+      - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
+          # linuxdeploy needs to find it to bundle it into the AppImage.
+          TARGET_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/${{ matrix.cargo_target }}/release"
+          echo "LD_LIBRARY_PATH=${TARGET_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        shell: bash
+
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -242,6 +251,54 @@ jobs:
         with:
           projectPath: backend/src-tauri
           args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
+
+      # Fallback: if linuxdeploy still fails (e.g., can't find libwebgpu_dawn.so),
+      # manually add the library to the AppDir and re-run appimagetool.
+      - name: Retry AppImage bundling (Linux fallback)
+        if: runner.os == 'Linux' && failure()
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          TARGET_DIR="target/${{ matrix.cargo_target }}/release"
+          APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
+          OUT_APPIMAGE="$TARGET_DIR/bundle/appimage/HiFiShifter_0.1.0-beta.13_amd64.AppImage"
+
+          echo "=== Checking AppDir state ==="
+          find "$APPDIR" -type f -maxdepth 3 2>/dev/null | head -40 || echo "AppDir not found"
+          echo "=== Binary dynamic dependencies ==="
+          ldd "$TARGET_DIR/HiFiShifter" 2>/dev/null | grep -E 'webgpu|not found|SoundTouch' || true
+
+          if [ -d "$APPDIR/usr/bin" ]; then
+            echo "Adding required shared libraries to AppDir..."
+            for lib in libwebgpu_dawn.so libSoundTouchDLL.so; do
+              if [ -f "$TARGET_DIR/$lib" ]; then
+                cp -v "$TARGET_DIR/$lib" "$APPDIR/usr/bin/"
+              fi
+            done
+            echo "AppDir contents after fix:"
+            ls -la "$APPDIR/usr/bin/" || true
+
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            wget -q -O /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+            chmod +x /tmp/appimagetool
+            /tmp/appimagetool "$APPDIR" "$OUT_APPIMAGE" || {
+              echo "appimagetool failed — dumping diagnostics"
+              ls -la "$TARGET_DIR/"
+              ls -la "$APPDIR/usr/bin/" || true
+            }
+            if [ -f "$OUT_APPIMAGE" ]; then
+              echo "SUCCESS: AppImage created"
+              ls -lh "$OUT_APPIMAGE"
+            else
+              echo "ERROR: AppImage was not created"
+              exit 1
+            fi
+          else
+            echo "ERROR: AppDir not found — tauri build failed before creating AppDir"
+            ls -la "$TARGET_DIR/" 2>/dev/null || echo "Target directory does not exist"
+            exit 1
+          fi
+        shell: bash
 
       # ── Portable directory (Windows) ─────────────────────────────────
 
