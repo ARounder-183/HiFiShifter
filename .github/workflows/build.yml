@@ -155,22 +155,50 @@ jobs:
           sudo apt-get install -y zsync desktop-file-utils libglib2.0-bin libgtk-3-bin librsvg2-bin appstream xdg-utils
           test -x /usr/bin/xdg-open
 
-      - name: Generate Linux WebKit include map for AppImage
+      - name: Generate Linux AppImage library include map
         if: runner.os == 'Linux'
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
+          FILES_JSON='{}'
+
+          # ── WebKit2GTK runtime libraries ──────────────────────────────
+          # Extract shared libs and auxiliary files, mapping them to flat
+          # usr/lib/ so they are discoverable via LD_LIBRARY_PATH.
           mapfile -t WEBKIT_FILES < <(
             { dpkg -L libwebkit2gtk-4.1-0 2>/dev/null || true
               dpkg -L libjavascriptcoregtk-4.1-0 2>/dev/null || true; } \
             | grep -E '^/usr/lib/.+/(libwebkit2gtk-4.1\.so\.0|libjavascriptcoregtk-4.1\.so\.0|webkit2gtk-4.1($|/))' | sort -u
           )
-          FILES_JSON='{}'
           for src in "${WEBKIT_FILES[@]}"; do
-            [ -e "$src" ] && FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+            if [ -e "$src" ]; then
+              fname="$(basename "$src")"
+              if [ -d "$src" ]; then
+                # Directory (e.g. webkit2gtk-4.1/): keep under usr/lib/...
+                FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              else
+                # Shared library: map to flat usr/lib/
+                FILES_JSON="$(jq -c --arg k "usr/lib/$fname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              fi
+            fi
           done
+
+          # ── Wayland + xkbcommon (transitive deps of GTK/Wayland) ─────
+          # Ubuntu 24.04 defaults to the Wayland backend for GTK.  These
+          # libraries are loaded at runtime by GDK via dlopen and are NOT
+          # captured by linuxdeploy's ldd-based dependency scan.  Map them
+          # to flat usr/lib/ so the AppRun LD_LIBRARY_PATH can find them.
+          for dep in libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 libxkbcommon.so.0; do
+            src="$(find /usr/lib -name "$dep" -type f -print -quit 2>/dev/null || true)"
+            if [ -n "$src" ] && [ -e "$src" ]; then
+              FILES_JSON="$(jq -c --arg k "usr/lib/$dep" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+            fi
+          done
+
+          # ── SoundTouch shared library ─────────────────────────────────
           ST_SO_PATH="$GITHUB_WORKSPACE/backend/src-tauri/third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so"
           FILES_JSON="$(jq -c --arg k "usr/bin/libSoundTouchDLL.so" --arg v "$ST_SO_PATH" '. + {($k): $v}' <<<"$FILES_JSON")"
+
           jq -n --argjson files "$FILES_JSON" '{ bundle: { linux: { appimage: { files: $files } } } }' > tauri.linux.conf.json
         shell: bash
 
