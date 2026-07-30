@@ -9,7 +9,7 @@ pub struct OnnxStatusPayload {
     pub available: bool,
     /// Human-readable error string when unavailable, null otherwise.
     pub error: Option<String>,
-    /// Requested execution provider choice (cpu/opencl/directml/auto/disabled).
+    /// Requested execution provider choice (cpu/webgpu/directml/auto/disabled).
     pub ep_choice: String,
 }
 

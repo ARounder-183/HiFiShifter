@@ -4196,7 +4196,7 @@ impl AppState {
 
         let gpu_backend = {
             #[cfg(target_os = "windows")] { "DirectML" }
-            #[cfg(target_os = "linux")] { "OpenCL" }
+            #[cfg(target_os = "linux")] { "WebGPU" }
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))] { "CoreML" }
             #[cfg(all(target_os = "macos", target_arch = "x86_64"))] { "" }
         };

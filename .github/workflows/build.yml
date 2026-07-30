@@ -51,7 +51,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows — DirectML baked into ort dependency
+          # Windows — DirectML + WebGPU baked into ort dependency
           - name: windows-x86_64
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
@@ -61,7 +61,7 @@ jobs:
             cargo_target: aarch64-pc-windows-msvc
             cargo_extra: "-- --no-default-features --features onnx"   # vslib is x86_64-only
 
-          # macOS — CoreML on ARM64, CPU on x86_64 (baked into ort deps)
+          # macOS — CoreML + WebGPU on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
             os: macos-latest
             cargo_target: aarch64-apple-darwin
@@ -71,7 +71,7 @@ jobs:
             cargo_target: x86_64-apple-darwin
             cargo_extra: "-- --no-default-features --features onnx"
 
-          # Linux — OpenCL via generic ORT EP API; vslib excluded
+          # Linux — WebGPU (Dawn/Vulkan backend); vslib excluded
           - name: linux-x86_64
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu

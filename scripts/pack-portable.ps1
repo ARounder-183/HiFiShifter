@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     After a successful `cargo tauri build`, this script collects the exe,
-    resource files, models, and GPU-dependent DLLs (OpenCL/DirectML) from
+    resource files, models, and GPU-dependent DLLs (DirectML/WebGPU) from
     the build output directory and packages them into a portable .zip file.
     All DLLs located in the release directory are automatically collected.
 

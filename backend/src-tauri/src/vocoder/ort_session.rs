@@ -1,9 +1,13 @@
 //! Shared ORT session builder with consistent optimization policy.
 //!
 //! All three ONNX models (NSF-HiFiGAN, FCPE, HNSEP) should use the same
-//! optimization stack: Level3 graph opt, memory pattern, OpenCL/DirectML EP with
-//! limits, and fallback to CPU. This module centralizes that configuration so
-//! individual vocoder modules don't drift.
+//! optimization stack. GPU acceleration is provided by:
+//!   - WebGPU EP (Dawn backend) — cross-platform (Windows/Linux/macOS)
+//!   - DirectML EP (DX12)        — Windows only, fallback
+//!
+//! On platforms without GPU prebuilt binaries, sessions gracefully fall
+//! back to CPU. This module centralizes EP registration so individual
+//! vocoder modules don't drift.
 
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
@@ -63,9 +67,6 @@ fn resolve_dml_device_id() -> Option<i32> {
         }
     }
     // 3. Auto-detect: pick the GPU with most VRAM.
-    //    Always use explicit device_id (old DML API) regardless of
-    //    whether the GPU is device 0 or not. The old API consistently
-    //    outperforms DML2 across architectures.
     let adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     if let Some(best) = adapters.first() {
         let device_id = best.device_id as i32;
@@ -82,10 +83,11 @@ fn resolve_dml_device_id() -> Option<i32> {
 /// Returns the runtime EP override if set, otherwise falls back to per-role env var,
 /// then global env var.
 fn ep_choice_for_role(role: OrtSessionRole) -> String {
-    // HNSEP (Separator) 强制使用 CPU。
-    // GPU (DirectML/OpenCL) 对该模型的算子支持不完整，ORT 会将不支持的算子
-    // 回退到 CPU 并插入 GPU↔CPU 数据搬运节点，导致推理反而比纯 CPU 更慢。
-    // 这是一个临时方案，待 HNSEP 模型升级或 ORT 算子覆盖完善后可移除。
+    // HNSEP (Separator) forces CPU.
+    // GPU (WebGPU/DirectML) has incomplete operator coverage for this model;
+    // ORT inserts GPU↔CPU data transfer nodes for unsupported ops, making
+    // inference slower than pure CPU. This is a temporary workaround until
+    // the HNSEP model is upgraded or ORT operator coverage improves.
     if matches!(role, OrtSessionRole::Separator) {
         return "cpu".to_string();
     }
@@ -133,78 +135,113 @@ pub enum OrtSessionRole {
     Separator,
 }
 
-// ── EP registration helpers (feature-gated) ──────────────────────────────
+// ── EP registration helpers ──────────────────────────────────────────────
 
-/// Try to register OpenCL EP on a session builder.
-/// Uses ONNX Runtime's generic `SessionOptionsAppendExecutionProvider` API
-/// to register "OpenCLExecutionProvider" by name.  Works if the ORT DLL has
-/// the OpenCL provider compiled in; returns a clear error otherwise.
+/// Try to register WebGPU EP on a session builder.
 ///
-/// # Safety
+/// Uses the ort crate's high-level `ep::WebGPU` type. The WebGPU EP
+/// leverages Dawn (Google's WebGPU implementation) with platform-native
+/// backends: D3D12 on Windows, Vulkan on Linux, Metal on macOS.
 ///
-/// `ort::api()` panics if `ort::init()` has not been called.  Callers must
-/// ensure `ensure_ort_init()` has succeeded before calling this function.
-#[cfg(target_os = "linux")]
-fn try_register_opencl_ep(
-    mut builder: ort::session::builder::SessionBuilder,
-    _role: OrtSessionRole,
-) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    use ort::AsPointer;
-    use std::ffi::CString;
-
-    // Safety: caller must have called ort::init() successfully first.
-    let api = ort::api();
-    let provider_name =
-        CString::new("OpenCLExecutionProvider").map_err(|e| format!("invalid provider name: {e}"))?;
-
-    // Call the generic provider registration API.  This registers by name
-    // rather than requiring a specific symbol.  No provider options needed.
-    // NOTE: The standard ONNX Runtime Linux binary from the ort crate's
-    // `download-binaries` feature is CPU-only — it does NOT include the
-    // OpenCL provider.  This call will fail gracefully on default builds.
-    // GPU acceleration on Linux requires either:
-    //   a) A custom ORT build with --use_opencl, or
-    //   b) The CUDA ort feature (requires NVIDIA GPU + CUDA Toolkit at runtime).
-    let status = unsafe {
-        (api.SessionOptionsAppendExecutionProvider)(
-            builder.ptr_mut(),
-            provider_name.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        )
-    };
-
-    if status.0.is_null() {
-        eprintln!("ort_session: OpenCL EP registered successfully");
-        Ok((builder, "opencl"))
-    } else {
-        Err(
-            "OpenCL EP not available in this ONNX Runtime build (ORT was not compiled with --use_opencl). \
-             Falling back to CPU."
-                .to_string(),
-        )
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn try_register_opencl_ep(
+/// On WSL2, Vulkan hardware acceleration is not directly available
+/// (the Windows GPU driver does not expose Vulkan to Linux guests).
+/// Mesa's Lavapipe software renderer may work but with poor performance.
+/// The EP will gracefully fall back to CPU if Dawn cannot find a
+/// usable Vulkan device.
+///
+/// WebGPU prebuilt binaries are available from the ort crate's
+/// `download-binaries` for: x86_64 Windows, x86_64 Linux, ARM64 macOS.
+/// On other targets, this call fails gracefully.
+fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let _ = (builder, _role);
-    Err("OpenCL EP not compiled in this build".to_string())
+    // Detect WSL2 for diagnostic purposes
+    let is_wsl = is_wsl2();
+
+    // On Linux, Dawn uses the Vulkan backend. Configure it explicitly
+    // and disable features that may cause issues on software renderers.
+    let wgpu = if cfg!(target_os = "linux") {
+        ort::ep::WebGPU::default()
+            .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
+            .with_validation_mode(ort::ep::webgpu::ValidationMode::Disabled)
+            .with_enable_graph_capture(false)
+            .build()
+    } else {
+        ort::ep::WebGPU::default().build()
+    };
+
+    let wsl_note = if is_wsl {
+        " (WSL2: Vulkan may not be available; ensure mesa-vulkan-drivers are installed)"
+    } else {
+        ""
+    };
+
+    builder
+        .with_execution_providers([wgpu])
+        .map(|b| {
+            eprintln!("ort_session: WebGPU EP registered successfully{wsl_note}");
+            (b, "webgpu")
+        })
+        .map_err(|e| {
+            let msg = format!(
+                "WebGPU EP registration failed: {e}{wsl_note}"
+            );
+            eprintln!("ort_session: {msg}");
+            msg
+        })
+}
+
+/// Check if we're running under WSL2 (Windows Subsystem for Linux).
+/// WSL2 does not expose native hardware Vulkan to Linux guests — the
+/// Windows GPU driver provides D3D12/DirectX passthrough via /dev/dxg.
+/// Mesa's Lavapipe software renderer may be available but offers poor
+/// performance and limited SPIR-V feature support.
+fn is_wsl2() -> bool {
+    if cfg!(target_os = "linux") {
+        if let Ok(version) = std::fs::read_to_string("/proc/version") {
+            return version.to_lowercase().contains("microsoft")
+                || version.to_lowercase().contains("wsl");
+        }
+    }
+    false
+}
+
+/// Emit diagnostic info about the Vulkan environment. Helps debug
+/// WebGPU/Dawn initialization failures, especially in WSL2 where
+/// Vulkan ICD availability is limited.
+fn log_vulkan_diagnostics() {
+    // Check for Vulkan ICDs
+    for icd_dir in ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"] {
+        if let Ok(entries) = std::fs::read_dir(icd_dir) {
+            eprintln!(
+                "ort_session: vulkan ICD dir {icd_dir}: {} entries",
+                entries.count()
+            );
+        }
+    }
+    // Check if /dev/dxg is present (WSL2 D3D12 passthrough)
+    if std::path::Path::new("/dev/dxg").exists() {
+        eprintln!("ort_session: WSL2 D3D12 passthrough (/dev/dxg) is available — WebGPU/Dawn cannot use this on Linux (Vulkan backend only)");
+    }
+    if is_wsl2() {
+        eprintln!("ort_session: WSL2 detected — Vulkan hardware acceleration is not available from the Windows GPU driver.");
+        eprintln!("ort_session: Only Mesa Lavapipe (software Vulkan) may be available, which is slow and may lack required Dawn features.");
+        eprintln!("ort_session: For GPU acceleration on WSL2, use the Windows build of HiFiShifter with DirectML instead.");
+    }
 }
 
 /// Try to register DirectML EP on a session builder.
-/// DirectML uses DirectX 12 to accelerate ONNX models on any GPU (NVIDIA, AMD, Intel Arc).
-/// It is Windows-only and requires no additional SDK or runtime DLLs beyond the ORT provider DLL.
 ///
-/// Registers BOTH DirectML AND CPU EP explicitly. When only DirectML is registered,
-/// ORT implicitly adds CPU as a fallback but the graph partitioner may not make
-/// optimal partitioning decisions — it doesn't "know" CPU is available as a target
-/// until after the first partitioning pass. Explicit registration of both EPs lets
-/// the partitioner plan the full EP assignment upfront, reducing partition boundaries.
+/// DirectML uses DirectX 12 to accelerate ONNX models on any GPU
+/// (NVIDIA, AMD, Intel Arc). It is Windows-only and requires no
+/// additional SDK or runtime DLLs beyond the ORT provider DLL.
+///
+/// Registers BOTH DirectML AND CPU EP explicitly. When only DirectML
+/// is registered, ORT implicitly adds CPU as a fallback but the graph
+/// partitioner may not make optimal partitioning decisions. Explicit
+/// registration of both EPs lets the partitioner plan the full EP
+/// assignment upfront, reducing partition boundaries.
 #[cfg(target_os = "windows")]
 fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
@@ -245,6 +282,11 @@ fn try_register_directml_ep(
 /// All three models (NSF-HiFiGAN, FCPE, HNSEP) should call this instead of
 /// building sessions ad-hoc with inconsistent settings.
 ///
+/// EP selection priority (for choice="auto"):
+///   1. WebGPU (cross-platform, Dawn backend)
+///   2. DirectML (Windows only, DX12 backend)
+///   3. CPU fallback
+///
 /// Returns `(Session, selected_ep_name)`.
 pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Session, String), String> {
     let choice = ep_choice_for_role(role);
@@ -253,65 +295,115 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         return build_cpu_session(onnx_path, role, &choice);
     }
 
-    // ── GPU path: try DirectML first (Windows) ──────────────────────────
-    #[cfg(target_os = "windows")]
-    {
-        // Attempt 1: strict DirectML (no CPU fallback).
-        // If all operators in the model have native DirectML support,
-        // the entire graph runs on GPU with ZERO partition boundaries.
-        match build_dml_session_inner(onnx_path, role, &choice, true) {
-            Ok((session, ep)) => return Ok((session, ep)),
-            Err(e) => eprintln!(
-                "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
-            ),
-        }
-        // Attempt 2: DirectML with CPU fallback.
-        match build_dml_session_inner(onnx_path, role, &choice, false) {
-            Ok((session, ep)) => return Ok((session, ep)),
-            Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
+    // ── GPU path: try WebGPU first (cross-platform) ─────────────────────
+    if choice == "auto" || choice == "webgpu" || choice == "gpu" {
+        match Session::builder() {
+            Ok(builder) => {
+                match try_register_webgpu_ep(builder, role) {
+                    Ok((b, ep)) => {
+                        let session = build_webgpu_session_finalize(b, onnx_path, role)?;
+                        return Ok((session, ep.to_string()));
+                    }
+                    Err(e) => {
+                        eprintln!("ort_session[{role:?}]: WebGPU unavailable — {e}");
+                        log_vulkan_diagnostics();
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "ort_session[{role:?}]: failed to create session builder for WebGPU — {e}"
+                );
+                log_vulkan_diagnostics();
+            }
         }
     }
 
-    // ── GPU path: try OpenCL (Linux) ───────────────────────────────────
-    #[cfg(target_os = "linux")]
-    {
-        match Session::builder() {
-            Ok(mut builder) => {
-                match try_register_opencl_ep(builder, role) {
-                    Ok((b, ep)) => {
-                        builder = b;
-                        builder = builder
-                            .with_optimization_level(GraphOptimizationLevel::Level3)
-                            .map_err(|e| format!("set graph optimization level failed: {e}"))?
-                            .with_memory_pattern(true)
-                            .map_err(|e| format!("set memory pattern failed: {e}"))?;
-                        let cores = std::thread::available_parallelism()
-                            .map(|n| n.get()).unwrap_or(4).max(2);
-                        let threads = match role {
-                            OrtSessionRole::Separator => cores,
-                            OrtSessionRole::Vocoder => (cores / 2).max(2),
-                            OrtSessionRole::PitchDetector => (cores / 2).max(2),
-                        };
-                        builder = builder
-                            .with_intra_threads(threads)
-                            .map_err(|e| format!("set intra op threads failed: {e}"))?;
-                        let session = builder
-                            .commit_from_file(onnx_path)
-                            .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
-                        eprintln!("ort_session[{role:?}]: OpenCL session created successfully");
-                        return Ok((session, ep.to_string()));
-                    }
-                    Err(e) => eprintln!("ort_session[{role:?}]: OpenCL unavailable — {e}"),
-                }
+    // ── GPU path: try DirectML (Windows) ────────────────────────────────
+    if choice == "auto" || choice == "directml" {
+        #[cfg(target_os = "windows")]
+        {
+            // Attempt 1: strict DirectML (no CPU fallback).
+            // If all operators in the model have native DirectML support,
+            // the entire graph runs on GPU with ZERO partition boundaries.
+            match build_dml_session_inner(onnx_path, role, &choice, true) {
+                Ok((session, ep)) => return Ok((session, ep)),
+                Err(e) => eprintln!(
+                    "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+                ),
             }
-            Err(e) => eprintln!(
-                "ort_session[{role:?}]: failed to create session builder for OpenCL — {e}; falling back to CPU"
-            ),
+            // Attempt 2: DirectML with CPU fallback.
+            match build_dml_session_inner(onnx_path, role, &choice, false) {
+                Ok((session, ep)) => return Ok((session, ep)),
+                Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
+            }
         }
     }
 
     // ── Fallback: CPU ──────────────────────────────────────────────────
     build_cpu_session(onnx_path, role, &choice)
+}
+
+/// Finalize a WebGPU session with appropriate optimization settings.
+fn build_webgpu_session_finalize(
+    mut builder: ort::session::builder::SessionBuilder,
+    onnx_path: &Path,
+    role: OrtSessionRole,
+) -> Result<Session, String> {
+    let model_name = onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    eprintln!(
+        "ort_session[{role:?}]: model={model_name} ep=webgpu (global_env={})",
+        env_ep_choice(),
+    );
+
+    builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| format!("set graph optimization level failed: {e}"))?
+        .with_memory_pattern(true)
+        .map_err(|e| format!("set memory pattern failed: {e}"))?;
+
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get()).unwrap_or(4).max(2);
+    let threads = match role {
+        OrtSessionRole::Separator => cores,
+        OrtSessionRole::Vocoder => (cores / 2).max(2),
+        OrtSessionRole::PitchDetector => (cores / 2).max(2),
+    };
+    builder = builder
+        .with_intra_threads(threads)
+        .map_err(|e| format!("set intra op threads failed: {e}"))?;
+
+    let t_create = std::time::Instant::now();
+    let session = builder
+        .commit_from_file(onnx_path)
+        .map_err(|e| {
+            let msg = format!(
+                "load onnx into WebGPU ort session failed: {e}"
+            );
+            eprintln!("ort_session[{role:?}]: {msg}");
+            msg
+        })?;
+    let create_ms = t_create.elapsed().as_millis();
+
+    eprintln!(
+        "ort_session[{role:?}]: created session ep=webgpu intra_threads={threads} commit_ms={create_ms}",
+    );
+
+    // Log session I/O metadata
+    for input in session.inputs() {
+        eprintln!(
+            "ort_session[{:?}]:   input name='{}' dtype={:?}",
+            role, input.name(), input.dtype()
+        );
+    }
+    for output in session.outputs() {
+        eprintln!(
+            "ort_session[{:?}]:   output name='{}' dtype={:?}",
+            role, output.name(), output.dtype()
+        );
+    }
+
+    Ok(session)
 }
 
 /// Build a DirectML session with optional strict mode (no CPU fallback).
@@ -473,7 +565,7 @@ fn build_cpu_session(
 pub struct GpuDiagnostic {
     /// List of all ONNX Runtime execution provider names available in the DLL.
     pub available_providers: Vec<String>,
-    /// The EP that was actually selected (e.g. "directml", "opencl", "cpu").
+    /// The EP that was actually selected (e.g. "webgpu", "directml", "cpu").
     pub selected_ep: String,
     /// GPU device ID that was requested (from env or default 0).
     pub gpu_device_id: i32,
@@ -484,25 +576,54 @@ pub struct GpuDiagnostic {
 /// Enumerate available ONNX Runtime execution providers.
 ///
 /// Checks each provider by attempting to query its availability through ORT.
-/// This is simpler and safer than using the raw C API for GetAvailableProviders.
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
-    // DirectML is Windows-only
-    if probe_directml_ep_available() {
-        providers.push("DmlExecutionProvider".to_string());
+    // WebGPU — cross-platform (Dawn/D3D12/Vulkan/Metal)
+    if probe_webgpu_ep_available() {
+        providers.push("WebGpuExecutionProvider".to_string());
     }
 
-    // OpenCL works across platforms
-    if probe_opencl_ep_available() {
-        providers.push("OpenCLExecutionProvider".to_string());
+    // DirectML — Windows only
+    if probe_directml_ep_available() {
+        providers.push("DmlExecutionProvider".to_string());
     }
 
     providers
 }
 
+/// Quick check: try registering WebGPU EP on a temporary session builder.
+/// Returns true if WebGPU EP is available in the loaded ORT binary.
+fn probe_webgpu_ep_available() -> bool {
+    match Session::builder() {
+        Ok(builder) => {
+            let wgpu = if cfg!(target_os = "linux") {
+                ort::ep::WebGPU::default()
+                    .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
+                    .build()
+            } else {
+                ort::ep::WebGPU::default().build()
+            };
+            match builder.with_execution_providers([wgpu]) {
+                Ok(_) => {
+                    eprintln!("ort_session: probe_webgpu_ep — AVAILABLE");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("ort_session: probe_webgpu_ep — NOT available: {e}");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("ort_session: probe_webgpu_ep — session builder failed: {e}");
+            false
+        }
+    }
+}
+
 /// Quick check: try registering DirectML EP on a temporary session builder.
-/// Returns true if DirectML EP is available in the loaded ORT DLL.
+/// Returns true if DirectML EP is available in the loaded ORT binary.
 #[cfg(target_os = "windows")]
 fn probe_directml_ep_available() -> bool {
     match Session::builder() {
@@ -520,50 +641,6 @@ fn probe_directml_ep_available() -> bool {
 /// Stub: DirectML EP not compiled in.
 #[cfg(not(target_os = "windows"))]
 const fn probe_directml_ep_available() -> bool {
-    false
-}
-
-/// Quick check: try registering "OpenCLExecutionProvider" by name via the
-/// generic `SessionOptionsAppendExecutionProvider` API.  Returns true if
-/// the provider registered successfully (meaning ORT was compiled with
-/// OpenCL support and the provider DLL/backend is available).
-#[cfg(target_os = "linux")]
-fn probe_opencl_ep_available() -> bool {
-    use ort::AsPointer;
-    use std::ffi::CString;
-
-    // Safety: ort::api() panics if called before ort::init().  This probe is
-    // only called from diagnose_available_providers() which is only reached
-    // after ensure_ort_init() succeeds.
-    let Ok(builder) = Session::builder() else {
-        return false;
-    };
-    let Ok(provider_name) = CString::new("OpenCLExecutionProvider") else {
-        return false;
-    };
-    let api = ort::api();
-    let append_fn = api.SessionOptionsAppendExecutionProvider;
-    let mut builder = builder;
-    let status = unsafe {
-        append_fn(
-            builder.ptr_mut(),
-            provider_name.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        )
-    };
-    let ok = status.0.is_null();
-    eprintln!(
-        "ort_session: probe_opencl_ep — {}",
-        if ok { "AVAILABLE" } else { "NOT available (ORT built without --use_opencl)" }
-    );
-    ok
-}
-
-/// Stub: OpenCL EP not compiled in.
-#[cfg(not(target_os = "linux"))]
-const fn probe_opencl_ep_available() -> bool {
     false
 }
 
@@ -589,7 +666,7 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
 /// benchmark session, restoring the previous value on drop.
 ///
 /// Used by `run_benchmark()` so it can force a specific EP (e.g. "cpu" or
-/// "opencl") without permanently changing the process-wide setting.
+/// "webgpu") without permanently changing the process-wide setting.
 ///
 /// Only sets the runtime override (mutex-protected), NOT the env var.
 /// The runtime override takes precedence in `ep_choice()` over the env var,

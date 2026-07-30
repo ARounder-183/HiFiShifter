@@ -14,7 +14,7 @@ export interface RuntimeInfo {
     is_playing?: boolean;
     playback_target?: string | null;
     timeline?: TimelineState;
-    /** GPU backend name for this build: "DirectML", "OpenCL", "CoreML", or "". */
+    /** GPU backend name for this build: "DirectML", "WebGPU", "CoreML", or "". */
     gpuBackend: string;
 }
 
@@ -313,16 +313,16 @@ export interface DmlAdapterList {
 export interface BenchmarkResult {
     cpuMedianMs: number;
     cpuRtFactor: number;
-    /** OpenCL GPU inference time (ms), null if unavailable or failed. */
+    /** WebGPU inference time (ms), null if unavailable or failed. */
     gpuMedianMs?: number | null;
-    /** OpenCL GPU real-time factor, null if unavailable or failed. */
+    /** WebGPU real-time factor, null if unavailable or failed. */
     gpuRtFactor?: number | null;
     /** DirectML GPU inference time (ms), null if unavailable or failed. */
     dmlMedianMs?: number | null;
     /** DirectML GPU real-time factor, null if unavailable or failed. */
     dmlRtFactor?: number | null;
     benchmarkSamples: number;
-    /** True when OpenCL EP was available and used for GPU benchmark. */
+    /** True when WebGPU EP was available and used for GPU benchmark. */
     gpuAvailable: boolean;
     /** True when DirectML EP was available and used for benchmark. */
     dmlAvailable: boolean;

@@ -41,7 +41,7 @@ fn emit_chunk_progress(_local: f64) {
 /// Tracks which execution provider was actually selected during session creation.
 static ACTIVE_EP: OnceLock<String> = OnceLock::new();
 
-/// Returns the EP that was actually used for the live session (e.g. "directml", "opencl", "cpu").
+/// Returns the EP that was actually used for the live session (e.g. "directml", "webgpu", "cpu").
 pub fn active_ep() -> String {
     ACTIVE_EP.get().cloned().unwrap_or_else(|| "unknown".to_string())
 }
@@ -2301,7 +2301,7 @@ pub struct BenchmarkResults {
     pub dml_median_ms: Option<f64>,
     pub dml_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
-    /// True when GPU EP was available and used for the GPU benchmark.
+    /// True when WebGPU EP was available and used for the GPU benchmark.
     pub gpu_available: bool,
     /// True when DirectML EP was available and used for the benchmark.
     pub dml_available: bool,
@@ -2331,7 +2331,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
-    let gpu_available = available_providers.iter().any(|p| p.contains("OpenCL"));
+    let gpu_available = available_providers.iter().any(|p| p.contains("WebGpu"));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
@@ -2380,25 +2380,42 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     eprintln!("[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
         t_cpu_total.elapsed().as_millis(), cpu_times);
 
-    // 2. Benchmark GPU (OpenCL) if available
+    // 2. Benchmark GPU (WebGPU) if available
     let mut gpu_median = None;
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
 
-    let opencl_available = available_providers.iter().any(|p| p.contains("OpenCL"));
-    if opencl_available {
+    let webgpu_available = available_providers.iter().any(|p| p.contains("WebGpu"));
+    if webgpu_available {
         let gpu_session_res = {
-            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("opencl".to_string());
+            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("webgpu".to_string());
             crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
         };
 
         if let Ok((mut gpu_session, ep)) = gpu_session_res {
-            if ep == "opencl" {
+            if ep == "webgpu" {
+                eprintln!("[benchmark] WebGPU session created: ep={ep}");
                 let mel = vec![0.0f32; cfg.num_mels * frames];
                 let f0 = vec![440.0f32; frames];
-                let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
-                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
-                if gpu_session.run(ort::inputs![mt, ft]).is_ok() {
+
+                // Warmup: test if WebGPU inference actually works.
+                // Use a block scope to ensure the SessionOutputs borrow
+                // is dropped before we borrow gpu_session again below.
+                let warmup_ok = {
+                    let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+                    let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                    match gpu_session.run(ort::inputs![mt, ft]) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!(
+                                "[benchmark] WARNING: WebGPU EP registered but warmup inference FAILED: {e}"
+                            );
+                            false
+                        }
+                    }
+                };
+
+                if warmup_ok {
                     gpu_actually_working = true;
                     let mut gpu_times = Vec::new();
                     for _ in 0..runs {
@@ -2412,12 +2429,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     let median = gpu_times[gpu_times.len() / 2];
                     gpu_median = Some(median);
                     gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                } else {
-                    eprintln!(
-                        "[benchmark] WARNING: OpenCL EP registered but warmup inference FAILED."
-                    );
+                    eprintln!("[benchmark] WebGPU: median={median:.1}ms rtf={:.3}x",
+                        audio_sec / (median / 1000.0));
                 }
             }
+        } else {
+            eprintln!("[benchmark] WebGPU session creation FAILED: {:?}", gpu_session_res.err());
         }
     }
 

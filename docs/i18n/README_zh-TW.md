@@ -228,7 +228,7 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 | Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自動下載，支援 NVIDIA / AMD / Intel Arc |
 | macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自動啟用                     |
 | macOS x86_64 (Intel)        | —                     | 僅 CPU                                            |
-| Linux x86_64 / ARM64        | —                     | 僅 CPU（ONNX Runtime 不原生支援 OpenCL）          |
+| Linux x86_64 / ARM64        | —                     | WebGPU（Dawn/Vulkan），CPU 回退                    |
 
 #### 所有平台
 

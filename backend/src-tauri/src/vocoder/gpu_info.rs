@@ -6,7 +6,7 @@
 //! covers all laptop and most desktop setups).
 //!
 //! This is used by the frontend to let users select which GPU to use for
-//! ONNX Runtime GPU inference (DirectML, OpenCL, etc.), and by the benchmark
+//! ONNX Runtime GPU inference (DirectML, WebGPU, etc.), and by the benchmark
 //! to report which physical GPU participated in the test.
 
 use serde::Serialize;

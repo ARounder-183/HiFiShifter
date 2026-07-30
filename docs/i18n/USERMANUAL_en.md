@@ -61,7 +61,7 @@ The `Options` menu allows you to modify various settings of HiFiShifter.
 
 - `Project Stretch Override`: Allows you to modify the current project's stretching algorithm.
 - `Global Stretch Default`: Allows you to modify the default global stretching algorithm.
-- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU`. You can run a benchmark from this menu to test the performance of each device (the benchmark will show specific backends such as GPU (DirectML), GPU (OpenCL), etc.). `GPU` is only available in the corresponding GPU build of HiFiShifter.
+- `Inference Device`: Allows you to set the inference device used for rendering. Currently supports `Auto`, `CPU`, and `GPU`. You can run a benchmark from this menu to test the performance of each device (the benchmark will show specific backends such as GPU (DirectML), GPU (WebGPU), etc.). `GPU` is only available in the corresponding GPU build of HiFiShifter.
 - `Background Pre-render`: When enabled, after opening a project or editing parameters, the edited parameters are automatically pre-rendered in the background, and you can play the already-rendered portions even while rendering is still in progress. When disabled, rendering only begins when playback starts, and you must wait for rendering to complete before the timeline plays normally. Enabled by default. Disabling it reduces rendering frequency and saves performance.
 - `Keyboard Shortcuts`: Allows you to configure HiFiShifter's keybindings. Several presets are available.
 
