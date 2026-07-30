@@ -489,11 +489,23 @@ static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::
 static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Drop the shared ORT session to release GPU memory. Called on app exit.
+///
+/// Uses try_lock with a short spin to avoid blocking indefinitely if
+/// another thread is stuck holding the session lock (e.g. during a
+/// hung GPU operation on WSL2/Lavapipe).
 pub fn drop_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+        // Try to acquire the lock for up to ~500ms before giving up.
+        // At shutdown we don't want to block the main thread forever.
+        for _ in 0..10 {
+            if let Ok(mut guard) = mutex.try_lock() {
+                *guard = None;
+                eprintln!("[nsf_hifigan] shared session dropped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        eprintln!("[nsf_hifigan] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 

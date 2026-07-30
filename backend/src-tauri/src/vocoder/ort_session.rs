@@ -377,8 +377,10 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     // ── Linux x86_64: WebGPU first, then CPU ───────────────────────────
     // NOTE: Linux ARM64 does NOT have the webgpu feature (no prebuilt
     // ORT binary for aarch64+wgpu), so this block is excluded there.
+    // NOTE: WSL2 is skipped because Dawn/Vulkan init hangs at shutdown
+    // even when WebGPU sessions are never used for inference.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    if choice == "auto" || choice == "webgpu" || choice == "gpu" {
+    if (choice == "auto" || choice == "webgpu" || choice == "gpu") && !is_wsl2() {
         match Session::builder() {
             Ok(builder) => {
                 match try_register_webgpu_ep(builder, role) {
@@ -403,6 +405,60 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
 
     // ── Fallback: CPU ──────────────────────────────────────────────────
     build_cpu_session(onnx_path, role, &choice)
+}
+
+/// Run a minimal inference through a newly-created GPU session to
+/// verify that the EP can actually execute compute shaders.  On some
+/// platforms (WSL2 with Lavapipe, misconfigured drivers, headless
+/// systems) the EP registers successfully but runtime inference fails
+/// — this catches that early so we can fall back to CPU.
+fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: &str) -> Result<(), String> {
+    use ort::value::{Tensor, ValueType};
+
+    // Collect f32 tensor inputs from the session metadata.
+    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::new();
+    for input in session.inputs() {
+        let (tensor_ty, shape) = match input.dtype() {
+            ValueType::Tensor { ty, shape, .. } => (ty, shape),
+            _ => continue,
+        };
+        if *tensor_ty != ort::value::TensorElementType::Float32 {
+            continue;
+        }
+        if shape.iter().any(|&d| d == 0) {
+            continue; // scalar or zero-dim — skip
+        }
+        // Replace dynamic dimensions (-1) with small test values:
+        //   dim 0 → 1 (batch),  other dims → 4 (one upsampling hop).
+        let test_shape: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
+            .collect();
+        let total: usize = test_shape.iter().product::<usize>().max(1);
+        let data: Vec<f32> = vec![0.0f32; total];
+        let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
+            .map_err(|e| format!("smoke test: tensor '{}' creation failed: {e}", input.name()))?;
+        input_pairs.push((input.name().to_string(), tensor.into()));
+    }
+
+    if input_pairs.is_empty() {
+        eprintln!("ort_session[{role:?}]: GPU smoke test skipped (no f32 tensor inputs)");
+        return Ok(());
+    }
+
+    session
+        .run(input_pairs)
+        .map_err(|e| {
+            format!(
+                "{ep_name} inference is not functional on this system. \
+                 The EP registered but compute shader execution failed: {e}. \
+                 Falling back to CPU."
+            )
+        })?;
+
+    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed — EP is functional");
+    Ok(())
 }
 
 /// Finalize a WebGPU session with appropriate optimization settings.
@@ -436,7 +492,7 @@ fn build_webgpu_session_finalize(
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
     let t_create = std::time::Instant::now();
-    let session = builder
+    let mut session = builder
         .commit_from_file(onnx_path)
         .map_err(|e| {
             let msg = format!(
@@ -463,6 +519,22 @@ fn build_webgpu_session_finalize(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
             role, output.name(), output.dtype()
         );
+    }
+
+    // ── Smoke test: verify WebGPU can actually run inference ──────────
+    // On some platforms (WSL2 with Lavapipe, headless systems, etc.)
+    // the WebGPU EP registers successfully (Dawn finds a Vulkan device)
+    // but compute shader execution fails at runtime.  Running a tiny
+    // inference now catches this early and lets us fall back to CPU
+    // instead of silently returning a broken session.
+    match smoke_test_gpu_session(&mut session, role, "WebGPU") {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("ort_session[{role:?}]: WebGPU smoke test failed, discarding session and falling back to CPU: {e}");
+            // Drop the session so ORT releases any partially-allocated GPU resources
+            drop(session);
+            return Err(e);
+        }
     }
 
     Ok(session)
@@ -546,7 +618,7 @@ fn build_dml_session_inner(
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
     let t_create = std::time::Instant::now();
-    let session = builder
+    let mut session = builder
         .commit_from_file(onnx_path)
         .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
     let create_ms = t_create.elapsed().as_millis();
@@ -567,6 +639,16 @@ fn build_dml_session_inner(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
             role, output.name(), output.dtype()
         );
+    }
+
+    // ── Smoke test: verify DirectML can actually run inference ─────────
+    match smoke_test_gpu_session(&mut session, role, "DirectML") {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
+            drop(session);
+            return Err(e);
+        }
     }
 
     Ok((session, selected.to_string()))
@@ -647,9 +729,10 @@ pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
     // WebGPU — compiled on Linux x86_64 / macOS ARM64 only.
-    // Excluded: Windows (Dawn/D3D12 crash risk), Linux ARM64 (no prebuilt binary).
+    // Excluded: Windows (Dawn/D3D12 crash risk), Linux ARM64 (no prebuilt binary),
+    //           WSL2 (Vulkan not available; Dawn init hangs at shutdown).
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
-    if probe_webgpu_ep_available() {
+    if !is_wsl2() && probe_webgpu_ep_available() {
         providers.push("WebGpuExecutionProvider".to_string());
     }
 
