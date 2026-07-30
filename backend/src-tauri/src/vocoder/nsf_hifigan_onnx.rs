@@ -2331,7 +2331,10 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
-    let gpu_available = available_providers.iter().any(|p| p.contains("WebGpu"));
+    // WebGPU is only compiled on Linux and macOS ARM64 (Dawn/Vulkan, Dawn/Metal).
+    // Windows uses DirectML instead (Dawn/D3D12 can cause native crashes).
+    // macOS x86_64 uses ort-tract (no GPU acceleration).
+    let gpu_available = cfg!(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
@@ -2385,8 +2388,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
 
-    let webgpu_available = available_providers.iter().any(|p| p.contains("WebGpu"));
-    if webgpu_available {
+    // Always attempt WebGPU benchmark on supported platforms.
+    // On Windows, we don't auto-probe WebGPU (Dawn/D3D12 can crash),
+    // but the benchmark explicitly forces "webgpu" EP choice which is
+    // safe because it only triggers Dawn init within the benchmark's
+    // controlled scope.
+    if gpu_available {
         let gpu_session_res = {
             let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("webgpu".to_string());
             crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)

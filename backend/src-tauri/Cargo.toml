@@ -72,14 +72,20 @@ vslib = []
 # via the `download-binaries` feature.
 #
 # GPU strategy by platform:
-#   Windows  → DirectML (DX12) + WebGPU (Dawn/D3D12 backend)
+#   Windows  → DirectML (DX12, proven stable)
 #   Linux    → WebGPU (Dawn/Vulkan backend)
 #   macOS ARM→ CoreML (ANE) + WebGPU (Dawn/Metal backend)
 #   macOS x64→ CPU only (ort-tract alternative backend)
+#
+# NOTE: WebGPU is NOT enabled on Windows. The Dawn/D3D12 backend in
+# the +wgpu prebuilt ORT binary causes native crashes on some GPU/driver
+# combinations during static initialization. DirectML is the mature,
+# stable GPU path for Windows. WebGPU on Linux & macOS ARM uses
+# Dawn/Vulkan and Dawn/Metal respectively, which are stable.
 
-# Windows — DirectML + WebGPU (Dawn/D3D12)
+# Windows — DirectML (DX12, stable)
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "webgpu", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
 # DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
 windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
 

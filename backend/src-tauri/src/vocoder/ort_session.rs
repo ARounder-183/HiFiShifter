@@ -141,17 +141,18 @@ pub enum OrtSessionRole {
 ///
 /// Uses the ort crate's high-level `ep::WebGPU` type. The WebGPU EP
 /// leverages Dawn (Google's WebGPU implementation) with platform-native
-/// backends: D3D12 on Windows, Vulkan on Linux, Metal on macOS.
+/// backends: Vulkan on Linux, Metal on macOS.
 ///
-/// On WSL2, Vulkan hardware acceleration is not directly available
-/// (the Windows GPU driver does not expose Vulkan to Linux guests).
+/// **Not compiled on Windows.** The Dawn/D3D12 backend in the `+wgpu`
+/// ORT static binary can cause native crashes during D3D12 device
+/// initialization on some GPU/driver combinations. Windows uses
+/// DirectML instead, which is the mature, stable GPU path.
+///
+/// On WSL2, Vulkan hardware acceleration is not directly available.
 /// Mesa's Lavapipe software renderer may work but with poor performance.
 /// The EP will gracefully fall back to CPU if Dawn cannot find a
 /// usable Vulkan device.
-///
-/// WebGPU prebuilt binaries are available from the ort crate's
-/// `download-binaries` for: x86_64 Windows, x86_64 Linux, ARM64 macOS.
-/// On other targets, this call fails gracefully.
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -161,14 +162,39 @@ fn try_register_webgpu_ep(
 
     // On Linux, Dawn uses the Vulkan backend. Configure it explicitly
     // and disable features that may cause issues on software renderers.
-    let wgpu = if cfg!(target_os = "linux") {
-        ort::ep::WebGPU::default()
-            .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
-            .with_validation_mode(ort::ep::webgpu::ValidationMode::Disabled)
-            .with_enable_graph_capture(false)
-            .build()
-    } else {
-        ort::ep::WebGPU::default().build()
+    //
+    // On Windows, Dawn auto-selects D3D12. We don't try to force a
+    // backend because the option string format differs between ORT
+    // versions and an incorrect value can crash Dawn internally.
+    //
+    // IMPORTANT: WebGPU EP registration calls into Dawn native code.
+    // On some GPU/driver combinations this can crash at the C level.
+    // We wrap the registration in catch_unwind, but note that C-level
+    // SIGSEGV cannot be caught — the best defense is to not auto-probe
+    // WebGPU on Windows (which we already avoid).
+    let wgpu = {
+        let result = std::panic::catch_unwind(|| {
+            if cfg!(target_os = "linux") {
+                ort::ep::WebGPU::default()
+                    .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
+                    .with_validation_mode(ort::ep::webgpu::ValidationMode::Disabled)
+                    .with_enable_graph_capture(false)
+                    .build()
+            } else {
+                ort::ep::WebGPU::default().build()
+            }
+        });
+        match result {
+            Ok(ep) => ep,
+            Err(panic) => {
+                let msg = format!(
+                    "WebGPU EP build panicked: {}",
+                    panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+                );
+                eprintln!("ort_session: {msg}");
+                return Err(msg);
+            }
+        }
     };
 
     let wsl_note = if is_wsl {
@@ -177,19 +203,45 @@ fn try_register_webgpu_ep(
         ""
     };
 
-    builder
-        .with_execution_providers([wgpu])
-        .map(|b| {
+    // Wrap the actual EP registration in catch_unwind as well.
+    // Dawn init happens inside with_execution_providers() → register().
+    let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builder.with_execution_providers([wgpu.clone()])
+    }));
+
+    match register_result {
+        Ok(Ok(b)) => {
             eprintln!("ort_session: WebGPU EP registered successfully{wsl_note}");
-            (b, "webgpu")
-        })
-        .map_err(|e| {
+            Ok((b, "webgpu"))
+        }
+        Ok(Err(e)) => {
             let msg = format!(
                 "WebGPU EP registration failed: {e}{wsl_note}"
             );
             eprintln!("ort_session: {msg}");
-            msg
-        })
+            Err(msg)
+        }
+        Err(panic) => {
+            let msg = format!(
+                "WebGPU EP registration panicked (likely Dawn/D3D12 init crash): {}{wsl_note}",
+                panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+            );
+            eprintln!("ort_session: {msg}");
+            log_vulkan_diagnostics();
+            Err(msg)
+        }
+    }
+}
+
+/// Stub: WebGPU EP not compiled on this platform (Windows, macOS x86_64).
+/// On these platforms, DirectML (Windows) or CPU fallback is used instead.
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
+fn try_register_webgpu_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let _ = (builder, _role);
+    Err("WebGPU EP is not compiled on this platform. Use DirectML (Windows) or CPU.".to_string())
 }
 
 /// Check if we're running under WSL2 (Windows Subsystem for Linux).
@@ -283,9 +335,13 @@ fn try_register_directml_ep(
 /// building sessions ad-hoc with inconsistent settings.
 ///
 /// EP selection priority (for choice="auto"):
-///   1. WebGPU (cross-platform, Dawn backend)
-///   2. DirectML (Windows only, DX12 backend)
-///   3. CPU fallback
+///   Windows:  1. DirectML (DX12, proven stable)  2. CPU fallback
+///   Linux:    1. WebGPU (Dawn/Vulkan)            2. CPU fallback
+///
+/// WebGPU on Windows is only used when explicitly selected
+/// (choice="webgpu"), because Dawn/D3D12 probing can crash on some
+/// GPU/driver combinations.  On Linux, Dawn/Vulkan is the primary
+/// GPU path since there is no DirectML alternative.
 ///
 /// Returns `(Session, selected_ep_name)`.
 pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Session, String), String> {
@@ -295,7 +351,31 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         return build_cpu_session(onnx_path, role, &choice);
     }
 
-    // ── GPU path: try WebGPU first (cross-platform) ─────────────────────
+    // ── Windows: DirectML first (proven stable, no crash risk) ─────────
+    #[cfg(target_os = "windows")]
+    if choice == "auto" || choice == "directml" || choice == "gpu" {
+        // DirectML with strict mode first, then with fallback
+        match build_dml_session_inner(onnx_path, role, &choice, true) {
+            Ok((session, ep)) => return Ok((session, ep)),
+            Err(e) => eprintln!(
+                "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+            ),
+        }
+        match build_dml_session_inner(onnx_path, role, &choice, false) {
+            Ok((session, ep)) => return Ok((session, ep)),
+            Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
+        }
+    }
+
+    // ── Windows: WebGPU not compiled (uses DirectML instead) ──────────
+    #[cfg(target_os = "windows")]
+    if choice == "webgpu" {
+        eprintln!("ort_session[{role:?}]: WebGPU is not available on Windows. Use DirectML ('auto' or 'directml' or 'gpu') for GPU acceleration, or 'cpu' for CPU-only.");
+        // Fall through to CPU below.
+    }
+
+    // ── Linux: WebGPU first, then CPU ──────────────────────────────────
+    #[cfg(target_os = "linux")]
     if choice == "auto" || choice == "webgpu" || choice == "gpu" {
         match Session::builder() {
             Ok(builder) => {
@@ -319,32 +399,12 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         }
     }
 
-    // ── GPU path: try DirectML (Windows) ────────────────────────────────
-    if choice == "auto" || choice == "directml" {
-        #[cfg(target_os = "windows")]
-        {
-            // Attempt 1: strict DirectML (no CPU fallback).
-            // If all operators in the model have native DirectML support,
-            // the entire graph runs on GPU with ZERO partition boundaries.
-            match build_dml_session_inner(onnx_path, role, &choice, true) {
-                Ok((session, ep)) => return Ok((session, ep)),
-                Err(e) => eprintln!(
-                    "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
-                ),
-            }
-            // Attempt 2: DirectML with CPU fallback.
-            match build_dml_session_inner(onnx_path, role, &choice, false) {
-                Ok((session, ep)) => return Ok((session, ep)),
-                Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
-            }
-        }
-    }
-
     // ── Fallback: CPU ──────────────────────────────────────────────────
     build_cpu_session(onnx_path, role, &choice)
 }
 
 /// Finalize a WebGPU session with appropriate optimization settings.
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 fn build_webgpu_session_finalize(
     mut builder: ort::session::builder::SessionBuilder,
     onnx_path: &Path,
@@ -576,10 +636,18 @@ pub struct GpuDiagnostic {
 /// Enumerate available ONNX Runtime execution providers.
 ///
 /// Checks each provider by attempting to query its availability through ORT.
+///
+/// NOTE: WebGPU probing is ONLY performed on Linux, where Dawn uses the
+/// Vulkan backend which is safe to probe. On Windows, Dawn uses D3D12
+/// and probing can trigger native crashes on some GPU/driver combos.
+/// WebGPU on Windows is only used when the user explicitly selects it.
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
-    // WebGPU — cross-platform (Dawn/D3D12/Vulkan/Metal)
+    // WebGPU — compiled on Linux/macOS ARM only (Dawn/Vulkan, Dawn/Metal).
+    // Windows is excluded because the Dawn/D3D12 backend in the +wgpu ORT
+    // static binary can cause native crashes during device initialization.
+    #[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
     if probe_webgpu_ep_available() {
         providers.push("WebGpuExecutionProvider".to_string());
     }
@@ -594,29 +662,46 @@ pub fn diagnose_available_providers() -> Vec<String> {
 
 /// Quick check: try registering WebGPU EP on a temporary session builder.
 /// Returns true if WebGPU EP is available in the loaded ORT binary.
+///
+/// Wrapped in catch_unwind because Dawn native code (Vulkan init)
+/// can crash on some platforms. Only compiled on Linux/macOS ARM
+/// where Dawn/Vulkan and Dawn/Metal are stable backends.
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))]
 fn probe_webgpu_ep_available() -> bool {
-    match Session::builder() {
-        Ok(builder) => {
-            let wgpu = if cfg!(target_os = "linux") {
-                ort::ep::WebGPU::default()
-                    .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
-                    .build()
-            } else {
-                ort::ep::WebGPU::default().build()
-            };
-            match builder.with_execution_providers([wgpu]) {
-                Ok(_) => {
-                    eprintln!("ort_session: probe_webgpu_ep — AVAILABLE");
-                    true
-                }
-                Err(e) => {
-                    eprintln!("ort_session: probe_webgpu_ep — NOT available: {e}");
-                    false
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match Session::builder() {
+            Ok(builder) => {
+                let wgpu = if cfg!(target_os = "linux") {
+                    ort::ep::WebGPU::default()
+                        .with_dawn_backend_type(ort::ep::webgpu::DawnBackendType::Vulkan)
+                        .build()
+                } else {
+                    ort::ep::WebGPU::default().build()
+                };
+                match builder.with_execution_providers([wgpu]) {
+                    Ok(_) => {
+                        eprintln!("ort_session: probe_webgpu_ep — AVAILABLE");
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("ort_session: probe_webgpu_ep — NOT available: {e}");
+                        false
+                    }
                 }
             }
+            Err(e) => {
+                eprintln!("ort_session: probe_webgpu_ep — session builder failed: {e}");
+                false
+            }
         }
-        Err(e) => {
-            eprintln!("ort_session: probe_webgpu_ep — session builder failed: {e}");
+    }));
+
+    match result {
+        Ok(available) => available,
+        Err(panic) => {
+            let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
+            eprintln!("ort_session: probe_webgpu_ep — PANICKED: {msg}");
+            log_vulkan_diagnostics();
             false
         }
     }
