@@ -574,7 +574,8 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
     let available_providers = diagnose_available_providers();
     let selected_ep = env_ep_choice();
     let gpu_device_id = 0;
-    let ort_build_info = ort::info().to_string();
+    let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
+        .unwrap_or_else(|_| "ort::info() unavailable".to_string());
 
     GpuDiagnostic {
         available_providers,

@@ -28,11 +28,13 @@ fn hnsep_cache_initial_capacity() -> usize {
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
-        if !ort::init()
-            .with_name("hifishifter")
-            .commit()
-        {
-            return Err("ort init failed".to_string());
+        // commit() returns false if the global ORT environment was already
+        // committed by another module — that's fine, the active environment
+        // remains valid. We still need to ensure the OrtEnv is created.
+        ort::init().with_name("hifishifter").commit();
+
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
         }
         Ok(())
     }) {
@@ -78,7 +80,11 @@ fn resolve_model_path() -> Result<PathBuf, String> {
         return Ok(onnx);
     }
 
-    if let Some(dir) = crate::hnsep_model_dir().map(|p| p.to_path_buf()).or_else(default_model_dir_guess) {
+    if let Some(dir) = crate::hnsep_model_dir()
+        .map(|p| p.to_path_buf())
+        .or_else(|| env_path("HIFISHIFTER_HNSEP_MODEL_DIR"))
+        .or_else(default_model_dir_guess)
+    {
         let onnx = dir.join("hnsep.onnx");
         if onnx.is_file() {
             return Ok(onnx);

@@ -48,12 +48,19 @@ pub fn active_ep() -> String {
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
-        if !ort::init()
-            .with_name("hifishifter")
-            .commit()
-        {
-            return Err("ort init failed".to_string());
+        // Try to commit our desired environment config (name, etc.).
+        // If commit() returns false, the environment was already committed
+        // by another module (e.g. FCPE or HNSEP init ran first) — that's
+        // perfectly fine; the active environment is still valid.
+        ort::init().with_name("hifishifter").commit();
+
+        // Ensure the environment is actually created before we proceed.
+        // Environment::current() lazily creates the OrtEnv from the committed
+        // options and caches it for all subsequent calls.
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
         }
+
         eprintln!("[ort] initialized: {}", ort::info());
         let providers = crate::vocoder_ort_session::diagnose_available_providers();
         eprintln!("[ort] available providers: {providers:?}");

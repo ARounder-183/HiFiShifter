@@ -46,11 +46,13 @@ static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
-        if !ort::init()
-            .with_name("hifishifter")
-            .commit()
-        {
-            return Err("ort init failed".to_string());
+        // commit() returns false if the global ORT environment was already
+        // committed by another module — that's fine, the active environment
+        // remains valid. We still need to ensure the OrtEnv is created.
+        ort::init().with_name("hifishifter").commit();
+
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
         }
         Ok(())
     }) {
@@ -102,6 +104,10 @@ fn default_model_guess() -> Option<PathBuf> {
 }
 
 fn resolve_model_path() -> Result<PathBuf, String> {
+    if let Some(onnx) = env_path("HIFISHIFTER_FCPE_ONNX") {
+        return Ok(onnx);
+    }
+
     if let Some(onnx) = crate::fcpe_onnx_path().map(|p| p.to_path_buf()) {
         return Ok(onnx);
     }
