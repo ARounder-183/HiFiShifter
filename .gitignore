@@ -184,3 +184,13 @@ temp_ort_setup/
 # DirectML.dll copied by build.rs from ORT build output for Tauri bundling
 backend/src-tauri/resources/DirectML.dll
 
+# Node.js dependencies (frontend/node_modules is covered by frontend/.gitignore;
+# this catches accidental npm install at project root)
+node_modules/
+
+# Temporary AppImage extraction directories (created by --appimage-extract)
+squashfs-root/
+
+# AppImage build artifacts (may be generated in CWD by linuxdeploy)
+*.AppImage
+

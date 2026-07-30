@@ -13,7 +13,7 @@ mod traits;
 mod utils;
 pub(crate) mod world;
 
-#[cfg(feature = "vslib")]
+#[cfg(all(feature = "vslib", target_os = "windows"))]
 pub(crate) mod vslib_processor;
 
 pub use chain::ProcessingStage;
@@ -31,7 +31,7 @@ use crate::state::SynthPipelineKind;
 
 static WORLD_RENDERER: world::WorldRenderer = world::WorldRenderer;
 static HIFIGAN_RENDERER: hifigan::HiFiGanRenderer = hifigan::HiFiGanRenderer;
-#[cfg(feature = "vslib")]
+#[cfg(all(feature = "vslib", target_os = "windows"))]
 static VSLIB_RENDERER: vslib_processor::VslibRenderer = vslib_processor::VslibRenderer;
 
 // ─── 注册表 ────────────────────────────────────────────────────────────────────
@@ -44,8 +44,10 @@ pub fn get_renderer(kind: SynthPipelineKind) -> &'static dyn Renderer {
     match kind {
         SynthPipelineKind::WorldVocoder => &WORLD_RENDERER,
         SynthPipelineKind::NsfHifiganOnnx => &HIFIGAN_RENDERER,
-        #[cfg(feature = "vslib")]
+        #[cfg(all(feature = "vslib", target_os = "windows"))]
         SynthPipelineKind::VocalShifterVslib => &VSLIB_RENDERER,
+        #[cfg(all(feature = "vslib", not(target_os = "windows")))]
+        SynthPipelineKind::VocalShifterVslib => &HIFIGAN_RENDERER,
     }
 }
 
@@ -65,8 +67,10 @@ pub fn get_processor(kind: SynthPipelineKind) -> Box<dyn ClipProcessor> {
     match kind {
         SynthPipelineKind::WorldVocoder => Box::new(chain::world_chain()),
         SynthPipelineKind::NsfHifiganOnnx => Box::new(chain::hifigan_chain()),
-        #[cfg(feature = "vslib")]
+        #[cfg(all(feature = "vslib", target_os = "windows"))]
         SynthPipelineKind::VocalShifterVslib => Box::new(vslib_processor::VslibProcessor),
+        #[cfg(all(feature = "vslib", not(target_os = "windows")))]
+        SynthPipelineKind::VocalShifterVslib => Box::new(chain::hifigan_chain()),
     }
 }
 

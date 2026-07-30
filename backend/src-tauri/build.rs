@@ -555,12 +555,17 @@ fn build_soundtouch() {
     println!("cargo:rustc-link-search=native={}", lib_search.display());
     println!("cargo:rustc-link-lib=dylib={}", lib_name);
 
-    // Set rpath so the binary finds the shared library in its own directory at runtime.
+    // Set rpath so the binary finds the shared library at runtime.
     // Linux/ELF uses `$ORIGIN`, while macOS uses dyld-specific loader paths.
+    // Two rpaths are needed:
+    //   1. $ORIGIN — finds libSoundTouchDLL.so next to the binary (e.g. target/release/)
+    //   2. $ORIGIN/../lib/HiFiShifter — finds it in the AppImage AppDir layout
+    //      (binary at usr/bin/, .so at usr/lib/HiFiShifter/)
     if is_apple {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if !is_windows {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/HiFiShifter");
     }
 
     // Step 5: Copy shared library to target dir (for runtime linking) AND to

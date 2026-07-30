@@ -146,7 +146,7 @@ pub enum OrtSessionRole {
 /// ensure `ensure_ort_init()` has succeeded before calling this function.
 #[cfg(target_os = "linux")]
 fn try_register_opencl_ep(
-    builder: ort::session::builder::SessionBuilder,
+    mut builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
     use ort::AsPointer;

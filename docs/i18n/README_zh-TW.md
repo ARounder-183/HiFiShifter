@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+請確保已安裝以下工具：
+
+- **Node.js**（建議 20+）及 npm
+- **Rust 工具鏈**（參見 `rust-toolchain.toml`，專案會自動選擇對應平台的 stable 工具鏈）
+- **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
+- **CMake**、**pkg-config** 及系統構建工具
+- **GTK3、WebKit2GTK、ALSA** 等 Tauri 執行時開發函式庫（詳見安裝腳本）
+
+執行一鍵安裝腳本：
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+腳本會自動安裝系統依賴、Node.js（如未安裝）、appimagetool 及前端 npm 依賴。
+
+安裝前端依賴（如未使用腳本）：
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage 構建
+
+由於 `vslib` 演算法僅限 Windows，Linux 構建需要禁用預設 feature：
+
+```bash
+# 進入 backend 目錄執行（tauri.conf.json 中路徑相對於此目錄）
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+或使用提供的輔助腳本：
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **注意：** WSL2 環境下因缺少 FUSE 支援，Tauri bundler 的 linuxdeploy 步驟可能失敗（錯誤：`failed to run linuxdeploy`）。這是 WSL2 已知限制，不影響實際 AppImage 產出——AppDir 已正確組裝在 `target/release/bundle/appimage/` 中。可設定 `APPIMAGE_EXTRACT_AND_RUN=1` 後手動執行 `appimagetool` 打包。在真實 Linux 機器與 CI 中不存在此問題。
 
 ### 3. SoundTouch 原始碼
 
@@ -198,12 +234,17 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 
 ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。
 
-```powershell
+```bash
 # 開發模式（熱更新）
+cd backend
 cargo tauri dev
 
 # 構建 Release
+# Windows / macOS（預設 features：onnx + vslib）
 cargo tauri build
+
+# Linux（vslib 僅限 Windows，需排除預設 feature）
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows 可攜版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild

@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+다음 도구가 설치되어 있는지 확인하세요:
+
+- **Node.js** (권장 20+) 및 npm
+- **Rust 툴체인** (`rust-toolchain.toml` 참조 — 프로젝트가 자동으로 플랫폼에 맞는 stable 툴체인을 선택합니다)
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**, **pkg-config** 및 시스템 빌드 도구
+- **GTK3, WebKit2GTK, ALSA** 등 Tauri 런타임 개발 라이브러리 (아래 설치 스크립트 참조)
+
+원클릭 설치 스크립트 실행:
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+이 스크립트는 시스템 종속성, Node.js(없는 경우), appimagetool 및 프론트엔드 npm 종속성을 설치합니다.
+
+프론트엔드 종속성 설치 (스크립트를 사용하지 않는 경우):
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage 빌드
+
+`vslib` 알고리즘은 Windows 전용이므로 Linux 빌드에서는 기본 기능을 비활성화해야 합니다:
+
+```bash
+# backend/ 디렉토리에서 실행 (tauri.conf.json의 경로는 이 디렉토리를 기준으로 합니다)
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+또는 제공된 헬퍼 스크립트를 사용:
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **참고:** WSL2 환경에서는 FUSE 지원이 없기 때문에 Tauri bundler의 linuxdeploy 단계가 실패할 수 있습니다 (오류: `failed to run linuxdeploy`). 이는 WSL2의 알려진 제한 사항이며 실제 AppImage 출력에는 영향을 미치지 않습니다 — AppDir은 `target/release/bundle/appimage/`에 올바르게 조립됩니다. `APPIMAGE_EXTRACT_AND_RUN=1`을 설정하고 수동으로 `appimagetool`을 실행하여 패키징하세요. 이 문제는 실제 Linux 머신이나 CI에서는 발생하지 않습니다.
 
 ### 3. SoundTouch 소스
 
@@ -198,12 +234,17 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 
 ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌드 시 자동 다운로드됩니다. 수동 설정이 필요하지 않습니다.
 
-```powershell
+```bash
 # 개발 모드 (핫 리로드)
+cd backend
 cargo tauri dev
 
 # 릴리스 빌드
+# Windows / macOS (기본 기능: onnx + vslib)
 cargo tauri build
+
+# Linux (vslib은 Windows 전용이므로 기본 기능 제외)
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows 휴대용 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild

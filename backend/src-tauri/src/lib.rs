@@ -101,7 +101,7 @@ mod time_stretch;
 mod vocalshifter_clipboard;
 #[path = "import/vocalshifter_import.rs"]
 mod vocalshifter_import;
-#[cfg(feature = "vslib")]
+#[cfg(all(feature = "vslib", target_os = "windows"))]
 #[path = "vocoder/vslib.rs"]
 mod vslib;
 #[path = "vocoder/world_vocoder.rs"]

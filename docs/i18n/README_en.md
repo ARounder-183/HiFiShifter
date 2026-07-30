@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+Make sure the following tools are installed:
+
+- **Node.js** (recommended 20+) and npm
+- **Rust toolchain** (see `rust-toolchain.toml` — the project auto-selects the correct platform stable toolchain)
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**, **pkg-config**, and system build tools
+- **GTK3, WebKit2GTK, ALSA** and other Tauri runtime dev libraries (see install script below)
+
+Run the one-click install script:
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+This script installs system dependencies, Node.js (if missing), appimagetool, and frontend npm dependencies.
+
+Install frontend dependencies (if not using the script):
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage Build
+
+The `vslib` algorithm is Windows-only, so Linux builds must disable the default feature:
+
+```bash
+# Run from the backend/ directory (paths in tauri.conf.json are relative to it)
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+Or use the provided helper script:
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **Note:** On WSL2, the Tauri bundler's linuxdeploy step may fail due to missing FUSE support (error: `failed to run linuxdeploy`). This is a known WSL2 limitation and does not affect the actual AppImage output — the AppDir is correctly assembled at `target/release/bundle/appimage/`. Set `APPIMAGE_EXTRACT_AND_RUN=1` and run `appimagetool` manually to package. This issue does not exist on real Linux machines or in CI.
 
 ### 3. SoundTouch Source
 
@@ -198,12 +234,17 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 
 ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed.
 
-```powershell
+```bash
 # Development mode (hot reload)
+cd backend
 cargo tauri dev
 
 # Build Release
+# Windows / macOS (default features: onnx + vslib)
 cargo tauri build
+
+# Linux (vslib is Windows-only; exclude default feature)
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
