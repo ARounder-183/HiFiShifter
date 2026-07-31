@@ -7,6 +7,8 @@
     resource files, models, and GPU-dependent DLLs (DirectML/WebGPU) from
     the build output directory and packages them into a portable .zip file.
     All DLLs located in the release directory are automatically collected.
+    Both the host-default target\release layout and the target\<triple>\release
+    layout produced by `--target` builds are supported.
 
 .PARAMETER SkipBuild
     Skip the build step and package from existing artifacts (useful when a
@@ -14,6 +16,11 @@
 
 .PARAMETER OutputDir
     Output directory, defaults to the dist folder under the project root.
+
+.PARAMETER TargetTriple
+    Optional Cargo target triple (e.g. x86_64-pc-windows-msvc) used by CI
+    when the build is invoked with `--target`. When omitted, the script
+    detects the release directory automatically.
 
 .EXAMPLE
     .\scripts\pack-portable.ps1
@@ -32,16 +39,122 @@ param(
     [switch]$SkipBuild,
     [switch]$NoZip,
     [string]$OutputDir,
-    [string]$Version
+    [string]$Version,
+    [string]$TargetTriple
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-ExeArchitecture {
+    param([string]$Path)
+
+    try {
+        $Stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $Reader = New-Object System.IO.BinaryReader($Stream)
+            try {
+                # MZ header
+                if ($Reader.ReadUInt16() -ne 0x5A4D) { return $null }
+
+                # PE header offset
+                [void]$Stream.Seek(0x3C, [System.IO.SeekOrigin]::Begin)
+                $PeOffset = $Reader.ReadInt32()
+                [void]$Stream.Seek($PeOffset, [System.IO.SeekOrigin]::Begin)
+
+                # PE signature
+                if ($Reader.ReadUInt32() -ne 0x00004550) { return $null }
+
+                switch ($Reader.ReadUInt16()) {
+                    0x8664 { return "x64" }
+                    0xAA64 { return "arm64" }
+                    0x014C { return "x86" }
+                    default { return $null }
+                }
+            }
+            finally {
+                $Reader.Dispose()
+            }
+        }
+        finally {
+            $Stream.Dispose()
+        }
+    }
+    catch {
+        return $null
+    }
+}
 
 # ===== Path definitions =====
 $ProjectRoot = Resolve-Path "$PSScriptRoot\.."
 $TauriDir = Join-Path $ProjectRoot "backend\src-tauri"
 $TauriTargetRoot = Join-Path $TauriDir "target"
 $SetVersionScript = Join-Path $ProjectRoot "scripts\set-version.ps1"
+
+function Resolve-TauriReleaseDir {
+    # A plain `cargo tauri build` now uses the host default target and writes
+    # to target/release; CI and explicit `--target` builds write to
+    # target/<triple>/release. Accept both layouts and pick the actual one.
+    $ReleaseCandidates = New-Object 'System.Collections.Generic.List[string]'
+    if ($script:TargetTriple) {
+        $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple "release")))
+    }
+    $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot "release"))
+    foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+        if (-not $script:TargetTriple -or $t -ne $script:TargetTriple) {
+            $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $t "release")))
+        }
+    }
+
+    $ResolvedRelease = $null
+    $ResolvedTriple = $null
+    $BestReleaseTime = [datetime]::MinValue
+    $ExplicitReleaseDir = if ($script:TargetTriple) {
+        Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple "release")
+    }
+    else {
+        $null
+    }
+
+    foreach ($Candidate in $ReleaseCandidates) {
+        $CandidateExe = Join-Path $Candidate "$($script:ProductName).exe"
+        if (-not (Test-Path $CandidateExe)) { continue }
+
+        $CandidateTime = (Get-Item $CandidateExe).LastWriteTime
+        # An explicitly requested triple is authoritative when its artifacts exist.
+        if ($ExplicitReleaseDir -and $Candidate -eq $ExplicitReleaseDir) {
+            $ResolvedRelease = $Candidate
+            $ResolvedTriple = $script:TargetTriple
+            $BestReleaseTime = $CandidateTime
+            break
+        }
+        if ($CandidateTime -gt $BestReleaseTime) {
+            $ResolvedRelease = $Candidate
+            $BestReleaseTime = $CandidateTime
+        }
+    }
+
+    if (-not $ResolvedRelease) {
+        if ($ExplicitReleaseDir) {
+            $ResolvedRelease = $ExplicitReleaseDir
+        }
+        else {
+            $ResolvedRelease = Join-Path $script:TauriTargetRoot "release"
+        }
+    }
+
+    # Remember which triple a triple-specific release directory belongs to.
+    foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+        if ($ResolvedRelease -eq (Join-Path $script:TauriTargetRoot (Join-Path $t "release"))) {
+            $ResolvedTriple = $t
+            break
+        }
+    }
+
+    return @{
+        ReleaseDir = $ResolvedRelease
+        Triple     = $ResolvedTriple
+    }
+}
 
 # If -Version is provided, update the version number first; subsequent build
 # and packaging will use that version.
@@ -57,29 +170,14 @@ if ($Version) {
     Write-Host "[Preprocessing] Version update completed [OK]" -ForegroundColor Green
 }
 
-# Detect target triple: prefer x86_64 but fall back to aarch64 if present.
-$DetectedTriple = $null
-$PossibleTriples = @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")
-foreach ($t in $PossibleTriples) {
-    $p = Join-Path $TauriTargetRoot (Join-Path $t "release")
-    if (Test-Path $p) {
-        $DetectedTriple = $t
-        $TargetRelease = $p
-        break
-    }
-}
-
-# If no triple-specific release directory exists yet, default to x86_64 path
-# (build may create it later).
-if (-not $DetectedTriple) {
-    $DetectedTriple = "x86_64-pc-windows-msvc"
-    $TargetRelease = Join-Path $TauriTargetRoot "x86_64-pc-windows-msvc\release"
-}
-
 # Read version and product name from tauri.conf.json
 $TauriConf = Get-Content (Join-Path $TauriDir "tauri.conf.json") -Raw | ConvertFrom-Json
 $ProductName = $TauriConf.productName
 $Version = $TauriConf.version
+
+$Resolved = Resolve-TauriReleaseDir
+$TargetRelease = $Resolved.ReleaseDir
+$DetectedTriple = $Resolved.Triple
 
 # Output directory
 if (-not $OutputDir) {
@@ -93,8 +191,15 @@ $TempDir = Join-Path $OutputDir $PortableDirName
 if ($DetectedTriple -like "*aarch64*") {
     $ArchShort = "arm64"
 }
-else {
+elseif ($DetectedTriple) {
     $ArchShort = "x64"
+}
+else {
+    # target/release has no triple in the path, so read the arch from the exe.
+    $ArchShort = Get-ExeArchitecture -Path (Join-Path $TargetRelease "$ProductName.exe")
+    if (-not $ArchShort) {
+        $ArchShort = if ($env:PROCESSOR_ARCHITECTURE -match "ARM64") { "arm64" } else { "x64" }
+    }
 }
 
 $ZipName = "$ProductName-v$Version-portable-win-$ArchShort.zip"
@@ -107,6 +212,7 @@ Write-Host ""
 Write-Host "  Product Name: $ProductName"
 Write-Host "  Version:      $Version"
 Write-Host "  Output Path:  $ZipPath"
+Write-Host "  Release Dir:  $TargetRelease"
 Write-Host ""
 
 # ===== Interactive choice (when -SkipBuild is not specified) =====
@@ -137,7 +243,12 @@ if (-not $SkipBuild) {
     Write-Host "[1/5] Building Release version..." -ForegroundColor Yellow
     Push-Location $TauriDir
     try {
-        cargo tauri build
+        $CargoArgs = @("tauri", "build")
+        if ($TargetTriple) {
+            $CargoArgs += "--target"
+            $CargoArgs += $TargetTriple
+        }
+        & cargo @CargoArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Build failed, exit code: $LASTEXITCODE"
         }
@@ -146,6 +257,26 @@ if (-not $SkipBuild) {
         Pop-Location
     }
     Write-Host "[1/5] Build completed [OK]" -ForegroundColor Green
+
+    # Re-resolve after the build: a fresh host-default build may have created
+    # target/release even when an older triple-specific directory existed.
+    $Resolved = Resolve-TauriReleaseDir
+    $TargetRelease = $Resolved.ReleaseDir
+    $DetectedTriple = $Resolved.Triple
+    if ($DetectedTriple -like "*aarch64*") {
+        $ArchShort = "arm64"
+    }
+    elseif ($DetectedTriple) {
+        $ArchShort = "x64"
+    }
+    else {
+        $ArchShort = Get-ExeArchitecture -Path (Join-Path $TargetRelease "$ProductName.exe")
+        if (-not $ArchShort) {
+            $ArchShort = if ($env:PROCESSOR_ARCHITECTURE -match "ARM64") { "arm64" } else { "x64" }
+        }
+    }
+    $ZipName = "$ProductName-v$Version-portable-win-$ArchShort.zip"
+    $ZipPath = Join-Path $OutputDir $ZipName
 }
 else {
     Write-Host "[1/5] Skipping build step (-SkipBuild)" -ForegroundColor DarkGray
@@ -264,8 +395,8 @@ else {
 if (-not $NoZip) {
     Write-Host "[5/5] Copying NSIS installer to dist..." -ForegroundColor Yellow
 
-    # NSIS installer path: look under the detected triple's bundle dir
-    $NsisDir = Join-Path $ProjectRoot (Join-Path "backend\src-tauri\target" (Join-Path $DetectedTriple "release\bundle\nsis"))
+    # NSIS installer path: look under the resolved release dir's bundle dir
+    $NsisDir = Join-Path $TargetRelease "bundle\nsis"
     if ($ArchShort -eq "x64") {
         $NsisPattern = "${ProductName}_${Version}_x64-setup.exe"
     }
