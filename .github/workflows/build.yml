@@ -307,7 +307,8 @@ jobs:
           # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
           # linuxdeploy needs to find it to bundle it into the AppImage.
           TARGET_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/${{ matrix.cargo_target }}/release"
-          echo "LD_LIBRARY_PATH=${TARGET_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          DEFAULT_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/release"
+          echo "LD_LIBRARY_PATH=${TARGET_LIB_DIR}:${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Build Linux AppImage
@@ -321,6 +322,22 @@ jobs:
           projectPath: backend/src-tauri
           args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
 
+      # Resolve the actual release directory so later steps work with both
+      # target/release (host-default builds) and target/<triple>/release
+      # (CI builds that pass --target).
+      - name: Resolve Tauri release directory
+        if: always()
+        id: tauri-release-dir
+        run: |
+          TRIPLE_DIR="backend/src-tauri/target/${{ matrix.cargo_target }}/release"
+          DEFAULT_DIR="backend/src-tauri/target/release"
+          if [ -d "$TRIPLE_DIR" ] && [ -d "$TRIPLE_DIR/bundle" ] && { [ ! -d "$DEFAULT_DIR/bundle" ] || [ "$TRIPLE_DIR/bundle" -nt "$DEFAULT_DIR/bundle" ]; }; then
+            echo "release-dir=$TRIPLE_DIR" >> "$GITHUB_OUTPUT"
+          else
+            echo "release-dir=$DEFAULT_DIR" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
       # Fallback: if linuxdeploy still fails (e.g., can't find libwebgpu_dawn.so),
       # manually add the library to the AppDir and re-run appimagetool.
       - name: Retry AppImage bundling (Linux fallback)
@@ -328,9 +345,14 @@ jobs:
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
-          TARGET_DIR="target/${{ matrix.cargo_target }}/release"
+          TARGET_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
           APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
-          OUT_APPIMAGE="$TARGET_DIR/bundle/appimage/HiFiShifter_0.1.0-beta.13_amd64.AppImage"
+          VERSION="$(jq -r '.version' tauri.conf.json)"
+          case "${{ matrix.cargo_target }}" in
+            *aarch64*) ARCH_SUFFIX="arm64" ;;
+            *) ARCH_SUFFIX="amd64" ;;
+          esac
+          OUT_APPIMAGE="$TARGET_DIR/bundle/appimage/HiFiShifter_${VERSION}_${ARCH_SUFFIX}.AppImage"
 
           echo "=== Checking AppDir state ==="
           find "$APPDIR" -type f -maxdepth 3 2>/dev/null | head -40 || echo "AppDir not found"
@@ -375,7 +397,7 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}" -TargetTriple "${{ matrix.cargo_target }}"
         shell: pwsh
 
       # ── Artifact naming ───────────────────────────────────────────────
@@ -461,7 +483,7 @@ jobs:
         with:
           name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
       - name: Upload portable (Windows)
@@ -479,16 +501,16 @@ jobs:
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/dmg/*.dmg
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/*.dmg
           if-no-files-found: error
 
       - name: Upload AppImage (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/*.AppImage
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)
