@@ -498,6 +498,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_auto_backup_settings":
             return { settings: args[0] };
 
+        case "save_recording_settings":
+            return { settings: args[0] };
+
+        case "start_recording":
+            return { startSec: args[0] };
+
         case "begin_undo_group":
             return undefined;
 

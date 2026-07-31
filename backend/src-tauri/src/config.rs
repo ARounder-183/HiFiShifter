@@ -187,6 +187,129 @@ impl AutoBackupSettings {
     }
 }
 
+/// 录音设置（持久化到 app_config.json）
+///
+/// - `source_device`：录音源 ID。`"default"` 表示系统默认录音设备；
+///   `"input:<name>"` 表示具体录音设备；`"loopback:<name>"` 表示系统声音回环
+///   （Windows WASAPI 下可直接捕获播放器输出）。
+/// - `path_template`：输出路径模板，支持 `<ProjectFolder>`、`<ProjectName>`
+///   与 strftime 时间格式（例如 `%Y-%m-%d-%H-%M-%S`）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingSettings {
+    #[serde(default = "default_recording_source_device")]
+    pub source_device: String,
+    #[serde(default = "default_recording_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_recording_bit_depth")]
+    pub bit_depth: u32,
+    #[serde(default = "default_recording_channels")]
+    pub channels: u16,
+    #[serde(default = "default_recording_gain_db")]
+    pub input_gain_db: f32,
+    #[serde(default)]
+    pub monitor_enabled: bool,
+    #[serde(default = "default_recording_gain_db")]
+    pub monitor_gain_db: f32,
+    #[serde(default)]
+    pub countdown_sec: u32,
+    #[serde(default)]
+    pub auto_normalize: bool,
+    #[serde(default)]
+    pub auto_stop_at_selection_end: bool,
+    #[serde(default = "default_recording_path_template")]
+    pub path_template: String,
+}
+
+fn default_recording_source_device() -> String {
+    "default".to_string()
+}
+
+fn default_recording_sample_rate() -> u32 {
+    48_000
+}
+
+fn default_recording_bit_depth() -> u32 {
+    24
+}
+
+fn default_recording_channels() -> u16 {
+    2
+}
+
+fn default_recording_gain_db() -> f32 {
+    0.0
+}
+
+fn default_recording_path_template() -> String {
+    "<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav".to_string()
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self {
+            source_device: default_recording_source_device(),
+            sample_rate: default_recording_sample_rate(),
+            bit_depth: default_recording_bit_depth(),
+            channels: default_recording_channels(),
+            input_gain_db: default_recording_gain_db(),
+            monitor_enabled: false,
+            monitor_gain_db: default_recording_gain_db(),
+            countdown_sec: 0,
+            auto_normalize: false,
+            auto_stop_at_selection_end: false,
+            path_template: default_recording_path_template(),
+        }
+    }
+}
+
+impl RecordingSettings {
+    pub fn normalized(&self) -> Self {
+        let source_device = {
+            let trimmed = self.source_device.trim();
+            if trimmed.is_empty() {
+                default_recording_source_device()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let sample_rate = if (8_000..=192_000).contains(&self.sample_rate) {
+            self.sample_rate
+        } else {
+            default_recording_sample_rate()
+        };
+        let bit_depth = match self.bit_depth {
+            16 | 32 => self.bit_depth,
+            _ => 24,
+        };
+        let channels = if self.channels == 1 { 1 } else { 2 };
+        let input_gain_db = self.input_gain_db.clamp(-24.0, 24.0);
+        let monitor_gain_db = self.monitor_gain_db.clamp(-24.0, 24.0);
+        let path_template = {
+            let trimmed = self.path_template.trim();
+            if trimmed.is_empty() {
+                default_recording_path_template()
+            } else {
+                trimmed.to_string()
+            }
+        };
+
+        Self {
+            source_device,
+            sample_rate,
+            bit_depth,
+            channels,
+            input_gain_db,
+            monitor_enabled: self.monitor_enabled,
+            monitor_gain_db,
+            countdown_sec: self.countdown_sec.clamp(0, 10),
+            auto_normalize: self.auto_normalize,
+            auto_stop_at_selection_end: self.auto_stop_at_selection_end,
+            path_template,
+        }
+    }
+}
+
 fn default_export_sample_rate() -> u32 {
     48_000
 }
@@ -313,6 +436,8 @@ struct AppConfig {
     export: ExportSettings,
     #[serde(default)]
     auto_backup: AutoBackupSettings,
+    #[serde(default)]
+    recording: RecordingSettings,
     /// 持久化的窗口状态（可选）。
     #[serde(default)]
     window: WindowState,
@@ -438,5 +563,17 @@ pub fn load_auto_backup_settings(config_dir: &Path) -> AutoBackupSettings {
 pub fn save_auto_backup_settings(config_dir: &Path, settings: &AutoBackupSettings) {
     let mut cfg = load_config(config_dir);
     cfg.auto_backup = settings.normalized();
+    save_config(config_dir, &cfg);
+}
+
+/// 从 config dir 读取录音设置。
+pub fn load_recording_settings(config_dir: &Path) -> RecordingSettings {
+    load_config(config_dir).recording.normalized()
+}
+
+/// 将录音设置写入 config dir；保留现有配置中的其他字段。
+pub fn save_recording_settings(config_dir: &Path, settings: &RecordingSettings) {
+    let mut cfg = load_config(config_dir);
+    cfg.recording = settings.normalized();
     save_config(config_dir, &cfg);
 }

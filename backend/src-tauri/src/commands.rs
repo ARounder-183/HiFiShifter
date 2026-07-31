@@ -34,7 +34,9 @@ pub(crate) mod playback;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
-mod project;
+pub(crate) mod project;
+#[path = "commands/recording.rs"]
+mod recording;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
@@ -191,6 +193,45 @@ pub fn run_timed_auto_backup(
     path_template: String,
 ) -> serde_json::Value {
     project::run_timed_auto_backup(state, path_template)
+}
+
+// ===================== recording =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_settings(
+    state: State<'_, AppState>,
+) -> crate::config::RecordingSettings {
+    recording::get_recording_settings(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_recording_settings(
+    state: State<'_, AppState>,
+    settings: crate::config::RecordingSettings,
+) -> serde_json::Value {
+    recording::save_recording_settings(state, settings)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_devices() -> serde_json::Value {
+    recording::get_recording_devices()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+    recording::start_recording(state, start_sec)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {
+    recording::stop_recording(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_state(
+    state: State<'_, AppState>,
+) -> crate::recording::RecordingStatePayload {
+    recording::get_recording_state(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -52,6 +52,7 @@ import {
 import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
+import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 
 import {
@@ -90,6 +91,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
+    const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
@@ -367,6 +369,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => setAutoBackupDialogOpen(true)}>
                         {tAny("menu_auto_backup")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setRecordingDialogOpen(true)}>
+                        {tAny("menu_recording_settings")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={onExit} color="red">
@@ -887,6 +892,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 settings={autoBackupSettings}
                 onOpenChange={setAutoBackupDialogOpen}
                 onSettingsSaved={onAutoBackupSettingsSaved}
+            />
+
+            <RecordingSettingsDialog
+                open={recordingDialogOpen}
+                onOpenChange={setRecordingDialogOpen}
             />
 
             {/* Inference device benchmark */}

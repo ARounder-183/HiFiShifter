@@ -308,3 +308,32 @@ Parameters:
 While typing a file path, you can click the `Placeholder` buttons to quickly insert the corresponding text.
 
 All file path strings support time format strings like `%Y-%m-%d-%H-%M-%S`. If you want to include a literal `%` in the output path, use `%%` to escape it.
+## 7. Recording
+
+HiFiShifter can record directly onto the timeline. Recording starts playback from the current playhead so you can sing along with the project's backing audio; when recording stops, playback stops automatically and the take is imported into the timeline.
+
+### Record button and shortcut
+
+- The red circular button in the transport area starts and stops recording.
+- The default shortcut is `R`. You can change it in `Options -> Keybindings`.
+- Right-click the record button to open recording settings quickly.
+
+### Recording settings
+
+Open `File -> Recording...` to configure:
+
+- `Input Device`: defaults to `System Default`, or choose any input device on this computer. `System Sound (Loopback)` captures audio played by the software itself (implemented with WASAPI loopback on Windows).
+- `Sample Rate` / `Bit Depth` / `Channels`: sample rate, bit depth (16 / 24 / 32-bit float) and channel count of the output WAV.
+- `Input Gain`: pre-recording gain compensation.
+- `Countdown`: wait a few seconds after clicking record before capture and timeline playback actually begin.
+- `Monitor input while recording`: route the input signal back to the output device while recording, useful when singing with headphones.
+- `Auto-normalize after import`: after stopping and importing, normalize the new clip's peak to 0 dB.
+- `Auto-stop at end of selected clips`: stop and import automatically when playback reaches the end of the selected clips.
+- `Output Path Template`: supports `<ProjectFolder>`, `<ProjectName>` and strftime strings. Default: `<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav`. If the file already exists, a numeric suffix is added automatically so old takes are never overwritten.
+
+### Recording workflow and import rules
+
+1. Move the playhead to the desired start position and select the target track.
+2. Click the record button (or press `R`). Timeline playback starts from the playhead while capture begins.
+3. Click record again (or press `R`) to stop. Timeline playback stops at the same time.
+4. If the selected track is completely empty within the recording range, the take is imported directly to it. Otherwise a new `Recording` track is created immediately below the selected track, the take is imported there, and the new track and clip are selected automatically. The track name follows the current UI language.

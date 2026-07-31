@@ -1197,6 +1197,10 @@ const sessionSlice = createSlice({
             pushHistory(state);
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
+        /** 供录音等后端直接导入时间轴的命令同步完整快照。 */
+        applyTimelinePayload(state, action: PayloadAction<TimelineState>) {
+            applyTimelineState(state, action.payload, { force: true });
+        },
         setToolMode(state, action: PayloadAction<ToolMode>) {
             if (state.toolMode !== action.payload) {
                 pushHistory(state);
@@ -3305,6 +3309,7 @@ export const {
     setTrackMeters,
     clearTrackMeters,
     checkpointHistory,
+    applyTimelinePayload,
     setToolMode,
     setEditParam,
     setBpm,

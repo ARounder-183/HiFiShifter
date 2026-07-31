@@ -28,17 +28,25 @@ import { SCALE_KEYS, SCALE_LABELS } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
+import {
+    cancelRecordingCountdown,
+    startRecordingFlow,
+    stopRecordingFlow,
+} from "../../features/recording/recordingSlice";
+import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 
 export function ActionBar() {
     const dispatch = useAppDispatch();
     const s = useAppSelector((state: RootState) => state.session);
     const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
     const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const recording = useAppSelector((state: RootState) => state.recording);
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
+    const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
     const [gridSnapMenuPos, setGridSnapMenuPos] = useState<{ x: number; y: number } | null>(null);
 
     const baseScaleWheelOptions = [
@@ -67,6 +75,23 @@ export function ActionBar() {
         dispatch(setBpm(next));
         void dispatch(updateTransportBpm(next));
         setBpmText(String(Math.round(next)));
+    }
+
+    function formatRecordingTime(seconds: number): string {
+        const total = Math.max(0, Math.floor(seconds));
+        const minutes = Math.floor(total / 60);
+        const secs = total % 60;
+        return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+
+    function recordingErrorMessage(code: string): string {
+        const text = tAny(code);
+        if (text && text !== code) return text;
+        return tAny(
+            code.startsWith("recording_error_stop")
+                ? "recording_error_stop_failed"
+                : "recording_error_start_failed",
+        );
     }
 
     // Custom styles for Radix components to match Qt look
@@ -340,6 +365,79 @@ export function ActionBar() {
                 >
                     {s.runtime.isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
+                <IconButton
+                    size="1"
+                    variant={recording.active ? "solid" : "ghost"}
+                    color={recording.active ? "red" : "gray"}
+                    title={tAny("recording_toggle_title")}
+                    disabled={recording.busy && recording.countdownRemaining === 0}
+                    onClick={() => {
+                        if (recording.active) {
+                            void dispatch(stopRecordingFlow());
+                        } else if (recording.countdownRemaining > 0) {
+                            void dispatch(cancelRecordingCountdown());
+                        } else {
+                            void dispatch(startRecordingFlow());
+                        }
+                    }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        setRecordingSettingsOpen(true);
+                    }}
+                >
+                    {recording.active ? (
+                        <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+                            <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                        </svg>
+                    ) : (
+                        <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+                            <circle cx="7.5" cy="7.5" r="4.2" />
+                        </svg>
+                    )}
+                </IconButton>
+                {recording.active || recording.countdownRemaining > 0 ? (
+                    <Flex align="center" gap="1" className="shrink-0">
+                        <Text
+                            size="1"
+                            color={recording.active ? "red" : "gray"}
+                            className="tabular-nums"
+                        >
+                            {recording.countdownRemaining > 0
+                                ? `-${recording.countdownRemaining}`
+                                : formatRecordingTime(recording.elapsedSec)}
+                        </Text>
+                        <div
+                            style={{
+                                width: 48,
+                                height: 6,
+                                borderRadius: 3,
+                                background: "var(--qt-border)",
+                                overflow: "hidden",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <div
+                                style={{
+                                    width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                    height: "100%",
+                                    background: recording.level > 0.98 ? "red" : "#e5484d",
+                                    transition: "width 80ms linear",
+                                }}
+                            />
+                        </div>
+                    </Flex>
+                ) : null}
+                {recording.error ? (
+                    <Text
+                        size="1"
+                        color="red"
+                        title={recording.error}
+                        className="truncate"
+                        style={{ maxWidth: 220 }}
+                    >
+                        {recordingErrorMessage(recording.error)}
+                    </Text>
+                ) : null}
             </Flex>
 
             <Separator orientation="vertical" size="2" />
@@ -585,6 +683,11 @@ export function ActionBar() {
             {customScaleOpen && (
                 <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
             )}
+
+            <RecordingSettingsDialog
+                open={recordingSettingsOpen}
+                onOpenChange={setRecordingSettingsOpen}
+            />
 
             {/* Grid Snap Context Menu */}
             {gridSnapMenuPos && (

@@ -73,4 +73,38 @@ await expectTauriPayload(
     },
 );
 
+await expectTauriPayload(
+    "save_recording_settings",
+    {
+        sourceDevice: "default",
+        sampleRate: 48_000,
+        bitDepth: 24,
+        channels: 2,
+        inputGainDb: 0,
+        monitorEnabled: false,
+        monitorGainDb: 0,
+        countdownSec: 0,
+        autoNormalize: false,
+        autoStopAtSelectionEnd: false,
+        pathTemplate: "<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav",
+    },
+    {
+        settings: {
+            sourceDevice: "default",
+            sampleRate: 48_000,
+            bitDepth: 24,
+            channels: 2,
+            inputGainDb: 0,
+            monitorEnabled: false,
+            monitorGainDb: 0,
+            countdownSec: 0,
+            autoNormalize: false,
+            autoStopAtSelectionEnd: false,
+            pathTemplate: "<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav",
+        },
+    },
+);
+
+await expectTauriPayload("start_recording", 12.5, { startSec: 12.5 });
+
 console.log("invoke bulk command wiring checks passed");
