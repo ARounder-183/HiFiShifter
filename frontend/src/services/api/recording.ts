@@ -4,6 +4,11 @@ import { invoke } from "../invoke";
 
 export interface RecordingSettings {
     sourceDevice: string;
+    captureMode: "device" | "loopback" | "application";
+    loopbackDevice: string;
+    captureAppId: string;
+    captureAppName: string;
+    captureAppProcess: string;
     sampleRate: number;
     bitDepth: 16 | 24 | 32;
     channels: 1 | 2;
@@ -22,6 +27,14 @@ export interface RecordingDeviceInfo {
     kind: string;
     isDefault: boolean;
     isLoopback: boolean;
+}
+
+export interface RecordingAppInfo {
+    id: string;
+    name: string;
+    processName: string;
+    pid: number;
+    isActive: boolean;
 }
 
 export interface RecordingStatePayload {
@@ -52,6 +65,11 @@ export interface RecordingFinishedInfo {
 
 export const DEFAULT_RECORDING_SETTINGS: RecordingSettings = {
     sourceDevice: "default",
+    captureMode: "device",
+    loopbackDevice: "default",
+    captureAppId: "",
+    captureAppName: "",
+    captureAppProcess: "",
     sampleRate: 48_000,
     bitDepth: 24,
     channels: 2,
@@ -76,6 +94,9 @@ export const recordingApi = {
 
     getDevices: () =>
         invoke<{ ok: boolean; devices?: RecordingDeviceInfo[] }>("get_recording_devices"),
+
+    getApps: () =>
+        invoke<{ ok: boolean; apps?: RecordingAppInfo[] }>("get_recording_apps"),
 
     startRecording: (startSec: number) =>
         invoke<{

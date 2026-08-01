@@ -3,13 +3,16 @@ import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes"
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
+    appsLoaded,
     devicesLoaded,
     loadRecordingDevices,
+    loadRecordingApps,
     loadRecordingSettings,
     saveRecordingSettings,
 } from "../../features/recording/recordingSlice";
 import {
     DEFAULT_RECORDING_SETTINGS,
+    type RecordingAppInfo,
     type RecordingSettings,
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
@@ -33,6 +36,7 @@ export function RecordingSettingsDialog({
     const tAny = t as (key: string) => string;
     const savedSettings = useAppSelector((state) => state.recording.settings);
     const devices = useAppSelector((state) => state.recording.devices);
+    const apps = useAppSelector((state) => state.recording.apps);
     const [draft, setDraft] = useState<RecordingSettings>(savedSettings);
     const [submitting, setSubmitting] = useState(false);
     const [errorText, setErrorText] = useState("");
@@ -43,6 +47,7 @@ export function RecordingSettingsDialog({
         setErrorText("");
         void dispatch(loadRecordingSettings());
         void dispatch(loadRecordingDevices());
+        void dispatch(loadRecordingApps());
     }, [open, dispatch]);
 
     useEffect(() => {
@@ -92,6 +97,30 @@ export function RecordingSettingsDialog({
         }
     }
 
+    async function refreshApps() {
+        try {
+            const result = await webApi.getRecordingApps();
+            if (result.apps) {
+                dispatch(appsLoaded(result.apps));
+            }
+        } catch {
+            setErrorText(tAny("recording_error_load_apps"));
+        }
+    }
+
+    function appNameById(id: string): string {
+        const app = apps.find((item) => item.id === id);
+        return app?.name ?? draft.captureAppName ?? id;
+    }
+
+    const missingApp = Boolean(
+        draft.captureAppId && !apps.some((item) => item.id === draft.captureAppId),
+    );
+    const loopbackValue =
+        draft.loopbackDevice === "default" ? "loopback:default" : draft.loopbackDevice;
+    const inputDevices = devices.filter((device) => !device.isLoopback);
+    const loopbackDevices = devices.filter((device) => device.isLoopback);
+
     async function handleSave() {
         setErrorText("");
         setSubmitting(true);
@@ -130,39 +159,150 @@ export function RecordingSettingsDialog({
                 <Flex direction="column" gap="3" mt="3">
                     <Flex align="center" gap="2">
                         <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_device")}
+                            {tAny("recording_source_mode")}
                         </Text>
                         <Select.Root
-                            value={draft.sourceDevice}
+                            value={draft.captureMode}
                             onValueChange={(value) =>
-                                setDraft((prev) => ({ ...prev, sourceDevice: value }))
+                                setDraft((prev) => ({
+                                    ...prev,
+                                    captureMode: value as RecordingSettings["captureMode"],
+                                }))
                             }
                         >
                             <Select.Trigger style={{ minWidth: 260 }} />
                             <Select.Content>
-                                <Select.Item value="default">
-                                    {tAny("recording_device_default")}
+                                <Select.Item value="device">
+                                    {tAny("recording_mode_device")}
                                 </Select.Item>
-                                {devices
-                                    .filter((device) => !device.isDefault)
-                                    .map((device) => (
-                                        <Select.Item key={device.id} value={device.id}>
-                                            {device.isLoopback
-                                                ? `${tAny("recording_system_sound")} - ${device.name}`
-                                                : device.name}
-                                        </Select.Item>
-                                    ))}
+                                <Select.Item value="loopback">
+                                    {tAny("recording_mode_loopback")}
+                                </Select.Item>
+                                <Select.Item value="application">
+                                    {tAny("recording_mode_application")}
+                                </Select.Item>
                             </Select.Content>
                         </Select.Root>
-                        <Button
-                            size="1"
-                            variant="ghost"
-                            color="gray"
-                            onClick={() => void refreshDevices()}
-                        >
-                            {tAny("recording_refresh_devices")}
-                        </Button>
                     </Flex>
+
+                    {draft.captureMode === "device" ? (
+                        <Flex align="center" gap="2">
+                            <Text size="2" style={{ minWidth: 132 }}>
+                                {tAny("recording_device")}
+                            </Text>
+                            <Select.Root
+                                value={draft.sourceDevice}
+                                onValueChange={(value) =>
+                                    setDraft((prev) => ({ ...prev, sourceDevice: value }))
+                                }
+                            >
+                                <Select.Trigger style={{ minWidth: 260 }} />
+                                <Select.Content>
+                                    <Select.Item value="default">
+                                        {tAny("recording_device_default")}
+                                    </Select.Item>
+                                    {inputDevices
+                                        .filter((device) => !device.isDefault)
+                                        .map((device) => (
+                                            <Select.Item key={device.id} value={device.id}>
+                                                {device.name}
+                                            </Select.Item>
+                                        ))}
+                                </Select.Content>
+                            </Select.Root>
+                            <Button
+                                size="1"
+                                variant="ghost"
+                                color="gray"
+                                onClick={() => void refreshDevices()}
+                            >
+                                {tAny("recording_refresh_devices")}
+                            </Button>
+                        </Flex>
+                    ) : null}
+
+                    {draft.captureMode === "loopback" ? (
+                        <Flex align="center" gap="2">
+                            <Text size="2" style={{ minWidth: 132 }}>
+                                {tAny("recording_loopback_device")}
+                            </Text>
+                            <Select.Root
+                                value={loopbackValue}
+                                onValueChange={(value) =>
+                                    setDraft((prev) => ({ ...prev, loopbackDevice: value }))
+                                }
+                            >
+                                <Select.Trigger style={{ minWidth: 260 }} />
+                                <Select.Content>
+                                    <Select.Item value="loopback:default">
+                                        {tAny("recording_loopback_default")}
+                                    </Select.Item>
+                                    {loopbackDevices
+                                        .filter((device) => device.id !== "loopback:default")
+                                        .map((device) => (
+                                            <Select.Item key={device.id} value={device.id}>
+                                                {device.name}
+                                            </Select.Item>
+                                        ))}
+                                </Select.Content>
+                            </Select.Root>
+                            <Button
+                                size="1"
+                                variant="ghost"
+                                color="gray"
+                                onClick={() => void refreshDevices()}
+                            >
+                                {tAny("recording_refresh_devices")}
+                            </Button>
+                        </Flex>
+                    ) : null}
+
+                    {draft.captureMode === "application" ? (
+                        <>
+                            <Flex align="center" gap="2">
+                                <Text size="2" style={{ minWidth: 132 }}>
+                                    {tAny("recording_application")}
+                                </Text>
+                                <Select.Root
+                                    value={draft.captureAppId}
+                                    onValueChange={(value) => {
+                                        const app = apps.find((item) => item.id === value);
+                                        setDraft((prev) => ({
+                                            ...prev,
+                                            captureAppId: value,
+                                            captureAppName: app?.name ?? value,
+                                            captureAppProcess: app?.processName ?? "",
+                                        }));
+                                    }}
+                                >
+                                    <Select.Trigger style={{ minWidth: 260 }} />
+                                    <Select.Content>
+                                        {missingApp ? (
+                                            <Select.Item value={draft.captureAppId}>
+                                                {appNameById(draft.captureAppId)}
+                                            </Select.Item>
+                                        ) : null}
+                                        {apps.map((app: RecordingAppInfo) => (
+                                            <Select.Item key={app.id} value={app.id}>
+                                                {app.name}
+                                            </Select.Item>
+                                        ))}
+                                    </Select.Content>
+                                </Select.Root>
+                                <Button
+                                    size="1"
+                                    variant="ghost"
+                                    color="gray"
+                                    onClick={() => void refreshApps()}
+                                >
+                                    {tAny("recording_refresh_apps")}
+                                </Button>
+                            </Flex>
+                            <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
+                                {tAny("recording_application_hint")}
+                            </Text>
+                        </>
+                    ) : null}
 
                     <Flex align="center" gap="2">
                         <Text size="2" style={{ minWidth: 132 }}>

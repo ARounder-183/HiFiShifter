@@ -2,6 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 import type { RootState } from "../../app/store";
 import {
     DEFAULT_RECORDING_SETTINGS,
+    type RecordingAppInfo,
     type RecordingDeviceInfo,
     type RecordingFinishedInfo,
     type RecordingMeterPayload,
@@ -21,6 +22,8 @@ interface RecordingSliceState {
     settingsLoaded: boolean;
     devices: RecordingDeviceInfo[];
     devicesLoaded: boolean;
+    apps: RecordingAppInfo[];
+    appsLoaded: boolean;
     active: boolean;
     busy: boolean;
     countdownSec: number;
@@ -40,6 +43,8 @@ const initialState: RecordingSliceState = {
     settingsLoaded: false,
     devices: [],
     devicesLoaded: false,
+    apps: [],
+    appsLoaded: false,
     active: false,
     busy: false,
     countdownSec: 0,
@@ -88,6 +93,20 @@ export const loadRecordingDevices = createAsyncThunk(
         const devices = result.devices ?? [];
         dispatch(recordingSlice.actions.devicesLoaded(devices));
         return devices;
+    },
+);
+
+export const loadRecordingApps = createAsyncThunk(
+    "recording/loadApps",
+    async (_, { dispatch, getState }) => {
+        const current = (getState() as RootState).recording;
+        if (current.appsLoaded && current.apps.length > 0) {
+            return current.apps;
+        }
+        const result = await webApi.getRecordingApps();
+        const apps = result.apps ?? [];
+        dispatch(recordingSlice.actions.appsLoaded(apps));
+        return apps;
     },
 );
 
@@ -200,6 +219,10 @@ const recordingSlice = createSlice({
             state.devices = action.payload;
             state.devicesLoaded = true;
         },
+        appsLoaded(state, action: PayloadAction<RecordingAppInfo[]>) {
+            state.apps = action.payload;
+            state.appsLoaded = true;
+        },
         setBusy(state, action: PayloadAction<boolean>) {
             state.busy = action.payload;
         },
@@ -259,6 +282,7 @@ const recordingSlice = createSlice({
 export const {
     settingsLoaded,
     devicesLoaded,
+    appsLoaded,
     setBusy,
     clearError,
     recordingFailed,

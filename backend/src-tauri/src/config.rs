@@ -199,6 +199,23 @@ impl AutoBackupSettings {
 pub struct RecordingSettings {
     #[serde(default = "default_recording_source_device")]
     pub source_device: String,
+    /// "device" (microphone), "loopback" (system sound) or "application".
+    #[serde(default = "default_recording_capture_mode")]
+    pub capture_mode: String,
+    /// Output device used for system-sound capture: "default" or an endpoint
+    /// id / legacy device name.
+    #[serde(default = "default_recording_loopback_device")]
+    pub loopback_device: String,
+    /// Selected application id, e.g. "pid:1234".
+    #[serde(default)]
+    pub capture_app_id: String,
+    /// Display name of the selected application (UI convenience only).
+    #[serde(default)]
+    pub capture_app_name: String,
+    /// Executable name of the selected application, used to re-match the app
+    /// after it restarts with a new PID.
+    #[serde(default)]
+    pub capture_app_process: String,
     #[serde(default = "default_recording_sample_rate")]
     pub sample_rate: u32,
     #[serde(default = "default_recording_bit_depth")]
@@ -222,6 +239,14 @@ pub struct RecordingSettings {
 }
 
 fn default_recording_source_device() -> String {
+    "default".to_string()
+}
+
+fn default_recording_capture_mode() -> String {
+    "device".to_string()
+}
+
+fn default_recording_loopback_device() -> String {
     "default".to_string()
 }
 
@@ -249,6 +274,11 @@ impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
             source_device: default_recording_source_device(),
+            capture_mode: default_recording_capture_mode(),
+            loopback_device: default_recording_loopback_device(),
+            capture_app_id: String::new(),
+            capture_app_name: String::new(),
+            capture_app_process: String::new(),
             sample_rate: default_recording_sample_rate(),
             bit_depth: default_recording_bit_depth(),
             channels: default_recording_channels(),
@@ -269,6 +299,28 @@ impl RecordingSettings {
             let trimmed = self.source_device.trim();
             if trimmed.is_empty() {
                 default_recording_source_device()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let capture_mode = {
+            let trimmed = self.capture_mode.trim();
+            match trimmed {
+                "loopback" | "application" => trimmed.to_string(),
+                // Migrate legacy `source_device = "loopback:<name>"` values
+                // saved by older builds into the new capture mode.
+                _ if source_device.starts_with("loopback:") => "loopback".to_string(),
+                _ => default_recording_capture_mode(),
+            }
+        };
+        let loopback_device = {
+            let trimmed = self.loopback_device.trim();
+            if trimmed.is_empty() {
+                if let Some(name) = source_device.strip_prefix("loopback:") {
+                    name.trim().to_string()
+                } else {
+                    default_recording_loopback_device()
+                }
             } else {
                 trimmed.to_string()
             }
@@ -296,6 +348,11 @@ impl RecordingSettings {
 
         Self {
             source_device,
+            capture_mode,
+            loopback_device,
+            capture_app_id: self.capture_app_id.trim().to_string(),
+            capture_app_name: self.capture_app_name.trim().to_string(),
+            capture_app_process: self.capture_app_process.trim().to_string(),
             sample_rate,
             bit_depth,
             channels,

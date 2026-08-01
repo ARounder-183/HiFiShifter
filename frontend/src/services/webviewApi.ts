@@ -76,6 +76,7 @@ export const webApi = {
     getRecordingSettings: recordingApi.getSettings,
     saveRecordingSettings: recordingApi.saveSettings,
     getRecordingDevices: recordingApi.getDevices,
+    getRecordingApps: recordingApi.getApps,
     startRecording: recordingApi.startRecording,
     stopRecording: recordingApi.stopRecording,
     getRecordingState: recordingApi.getState,

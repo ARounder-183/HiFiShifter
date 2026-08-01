@@ -85,8 +85,11 @@ export function ActionBar() {
     }
 
     function recordingErrorMessage(code: string): string {
-        const text = tAny(code);
-        if (text && text !== code) return text;
+        // Backend errors may carry a `:detail` suffix (e.g.
+        // "recording_error_wasapi_init:0x80004005"); localize the base key.
+        const baseKey = code.split(":")[0] ?? code;
+        const text = tAny(baseKey);
+        if (text && text !== baseKey) return text;
         return tAny(
             code.startsWith("recording_error_stop")
                 ? "recording_error_stop_failed"

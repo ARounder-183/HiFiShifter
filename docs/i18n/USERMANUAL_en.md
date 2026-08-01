@@ -322,10 +322,13 @@ HiFiShifter can record directly onto the timeline. Recording starts playback fro
 
 Open `File -> Recording...` to configure:
 
-- `Input Device`: defaults to `System Default`, or choose any input device on this computer. `System Sound (Loopback)` captures audio played by the software itself (implemented with WASAPI loopback on Windows).
+- `Source`: choose one of three capture sources.
+- `Input Device`: defaults to `System Default`, or choose any input device (microphone) on this computer.
+- `Loopback Device`: when the source is `System Sound (Loopback)`, choose the output device to capture (default: `System Default Output`). On Windows this uses a native WASAPI loopback engine that honors the audio engine's silent-buffer flag (`AUDCLNT_BUFFERFLAGS_SILENT`) and writes zeros, so no hiss/rustle is recorded while nothing is playing.
+- `Application`: when the source is `Application Audio`, capture only the selected program (e.g. browser or media player); use `Refresh` to re-enumerate programs currently producing audio. If the program restarts (new PID), it is re-matched automatically by its process name. On Windows 10 21H2 (build 20348) and newer the OS process-loopback API is used, with an automatic fallback that mutes other audio sessions on older builds. On Linux capture uses PipeWire (`pw-dump` / `pw-cat`). macOS does not support this mode yet.
 - `Sample Rate` / `Bit Depth` / `Channels`: sample rate, bit depth (16 / 24 / 32-bit float) and channel count of the output WAV.
 - `Input Gain`: pre-recording gain compensation.
-- `Countdown`: wait a few seconds after clicking record before capture and timeline playback actually begin.
+- `Countdown`: enter the number of seconds (unit: seconds, 0–10); after clicking record, capture and playback wait until the countdown finishes.
 - `Monitor input while recording`: route the input signal back to the output device while recording, useful when singing with headphones.
 - `Auto-normalize after import`: after stopping and importing, normalize the new clip's peak to 0 dB.
 - `Auto-stop at end of selected clips`: stop and import automatically when playback reaches the end of the selected clips.

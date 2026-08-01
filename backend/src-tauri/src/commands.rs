@@ -218,6 +218,11 @@ pub fn get_recording_devices() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_apps() -> serde_json::Value {
+    recording::get_recording_apps()
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     recording::start_recording(state, start_sec)
 }

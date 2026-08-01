@@ -316,6 +316,7 @@ pub fn run() {
             commands::get_recording_settings,
             commands::save_recording_settings,
             commands::get_recording_devices,
+            commands::get_recording_apps,
             commands::start_recording,
             commands::stop_recording,
             commands::get_recording_state,

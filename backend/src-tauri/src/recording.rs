@@ -1,8 +1,6 @@
 use crate::config::RecordingSettings;
 use crate::state::AppState;
 use chrono::Local;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat, SizedSample};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -12,18 +10,16 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
-const METER_POLL_MS: u64 = 100;
-const MONITOR_QUEUE_MAX_SAMPLES: usize = 262_144;
+mod capture;
+#[cfg(target_os = "windows")]
+mod wasapi;
+#[cfg(target_os = "linux")]
+mod linux;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioDeviceInfo {
-    pub id: String,
-    pub name: String,
-    pub kind: String,
-    pub is_default: bool,
-    pub is_loopback: bool,
-}
+pub use capture::{AppAudioInfo, AudioDeviceInfo};
+use capture::{CaptureContext, WriterMsg};
+
+const METER_POLL_MS: u64 = 100;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,12 +60,7 @@ pub struct RecordingMeterEvent {
     pub peak: f32,
 }
 
-enum WriterMsg {
-    Data(Vec<f32>),
-    Finish,
-}
-
-/// 一次进行中的录音会话。
+/// A recording session currently in progress.
 pub struct ActiveRecording {
     start_sec: f64,
     output_path: PathBuf,
@@ -115,139 +106,11 @@ pub fn save_settings(state: &AppState, settings: &RecordingSettings) -> Recordin
 }
 
 pub fn enumerate_devices() -> Vec<AudioDeviceInfo> {
-    let host = cpal::default_host();
-    let mut devices = Vec::new();
-
-    devices.push(AudioDeviceInfo {
-        id: "default".to_string(),
-        name: "System Default".to_string(),
-        kind: "default".to_string(),
-        is_default: true,
-        is_loopback: false,
-    });
-
-    if let Ok(inputs) = host.input_devices() {
-        for device in inputs {
-            let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-            devices.push(AudioDeviceInfo {
-                id: format!("input:{name}"),
-                name,
-                kind: "input".to_string(),
-                is_default: false,
-                is_loopback: false,
-            });
-        }
-    }
-
-    // Windows WASAPI 会把输出设备用作输入流时透明开启 loopback；
-    // 其他平台可能不支持，但保留选项以便用户尝试系统音频捕获。
-    if let Ok(outputs) = host.output_devices() {
-        for device in outputs {
-            let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-            devices.push(AudioDeviceInfo {
-                id: format!("loopback:{name}"),
-                name,
-                kind: "output".to_string(),
-                is_default: false,
-                is_loopback: true,
-            });
-        }
-    }
-
-    devices
+    capture::enumerate_devices()
 }
 
-fn resolve_device(settings: &RecordingSettings) -> Result<(cpal::Device, bool), String> {
-    let host = cpal::default_host();
-    if settings.source_device == "default" {
-        return host
-            .default_input_device()
-            .map(|device| (device, false))
-            .ok_or_else(|| "recording_error_no_default_input".to_string());
-    }
-
-    if let Some(name) = settings.source_device.strip_prefix("input:") {
-        let devices = host
-            .input_devices()
-            .map_err(|_| "recording_error_enumeration".to_string())?;
-        for device in devices {
-            if let Ok(device_name) = device.name() {
-                if device_name == name {
-                    return Ok((device, false));
-                }
-            }
-        }
-        return Err("recording_error_device_not_found".to_string());
-    }
-
-    if let Some(name) = settings.source_device.strip_prefix("loopback:") {
-        let devices = host
-            .output_devices()
-            .map_err(|_| "recording_error_enumeration".to_string())?;
-        for device in devices {
-            if let Ok(device_name) = device.name() {
-                if device_name == name {
-                    return Ok((device, true));
-                }
-            }
-        }
-        return Err("recording_error_loopback_not_found".to_string());
-    }
-
-    Err("recording_error_unknown_source".to_string())
-}
-
-fn pick_input_config(
-    device: &cpal::Device,
-    settings: &RecordingSettings,
-    is_loopback: bool,
-) -> Result<(cpal::StreamConfig, SampleFormat), String> {
-    let want_rate = cpal::SampleRate(settings.sample_rate);
-    let want_channels = settings.channels;
-    let mut fallback: Option<(cpal::StreamConfig, SampleFormat)> = None;
-
-    if is_loopback {
-        if let Ok(default_config) = device.default_output_config() {
-            let sample_format = default_config.sample_format();
-            let config: cpal::StreamConfig = default_config.into();
-            fallback = Some((config, sample_format));
-        }
-        if let Ok(ranges) = device.supported_output_configs() {
-            for range in ranges {
-                if range.channels() != want_channels {
-                    continue;
-                }
-                if let Some(config) = range.try_with_sample_rate(want_rate) {
-                    let sample_format = config.sample_format();
-                    return Ok((config.into(), sample_format));
-                }
-            }
-        }
-    } else {
-        if let Ok(default_config) = device.default_input_config() {
-            let sample_format = default_config.sample_format();
-            let default_channels = default_config.channels();
-            let default_rate = default_config.sample_rate();
-            let config: cpal::StreamConfig = default_config.into();
-            if default_channels == want_channels && default_rate == want_rate {
-                return Ok((config, sample_format));
-            }
-            fallback = Some((config, sample_format));
-        }
-        if let Ok(ranges) = device.supported_input_configs() {
-            for range in ranges {
-                if range.channels() != want_channels {
-                    continue;
-                }
-                if let Some(config) = range.try_with_sample_rate(want_rate) {
-                    let sample_format = config.sample_format();
-                    return Ok((config.into(), sample_format));
-                }
-            }
-        }
-    }
-
-    fallback.ok_or_else(|| "recording_error_no_supported_config".to_string())
+pub fn enumerate_applications() -> Vec<AppAudioInfo> {
+    capture::enumerate_applications()
 }
 
 fn db_to_linear(db: f32) -> f32 {
@@ -256,297 +119,6 @@ fn db_to_linear(db: f32) -> f32 {
     } else {
         10f32.powf(db / 20.0)
     }
-}
-
-fn send_to_writer_and_monitor(
-    samples: &[f32],
-    channels: usize,
-    gain: f32,
-    monitor_gain: f32,
-    tx: &mpsc::Sender<WriterMsg>,
-    level: &AtomicU32,
-    peak: &AtomicU32,
-    monitor_queue: &Option<Arc<Mutex<VecDeque<f32>>>>,
-) {
-    if samples.is_empty() {
-        return;
-    }
-
-    let mut out: Vec<f32> = Vec::with_capacity(samples.len());
-    let mut max = 0.0f32;
-    for sample in samples {
-        let value = (sample * gain).clamp(-1.0, 1.0);
-        out.push(value);
-        let magnitude = value.abs();
-        if magnitude > max {
-            max = magnitude;
-        }
-    }
-    let _ = tx.send(WriterMsg::Data(out));
-
-    level.store(max.to_bits(), Ordering::Relaxed);
-    let old_peak = f32::from_bits(peak.load(Ordering::Relaxed));
-    if max > old_peak {
-        peak.store(max.to_bits(), Ordering::Relaxed);
-    }
-
-    if let Some(queue) = monitor_queue {
-        if let Ok(mut q) = queue.lock() {
-            if q.len() > MONITOR_QUEUE_MAX_SAMPLES {
-                q.clear();
-            }
-            q.extend(samples.iter().map(|s| *s * gain * monitor_gain));
-        }
-    }
-
-    let _ = channels;
-}
-
-fn handle_input_data(
-    data: &cpal::Data,
-    channels: usize,
-    gain: f32,
-    monitor_gain: f32,
-    tx: &mpsc::Sender<WriterMsg>,
-    level: &AtomicU32,
-    peak: &AtomicU32,
-    monitor_queue: &Option<Arc<Mutex<VecDeque<f32>>>>,
-) {
-    if let Some(samples) = data.as_slice::<f32>() {
-        send_to_writer_and_monitor(
-            samples,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<i8>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<u8>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<i16>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<u16>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<i32>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<u32>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample())
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<i64>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample() as f32)
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<u64>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample() as f32)
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else if let Some(samples) = data.as_slice::<f64>() {
-        let converted: Vec<f32> = samples
-            .iter()
-            .map(|s| s.to_float_sample() as f32)
-            .collect();
-        send_to_writer_and_monitor(
-            &converted,
-            channels,
-            gain,
-            monitor_gain,
-            tx,
-            level,
-            peak,
-            monitor_queue,
-        );
-    } else {
-        // 不支持的采样格式：静默处理，避免音频回调崩溃。
-    }
-}
-
-fn fill_monitor_output<T: SizedSample + Sample + cpal::FromSample<f32>>(
-    samples: &mut [T],
-    queue: &Mutex<VecDeque<f32>>,
-) {
-    let len = samples.len();
-    let mut chunk = Vec::with_capacity(len);
-    if let Ok(mut q) = queue.lock() {
-        let take = len.min(q.len());
-        for _ in 0..take {
-            chunk.push(q.pop_front().unwrap_or(0.0));
-        }
-    }
-    for (index, sample) in samples.iter_mut().enumerate() {
-        let value = if index < chunk.len() { chunk[index] } else { 0.0 };
-        *sample = <f32 as cpal::Sample>::to_sample(value);
-    }
-}
-
-fn build_monitor_stream(
-    device: &cpal::Device,
-    queue: Arc<Mutex<VecDeque<f32>>>,
-) -> Result<cpal::Stream, String> {
-    let (config, sample_format) = pick_monitor_config(device)?;
-    let err_callback = |err: cpal::StreamError| {
-        eprintln!("[recording] monitor stream error: {err}");
-    };
-    let stream = device
-        .build_output_stream_raw(
-            &config,
-            sample_format,
-            move |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {
-                if let Some(samples) = data.as_slice_mut::<f32>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<i8>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<u8>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<i16>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<u16>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<i32>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<u32>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<i64>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<u64>() {
-                    fill_monitor_output(samples, &queue);
-                } else if let Some(samples) = data.as_slice_mut::<f64>() {
-                    fill_monitor_output(samples, &queue);
-                }
-            },
-            err_callback,
-            None,
-        )
-        .map_err(|_| "recording_error_build_monitor".to_string())?;
-    stream
-        .play()
-        .map_err(|_| "recording_error_play_monitor".to_string())?;
-    Ok(stream)
-}
-
-fn pick_monitor_config(
-    device: &cpal::Device,
-) -> Result<(cpal::StreamConfig, SampleFormat), String> {
-    if let Ok(ranges) = device.supported_output_configs() {
-        for range in ranges {
-            if range.sample_format() != SampleFormat::F32 {
-                continue;
-            }
-            let config = range
-                .try_with_sample_rate(cpal::SampleRate(48_000))
-                .or_else(|| Some(range.with_max_sample_rate()));
-            if let Some(config) = config {
-                return Ok((config.into(), SampleFormat::F32));
-            }
-        }
-    }
-    if let Ok(default_config) = device.default_output_config() {
-        let sample_format = default_config.sample_format();
-        return Ok((default_config.into(), sample_format));
-    }
-    Err("recording_error_no_monitor_config".to_string())
 }
 
 fn write_wav_thread(
@@ -704,14 +276,14 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
         }
     }
 
-    // 设备/配置解析在主线程完成，常见的“找不到设备/不支持配置”错误可以同步返回。
-    let (device, is_loopback) = resolve_device(&settings)?;
-    let (config, sample_format) = pick_input_config(&device, &settings, is_loopback)?;
+    // Resolve the capture plan synchronously so common configuration errors
+    // (unknown app, bad source) fail fast with a clean message.
+    let plan = capture::CapturePlan::from_settings(&settings)?;
 
     let (writer_tx, writer_rx) = mpsc::channel();
     let writer_path = output_path.clone();
-    let writer_channels = config.channels;
-    let writer_sample_rate = config.sample_rate.0;
+    let writer_channels = settings.channels;
+    let writer_sample_rate = settings.sample_rate;
     let writer_bit_depth = settings.bit_depth;
     let writer_join = std::thread::spawn(move || {
         write_wav_thread(
@@ -726,87 +298,31 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
     let stop_signal = Arc::new(AtomicBool::new(false));
     let level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let peak = Arc::new(AtomicU32::new(0.0f32.to_bits()));
-
-    // 录音线程持有 cpal::Stream（Windows 上包含非 Send 的 COM 指针），
-    // 因此流只能在独立线程中创建、播放并销毁，AppState 只保存 JoinHandle。
-    let thread_stop = stop_signal.clone();
-    let thread_level = level.clone();
-    let thread_peak = peak.clone();
-    let thread_writer_tx = writer_tx.clone();
-    let thread_settings = settings.clone();
-    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-    let thread_join = std::thread::spawn(move || {
-        let channels = config.channels as usize;
-        let gain = db_to_linear(thread_settings.input_gain_db);
-        let monitor_gain = db_to_linear(thread_settings.monitor_gain_db);
-
-        let monitor_queue = if thread_settings.monitor_enabled {
-            Some(Arc::new(Mutex::new(VecDeque::new())))
-        } else {
-            None
-        };
-        let mut monitor_stream = None;
-        if thread_settings.monitor_enabled {
-            let host = cpal::default_host();
-            if let Some(output_device) = host.default_output_device() {
-                if let Some(queue) = monitor_queue.clone() {
-                    match build_monitor_stream(&output_device, queue) {
-                        Ok(stream) => monitor_stream = Some(stream),
-                        Err(err) => eprintln!("[recording] monitor unavailable: {err}"),
-                    }
-                }
-            }
-        }
-
-        let tx_callback = thread_writer_tx.clone();
-        let level_callback = thread_level.clone();
-        let peak_callback = thread_peak.clone();
-        let monitor_callback = monitor_queue.clone();
-        let err_callback = |err: cpal::StreamError| {
-            eprintln!("[recording] input stream error: {err}");
-        };
-        let stream = match device
-            .build_input_stream_raw(
-                &config,
-                sample_format,
-                move |data: &cpal::Data, _: &cpal::InputCallbackInfo| {
-                    handle_input_data(
-                        data,
-                        channels,
-                        gain,
-                        monitor_gain,
-                        &tx_callback,
-                        &level_callback,
-                        &peak_callback,
-                        &monitor_callback,
-                    );
-                },
-                err_callback,
-                None,
-            )
-        {
-            Ok(stream) => stream,
-            Err(_) => {
-                let _ = ready_tx.send(Err("recording_error_build_input".to_string()));
-                return Err("recording_error_build_input".to_string());
-            }
-        };
-        if let Err(_) = stream.play() {
-            let _ = ready_tx.send(Err("recording_error_play_input".to_string()));
-            return Err("recording_error_play_input".to_string());
-        }
-        let _ = ready_tx.send(Ok(()));
-
-        // 阻塞等待停止信号，确保 Stream 在本线程中自然 Drop。
-        while !thread_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        drop(stream);
-        drop(monitor_stream);
-        Ok(())
+    let monitor_queue = if settings.monitor_enabled {
+        Some(Arc::new(Mutex::new(VecDeque::new())))
+    } else {
+        None
+    };
+    let ctx = Arc::new(CaptureContext {
+        tx: writer_tx.clone(),
+        stop: stop_signal.clone(),
+        level: level.clone(),
+        peak: peak.clone(),
+        monitor_queue,
+        gain: db_to_linear(settings.input_gain_db),
+        monitor_gain: db_to_linear(settings.monitor_gain_db),
     });
 
-    let readiness = ready_rx.recv_timeout(Duration::from_secs(5));
+    // The capture stream is created, played and destroyed on a dedicated
+    // thread because platform streams (WASAPI COM objects, PipeWire children,
+    // cpal streams) are not Send.
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let thread_ctx = ctx.clone();
+    let thread_join = std::thread::spawn(move || {
+        capture::run_capture(plan, thread_ctx, ready_tx)
+    });
+
+    let readiness = ready_rx.recv_timeout(Duration::from_secs(8));
     match &readiness {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => {

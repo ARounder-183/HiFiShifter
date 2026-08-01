@@ -23,6 +23,13 @@ pub(super) fn get_recording_devices() -> serde_json::Value {
     })
 }
 
+pub(super) fn get_recording_apps() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "apps": recording::enumerate_applications(),
+    })
+}
+
 pub(super) fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     match recording::start(state.inner(), start_sec.max(0.0)) {
         Ok(info) => serde_json::json!({
