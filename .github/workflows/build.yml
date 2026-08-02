@@ -358,45 +358,51 @@ jobs:
           echo "=== macOS bundle layout ==="
           find "$APP_DIR/Contents" -maxdepth 3 \( -type d -o -type f \) -print | sort
 
-          # The dylib may live in Contents/Frameworks (bundle.macOS.frameworks,
-          # preferred) or Contents/Resources (bundle.macOS.files fallback). The
-          # binary carries rpaths for both locations, so either layout loads.
-          FRAMEWORK_DYLIB="$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib"
-          RESOURCE_DYLIB="$APP_DIR/Contents/Resources/libSoundTouchDLL.dylib"
-          DYLIB=""
-          if [ -f "$FRAMEWORK_DYLIB" ]; then
-            DYLIB="$FRAMEWORK_DYLIB"
-          fi
-          if [ -f "$RESOURCE_DYLIB" ]; then
-            if [ -n "$DYLIB" ]; then
-              echo "note: dylib present in both Frameworks and Resources"
-            else
-              DYLIB="$RESOURCE_DYLIB"
-            fi
-          fi
-          if [ -z "$DYLIB" ]; then
-            echo "ERROR: libSoundTouchDLL.dylib missing from Contents/Frameworks and Contents/Resources" >&2
-            exit 1
-          fi
-          echo "dylib found at: $DYLIB"
-
-          echo "=== Binary load commands for SoundTouch ==="
-          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -E 'SoundTouch|@rpath|@executable_path' || true
+          BIN="$APP_DIR/Contents/MacOS/HiFiShifter"
+          echo "=== Binary @rpath dependencies ==="
+          otool -L "$BIN" | grep -E '@rpath|@executable_path' || true
           echo "=== Binary rpaths ==="
-          otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -A2 'LC_RPATH' || true
+          otool -l "$BIN" | grep -A2 'LC_RPATH' || true
 
-          # The binary must reference the dylib through a relocatable @rpath
-          # install name, never an absolute or @executable_path-only name.
-          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
-          # The bundled copy must carry the same relocatable install name.
-          otool -D "$DYLIB" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
-          # dyld must be able to reach at least one bundled copy.
-          if ! otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Frameworks" >/dev/null \
-             && ! otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Resources" >/dev/null; then
-            echo "ERROR: no rpath points into Contents/Frameworks or Contents/Resources" >&2
-            exit 1
-          fi
-          if otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
+          # Every @rpath dylib referenced by the binary must be bundled in one
+          # of the locations dyld searches: Frameworks (SoundTouch),
+          # Resources (SoundTouch fallback), Resources/macos (ORT dylibs such
+          # as libwebgpu_dawn.dylib), or MacOS (cargo-run copies).
+          SEARCH_DIRS=(
+            "$APP_DIR/Contents/Frameworks"
+            "$APP_DIR/Contents/Resources"
+            "$APP_DIR/Contents/Resources/macos"
+            "$APP_DIR/Contents/MacOS"
+          )
+          MISSING=0
+          while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            found=""
+            for dir in "${SEARCH_DIRS[@]}"; do
+              if [ -f "$dir/$dep" ]; then
+                found="$dir/$dep"
+                break
+              fi
+            done
+            if [ -z "$found" ]; then
+              echo "ERROR: $dep referenced via @rpath but not bundled" >&2
+              MISSING=1
+            else
+              echo "ok: $dep -> $found"
+              # Every bundled copy must carry a relocatable @rpath install name.
+              otool -D "$found" | grep -F "@rpath/$dep" >/dev/null || MISSING=1
+            fi
+          done < <(otool -L "$BIN" | sed -n 's/.*@rpath\/\([^ ]*\.dylib\).*/\1/p' | sort -u)
+          [ "$MISSING" -eq 0 ] || exit 1
+
+          # dyld must be able to reach Frameworks, Resources, and the ORT
+          # Resources/macos directory.
+          otool -l "$BIN" | grep -F "@executable_path/../Frameworks" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources/macos" >/dev/null
+
+          # Reject stale/typo'd dependency names.
+          if otool -L "$BIN" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
             echo "ERROR: stale libSoundTouchDL.dylib dependency found" >&2
             exit 1
           fi
@@ -414,13 +420,15 @@ jobs:
             echo "=== app contents ==="
             find "$APP_DIR/Contents" -maxdepth 3 -print | head -100
             echo "=== binary SoundTouch deps ==="
-            otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -E 'SoundTouch|rpath|executable_path' || true
+            otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -E '@rpath|SoundTouch|executable_path' || true
             echo "=== binary rpaths ==="
             otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -A2 'LC_RPATH' || true
             echo "=== MacOS dir ==="
             ls -la "$APP_DIR/Contents/MacOS" 2>/dev/null || true
             echo "=== Resources SoundTouch entries ==="
             ls -la "$APP_DIR/Contents/Resources" 2>/dev/null | grep -i soundtouch || true
+            echo "=== Resources/macos (ORT dylibs) ==="
+            ls -la "$APP_DIR/Contents/Resources/macos" 2>/dev/null || true
           fi
         shell: bash
 
