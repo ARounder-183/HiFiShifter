@@ -1,7 +1,9 @@
 {
     "bundle": {
-        "resources": {
-            "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib": "libSoundTouchDLL.dylib"
+        "macOS": {
+            "frameworks": [
+                "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib"
+            ]
         }
     }
 }

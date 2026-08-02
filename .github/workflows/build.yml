@@ -338,6 +338,26 @@ jobs:
           fi
         shell: bash
 
+      - name: Verify SoundTouch dylib in macOS bundle
+        if: runner.os == 'macOS' && success() && steps.tauri-release-dir.outputs.release-dir != ''
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          echo "=== macOS bundle layout ==="
+          ls -la "$APP_DIR/Contents/Frameworks"
+          echo "=== Binary load commands for SoundTouch ==="
+          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -E 'SoundTouch|@rpath' || true
+          test -f "$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib"
+          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
+          otool -D "$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
+          otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Frameworks" >/dev/null
+          if otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
+            echo "ERROR: stale libSoundTouchDL.dylib dependency found" >&2
+            exit 1
+          fi
+        shell: bash
+
       # Fallback: if linuxdeploy still fails (e.g., can't find libwebgpu_dawn.so),
       # manually add the library to the AppDir and re-run appimagetool.
       - name: Retry AppImage bundling (Linux fallback)

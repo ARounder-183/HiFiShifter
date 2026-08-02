@@ -501,7 +501,7 @@ fn build_soundtouch() {
     cfg.arg("-DSOUNDTOUCH_DLL=ON");
 
     if is_apple {
-        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@executable_path");
+        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");
         cfg.arg("-DCMAKE_MACOSX_RPATH=ON");
     }
 
@@ -550,18 +550,45 @@ fn build_soundtouch() {
         });
     println!("cargo:warning=[soundtouch] found shared lib: {}", lib_src.display());
 
+    // Force a stable, relocatable Mach-O install name.  The library is bundled
+    // into HiFiShifter.app/Contents/Frameworks and loaded through @rpath, so it
+    // must record `@rpath/libSoundTouchDLL.dylib` instead of an absolute path
+    // or an executable-relative path (which would point at Contents/MacOS).
+    if is_apple {
+        let install_name = format!("@rpath/{}", lib_filename);
+        let status = Command::new("install_name_tool")
+            .arg("-id")
+            .arg(&install_name)
+            .arg(&lib_src)
+            .status()
+            .expect("[soundtouch] failed to run install_name_tool");
+        if !status.success() {
+            panic!(
+                "[soundtouch] install_name_tool failed to set {} on {}",
+                install_name,
+                lib_src.display()
+            );
+        }
+        println!(
+            "cargo:warning=[soundtouch] set dylib install name to {}",
+            install_name
+        );
+    }
+
     // Step 4: Link against the shared library
     let lib_search = lib_src.parent().unwrap();
     println!("cargo:rustc-link-search=native={}", lib_search.display());
     println!("cargo:rustc-link-lib=dylib={}", lib_name);
 
     // Set rpath so the binary finds the shared library at runtime.
-    // Linux/ELF uses `$ORIGIN`, while macOS uses dyld-specific loader paths.
-    // Two rpaths are needed:
-    //   1. $ORIGIN — finds libSoundTouchDLL.so next to the binary (e.g. target/release/)
+    // macOS:
+    //   1. @executable_path/../Frameworks — finds the copy in the .app bundle
+    //   2. @executable_path — finds the copy next to the binary during plain cargo runs
+    // Linux:
+    //   1. $ORIGIN — finds libSoundTouchDLL.so next to the binary
     //   2. $ORIGIN/../lib/HiFiShifter — finds it in the AppImage AppDir layout
-    //      (binary at usr/bin/, .so at usr/lib/HiFiShifter/)
     if is_apple {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if !is_windows {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
@@ -569,7 +596,7 @@ fn build_soundtouch() {
     }
 
     // Step 5: Copy shared library to target dir (for runtime linking) AND to
-    // source tree (for Tauri resource bundling / tauri_build validation).
+    // source tree (for Tauri macOS framework bundling / tauri_build validation).
     let target_dir = Path::new(&out_dir)
         .ancestors()
         .nth(3)
@@ -601,19 +628,19 @@ fn build_soundtouch() {
     if src_bytes != dst_bytes {
         if let Err(e) = std::fs::write(&lib_dst_resource, &src_bytes) {
             println!(
-                "cargo:warning=[soundtouch] could not copy {} to resource path {}: {}",
+                "cargo:warning=[soundtouch] could not copy {} to framework source path {}: {}",
                 lib_src.display(),
                 lib_dst_resource.display(),
                 e
             );
         } else {
             println!(
-                "cargo:warning=[soundtouch] updated resource DLL at {}",
+                "cargo:warning=[soundtouch] updated macOS framework dylib at {}",
                 lib_dst_resource.display()
             );
         }
     } else {
-        println!("cargo:warning=[soundtouch] resource DLL unchanged, skipping write");
+        println!("cargo:warning=[soundtouch] macOS framework dylib unchanged, skipping write");
     }
 
 }
