@@ -39,6 +39,14 @@
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
             "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx"
         },
+        "macOS": {
+            "frameworks": [
+                "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib"
+            ],
+            "files": {
+                "Resources/libSoundTouchDLL.dylib": "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib"
+            }
+        },
         "icon": [
             "icons/32x32.png",
             "icons/128x128.png",

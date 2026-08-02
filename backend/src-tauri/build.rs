@@ -37,8 +37,9 @@ fn main() {
     copy_directml_dll();
 
     // tauri_build validates resources listed in tauri.conf.json and its
-    // platform-specific merges (tauri.windows.conf.json, tauri.macos.conf.json).
-    // All resource files must exist before this call.
+    // platform-specific merges (tauri.windows.conf.json, tauri.linux.conf.json),
+    // and copies bundle.macOS.frameworks for darwin targets. All referenced
+    // files must exist before this call.
     tauri_build::build();
 }
 
@@ -582,13 +583,18 @@ fn build_soundtouch() {
 
     // Set rpath so the binary finds the shared library at runtime.
     // macOS:
-    //   1. @executable_path/../Frameworks — finds the copy in the .app bundle
-    //   2. @executable_path — finds the copy next to the binary during plain cargo runs
+    //   1. @executable_path/../Frameworks — primary location: Tauri
+    //      bundle.macOS.frameworks copies the dylib into Contents/Frameworks
+    //   2. @executable_path/../Resources  — fallback location: Tauri
+    //      bundle.macOS.files copies the dylib into Contents/Resources
+    //   3. @executable_path                — finds the copy next to the binary
+    //      during plain cargo runs (target/<triple>/release/)
     // Linux:
     //   1. $ORIGIN — finds libSoundTouchDLL.so next to the binary
     //   2. $ORIGIN/../lib/HiFiShifter — finds it in the AppImage AppDir layout
     if is_apple {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if !is_windows {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");

@@ -345,16 +345,71 @@ jobs:
           set -euxo pipefail
           APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
           echo "=== macOS bundle layout ==="
-          ls -la "$APP_DIR/Contents/Frameworks"
+          find "$APP_DIR/Contents" -maxdepth 3 \( -type d -o -type f \) -print | sort
+
+          # The dylib may live in Contents/Frameworks (bundle.macOS.frameworks,
+          # preferred) or Contents/Resources (bundle.macOS.files fallback). The
+          # binary carries rpaths for both locations, so either layout loads.
+          FRAMEWORK_DYLIB="$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib"
+          RESOURCE_DYLIB="$APP_DIR/Contents/Resources/libSoundTouchDLL.dylib"
+          DYLIB=""
+          if [ -f "$FRAMEWORK_DYLIB" ]; then
+            DYLIB="$FRAMEWORK_DYLIB"
+          fi
+          if [ -f "$RESOURCE_DYLIB" ]; then
+            if [ -n "$DYLIB" ]; then
+              echo "note: dylib present in both Frameworks and Resources"
+            else
+              DYLIB="$RESOURCE_DYLIB"
+            fi
+          fi
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: libSoundTouchDLL.dylib missing from Contents/Frameworks and Contents/Resources" >&2
+            exit 1
+          fi
+          echo "dylib found at: $DYLIB"
+
           echo "=== Binary load commands for SoundTouch ==="
-          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -E 'SoundTouch|@rpath' || true
-          test -f "$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib"
+          otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -E 'SoundTouch|@rpath|@executable_path' || true
+          echo "=== Binary rpaths ==="
+          otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -A2 'LC_RPATH' || true
+
+          # The binary must reference the dylib through a relocatable @rpath
+          # install name, never an absolute or @executable_path-only name.
           otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
-          otool -D "$APP_DIR/Contents/Frameworks/libSoundTouchDLL.dylib" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
-          otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Frameworks" >/dev/null
+          # The bundled copy must carry the same relocatable install name.
+          otool -D "$DYLIB" | grep -F "@rpath/libSoundTouchDLL.dylib" >/dev/null
+          # dyld must be able to reach at least one bundled copy.
+          if ! otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Frameworks" >/dev/null \
+             && ! otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "@executable_path/../Resources" >/dev/null; then
+            echo "ERROR: no rpath points into Contents/Frameworks or Contents/Resources" >&2
+            exit 1
+          fi
           if otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
             echo "ERROR: stale libSoundTouchDL.dylib dependency found" >&2
             exit 1
+          fi
+        shell: bash
+
+      - name: Dump macOS bundle diagnostics on failure
+        if: runner.os == 'macOS' && failure()
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          echo "=== candidate bundle dirs ==="
+          find target -maxdepth 6 -type d | grep -E 'bundle' || true
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ -d "$APP_DIR" ]; then
+            echo "=== app contents ==="
+            find "$APP_DIR/Contents" -maxdepth 3 -print | head -100
+            echo "=== binary SoundTouch deps ==="
+            otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -E 'SoundTouch|rpath|executable_path' || true
+            echo "=== binary rpaths ==="
+            otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -A2 'LC_RPATH' || true
+            echo "=== MacOS dir ==="
+            ls -la "$APP_DIR/Contents/MacOS" 2>/dev/null || true
+            echo "=== Resources SoundTouch entries ==="
+            ls -la "$APP_DIR/Contents/Resources" 2>/dev/null | grep -i soundtouch || true
           fi
         shell: bash
 
