@@ -299,7 +299,11 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Request the .app bundle explicitly: when only the DMG is requested,
+          # tauri-bundler deletes the intermediate .app from bundle/macos right
+          # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
+          # nothing on disk for the bundle verification step to inspect.
+          args: --target ${{ matrix.cargo_target }} --bundles app,dmg ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -344,6 +348,13 @@ jobs:
         run: |
           set -euxo pipefail
           APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ ! -d "$APP_DIR" ]; then
+            echo "ERROR: $APP_DIR not found." >&2
+            echo "When only the DMG is requested, tauri-bundler removes the intermediate .app" >&2
+            echo "after creating the DMG. Build with --bundles app,dmg so the .app is kept." >&2
+            ls -la "$(dirname "$APP_DIR")" 2>/dev/null || true
+            exit 1
+          fi
           echo "=== macOS bundle layout ==="
           find "$APP_DIR/Contents" -maxdepth 3 \( -type d -o -type f \) -print | sort
 
