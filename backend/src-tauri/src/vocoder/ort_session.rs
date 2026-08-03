@@ -33,6 +33,24 @@ pub const COREML_FIXED_TIME_FRAMES: usize = 4096;
 /// the fixed dimension; FCPE/HNSEP keep their dynamic shapes.
 static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = OnceLock::new();
 
+/// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
+/// then skipped for the rest of the process (WebGPU/CPU take over) so a
+/// hung CoreML inference can never block the benchmark or rendering again.
+static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+fn coreml_disabled() -> bool {
+    COREML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn disable_coreml(reason: &str) {
+    eprintln!("ort_session: disabling CoreML EP for this process: {reason}");
+    COREML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Returns `true` when the current process is a macOS ARM64 build running
 /// with the CoreML execution provider (i.e. sessions are pinned to
 /// [`COREML_FIXED_TIME_FRAMES`] for the given role and inference inputs must
@@ -565,19 +583,22 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     if choice == "auto" || choice == "coreml" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
         // CoreML is the primary GPU path on Apple Silicon. An explicit
         // "webgpu" selection skips CoreML and goes straight to Dawn/Metal.
-        if choice != "webgpu" {
+        if choice != "webgpu" && !coreml_disabled() {
             match Session::builder() {
                 Ok(builder) => match try_register_coreml_ep(builder, role) {
                     Ok((b, ep)) => {
-                        // Pin the vocoder model's dynamic `time` dimension.
-                        // Without this, the CoreML EP fails to compile this
-                        // model ("Unable to get shape for output") because
-                        // the f0 subgraph (Shape/Gather/Mod/ConstantOfShape)
-                        // cannot resolve dynamic shapes.  FCPE/HNSEP keep
+                        // Pin the vocoder model's dynamic `time` and `batch`
+                        // dimensions.  Without this, the CoreML EP fails to
+                        // compile this model ("Unable to get shape for
+                        // output") because the f0 subgraph
+                        // (Shape/Gather/Mod/ConstantOfShape) cannot resolve
+                        // dynamic shapes, and a dynamic batch is a known
+                        // CoreML EP crash/hang source.  FCPE/HNSEP keep
                         // dynamic shapes (they are not padded downstream).
                         let pinned = matches!(role, OrtSessionRole::Vocoder);
                         let pinned_builder = if pinned {
-                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)
+                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)?
+                                .with_dimension_override("batch", 1)
                         } else {
                             Ok(b)
                         };
@@ -623,11 +644,16 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
 /// platforms (WSL2 with Lavapipe, misconfigured drivers, headless
 /// systems) the EP registers successfully but runtime inference fails
 /// — this catches that early so we can fall back to CPU.
-fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: &str) -> Result<(), String> {
+fn smoke_test_gpu_session(
+    mut session: Session,
+    role: OrtSessionRole,
+    ep_name: &str,
+) -> Result<Session, String> {
     use ort::value::{Tensor, ValueType};
 
-    // Collect f32 tensor inputs from the session metadata.
-    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::new();
+    // Collect f32 tensor input metadata first so the `session` borrow ends
+    // before the session is moved into the helper thread below.
+    let mut plans: Vec<(String, Vec<usize>)> = Vec::new();
     for input in session.inputs() {
         let (tensor_ty, shape) = match input.dtype() {
             ValueType::Tensor { ty, shape, .. } => (ty, shape),
@@ -637,40 +663,74 @@ fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: 
             continue;
         }
         if shape.iter().any(|&d| d == 0) {
-            continue; // scalar or zero-dim — skip
+            continue; // scalar or zero-dim - skip
         }
         // Replace dynamic dimensions (-1) with small test values:
-        //   dim 0 → 1 (batch),  other dims → 4 (one upsampling hop).
+        //   dim 0 -> 1 (batch),  other dims -> 4 (one upsampling hop).
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
             .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
             .collect();
+        plans.push((input.name().to_string(), test_shape));
+    }
+    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::with_capacity(plans.len());
+    for (name, test_shape) in plans {
         let total: usize = test_shape.iter().product::<usize>().max(1);
         let data: Vec<f32> = vec![0.0f32; total];
         let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
-            .map_err(|e| format!("smoke test: tensor '{}' creation failed: {e}", input.name()))?;
-        input_pairs.push((input.name().to_string(), tensor.into()));
+            .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?;
+        input_pairs.push((name, tensor.into()));
     }
 
     if input_pairs.is_empty() {
         eprintln!("ort_session[{role:?}]: GPU smoke test skipped (no f32 tensor inputs)");
-        return Ok(());
+        return Ok(session);
     }
 
-    session
-        .run(input_pairs)
-        .map_err(|e| {
-            format!(
-                "{ep_name} inference is not functional on this system. \
-                 The EP registered but compute shader execution failed: {e}. \
-                 Falling back to CPU."
-            )
-        })?;
+    // CoreML can take a long time (or hang forever) on its first inference:
+    // MLProgram compilation is deferred to the first run, and a dynamic
+    // batch is a known hang source.  Run the smoke test on a helper thread
+    // with a generous timeout so a stuck CoreML session can never freeze the
+    // benchmark.  If it times out we return an error and the caller falls
+    // back to WebGPU/CPU; the orphaned thread (if truly hung) is harmless.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let timeout = std::time::Duration::from_secs(60);
+    let run_thread = std::thread::spawn(move || {
+        // Run inside a block so the returned SessionOutputs (which borrow
+        // the session) are dropped before we move the session back.
+        let result = {
+            let outputs = session.run(input_pairs);
+            outputs.map(|_| ())
+        };
+        let _ = tx.send((result, session));
+    });
 
-    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed — EP is functional");
-    Ok(())
+    match rx.recv_timeout(timeout) {
+        Ok((result, session)) => {
+            let _ = run_thread.join();
+            match result {
+                Ok(_) => {
+                    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
+                    Ok(session)
+                }
+                Err(e) => Err(format!(
+                    "{ep_name} inference is not functional on this system.                      The EP registered but compute shader execution failed: {e}.                      Falling back to CPU."
+                )),
+            }
+        }
+        Err(_) => {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            disable_coreml(&format!(
+                "{ep_name} smoke test exceeded {timeout:?} (first inference hung)"
+            ));
+            Err(format!(
+                "{ep_name} smoke test timed out after {timeout:?}.                  The EP registered but the first inference did not complete.                  Falling back to WebGPU/CPU."
+            ))
+        }
+    }
 }
+
 
 /// Finalize a GPU session (CoreML / WebGPU) with appropriate optimization
 /// settings, then smoke-test it so broken GPU backends fall back to CPU early.
@@ -740,12 +800,10 @@ fn build_gpu_session_finalize(
     // but compute shader execution fails at runtime.  Running a tiny
     // inference now catches this early and lets us fall back to CPU
     // instead of silently returning a broken session.
-    match smoke_test_gpu_session(&mut session, role, ep_name) {
-        Ok(()) => {}
+    match smoke_test_gpu_session(session, role, ep_name) {
+        Ok(s) => session = s,
         Err(e) => {
             eprintln!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
-            // Drop the session so ORT releases any partially-allocated GPU resources
-            drop(session);
             return Err(e);
         }
     }
@@ -855,11 +913,10 @@ fn build_dml_session_inner(
     }
 
     // ── Smoke test: verify DirectML can actually run inference ─────────
-    match smoke_test_gpu_session(&mut session, role, "DirectML") {
-        Ok(()) => {}
+    match smoke_test_gpu_session(session, role, "DirectML") {
+        Ok(s) => session = s,
         Err(e) => {
             eprintln!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
-            drop(session);
             return Err(e);
         }
     }

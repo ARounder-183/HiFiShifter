@@ -889,6 +889,16 @@ impl NsfHifiganOnnx {
             let (mel, f0, t) = &items[0];
             return self.run_model(mel.clone(), f0.clone(), *t).map(|v| vec![v]);
         }
+        // CoreML sessions are compiled with batch=1 pinned (dynamic batch is
+        // a known CoreML EP crash/hang source), so a batch of >1 items must
+        // be executed one item at a time.
+        if session_time_frames().is_some() {
+            let mut results = Vec::with_capacity(items.len());
+            for (mel, f0, t) in items {
+                results.push(self.run_model(mel.clone(), f0.clone(), *t)?);
+            }
+            return Ok(results);
+        }
 
         let n = items.len();
         // CoreML sessions are compiled with a fixed `time` dimension: pad the
@@ -2300,6 +2310,22 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
     
     with_tls_session(|sess| {
         let n = jobs.len();
+        // CoreML sessions are compiled with batch=1 pinned, so cross-clip
+        // batches must be executed one chunk at a time.
+        if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder) {
+            let mut results = Vec::with_capacity(n);
+            for job in &jobs {
+                let waveform = sess.run_model(job.mel_seg.clone(), job.f0_seg.clone(), job.chunk_t)?;
+                results.push(ChunkResult {
+                    clip_idx: job.clip_idx,
+                    frame_off: job.frame_off,
+                    chunk_end: job.chunk_end,
+                    waveform,
+                });
+                emit_chunk_progress(results.len() as f64 / n as f64);
+            }
+            return Ok(results);
+        }
         // CoreML sessions are compiled with a fixed `time` dimension: pad the
         // whole batch to that length and trim each job's output below.
         let max_t = crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder)
