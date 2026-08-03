@@ -289,7 +289,13 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Do NOT pass --target: every runner in this matrix is native to its
+          # target architecture (windows-11-arm is a native ARM64 runner), so
+          # cargo builds for the host default target and writes to
+          # target/release, exactly like a local `cargo tauri build`.
+          # Passing --target would move the output to target/<triple>/release
+          # and diverge from local developer builds.
+          args: ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -303,16 +309,15 @@ jobs:
           # tauri-bundler deletes the intermediate .app from bundle/macos right
           # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
           # nothing on disk for the bundle verification step to inspect.
-          args: --target ${{ matrix.cargo_target }} --bundles app,dmg ${{ matrix.cargo_extra }}
+          args: --bundles app,dmg ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
         run: |
           # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
           # linuxdeploy needs to find it to bundle it into the AppImage.
-          TARGET_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/${{ matrix.cargo_target }}/release"
           DEFAULT_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/release"
-          echo "LD_LIBRARY_PATH=${TARGET_LIB_DIR}:${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Build Linux AppImage
@@ -324,11 +329,13 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
+          args: --bundles appimage ${{ matrix.cargo_extra }}
 
-      # Resolve the actual release directory so later steps work with both
-      # target/release (host-default builds) and target/<triple>/release
-      # (CI builds that pass --target).
+      # CI builds now use the host default target (no --target), so the output
+      # directory is target/release, matching a local `cargo tauri build`.
+      # This step still resolves the path defensively: if a future contributor
+      # re-adds --target, packaging and verification keep working instead of
+      # failing with a hard-coded path.
       - name: Resolve Tauri release directory
         if: always()
         id: tauri-release-dir
