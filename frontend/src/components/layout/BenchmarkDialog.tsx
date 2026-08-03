@@ -47,14 +47,14 @@ function buildRows(result: BenchmarkResult): EpRow[] {
     // GPU (WebGPU)
     if (result.gpuMedianMs != null && result.gpuRtFactor != null) {
         rows.push({
-            label: "GPU (WebGPU)",
+            label: result.gpuBackendName ? `GPU (${result.gpuBackendName})` : "GPU (WebGPU)",
             medianMs: result.gpuMedianMs,
             rtf: result.gpuRtFactor,
             available: true,
         });
     } else if (result.gpuAvailable) {
         rows.push({
-            label: "GPU (WebGPU)",
+            label: result.gpuBackendName ? `GPU (${result.gpuBackendName})` : "GPU (WebGPU)",
             medianMs: -1,
             rtf: -1,
             available: false,

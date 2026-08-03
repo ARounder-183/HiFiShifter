@@ -2315,6 +2315,9 @@ pub struct BenchmarkResults {
     pub benchmark_samples: usize,
     /// True when WebGPU EP was available and used for the GPU benchmark.
     pub gpu_available: bool,
+    /// Display name of the GPU backend used by the benchmark ("CoreML" on
+    /// macOS ARM64, "WebGPU" on Linux x86_64).
+    pub gpu_backend_name: String,
     /// True when DirectML EP was available and used for the benchmark.
     pub dml_available: bool,
     /// GPU device ID that was used (0 if GPU not available).
@@ -2398,29 +2401,31 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     eprintln!("[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
         t_cpu_total.elapsed().as_millis(), cpu_times);
 
-    // 2. Benchmark GPU (WebGPU) if available
+    // 2. Benchmark GPU (CoreML on macOS, WebGPU elsewhere) if available
     let mut gpu_median = None;
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
+    let mut gpu_ep_name = String::new();
 
-    // Always attempt WebGPU benchmark on supported platforms.
-    // On Windows, we don't auto-probe WebGPU (Dawn/D3D12 can crash),
-    // but the benchmark explicitly forces "webgpu" EP choice which is
-    // safe because it only triggers Dawn init within the benchmark's
-    // controlled scope.
+    // Always attempt the GPU benchmark on supported platforms. On Windows we
+    // don't auto-probe WebGPU (Dawn/D3D12 can crash), but the benchmark
+    // explicitly forces the GPU EP choice which is safe because it only
+    // triggers EP init within the benchmark's controlled scope.
     if gpu_available {
+        let gpu_ep_choice = if cfg!(target_os = "macos") { "coreml" } else { "webgpu" };
         let gpu_session_res = {
-            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("webgpu".to_string());
+            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
             crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
         };
 
         if let Ok((mut gpu_session, ep)) = gpu_session_res {
-            if ep == "webgpu" {
-                eprintln!("[benchmark] WebGPU session created: ep={ep}");
+            if ep == "webgpu" || ep == "coreml" {
+                gpu_ep_name = ep.to_string();
+                eprintln!("[benchmark] GPU session created: ep={ep}");
                 let mel = vec![0.0f32; cfg.num_mels * frames];
                 let f0 = vec![440.0f32; frames];
 
-                // Warmup: test if WebGPU inference actually works.
+                // Warmup: test if GPU inference actually works.
                 // Use a block scope to ensure the SessionOutputs borrow
                 // is dropped before we borrow gpu_session again below.
                 let warmup_ok = {
@@ -2430,7 +2435,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                         Ok(_) => true,
                         Err(e) => {
                             eprintln!(
-                                "[benchmark] WARNING: WebGPU EP registered but warmup inference FAILED: {e}"
+                                "[benchmark] WARNING: {ep} EP registered but warmup inference FAILED: {e}"
                             );
                             false
                         }
@@ -2451,12 +2456,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     let median = gpu_times[gpu_times.len() / 2];
                     gpu_median = Some(median);
                     gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                    eprintln!("[benchmark] WebGPU: median={median:.1}ms rtf={:.3}x",
+                    eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
                         audio_sec / (median / 1000.0));
                 }
             }
         } else {
-            eprintln!("[benchmark] WebGPU session creation FAILED: {:?}", gpu_session_res.err());
+            eprintln!("[benchmark] GPU session creation FAILED: {:?}", gpu_session_res.err());
         }
     }
 
@@ -2526,6 +2531,19 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         available_providers, gpu_device_id, gpu_actually_working, dml_available
     );
 
+    let gpu_backend_name = match gpu_ep_name.as_str() {
+        "coreml" => "CoreML",
+        "webgpu" => "WebGPU",
+        _ => {
+            if cfg!(target_os = "macos") {
+                "CoreML"
+            } else {
+                "WebGPU"
+            }
+        }
+    }
+    .to_string();
+
     Ok(BenchmarkResults {
         cpu_median_ms: cpu_median,
         cpu_rt_factor,
@@ -2535,6 +2553,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         dml_rt_factor,
         benchmark_samples: runs,
         gpu_available,
+        gpu_backend_name,
         dml_available,
         gpu_device_id,
         available_providers,

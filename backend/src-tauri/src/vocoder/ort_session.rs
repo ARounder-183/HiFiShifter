@@ -244,6 +244,60 @@ fn try_register_webgpu_ep(
     Err("WebGPU EP is not compiled on this platform. Use DirectML (Windows) or CPU.".to_string())
 }
 
+/// Try to register the CoreML EP on a session builder (macOS ARM64).
+///
+/// CoreML is the primary GPU/Neural Engine path on Apple Silicon: it uses
+/// Apple's Core ML framework (CPU + Neural Engine + GPU depending on the
+/// selected compute units) instead of Dawn/WebGPU.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn try_register_coreml_ep(
+    builder: ort::session::builder::SessionBuilder,
+    _role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    // For a real-time vocoder the Neural Engine is the fastest and most
+    // power-efficient target; CoreML falls back to CPU for unsupported ops.
+    let build_result = std::panic::catch_unwind(|| {
+        ort::ep::CoreML::default()
+            .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndNeuralEngine)
+            .build()
+    });
+    let ep = match build_result {
+        Ok(ep) => ep,
+        Err(panic) => {
+            let msg = format!(
+                "CoreML EP build panicked: {}",
+                panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+            );
+            eprintln!("ort_session: {msg}");
+            return Err(msg);
+        }
+    };
+
+    let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builder.with_execution_providers([ep.clone()])
+    }));
+
+    match register_result {
+        Ok(Ok(b)) => {
+            eprintln!("ort_session: CoreML EP registered successfully");
+            Ok((b, "coreml"))
+        }
+        Ok(Err(e)) => {
+            let msg = format!("CoreML EP registration failed: {e}");
+            eprintln!("ort_session: {msg}");
+            Err(msg)
+        }
+        Err(panic) => {
+            let msg = format!(
+                "CoreML EP registration panicked: {}",
+                panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+            );
+            eprintln!("ort_session: {msg}");
+            Err(msg)
+        }
+    }
+}
+
 /// Check if we're running under WSL2 (Windows Subsystem for Linux).
 /// WSL2 does not expose native hardware Vulkan to Linux guests — the
 /// Windows GPU driver provides D3D12/DirectX passthrough via /dev/dxg.
@@ -337,6 +391,8 @@ fn try_register_directml_ep(
 /// EP selection priority (for choice="auto"):
 ///   Windows:  1. DirectML (DX12, proven stable)  2. CPU fallback
 ///   Linux:    1. WebGPU (Dawn/Vulkan)            2. CPU fallback
+///   macOS ARM64: 1. CoreML (Neural Engine/GPU)   2. WebGPU (Dawn/Metal)
+///               3. CPU fallback
 ///
 /// WebGPU on Windows is only used when explicitly selected
 /// (choice="webgpu"), because Dawn/D3D12 probing can crash on some
@@ -385,7 +441,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
             Ok(builder) => {
                 match try_register_webgpu_ep(builder, role) {
                     Ok((b, ep)) => {
-                        let session = build_webgpu_session_finalize(b, onnx_path, role)?;
+                        let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
                         return Ok((session, ep.to_string()));
                     }
                     Err(e) => {
@@ -404,6 +460,35 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     }
 
     // ── Fallback: CPU ──────────────────────────────────────────────────
+    // macOS ARM64: CoreML (Neural Engine/GPU) first, WebGPU fallback, then CPU.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if choice == "auto" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
+        // CoreML is the primary GPU path on Apple Silicon. An explicit
+        // "webgpu" selection skips CoreML and goes straight to Dawn/Metal.
+        if choice != "webgpu" {
+            match Session::builder() {
+                Ok(builder) => match try_register_coreml_ep(builder, role) {
+                    Ok((b, ep)) => {
+                        let session = build_gpu_session_finalize(b, onnx_path, role, "CoreML")?;
+                        return Ok((session, ep.to_string()));
+                    }
+                    Err(e) => eprintln!("ort_session[{role:?}]: CoreML unavailable: {e}"),
+                },
+                Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for CoreML: {e}"),
+            }
+        }
+        match Session::builder() {
+            Ok(builder) => match try_register_webgpu_ep(builder, role) {
+                Ok((b, ep)) => {
+                    let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
+                    return Ok((session, ep.to_string()));
+                }
+                Err(e) => eprintln!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
+            },
+            Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"),
+        }
+    }
+
     build_cpu_session(onnx_path, role, &choice)
 }
 
@@ -461,16 +546,18 @@ fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: 
     Ok(())
 }
 
-/// Finalize a WebGPU session with appropriate optimization settings.
+/// Finalize a GPU session (CoreML / WebGPU) with appropriate optimization
+/// settings, then smoke-test it so broken GPU backends fall back to CPU early.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
-fn build_webgpu_session_finalize(
+fn build_gpu_session_finalize(
     mut builder: ort::session::builder::SessionBuilder,
     onnx_path: &Path,
     role: OrtSessionRole,
+    ep_name: &str,
 ) -> Result<Session, String> {
     let model_name = onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     eprintln!(
-        "ort_session[{role:?}]: model={model_name} ep=webgpu (global_env={})",
+        "ort_session[{role:?}]: model={model_name} ep={ep_name} (global_env={})",
         env_ep_choice(),
     );
 
@@ -496,7 +583,7 @@ fn build_webgpu_session_finalize(
         .commit_from_file(onnx_path)
         .map_err(|e| {
             let msg = format!(
-                "load onnx into WebGPU ort session failed: {e}"
+                "load onnx into {ep_name} ort session failed: {e}"
             );
             eprintln!("ort_session[{role:?}]: {msg}");
             msg
@@ -504,7 +591,7 @@ fn build_webgpu_session_finalize(
     let create_ms = t_create.elapsed().as_millis();
 
     eprintln!(
-        "ort_session[{role:?}]: created session ep=webgpu intra_threads={threads} commit_ms={create_ms}",
+        "ort_session[{role:?}]: created session ep={ep_name} intra_threads={threads} commit_ms={create_ms}",
     );
 
     // Log session I/O metadata
@@ -527,10 +614,10 @@ fn build_webgpu_session_finalize(
     // but compute shader execution fails at runtime.  Running a tiny
     // inference now catches this early and lets us fall back to CPU
     // instead of silently returning a broken session.
-    match smoke_test_gpu_session(&mut session, role, "WebGPU") {
+    match smoke_test_gpu_session(&mut session, role, ep_name) {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("ort_session[{role:?}]: WebGPU smoke test failed, discarding session and falling back to CPU: {e}");
+            eprintln!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
             // Drop the session so ORT releases any partially-allocated GPU resources
             drop(session);
             return Err(e);
@@ -736,6 +823,12 @@ pub fn diagnose_available_providers() -> Vec<String> {
         providers.push("WebGpuExecutionProvider".to_string());
     }
 
+    // CoreML -- macOS ARM64 only (Apple Neural Engine / GPU).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if probe_coreml_ep_available() {
+        providers.push("CoreMLExecutionProvider".to_string());
+    }
+
     // DirectML — Windows only
     if probe_directml_ep_available() {
         providers.push("DmlExecutionProvider".to_string());
@@ -786,6 +879,44 @@ fn probe_webgpu_ep_available() -> bool {
             let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
             eprintln!("ort_session: probe_webgpu_ep — PANICKED: {msg}");
             log_vulkan_diagnostics();
+            false
+        }
+    }
+}
+
+/// Quick check: try registering the CoreML EP on a temporary session builder.
+/// Returns true if CoreML EP is available in the loaded ORT binary.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn probe_coreml_ep_available() -> bool {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match Session::builder() {
+            Ok(builder) => {
+                let ep = ort::ep::CoreML::default()
+                    .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndNeuralEngine)
+                    .build();
+                match builder.with_execution_providers([ep]) {
+                    Ok(_) => {
+                        eprintln!("ort_session: probe_coreml_ep - AVAILABLE");
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("ort_session: probe_coreml_ep - NOT available: {e}");
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ort_session: probe_coreml_ep - session builder failed: {e}");
+                false
+            }
+        }
+    }));
+
+    match result {
+        Ok(available) => available,
+        Err(panic) => {
+            let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
+            eprintln!("ort_session: probe_coreml_ep - PANICKED: {msg}");
             false
         }
     }
