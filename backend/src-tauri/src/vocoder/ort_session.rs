@@ -109,7 +109,10 @@ fn build_coreml_ep() -> ort::ep::CoreML {
             .join("HiFiShifter")
             .join("coreml");
         if std::fs::create_dir_all(&cache).is_ok() {
-            ep = ep.with_model_cache_dir(cache);
+            // with_model_cache_dir takes `impl ToString`, so convert the
+            // PathBuf explicitly (PathBuf itself does not implement
+            // ToString).
+            ep = ep.with_model_cache_dir(cache.to_string_lossy().into_owned());
         }
     }
 
