@@ -319,6 +319,8 @@ export interface BenchmarkResult {
     gpuRtFactor?: number | null;
     /** Display name of the GPU backend ("CoreML", "WebGPU", ...). */
     gpuBackendName?: string | null;
+    /** Detailed error message when the GPU benchmark could not complete. */
+    gpuError?: string | null;
     /** DirectML GPU inference time (ms), null if unavailable or failed. */
     dmlMedianMs?: number | null;
     /** DirectML GPU real-time factor, null if unavailable or failed. */

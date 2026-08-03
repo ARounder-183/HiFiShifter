@@ -59,9 +59,13 @@ libc = "0.2"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 objc2 = "0.6"
+libc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+libc = "0.2"
 
 [features]
-default = ["onnx", "vslib"]
+default = ["onnx", "vslib", "logging"]
 logging = []
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []

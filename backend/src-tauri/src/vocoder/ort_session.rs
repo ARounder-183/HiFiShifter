@@ -15,6 +15,107 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+/// Fixed mel-frame length used by CoreML sessions on macOS ARM64.
+///
+/// The NSF-HiFiGAN model has a dynamic `time` axis and its f0
+/// pre-processing subgraph contains `Shape`/`Gather`/`Mod`/`ConstantOfShape`
+/// operators.  ONNX Runtime's CoreML EP cannot always resolve shapes at
+/// graph-compilation time when `time` is dynamic ("Unable to get shape for
+/// output" / `model_builder` failures), even though the same model loads
+/// fine on CPU/WebGPU.  Pinning `time` to this constant makes every shape in
+/// the graph statically resolvable, which lets the CoreML EP compile and run
+/// the model.  All inference entry points pad mel/f0 to this length and trim
+/// the output back to the requested chunk length.
+pub const COREML_FIXED_TIME_FRAMES: usize = 4096;
+
+/// Stores whether the most recently created CoreML session for each role is
+/// pinned to [`COREML_FIXED_TIME_FRAMES`].  Only the vocoder model requires
+/// the fixed dimension; FCPE/HNSEP keep their dynamic shapes.
+static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = OnceLock::new();
+
+/// Returns `true` when the current process is a macOS ARM64 build running
+/// with the CoreML execution provider (i.e. sessions are pinned to
+/// [`COREML_FIXED_TIME_FRAMES`] for the given role and inference inputs must
+/// be padded).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn coreml_active(role: OrtSessionRole) -> bool {
+    COREML_PINNED_BY_ROLE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .ok()
+        .map(|g| g.iter().any(|(r, pinned)| *r == role && *pinned))
+        .unwrap_or(false)
+}
+
+/// Stub for non-macOS-ARM64 builds.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn coreml_active(_role: OrtSessionRole) -> bool {
+    false
+}
+
+/// Clear the CoreML pinned-state cache (e.g. when the runtime EP is changed,
+/// so stale "coreml" state does not keep padding after switching to CPU).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn reset_coreml_pinned_state() {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        guard.clear();
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn reset_coreml_pinned_state() {}
+
+/// Record the CoreML pinned state for a role (macOS ARM64 only).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn set_coreml_pinned(role: OrtSessionRole, pinned: bool) {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        if let Some(entry) = guard.iter_mut().find(|(r, _)| *r == role) {
+            entry.1 = pinned;
+        } else {
+            guard.push((role, pinned));
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn set_coreml_pinned(_role: OrtSessionRole, _pinned: bool) {}
+
+/// Build a CoreML execution provider with the options that make the
+/// NSF-HiFiGAN model compile reliably on Apple Silicon.
+///
+/// - `MLProgram` format: supports more operators and is required for many
+///   models that the legacy NeuralNetwork format rejects.
+/// - `CPUAndNeuralEngine`: prefer the ANE for real-time vocoding, with CPU
+///   fallback for unsupported ops.
+/// - A persistent model cache avoids recompiling the CoreML model on every
+///   session creation (can take tens of seconds for this 56 MB model).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn build_coreml_ep() -> ort::ep::CoreML {
+    use ort::ep::coreml::{ComputeUnits, ModelFormat};
+
+    let mut ep = ort::ep::CoreML::default()
+        .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
+        .with_model_format(ModelFormat::MLProgram)
+        .with_static_input_shapes(false);
+
+    // Cache compiled CoreML programs under ~/Library/Caches/HiFiShifter so
+    // repeated session creation (e.g. after an EP switch) does not recompile
+    // the whole model.  If the cache directory cannot be created, continue
+    // without caching -- it is purely an optimization.
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("HiFiShifter")
+            .join("coreml");
+        if std::fs::create_dir_all(&cache).is_ok() {
+            ep = ep.with_model_cache_dir(cache);
+        }
+    }
+
+    ep
+}
+
 /// Runtime override for EP choice. Set by `set_runtime_ep_override()`.
 /// Takes precedence over the `HIFISHIFTER_ORT_EP` env var.
 static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -254,12 +355,8 @@ fn try_register_coreml_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    // For a real-time vocoder the Neural Engine is the fastest and most
-    // power-efficient target; CoreML falls back to CPU for unsupported ops.
     let build_result = std::panic::catch_unwind(|| {
-        ort::ep::CoreML::default()
-            .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndNeuralEngine)
-            .build()
+        build_coreml_ep().build()
     });
     let ep = match build_result {
         Ok(ep) => ep,
@@ -462,15 +559,41 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     // ── Fallback: CPU ──────────────────────────────────────────────────
     // macOS ARM64: CoreML (Neural Engine/GPU) first, WebGPU fallback, then CPU.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if choice == "auto" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
+    if choice == "auto" || choice == "coreml" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
         // CoreML is the primary GPU path on Apple Silicon. An explicit
         // "webgpu" selection skips CoreML and goes straight to Dawn/Metal.
         if choice != "webgpu" {
             match Session::builder() {
                 Ok(builder) => match try_register_coreml_ep(builder, role) {
                     Ok((b, ep)) => {
-                        let session = build_gpu_session_finalize(b, onnx_path, role, "CoreML")?;
-                        return Ok((session, ep.to_string()));
+                        // Pin the vocoder model's dynamic `time` dimension.
+                        // Without this, the CoreML EP fails to compile this
+                        // model ("Unable to get shape for output") because
+                        // the f0 subgraph (Shape/Gather/Mod/ConstantOfShape)
+                        // cannot resolve dynamic shapes.  FCPE/HNSEP keep
+                        // dynamic shapes (they are not padded downstream).
+                        let pinned = matches!(role, OrtSessionRole::Vocoder);
+                        let pinned_builder = if pinned {
+                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)
+                        } else {
+                            Ok(b)
+                        };
+                        match pinned_builder {
+                            Ok(b) => {
+                                match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
+                                    Ok(session) => {
+                                        set_coreml_pinned(role, pinned);
+                                        return Ok((session, ep.to_string()));
+                                    }
+                                    Err(e) => eprintln!(
+                                        "ort_session[{role:?}]: CoreML session creation failed (will try WebGPU): {e}"
+                                    ),
+                                }
+                            }
+                            Err(e) => eprintln!(
+                                "ort_session[{role:?}]: failed to pin CoreML time dimension (will try WebGPU): {e}"
+                            ),
+                        }
                     }
                     Err(e) => eprintln!("ort_session[{role:?}]: CoreML unavailable: {e}"),
                 },
@@ -891,9 +1014,7 @@ fn probe_coreml_ep_available() -> bool {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match Session::builder() {
             Ok(builder) => {
-                let ep = ort::ep::CoreML::default()
-                    .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndNeuralEngine)
-                    .build();
+                let ep = build_coreml_ep().build();
                 match builder.with_execution_providers([ep]) {
                     Ok(_) => {
                         eprintln!("ort_session: probe_coreml_ep - AVAILABLE");

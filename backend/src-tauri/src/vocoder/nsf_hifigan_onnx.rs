@@ -12,6 +12,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// Returns the mel-frame length the current ORT session is pinned to, when
+/// the CoreML EP is active on macOS ARM64.  On other platforms / EPs the
+/// session keeps the model's dynamic `time` axis and no padding is needed.
+fn session_time_frames() -> Option<usize> {
+    if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder) {
+        Some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
+    } else {
+        None
+    }
+}
+
 /// Global progress callback for chunk rendering. Set before render, cleared after.
 static CHUNK_PROGRESS_CB: OnceLock<Mutex<Option<Box<dyn Fn(f64) + Send + Sync>>>> = OnceLock::new();
 static CHUNK_PROGRESS_TOTAL: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
@@ -175,16 +186,38 @@ pub(crate) fn probe_load() -> Result<String, String> {
     let mut session = build_session_with_ep(&onnx_path)?;
 
     // Best-effort smoke run to ensure inputs/outputs are compatible.
-    // Model expects mel: (1, n_mels, T) and f0: (1, T).
-    let t = 10usize;
-    let mel = vec![0.0f32; cfg.num_mels.saturating_mul(t)];
-    let f0 = vec![0.0f32; t];
-    let mel_tensor = Tensor::from_array(([1usize, cfg.num_mels, t], mel.into_boxed_slice()))
-        .map_err(|e| format!("build mel tensor failed: {e}"))?;
-    let f0_tensor = Tensor::from_array(([1usize, t], f0.into_boxed_slice()))
-        .map_err(|e| format!("build f0 tensor failed: {e}"))?;
+    // Build test tensors from the session's actual input metadata so the
+    // probe works for both dynamic-shape sessions (CPU/WebGPU, tiny test
+    // frames) and fixed-shape CoreML sessions (4096 frames).
+    use ort::value::{Tensor, ValueType};
+    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::new();
+    for input in session.inputs() {
+        let (tensor_ty, shape) = match input.dtype() {
+            ValueType::Tensor { ty, shape, .. } => (ty, shape),
+            _ => continue,
+        };
+        if *tensor_ty != ort::value::TensorElementType::Float32 {
+            continue;
+        }
+        if shape.iter().any(|&d| d == 0) {
+            continue;
+        }
+        let test_shape: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
+            .collect();
+        let total: usize = test_shape.iter().product::<usize>().max(1);
+        let data: Vec<f32> = vec![0.0f32; total];
+        let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
+            .map_err(|e| format!("probe: tensor '{}' creation failed: {e}", input.name()))?;
+        input_pairs.push((input.name().to_string(), tensor.into()));
+    }
+    if input_pairs.is_empty() {
+        return Err("probe: no f32 tensor inputs found".to_string());
+    }
     let outputs = session
-        .run(ort::inputs![mel_tensor, f0_tensor])
+        .run(input_pairs)
         .map_err(|e| format!("ort session run failed: {e}"))?;
     let output0 = outputs
         .into_iter()
@@ -531,6 +564,7 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     crate::vocoder_ort_session::set_runtime_ep_override(Some(ep_str));
     // 写入 DirectML 设备 ID 覆盖
     crate::vocoder_ort_session::set_runtime_dml_device_id(device_id);
+    crate::vocoder_ort_session::reset_coreml_pinned_state();
 
     // 重置全局 Session，下一次渲染请求时将自动使用新 EP 重新创建
     if let Some(mutex) = SHARED_SESSION.get() {
@@ -786,15 +820,39 @@ impl NsfHifiganOnnx {
         self.f0_scratch.resize(f0_slice.len(), 0.0);
         self.f0_scratch.copy_from_slice(f0_slice);
 
-        // take 转移所有权，scratch 保留空 Vec + 原容量
-        let mel_buf = std::mem::take(&mut self.mel_scratch);
-        let f0_buf = std::mem::take(&mut self.f0_scratch);
+        // CoreML sessions are compiled with a fixed `time` dimension, so pad
+        // inputs to that length and trim the output back to t * hop_size.
+        let fixed_t = session_time_frames();
+        let n_mels = self.cfg.num_mels;
+        let mel_buf = match fixed_t {
+            Some(fixed) if fixed > t => {
+                let mut padded = vec![0.0f32; n_mels * fixed];
+                for m in 0..n_mels {
+                    let src = &self.mel_scratch[m * t..(m + 1) * t];
+                    let dst = &mut padded[m * fixed..m * fixed + t];
+                    dst.copy_from_slice(src);
+                }
+                padded
+            }
+            _ => std::mem::take(&mut self.mel_scratch),
+        };
+        let f0_buf = match fixed_t {
+            Some(fixed) if fixed > t => {
+                let mut padded = vec![0.0f32; fixed];
+                padded[..t].copy_from_slice(&self.f0_scratch[..t]);
+                padded
+            }
+            _ => std::mem::take(&mut self.f0_scratch),
+        };
 
-        let mel_tensor =
-            Tensor::from_array(([1usize, self.cfg.num_mels, t], mel_buf.into_boxed_slice()))
-                .map_err(|e| format!("build mel tensor failed: {e}"))?;
-        let f0_tensor = Tensor::from_array(([1usize, t], f0_buf.into_boxed_slice()))
-            .map_err(|e| format!("build f0 tensor failed: {e}"))?;
+        let mel_tensor = Tensor::from_array(
+            ([1usize, n_mels, fixed_t.unwrap_or(t)], mel_buf.into_boxed_slice()),
+        )
+        .map_err(|e| format!("build mel tensor failed: {e}"))?;
+        let f0_tensor = Tensor::from_array(
+            ([1usize, fixed_t.unwrap_or(t)], f0_buf.into_boxed_slice()),
+        )
+        .map_err(|e| format!("build f0 tensor failed: {e}"))?;
 
         let result: Vec<f32> = {
             let mut session_guard = self
@@ -814,6 +872,10 @@ impl NsfHifiganOnnx {
                 .map_err(|e| format!("ort output type mismatch: {e}"))?;
             data.to_vec()
         };
+        if fixed_t.is_some() {
+            let expect = t.saturating_mul(self.cfg.hop_size);
+            return Ok(result.into_iter().take(expect).collect());
+        }
         Ok(result)
     }
 
@@ -829,7 +891,11 @@ impl NsfHifiganOnnx {
         }
 
         let n = items.len();
-        let max_t = items.iter().map(|(_, _, t)| *t).max().unwrap_or(1);
+        // CoreML sessions are compiled with a fixed `time` dimension: pad the
+        // batch to that length so every item matches the compiled shape.
+        let max_t = session_time_frames()
+            .map(|fixed| fixed.max(items.iter().map(|(_, _, t)| *t).max().unwrap_or(1)))
+            .unwrap_or_else(|| items.iter().map(|(_, _, t)| *t).max().unwrap_or(1));
         let n_mels = self.cfg.num_mels;
         let hop = self.cfg.hop_size;
 
@@ -2234,7 +2300,12 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
     
     with_tls_session(|sess| {
         let n = jobs.len();
-        let max_t = jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1);
+        // CoreML sessions are compiled with a fixed `time` dimension: pad the
+        // whole batch to that length and trim each job's output below.
+        let max_t = crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder)
+            .then_some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
+            .map(|fixed| fixed.max(jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1)))
+            .unwrap_or_else(|| jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1));
         let n_mels = sess.cfg.num_mels;
         let hop = sess.cfg.hop_size;
 
@@ -2318,6 +2389,9 @@ pub struct BenchmarkResults {
     /// Display name of the GPU backend used by the benchmark ("CoreML" on
     /// macOS ARM64, "WebGPU" on Linux x86_64).
     pub gpu_backend_name: String,
+    /// Detailed error message when the GPU benchmark could not be completed
+    /// (None when the GPU benchmark succeeded or was not attempted).
+    pub gpu_error: Option<String>,
     /// True when DirectML EP was available and used for the benchmark.
     pub dml_available: bool,
     /// GPU device ID that was used (0 if GPU not available).
@@ -2337,7 +2411,13 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let (onnx_path, cfg_path) = resolve_model_paths()?;
     let cfg = read_config(&cfg_path)?;
 
-    let frames = 1024;
+    // CoreML sessions on macOS ARM64 are compiled with a fixed `time`
+    // dimension, so the benchmark must use that length there.  Other
+    // platforms keep the 1024-frame budget.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let frames = crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES;
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let frames = 1024usize;
     let audio_sec = (frames as f64) * (cfg.hop_size as f64) / (cfg.sampling_rate as f64);
     let runs = 5;
 
@@ -2406,6 +2486,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
     let mut gpu_ep_name = String::new();
+    let mut gpu_error: Option<String> = None;
 
     // Always attempt the GPU benchmark on supported platforms. On Windows we
     // don't auto-probe WebGPU (Dawn/D3D12 can crash), but the benchmark
@@ -2434,6 +2515,9 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     match gpu_session.run(ort::inputs![mt, ft]) {
                         Ok(_) => true,
                         Err(e) => {
+                            gpu_error = Some(format!(
+                                "{ep} EP registered but warmup inference failed: {e}"
+                            ));
                             eprintln!(
                                 "[benchmark] WARNING: {ep} EP registered but warmup inference FAILED: {e}"
                             );
@@ -2459,9 +2543,15 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
                         audio_sec / (median / 1000.0));
                 }
+            } else {
+                gpu_error = Some(format!(
+                    "GPU session was created with an unexpected EP: {ep}"
+                ));
             }
         } else {
-            eprintln!("[benchmark] GPU session creation FAILED: {:?}", gpu_session_res.err());
+            let err = gpu_session_res.err().unwrap_or_else(|| "unknown error".to_string());
+            gpu_error = Some(err.clone());
+            eprintln!("[benchmark] GPU session creation FAILED: {err}");
         }
     }
 
@@ -2554,6 +2644,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         benchmark_samples: runs,
         gpu_available,
         gpu_backend_name,
+        gpu_error,
         dml_available,
         gpu_device_id,
         available_providers,

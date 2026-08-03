@@ -288,6 +288,19 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     <Text size="1" style={{ color: "var(--red-9)" }}>
                                         {t("benchmark_gpu_failed_desc")}
                                     </Text>
+                                    {result.gpuError && (
+                                        <Text
+                                            size="1"
+                                            style={{
+                                                color: "var(--red-9)",
+                                                fontFamily: "monospace",
+                                                whiteSpace: "pre-wrap",
+                                                wordBreak: "break-word",
+                                            }}
+                                        >
+                                            {result.gpuError}
+                                        </Text>
+                                    )}
                                 </Flex>
                             )}
 

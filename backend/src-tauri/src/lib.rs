@@ -139,6 +139,21 @@ pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     }
 }
 
+/// Run the inference-device benchmark and return the serialized results.
+/// Used by the in-app benchmark dialog and by the `--benchmark` CLI flag.
+pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
+    #[cfg(feature = "onnx")]
+    {
+        let results = nsf_hifigan_onnx::run_benchmark()?;
+        serde_json::to_string_pretty(&results)
+            .map_err(|e| format!("failed to serialize benchmark results: {e}"))
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        Err("onnx feature disabled".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

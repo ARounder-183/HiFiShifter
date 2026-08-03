@@ -105,6 +105,87 @@ fn init_file_log() {
     });
 }
 
+#[cfg(all(feature = "logging", unix, not(debug_assertions)))]
+fn init_file_log() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::AsRawFd;
+
+    // macOS: ~/Library/Logs/HiFiShifter.log; Linux: log.txt next to the exe.
+    let log_path = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("Library").join("Logs").join("HiFiShifter.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("HiFiShifter.log"))
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("log.txt")
+    };
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Save the real stderr, then redirect fd 2 into a pipe.  A background
+    // thread timestamps every line and tees it to the log file and console.
+    let saved = unsafe { libc::dup(2) };
+    if saved < 0 {
+        return;
+    }
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        unsafe { libc::close(saved) };
+        return;
+    }
+    unsafe {
+        libc::dup2(fds[1], 2);
+        libc::close(fds[1]);
+    }
+
+    let log_path_copy = log_path.clone();
+    std::thread::spawn(move || {
+        use std::os::fd::FromRawFd;
+
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let mut reader = BufReader::new(reader);
+        let mut out_file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path_copy)
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let _ = writeln!(
+            out_file,
+            "==== HiFiShifter log started at {} ====",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+        );
+        let _ = out_file.flush();
+        let mut console = unsafe { std::fs::File::from_raw_fd(saved) };
+        let mut line_buf = String::new();
+
+        loop {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+                    let body = line_buf.trim_end_matches('\n');
+                    let stamped = format!("[{}] {}\n", ts, body);
+                    let _ = out_file.write_all(stamped.as_bytes());
+                    let _ = out_file.flush();
+                    let _ = console.write_all(stamped.as_bytes());
+                    let _ = console.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+#[cfg(not(all(feature = "logging", unix, not(debug_assertions))))]
 #[cfg(not(all(feature = "logging", windows, not(debug_assertions))))]
 fn init_file_log() {}
 
@@ -113,6 +194,23 @@ fn main() {
     sanitize_gtk_modules_for_appimage();
 
     init_file_log();
+
+    // CLI diagnostics: `HiFiShifter --benchmark` runs the inference-device
+    // benchmark and prints the JSON result, then exits.  Useful for
+    // debugging GPU/CoreML issues from a terminal without opening the GUI.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--benchmark" || a == "--diagnose") {
+        match backend_lib::run_vocoder_benchmark_cli() {
+            Ok(json) => {
+                println!("{json}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("benchmark failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     backend_lib::run()
 }
