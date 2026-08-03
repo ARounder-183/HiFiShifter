@@ -597,8 +597,9 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
                         // dynamic shapes (they are not padded downstream).
                         let pinned = matches!(role, OrtSessionRole::Vocoder);
                         let pinned_builder = if pinned {
-                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)?
-                                .with_dimension_override("batch", 1)
+                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)
+                                .and_then(|b| b.with_dimension_override("batch", 1))
+                                .map_err(|e| format!("set CoreML dimension override failed: {e}"))
                         } else {
                             Ok(b)
                         };
