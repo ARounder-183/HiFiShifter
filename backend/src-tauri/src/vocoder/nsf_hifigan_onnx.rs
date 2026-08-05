@@ -2571,7 +2571,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                 }
             } else {
                 gpu_error = Some(format!(
-                    "GPU session was created with an unexpected EP: {ep}"
+                    "GPU session creation fell back to CPU (requested {gpu_ep_choice}, got {ep}). \
+                     Check the application log for the detailed CoreML/WebGPU error."
                 ));
             }
         } else {

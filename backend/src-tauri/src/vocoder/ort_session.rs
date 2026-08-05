@@ -112,7 +112,12 @@ fn build_coreml_ep() -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
 
     let mut ep = ort::ep::CoreML::default()
-        .with_compute_units(ComputeUnits::CPUAndNeuralEngine)
+        // Use the GPU instead of the Neural Engine: HiFi-GAN's ConvTranspose
+        // upsampling layers (stride/kernel 16/8/4/2) are known to hang the
+        // ANE compiler (see Apple Developer Forums: ConvTranspose2d with
+        // stride(16,1) kernel(16,1) breaks the ANE).  CPUAndGPU keeps the
+        // model on the Metal GPU where these layers run correctly.
+        .with_compute_units(ComputeUnits::CPUAndGPU)
         .with_model_format(ModelFormat::MLProgram)
         .with_static_input_shapes(false);
 
@@ -628,8 +633,12 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
         match Session::builder() {
             Ok(builder) => match try_register_webgpu_ep(builder, role) {
                 Ok((b, ep)) => {
-                    let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
-                    return Ok((session, ep.to_string()));
+                    match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
+                        Ok(session) => return Ok((session, ep.to_string())),
+                        Err(e) => eprintln!(
+                            "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
+                        ),
+                    }
                 }
                 Err(e) => eprintln!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
             },
@@ -666,12 +675,24 @@ fn smoke_test_gpu_session(
         if shape.iter().any(|&d| d == 0) {
             continue; // scalar or zero-dim - skip
         }
-        // Replace dynamic dimensions (-1) with small test values:
-        //   dim 0 -> 1 (batch),  other dims -> 4 (one upsampling hop).
+        // Replace dynamic dimensions (-1) with realistic test values:
+        //   dim 0 -> 1 (batch),  other dims -> COREML_FIXED_TIME_FRAMES.
+        // Tiny values (e.g. 4) make ORT's buffer-reuse optimizer collide
+        // with the model's fixed intermediate shapes ("{1,4,1} !=
+        // {1,2048,1}"), so use the same frame length the app actually runs.
+        let fallback_dim = COREML_FIXED_TIME_FRAMES as i64;
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
-            .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
+            .map(|(i, &d)| {
+                if d > 0 {
+                    d as usize
+                } else if i == 0 {
+                    1
+                } else {
+                    fallback_dim as usize
+                }
+            })
             .collect();
         plans.push((input.name().to_string(), test_shape));
     }
