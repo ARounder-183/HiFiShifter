@@ -111,11 +111,13 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// On macOS ARM64 the CoreML-compatible model variant (static Pad pads) is
-/// preferred because the stock model's dynamic Pad input cannot be compiled
-/// by the CoreML EP ("output_features has no value for 'Sub_output_0'").
+/// On macOS the CoreML-compatible model variant (static Pad pads) is used
+/// because the stock model's dynamic Pad input cannot be compiled by the
+/// CoreML EP ("output_features has no value for 'Sub_output_0'").  The
+/// variant is numerically identical to the stock model, so Intel macOS
+/// (CPU-only) can use it too, and macOS bundles only this single model.
 fn vocoder_model_filename() -> &'static str {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    if cfg!(target_os = "macos") {
         "pc_nsf_hifigan_coreml.onnx"
     } else {
         "pc_nsf_hifigan.onnx"
@@ -2700,4 +2702,3 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         dml_adapters,
     })
 }
-
