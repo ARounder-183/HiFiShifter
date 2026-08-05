@@ -111,6 +111,17 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// On macOS ARM64 the CoreML-compatible model variant (static Pad pads) is
+/// preferred because the stock model's dynamic Pad input cannot be compiled
+/// by the CoreML EP ("output_features has no value for 'Sub_output_0'").
+fn vocoder_model_filename() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "pc_nsf_hifigan_coreml.onnx"
+    } else {
+        "pc_nsf_hifigan.onnx"
+    }
+}
+
 fn default_model_dir_guess() -> Option<PathBuf> {
     // 开发环境：模型位于 CARGO_MANIFEST_DIR/resources/models/nsf_hifigan/
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -118,7 +129,9 @@ fn default_model_dir_guess() -> Option<PathBuf> {
         .join("resources")
         .join("models")
         .join("nsf_hifigan");
-    if p.join("pc_nsf_hifigan.onnx").is_file() && p.join("config.json").is_file() {
+    let has_model = p.join(vocoder_model_filename()).is_file()
+        || p.join("pc_nsf_hifigan.onnx").is_file();
+    if has_model && p.join("config.json").is_file() {
         return Some(p);
     }
 
@@ -127,7 +140,9 @@ fn default_model_dir_guess() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             let p = exe_dir.join("models").join("nsf_hifigan");
-            if p.join("pc_nsf_hifigan.onnx").is_file() && p.join("config.json").is_file() {
+            let has_model = p.join(vocoder_model_filename()).is_file()
+                || p.join("pc_nsf_hifigan.onnx").is_file();
+            if has_model && p.join("config.json").is_file() {
                 return Some(p);
             }
         }
@@ -158,7 +173,12 @@ fn resolve_model_paths() -> Result<(PathBuf, PathBuf), String> {
         .or_else(|| env_path("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR"))
         .or_else(default_model_dir_guess)
     {
-        let onnx = dir.join("pc_nsf_hifigan.onnx");
+        let preferred = dir.join(vocoder_model_filename());
+        let onnx = if preferred.is_file() {
+            preferred
+        } else {
+            dir.join("pc_nsf_hifigan.onnx")
+        };
         let cfg = dir.join("config.json");
         if onnx.is_file() && cfg.is_file() {
             return Ok((onnx, cfg));

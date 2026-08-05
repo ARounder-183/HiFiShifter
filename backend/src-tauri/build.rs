@@ -43,6 +43,12 @@ fn main() {
     // fails at launch.
     stage_ort_macos_dylibs();
 
+    // Generate a CoreML-compatible NSF-HiFiGAN model variant (macOS ARM64
+    // only): the stock model derives Pad pads at runtime, which the CoreML EP
+    // cannot compile.  The generated file is gitignored and produced on
+    // demand during the build.
+    generate_coreml_model_variant();
+
     // tauri_build validates resources listed in tauri.conf.json and its
     // platform-specific merges (tauri.windows.conf.json, tauri.linux.conf.json),
     // and copies bundle.macOS.frameworks for darwin targets. All referenced
@@ -949,3 +955,241 @@ fn normalize_macos_dylib(path: &std::path::Path, staging_dir: &std::path::Path) 
         }
     }
 }
+
+
+/// Minimal protobuf reader/writer (no external crates) used to rewrite the
+/// NSF-HiFiGAN ONNX model so the Pad node's runtime-derived `pads` become a
+/// constant initializer.  CoreML EP cannot compile the stock model's dynamic
+/// pads ("output_features has no value for 'Sub_output_0'").
+#[cfg(target_os = "macos")]
+mod coreml_pb {
+    pub fn write_varint(buf: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            buf.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        buf.push(v as u8);
+    }
+    pub fn write_tag(buf: &mut Vec<u8>, num: u32, wire: u8) {
+        write_varint(buf, ((num as u64) << 3) | wire as u64);
+    }
+    pub fn write_bytes_field(buf: &mut Vec<u8>, num: u32, payload: &[u8]) {
+        write_tag(buf, num, 2);
+        write_varint(buf, payload.len() as u64);
+        buf.extend_from_slice(payload);
+    }
+    pub fn write_varint_field(buf: &mut Vec<u8>, num: u32, v: u64) {
+        write_tag(buf, num, 0);
+        write_varint(buf, v);
+    }
+
+    pub struct Field {
+        pub num: u32,
+        pub wire: u8,
+        pub payload: Vec<u8>,
+    }
+
+    pub fn parse(data: &[u8]) -> Result<Vec<Field>, String> {
+        let mut fields = Vec::new();
+        let mut pos = 0usize;
+        while pos < data.len() {
+            let tag = read_varint(data, &mut pos)?;
+            let num = (tag >> 3) as u32;
+            let wire = (tag & 7) as u8;
+            match wire {
+                0 => {
+                    let start = pos;
+                    read_varint(data, &mut pos)?;
+                    fields.push(Field { num, wire, payload: data[start..pos].to_vec() });
+                }
+                2 => {
+                    let len = read_varint(data, &mut pos)? as usize;
+                    if pos + len > data.len() {
+                        return Err("protobuf length overflow".to_string());
+                    }
+                    fields.push(Field { num, wire, payload: data[pos..pos + len].to_vec() });
+                    pos += len;
+                }
+                5 => {
+                    if pos + 4 > data.len() {
+                        return Err("protobuf fixed32 overflow".to_string());
+                    }
+                    fields.push(Field { num, wire, payload: data[pos..pos + 4].to_vec() });
+                    pos += 4;
+                }
+                1 => {
+                    if pos + 8 > data.len() {
+                        return Err("protobuf fixed64 overflow".to_string());
+                    }
+                    fields.push(Field { num, wire, payload: data[pos..pos + 8].to_vec() });
+                    pos += 8;
+                }
+                w => return Err(format!("unsupported protobuf wire type {w}")),
+            }
+        }
+        Ok(fields)
+    }
+
+    pub fn encode(fields: &[Field]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for f in fields {
+            write_tag(&mut buf, f.num, f.wire);
+            match f.wire {
+                0 => buf.extend_from_slice(&f.payload),
+                2 => {
+                    write_varint(&mut buf, f.payload.len() as u64);
+                    buf.extend_from_slice(&f.payload);
+                }
+                5 | 1 => buf.extend_from_slice(&f.payload),
+                _ => {}
+            }
+        }
+        buf
+    }
+
+    fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
+        let mut shift = 0;
+        let mut val = 0u64;
+        while *pos < data.len() && shift < 64 {
+            let b = data[*pos];
+            *pos += 1;
+            val |= ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Ok(val);
+            }
+            shift += 7;
+        }
+        Err("truncated protobuf varint".to_string())
+    }
+}
+
+/// Rewrite the Pad node's dynamic `pads` input to a constant initializer.
+/// Only the node input list and the initializer list are touched; all other
+/// bytes (including the ~54 MB weight raw_data) are preserved verbatim.
+#[cfg(target_os = "macos")]
+fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    use coreml_pb::{Field, encode, parse};
+
+    let data = std::fs::read(src).map_err(|e| e.to_string())?;
+    let model_fields = parse(&data)?;
+
+    let mut out_model: Vec<Field> = Vec::new();
+    let mut changed = false;
+    for f in &model_fields {
+        if f.num == 7 && f.wire == 2 {
+            out_model.push(Field { num: 7, wire: 2, payload: rewrite_graph(&f.payload)? });
+            changed = true;
+        } else {
+            out_model.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() });
+        }
+    }
+    if !changed {
+        return Err("ONNX graph field not found".to_string());
+    }
+    std::fs::write(dst, encode(&out_model)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn rewrite_graph(graph: &[u8]) -> Result<Vec<u8>, String> {
+    use coreml_pb::{Field, encode, parse};
+
+    let gfields = parse(graph)?;
+    let mut nodes: Vec<Field> = Vec::new();
+    let mut inits: Vec<Field> = Vec::new();
+    let mut others: Vec<Field> = Vec::new();
+    for f in &gfields {
+        match (f.num, f.wire) {
+            (1, 2) => nodes.push(Field { num: 1, wire: 2, payload: rewrite_node(&f.payload)? }),
+            (5, 2) => inits.push(Field { num: 5, wire: 2, payload: f.payload.clone() }),
+            _ => others.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() }),
+        }
+    }
+
+    // New TensorProto initializer:
+    //   dims = [6], data_type = INT64(7), int64_data = [0,0,0,0,1,0],
+    //   name = "/coreml_pads_const"
+    let mut t = Vec::new();
+    let mut dims = Vec::new();
+    coreml_pb::write_varint(&mut dims, 6);
+    coreml_pb::write_bytes_field(&mut t, 1, &dims);
+    coreml_pb::write_varint_field(&mut t, 2, 7);
+    let mut vals = Vec::new();
+    for v in [0u64, 0, 0, 0, 1, 0] {
+        coreml_pb::write_varint(&mut vals, v);
+    }
+    coreml_pb::write_bytes_field(&mut t, 7, &vals);
+    coreml_pb::write_bytes_field(&mut t, 8, b"/coreml_pads_const");
+
+    let mut out = Vec::new();
+    for f in others {
+        out.extend(encode(&[f]));
+    }
+    for f in nodes {
+        out.extend(encode(&[f]));
+    }
+    for f in inits {
+        out.extend(encode(&[f]));
+    }
+    out.extend(encode(&[Field { num: 5, wire: 2, payload: t }]));
+    Ok(out)
+}
+
+#[cfg(target_os = "macos")]
+fn rewrite_node(node: &[u8]) -> Result<Vec<u8>, String> {
+    use coreml_pb::{Field, encode, parse};
+
+    let nf = parse(node)?;
+    let mut op_type = String::new();
+    let mut inputs: Vec<Vec<u8>> = Vec::new();
+    for f in &nf {
+        if f.num == 4 && f.wire == 2 {
+            op_type = String::from_utf8_lossy(&f.payload).into_owned();
+        }
+        if f.num == 1 && f.wire == 2 {
+            inputs.push(f.payload.clone());
+        }
+    }
+    if op_type == "Pad" && inputs.iter().any(|i| i == b"/Sub_output_0") {
+        let mut out = Vec::new();
+        for f in &nf {
+            if f.num == 1 && f.wire == 2 {
+                continue; // rebuilt below
+            }
+            out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
+        }
+        for (i, inp) in inputs.iter().enumerate() {
+            let name: &[u8] = if i == 1 { b"/coreml_pads_const" } else { inp };
+            coreml_pb::write_bytes_field(&mut out, 1, name);
+        }
+        return Ok(out);
+    }
+    Ok(node.to_vec())
+}
+
+/// Generate the CoreML-compatible model variant during macOS ARM64 builds.
+/// The output file lives in the resources tree (so Tauri bundles it) but is
+/// gitignored; it is regenerated whenever the stock model changes.
+#[cfg(target_os = "macos")]
+fn generate_coreml_model_variant() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("resources/models/nsf_hifigan/pc_nsf_hifigan.onnx");
+    let dst = manifest.join("resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx");
+    if !src.is_file() {
+        println!("cargo:warning=[build.rs] pc_nsf_hifigan.onnx not found; skipping CoreML variant");
+        return;
+    }
+    let src_m = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+    let dst_m = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
+    if dst.is_file() && dst_m >= src_m {
+        return;
+    }
+    match rewrite_coreml_model(&src, &dst) {
+        Ok(()) => println!("cargo:warning=[build.rs] generated CoreML model variant: {}", dst.display()),
+        Err(e) => println!("cargo:warning=[build.rs] failed to generate CoreML model variant: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn generate_coreml_model_variant() {}
+

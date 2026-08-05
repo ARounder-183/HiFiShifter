@@ -1,7 +1,8 @@
 {
     "bundle": {
         "resources": {
-            "resources/macos": "macos"
+            "resources/macos": "macos",
+            "resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx": "models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx"
         }
     }
 }

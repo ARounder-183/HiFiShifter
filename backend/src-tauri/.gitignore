@@ -15,3 +15,5 @@
 
 # Third-party source code (static linking - embedded as source code in the repo)
 # Note: rubberband-static/ has been removed (replaced by signalsmith-stretch)
+# Generated at build time by build.rs (CoreML-compatible variant)
+backend/src-tauri/resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx

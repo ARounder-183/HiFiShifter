@@ -176,7 +176,9 @@ pub fn run() {
             // 打包后的应用：从 resource_dir 查找内嵌的 ONNX 模型
             if let Ok(res_dir) = app.path().resource_dir() {
                 let p = res_dir.join("models").join("nsf_hifigan");
-                if p.join("pc_nsf_hifigan.onnx").exists() && p.join("config.json").exists() {
+                let has_model = p.join("pc_nsf_hifigan.onnx").exists()
+                    || p.join("pc_nsf_hifigan_coreml.onnx").exists();
+                if has_model && p.join("config.json").exists() {
                     let _ = NSF_HIFIGAN_MODEL_DIR.set(p);
                 }
             }

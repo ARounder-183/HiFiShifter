@@ -699,7 +699,13 @@ fn smoke_test_gpu_session(
     let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::with_capacity(plans.len());
     for (name, test_shape) in plans {
         let total: usize = test_shape.iter().product::<usize>().max(1);
-        let data: Vec<f32> = vec![0.0f32; total];
+        // Use a non-zero f0: this model's f0 pre-processing computes a
+        // differential that becomes the Pad "pads" input, and an all-zero f0
+        // produces an empty/zero-sized tensor that crashes ORT's buffer
+        // reuse ("{1,0,112}", "{1,4096,1} vs {1,4096,4096}").  440 Hz is a
+        // realistic mid-range pitch and keeps every intermediate shape valid.
+        let fill = if name == "f0" { 440.0f32 } else { 0.0f32 };
+        let data: Vec<f32> = vec![fill; total];
         let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
             .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?;
         input_pairs.push((name, tensor.into()));
