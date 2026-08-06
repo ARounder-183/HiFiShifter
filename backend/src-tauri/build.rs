@@ -1070,6 +1070,7 @@ mod coreml_pb {
 fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     use coreml_pb::{Field, encode, parse};
 
+    let patch = load_pads_patch()?;
     let data = std::fs::read(src).map_err(|e| e.to_string())?;
     let model_fields = parse(&data)?;
 
@@ -1077,7 +1078,7 @@ fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<
     let mut changed = false;
     for f in &model_fields {
         if f.num == 7 && f.wire == 2 {
-            out_model.push(Field { num: 7, wire: 2, payload: rewrite_graph(&f.payload)? });
+            out_model.push(Field { num: 7, wire: 2, payload: rewrite_graph(&f.payload, &patch)? });
             changed = true;
         } else {
             out_model.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() });
@@ -1090,36 +1091,80 @@ fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<
     Ok(())
 }
 
+/// Load the Pad-pads patch (name -> constant int64 values).  The stock
+/// model derives Pad pads at runtime; CoreML EP cannot compile dynamic pads,
+/// so this patch records the (constant) values and build.rs rewrites every
+/// affected Pad node to use a constant initializer.
 #[cfg(target_os = "macos")]
-fn rewrite_graph(graph: &[u8]) -> Result<Vec<u8>, String> {
+fn load_pads_patch() -> Result<std::collections::HashMap<String, Vec<i64>>, String> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut map = std::collections::HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, vals) = line
+            .split_once('=')
+            .ok_or_else(|| format!("bad pads patch line: {line}"))?;
+        let vals = vals
+            .split(',')
+            .map(|v| {
+                v.trim()
+                    .parse::<i64>()
+                    .map_err(|e| format!("bad pads patch value '{v}': {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        map.insert(name.trim().to_string(), vals);
+    }
+    Ok(map)
+}
+
+/// Encode a TensorProto with dims=[len], data_type=INT64, int64_data=vals,
+/// name=name.  Values are expected to be non-negative (pads are 0/1).
+#[cfg(target_os = "macos")]
+fn build_int64_tensor(name: &str, vals: &[i64]) -> Vec<u8> {
+    let mut t = Vec::new();
+    let mut dims = Vec::new();
+    coreml_pb::write_varint(&mut dims, vals.len() as u64);
+    coreml_pb::write_bytes_field(&mut t, 1, &dims);
+    coreml_pb::write_varint_field(&mut t, 2, 7);
+    let mut data = Vec::new();
+    for v in vals {
+        coreml_pb::write_varint(&mut data, *v as u64);
+    }
+    coreml_pb::write_bytes_field(&mut t, 7, &data);
+    coreml_pb::write_bytes_field(&mut t, 8, name.as_bytes());
+    t
+}
+
+#[cfg(target_os = "macos")]
+fn rewrite_graph(
+    graph: &[u8],
+    patch: &std::collections::HashMap<String, Vec<i64>>,
+) -> Result<Vec<u8>, String> {
     use coreml_pb::{Field, encode, parse};
 
     let gfields = parse(graph)?;
     let mut nodes: Vec<Field> = Vec::new();
     let mut inits: Vec<Field> = Vec::new();
     let mut others: Vec<Field> = Vec::new();
+    let mut next_id = 0usize;
+    let mut new_inits: Vec<Vec<u8>> = Vec::new();
     for f in &gfields {
         match (f.num, f.wire) {
-            (1, 2) => nodes.push(Field { num: 1, wire: 2, payload: rewrite_node(&f.payload)? }),
+            (1, 2) => nodes.push(Field {
+                num: 1,
+                wire: 2,
+                payload: rewrite_node(&f.payload, patch, &mut next_id, &mut new_inits)?,
+            }),
             (5, 2) => inits.push(Field { num: 5, wire: 2, payload: f.payload.clone() }),
             _ => others.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() }),
         }
     }
-
-    // New TensorProto initializer:
-    //   dims = [6], data_type = INT64(7), int64_data = [0,0,0,0,1,0],
-    //   name = "/coreml_pads_const"
-    let mut t = Vec::new();
-    let mut dims = Vec::new();
-    coreml_pb::write_varint(&mut dims, 6);
-    coreml_pb::write_bytes_field(&mut t, 1, &dims);
-    coreml_pb::write_varint_field(&mut t, 2, 7);
-    let mut vals = Vec::new();
-    for v in [0u64, 0, 0, 0, 1, 0] {
-        coreml_pb::write_varint(&mut vals, v);
-    }
-    coreml_pb::write_bytes_field(&mut t, 7, &vals);
-    coreml_pb::write_bytes_field(&mut t, 8, b"/coreml_pads_const");
 
     let mut out = Vec::new();
     for f in others {
@@ -1131,12 +1176,22 @@ fn rewrite_graph(graph: &[u8]) -> Result<Vec<u8>, String> {
     for f in inits {
         out.extend(encode(&[f]));
     }
-    out.extend(encode(&[Field { num: 5, wire: 2, payload: t }]));
+    for t in new_inits {
+        out.extend(encode(&[Field { num: 5, wire: 2, payload: t }]));
+    }
     Ok(out)
 }
 
+/// Rewrite a Pad node whose `pads` input (input[1]) is listed in the patch:
+/// replace it with a fresh constant initializer name and record the
+/// initializer in `new_inits`.
 #[cfg(target_os = "macos")]
-fn rewrite_node(node: &[u8]) -> Result<Vec<u8>, String> {
+fn rewrite_node(
+    node: &[u8],
+    patch: &std::collections::HashMap<String, Vec<i64>>,
+    next_id: &mut usize,
+    new_inits: &mut Vec<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
     use coreml_pb::{Field, encode, parse};
 
     let nf = parse(node)?;
@@ -1150,19 +1205,26 @@ fn rewrite_node(node: &[u8]) -> Result<Vec<u8>, String> {
             inputs.push(f.payload.clone());
         }
     }
-    if op_type == "Pad" && inputs.iter().any(|i| i == b"/Sub_output_0") {
-        let mut out = Vec::new();
-        for f in &nf {
-            if f.num == 1 && f.wire == 2 {
-                continue; // rebuilt below
+    if op_type == "Pad" && inputs.len() >= 2 {
+        let pads_name = String::from_utf8_lossy(&inputs[1]).into_owned();
+        if let Some(vals) = patch.get(&pads_name) {
+            let const_name = format!("/coreml_pads_const_{}", *next_id);
+            *next_id += 1;
+            new_inits.push(build_int64_tensor(&const_name, vals));
+
+            let mut out = Vec::new();
+            for f in &nf {
+                if f.num == 1 && f.wire == 2 {
+                    continue; // rebuilt below
+                }
+                out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
             }
-            out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
+            for (i, inp) in inputs.iter().enumerate() {
+                let name: &[u8] = if i == 1 { const_name.as_bytes() } else { inp };
+                coreml_pb::write_bytes_field(&mut out, 1, name);
+            }
+            return Ok(out);
         }
-        for (i, inp) in inputs.iter().enumerate() {
-            let name: &[u8] = if i == 1 { b"/coreml_pads_const" } else { inp };
-            coreml_pb::write_bytes_field(&mut out, 1, name);
-        }
-        return Ok(out);
     }
     Ok(node.to_vec())
 }
@@ -1179,9 +1241,14 @@ fn generate_coreml_model_variant() {
         println!("cargo:warning=[build.rs] pc_nsf_hifigan.onnx not found; skipping CoreML variant");
         return;
     }
+    let patch_path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
     let src_m = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+    let patch_m = std::fs::metadata(&patch_path).and_then(|m| m.modified()).ok();
     let dst_m = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
-    if dst.is_file() && dst_m >= src_m {
+    if dst.is_file()
+        && dst_m >= src_m
+        && (patch_m.is_none() || dst_m >= patch_m)
+    {
         return;
     }
     match rewrite_coreml_model(&src, &dst) {
