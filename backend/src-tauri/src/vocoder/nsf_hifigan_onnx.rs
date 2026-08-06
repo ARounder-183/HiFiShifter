@@ -2454,6 +2454,76 @@ pub struct BenchmarkResults {
     pub dml_adapters: Vec<crate::dml_adapters::DmlAdapterInfo>,
 }
 
+/// Build input tensors for a session using its declared metadata, filling
+/// dynamic dimensions with the benchmark's frame count (batch=1).
+fn build_benchmark_inputs(
+    session: &Session,
+    frames: usize,
+) -> Result<Vec<(String, ort::value::Value)>, String> {
+    use ort::value::{Tensor, ValueType};
+    let mut pairs = Vec::new();
+    for input in session.inputs() {
+        let (ty, shape) = match input.dtype() {
+            ValueType::Tensor { ty, shape, .. } => (ty, shape),
+            _ => continue,
+        };
+        if *ty != ort::value::TensorElementType::Float32 {
+            continue;
+        }
+        let test_shape: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                if d > 0 {
+                    d as usize
+                } else if i == 0 {
+                    1
+                } else {
+                    frames
+                }
+            })
+            .collect();
+        let total: usize = test_shape.iter().product::<usize>().max(1);
+        // Non-zero f0 keeps the model's f0 differential (Pad data) valid.
+        let fill = if input.name() == "f0" { 440.0f32 } else { 0.0f32 };
+        let data: Vec<f32> = vec![fill; total];
+        let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
+            .map_err(|e| format!("build benchmark tensor '{}' failed: {e}", input.name()))?;
+        pairs.push((input.name().to_string(), tensor.into()));
+    }
+    if pairs.is_empty() {
+        return Err("benchmark: no f32 tensor inputs found".to_string());
+    }
+    Ok(pairs)
+}
+
+/// Run one session inference on a helper thread with a timeout so a hung GPU
+/// backend can never freeze the benchmark.  Returns Ok(Some(ms)) on success,
+/// Ok(None) on timeout, Err on inference failure.
+fn timed_session_run(
+    session: &Arc<Mutex<Session>>,
+    input_pairs: Vec<(String, ort::value::Value)>,
+    timeout: std::time::Duration,
+) -> Result<Option<f64>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sess = Arc::clone(session);
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let result = sess
+            .lock()
+            .map_err(|e| e.to_string())
+            .and_then(|mut guard| {
+                guard.run(input_pairs).map(|_| ()).map_err(|e| e.to_string())
+            });
+        let _ = tx.send((t0.elapsed(), result));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok((elapsed, Ok(()))) => Ok(Some(elapsed.as_secs_f64() * 1000.0)),
+        Ok((_, Err(e))) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     ensure_ort_init()?;
     let (onnx_path, cfg_path) = resolve_model_paths()?;
@@ -2547,28 +2617,32 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
             crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
         };
 
-        if let Ok((mut gpu_session, ep)) = gpu_session_res {
+        if let Ok((gpu_session, ep)) = gpu_session_res {
             if ep == "webgpu" || ep == "coreml" {
                 gpu_ep_name = ep.to_string();
                 eprintln!("[benchmark] GPU session created: ep={ep}");
-                let mel = vec![0.0f32; cfg.num_mels * frames];
-                let f0 = vec![440.0f32; frames];
+                let gpu_session = Arc::new(Mutex::new(gpu_session));
+                let timeout = std::time::Duration::from_secs(120);
 
-                // Warmup: test if GPU inference actually works.
-                // Use a block scope to ensure the SessionOutputs borrow
-                // is dropped before we borrow gpu_session again below.
+                // Warmup on a helper thread (same execution model as the
+                // session smoke test) so a hung CoreML/WebGPU inference can
+                // never freeze the benchmark.
                 let warmup_ok = {
-                    let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
-                    let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
-                    match gpu_session.run(ort::inputs![mt, ft]) {
-                        Ok(_) => true,
-                        Err(e) => {
+                    let guard = gpu_session.lock().map_err(|e| e.to_string())?;
+                    let inputs = build_benchmark_inputs(&guard, frames)?;
+                    drop(guard);
+                    match timed_session_run(&gpu_session, inputs, timeout) {
+                        Ok(Some(_)) => true,
+                        Ok(None) => {
                             gpu_error = Some(format!(
-                                "{ep} EP registered but warmup inference failed: {e}"
+                                "{ep} warmup inference timed out after {timeout:?}"
                             ));
-                            eprintln!(
-                                "[benchmark] WARNING: {ep} EP registered but warmup inference FAILED: {e}"
-                            );
+                            eprintln!("[benchmark] WARNING: {ep} warmup inference TIMED OUT");
+                            false
+                        }
+                        Err(e) => {
+                            gpu_error = Some(format!("{ep} warmup inference failed: {e}"));
+                            eprintln!("[benchmark] WARNING: {ep} warmup inference FAILED: {e}");
                             false
                         }
                     }
@@ -2578,18 +2652,35 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     gpu_actually_working = true;
                     let mut gpu_times = Vec::new();
                     for _ in 0..runs {
-                        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
-                        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
-                        let t = std::time::Instant::now();
-                        let _ = gpu_session.run(ort::inputs![mt, ft]).unwrap();
-                        gpu_times.push(t.elapsed().as_secs_f64() * 1000.0);
+                        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
+                        let inputs = build_benchmark_inputs(&guard, frames)?;
+                        drop(guard);
+                        match timed_session_run(&gpu_session, inputs, timeout) {
+                            Ok(Some(ms)) => gpu_times.push(ms),
+                            Ok(None) => {
+                                gpu_error = Some(format!(
+                                    "{ep} inference timed out after {timeout:?}"
+                                ));
+                                eprintln!("[benchmark] WARNING: {ep} inference TIMED OUT");
+                                break;
+                            }
+                            Err(e) => {
+                                gpu_error = Some(format!("{ep} inference failed: {e}"));
+                                eprintln!("[benchmark] WARNING: {ep} inference FAILED: {e}");
+                                break;
+                            }
+                        }
                     }
-                    gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let median = gpu_times[gpu_times.len() / 2];
-                    gpu_median = Some(median);
-                    gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                    eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
-                        audio_sec / (median / 1000.0));
+                    if gpu_times.len() >= 2 {
+                        gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let median = gpu_times[gpu_times.len() / 2];
+                        gpu_median = Some(median);
+                        gpu_rt_factor = Some(audio_sec / (median / 1000.0));
+                        eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
+                            audio_sec / (median / 1000.0));
+                    } else if gpu_error.is_none() {
+                        gpu_error = Some(format!("{ep} did not complete any timed run"));
+                    }
                 }
             } else {
                 gpu_error = Some(format!(
