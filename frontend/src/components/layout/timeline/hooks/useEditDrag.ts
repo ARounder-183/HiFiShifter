@@ -3,6 +3,7 @@ import { batch } from "react-redux";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
+    bumpParamsEpoch,
     checkpointHistory,
     moveClipStart,
     setClipFades,
@@ -141,13 +142,7 @@ async function stretchLinkedParams(
 }
 
 export type EditDragType =
-    | "trim_left"
-    | "trim_right"
-    | "stretch_left"
-    | "stretch_right"
-    | "fade_in"
-    | "fade_out"
-    | "gain";
+    "trim_left" | "trim_right" | "stretch_left" | "stretch_right" | "fade_in" | "fade_out" | "gain";
 
 export type EditDragState = {
     type: EditDragType;
@@ -1140,6 +1135,9 @@ export function useEditDrag(deps: {
 
             // 拉伸后同步参数线：当"锁定参数线"启用时，将旧范围内的参数值时域映射到新范围
             const isStretch = drag.type === "stretch_left" || drag.type === "stretch_right";
+            // The clip persistence already bumps paramsEpoch, but at that point
+            // stretchLinkedParams has not written the new curves yet. Bump again
+            // after the mapping finishes so the parameter editor fetches fresh data.
             if (isStretch && sessionRef.current.lockParamLinesEnabled && drag.stretchGroup) {
                 const stretchTasks = drag.stretchGroup.clipIds.map((id) => {
                     const initial = drag.stretchGroup?.initialById[id];
@@ -1155,7 +1153,9 @@ export function useEditDrag(deps: {
                         now.lengthSec,
                     );
                 });
-                void Promise.resolve(persistPromise).then(() => Promise.allSettled(stretchTasks));
+                void Promise.resolve(persistPromise)
+                    .then(() => Promise.allSettled(stretchTasks))
+                    .finally(() => dispatch(bumpParamsEpoch()));
             } else if (
                 isStretch &&
                 sessionRef.current.lockParamLinesEnabled &&
@@ -1166,15 +1166,17 @@ export function useEditDrag(deps: {
                 const oldLengthSec = drag.baselengthSec;
                 const newStartSec = singleClipNow.startSec;
                 const newLengthSec = singleClipNow.lengthSec;
-                void Promise.resolve(persistPromise).then(() =>
-                    stretchLinkedParams(
-                        stretchTrackId,
-                        oldStartSec,
-                        oldLengthSec,
-                        newStartSec,
-                        newLengthSec,
-                    ),
-                );
+                void Promise.resolve(persistPromise)
+                    .then(() =>
+                        stretchLinkedParams(
+                            stretchTrackId,
+                            oldStartSec,
+                            oldLengthSec,
+                            newStartSec,
+                            newLengthSec,
+                        ),
+                    )
+                    .finally(() => dispatch(bumpParamsEpoch()));
             }
 
             // 在所有持久化请求完成后释放交互锁

@@ -1197,6 +1197,9 @@ const sessionSlice = createSlice({
             pushHistory(state);
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
+        bumpParamsEpoch(state) {
+            state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+        },
         setToolMode(state, action: PayloadAction<ToolMode>) {
             if (state.toolMode !== action.payload) {
                 pushHistory(state);
@@ -3377,6 +3380,7 @@ export const {
     removeClipPitchData,
     undo,
     redo,
+    bumpParamsEpoch,
 } = sessionSlice.actions;
 
 export default sessionSlice.reducer;
