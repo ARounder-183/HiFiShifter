@@ -322,9 +322,9 @@ export interface BenchmarkResult {
     /** DirectML GPU real-time factor, null if unavailable or failed. */
     dmlRtFactor?: number | null;
     benchmarkSamples: number;
-    /** True when WebGPU EP was available and used for GPU benchmark. */
+    /** True when WebGPU EP was available for the GPU benchmark. */
     gpuAvailable: boolean;
-    /** True when DirectML EP was available and used for benchmark. */
+    /** True when DirectML EP was available for the benchmark. */
     dmlAvailable: boolean;
     /** GPU device ID that was used. */
     gpuDeviceId: number;

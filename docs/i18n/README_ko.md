@@ -181,7 +181,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-sudo bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
 
 이 스크립트는 시스템 종속성, Node.js(없는 경우), appimagetool 및 프론트엔드 npm 종속성을 설치합니다.

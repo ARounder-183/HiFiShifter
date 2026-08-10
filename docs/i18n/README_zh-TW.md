@@ -181,7 +181,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-sudo bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
 
 腳本會自動安裝系統依賴、Node.js（如未安裝）、appimagetool 及前端 npm 依賴。

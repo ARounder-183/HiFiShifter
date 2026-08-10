@@ -2313,9 +2313,9 @@ pub struct BenchmarkResults {
     pub dml_median_ms: Option<f64>,
     pub dml_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
-    /// True when WebGPU EP was available and used for the GPU benchmark.
+    /// True when WebGPU EP was available for the GPU benchmark.
     pub gpu_available: bool,
-    /// True when DirectML EP was available and used for the benchmark.
+    /// True when DirectML EP was available for the benchmark.
     pub dml_available: bool,
     /// GPU device ID that was used (0 if GPU not available).
     pub gpu_device_id: i32,
@@ -2343,13 +2343,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
-    // WebGPU is compiled on Linux x86_64 and macOS ARM64 only.
-    // Excluded: Windows (Dawn/D3D12 crash), Linux ARM64 (no prebuilt ORT binary),
-    // macOS x86_64 (ort-tract, no GPU).
-    let gpu_available = cfg!(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    ));
+    // Report WebGPU availability from the actual runtime probe rather than the
+    // compile-time target: the probe can fail on unsupported drivers/WSL2 even
+    // when WebGPU is compiled in.
+    let gpu_available = available_providers
+        .iter()
+        .any(|provider| provider == "WebGpuExecutionProvider");
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
