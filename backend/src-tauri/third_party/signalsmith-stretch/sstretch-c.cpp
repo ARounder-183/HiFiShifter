@@ -177,6 +177,14 @@ int sstretch_process_offline(
         return (int)out_frames;
     }
 
+    // Use the exact/outputSeek path so output sample 0 aligns with input sample 0.
+    // The old implementation here skipped outputLatency frames from the start,
+    // which cut off the beginning of short clips.
+    (void)time_ratio;
+    int exactRet = sstretch_exact(state, input_interleaved, in_frames, output_interleaved, out_frames);
+    if (exactRet < 0) return -1;
+    return (int)out_frames;
+
     auto* s = (SStretchInternal*)state;
     int ch = s->channels;
 
@@ -292,6 +300,39 @@ int sstretch_process_offline(
     }
 
     return copyFrames;
+}
+
+int sstretch_exact(
+    SStretchState state,
+    const float* input_interleaved,
+    unsigned int in_frames,
+    float* output_interleaved,
+    unsigned int out_frames
+) {
+    if (!state || !input_interleaved || !output_interleaved) return -1;
+
+    auto* s = (SStretchInternal*)state;
+    int ch = s->channels;
+
+    // Reset so the exact path starts from a clean state.
+    s->stretch.reset();
+    s->deinterleave(input_interleaved, (int)in_frames);
+    s->prepare_out_ptrs((int)out_frames);
+
+    bool ok = s->stretch.exact(
+        s->in_ptrs_const.data(),
+        (int)in_frames,
+        s->out_ptrs.data(),
+        (int)out_frames
+    );
+
+    if (!ok) {
+        std::memset(output_interleaved, 0, (size_t)out_frames * ch * sizeof(float));
+        return 0;
+    }
+
+    s->interleave(output_interleaved, (int)out_frames);
+    return 1;
 }
 
 int sstretch_flush(
