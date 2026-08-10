@@ -98,7 +98,12 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         let clips_needing_render =
             collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
         let need_prerender = !clips_needing_render.is_empty();
-        eprintln!("[play_original] clips_needing_render={} need_prerender={} timeline_version={}", clips_needing_render.len(), need_prerender, render_timeline_version);
+        eprintln!(
+            "[play_original] clips_needing_render={} need_prerender={} timeline_version={}",
+            clips_needing_render.len(),
+            need_prerender,
+            render_timeline_version
+        );
 
         // Check if the engine's current snapshot has clips awaiting synthesis
         // (rendered_pcm=None, needs_synthesis=true).  This can happen when
@@ -171,16 +176,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
 
                 // Set up chunk-level progress callback for granular UI updates
                 let app_for_progress = app.clone();
-                crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(move |progress: f64| {
-                    let _ = app_for_progress.emit(
-                        "playback_rendering_state",
-                        PlaybackRenderingStateEvent {
-                            active: true,
-                            progress: Some(progress),
-                            target: Some("original".to_string()),
-                        },
-                    );
-                })));
+                crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(
+                    move |progress: f64| {
+                        let _ = app_for_progress.emit(
+                            "playback_rendering_state",
+                            PlaybackRenderingStateEvent {
+                                active: true,
+                                progress: Some(progress),
+                                target: Some("original".to_string()),
+                            },
+                        );
+                    },
+                )));
 
                 let _ = app.emit(
                     "playback_rendering_state",
@@ -958,25 +965,24 @@ fn render_single_clip(
     // 5. 时间拉伸（playback_rate != 1）
     // 若合成处理器声明自己处理时间拉伸（handles_time_stretch = true），
     // 则跳过此处的时间拉伸，由处理器在 pitch edit 阶段通过 ClipProcessContext.playback_rate 内部完成。
-        let processor_handles_stretch = {
-            let clip_root = timeline.resolve_root_track_id(&clip.track_id);
-            clip_root
-                .and_then(|root| {
-                    let t = timeline.tracks.iter().find(|t| t.id == root)?;
-                    let kind =
-                        crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                    let has_adjustment = timeline
-                        .params_by_root_track
-                        .get(&root)
-                        .map(|e| e.has_pitch_adjustment_active)
-                        .unwrap_or(false);
-                    Some(crate::renderer::processor_handles_time_stretch(
-                        kind,
-                        t.compose_enabled || has_adjustment,
-                    ))
-                })
-                .unwrap_or(false)
-        };
+    let processor_handles_stretch = {
+        let clip_root = timeline.resolve_root_track_id(&clip.track_id);
+        clip_root
+            .and_then(|root| {
+                let t = timeline.tracks.iter().find(|t| t.id == root)?;
+                let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
+                let has_adjustment = timeline
+                    .params_by_root_track
+                    .get(&root)
+                    .map(|e| e.has_pitch_adjustment_active)
+                    .unwrap_or(false);
+                Some(crate::renderer::processor_handles_time_stretch(
+                    kind,
+                    t.compose_enabled || has_adjustment,
+                ))
+            })
+            .unwrap_or(false)
+    };
     if (playback_rate - 1.0).abs() > 1e-6 && !processor_handles_stretch {
         let seg_frames_in = segment.len() / 2;
         let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;
@@ -1321,9 +1327,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         return serde_json::json!({"ok": true, "rendered": 0});
     }
 
-    let render_timeline_version = state
-        .timeline_version
-        .load(Ordering::Acquire);
+    let render_timeline_version = state.timeline_version.load(Ordering::Acquire);
 
     eprintln!(
         "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={}",
@@ -1373,11 +1377,14 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         );
     })));
 
-    let _ = app_clone.emit("playback_rendering_state", PlaybackRenderingStateEvent {
-        active: true,
-        progress: Some(0.0),
-        target: Some("background".to_string()),
-    });
+    let _ = app_clone.emit(
+        "playback_rendering_state",
+        PlaybackRenderingStateEvent {
+            active: true,
+            progress: Some(0.0),
+            target: Some("background".to_string()),
+        },
+    );
     // Explicitly drop app_clone's state borrow before moving app into the thread
     drop(state);
     drop(app_clone);
@@ -1405,17 +1412,18 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         for clip_render_info in &clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
-                eprintln!("[bg_render] cancel flag detected at clip {}/{}", rendered_count, total);
+                eprintln!(
+                    "[bg_render] cancel flag detected at clip {}/{}",
+                    rendered_count, total
+                );
                 cancelled = true;
                 break;
             }
             // 每隔 32 个 clip 检查时间线版本是否已变更
             if rendered_count % 32 == 0 {
                 let state = app.state::<AppState>();
-                let changed = state
-                    .timeline_version
-                    .load(Ordering::Acquire)
-                    != render_timeline_version;
+                let changed =
+                    state.timeline_version.load(Ordering::Acquire) != render_timeline_version;
                 if changed {
                     cancelled = true;
                     break;
@@ -1468,11 +1476,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                 let render_started_at = std::time::Instant::now();
                 let state = app.state::<AppState>();
                 let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                match render_single_clip(
-                    &tl,
-                    &clip_render_info.clip,
-                    clip_render_info.sr,
-                ) {
+                match render_single_clip(&tl, &clip_render_info.clip, clip_render_info.sr) {
                     Ok(rendered) => {
                         drop(tl);
                         render_elapsed += render_started_at.elapsed();
@@ -1596,11 +1600,14 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                     render_success_count, render_failed_count
                 );
             }
-            let _ = app.emit("playback_rendering_state", PlaybackRenderingStateEvent {
-                active: false,
-                progress: Some(1.0),
-                target: Some("background".to_string()),
-            });
+            let _ = app.emit(
+                "playback_rendering_state",
+                PlaybackRenderingStateEvent {
+                    active: false,
+                    progress: Some(1.0),
+                    target: Some("background".to_string()),
+                },
+            );
             return;
         }
 
@@ -1644,14 +1651,41 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
             return;
         }
 
-        let _ = app.emit("playback_rendering_state", PlaybackRenderingStateEvent {
-            active: false,
-            progress: Some(1.0),
-            target: Some("background".to_string()),
-        });
+        let _ = app.emit(
+            "playback_rendering_state",
+            PlaybackRenderingStateEvent {
+                active: false,
+                progress: Some(1.0),
+                target: Some("background".to_string()),
+            },
+        );
     });
 
     serde_json::json!({"ok": true, "rendering": total})
+}
+
+/// Request a background pre-render after render caches have been invalidated.
+///
+/// Unlike `start_background_render`, this is safe to call even while a render is
+/// already running: it cancels the in-flight render and requests a restart with
+/// the fresh cache state. It is a no-op when background pre-render is disabled.
+pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+
+    if !AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed) {
+        return serde_json::json!({"ok": true, "skipped": true, "reason": "disabled"});
+    }
+
+    if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
+        BG_RENDER_CANCEL.store(true, Ordering::Release);
+        BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
+        eprintln!("[bg_render] caches invalidated while render active; requesting restart");
+        return serde_json::json!({"ok": true, "restart_requested": true});
+    }
+
+    // A fresh render request supersedes any stale restart marker.
+    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+    start_background_render(app.clone())
 }
 
 /// 取消当前正在运行的后台预渲染（如果有）。

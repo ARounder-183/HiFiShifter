@@ -913,6 +913,9 @@ pub(super) fn open_project(
         update_window_title(&window, &p.name, p.dirty);
     }
     sync_runtime_stretch_settings(state.inner());
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
+    }
 
     // 持久化最近工程列表
     save_recent_projects(state.inner());
@@ -1150,11 +1153,18 @@ pub(super) fn set_project_stretch_settings(
 
     update_project_stretch_overrides(stretch_algorithm_override, hifigan_mel_stretch_override);
     {
-        let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let timeline = state
+            .timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         for clip in &timeline.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }
         state.audio_engine.update_timeline(timeline);
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
     serde_json::json!({ "ok": true, "project": state.project_meta_payload() })
 }

@@ -660,7 +660,9 @@ impl AudioEngine {
     /// but have no rendered PCM yet (i.e. a render is in progress or pending).
     pub fn snapshot_has_pending_clips(&self) -> bool {
         let snap = self.snapshot.load();
-        snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
+        snap.clips
+            .iter()
+            .any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
     }
 
     pub fn snapshot_state(&self) -> AudioEngineStateSnapshot {
@@ -760,6 +762,18 @@ fn handle_set_playing(s: &mut EngineWorkerState, playing: bool, target: Option<S
     }
 }
 
+fn track_params_affect_render(
+    old: &crate::state::TrackParamsState,
+    new: &crate::state::TrackParamsState,
+) -> bool {
+    old.frame_period_ms != new.frame_period_ms
+        || old.pitch_orig != new.pitch_orig
+        || old.pitch_edit != new.pitch_edit
+        || old.tension_edit != new.tension_edit
+        || old.extra_curves != new.extra_curves
+        || old.extra_params != new.extra_params
+}
+
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     eprintln!(
         "[engine] handle_update_timeline: tracks={}, clips={}",
@@ -800,8 +814,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 let new_params = new_root.and_then(|r| tl.params_by_root_track.get(&r));
 
                 match (old_params, new_params) {
-                    (Some(old), Some(new)) => old.pitch_edit != new.pitch_edit,
-                    (None, Some(new)) => !new.pitch_edit.is_empty(),
+                    (Some(old), Some(new)) => track_params_affect_render(old, new),
+                    (None, Some(new)) => track_params_affect_render(&Default::default(), new),
                     (Some(_), None) => true, // track params 被删除
                     (None, None) => false,
                 }
@@ -863,7 +877,6 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             // 当源文件变更时（包括同路径替换），必须使所有以文件路径为 key 的缓存失效。
             // 使用字符串比较（与 handle_evict_source_path 保持一致），兼容不同 PathBuf 表示形式。
             for stale_path in &stale_source_paths {
-
                 // 1. 解码缓存（ResourceManager LRU）
                 if let Ok(mut cache) = s.cache.lock() {
                     let keys_to_evict: Vec<(std::path::PathBuf, u32)> = cache
@@ -918,8 +931,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     root_id
                 );
                 for clip in &tl.clips {
-                    if tl.resolve_root_track_id(&clip.track_id).as_deref()
-                        == Some(root_id.as_str())
+                    if tl.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_id.as_str())
                     {
                         crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
                         any_cache_invalidated = true;
@@ -934,16 +946,17 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // any_cache_invalidated 由上方的 clip 变化检测代码设置。
     if any_cache_invalidated {
         use std::sync::atomic::Ordering;
-        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
-            .load(Ordering::Relaxed);
-        let running = crate::commands::playback::BG_RENDER_ACTIVE
-            .load(Ordering::Relaxed);
+        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed);
+        let running = crate::commands::playback::BG_RENDER_ACTIVE.load(Ordering::Relaxed);
         if enabled && !tl.clips.is_empty() {
             if !running {
                 // 没有渲染在运行 → 直接启动
                 if let Some(app) = s.app_handle.as_ref() {
-                    eprintln!("[engine] auto-triggering background render ({} clips invalidated)", tl.clips.len());
-                    let _ = crate::commands::playback::start_background_render(app.clone());
+                    eprintln!(
+                        "[engine] auto-triggering background render ({} clips invalidated)",
+                        tl.clips.len()
+                    );
+                    let _ = crate::commands::playback::request_background_render(app);
                 }
             } else {
                 // 渲染已在运行 → 取消旧渲染，标记需要重启
@@ -986,17 +999,22 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
     let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
         tl.params_by_root_track.iter().any(|(root_id, new_params)| {
-            old_tl.params_by_root_track.get(root_id)
-                .map_or(true, |old_params| old_params.pitch_edit != new_params.pitch_edit)
+            old_tl
+                .params_by_root_track
+                .get(root_id)
+                .map_or(true, |old_params| {
+                    old_params.pitch_edit != new_params.pitch_edit
+                })
         })
     });
 
-    let clip_changed = track_pitch_edit_changed || tl.clips.iter().any(|clip| {
-        match old_clips_map.get(clip.id.as_str()) {
-            None => true, // 新增 clip
-            Some(old) => clip_pitch_params_changed(old, clip),
-        }
-    });
+    let clip_changed = track_pitch_edit_changed
+        || tl.clips.iter().any(|clip| {
+            match old_clips_map.get(clip.id.as_str()) {
+                None => true, // 新增 clip
+                Some(old) => clip_pitch_params_changed(old, clip),
+            }
+        });
 
     let pitch_params_changed_clip_ids: std::collections::HashSet<&str> = tl
         .clips
@@ -1188,10 +1206,13 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     //
     // 如果后台预渲染（Background Pre-render）正在运行，则不暂停播放，
     // 允许音频回调在未渲染 clip 位置输出静音（自然暂停），渲染线程在后台继续推进。
-    let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let bg_render =
+        crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
     let any_need_render = !snap.clips.is_empty()
-        && snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
+        && snap
+            .clips
+            .iter()
+            .any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
     let should_halt = (any_need_render || track_pitch_edit_changed) && !bg_render;
     if should_halt && s.is_playing.load(Ordering::Relaxed) {
         eprintln!(
@@ -1202,11 +1223,19 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         if let Some(app) = s.app_handle.as_ref() {
             #[derive(Clone, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
-            struct Evt { active: bool, progress: Option<f64>, target: Option<String> }
-            let _ = app.emit("playback_rendering_state", Evt {
-                active: false, progress: Some(0.0),
-                target: Some("original".to_string()),
-            });
+            struct Evt {
+                active: bool,
+                progress: Option<f64>,
+                target: Option<String>,
+            }
+            let _ = app.emit(
+                "playback_rendering_state",
+                Evt {
+                    active: false,
+                    progress: Some(0.0),
+                    target: Some("original".to_string()),
+                },
+            );
         }
     }
 
@@ -1600,7 +1629,7 @@ mod tests {
     use super::*;
     use crate::audio_engine::resource_manager::ResourceManager;
     use crate::audio_engine::types::{EngineCommand, EngineSnapshot};
-    use crate::state::{Clip, TimelineState};
+    use crate::state::{Clip, TimelineState, TrackParamsState};
     use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
     use arc_swap::ArcSwap;
     use std::collections::{HashMap, HashSet};
@@ -1646,6 +1675,26 @@ mod tests {
             midi_note_data: None,
         });
         timeline
+    }
+
+    #[test]
+    fn track_params_affect_render_detects_curve_and_static_param_changes() {
+        let old = TrackParamsState::default();
+        let mut new = old.clone();
+
+        assert!(!track_params_affect_render(&old, &new));
+
+        new.tension_edit.push(1.0);
+        assert!(track_params_affect_render(&old, &new));
+
+        new = old.clone();
+        new.extra_curves
+            .insert("breath_gain".to_string(), vec![0.5]);
+        assert!(track_params_affect_render(&old, &new));
+
+        new = old.clone();
+        new.extra_params.insert("synth_mode".to_string(), 1.0);
+        assert!(track_params_affect_render(&old, &new));
     }
 
     #[test]
@@ -1698,10 +1747,7 @@ mod tests {
             meter_generation: &meter_generation,
         };
 
-        handle_audio_ready(
-            &mut worker,
-            (PathBuf::from("E:/virtual/test.wav"), 44_100),
-        );
+        handle_audio_ready(&mut worker, (PathBuf::from("E:/virtual/test.wav"), 44_100));
 
         let job = stretch_rx
             .try_recv()
