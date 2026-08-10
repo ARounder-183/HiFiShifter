@@ -7,6 +7,7 @@ type SparseRenderClip = {
     startSec: number;
     lengthSec: number;
     gain: number;
+    playbackRate: number;
     muted: boolean;
     midiNoteCount?: number;
     groupId?: string;
@@ -32,6 +33,7 @@ export type TimelineCanvasClipModel = {
     selected: boolean;
     muted: boolean;
     gain: number;
+    playbackRate: number;
     groupId?: string;
     isMidiClip: boolean;
     trackColor?: string;
@@ -116,6 +118,7 @@ export function buildSparseClipRenderModel(args: {
                     : args.selectedClipId === clip.id,
             muted: clip.muted,
             gain: clip.gain,
+            playbackRate: clip.playbackRate,
             groupId: clip.groupId,
             isMidiClip: clip.midiNoteCount != null,
             trackColor: track.color,

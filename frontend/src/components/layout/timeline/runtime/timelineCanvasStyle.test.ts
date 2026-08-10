@@ -39,6 +39,15 @@ const selectedStyle = buildTimelineClipVisualStyle({
     playbackRate: 1,
     name: "Lead Vocal Very Long Name For Playback Rate Header",
 });
+const stretchedStyle = buildTimelineClipVisualStyle({
+    widthPx: 160,
+    trackColor: "#ff7a00",
+    selected: false,
+    muted: false,
+    gain: 1,
+    playbackRate: 1.25,
+    name: "Lead Vocal Very Long Name For Playback Rate Header",
+});
 
 assertEqual(style.showGainKnob, true, "gain knob visible");
 assertEqual(style.showGainLabel, true, "gain label visible");
@@ -51,6 +60,11 @@ assertEqual(style.muteBadgeLabel, "M", "mute badge uses M label");
 assertEqual(style.formantBadgeLabel, "F", "formant badge uses F label");
 assertEqual(style.gainKnobAngleDeg, 0, "unity gain knob stays centered");
 assertEqual(style.playbackRateLabel, "x1", "playback rate label is formatted (unity)");
+assertEqual(
+    stretchedStyle.playbackRateLabel,
+    "x1.25",
+    "playback rate label reflects the stretched rate",
+);
 assertEqual(style.showPlaybackRate, true, "playback rate shows on sufficiently wide clips");
 assertEqual(
     compactStyle.showPlaybackRate,
