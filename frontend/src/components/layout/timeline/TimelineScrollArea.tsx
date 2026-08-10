@@ -37,7 +37,6 @@ export const TimelineScrollArea: React.FC<
     setRowHeight,
     setScrollLeft,
     onScroll,
-    onWheel,
     scrollHorizontalKb,
     scrollVerticalKb,
     horizontalZoomKb,
@@ -158,12 +157,6 @@ export const TimelineScrollArea: React.FC<
 
         const handler: EventListener = (evt) => {
             const e = evt as globalThis.WheelEvent;
-            const clipGainKnobEl = (e.target as HTMLElement | null)?.closest(
-                "[data-clip-gain-knob]",
-            );
-            if (clipGainKnobEl) {
-                return;
-            }
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
                 if (!kb) return false;

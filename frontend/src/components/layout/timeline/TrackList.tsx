@@ -6,6 +6,9 @@ import { isNoneBinding, isModifierActive } from "../../../features/keybindings/k
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
+import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
+import { GainValueTooltip } from "./GainValueTooltip";
+import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 
 /** Color palette options shown when creating a new track. */
@@ -29,31 +32,6 @@ const TRACK_GAIN_WHEEL_STEP_DB = 0.5;
 const TRACK_GAIN_WHEEL_FINE_STEP_DB = 0.1;
 const TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS = 120;
 const TRACK_GAIN_DRAG_DB_PER_PX = 0.2;
-const TRACK_GAIN_DRAG_FINE_SCALE = 0.2;
-const TRACK_GAIN_DRAG_FINE_PULLBACK_RATIO = 0.35;
-
-type FineAxisDragState = {
-    raw: number;
-    adjusted: number;
-    fineActive: boolean;
-};
-
-function advanceFineAxisDrag(
-    state: FineAxisDragState,
-    nextRaw: number,
-    fineActive: boolean,
-): number {
-    const delta = nextRaw - state.raw;
-    if (fineActive && !state.fineActive) {
-        state.adjusted += delta * (1 - TRACK_GAIN_DRAG_FINE_PULLBACK_RATIO);
-    } else {
-        const scale = fineActive ? TRACK_GAIN_DRAG_FINE_SCALE : 1;
-        state.adjusted += delta * scale;
-    }
-    state.raw = nextRaw;
-    state.fineActive = fineActive;
-    return state.adjusted;
-}
 
 function gainToDb(gain: number): number {
     if (!Number.isFinite(gain) || gain <= 1e-4) return TRACK_GAIN_MIN_DB;
@@ -198,6 +176,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
         indicatorY: number | null;
     } | null>(null);
     const volumeCommitTimersRef = useRef<Record<string, number>>({});
+    const [volumeHoveredTrackId, setVolumeHoveredTrackId] = useState<string | null>(null);
+    const [volumeTooltipPos, setVolumeTooltipPos] = useState<{ x: number; y: number } | null>(null);
+    const [volumeDrag, setVolumeDrag] = useState<{ trackId: string; baseDb: number } | null>(null);
 
     // 轨道颜色选择器弹出状�?
     const [colorPickerTrackId, setColorPickerTrackId] = useState<string | null>(null);
@@ -510,7 +491,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         try {
             (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        } catch {}
+        } catch {
+            // Pointer capture can fail in some WebView/edge cases; panning still works.
+        }
 
         function onMove(ev: PointerEvent) {
             const pan = panRef.current;
@@ -689,8 +672,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
         e.stopPropagation();
         clearPendingVolumeCommit(trackId);
 
+        const knobEl = e.currentTarget;
         const startY = e.clientY;
         const startDb = clampGainDb(gainToDb(volume));
+        setVolumeDrag({ trackId, baseDb: startDb });
+        setVolumeHoveredTrackId(trackId);
+        setVolumeTooltipPos({ x: e.clientX, y: e.clientY });
         let lastDb = startDb;
         const fineAxisState: FineAxisDragState = {
             raw: startY,
@@ -699,6 +686,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         };
 
         const onMove = (ev: PointerEvent) => {
+            setVolumeTooltipPos({ x: ev.clientX, y: ev.clientY });
             const adjustedY = advanceFineAxisDrag(
                 fineAxisState,
                 ev.clientY,
@@ -711,10 +699,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onVolumeUiChange(trackId, dbToGain(nextDb));
         };
 
-        const onEnd = () => {
+        const onEnd = (ev: PointerEvent) => {
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onEnd);
             window.removeEventListener("pointercancel", onEnd);
+            setVolumeDrag(null);
+            const knobRect = knobEl.getBoundingClientRect();
+            const stillOverKnob =
+                ev.clientX >= knobRect.left &&
+                ev.clientX <= knobRect.right &&
+                ev.clientY >= knobRect.top &&
+                ev.clientY <= knobRect.bottom;
+            setVolumeHoveredTrackId(stillOverKnob ? trackId : null);
             onVolumeCommit(trackId, dbToGain(lastDb));
         };
 
@@ -823,6 +819,29 @@ const TrackListInner: React.FC<TrackListProps> = ({
         [tracks, visibleTrackWindow.endIndex, visibleTrackWindow.startIndex],
     );
 
+    const buildVolumeTooltip = (trackId: string, volume: number): string => {
+        const db = clampGainDb(gainToDb(volume));
+        if (volumeDrag && volumeDrag.trackId === trackId) {
+            return t("gain_value_tooltip_drag")
+                .replace("{gain}", formatGainDbValue(db))
+                .replace("{delta}", formatGainDbValue(db - volumeDrag.baseDb));
+        }
+        return t("gain_value_tooltip").replace("{gain}", formatGainDbValue(db));
+    };
+
+    const volumeTooltipTrackId = volumeDrag?.trackId ?? volumeHoveredTrackId;
+    const volumeTooltipTrack = volumeTooltipTrackId
+        ? tracks.find((tr) => tr.id === volumeTooltipTrackId)
+        : null;
+    const volumeTooltipText =
+        volumeTooltipTrackId && volumeTooltipTrack
+            ? buildVolumeTooltip(
+                  volumeTooltipTrackId,
+                  currentTrackVolumeById[volumeTooltipTrackId] ?? 1,
+              )
+            : "";
+    const showVolumeTooltip = volumeTooltipTrackId != null && volumeTooltipPos != null;
+
     return (
         <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
             <Box className="h-6 border-b border-qt-border px-2 flex items-center bg-qt-window shadow-sm z-10">
@@ -910,6 +929,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                 volumeDb >= 0
                                     ? (volumeDb / TRACK_GAIN_MAX_DB) * 135
                                     : (volumeDb / Math.abs(TRACK_GAIN_MIN_DB)) * 135;
+                            const volumeTooltip = buildVolumeTooltip(track.id, volume);
 
                             const guideLines = depth > 0 ? Array.from({ length: depth }) : [];
 
@@ -1335,9 +1355,27 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         <button
                                                             type="button"
                                                             className="relative w-8 h-8 rounded-full border border-qt-border bg-qt-window hover:bg-qt-surface transition-colors shrink-0"
-                                                            title={formatGainLabel(volume)}
+                                                            aria-label={volumeTooltip}
                                                             data-track-volume-knob
                                                             data-track-id={track.id}
+                                                            onPointerEnter={(e) => {
+                                                                setVolumeHoveredTrackId(track.id);
+                                                                setVolumeTooltipPos({
+                                                                    x: e.clientX,
+                                                                    y: e.clientY,
+                                                                });
+                                                            }}
+                                                            onPointerMove={(e) => {
+                                                                setVolumeTooltipPos({
+                                                                    x: e.clientX,
+                                                                    y: e.clientY,
+                                                                });
+                                                            }}
+                                                            onPointerLeave={() => {
+                                                                setVolumeHoveredTrackId((prev) =>
+                                                                    prev === track.id ? null : prev,
+                                                                );
+                                                            }}
                                                             onPointerDown={(e) =>
                                                                 beginVolumeKnobDrag(
                                                                     e,
@@ -1541,6 +1579,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     </button>
                 </div>
             )}
+            <GainValueTooltip
+                text={volumeTooltipText}
+                position={showVolumeTooltip ? volumeTooltipPos : null}
+            />
         </Flex>
     );
 };

@@ -349,7 +349,8 @@ export const enUS = {
     fade_curve_logarithmic: "Logarithmic",
     fade_curve_scurve: "S-Curve",
 
-    clip_gain_drag_hint: "Drag up/down to adjust gain / Double-click to enter precise value",
+    gain_value_tooltip: "Gain: {gain} dB",
+    gain_value_tooltip_drag: "Gain: {gain} dB ({delta} dB)",
     track_change_color: "Change track color",
     track_clone: "Clone Track",
     color_blue: "Blue",

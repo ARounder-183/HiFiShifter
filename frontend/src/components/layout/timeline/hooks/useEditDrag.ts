@@ -17,6 +17,7 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { applyAutoCrossfade } from "./autoCrossfade";
 import { clamp } from "../math";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { paramsApi } from "../../../../services/api";
@@ -30,6 +31,8 @@ import {
 import { applyBulkFadeValue, applyBulkGainDeltaDb, getBulkEditableClipIds } from "./bulkClipEdit";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
+
+const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
 
 export function resolveStretchParamTypes(
     pitchEditUserModified: boolean | null | undefined,
@@ -138,7 +141,13 @@ async function stretchLinkedParams(
 }
 
 export type EditDragType =
-    "trim_left" | "trim_right" | "stretch_left" | "stretch_right" | "fade_in" | "fade_out" | "gain";
+    | "trim_left"
+    | "trim_right"
+    | "stretch_left"
+    | "stretch_right"
+    | "fade_in"
+    | "fade_out"
+    | "gain";
 
 export type EditDragState = {
     type: EditDragType;
@@ -192,6 +201,8 @@ export function useEditDrag(deps: {
     gridSnapEnabled: boolean;
     /** 忽略编组 */
     ignoreGrouping: boolean;
+    /** modifier.paramFineAdjust 绑定 */
+    paramFineAdjustKb: Keybinding;
 }) {
     const {
         scrollRef,
@@ -204,6 +215,7 @@ export function useEditDrag(deps: {
         noSnapKb,
         gridSnapEnabled,
         ignoreGrouping,
+        paramFineAdjustKb,
     } = deps;
 
     const editDragRef = useRef<EditDragState | null>(null);
@@ -255,6 +267,12 @@ export function useEditDrag(deps: {
         dispatch(checkpointHistory());
         dispatch(beginInteraction());
 
+        // Gain drag sends throttled backend preview updates while dragging. Open the
+        // backend undo group up front so the single checkpoint is the pre-drag value;
+        // otherwise the final bulk write would checkpoint after the previews already
+        // changed the backend, and undo would bounce back to the post-drag value.
+        const gainUndoGroupPromise = type === "gain" ? webApi.beginUndoGroup() : null;
+
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -303,6 +321,19 @@ export function useEditDrag(deps: {
         let ticking = false;
         let latestEvent: PointerEvent | null = null;
         let accumulatedGainDeltaDb = 0;
+        let gainFineAxisState: FineAxisDragState | null = null;
+        let gainDragStartClientY: number | null = null;
+        let remotePreviewChain: Promise<unknown> = Promise.resolve();
+
+        const finishGainUndoGroup = async () => {
+            if (!gainUndoGroupPromise) return;
+            try {
+                await remotePreviewChain;
+                await gainUndoGroupPromise;
+            } finally {
+                await webApi.endUndoGroup();
+            }
+        };
 
         function onMove(ev: PointerEvent) {
             latestEvent = ev;
@@ -358,7 +389,9 @@ export function useEditDrag(deps: {
                                 );
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
                 if (drag.type === "fade_out") {
@@ -388,13 +421,27 @@ export function useEditDrag(deps: {
                                 );
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
                 if (drag.type === "gain") {
-                    const movementY = (currentEv.movementY ?? 0) as number;
-                    const deltaDb = -movementY * 0.25;
-                    accumulatedGainDeltaDb += deltaDb;
+                    if (gainDragStartClientY == null || !gainFineAxisState) {
+                        gainDragStartClientY = currentEv.clientY;
+                        gainFineAxisState = {
+                            raw: currentEv.clientY,
+                            adjusted: currentEv.clientY,
+                            fineActive: isModifierActive(paramFineAdjustKb, currentEv),
+                        };
+                    }
+                    const adjustedY = advanceFineAxisDrag(
+                        gainFineAxisState,
+                        currentEv.clientY,
+                        isModifierActive(paramFineAdjustKb, currentEv),
+                    );
+                    const deltaY = gainDragStartClientY - adjustedY;
+                    accumulatedGainDeltaDb = deltaY * CLIP_GAIN_DRAG_DB_PER_PX;
                     const gainUpdates = applyBulkGainDeltaDb({
                         clipIds: drag.selectedClipIds,
                         clipsById: new Map(
@@ -419,14 +466,23 @@ export function useEditDrag(deps: {
                             const nextGain = gainUpdates[0]?.gain;
                             if (nextGain != null && now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
-                                void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    gain: nextGain,
-                                    checkpoint: false,
-                                });
+                                const remoteUpdate = () =>
+                                    webApi.setClipState({
+                                        clipId: drag.clipId,
+                                        gain: nextGain,
+                                        checkpoint: false,
+                                    });
+                                const nextRemotePreview = gainUndoGroupPromise
+                                    ? gainUndoGroupPromise.then(remoteUpdate)
+                                    : Promise.resolve().then(remoteUpdate);
+                                remotePreviewChain = remotePreviewChain
+                                    .then(() => nextRemotePreview)
+                                    .catch(() => undefined);
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
 
@@ -721,6 +777,9 @@ export function useEditDrag(deps: {
 
             const clipNow = sessionRef.current.clips.find((c) => c.id === drag.clipId);
             if (!isGroupStretch && !clipNow) {
+                if (gainUndoGroupPromise) {
+                    void finishGainUndoGroup().catch(() => undefined);
+                }
                 dispatch(endInteraction());
                 return;
             }
@@ -1054,14 +1113,20 @@ export function useEditDrag(deps: {
                         return [clipId, { gain: nextClip?.gain ?? 1 }] as const;
                     }),
                 );
-                persistPromise = dispatch(
-                    setClipsStateBulkRemote({
-                        updates: buildBulkClipStateUpdates({
-                            clipIds: drag.selectedClipIds,
-                            changesById,
-                        }),
-                    }),
-                ).unwrap();
+                const persistBulkGain = () =>
+                    remotePreviewChain.then(() =>
+                        dispatch(
+                            setClipsStateBulkRemote({
+                                updates: buildBulkClipStateUpdates({
+                                    clipIds: drag.selectedClipIds,
+                                    changesById,
+                                }),
+                            }),
+                        ).unwrap(),
+                    );
+                persistPromise = gainUndoGroupPromise
+                    ? gainUndoGroupPromise.then(persistBulkGain)
+                    : persistBulkGain();
             }
 
             // 两阶段播放速率更新：后端响应后重新应用前端计算的值
@@ -1113,7 +1178,14 @@ export function useEditDrag(deps: {
             }
 
             // 在所有持久化请求完成后释放交互锁
-            void Promise.resolve(persistPromise).finally(() => {
+            void Promise.resolve(persistPromise).finally(async () => {
+                if (gainUndoGroupPromise) {
+                    try {
+                        await finishGainUndoGroup();
+                    } catch {
+                        // Best-effort undo-group cleanup.
+                    }
+                }
                 dispatch(endInteraction());
             });
 

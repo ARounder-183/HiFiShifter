@@ -350,7 +350,8 @@ export const jaJP = {
     fade_curve_logarithmic: "ログ",
     fade_curve_scurve: "S カーブ",
 
-    clip_gain_drag_hint: "上下にドラッグしてゲインを調整 / ダブルクリックで数値入力",
+    gain_value_tooltip: "ゲイン：{gain} dB",
+    gain_value_tooltip_drag: "ゲイン：{gain} dB（{delta} dB）",
     track_change_color: "トラックの色を変更",
     track_clone: "トラックを複製",
     color_blue: "ブルー",

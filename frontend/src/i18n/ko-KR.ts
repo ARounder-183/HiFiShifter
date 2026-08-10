@@ -421,7 +421,8 @@ export const koKR = {
     fade_curve_logarithmic: "로그",
     fade_curve_scurve: "S 커브",
 
-    clip_gain_drag_hint: "위아래로 드래그하여 게인 조절 / 더블 클릭으로 수치 입력",
+    gain_value_tooltip: "게인: {gain} dB",
+    gain_value_tooltip_drag: "게인: {gain} dB ({delta} dB)",
     track_change_color: "트랙 색상 변경",
     track_clone: "트랙 복제",
     color_blue: "파랑",

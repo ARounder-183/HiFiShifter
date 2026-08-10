@@ -334,7 +334,8 @@ export const zhCN = {
     fade_curve_logarithmic: "对数",
     fade_curve_scurve: "S曲线",
 
-    clip_gain_drag_hint: "上下拖拽调节增益 / 双击输入精确值",
+    gain_value_tooltip: "增益：{gain} dB",
+    gain_value_tooltip_drag: "增益：{gain} dB【{delta} dB】",
     track_change_color: "更改轨道颜色",
     track_clone: "克隆轨道",
     color_blue: "蓝",

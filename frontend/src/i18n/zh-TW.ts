@@ -335,7 +335,8 @@ export const zhTW = {
     fade_curve_logarithmic: "對數",
     fade_curve_scurve: "S曲線",
 
-    clip_gain_drag_hint: "上下拖曳調整增益 / 雙擊輸入精確值",
+    gain_value_tooltip: "增益：{gain} dB",
+    gain_value_tooltip_drag: "增益：{gain} dB【{delta} dB】",
     track_change_color: "變更軌道顏色",
     track_clone: "複製軌道",
     color_blue: "藍",

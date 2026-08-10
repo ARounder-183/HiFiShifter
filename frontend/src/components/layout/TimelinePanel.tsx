@@ -601,6 +601,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
         gridSnapEnabled: s.gridSnapEnabled,
         ignoreGrouping,
+        paramFineAdjustKb,
     });
 
     const { slipDragRef: _slipDragRef, startSlipDrag } = useSlipDrag({
