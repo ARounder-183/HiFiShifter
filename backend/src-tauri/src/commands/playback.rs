@@ -1474,11 +1474,8 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                 }
 
                 let render_started_at = std::time::Instant::now();
-                let state = app.state::<AppState>();
-                let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-                match render_single_clip(&tl, &clip_render_info.clip, clip_render_info.sr) {
+                match render_single_clip(&timeline, &clip_render_info.clip, clip_render_info.sr) {
                     Ok(rendered) => {
-                        drop(tl);
                         render_elapsed += render_started_at.elapsed();
                         let stereo_pcm = rendered.rendered_stereo;
                         let frames = (stereo_pcm.len() / 2) as u64;
@@ -1527,17 +1524,14 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
 
             if let Some(base_entry) = base_entry.as_ref() {
                 let tension_started_at = std::time::Instant::now();
-                let state = app.state::<AppState>();
-                let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
                 match ensure_hifigan_tension_cache(
-                    &tl,
+                    &timeline,
                     &clip_render_info.clip,
                     clip_render_info.sr,
                     clip_render_info.cache_key.param_hash,
                     base_entry.pcm_stereo.as_slice(),
                 ) {
                     Ok((_, _tension_generated)) => {
-                        drop(tl);
                         tension_elapsed += tension_started_at.elapsed();
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
