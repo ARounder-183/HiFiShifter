@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { batch } from "react-redux";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
+import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
     bumpParamsEpoch,
     checkpointHistory,
@@ -137,6 +138,168 @@ async function stretchLinkedParams(
             const clearFrom = newRangeMax + 1;
             const clearLen = oldRangeMax - newRangeMax;
             void paramsApi.restoreParamFrames(trackId, paramType, clearFrom, clearLen, false);
+        }
+    }
+}
+
+type StretchRangeMapping = {
+    oldStartSec: number;
+    oldLengthSec: number;
+    newStartSec: number;
+    newLengthSec: number;
+};
+
+function buildMappedParamValues(
+    oldValues: number[],
+    paramType: "pitch" | "tension",
+    newFrameCount: number,
+): number[] {
+    const newValues = new Array<number>(newFrameCount);
+    const oldMaxIdx = oldValues.length - 1;
+    const newMaxIdx = newFrameCount > 1 ? newFrameCount - 1 : 1;
+    const ratio = oldMaxIdx / newMaxIdx;
+
+    for (let i = 0; i < newFrameCount; i++) {
+        const oldIdxF = i * ratio;
+        const lo = oldIdxF | 0;
+        const hi = lo < oldMaxIdx ? lo + 1 : oldMaxIdx;
+        const frac = oldIdxF - lo;
+        const loVal = oldValues[lo] ?? 0;
+        const hiVal = oldValues[hi] ?? 0;
+        if (paramType === "pitch") {
+            if (loVal === 0 && hiVal === 0) {
+                newValues[i] = 0;
+            } else if (loVal === 0) {
+                newValues[i] = 0;
+            } else if (hiVal === 0) {
+                newValues[i] = frac < 0.5 ? loVal : 0;
+            } else {
+                newValues[i] = loVal + (hiVal - loVal) * frac;
+            }
+        } else {
+            newValues[i] = loVal + (hiVal - loVal) * frac;
+        }
+    }
+
+    return newValues;
+}
+
+function subtractIntervals(
+    range: { start: number; end: number },
+    excluded: Array<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+    const sorted = excluded
+        .filter((item) => item.end >= range.start && item.start <= range.end)
+        .sort((a, b) => a.start - b.start);
+    const result: Array<{ start: number; end: number }> = [];
+    let cursor = range.start;
+
+    for (const item of sorted) {
+        if (cursor < item.start) {
+            result.push({
+                start: cursor,
+                end: Math.min(item.start - 1, range.end),
+            });
+        }
+        cursor = Math.max(cursor, item.end + 1);
+        if (cursor > range.end) break;
+    }
+
+    if (cursor <= range.end) {
+        result.push({ start: cursor, end: range.end });
+    }
+
+    return result;
+}
+
+/**
+ * Stretch parameter lines for several clips on the same track as one batch.
+ *
+ * Per-clip independent writes were racing with per-clip restores: the old
+ * range of one clip can overlap the new range of a neighbouring clip, so a
+ * restore could erase freshly written mapped values. This version writes all
+ * new ranges first, then only restores old-range parts that are not covered
+ * by any new range on that track.
+ */
+async function stretchTrackLinkedParams(
+    trackId: string,
+    mappings: StretchRangeMapping[],
+): Promise<void> {
+    if (mappings.length === 0) return;
+
+    const probe = await paramsApi.getParamFrames(trackId, "pitch", 0, 1, 1);
+    if (!probe?.ok) return;
+    const fp = Math.max(1, Number(probe.frame_period_ms) || 5);
+    const stretchParams = resolveStretchParamTypes(probe.pitch_edit_user_modified);
+
+    const frameMappings = mappings.map((mapping) => {
+        const oldStartFrame = Math.round((mapping.oldStartSec * 1000) / fp);
+        const oldEndFrame = Math.round(((mapping.oldStartSec + mapping.oldLengthSec) * 1000) / fp);
+        const oldFrameCount = Math.max(1, oldEndFrame - oldStartFrame);
+
+        const newStartFrame = Math.round((mapping.newStartSec * 1000) / fp);
+        const newEndFrame = Math.round(((mapping.newStartSec + mapping.newLengthSec) * 1000) / fp);
+        const newFrameCount = Math.max(1, newEndFrame - newStartFrame);
+
+        return { oldStartFrame, oldFrameCount, newStartFrame, newFrameCount };
+    });
+
+    const newRanges = frameMappings.map((mapping) => ({
+        start: mapping.newStartFrame,
+        end: mapping.newStartFrame + mapping.newFrameCount - 1,
+    }));
+
+    for (const paramType of stretchParams) {
+        const fetched = await Promise.all(
+            frameMappings.map(async (mapping) => {
+                const res = await paramsApi.getParamFrames(
+                    trackId,
+                    paramType,
+                    mapping.oldStartFrame,
+                    mapping.oldFrameCount,
+                    1,
+                );
+                if (!res?.ok) return null;
+                return {
+                    mapping,
+                    values: (res.edit ?? []).map((value) => Number(value) || 0),
+                };
+            }),
+        );
+
+        // Write every new range first so no restore can clobber a fresh write.
+        for (const item of fetched) {
+            if (!item || item.values.length === 0) continue;
+            const newValues = buildMappedParamValues(
+                item.values,
+                paramType,
+                item.mapping.newFrameCount,
+            );
+            await paramsApi.setParamFrames(
+                trackId,
+                paramType,
+                item.mapping.newStartFrame,
+                newValues,
+                false,
+            );
+        }
+
+        // Restore only old-range parts not covered by any new range.
+        for (const mapping of frameMappings) {
+            const oldEndFrame = mapping.oldStartFrame + mapping.oldFrameCount - 1;
+            const restoreSegments = subtractIntervals(
+                { start: mapping.oldStartFrame, end: oldEndFrame },
+                newRanges,
+            );
+            for (const segment of restoreSegments) {
+                await paramsApi.restoreParamFrames(
+                    trackId,
+                    paramType,
+                    segment.start,
+                    segment.end - segment.start + 1,
+                    false,
+                );
+            }
         }
     }
 }
@@ -1139,20 +1302,25 @@ export function useEditDrag(deps: {
             // stretchLinkedParams has not written the new curves yet. Bump again
             // after the mapping finishes so the parameter editor fetches fresh data.
             if (isStretch && sessionRef.current.lockParamLinesEnabled && drag.stretchGroup) {
-                const stretchTasks = drag.stretchGroup.clipIds.map((id) => {
+                const mappingsByRootTrack = new Map<string, StretchRangeMapping[]>();
+                for (const id of drag.stretchGroup.clipIds) {
                     const initial = drag.stretchGroup?.initialById[id];
                     const now = sessionRef.current.clips.find((c) => c.id === id);
-                    if (!initial || !now?.trackId) {
-                        return Promise.resolve();
-                    }
-                    return stretchLinkedParams(
-                        now.trackId,
-                        initial.startSec,
-                        initial.lengthSec,
-                        now.startSec,
-                        now.lengthSec,
-                    );
-                });
+                    if (!initial || !now?.trackId) continue;
+                    const rootTrackId = resolveRootTrackId(sessionRef.current.tracks, now.trackId);
+                    if (!rootTrackId) continue;
+                    const trackMappings = mappingsByRootTrack.get(rootTrackId) ?? [];
+                    trackMappings.push({
+                        oldStartSec: initial.startSec,
+                        oldLengthSec: initial.lengthSec,
+                        newStartSec: now.startSec,
+                        newLengthSec: now.lengthSec,
+                    });
+                    mappingsByRootTrack.set(rootTrackId, trackMappings);
+                }
+                const stretchTasks = Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
+                    stretchTrackLinkedParams(trackId, mappings),
+                );
                 void Promise.resolve(persistPromise)
                     .then(() => Promise.allSettled(stretchTasks))
                     .finally(() => dispatch(bumpParamsEpoch()));
