@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+以下のツールがインストールされていることを確認してください：
+
+- **Node.js**（推奨 20+）と npm
+- **Rust ツールチェーン**（`rust-toolchain.toml` を参照 — プロジェクトが自動的にプラットフォームに対応した stable ツールチェーンを選択します）
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**、**pkg-config**、およびシステムビルドツール
+- **GTK3、WebKit2GTK、ALSA** などの Tauri ランタイム開発ライブラリ（下記のインストールスクリプトを参照）
+
+ワンクリックインストールスクリプトを実行：
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+このスクリプトはシステム依存関係、Node.js（存在しない場合）、appimagetool、およびフロントエンドの npm 依存関係をインストールします。
+
+フロントエンド依存関係のインストール（スクリプトを使用しない場合）：
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage ビルド
+
+`vslib` アルゴリズムは Windows 専用のため、Linux ビルドではデフォルト機能を無効にする必要があります：
+
+```bash
+# backend/ ディレクトリから実行（tauri.conf.json のパスはこのディレクトリからの相対パスです）
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+または提供されているヘルパースクリプトを使用：
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **注意：** WSL2 環境では FUSE サポートがないため、Tauri bundler の linuxdeploy ステップが失敗する場合があります（エラー：`failed to run linuxdeploy`）。これは WSL2 の既知の制限であり、実際の AppImage 出力には影響しません — AppDir は `target/release/bundle/appimage/` に正しく構築されます。`APPIMAGE_EXTRACT_AND_RUN=1` を設定して手動で `appimagetool` を実行してパッケージ化してください。この問題は実際の Linux マシンや CI では発生しません。
 
 ### 3. SoundTouch ソース
 
@@ -185,25 +221,37 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPUアクセラレーションビルド
+### 4. GPUアクセラレーション
 
-| プラットフォーム            | GPU技術               | 説明                                                            |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crateが自動ダウンロード、NVIDIA / AMD / Intel Arcに対応     |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine、自動有効化                                 |
-| macOS x86_64 (Intel)        | —                     | CPUのみ                                                         |
-| Linux x86_64 / ARM64        | —                     | CPUのみ（ONNX RuntimeはOpenCLをネイティブサポートしていません） |
+HiFiShifterは、サポートされているプラットフォームで自動的にGPU推論アクセラレーションを有効にします。メニューバーの**推論デバイス（Inference Device）**から Auto / CPU / GPU を選択でき、**ベンチマークを実行（Run Benchmark）** で各デバイスの推論遅延を比較できます。
+
+| プラットフォーム                | GPU技術                               | 説明                                                                           |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | 成熟した安定GPUパス、NVIDIA / AMD / Intel Arcに対応                            |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreMLはApple Neural Engineを活用；WebGPUは補助GPUバックエンドとして利用可能   |
+| macOS x86_64 (Intel)            | —                                     | CPUのみ（ort-tract代替バックエンドを使用）                                     |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | DawnがVulkan APIを通じてGPUにアクセス；GPUがない場合はCPUにフォールバック      |
+| Linux ARM64                     | —                                     | CPUのみ（このターゲット向けのWebGPU ONNX Runtimeプリビルドバイナリがないため） |
+
+> **注意**：WindowsではWebGPUは無効です。Dawn/D3D12バックエンドが一部のGPU/ドライバの組み合わせでネイティブクラッシュを引き起こす可能性があります。DirectMLはWindows向けの成熟した安定GPUパスです。
+>
+> **WSL2ユーザー**：WSL2はLinuxサブ環境にハードウェアVulkanを公開しません。WebGPU/DawnはLavapipe（CPUソフトウェアレンダリング）しか使用できず、非常に低速です。WSL2でGPUアクセラレーションが必要な場合は、WindowsネイティブビルドのDirectMLを使用してください。
 
 #### 全プラットフォーム
 
-ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。
+ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。GPUプロバイダ（DirectML / WebGPU / CoreML）は、各ターゲットプラットフォーム向けにコンパイル時に自動的に有効化されます。追加の `--features` フラグは不要です。
 
-```powershell
+```bash
 # 開発モード（ホットリロード）
+cd backend
 cargo tauri dev
 
 # リリースビルド
+# Windows / macOS（デフォルト機能：onnx + vslib）
 cargo tauri build
+
+# Linux（vslibはWindows専用のため、デフォルト機能を除外）
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows ポータブルZIP
 .\scripts\pack-portable.ps1 -SkipBuild

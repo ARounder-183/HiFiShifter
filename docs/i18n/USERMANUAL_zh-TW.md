@@ -21,12 +21,15 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
-- **Windows**：DirectML（DirectX 12），支援 NVIDIA、AMD、Intel Arc GPU
-- **macOS（Apple Silicon）**：CoreML，利用 Apple Neural Engine 加速
-- **macOS（Intel）**：僅 CPU 推理
-- **Linux**：暫無
+- **Windows（x86_64 / ARM64）**：DirectML（DirectX 12）—— 成熟穩定，支援 NVIDIA / AMD / Intel Arc GPU
+- **macOS（Apple Silicon）**：CoreML + WebGPU（Dawn/Metal）—— CoreML 利用 Apple Neural Engine，WebGPU 作為補充後端
+- **macOS（Intel）**：僅 CPU 推理（使用 ort-tract 替代後端，無 GPU 加速）
+- **Linux（x86_64）**：WebGPU（Dawn/Vulkan）—— Dawn 透過 Vulkan API 使用 GPU，無 GPU 時自動回退至 CPU
+- **Linux（ARM64）**：僅 CPU 推理（尚無預編譯的 WebGPU ONNX Runtime 二進位檔案）
 
-在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可查看各裝置的推理效能。
+> **注意**：WSL2 不向 Linux 子環境暴露硬體 Vulkan，WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本（DirectML）。
+
+在選單 `選項 → 推理裝置` 中可選擇 `Auto`（自動）、`CPU`、`GPU`。執行基準測試可比較各裝置的推理延遲，幫助你選擇最快的裝置。
 
 **關於 WebView 的說明**：HiFiShifter 基於 Rust + Tauri 框架開發，需要系統提供 WebView 元件來顯示介面。
 
@@ -61,7 +64,7 @@ HiFiShifter 的專案檔副檔名為 `.hshp` 或 `.hsp`。除此以外，`另存
 
 - `工程拉伸覆寫`：允許你修改目前專案的拉伸演算法。
 - `全域拉伸預設`：允許你修改全域預設的拉伸演算法。
-- `推理裝置`：允許你設定渲染所使用的推理裝置。目前分為 `Auto`、`CPU`、`GPU` 三種。可以透過該選單執行基準測試，以檢測各推理裝置的效能（基準測試中會顯示具體後端，如 GPU (DirectML)、GPU (OpenCL) 等）。GPU 選項僅在對應的 GPU 版本 HiFiShifter 中有效。
+- `推理裝置`：允許你設定渲染所使用的推理裝置。目前分為 `Auto`、`CPU`、`GPU` 三種。可以透過該選單執行基準測試，以檢測各推理裝置的效能（基準測試中會顯示具體後端，如 GPU (DirectML)、GPU (WebGPU) 等）。GPU 選項僅在對應的 GPU 版本 HiFiShifter 中有效。
 - `背景預渲染`：當被啟用時，每次開啟專案或者編輯完參數以後，均會自動在背景對已編輯的參數進行預渲染，且即使仍然在渲染狀態中，也可以播放已渲染的部分；否則，只有在進行播放操作時，才會進入渲染流程，且需要等待渲染完畢，才可以正常播放時間軸。預設為啟用。禁用後可以降低渲染頻率，節省效能。
 - `快捷鍵設定`：允許你設定 HiFiShifter 的快捷鍵對應。有多種預設可以選擇。
 

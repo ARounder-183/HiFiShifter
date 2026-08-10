@@ -46,7 +46,14 @@ static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
+        // commit() returns false if the global ORT environment was already
+        // committed by another module — that's fine, the active environment
+        // remains valid. We still need to ensure the OrtEnv is created.
         ort::init().with_name("hifishifter").commit();
+
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
+        }
         Ok(())
     }) {
         Ok(()) => Ok(()),
@@ -97,6 +104,10 @@ fn default_model_guess() -> Option<PathBuf> {
 }
 
 fn resolve_model_path() -> Result<PathBuf, String> {
+    if let Some(onnx) = env_path("HIFISHIFTER_FCPE_ONNX") {
+        return Ok(onnx);
+    }
+
     if let Some(onnx) = crate::fcpe_onnx_path().map(|p| p.to_path_buf()) {
         return Ok(onnx);
     }
@@ -136,14 +147,20 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.
 pub fn drop_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+        for _ in 0..10 {
+            if let Ok(mut guard) = mutex.try_lock() {
+                *guard = None;
+                eprintln!("[fcpe] shared session dropped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        eprintln!("[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
 /// Reset the shared session so the next inference rebuilds it with the
-/// current EP choice (e.g. after user switches from OpenCL to DirectML).
+/// current EP choice (e.g. after user switches from WebGPU to DirectML).
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
     crate::vocoder_ort_session::set_runtime_ep_override(Some(_choice.to_string()));
     crate::vocoder_ort_session::set_runtime_dml_device_id(_device_id);

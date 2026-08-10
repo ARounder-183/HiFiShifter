@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+請確保已安裝以下工具：
+
+- **Node.js**（建議 20+）及 npm
+- **Rust 工具鏈**（參見 `rust-toolchain.toml`，專案會自動選擇對應平台的 stable 工具鏈）
+- **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
+- **CMake**、**pkg-config** 及系統構建工具
+- **GTK3、WebKit2GTK、ALSA** 等 Tauri 執行時開發函式庫（詳見安裝腳本）
+
+執行一鍵安裝腳本：
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+腳本會自動安裝系統依賴、Node.js（如未安裝）、appimagetool 及前端 npm 依賴。
+
+安裝前端依賴（如未使用腳本）：
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage 構建
+
+由於 `vslib` 演算法僅限 Windows，Linux 構建需要禁用預設 feature：
+
+```bash
+# 進入 backend 目錄執行（tauri.conf.json 中路徑相對於此目錄）
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+或使用提供的輔助腳本：
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **注意：** WSL2 環境下因缺少 FUSE 支援，Tauri bundler 的 linuxdeploy 步驟可能失敗（錯誤：`failed to run linuxdeploy`）。這是 WSL2 已知限制，不影響實際 AppImage 產出——AppDir 已正確組裝在 `target/release/bundle/appimage/` 中。可設定 `APPIMAGE_EXTRACT_AND_RUN=1` 後手動執行 `appimagetool` 打包。在真實 Linux 機器與 CI 中不存在此問題。
 
 ### 3. SoundTouch 原始碼
 
@@ -185,25 +221,37 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU 加速構建
+### 4. GPU 加速
 
-| 平台                        | GPU 技術              | 說明                                              |
-| --------------------------- | --------------------- | ------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crate 自動下載，支援 NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine，自動啟用                     |
-| macOS x86_64 (Intel)        | —                     | 僅 CPU                                            |
-| Linux x86_64 / ARM64        | —                     | 僅 CPU（ONNX Runtime 不原生支援 OpenCL）          |
+HiFiShifter 在支援的平台上自動啟用 GPU 推理加速。你可以在選單列的**推理裝置（Inference Device）**中選擇 Auto / CPU / GPU，並透過**執行基準測試（Run Benchmark）**比較各裝置的推理延遲。
+
+| 平台                            | GPU 技術                             | 說明                                                                           |
+| ------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                | 成熟穩定的 GPU 路徑，支援 NVIDIA / AMD / Intel Arc                             |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)         | CoreML 利用 Apple Neural Engine；WebGPU 作為補充 GPU 後端                      |
+| macOS x86_64 (Intel)            | —                                    | 僅 CPU（使用 ort-tract 替代後端）                                              |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                 | Dawn 透過 Vulkan API 存取 GPU；無 GPU 時自動回退到 CPU                         |
+| Linux ARM64                     | —                                    | 僅 CPU（此目標尚無預編譯的 WebGPU ONNX Runtime 二進位檔案）                    |
+
+> **注意**：Windows 平台未啟用 WebGPU。其 Dawn/D3D12 後端在部分 GPU/驅動組合上存在原生崩潰風險。DirectML 是 Windows 上成熟穩定的 GPU 路徑。
+>
+> **WSL2 使用者**：WSL2 不向 Linux 子環境暴露硬體 Vulkan。WebGPU/Dawn 只能使用 Lavapipe（CPU 軟體渲染），效能極差。如需 GPU 加速，請使用 Windows 原生版本的 DirectML。
 
 #### 所有平台
 
-ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。
+ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries` 特性自動下載，無需手動設定。GPU 提供程序（DirectML / WebGPU / CoreML）在編譯時根據目標平台自動啟用，無需額外的 `--features` 標誌。
 
-```powershell
+```bash
 # 開發模式（熱更新）
+cd backend
 cargo tauri dev
 
 # 構建 Release
+# Windows / macOS（預設 features：onnx + vslib）
 cargo tauri build
+
+# Linux（vslib 僅限 Windows，需排除預設 feature）
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows 可攜版 ZIP
 .\scripts\pack-portable.ps1 -SkipBuild

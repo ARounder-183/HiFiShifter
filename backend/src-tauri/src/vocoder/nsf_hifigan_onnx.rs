@@ -41,14 +41,26 @@ fn emit_chunk_progress(_local: f64) {
 /// Tracks which execution provider was actually selected during session creation.
 static ACTIVE_EP: OnceLock<String> = OnceLock::new();
 
-/// Returns the EP that was actually used for the live session (e.g. "directml", "opencl", "cpu").
+/// Returns the EP that was actually used for the live session (e.g. "directml", "webgpu", "cpu").
 pub fn active_ep() -> String {
     ACTIVE_EP.get().cloned().unwrap_or_else(|| "unknown".to_string())
 }
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
+        // Try to commit our desired environment config (name, etc.).
+        // If commit() returns false, the environment was already committed
+        // by another module (e.g. FCPE or HNSEP init ran first) — that's
+        // perfectly fine; the active environment is still valid.
         ort::init().with_name("hifishifter").commit();
+
+        // Ensure the environment is actually created before we proceed.
+        // Environment::current() lazily creates the OrtEnv from the committed
+        // options and caches it for all subsequent calls.
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
+        }
+
         eprintln!("[ort] initialized: {}", ort::info());
         let providers = crate::vocoder_ort_session::diagnose_available_providers();
         eprintln!("[ort] available providers: {providers:?}");
@@ -130,8 +142,10 @@ fn resolve_model_paths() -> Result<(PathBuf, PathBuf), String> {
         return Ok((onnx, cfg));
     }
 
-    if let Some(dir) =
-        env_path("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR").or_else(default_model_dir_guess)
+    if let Some(dir) = crate::nsf_hifigan_model_dir()
+        .map(|p| p.to_path_buf())
+        .or_else(|| env_path("HIFISHIFTER_NSF_HIFIGAN_MODEL_DIR"))
+        .or_else(default_model_dir_guess)
     {
         let onnx = dir.join("pc_nsf_hifigan.onnx");
         let cfg = dir.join("config.json");
@@ -475,11 +489,23 @@ static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::
 static SESSION_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Drop the shared ORT session to release GPU memory. Called on app exit.
+///
+/// Uses try_lock with a short spin to avoid blocking indefinitely if
+/// another thread is stuck holding the session lock (e.g. during a
+/// hung GPU operation on WSL2/Lavapipe).
 pub fn drop_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+        // Try to acquire the lock for up to ~500ms before giving up.
+        // At shutdown we don't want to block the main thread forever.
+        for _ in 0..10 {
+            if let Ok(mut guard) = mutex.try_lock() {
+                *guard = None;
+                eprintln!("[nsf_hifigan] shared session dropped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        eprintln!("[nsf_hifigan] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
@@ -2287,7 +2313,7 @@ pub struct BenchmarkResults {
     pub dml_median_ms: Option<f64>,
     pub dml_rt_factor: Option<f64>,
     pub benchmark_samples: usize,
-    /// True when GPU EP was available and used for the GPU benchmark.
+    /// True when WebGPU EP was available and used for the GPU benchmark.
     pub gpu_available: bool,
     /// True when DirectML EP was available and used for the benchmark.
     pub dml_available: bool,
@@ -2315,8 +2341,15 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // Collect diagnostic info before benchmark
     let available_providers = crate::vocoder_ort_session::diagnose_available_providers();
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
-    let ort_build_info = ort::info().to_string();
-    let gpu_available = available_providers.iter().any(|p| p.contains("OpenCL"));
+    let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
+        .unwrap_or_else(|_| "ort::info() unavailable".to_string());
+    // WebGPU is compiled on Linux x86_64 and macOS ARM64 only.
+    // Excluded: Windows (Dawn/D3D12 crash), Linux ARM64 (no prebuilt ORT binary),
+    // macOS x86_64 (ort-tract, no GPU).
+    let gpu_available = cfg!(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
@@ -2365,25 +2398,46 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     eprintln!("[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
         t_cpu_total.elapsed().as_millis(), cpu_times);
 
-    // 2. Benchmark GPU (OpenCL) if available
+    // 2. Benchmark GPU (WebGPU) if available
     let mut gpu_median = None;
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
 
-    let opencl_available = available_providers.iter().any(|p| p.contains("OpenCL"));
-    if opencl_available {
+    // Always attempt WebGPU benchmark on supported platforms.
+    // On Windows, we don't auto-probe WebGPU (Dawn/D3D12 can crash),
+    // but the benchmark explicitly forces "webgpu" EP choice which is
+    // safe because it only triggers Dawn init within the benchmark's
+    // controlled scope.
+    if gpu_available {
         let gpu_session_res = {
-            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("opencl".to_string());
+            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("webgpu".to_string());
             crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
         };
 
         if let Ok((mut gpu_session, ep)) = gpu_session_res {
-            if ep == "opencl" {
+            if ep == "webgpu" {
+                eprintln!("[benchmark] WebGPU session created: ep={ep}");
                 let mel = vec![0.0f32; cfg.num_mels * frames];
                 let f0 = vec![440.0f32; frames];
-                let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
-                let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
-                if gpu_session.run(ort::inputs![mt, ft]).is_ok() {
+
+                // Warmup: test if WebGPU inference actually works.
+                // Use a block scope to ensure the SessionOutputs borrow
+                // is dropped before we borrow gpu_session again below.
+                let warmup_ok = {
+                    let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+                    let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
+                    match gpu_session.run(ort::inputs![mt, ft]) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            eprintln!(
+                                "[benchmark] WARNING: WebGPU EP registered but warmup inference FAILED: {e}"
+                            );
+                            false
+                        }
+                    }
+                };
+
+                if warmup_ok {
                     gpu_actually_working = true;
                     let mut gpu_times = Vec::new();
                     for _ in 0..runs {
@@ -2397,12 +2451,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     let median = gpu_times[gpu_times.len() / 2];
                     gpu_median = Some(median);
                     gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                } else {
-                    eprintln!(
-                        "[benchmark] WARNING: OpenCL EP registered but warmup inference FAILED."
-                    );
+                    eprintln!("[benchmark] WebGPU: median={median:.1}ms rtf={:.3}x",
+                        audio_sec / (median / 1000.0));
                 }
             }
+        } else {
+            eprintln!("[benchmark] WebGPU session creation FAILED: {:?}", gpu_session_res.err());
         }
     }
 

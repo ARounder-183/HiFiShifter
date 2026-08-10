@@ -1,0 +1,7 @@
+{
+    "bundle": {
+        "resources": {
+            "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so": "libSoundTouchDLL.so"
+        }
+    }
+}

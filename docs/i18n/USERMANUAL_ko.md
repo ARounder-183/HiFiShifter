@@ -21,12 +21,15 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 
 **GPU 가속 정보**: HiFiShifter는 각 플랫폼별로 다양한 GPU 가속 옵션을 제공합니다:
 
-- **Windows**: DirectML (DirectX 12), NVIDIA, AMD, Intel Arc GPU 지원
-- **macOS (Apple Silicon)**: CoreML, Apple Neural Engine 가속 사용
-- **macOS (Intel)**: CPU 추론만 가능
-- **Linux**: 없음
+- **Windows (x86_64 / ARM64)**: DirectML (DirectX 12) — 검증된 안정적 경로, NVIDIA / AMD / Intel Arc GPU 지원
+- **macOS (Apple Silicon)**: CoreML + WebGPU (Dawn/Metal) — CoreML은 Apple Neural Engine을 활용, WebGPU는 보조 백엔드로 사용 가능
+- **macOS (Intel)**: CPU 추론만 가능 (ort-tract 대체 백엔드 사용, GPU 가속 없음)
+- **Linux (x86_64)**: WebGPU (Dawn/Vulkan) — Dawn이 Vulkan API를 통해 GPU에 접근, GPU가 없으면 CPU로 폴백
+- **Linux (ARM64)**: CPU 추론만 가능 (이 타겟용 WebGPU ONNX Runtime 사전 빌드 바이너리 없음)
 
-메뉴 `옵션 → 추론 장치`에서 `Auto`(자동), `CPU`, `GPU`를 선택할 수 있습니다. 벤치마크를 실행하여 각 장치의 추론 성능을 확인할 수 있습니다.
+> **참고**: WSL2는 Linux 하위 환경에 하드웨어 Vulkan을 노출하지 않습니다. WebGPU/Dawn은 Lavapipe(CPU 소프트웨어 렌더링)만 사용할 수 있어 매우 느립니다. WSL2에서 GPU 가속이 필요하면 Windows 네이티브 빌드의 DirectML을 사용하세요.
+
+메뉴 `옵션 → 추론 장치`에서 `Auto`(자동), `CPU`, `GPU`를 선택할 수 있습니다. 벤치마크를 실행하여 각 장치의 추론 지연 시간을 비교하고 가장 빠른 장치를 선택할 수 있습니다.
 
 **WebView 정보**: HiFiShifter 는 Rust + Tauri 프레임워크로 구축되었으며, 인터페이스를 표시하려면 WebView 구성 요소가 필요합니다.
 
@@ -61,7 +64,7 @@ HiFiShifter 프로젝트 파일의 확장자는 `.hshp` 또는 `.hsp`입니다. 
 
 - `프로젝트 스트레치 재정의`：현재 프로젝트의 스트레치 알고리즘을 수정할 수 있습니다.
 - `전역 스트레치 기본값`：전역 기본 스트레치 알고리즘을 수정할 수 있습니다.
-- `추론 장치`：렌더링에 사용할 추론 장치를 설정할 수 있습니다. 현재 `Auto`、`CPU`、`GPU` 세 가지가 있습니다. 이 메뉴에서 벤치마크를 실행하여 각 장치의 성능을 테스트할 수 있습니다(벤치마크에서는 GPU (DirectML), GPU (OpenCL) 등 구체적인 백엔드가 표시됩니다). `GPU`는 해당 GPU 버전의 HiFiShifter에서만 유효합니다.
+- `추론 장치`：렌더링에 사용할 추론 장치를 설정할 수 있습니다. 현재 `Auto`、`CPU`、`GPU` 세 가지가 있습니다. 이 메뉴에서 벤치마크를 실행하여 각 장치의 성능을 테스트할 수 있습니다(벤치마크에서는 GPU (DirectML), GPU (WebGPU) 등 구체적인 백엔드가 표시됩니다). `GPU`는 해당 GPU 버전의 HiFiShifter에서만 유효합니다.
 - `백그라운드 사전 렌더링`：활성화하면 프로젝트를 열거나 파라미터를 편집한 후, 편집된 파라미터가 자동으로 백그라운드에서 사전 렌더링되며, 렌더링 중에도 이미 렌더링된 부분을 재생할 수 있습니다. 비활성화하면 재생 시작 시에만 렌더링이 진행되며, 타임라인을 정상적으로 재생하려면 렌더링이 완료될 때까지 기다려야 합니다. 기본값은 활성화입니다. 비활성화하면 렌더링 빈도를 낮춰 성능을 절약할 수 있습니다.
 - `키보드 단축키`：HiFiShifter의 키 바인딩을 설정할 수 있습니다. 여러 프리셋을 선택할 수 있습니다.
 

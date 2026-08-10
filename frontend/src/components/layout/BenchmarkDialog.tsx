@@ -1,7 +1,7 @@
 /**
  * Inference Device Benchmark Dialog
  *
- * Runs the backend run_vocoder_benchmark command which tests CPU, GPU (OpenCL),
+ * Runs the backend run_vocoder_benchmark command which tests CPU, GPU (WebGPU),
  * and GPU (DirectML) inference latency (median over 1024 frames / ~12 s of audio)
  * and displays the results so the user can pick the fastest provider for their system.
  */
@@ -44,17 +44,17 @@ function buildRows(result: BenchmarkResult): EpRow[] {
         },
     ];
 
-    // GPU (OpenCL)
+    // GPU (WebGPU)
     if (result.gpuMedianMs != null && result.gpuRtFactor != null) {
         rows.push({
-            label: "GPU (OpenCL)",
+            label: "GPU (WebGPU)",
             medianMs: result.gpuMedianMs,
             rtf: result.gpuRtFactor,
             available: true,
         });
     } else if (result.gpuAvailable) {
         rows.push({
-            label: "GPU (OpenCL)",
+            label: "GPU (WebGPU)",
             medianMs: -1,
             rtf: -1,
             available: false,
@@ -266,7 +266,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 </Text>
                             )}
 
-                            {/* GPU (OpenCL) available but benchmark failed */}
+                            {/* GPU (WebGPU) available but benchmark failed */}
                             {gpuFailed && (
                                 <Flex
                                     direction="column"

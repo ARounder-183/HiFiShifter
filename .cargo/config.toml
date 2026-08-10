@@ -1,2 +1,5 @@
-[build]
-target = "x86_64-pc-windows-msvc"
+# Default build target follows the host triple (cross-compilation targets
+# are specified via --target at build time or through CI matrix).
+#
+# Platform-specific Cargo configs can be placed in:
+#   .cargo/config-windows.toml   .cargo/config-macos.toml   .cargo/config-linux.toml

@@ -169,10 +169,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+Make sure the following tools are installed:
+
+- **Node.js** (recommended 20+) and npm
+- **Rust toolchain** (see `rust-toolchain.toml` — the project auto-selects the correct platform stable toolchain)
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**, **pkg-config**, and system build tools
+- **GTK3, WebKit2GTK, ALSA** and other Tauri runtime dev libraries (see install script below)
+
+Run the one-click install script:
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+sudo bash ./scripts/install_deps_linux.sh
 ```
+
+This script installs system dependencies, Node.js (if missing), appimagetool, and frontend npm dependencies.
+
+Install frontend dependencies (if not using the script):
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage Build
+
+The `vslib` algorithm is Windows-only, so Linux builds must disable the default feature:
+
+```bash
+# Run from the backend/ directory (paths in tauri.conf.json are relative to it)
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+Or use the provided helper script:
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **Note:** On WSL2, the Tauri bundler's linuxdeploy step may fail due to missing FUSE support (error: `failed to run linuxdeploy`). This is a known WSL2 limitation and does not affect the actual AppImage output — the AppDir is correctly assembled at `target/release/bundle/appimage/`. Set `APPIMAGE_EXTRACT_AND_RUN=1` and run `appimagetool` manually to package. This issue does not exist on real Linux machines or in CI.
 
 ### 3. SoundTouch Source
 
@@ -185,25 +221,37 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU-Accelerated Build
+### 4. GPU Acceleration
 
-| Platform                    | GPU Technology        | Description                                                     |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | Auto-downloaded by ort crate, supports NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine, auto-enabled                               |
-| macOS x86_64 (Intel)        | —                     | CPU only                                                        |
-| Linux x86_64 / ARM64        | —                     | CPU only (ONNX Runtime has no native OpenCL support)            |
+HiFiShifter automatically enables GPU-accelerated inference on supported platforms. You can choose between Auto / CPU / GPU from the **Inference Device** menu in the menu bar, and compare per-device latency using **Run Benchmark**.
+
+| Platform                        | GPU Technology                        | Description                                                               |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | Proven, stable GPU path; supports NVIDIA / AMD / Intel Arc                |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML leverages the Apple Neural Engine; WebGPU as a supplementary GPU backend |
+| macOS x86_64 (Intel)            | —                                     | CPU only (uses the ort-tract alternative backend)                         |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present |
+| Linux ARM64                     | —                                     | CPU only (no prebuilt WebGPU ONNX Runtime binary for this target)        |
+
+> **Note**: WebGPU is not enabled on Windows. Its Dawn/D3D12 backend can cause native crashes on some GPU/driver combinations. DirectML is the mature, stable GPU path for Windows.
+>
+> **WSL2 users**: WSL2 does not expose hardware Vulkan to Linux guests. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration on WSL2, use the Windows native build with DirectML instead.
 
 #### All Platforms
 
-ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed.
+ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed. GPU providers (DirectML / WebGPU / CoreML) are enabled automatically at compile time for each target platform; no extra `--features` flags are required.
 
-```powershell
+```bash
 # Development mode (hot reload)
+cd backend
 cargo tauri dev
 
 # Build Release
+# Windows / macOS (default features: onnx + vslib)
 cargo tauri build
+
+# Linux (vslib is Windows-only; exclude default feature)
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild

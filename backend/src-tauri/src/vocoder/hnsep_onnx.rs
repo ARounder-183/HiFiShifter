@@ -28,7 +28,14 @@ fn hnsep_cache_initial_capacity() -> usize {
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
+        // commit() returns false if the global ORT environment was already
+        // committed by another module — that's fine, the active environment
+        // remains valid. We still need to ensure the OrtEnv is created.
         ort::init().with_name("hifishifter").commit();
+
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
+        }
         Ok(())
     }) {
         Ok(()) => Ok(()),
@@ -73,7 +80,11 @@ fn resolve_model_path() -> Result<PathBuf, String> {
         return Ok(onnx);
     }
 
-    if let Some(dir) = crate::hnsep_model_dir().map(|p| p.to_path_buf()).or_else(default_model_dir_guess) {
+    if let Some(dir) = crate::hnsep_model_dir()
+        .map(|p| p.to_path_buf())
+        .or_else(|| env_path("HIFISHIFTER_HNSEP_MODEL_DIR"))
+        .or_else(default_model_dir_guess)
+    {
         let onnx = dir.join("hnsep.onnx");
         if onnx.is_file() {
             return Ok(onnx);
@@ -119,14 +130,20 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.
 pub fn drop_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+        for _ in 0..10 {
+            if let Ok(mut guard) = mutex.try_lock() {
+                *guard = None;
+                eprintln!("[hnsep] shared session dropped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        eprintln!("[hnsep] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
 /// Reset the shared session so the next inference rebuilds it with the
-/// current EP choice (e.g. after user switches from OpenCL to DirectML).
+/// current EP choice (e.g. after user switches from WebGPU to DirectML).
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
     crate::vocoder_ort_session::set_runtime_ep_override(Some(_choice.to_string()));
     crate::vocoder_ort_session::set_runtime_dml_device_id(_device_id);
