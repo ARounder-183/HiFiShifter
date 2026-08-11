@@ -179,6 +179,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const [volumeHoveredTrackId, setVolumeHoveredTrackId] = useState<string | null>(null);
     const [volumeTooltipPos, setVolumeTooltipPos] = useState<{ x: number; y: number } | null>(null);
     const [volumeDrag, setVolumeDrag] = useState<{ trackId: string; baseDb: number } | null>(null);
+    const [editingGainTrackId, setEditingGainTrackId] = useState<string | null>(null);
+    const [editingGainValue, setEditingGainValue] = useState("");
+    const editingGainInputRef = useRef<HTMLInputElement | null>(null);
 
     // 轨道颜色选择器弹出状�?
     const [colorPickerTrackId, setColorPickerTrackId] = useState<string | null>(null);
@@ -405,6 +408,30 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onVolumeCommit(trackId, nextVolume);
         }, TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS);
         volumeCommitTimersRef.current[trackId] = timerId;
+    }
+
+    function beginTrackGainEdit(trackId: string, volume: number) {
+        const db = clampGainDb(gainToDb(volume));
+        setEditingGainTrackId(trackId);
+        setEditingGainValue(db.toFixed(1));
+    }
+
+    function commitTrackGainEdit() {
+        if (!editingGainTrackId) return;
+        const trackId = editingGainTrackId;
+        const parsed = parseFloat(editingGainValue);
+        if (!isNaN(parsed)) {
+            const nextDb = clampGainDb(parsed);
+            const nextVolume = dbToGain(nextDb);
+            clearPendingVolumeCommit(trackId);
+            onVolumeUiChange(trackId, nextVolume);
+            onVolumeCommit(trackId, nextVolume);
+        }
+        setEditingGainTrackId(null);
+    }
+
+    function cancelTrackGainEdit() {
+        setEditingGainTrackId(null);
     }
 
     useEffect(() => {
@@ -1350,6 +1377,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     onClick={(e) => e.stopPropagation()}
                                                     onDoubleClick={(e) => {
                                                         e.stopPropagation();
+                                                        const target =
+                                                            e.target instanceof HTMLElement
+                                                                ? e.target
+                                                                : null;
+                                                        if (
+                                                            target?.closest?.(
+                                                                "[data-track-gain-value]",
+                                                            )
+                                                        ) {
+                                                            beginTrackGainEdit(track.id, volume);
+                                                            return;
+                                                        }
                                                         clearPendingVolumeCommit(track.id);
                                                         onVolumeUiChange(track.id, 1);
                                                         onVolumeCommit(track.id, 1);
@@ -1396,17 +1435,55 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }}
                                                             />
                                                         </button>
-                                                        <Text
-                                                            size="1"
-                                                            color={
-                                                                Math.abs(gainToDb(volume)) < 0.05
-                                                                    ? "blue"
-                                                                    : "gray"
-                                                            }
-                                                            className="leading-none tabular-nums select-none"
-                                                        >
-                                                            {formatGainLabel(volume)}
-                                                        </Text>
+                                                        {editingGainTrackId === track.id ? (
+                                                            <input
+                                                                ref={editingGainInputRef}
+                                                                className="w-14 text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                value={editingGainValue}
+                                                                onChange={(e) =>
+                                                                    setEditingGainValue(
+                                                                        e.target.value,
+                                                                    )
+                                                                }
+                                                                autoFocus
+                                                                onFocus={(e) =>
+                                                                    e.currentTarget.select()
+                                                                }
+                                                                onKeyDown={(e) => {
+                                                                    e.stopPropagation();
+                                                                    if (e.key === "Enter") {
+                                                                        commitTrackGainEdit();
+                                                                    }
+                                                                    if (e.key === "Escape") {
+                                                                        cancelTrackGainEdit();
+                                                                    }
+                                                                }}
+                                                                onBlur={commitTrackGainEdit}
+                                                                onPointerDown={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                                onDoubleClick={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                            />
+                                                        ) : (
+                                                            <Text
+                                                                size="1"
+                                                                color={
+                                                                    Math.abs(gainToDb(volume)) <
+                                                                    0.05
+                                                                        ? "blue"
+                                                                        : "gray"
+                                                                }
+                                                                className="leading-none tabular-nums select-none"
+                                                                data-track-gain-value
+                                                                onPointerDown={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                            >
+                                                                {formatGainLabel(volume)}
+                                                            </Text>
+                                                        )}
                                                     </Flex>
                                                 </div>
                                             </Flex>

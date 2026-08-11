@@ -420,7 +420,7 @@ export const ClipHeader: React.FC<{
                         />
                     ) : (
                         <div
-                            className="text-xs font-medium drop-shadow-md truncate cursor-text"
+                            className="text-xs font-medium drop-shadow-md truncate cursor-default"
                             data-tooltip={clipTooltipText}
                             style={{
                                 color: visualStyle.textFill,
