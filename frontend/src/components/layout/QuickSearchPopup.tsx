@@ -401,7 +401,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         size="1"
                         variant={regexEnabled ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_regex") || "Regex"}
+                        data-tooltip={tAny("fb_regex") || "Regex"}
                         onClick={() => {
                             setRegexEnabled((v) => !v);
                             focusSearchInput();
@@ -518,7 +518,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                     />
                                 </svg>
                                 {/* 文件名 */}
-                                <span className="truncate flex-1" title={entry.name}>
+                                <span className="truncate flex-1" data-tooltip={entry.name}>
                                     {entry.name}
                                 </span>
                                 {/* 预览指示 */}

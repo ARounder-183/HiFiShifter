@@ -57,7 +57,7 @@ const FadeCurveRow: React.FC<{
         {CURVE_OPTION_KEYS.map((opt) => (
             <button
                 key={opt.value}
-                title={t(opt.key)}
+                data-tooltip={t(opt.key)}
                 className={`px-1.5 py-0.5 rounded text-[10px] transition-colors
                     ${
                         current === opt.value

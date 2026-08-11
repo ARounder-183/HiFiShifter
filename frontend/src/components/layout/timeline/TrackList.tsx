@@ -7,7 +7,7 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
-import { GainValueTooltip } from "./GainValueTooltip";
+import { AppTooltipBubble } from "../../AppTooltip";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 
@@ -1175,7 +1175,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     backgroundColor:
                                                                         track.color || "#4f8ef7",
                                                                 }}
-                                                                title={t("track_change_color")}
+                                                                data-tooltip={t(
+                                                                    "track_change_color",
+                                                                )}
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
@@ -1201,7 +1203,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                         (opt) => (
                                                                             <button
                                                                                 key={opt.value}
-                                                                                title={t(opt.key)}
+                                                                                data-tooltip={t(
+                                                                                    opt.key,
+                                                                                )}
                                                                                 className={`w-4 h-4 rounded-full transition-transform hover:scale-125 ${
                                                                                     (track.color ||
                                                                                         "#4f8ef7") ===
@@ -1419,7 +1423,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         size="1"
                                                         variant={composeEnabled ? "solid" : "ghost"}
                                                         color={composeEnabled ? "blue" : "gray"}
-                                                        title={t("compose")}
+                                                        data-tooltip={t("compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -1444,7 +1448,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     size="1"
                                                     variant={muted ? "solid" : "ghost"}
                                                     color={muted ? "red" : "gray"}
-                                                    title={
+                                                    data-tooltip={
                                                         muted ? t("clip_unmute") : t("clip_mute")
                                                     }
                                                     onPointerDown={(e) => e.stopPropagation()}
@@ -1465,7 +1469,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     size="1"
                                                     variant={solo ? "solid" : "ghost"}
                                                     color={solo ? "amber" : "gray"}
-                                                    title={t("solo")}
+                                                    data-tooltip={t("solo")}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
@@ -1579,7 +1583,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     </button>
                 </div>
             )}
-            <GainValueTooltip
+            <AppTooltipBubble
                 text={volumeTooltipText}
                 position={showVolumeTooltip ? volumeTooltipPos : null}
             />

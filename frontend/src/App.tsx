@@ -1504,7 +1504,7 @@ function AppInner() {
                     <Dialog.Description>{t("vs_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" title={file}>
+                            <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
@@ -1530,7 +1530,7 @@ function AppInner() {
                     <Dialog.Description>{t("reaper_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" title={file}>
+                            <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
@@ -1649,7 +1649,7 @@ function AppInner() {
                             <div
                                 key={item.clip_id}
                                 className="truncate py-0.5"
-                                title={item.source_path}
+                                data-tooltip={item.source_path}
                             >
                                 <span
                                     className={

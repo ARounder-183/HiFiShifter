@@ -251,3 +251,19 @@ textarea {
 .rt-ContextMenuSeparator {
     background: var(--qt-divider) !important;
 }
+
+/* Unified app tooltip (shared by gain knobs and all data-tooltip elements) */
+.app-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    pointer-events: none;
+    background: var(--qt-panel);
+    color: var(--qt-text);
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    border: 1px solid var(--qt-border);
+    box-shadow: 0 2px 10px var(--qt-overlay);
+    white-space: nowrap;
+}

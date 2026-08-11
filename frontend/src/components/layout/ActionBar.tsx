@@ -322,7 +322,7 @@ export function ActionBar() {
                     onClick={() => {
                         dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     }}
-                    title={t("action_stop")}
+                    data-tooltip={t("action_stop")}
                 >
                     <StopIcon />
                 </Button>
@@ -336,7 +336,7 @@ export function ActionBar() {
                         }
                         dispatch(playOriginal());
                     }}
-                    title={s.runtime.isPlaying ? tAny("action_pause") : t("action_play_out")}
+                    data-tooltip={s.runtime.isPlaying ? tAny("action_pause") : t("action_play_out")}
                 >
                     {s.runtime.isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
@@ -350,7 +350,7 @@ export function ActionBar() {
                     size="1"
                     variant={fileBrowserVisible ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("fb_title")}
+                    data-tooltip={tAny("fb_title")}
                     onClick={() => dispatch(toggleVisible())}
                 >
                     <svg
@@ -370,7 +370,7 @@ export function ActionBar() {
                     size="1"
                     variant={notebookVisible ? "solid" : "ghost"}
                     color="gray"
-                    title={t("notebook")}
+                    data-tooltip={t("notebook")}
                     onClick={() => dispatch(toggleNotebookVisible())}
                 >
                     <Pencil1Icon />
@@ -386,7 +386,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.autoCrossfadeEnabled ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("auto_crossfade")}
+                    data-tooltip={tAny("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoCrossfade());
@@ -422,7 +422,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.gridSnapEnabled ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("grid_snap")}
+                    data-tooltip={tAny("grid_snap")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleGridSnap());
@@ -457,7 +457,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.playheadZoomEnabled ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("playhead_zoom")}
+                    data-tooltip={tAny("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(togglePlayheadZoom());
@@ -484,7 +484,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("param_editor_seek_playhead")}
+                    data-tooltip={tAny("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleParamEditorSeekPlayhead());
@@ -519,7 +519,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.autoScrollEnabled ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("auto_scroll")}
+                    data-tooltip={tAny("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleAutoScroll());
@@ -545,7 +545,7 @@ export function ActionBar() {
                     size="1"
                     variant={s.ignoreGrouping ? "solid" : "ghost"}
                     color="gray"
-                    title={tAny("ignore_grouping")}
+                    data-tooltip={tAny("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleIgnoreGrouping());

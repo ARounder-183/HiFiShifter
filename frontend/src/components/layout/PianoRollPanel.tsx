@@ -3205,7 +3205,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
                             color="gray"
-                            title={t("select")}
+                            data-tooltip={t("select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
                         >
@@ -3216,7 +3216,7 @@ export const PianoRollPanel: React.FC = () => {
                                 size="1"
                                 variant={s.toolModeGroup === "draw" ? "solid" : "ghost"}
                                 color="gray"
-                                title={drawToolButtonTitle}
+                                data-tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
                                 onContextMenu={(e) => {
@@ -3342,7 +3342,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             color="gray"
                             variant={activeDragDirection === "free" ? "ghost" : "solid"}
-                            title={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}`}
+                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}`}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(cycleDragDirection(activeDragDirectionTool));
@@ -3403,7 +3403,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={effectivePitchSnapVisual ? "solid" : "ghost"}
                             color="gray"
-                            title={`${t("pitch_snap")}: ${
+                            data-tooltip={`${t("pitch_snap")}: ${
                                 effectivePitchSnapVisual
                                     ? s.pitchSnapUnit === "semitone"
                                         ? tAny("quantize_semitone")
@@ -3490,7 +3490,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
                             color="gray"
-                            title={tAny("scale_highlight")}
+                            data-tooltip={tAny("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(
@@ -3558,7 +3558,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={s.showClipboardPreview ? "solid" : "ghost"}
                             color="gray"
-                            title={t("clipboard_preview")}
+                            data-tooltip={t("clipboard_preview")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleClipboardPreview());
@@ -3599,7 +3599,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={s.showParamValuePopup ? "solid" : "ghost"}
                             color="gray"
-                            title={t("param_value_popup")}
+                            data-tooltip={t("param_value_popup")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleParamValuePopup());
@@ -3637,7 +3637,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             variant={s.lockParamLinesEnabled ? "solid" : "ghost"}
                             color="gray"
-                            title={t("lock_param_lines")}
+                            data-tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleLockParamLines());
@@ -3757,7 +3757,7 @@ export const PianoRollPanel: React.FC = () => {
                                 color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
                                 onClick={() => toggleSecondaryParam("pitch")}
                                 style={{ cursor: "pointer" }}
-                                title={
+                                data-tooltip={
                                     secondaryParamVisible["pitch"]
                                         ? t("hide_secondary_param")
                                         : t("show_secondary_param")
@@ -3789,7 +3789,7 @@ export const PianoRollPanel: React.FC = () => {
                                         color={secondaryParamVisible[p.id] ? "orange" : "gray"}
                                         onClick={() => toggleSecondaryParam(p.id)}
                                         style={{ cursor: "pointer" }}
-                                        title={
+                                        data-tooltip={
                                             secondaryParamVisible[p.id]
                                                 ? t("hide_secondary_param")
                                                 : t("show_secondary_param")
@@ -3971,17 +3971,21 @@ export const PianoRollPanel: React.FC = () => {
                                 </DropdownMenu.Root>
                             ) : null}
                             {editParam === "pitch" ? (
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="blue"
-                                    onClick={handleOpenMidiDialog}
-                                    disabled={!pitchEnabled}
-                                    style={{ cursor: "pointer" }}
-                                    title={pitchHardDisableReason ?? undefined}
+                                <span
+                                    className="inline-flex"
+                                    data-tooltip={pitchHardDisableReason ?? undefined}
                                 >
-                                    {(t as (key: string) => string)("midi_import")}
-                                </Button>
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="blue"
+                                        onClick={handleOpenMidiDialog}
+                                        disabled={!pitchEnabled}
+                                        style={{ cursor: "pointer" }}
+                                    >
+                                        {(t as (key: string) => string)("midi_import")}
+                                    </Button>
+                                </span>
                             ) : null}
                         </Flex>
                     ) : null}

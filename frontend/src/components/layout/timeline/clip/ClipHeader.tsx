@@ -2,25 +2,12 @@ import React, { useRef, useState } from "react";
 import type { ClipFormantMorph, ClipInfo } from "../../../../features/session/sessionTypes";
 import { CLIP_HEADER_HEIGHT } from "../constants";
 import { formatGainDbValue, gainToDb } from "../math";
-import { GainValueTooltip } from "../GainValueTooltip";
+import { AppTooltipBubble } from "../../../../components/AppTooltip";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { resolveTimelineClipHeaderVisibility } from "../runtime/timelineClipHeaderVisibility";
 import { buildTimelineClipVisualStyle } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
-
-let activeClipItemTitleSuppression: {
-    element: HTMLElement;
-    title: string | null;
-} | null = null;
-
-function restoreActiveClipItemTitle() {
-    if (!activeClipItemTitleSuppression) return;
-    const { element, title } = activeClipItemTitleSuppression;
-    if (title != null) element.setAttribute("title", title);
-    else element.removeAttribute("title");
-    activeClipItemTitleSuppression = null;
-}
 
 export const ClipHeader: React.FC<{
     clip: ClipInfo;
@@ -65,7 +52,6 @@ export const ClipHeader: React.FC<{
     const [gainDragBaseDb, setGainDragBaseDb] = useState<number | null>(null);
     const [gainHovered, setGainHovered] = useState(false);
     const [gainTooltipPos, setGainTooltipPos] = useState<{ x: number; y: number } | null>(null);
-    const clipItemTitleRef = useRef<{ element: HTMLElement; title: string | null } | null>(null);
     const gainTooltip =
         gainDragBaseDb == null
             ? t("gain_value_tooltip").replace("{gain}", formatGainDbValue(clampedGainDb))
@@ -73,38 +59,10 @@ export const ClipHeader: React.FC<{
                   .replace("{gain}", formatGainDbValue(clampedGainDb))
                   .replace("{delta}", formatGainDbValue(clampedGainDb - gainDragBaseDb));
     const showGainTooltip = gainHovered || gainDragBaseDb != null;
-
-    function suppressAncestorClipTitle(currentTarget: HTMLElement) {
-        const clipItem = currentTarget.closest<HTMLElement>("[data-hs-clip-item='1']");
-        if (!clipItem) return;
-        if (activeClipItemTitleSuppression?.element === clipItem) {
-            clipItemTitleRef.current = {
-                element: clipItem,
-                title: activeClipItemTitleSuppression.title,
-            };
-            return;
-        }
-        restoreActiveClipItemTitle();
-        clipItemTitleRef.current = {
-            element: clipItem,
-            title: clipItem.getAttribute("title"),
-        };
-        clipItem.removeAttribute("title");
-    }
-
-    function restoreAncestorClipTitle() {
-        restoreActiveClipItemTitle();
-        clipItemTitleRef.current = null;
-    }
-
-    React.useEffect(() => {
-        return () => {
-            const saved = clipItemTitleRef.current;
-            if (saved && activeClipItemTitleSuppression?.element === saved.element) {
-                restoreActiveClipItemTitle();
-            }
-        };
-    }, []);
+    const clipTooltipText =
+        clip.midiNoteCount != null
+            ? `${t("clip_type_midi_prefix")} ${clip.name}`
+            : (clip.sourcePath ?? clip.name);
 
     // 根据 clip 像素宽度决定显示哪些元素（从右往左依次隐藏）
     // >= 152px: 全显示 | 116-152: 隐藏名称 | 96-116: 隐藏播放速率 | 68-96: 隐藏增益值+F | 52-68: 隐藏F | 32-52: 只留增益旋钮 | < 32px: 全隐藏
@@ -195,7 +153,6 @@ export const ClipHeader: React.FC<{
                     aria-label={gainTooltip}
                     style={{ cursor: "ns-resize", opacity: hideVisuals ? 0 : 1 }}
                     onPointerEnter={(e) => {
-                        suppressAncestorClipTitle(e.currentTarget);
                         setGainHovered(true);
                         setGainTooltipPos({ x: e.clientX, y: e.clientY });
                     }}
@@ -204,14 +161,10 @@ export const ClipHeader: React.FC<{
                     }}
                     onPointerLeave={() => {
                         setGainHovered(false);
-                        if (gainDragBaseDb == null) {
-                            restoreAncestorClipTitle();
-                        }
                     }}
                     onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        suppressAncestorClipTitle(e.currentTarget);
                         setGainHovered(true);
                         setGainTooltipPos({ x: e.clientX, y: e.clientY });
 
@@ -250,9 +203,6 @@ export const ClipHeader: React.FC<{
                                 ev.clientY >= knobRect.top &&
                                 ev.clientY <= knobRect.bottom;
                             setGainHovered(stillOverKnob);
-                            if (!stillOverKnob) {
-                                restoreAncestorClipTitle();
-                            }
                             setGainDragBaseDb(null);
                             window.removeEventListener("pointermove", onMove, true);
                             window.removeEventListener("pointerup", onEnd, true);
@@ -389,7 +339,7 @@ export const ClipHeader: React.FC<{
                                 e.stopPropagation();
                                 onToggleGroupDisabled?.(clip.groupId!);
                             }}
-                            title={title}
+                            data-tooltip={title}
                             style={{
                                 opacity: hideVisuals ? 0 : 1,
                                 width: visualStyle.muteBadgeWidth,
@@ -418,7 +368,7 @@ export const ClipHeader: React.FC<{
                         e.stopPropagation();
                         toggleClipMuted(clip.id, !clip.muted);
                     }}
-                    title={clip.muted ? t("clip_unmute") : t("clip_mute")}
+                    data-tooltip={clip.muted ? t("clip_unmute") : t("clip_mute")}
                     style={{
                         opacity: hideVisuals ? 0 : 1,
                         width: visualStyle.muteBadgeWidth,
@@ -471,6 +421,7 @@ export const ClipHeader: React.FC<{
                     ) : (
                         <div
                             className="text-xs font-medium drop-shadow-md truncate cursor-text"
+                            data-tooltip={clipTooltipText}
                             style={{
                                 color: visualStyle.textFill,
                                 opacity: hideVisuals ? 0 : 1,
@@ -544,7 +495,7 @@ export const ClipHeader: React.FC<{
                     )}
                 </div>
             )}
-            <GainValueTooltip
+            <AppTooltipBubble
                 text={gainTooltip}
                 position={showGainTooltip ? gainTooltipPos : null}
             />
