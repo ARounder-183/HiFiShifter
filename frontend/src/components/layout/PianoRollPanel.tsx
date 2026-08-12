@@ -69,7 +69,6 @@ import {
     MIN_PX_PER_SEC,
     TimeRuler,
     clamp,
-    gridStepBeats,
 } from "./timeline";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
@@ -967,12 +966,6 @@ export const PianoRollPanel: React.FC = () => {
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
     const gridBoundaryRef = useRef<HTMLDivElement | null>(null);
 
-    function positiveMod(value: number, mod: number): number {
-        if (!Number.isFinite(value) || !Number.isFinite(mod) || mod <= 0) return 0;
-        const r = value % mod;
-        return (r + mod) % mod;
-    }
-
     function pitchDeltaToDegreeSteps(
         basePitch: number,
         targetPitch: number,
@@ -1091,14 +1084,11 @@ export const PianoRollPanel: React.FC = () => {
         }
 
         if (gridLayerRef.current) {
-            const weakStepPx = Math.max(1e-6, pxPerBeatRef.current * gridStepBeats(s.grid));
-            const barStepPx = Math.max(
-                1e-6,
-                pxPerBeatRef.current * Math.max(1, Math.round(s.beats || 4)),
-            );
-            const weakOffsetPx = -positiveMod(next, weakStepPx);
-            const barOffsetPx = -positiveMod(next, barStepPx);
-            gridLayerRef.current.style.backgroundPosition = `${weakOffsetPx}px 0px, ${barOffsetPx}px 0px`;
+            (
+                gridLayerRef.current as unknown as {
+                    __hifiGridRedraw?: (scrollLeft: number) => void;
+                }
+            ).__hifiGridRedraw?.(next);
         }
 
         if (gridBoundaryRef.current) {
@@ -4108,6 +4098,7 @@ export const PianoRollPanel: React.FC = () => {
                                     beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
                                     layerRef={gridLayerRef}
                                     boundaryRef={gridBoundaryRef}
+                                    sticky
                                 />
 
                                 <canvas

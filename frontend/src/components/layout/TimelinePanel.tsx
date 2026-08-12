@@ -1322,6 +1322,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             pxPerBeat={pxPerBeat}
                             grid={s.grid}
                             beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                            viewportWidth={viewportWidth}
+                            scrollLeft={scrollLeft}
                         />
 
                         {viewportWidth > 0 ? (
@@ -1466,6 +1468,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 pxPerBeat={pxPerBeat}
                                 grid={s.grid}
                                 beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                viewportWidth={viewportWidth}
+                                scrollLeft={scrollLeft}
                                 lineOpacity={0.38}
                                 showBoundary={false}
                             />
