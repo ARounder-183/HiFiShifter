@@ -3,11 +3,12 @@ use crate::state::AppState;
 use tauri::State;
 
 pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
-    let settings = if let Some(dir) = state.config_dir.get() {
+    let mut settings = if let Some(dir) = state.config_dir.get() {
         crate::config::load_ui_settings(dir)
     } else {
         UiSettings::default()
     };
+    settings.normalize_split_transition();
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -26,8 +27,9 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
 
 pub(super) fn save_ui_settings(
     state: State<'_, AppState>,
-    settings: UiSettings,
+    mut settings: UiSettings,
 ) -> serde_json::Value {
+    settings.normalize_split_transition();
     let prev_settings = if let Some(dir) = state.config_dir.get() {
         crate::config::load_ui_settings(dir)
     } else {

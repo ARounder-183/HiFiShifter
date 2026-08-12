@@ -34,6 +34,13 @@ export const persistUiSettings = createAsyncThunk(
         const s = (getState() as { session: SessionState }).session;
         return settingsApi.saveUiSettings({
             autoCrossfade: s.autoCrossfadeEnabled,
+            splitTransitionEnabled: s.splitTransitionEnabled,
+            splitTransitionMode: s.splitTransitionMode,
+            splitTransitionDurationUnit: s.splitTransitionDurationUnit,
+            splitTransitionDurationSec: s.splitTransitionDurationSec,
+            splitTransitionDurationPercent: s.splitTransitionDurationPercent,
+            splitTransitionCurve: s.splitTransitionCurve,
+            splitTransitionOverlapCrossfade: s.splitTransitionOverlapCrossfade,
             gridSnap: s.gridSnapEnabled,
             pitchSnap: s.pitchSnapEnabled,
             pitchSnapUnit: s.pitchSnapUnit,

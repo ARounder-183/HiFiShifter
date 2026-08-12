@@ -541,6 +541,28 @@ export const jaJP = {
 
     // ツールバートグルボタン
     auto_crossfade: "自動クロスフェード",
+    split_transition: "分割トランジション",
+    split_transition_tooltip: "分割トランジション（右クリックで詳細設定）",
+    split_transition_settings_title: "分割トランジション設定",
+    split_transition_settings_desc:
+        "分割後に分割位置へ自動的にフェードイン/フェードアウトを追加するか、拡張オーバーラップでクリックノイズを低減します。",
+    split_transition_mode: "モード",
+    split_transition_mode_fade: "フェードのみ",
+    split_transition_mode_overlap: "拡張して重ねる",
+    split_transition_duration: "トランジション長",
+    split_transition_duration_unit: "秒",
+    split_transition_duration_unit_label: "単位",
+    split_transition_duration_unit_seconds: "秒",
+    split_transition_duration_unit_percent: "パーセント",
+    split_transition_duration_percent_unit: "%",
+    split_transition_duration_percent_hint:
+        "パーセントは分割で生成された前後2つのクリップの合計の長さに対して計算されます。",
+    split_transition_curve: "フェードカーブ",
+    split_transition_overlap_crossfade: "オーバーラップのクロスフェード",
+    split_transition_overlap_crossfade_auto: "自動クロスフェードに従う",
+    split_transition_overlap_crossfade_always: "常に適用",
+    split_transition_overlap_hint:
+        "拡張オーバーラップでは、前のクリップを後方へ X 秒、後ろのクリップを前方へ X 秒延長して 2X 秒の重なりを作ります。延長範囲はクリップの元素材の実際の長さの範囲内に制限されます。",
     grid_snap: "グリッドスナップ",
     pitch_snap: "ピッチスナップ",
     playhead_zoom: "再生ヘッドでズーム",

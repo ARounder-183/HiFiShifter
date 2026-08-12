@@ -4,6 +4,13 @@ export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
 export interface UiSettings {
     autoCrossfade: boolean;
+    splitTransitionEnabled?: boolean;
+    splitTransitionMode?: "fade" | "overlap";
+    splitTransitionDurationUnit?: "seconds" | "percent";
+    splitTransitionDurationSec?: number;
+    splitTransitionDurationPercent?: number;
+    splitTransitionCurve?: string;
+    splitTransitionOverlapCrossfade?: "auto" | "always";
     gridSnap: boolean;
     gridSize?: string;
     pitchSnap: boolean;

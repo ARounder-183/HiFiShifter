@@ -115,11 +115,25 @@ Track view toolbar buttons:
 - `File Browser`: Open the HiFiShifter file browser window.
 - `Notepad`: Open the HiFiShifter notepad window, which records and displays Markdown-formatted text.
 - `Auto Crossfade`: Similar to Reaper/VEGAS Pro, when enabled, moving clips that overlap will automatically adjust crossfade envelopes.
+- `Split Transition`: Modeled after Reaper/VEGAS Pro split fades, enabled by default. After splitting, it automatically adds a fade-out to the left clip and a fade-in to the right clip at the split point, or extends both clips into an overlap, to reduce clicks. Left-click toggles it; right-click opens detailed settings.
 - `Grid Snap`: When enabled, all clip adjustments attempt to snap to grid. Hold `Shift` to temporarily toggle snap.
 - `Zoom at Playhead`: When enabled, horizontal zoom centers on the playhead; otherwise, centers on the mouse cursor.
 - `Allow Param Editor to Move Playhead`: When disabled, clicking in the parameter editor will not move the playhead; only clicking the track view or the timecode area of the parameter editor moves the playhead.
 - `Auto Scroll`: When enabled, the view automatically scrolls horizontally during playback to follow the playhead.
 - `Ignore Grouping`: When enabled, edits to grouped audio clips will globally ignore group-linked editing.
+
+### Split Transition
+
+`Split Transition` is designed to reduce clicks at split points and is enabled by default. Due to time-stretching algorithms and similar factors, clips can click at the newly created boundary after a split. This feature follows the approach used by Reaper/VEGAS Pro and automatically handles the boundary after every split.
+
+The `Split Transition` toolbar button is located to the right of `Auto Crossfade`. Left-click toggles the feature; right-click opens detailed settings.
+
+- `Fades Only` (default): After splitting, automatically adds a fade-out of length X to the left clip and a fade-in of length X to the right clip. The two clips do not overlap.
+- `Extend & Overlap`: After splitting, automatically extends the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. The extension keeps the source material at the same timeline position and correctly accounts for playback rate. Extensions are clamped to the clip source's actual length. When `Auto Crossfade` is also enabled, a crossfade is automatically created across this overlap.
+- `Transition Length X`: The fade/overlap length used by both modes, 0.01 seconds by default.
+- `Transition Length Unit`: Choose `Seconds` or `Percent`. Percent defaults to 1% and is calculated from the combined full length of the two clips created by the split; for example, two clips totaling 10 seconds at 1% gives 0.1 seconds.
+- `Fade Curve`: Selects the fade curve used by split transitions.
+- `Overlap Crossfade`: With `Follow Auto Crossfade`, crossfades are only added to the overlap when `Auto Crossfade` is enabled. With `Always Apply`, crossfades are always added to the overlap.
 
 ## 4. File Browser
 

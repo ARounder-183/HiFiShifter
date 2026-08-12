@@ -169,8 +169,15 @@ export interface SessionState {
     projectSec: number;
     grid: GridSize;
 
-    /** 自动交叉淡入淡出 */
     autoCrossfadeEnabled: boolean;
+    /** 分割过渡 */
+    splitTransitionEnabled: boolean;
+    splitTransitionMode: "fade" | "overlap";
+    splitTransitionDurationUnit: "seconds" | "percent";
+    splitTransitionDurationSec: number;
+    splitTransitionDurationPercent: number;
+    splitTransitionCurve: FadeCurveType;
+    splitTransitionOverlapCrossfade: "auto" | "always";
     /** 网格吸附 */
     gridSnapEnabled: boolean;
     /** 音高吸附 */
@@ -963,6 +970,13 @@ const initialState: SessionState = {
     grid: "1/4",
 
     autoCrossfadeEnabled: true,
+    splitTransitionEnabled: true,
+    splitTransitionMode: "fade",
+    splitTransitionDurationUnit: "seconds",
+    splitTransitionDurationSec: 0.01,
+    splitTransitionDurationPercent: 1,
+    splitTransitionCurve: "sine" as FadeCurveType,
+    splitTransitionOverlapCrossfade: "auto",
     gridSnapEnabled: true,
     pitchSnapEnabled: false,
     pitchSnapUnit: "semitone",
@@ -1227,6 +1241,47 @@ const sessionSlice = createSlice({
         },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
+        },
+        toggleSplitTransition(state) {
+            state.splitTransitionEnabled = !state.splitTransitionEnabled;
+        },
+        setSplitTransitionMode(
+            state,
+            action: PayloadAction<"fade" | "overlap">,
+        ) {
+            state.splitTransitionMode = action.payload;
+        },
+        setSplitTransitionDurationUnit(
+            state,
+            action: PayloadAction<"seconds" | "percent">,
+        ) {
+            state.splitTransitionDurationUnit = action.payload;
+        },
+        setSplitTransitionDurationSec(state, action: PayloadAction<number>) {
+            state.splitTransitionDurationSec = clamp(
+                Number(action.payload) || 0.01,
+                0.001,
+                10,
+            );
+        },
+        setSplitTransitionDurationPercent(state, action: PayloadAction<number>) {
+            state.splitTransitionDurationPercent = clamp(
+                Number(action.payload) || 1,
+                0.01,
+                100,
+            );
+        },
+        setSplitTransitionCurve(
+            state,
+            action: PayloadAction<FadeCurveType>,
+        ) {
+            state.splitTransitionCurve = action.payload;
+        },
+        setSplitTransitionOverlapCrossfade(
+            state,
+            action: PayloadAction<"auto" | "always">,
+        ) {
+            state.splitTransitionOverlapCrossfade = action.payload;
         },
         toggleGridSnap(state) {
             state.gridSnapEnabled = !state.gridSnapEnabled;
@@ -1830,6 +1885,35 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
+                state.splitTransitionEnabled = Boolean(
+                    (s as any).splitTransitionEnabled ?? true,
+                );
+                state.splitTransitionMode =
+                    (s as any).splitTransitionMode === "overlap" ? "overlap" : "fade";
+                state.splitTransitionDurationUnit =
+                    (s as any).splitTransitionDurationUnit === "percent"
+                        ? "percent"
+                        : "seconds";
+                const splitDuration = Number((s as any).splitTransitionDurationSec);
+                if (Number.isFinite(splitDuration)) {
+                    state.splitTransitionDurationSec = clamp(splitDuration, 0.001, 10);
+                }
+                const splitPercent = Number((s as any).splitTransitionDurationPercent);
+                if (Number.isFinite(splitPercent)) {
+                    state.splitTransitionDurationPercent = clamp(splitPercent, 0.01, 100);
+                }
+                const splitCurve = (s as any).splitTransitionCurve as string;
+                if (
+                    ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(
+                        splitCurve,
+                    )
+                ) {
+                    state.splitTransitionCurve = splitCurve as FadeCurveType;
+                }
+                state.splitTransitionOverlapCrossfade =
+                    (s as any).splitTransitionOverlapCrossfade === "always"
+                        ? "always"
+                        : "auto";
                 state.gridSnapEnabled = s.gridSnap;
                 state.pitchSnapEnabled = s.pitchSnap;
                 // Validate pitchSnapUnit
@@ -3314,6 +3398,13 @@ export const {
     setBeats,
     setGrid,
     toggleAutoCrossfade,
+    toggleSplitTransition,
+    setSplitTransitionMode,
+    setSplitTransitionDurationUnit,
+    setSplitTransitionDurationSec,
+    setSplitTransitionDurationPercent,
+    setSplitTransitionCurve,
+    setSplitTransitionOverlapCrossfade,
     toggleGridSnap,
     togglePitchSnap,
     setPitchSnapUnit,

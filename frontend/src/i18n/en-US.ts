@@ -533,6 +533,28 @@ export const enUS = {
 
     // Toolbar toggle buttons
     auto_crossfade: "Auto Crossfade",
+    split_transition: "Split Transition",
+    split_transition_tooltip: "Split Transition (right-click for settings)",
+    split_transition_settings_title: "Split Transition Settings",
+    split_transition_settings_desc:
+        "After splitting, automatically add fades or an extended overlap at the split point to reduce clicks.",
+    split_transition_mode: "Mode",
+    split_transition_mode_fade: "Fades Only",
+    split_transition_mode_overlap: "Extend & Overlap",
+    split_transition_duration: "Transition Length",
+    split_transition_duration_unit: "sec",
+    split_transition_duration_unit_label: "Unit",
+    split_transition_duration_unit_seconds: "Seconds",
+    split_transition_duration_unit_percent: "Percent",
+    split_transition_duration_percent_unit: "%",
+    split_transition_duration_percent_hint:
+        "The percentage is applied to the combined full length of the two clips created by the split.",
+    split_transition_curve: "Fade Curve",
+    split_transition_overlap_crossfade: "Overlap Crossfade",
+    split_transition_overlap_crossfade_auto: "Follow Auto Crossfade",
+    split_transition_overlap_crossfade_always: "Always Apply",
+    split_transition_overlap_hint:
+        "Extend & Overlap moves the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. Extensions are clamped to the clip source's actual length.",
     grid_snap: "Grid Snap",
     pitch_snap: "Pitch Snap",
     playhead_zoom: "Zoom at Playhead",

@@ -1,4 +1,7 @@
 use crate::state::AppState;
+use crate::state::SplitTransitionDurationUnit;
+use crate::state::SplitTransitionMode;
+use crate::state::SplitTransitionOptions;
 use base64::Engine;
 use std::collections::HashSet;
 use std::fs;
@@ -740,7 +743,8 @@ pub(super) fn split_clip(
         .find(|c| c.id == clip_id)
         .map(|c| c.track_id.clone())
         .and_then(|tid| tl.resolve_root_track_id(&tid));
-    tl.split_clip(&clip_id, split_sec);
+    let options = split_transition_options(&state);
+    let _ = tl.split_clip_with_transition(&clip_id, split_sec, &options);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -766,7 +770,8 @@ pub(super) fn split_clips_at(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    tl.split_clips_at(&clip_ids, split_sec);
+    let options = split_transition_options(&state);
+    tl.split_clips_at_with_transition(&clip_ids, split_sec, &options);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -775,6 +780,37 @@ pub(super) fn split_clips_at(
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
     }
     payload
+}
+
+fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptions {
+    let settings = if let Some(dir) = state.config_dir.get() {
+        let mut settings = crate::config::load_ui_settings(dir);
+        settings.normalize_split_transition();
+        settings
+    } else {
+        crate::config::UiSettings::default()
+    };
+
+    let mode = if settings.split_transition_mode == "overlap" {
+        SplitTransitionMode::ExtendOverlap
+    } else {
+        SplitTransitionMode::FadeOnly
+    };
+
+    SplitTransitionOptions {
+        enabled: settings.split_transition_enabled,
+        mode,
+        duration_unit: if settings.split_transition_duration_unit == "percent" {
+            SplitTransitionDurationUnit::Percent
+        } else {
+            SplitTransitionDurationUnit::Seconds
+        },
+        duration_sec: settings.split_transition_duration_sec,
+        duration_percent: settings.split_transition_duration_percent,
+        curve: Some(settings.split_transition_curve),
+        overlap_fades: settings.auto_crossfade
+            || settings.split_transition_overlap_crossfade == "always",
+    }
 }
 
 pub(super) fn glue_clips(

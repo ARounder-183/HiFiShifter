@@ -6,6 +6,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 
 import {
@@ -15,6 +16,7 @@ import {
     updateTransportBpm,
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
+    toggleSplitTransition,
     toggleGridSnap,
     togglePlayheadZoom,
     toggleAutoScroll,
@@ -38,6 +40,7 @@ export function ActionBar() {
     const tAny = t as (key: string) => string;
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
+    const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
     const [gridSnapMenuPos, setGridSnapMenuPos] = useState<{ x: number; y: number } | null>(null);
 
@@ -417,6 +420,43 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
+                {/* Split Transition */}
+                <IconButton
+                    size="1"
+                    variant={s.splitTransitionEnabled ? "solid" : "ghost"}
+                    color="gray"
+                    data-tooltip={tAny("split_transition_tooltip")}
+                    tabIndex={-1}
+                    onClick={() => {
+                        dispatch(toggleSplitTransition());
+                        void dispatch(persistUiSettings());
+                    }}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        setSplitTransitionOpen(true);
+                    }}
+                >
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 15 15"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                    >
+                        <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path
+                            d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                            fill="currentColor"
+                            opacity="0.85"
+                        />
+                        <path
+                            d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                            fill="currentColor"
+                            opacity="0.45"
+                        />
+                    </svg>
+                </IconButton>
+
                 {/* Grid Snap */}
                 <IconButton
                     size="1"
@@ -580,6 +620,13 @@ export function ActionBar() {
             {/* Pitch Snap Settings Dialog */}
             {pitchSnapOpen && (
                 <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
+            )}
+
+            {splitTransitionOpen && (
+                <SplitTransitionSettingsDialog
+                    open={splitTransitionOpen}
+                    onOpenChange={setSplitTransitionOpen}
+                />
             )}
 
             {customScaleOpen && (

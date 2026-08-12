@@ -21,6 +21,20 @@ pub struct UiSettings {
     #[serde(default = "default_true")]
     pub auto_crossfade: bool,
     #[serde(default = "default_true")]
+    pub split_transition_enabled: bool,
+    #[serde(default = "default_split_transition_mode")]
+    pub split_transition_mode: String,
+    #[serde(default = "default_split_transition_duration_unit")]
+    pub split_transition_duration_unit: String,
+    #[serde(default = "default_split_transition_duration_sec")]
+    pub split_transition_duration_sec: f64,
+    #[serde(default = "default_split_transition_duration_percent")]
+    pub split_transition_duration_percent: f64,
+    #[serde(default = "default_split_transition_curve")]
+    pub split_transition_curve: String,
+    #[serde(default = "default_split_transition_overlap_crossfade")]
+    pub split_transition_overlap_crossfade: String,
+    #[serde(default = "default_true")]
     pub grid_snap: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
@@ -228,6 +242,30 @@ fn default_hifigan_mel_stretch() -> bool {
     true
 }
 
+fn default_split_transition_mode() -> String {
+    "fade".to_string()
+}
+
+fn default_split_transition_duration_sec() -> f64 {
+    0.01
+}
+
+fn default_split_transition_duration_unit() -> String {
+    "seconds".to_string()
+}
+
+fn default_split_transition_duration_percent() -> f64 {
+    1.0
+}
+
+fn default_split_transition_curve() -> String {
+    "sine".to_string()
+}
+
+fn default_split_transition_overlap_crossfade() -> String {
+    "auto".to_string()
+}
+
 fn default_scale_highlight_mode() -> String {
     "off".to_string()
 }
@@ -248,6 +286,13 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             auto_crossfade: true,
+            split_transition_enabled: true,
+            split_transition_mode: default_split_transition_mode(),
+            split_transition_duration_unit: default_split_transition_duration_unit(),
+            split_transition_duration_sec: default_split_transition_duration_sec(),
+            split_transition_duration_percent: default_split_transition_duration_percent(),
+            split_transition_curve: default_split_transition_curve(),
+            split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
             grid_snap: true,
             grid_size: default_grid_size(),
             pitch_snap: false,
@@ -286,6 +331,47 @@ impl Default for UiSettings {
     }
 }
 
+impl UiSettings {
+    /// 规范化分割过渡相关设置，避免损坏/越界的持久化值影响编辑行为。
+    pub fn normalize_split_transition(&mut self) {
+        if !["fade", "overlap"].contains(&self.split_transition_mode.as_str()) {
+            self.split_transition_mode = default_split_transition_mode();
+        }
+        if !self.split_transition_duration_sec.is_finite() {
+            self.split_transition_duration_sec = default_split_transition_duration_sec();
+        } else {
+            self.split_transition_duration_sec = self
+                .split_transition_duration_sec
+                .clamp(0.001, 10.0);
+        }
+        if !["seconds", "percent"].contains(&self.split_transition_duration_unit.as_str()) {
+            self.split_transition_duration_unit = default_split_transition_duration_unit();
+        }
+        if !self.split_transition_duration_percent.is_finite() {
+            self.split_transition_duration_percent = default_split_transition_duration_percent();
+        } else {
+            self.split_transition_duration_percent = self
+                .split_transition_duration_percent
+                .clamp(0.01, 100.0);
+        }
+        if ![
+            "linear",
+            "sine",
+            "exponential",
+            "logarithmic",
+            "scurve",
+        ]
+        .contains(&self.split_transition_curve.as_str())
+        {
+            self.split_transition_curve = default_split_transition_curve();
+        }
+        if !["auto", "always"].contains(&self.split_transition_overlap_crossfade.as_str()) {
+            self.split_transition_overlap_crossfade =
+                default_split_transition_overlap_crossfade();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::UiSettings;
@@ -299,6 +385,33 @@ mod tests {
             UserStretchAlgorithm::Signalsmith
         );
         assert!(settings.default_hifigan_mel_stretch);
+        assert!(settings.split_transition_enabled);
+        assert_eq!(settings.split_transition_mode, "fade");
+        assert_eq!(settings.split_transition_duration_unit, "seconds");
+        assert!((settings.split_transition_duration_sec - 0.01).abs() < 1e-12);
+        assert!((settings.split_transition_duration_percent - 1.0).abs() < 1e-12);
+        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_overlap_crossfade, "auto");
+    }
+
+    #[test]
+    fn ui_settings_normalizes_split_transition_values() {
+        let mut settings = UiSettings {
+            split_transition_mode: "bogus".to_string(),
+            split_transition_duration_unit: "frames".to_string(),
+            split_transition_duration_sec: 9999.0,
+            split_transition_duration_percent: 999.0,
+            split_transition_curve: "nope".to_string(),
+            split_transition_overlap_crossfade: "sometimes".to_string(),
+            ..UiSettings::default()
+        };
+        settings.normalize_split_transition();
+        assert_eq!(settings.split_transition_mode, "fade");
+        assert_eq!(settings.split_transition_duration_unit, "seconds");
+        assert!((settings.split_transition_duration_sec - 10.0).abs() < 1e-12);
+        assert!((settings.split_transition_duration_percent - 100.0).abs() < 1e-12);
+        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_overlap_crossfade, "auto");
     }
 }
 

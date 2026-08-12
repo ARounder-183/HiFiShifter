@@ -610,6 +610,28 @@ export const koKR = {
 
     // 도구 모음 토글 버튼
     auto_crossfade: "자동 크로스페이드",
+    split_transition: "분할 트랜지션",
+    split_transition_tooltip: "분할 트랜지션 (우클릭하여 상세 설정)",
+    split_transition_settings_title: "분할 트랜지션 설정",
+    split_transition_settings_desc:
+        "분할 후 분할 지점에 자동으로 페이드 인/아웃을 추가하거나 오버랩 확장으로 클릭 노이즈를 줄입니다.",
+    split_transition_mode: "모드",
+    split_transition_mode_fade: "페이드만",
+    split_transition_mode_overlap: "확장 및 겹치기",
+    split_transition_duration: "트랜지션 길이",
+    split_transition_duration_unit: "초",
+    split_transition_duration_unit_label: "단위",
+    split_transition_duration_unit_seconds: "초",
+    split_transition_duration_unit_percent: "퍼센트",
+    split_transition_duration_percent_unit: "%",
+    split_transition_duration_percent_hint:
+        "백분율은 분할로 생성된 앞뒤 두 클립의 전체 길이 합계를 기준으로 계산됩니다.",
+    split_transition_curve: "페이드 커브",
+    split_transition_overlap_crossfade: "오버랩 크로스페이드",
+    split_transition_overlap_crossfade_auto: "자동 크로스페이드 따르기",
+    split_transition_overlap_crossfade_always: "항상 적용",
+    split_transition_overlap_hint:
+        "확장 및 겹치기 모드는 앞 클립을 뒤로 X초, 뒤 클립을 앞으로 X초 늘려 2X초의 겹치는 구간을 만듭니다. 연장 범위는 클립 원본 소재의 실제 길이 범위 안으로 제한됩니다.",
     grid_snap: "그리드 스냅",
     pitch_snap: "피치 스냅",
     playhead_zoom: "재생 헤드 기준 줌",

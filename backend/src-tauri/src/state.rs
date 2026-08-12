@@ -449,6 +449,31 @@ impl Default for TimelineState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitTransitionMode {
+    FadeOnly,
+    ExtendOverlap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitTransitionDurationUnit {
+    Seconds,
+    Percent,
+}
+
+/// 分割过渡选项，由全局 UI 设置解析而来，并在 `split_clip_with_transition` 中使用。
+#[derive(Debug, Clone)]
+pub struct SplitTransitionOptions {
+    pub enabled: bool,
+    pub mode: SplitTransitionMode,
+    pub duration_unit: SplitTransitionDurationUnit,
+    pub duration_sec: f64,
+    pub duration_percent: f64,
+    pub curve: Option<String>,
+    /// 延伸重叠模式下，是否同时为重叠区域设置淡入淡出。
+    pub overlap_fades: bool,
+}
+
 impl TimelineState {
     fn clip_frame_bounds(
         &self,
@@ -1844,6 +1869,291 @@ mod tests {
         // Original group_a, new right group for A, original group_b, new right group for B
         assert!(groups.len() >= 4, "expected >=4 groups, got {}", groups.len());
     }
+
+    #[test]
+    fn split_clip_with_transition_fade_only_sets_boundary_fades() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.5).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.1).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        assert!((right.start_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.1).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+        assert_eq!(left.fade_out_curve, "sine");
+        assert_eq!(right.fade_in_curve, "sine");
+    }
+
+    #[test]
+    fn split_clip_with_transition_extend_overlap_preserves_source_position() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.2).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((right.length_sec - 1.6).abs() < 1e-9);
+        assert!((right.source_start_sec - 1.8).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.2).abs() < 1e-9);
+
+        // At the split point, both clips must still reference the same source position.
+        let left_source_at_split = left.source_end_sec - (left.length_sec - 0.5) * 2.0;
+        let right_source_at_split =
+            right.source_start_sec + (0.5 - right.start_sec) * 2.0;
+        assert!((left_source_at_split - 2.0).abs() < 1e-9);
+        assert!((right_source_at_split - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_percent_uses_combined_clip_length() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Percent,
+            duration_sec: 999.0,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        // 前 0.5s + 后 1.5s = 2.0s，1% = 0.02s
+        assert!((left.fade_out_sec - 0.02).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.02).abs() < 1e-9);
+        assert!((left.length_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_without_fades_keeps_zero_fades() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_handles_reversed_clips() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 3.0;
+            clip.source_end_sec = 7.0;
+            clip.playback_rate = 2.0;
+            clip.reversed = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((left.source_start_sec - 5.8).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((right.length_sec - 1.6).abs() < 1e-9);
+        assert!((right.source_end_sec - 6.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_clamps_near_timeline_start() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.005, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.105).abs() < 1e-9);
+        assert!((right.start_sec - 0.0).abs() < 1e-9);
+        assert!((right.length_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.105).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.105).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_clamps_to_source_material_end() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 2.0;
+            clip.source_end_sec = 3.0;
+            clip.duration_sec = Some(3.0);
+            clip.playback_rate = 1.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.95, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 1.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!((right.start_sec - 0.85).abs() < 1e-9);
+        assert!((right.length_sec - 1.05).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.85).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
+    }
 }
 
 fn new_id(prefix: &str) -> String {
@@ -3034,16 +3344,16 @@ impl TimelineState {
         created_clip_ids
     }
 
-    pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) {
+    pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
         let Some(idx) = self.clips.iter().position(|c| c.id == clip_id) else {
-            return;
+            return None;
         };
         let clip = self.clips[idx].clone();
         let start = clip.start_sec;
         let end = clip.start_sec + clip.length_sec;
         let split = split_sec.clamp(start, end);
         if split <= start + 1e-6 || split >= end - 1e-6 {
-            return;
+            return None;
         }
 
         self.ensure_project_end_sec(end);
@@ -3110,7 +3420,195 @@ impl TimelineState {
         }
         // Propagate group_id to the split-off right clip
         right.group_id = self.clips[idx].group_id.clone();
+        let right_id = right.id.clone();
         self.clips.push(right);
+        Some(right_id)
+    }
+
+    /// 分割 clip，并在分割完成后根据全局“分割过渡”设置应用淡入淡出或延伸重叠。
+    pub fn split_clip_with_transition(
+        &mut self,
+        clip_id: &str,
+        split_sec: f64,
+        opts: &SplitTransitionOptions,
+    ) -> Option<String> {
+        let orig_source_end = self
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .map(|c| c.source_end_sec)
+            .unwrap_or(0.0);
+        let right_id = self.split_clip(clip_id, split_sec)?;
+        let effective_duration_sec = match opts.duration_unit {
+            SplitTransitionDurationUnit::Seconds => opts.duration_sec,
+            SplitTransitionDurationUnit::Percent => {
+                let left_len = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|c| c.length_sec)
+                    .unwrap_or(0.0);
+                let right_len = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == right_id)
+                    .map(|c| c.length_sec)
+                    .unwrap_or(0.0);
+                (left_len + right_len) * opts.duration_percent / 100.0
+            }
+        };
+        if opts.enabled && effective_duration_sec.is_finite() && effective_duration_sec > 0.0 {
+            self.apply_split_transition(
+                clip_id,
+                &right_id,
+                opts,
+                effective_duration_sec,
+                orig_source_end,
+            );
+        }
+        Some(right_id)
+    }
+
+    fn apply_split_transition(
+        &mut self,
+        left_id: &str,
+        right_id: &str,
+        opts: &SplitTransitionOptions,
+        duration_sec: f64,
+        orig_source_end: f64,
+    ) {
+        let Some(left_idx) = self.clips.iter().position(|c| c.id == left_id) else {
+            return;
+        };
+        let Some(right_idx) = self.clips.iter().position(|c| c.id == right_id) else {
+            return;
+        };
+
+        let duration = duration_sec.max(0.0);
+        if duration <= 0.0 {
+            return;
+        }
+
+        let set_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+            left.fade_out_sec = fade_len.min(left.length_sec);
+            right.fade_in_sec = fade_len.min(right.length_sec);
+            if let Some(curve) = opts.curve.as_deref() {
+                left.fade_out_curve = curve.to_string();
+                right.fade_in_curve = curve.to_string();
+            }
+        };
+
+        match opts.mode {
+            SplitTransitionMode::FadeOnly => {
+                let (left, right) = self.clips.split_at_mut(right_idx);
+                set_fade(&mut left[left_idx], &mut right[0], duration);
+            }
+            SplitTransitionMode::ExtendOverlap => {
+                // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
+                // 两侧都会钳制在 Clip 原素材的实际长度范围内（source 0 .. 文件时长），
+                // 后 clip 同时不能越过时间轴起点 0。
+                let source_end_limit = self
+                    .source_file_duration_sec(&self.clips[left_idx])
+                    .unwrap_or(orig_source_end.max(0.0));
+
+                let left_rate = {
+                    let left = &self.clips[left_idx];
+                    if left.playback_rate.is_finite() && left.playback_rate > 0.0 {
+                        left.playback_rate as f64
+                    } else {
+                        1.0
+                    }
+                };
+                let left_source_avail_sec = {
+                    let left = &self.clips[left_idx];
+                    if left.reversed {
+                        left.source_start_sec.max(0.0) / left_rate
+                    } else {
+                        (source_end_limit - left.source_end_sec).max(0.0) / left_rate
+                    }
+                };
+                let left_grow = duration.min(left_source_avail_sec).max(0.0);
+
+                let right_rate = {
+                    let right = &self.clips[right_idx];
+                    if right.playback_rate.is_finite() && right.playback_rate > 0.0 {
+                        right.playback_rate as f64
+                    } else {
+                        1.0
+                    }
+                };
+                let right_source_avail_sec = {
+                    let right = &self.clips[right_idx];
+                    if right.reversed {
+                        (source_end_limit - right.source_end_sec).max(0.0) / right_rate
+                    } else {
+                        right.source_start_sec.max(0.0) / right_rate
+                    }
+                };
+                let right_grow = duration
+                    .min(self.clips[right_idx].start_sec)
+                    .min(right_source_avail_sec)
+                    .max(0.0);
+
+                let overlap_sec = left_grow + right_grow;
+                if overlap_sec <= 0.0 {
+                    return;
+                }
+
+                // 前 clip 末尾向后延长 left_grow，同时扩展 source 范围，
+                // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
+                {
+                    let left = &mut self.clips[left_idx];
+                    left.length_sec += left_grow;
+                    if left.reversed {
+                        left.source_start_sec =
+                            (left.source_start_sec - left_grow * left_rate).max(0.0);
+                    } else {
+                        left.source_end_sec =
+                            (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                    }
+                }
+
+                // 后 clip 起始位置向前延长 right_grow，同时扩展 source 范围。
+                {
+                    let right = &mut self.clips[right_idx];
+                    right.start_sec = (right.start_sec - right_grow).max(0.0);
+                    right.length_sec += right_grow;
+                    if right.reversed {
+                        right.source_end_sec =
+                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                    } else {
+                        right.source_start_sec =
+                            (right.source_start_sec - right_grow * right_rate).max(0.0);
+                    }
+                }
+
+                if opts.overlap_fades {
+                    let (left, right) = self.clips.split_at_mut(right_idx);
+                    set_fade(&mut left[left_idx], &mut right[0], overlap_sec);
+                }
+            }
+        }
+
+        if let Some(clip) = self.clips.get(left_idx) {
+            self.ensure_project_end_sec(clip.start_sec + clip.length_sec);
+        }
+    }
+
+    fn source_file_duration_sec(&self, clip: &Clip) -> Option<f64> {
+        if let (Some(frames), Some(sample_rate)) =
+            (clip.duration_frames, clip.source_sample_rate)
+        {
+            if sample_rate > 0 && frames > 0 {
+                return Some(frames as f64 / sample_rate as f64);
+            }
+        }
+        if let Some(duration) = clip.duration_sec {
+            if duration.is_finite() && duration > 0.0 {
+                return Some(duration);
+            }
+        }
+        None
     }
 
     /// Split multiple clips at the same position.
@@ -3118,7 +3616,27 @@ impl TimelineState {
     /// - Right halves get a new group_id (per original group).
     /// - Unsplit clips in affected groups are assigned to left or right side by position.
     /// - Groups with fewer than 2 members after reassignment are dissolved.
+    #[allow(dead_code)]
     pub fn split_clips_at(&mut self, clip_ids: &[String], split_sec: f64) {
+        self.split_clips_at_with_options(clip_ids, split_sec, None);
+    }
+
+    /// 同 `split_clips_at`，但在每个分割上应用“分割过渡”设置。
+    pub fn split_clips_at_with_transition(
+        &mut self,
+        clip_ids: &[String],
+        split_sec: f64,
+        opts: &SplitTransitionOptions,
+    ) {
+        self.split_clips_at_with_options(clip_ids, split_sec, Some(opts));
+    }
+
+    fn split_clips_at_with_options(
+        &mut self,
+        clip_ids: &[String],
+        split_sec: f64,
+        opts: Option<&SplitTransitionOptions>,
+    ) {
         // 1. Collect affected group IDs from input clips
         let affected_groups: HashSet<Option<String>> = clip_ids
             .iter()
@@ -3135,7 +3653,11 @@ impl TimelineState {
 
         // 3. Split each input clip
         for cid in clip_ids {
-            self.split_clip(cid, split_sec);
+            if let Some(opts) = opts {
+                let _ = self.split_clip_with_transition(cid, split_sec, opts);
+            } else {
+                let _ = self.split_clip(cid, split_sec);
+            }
         }
 
         // 4. Identify newly created clip IDs (right halves)
