@@ -243,31 +243,45 @@ export function formatCursorTime(
  * 候选标尺刻度步长（拍）。升序排列，始终包含小节步长。
  *
  * 标准网格使用常用音符阶梯；附点/三连音网格额外加入网格步长及其倍增，
- * 使标签始终落在网格线上，同时支持逐步细化到用户设置的“网格”精度。
- * 若网格步长本身大于一个小节（如 `1/1d`），则一并加入网格步长的倍增。
+ * 支持逐步细化到用户设置的“网格”精度。
+ *
+ * 为保证刻度在任意“每小节拍数”下都均匀且与小节对齐，只保留满足以下条件的步长：
+ * - 步长能整除每小节拍数（例如 3/4 拍中的 1 拍、0.5 拍）；
+ * - 或步长是每小节拍数的整数倍（例如 3/4 拍中的 3 拍、6 拍、12 拍）。
+ * 这样不会出现 `1.1 1.3 2.1 2.2 3.1…` 这类间距不均的标签序列。
  */
 export function rulerStepCandidates(grid: string, beatsPerBar: number): number[] {
     const gridStep = Math.max(1e-9, gridStepBeats(grid));
     const bpb = normalizeBeatsPerBar(beatsPerBar);
     const set = new Set<number>();
     const standard = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4];
-    for (const step of standard) {
-        if (step >= gridStep - 1e-9) set.add(step);
-    }
-    set.add(bpb);
     const isStandard =
         standard.some((step) => Math.abs(step - gridStep) < 1e-9) ||
         Math.abs(gridStep - bpb) < 1e-9;
+
+    const rawCandidates: number[] = [];
+    for (const step of standard) {
+        if (step >= gridStep - 1e-9) rawCandidates.push(step);
+    }
     if (!isStandard) {
         for (let multiplier = 1; multiplier <= 8; multiplier *= 2) {
             const step = gridStep * multiplier;
-            if (step <= bpb + 1e-9) set.add(step);
+            if (step <= bpb + 1e-9) rawCandidates.push(step);
         }
         if (gridStep > bpb + 1e-9) {
             for (let multiplier = 1; multiplier <= 16; multiplier *= 2) {
-                set.add(gridStep * multiplier);
+                rawCandidates.push(gridStep * multiplier);
             }
         }
+    }
+    for (let multiplier = 1; multiplier <= 1 << 16; multiplier *= 2) {
+        rawCandidates.push(bpb * multiplier);
+    }
+
+    for (const step of rawCandidates) {
+        const dividesBar = Math.abs(bpb / step - Math.round(bpb / step)) < 1e-9;
+        const isBarMultiple = Math.abs(step / bpb - Math.round(step / bpb)) < 1e-9;
+        if (dividesBar || isBarMultiple) set.add(step);
     }
     return [...set].sort((a, b) => a - b);
 }
@@ -295,10 +309,9 @@ export function selectRulerStep(args: {
     }
     // 缩小到候选阶梯之外时，按 2 的幂继续拉大间隔：
     // 每 2 个小节、每 4 个小节、每 8 个小节……以此类推，可持续无限放大。
-    // 当网格步长本身大于一个小节时，以网格步长为基础倍增，保证标签仍落在网格线上。
+    // 始终以“每小节拍数”为基础倍增，保证标签始终与小节均匀对齐。
     const bpb = normalizeBeatsPerBar(beatsPerBar);
-    const baseUnit = gridStep > bpb + 1e-9 ? gridStep : bpb;
-    let step = baseUnit;
+    let step = bpb;
     while (step * pxPerBeat < spacing - 1e-9) {
         step *= 2;
     }
@@ -353,12 +366,10 @@ export function buildRulerTicks(args: {
         secondaryUnit !== "none" && secondaryUnit !== primaryUnit;
     const ticks = new Map<number, RulerTick>();
 
-    const addTick = (beat: number, forcedBarStart: boolean) => {
+    const addTick = (beat: number) => {
         if (!Number.isFinite(beat) || beat < -1e-9 || beat > totalBeats + 1e-9) return;
         const key = Math.round(beat * 1e9) / 1e9;
-        const isBarStart =
-            forcedBarStart ||
-            Math.abs(key / bpb - Math.round(key / bpb)) < 1e-9;
+        const isBarStart = Math.abs(key / bpb - Math.round(key / bpb)) < 1e-9;
         const existing = ticks.get(key);
         if (existing) {
             if (isBarStart) existing.isBarStart = true;
@@ -378,18 +389,7 @@ export function buildRulerTicks(args: {
     const firstTickIndex = Math.max(0, Math.floor(leftBeat / step));
     const lastTickIndex = Math.max(firstTickIndex, Math.ceil(rightBeat / step));
     for (let index = firstTickIndex; index <= lastTickIndex; index += 1) {
-        addTick(index * step, false);
-    }
-
-    // 只有当刻度步长小于一个小节时，才额外补入每个小节起始刻度；
-    // 否则（每 2/4/8… 个小节才显示一个标签），标签只来自刻度序列本身，
-    // 避免缩小后每个小节的文本挤成一团。
-    if (step < bpb - 1e-9) {
-        const firstBarIndex = Math.max(0, Math.floor(leftBeat / bpb));
-        const lastBarIndex = Math.max(firstBarIndex, Math.ceil(rightBeat / bpb));
-        for (let barIndex = firstBarIndex; barIndex <= lastBarIndex; barIndex += 1) {
-            addTick(barIndex * bpb, true);
-        }
+        addTick(index * step);
     }
 
     return [...ticks.values()].sort((a, b) => a.beat - b.beat);

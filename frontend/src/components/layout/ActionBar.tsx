@@ -28,6 +28,7 @@ import {
 } from "../../features/session/sessionSlice";
 import { SCALE_KEYS, SCALE_LABELS } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
 
@@ -36,6 +37,9 @@ export function ActionBar() {
     const s = useAppSelector((state: RootState) => state.session);
     const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
     const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
 
@@ -50,12 +54,17 @@ export function ActionBar() {
         "__custom_dialog__",
     ];
 
-    const [bpmText, setBpmText] = useState(() => String(Math.round(s.bpm || 120)));
+    function formatBpmValue(value: number): string {
+        const normalized = Number(value);
+        return Number.isFinite(normalized) ? String(normalized) : "120";
+    }
+
+    const [bpmText, setBpmText] = useState(() => formatBpmValue(s.bpm || 120));
     const bpmDirtyRef = useRef(false);
 
     useEffect(() => {
         if (!bpmDirtyRef.current) {
-            setBpmText(String(Math.round(s.bpm || 120)));
+            setBpmText(formatBpmValue(s.bpm || 120));
         }
     }, [s.bpm]);
 
@@ -64,12 +73,13 @@ export function ActionBar() {
         const next = Number(raw);
         bpmDirtyRef.current = false;
         if (!Number.isFinite(next)) {
-            setBpmText(String(Math.round(s.bpm || 120)));
+            setBpmText(formatBpmValue(s.bpm || 120));
             return;
         }
-        dispatch(setBpm(next));
-        void dispatch(updateTransportBpm(next));
-        setBpmText(String(Math.round(next)));
+        const clamped = Math.min(300, Math.max(10, next));
+        dispatch(setBpm(clamped));
+        void dispatch(updateTransportBpm(clamped));
+        setBpmText(formatBpmValue(clamped));
     }
 
     // Custom styles for Radix components to match Qt look
@@ -102,9 +112,24 @@ export function ActionBar() {
                         } else if (e.key === "Escape") {
                             e.preventDefault();
                             bpmDirtyRef.current = false;
-                            setBpmText(String(Math.round(s.bpm || 120)));
+                            setBpmText(formatBpmValue(s.bpm || 120));
                             (e.currentTarget as HTMLInputElement).blur();
                         }
+                    }}
+                    onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const direction = e.deltaY < 0 ? 1 : -1;
+                        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+                        const current = Number(bpmText);
+                        const base = Number.isFinite(current) ? current : Number(s.bpm || 120);
+                        const nextRaw = base + direction * step;
+                        const next = Math.round(nextRaw * 1000) / 1000;
+                        const clamped = Math.min(300, Math.max(10, next));
+                        dispatch(setBpm(clamped));
+                        void dispatch(updateTransportBpm(clamped));
+                        setBpmText(formatBpmValue(clamped));
+                        bpmDirtyRef.current = false;
                     }}
                     style={{
                         width: 60,
@@ -130,6 +155,20 @@ export function ActionBar() {
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: clamped,
+                                    gridSize: s.grid,
+                                }),
+                            );
+                        }}
+                        onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const direction = e.deltaY < 0 ? 1 : -1;
+                            const current = Math.max(1, Math.min(32, Math.round(s.beats || 4)));
+                            const next = Math.max(1, Math.min(32, current + direction));
+                            if (next === current) return;
+                            void dispatch(
+                                setProjectTimelineSettingsRemote({
+                                    beatsPerBar: next,
                                     gridSize: s.grid,
                                 }),
                             );

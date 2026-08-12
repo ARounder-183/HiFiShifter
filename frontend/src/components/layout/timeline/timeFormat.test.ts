@@ -127,6 +127,11 @@ assertEqual(selectRulerStep({ pxPerBeat: 40, grid: "1/4", beatsPerBar: 4, minLab
 assertEqual(selectRulerStep({ pxPerBeat: 8, grid: "1/4", beatsPerBar: 4, minLabelSpacingPx: 90 }), 16, "zoom out labels every 4 bars");
 assertEqual(selectRulerStep({ pxPerBeat: 4, grid: "1/4", beatsPerBar: 4, minLabelSpacingPx: 90 }), 32, "zoom out labels every 8 bars");
 assertEqual(selectRulerStep({ pxPerBeat: 2, grid: "1/4", beatsPerBar: 4, minLabelSpacingPx: 90 }), 64, "zoom out labels every 16 bars");
+assertEqual(selectRulerStep({ pxPerBeat: 75, grid: "1/4", beatsPerBar: 3, minLabelSpacingPx: 90 }), 3, "3/4 zoom out labels every bar");
+assertEqual(selectRulerStep({ pxPerBeat: 120, grid: "1/4", beatsPerBar: 3, minLabelSpacingPx: 90 }), 1, "3/4 zoom in labels every beat");
+assertEqual(selectRulerStep({ pxPerBeat: 240, grid: "1/8", beatsPerBar: 3, minLabelSpacingPx: 90 }), 0.5, "3/4 eighth-note labels");
+assertEqual(selectRulerStep({ pxPerBeat: 100, grid: "1/4", beatsPerBar: 3, minLabelSpacingPx: 90 }), 1, "3/4 never picks half-bar step");
+assertEqual(selectRulerStep({ pxPerBeat: 8, grid: "1/4", beatsPerBar: 3, minLabelSpacingPx: 90 }), 12, "3/4 far zoom out labels every 4 bars");
 assertEqual(
     selectRulerStep({ pxPerBeat: 0.25, grid: "1/4", beatsPerBar: 4, minLabelSpacingPx: 90 }),
     512,
@@ -140,8 +145,13 @@ assertEqual(
 );
 assertEqual(
     rulerStepCandidates("1/4d", 4).includes(1.5),
+    false,
+    "dotted candidates exclude non-bar-aligning step",
+);
+assertEqual(
+    rulerStepCandidates("1/4d", 4).includes(2),
     true,
-    "dotted candidates include dotted quarter",
+    "dotted candidates keep bar-aligning steps",
 );
 
 // ── 刻度生成 ─────────────────────────────────────────────────────
@@ -200,6 +210,46 @@ assertEqual(
     assertEqual(sparse.map((t) => t.primaryLabel).join(","), "1.1,9.1,17.1,25.1", "sparse labels every 8 bars");
     assertEqual(sparse.every((t) => t.isBarStart), true, "sparse ticks all on bar starts");
     assertEqual(sparse.some((t) => t.primaryLabel === "2.1"), false, "no crowded per-bar labels");
+
+    // 每小节 3 拍时，标签必须均匀：要么每小节一个，要么每拍一个，绝不出现 1.3/2.2 交替。
+    const triple = buildRulerTicks({
+        pxPerSec: 150,
+        scrollLeft: 0,
+        viewportWidth: 1000,
+        projectSec: 8,
+        bpm: 120,
+        beatsPerBar: 3,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+    });
+    assertEqual(
+        triple.map((t) => t.primaryLabel).join(","),
+        "1.1,2.1,3.1,4.1,5.1,6.1",
+        "3/4 labels every bar uniformly",
+    );
+
+    const tripleBeats = buildRulerTicks({
+        pxPerSec: 240,
+        scrollLeft: 0,
+        viewportWidth: 1000,
+        projectSec: 8,
+        bpm: 120,
+        beatsPerBar: 3,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+    });
+    assertEqual(
+        tripleBeats
+            .slice(0, 7)
+            .map((t) => t.primaryLabel)
+            .join(","),
+        "1.1,1.2,1.3,2.1,2.2,2.3,3.1",
+        "3/4 labels every beat uniformly",
+    );
 }
 
 assertNear(beatFromSec(0.5, 120), 1, "beatFromSec");

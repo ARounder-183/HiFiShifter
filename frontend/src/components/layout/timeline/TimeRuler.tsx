@@ -361,6 +361,16 @@ export const TimeRuler: React.FC<{
 
     const handleMouseMove = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
+            // 右键菜单打开期间不显示标尺悬浮时间；菜单内部的事件也不触发。
+            if (ctxMenu) {
+                setHover(null);
+                return;
+            }
+            const target = e.target as HTMLElement | null;
+            if (target?.closest?.("[data-time-ruler-context-menu]")) {
+                setHover(null);
+                return;
+            }
             const bounds = e.currentTarget.getBoundingClientRect();
             const sec = Math.max(
                 0,
@@ -373,7 +383,7 @@ export const TimeRuler: React.FC<{
             );
             setHover({ x: e.clientX - bounds.left, y: e.clientY - bounds.top, sec });
         },
-        [pxPerSec, scrollLeft],
+        [ctxMenu, pxPerSec, scrollLeft],
     );
 
     const hoverTime = hover
@@ -413,6 +423,7 @@ export const TimeRuler: React.FC<{
             onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                setHover(null);
                 setCtxMenu({ x: e.clientX, y: e.clientY });
             }}
             onMouseMove={handleMouseMove}
