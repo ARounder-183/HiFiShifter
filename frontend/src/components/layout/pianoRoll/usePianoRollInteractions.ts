@@ -41,7 +41,8 @@ import {
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
 import { buildChildOffsetPasteValues as buildChildOffsetPasteValuesHelper } from "./childPitchOffsetPaste";
-import { computeAnchoredHorizontalZoom } from "../../../utils/horizontalZoom";
+import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
+import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
 import { transformSelectionByRightDrag } from "./selectionTransforms";
 import {
@@ -73,9 +74,17 @@ export function usePianoRollInteractions(args: {
     scrollLeftRef: MutableRefObject<number>;
     pxPerBeatRef: MutableRefObject<number>;
     pxPerSecRef: MutableRefObject<number>;
-    setPxPerBeat: (next: number) => void;
-    /** 当前 BPM，用于动态计算 pxPerBeat 的合法范围 */
-    bpm: number;
+    /** 连续滚轮缩放期间暂存最新结果，下一 tick 以此为基础继续锚定。 */
+    horizontalZoomChainRef: MutableRefObject<{
+        nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>;
+    /** 水平缩放结果回调（与轨道视图共用同一套计算逻辑）。 */
+    onHorizontalZoom: (nextPxPerSec: number, nextScrollLeft: number) => void;
+    /** 是否启用“同步时间轴视图”。 */
+    syncTimelineEnabled: boolean;
+    /** 轨道头与钢琴卷帘之间的水平偏移（ref，始终与缩放应用侧一致）。 */
+    timelineOffsetRef: MutableRefObject<number>;
     /** 项目时长（秒），用于计算缩放时的 maxScroll */
     dynamicProjectSec: number;
     setPitchView: (next: ValueViewport) => void;
@@ -229,8 +238,10 @@ export function usePianoRollInteractions(args: {
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
-        setPxPerBeat,
-        bpm,
+        horizontalZoomChainRef,
+        onHorizontalZoom,
+        syncTimelineEnabled,
+        timelineOffsetRef,
         dynamicProjectSec,
         setPitchView,
         setParamViewport,
@@ -1119,11 +1130,11 @@ export function usePianoRollInteractions(args: {
             if (!canvas) return 0;
             const rect = canvas.getBoundingClientRect();
             const x = clientX - rect.left;
-            const sl = scrollerRef.current?.scrollLeft ?? scrollLeftRef.current;
+            const sl = scrollLeftRef.current;
             const ppb = pxPerBeatRef.current;
             return (sl + x) / Math.max(1e-9, ppb);
         },
-        [canvasRef, scrollerRef, scrollLeftRef, pxPerBeatRef],
+        [canvasRef, scrollLeftRef, pxPerBeatRef],
     );
 
     const pointerSec = useCallback(
@@ -1134,11 +1145,11 @@ export function usePianoRollInteractions(args: {
             return secFromViewportClientX({
                 clientX,
                 viewportLeft: rect.left,
-                scrollLeft: scrollerRef.current?.scrollLeft ?? scrollLeftRef.current,
+                scrollLeft: scrollLeftRef.current,
                 pxPerSec: pxPerSecRef.current,
             });
         },
-        [canvasRef, scrollerRef, scrollLeftRef, pxPerSecRef],
+        [canvasRef, scrollLeftRef, pxPerSecRef],
     );
 
     const pointerValue = useCallback(
@@ -1159,12 +1170,11 @@ export function usePianoRollInteractions(args: {
         (e: ReactMouseEvent<HTMLDivElement>) => {
             if (e.button !== 0) return;
             const bounds = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-            const sl = scrollerRef.current?.scrollLeft ?? scrollLeftRef.current;
             const sec = clamp(
                 secFromViewportClientX({
                     clientX: e.clientX,
                     viewportLeft: bounds.left,
-                    scrollLeft: sl,
+                    scrollLeft: scrollLeftRef.current,
                     pxPerSec: pxPerSecRef.current,
                 }),
                 0,
@@ -1173,7 +1183,7 @@ export function usePianoRollInteractions(args: {
             dispatch(setplayheadSec(sec));
             void dispatch(seekPlayhead(sec));
         },
-        [dispatch, scrollerRef, scrollLeftRef, pxPerSecRef],
+        [dispatch, scrollLeftRef, pxPerSecRef],
     );
 
     const onScrollerMouseDownCapture = useCallback((e: ReactMouseEvent) => {
@@ -1545,19 +1555,19 @@ export function usePianoRollInteractions(args: {
 
             const pointerXRaw = e.clientX - bounds.left;
             const pointerYRaw = e.clientY - bounds.top;
-            if (
-                pointerXRaw < 0 ||
-                pointerYRaw < 0 ||
-                pointerXRaw > bounds.width ||
-                pointerYRaw > bounds.height
-            ) {
-                return;
-            }
 
             // We rely on preventDefault to stop native scrolling while zooming.
             e.preventDefault();
 
             if (wheelAction === "vertical-zoom") {
+                if (
+                    pointerXRaw < 0 ||
+                    pointerYRaw < 0 ||
+                    pointerXRaw > bounds.width ||
+                    pointerYRaw > bounds.height
+                ) {
+                    return;
+                }
                 const h = Math.max(1, bounds.height);
                 const y = clamp(pointerYRaw, 0, h);
                 const t = yToViewportT(y, h);
@@ -1595,47 +1605,36 @@ export function usePianoRollInteractions(args: {
             }
             const dir = e.deltaY < 0 ? 1 : -1;
             const factor = dir > 0 ? 1.1 : 0.9;
-            const curPxPerBeat = pxPerBeatRef.current;
-
-            // Playhead-based zoom: use playhead position as anchor instead of pointer
-            const secPerBeatLocal = 60 / Math.max(1, bpm);
-            const totalBeats = Math.max(0, dynamicProjectSec / Math.max(1e-9, secPerBeatLocal));
-            let anchorX: number;
-            let anchorBeat: number;
-            if (playheadZoomEnabled && playheadSec != null) {
-                anchorBeat = clamp(playheadSec / secPerBeatLocal, 0, totalBeats);
-                anchorX = anchorBeat * curPxPerBeat - el.scrollLeft;
-                if (anchorX < 0 || anchorX > bounds.width) {
-                    anchorX = bounds.width / 2;
-                }
-                anchorX = clamp(anchorX, 0, Math.max(1, bounds.width));
-            } else {
-                anchorX = clamp(pointerXRaw, 0, Math.max(1, bounds.width));
-                anchorBeat = clamp(
-                    (anchorX + el.scrollLeft) / Math.max(1e-9, curPxPerBeat),
-                    0,
-                    totalBeats,
-                );
-            }
-
-            const minPxPerBeat = MIN_PX_PER_SEC * secPerBeatLocal;
-            const maxPxPerBeat = MAX_PX_PER_SEC * secPerBeatLocal;
-
-            const zoomResult = computeAnchoredHorizontalZoom({
-                currentScale: curPxPerBeat,
+            const totalSec = Math.max(0, dynamicProjectSec);
+            const minPxPerSec = resolveTimelineMinPxPerSec({
+                baseMinPxPerSec: MIN_PX_PER_SEC,
+                projectSec: totalSec,
+                viewportWidthPx: el.clientWidth,
+            });
+            // 与轨道视图共用同一套水平缩放逻辑（秒为单位）：
+            // 鼠标锚点 / 播放光标锚点 / 平滑右延滚动范围全部一致。
+            const pendingZoom = horizontalZoomChainRef.current;
+            const zoomResult = resolveHorizontalWheelZoom({
                 factor,
-                minScale: minPxPerBeat,
-                maxScale: maxPxPerBeat,
-                scrollLeft: el.scrollLeft,
-                viewportWidth: Math.max(1, bounds.width),
-                anchorSec: anchorBeat,
-                contentSec: totalBeats,
+                basePxPerSec: pendingZoom?.nextPxPerSec ?? pxPerSecRef.current,
+                baseScrollLeft: pendingZoom?.nextScrollLeft ?? scrollLeftRef.current,
+                totalSec,
+                viewportWidth: el.clientWidth,
+                playheadZoomEnabled: Boolean(playheadZoomEnabled),
+                playheadSec: playheadSec ?? null,
+                anchorScreenX: pointerXRaw,
+                minPxPerSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
+                minScrollLeft: syncTimelineEnabled ? -timelineOffsetRef.current : 0,
+                anchorOffsetPx: syncTimelineEnabled ? timelineOffsetRef.current : 0,
             });
             if (!zoomResult) return;
 
-            setPxPerBeat(zoomResult.nextScale);
-            el.scrollLeft = zoomResult.nextScrollLeft;
-            syncScrollLeft(el);
+            horizontalZoomChainRef.current = {
+                nextPxPerSec: zoomResult.nextPxPerSec,
+                nextScrollLeft: zoomResult.nextScrollLeft,
+            };
+            onHorizontalZoom(zoomResult.nextPxPerSec, zoomResult.nextScrollLeft);
         },
         [
             scrollerRef,
@@ -1649,9 +1648,11 @@ export function usePianoRollInteractions(args: {
             setPitchView,
             setParamViewport,
             invalidate,
-            pxPerBeatRef,
-            setPxPerBeat,
             syncScrollLeft,
+            horizontalZoomChainRef,
+            onHorizontalZoom,
+            syncTimelineEnabled,
+            timelineOffsetRef,
             prVerticalZoomKb,
             scrollHorizontalKb,
             scrollVerticalKb,
@@ -1659,10 +1660,10 @@ export function usePianoRollInteractions(args: {
             vibratoAmplitudeAdjustKb,
             vibratoFrequencyAdjustKb,
             applyVibratoDragAdjustment,
-            bpm,
             dynamicProjectSec,
             playheadSec,
             playheadZoomEnabled,
+            currentParamRange,
         ],
     );
 
@@ -3265,15 +3266,20 @@ export function usePianoRollInteractions(args: {
                             }
 
                             if (Math.abs(deltaPx) > 0.01) {
-                                const maxScrollLeft = Math.max(
+                                const drawingMaxScrollLeft = Math.max(
                                     0,
                                     maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
                                         scroller.clientWidth,
                                 );
+                                const nativeOffset = syncTimelineEnabled
+                                    ? timelineOffsetRef.current
+                                    : 0;
+                                const nativeMaxScrollLeft =
+                                    drawingMaxScrollLeft + nativeOffset;
                                 const nextScrollLeft = clamp(
                                     scroller.scrollLeft + deltaPx,
                                     0,
-                                    maxScrollLeft,
+                                    nativeMaxScrollLeft,
                                 );
                                 if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.01) {
                                     scroller.scrollLeft = nextScrollLeft;
@@ -3284,7 +3290,7 @@ export function usePianoRollInteractions(args: {
 
                         const clampedClientX = clamp(clientX, bounds.left, bounds.right);
                         const beat =
-                            (scroller.scrollLeft + (clampedClientX - bounds.left)) /
+                            (scrollLeftRef.current + (clampedClientX - bounds.left)) /
                             Math.max(1e-9, pxPerBeatRef.current);
                         return clampSelectionBeat(beat);
                     };
@@ -3734,6 +3740,8 @@ export function usePianoRollInteractions(args: {
             disposeFineAdjustedPointerState,
             pxPerBeatRef,
             scrollLeftRef,
+            syncTimelineEnabled,
+            timelineOffsetRef,
             valueToY,
             buildVibratoDense,
             paramEditorSeekPlayheadEnabled,
@@ -3742,6 +3750,7 @@ export function usePianoRollInteractions(args: {
             setActivePointerGestureEnd,
             clearActivePointerGestureEnd,
             setVibratoDragCaptureActive,
+            dynamicProjectSec,
         ],
     );
 

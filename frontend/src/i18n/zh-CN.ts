@@ -579,6 +579,8 @@ export const zhCN = {
     ruler_label_spacing: "标签间距",
     show_playhead_time_in_track_header: "在轨道头显示播放光标时间",
     copy_playhead_time: "复制播放光标时间",
+    sync_timeline_view: "同步时间轴视图",
+    sync_timeline_view_tooltip: "将参数编辑器的水平位置与缩放同步到时间轴",
     grid_snap_dotted_half: "附点2分音符",
     grid_snap_dotted_quarter: "附点4分音符",
     grid_snap_dotted_8th: "附点8分音符",

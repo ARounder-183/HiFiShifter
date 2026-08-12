@@ -184,6 +184,7 @@ export interface SessionState {
     secondaryTimeUnit: TimeUnitChoice;
     rulerLabelSpacingPx: number;
     showPlayheadTimeInTrackHeader: boolean;
+    paramEditorSyncTimeline: boolean;
 
     autoCrossfadeEnabled: boolean;
     /** 分割过渡 */
@@ -988,6 +989,7 @@ const initialState: SessionState = {
     secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
     rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
     showPlayheadTimeInTrackHeader: true,
+    paramEditorSyncTimeline: false,
 
     autoCrossfadeEnabled: true,
     splitTransitionEnabled: true,
@@ -1277,6 +1279,9 @@ const sessionSlice = createSlice({
         },
         setShowPlayheadTimeInTrackHeader(state, action: PayloadAction<boolean>) {
             state.showPlayheadTimeInTrackHeader = Boolean(action.payload);
+        },
+        setParamEditorSyncTimeline(state, action: PayloadAction<boolean>) {
+            state.paramEditorSyncTimeline = Boolean(action.payload);
         },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
@@ -1976,6 +1981,9 @@ const sessionSlice = createSlice({
                     state.showPlayheadTimeInTrackHeader = Boolean(
                         (s as any).showPlayheadTimeInTrackHeader,
                     );
+                }
+                if (s.paramEditorSyncTimeline != null) {
+                    state.paramEditorSyncTimeline = Boolean(s.paramEditorSyncTimeline);
                 }
                 state.pitchSnapEnabled = s.pitchSnap;
                 // Validate pitchSnapUnit
@@ -3463,6 +3471,7 @@ export const {
     setSecondaryTimeUnit,
     setRulerLabelSpacingPx,
     setShowPlayheadTimeInTrackHeader,
+    setParamEditorSyncTimeline,
     toggleAutoCrossfade,
     toggleSplitTransition,
     setSplitTransitionMode,

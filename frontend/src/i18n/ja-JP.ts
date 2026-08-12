@@ -602,6 +602,9 @@ export const jaJP = {
     ruler_label_spacing: "ラベル間隔",
     show_playhead_time_in_track_header: "トラックヘッダーに再生ヘッド時間を表示",
     copy_playhead_time: "再生ヘッド時間をコピー",
+    sync_timeline_view: "タイムライン表示に同期",
+    sync_timeline_view_tooltip:
+        "パラメータエディタの水平位置とズームをタイムラインに同期します",
     grid_snap_dotted_half: "付点2分音符",
     grid_snap_dotted_quarter: "付点4分音符",
     grid_snap_dotted_8th: "付点8分音符",

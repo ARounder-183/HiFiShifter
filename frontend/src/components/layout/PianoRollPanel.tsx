@@ -13,6 +13,8 @@ import {
     CursorArrowIcon,
     EyeOpenIcon,
     EyeClosedIcon,
+    Link2Icon,
+    LinkBreak2Icon,
     Pencil1Icon,
     CheckIcon,
 } from "@radix-ui/react-icons";
@@ -33,6 +35,7 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     setVisibleReferenceRootTrackIds,
@@ -56,7 +59,12 @@ import {
     snapToSemitone,
     transposePitchByScaleSteps,
 } from "../../utils/musicalScales";
-import { computeAnchoredHorizontalZoom } from "../../utils/horizontalZoom";
+import {
+    measureTimelineViewportOffsetPx,
+    timelineViewportSync,
+    timelineViewportNativeToState,
+    timelineViewportStateToNative,
+} from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -75,6 +83,8 @@ import {
     formatCursorTime,
 } from "./timeline";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
+import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
@@ -445,6 +455,7 @@ export const PianoRollPanel: React.FC = () => {
         return buildChildPitchOffsetDegreesParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack]);
 
+    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.paramPxPerSec"));
@@ -457,10 +468,47 @@ export const PianoRollPanel: React.FC = () => {
     const scrollLeftRef = useRef(scrollLeft);
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
-    const keyboardZoomPendingRef = useRef<{
+    // 渲染期立即同步 ref，确保同步视口在 layout effect 落地时，
+    // Canvas 读取到的是与标尺/网格同一帧的新缩放与滚动值。
+    scrollLeftRef.current = scrollLeft;
+    pxPerBeatRef.current = pxPerBeat;
+    pxPerSecRef.current = pxPerSec;
+    const timelineSyncApplyingRef = useRef(false);
+    const timelineOffsetRef = useRef(0);
+    const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
+    const pendingParamSyncViewportRef = useRef<{
+        nativeScrollLeft: number;
+        pxPerSec: number;
+    } | null>(null);
+    const horizontalZoomPendingRef = useRef<{
         nextScale: number;
         nextScrollLeft: number;
     } | null>(null);
+    const horizontalZoomChainRef = useRef<{
+        nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>(null);
+
+    // 测量轨道时间线区与参数编辑器画布区之间的全局水平偏移，
+    // 用于同步时把参数编辑器的绘制坐标与轨道视图按同一屏幕位置对齐。
+    useLayoutEffect(() => {
+        const update = () => {
+            const next = measureTimelineViewportOffsetPx();
+            timelineOffsetRef.current = next;
+            setTimelineOffsetPx((prev) => (Math.abs(prev - next) < 0.5 ? prev : next));
+        };
+        update();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(update);
+            const scroller = scrollerRef.current;
+            if (scroller) observer.observe(scroller);
+            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
+            if (track) observer.observe(track);
+            return () => observer.disconnect();
+        }
+        window.addEventListener("resize", update);
+        return () => window.removeEventListener("resize", update);
+    }, []);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
     // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)
@@ -468,6 +516,7 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         const prevBpm = prevBpmRef.current;
         prevBpmRef.current = s.bpm;
+        if (s.paramEditorSyncTimeline) return;
         if (Math.abs(prevBpm - s.bpm) < 1e-9) return;
         const ratio = prevBpm / Math.max(1e-6, s.bpm);
         const newScrollLeft = scrollLeftRef.current * ratio;
@@ -479,43 +528,161 @@ export const PianoRollPanel: React.FC = () => {
         }
         scrollLeftRef.current = newScrollLeft;
         setScrollLeft(newScrollLeft);
-    }, [s.bpm]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.bpm, s.paramEditorSyncTimeline]);
 
     useEffect(() => {
-        scrollLeftRef.current = scrollLeft;
-    }, [scrollLeft]);
-
-    useEffect(() => {
-        pxPerBeatRef.current = pxPerBeat;
-        pxPerSecRef.current = pxPerSec;
         const timer = setTimeout(() => {
             localStorage.setItem("hifishifter.paramPxPerSec", String(pxPerSec));
         }, 500);
         return () => clearTimeout(timer);
-    }, [pxPerBeat, pxPerSec]);
+    }, [pxPerSec]);
 
+    // 同步开关（双向交互）：订阅共享视口并应用到本面板。
+    // 原生滚动位置 = 共享视口值（轨道坐标）；绘制坐标 = 原生 - 左右偏移。
     useLayoutEffect(() => {
-        const pending = keyboardZoomPendingRef.current;
-        if (!pending) return;
-        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        if (!s.paramEditorSyncTimeline) return;
+        horizontalZoomPendingRef.current = null;
+        horizontalZoomChainRef.current = null;
+        const applyViewport = () => {
+            const store = timelineViewportSync.get();
+            const offset = timelineOffsetRef.current;
+            const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
+            timelineSyncApplyingRef.current = true;
+            pendingParamSyncViewportRef.current = {
+                nativeScrollLeft: store.scrollLeft,
+                pxPerSec: store.pxPerSec,
+            };
+            setScrollLeft(drawingScrollLeft);
+            setPxPerSec(store.pxPerSec);
+            timelineSyncApplyingRef.current = false;
+        };
+        const unsubscribe = timelineViewportSync.subscribe(applyViewport);
+        // 启用瞬间以轨道视图当前值为基准：原生位置对齐共享视口。
+        applyViewport();
+        const scroller = scrollerRef.current;
+        return () => {
+            unsubscribe();
+            pendingParamSyncViewportRef.current = null;
+            horizontalZoomPendingRef.current = null;
+            horizontalZoomChainRef.current = null;
+            // 禁用时移除偏移补偿：把原生滚动位置还原为绘制坐标。
+            if (scroller) {
+                const next = Math.max(0, scrollLeftRef.current);
+                scroller.scrollLeft = next;
+                scrollLeftRef.current = next;
+                lastScrollLeftRef.current = next;
+                setScrollLeft(next);
+                applyScrollLayers(next);
+            }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.paramEditorSyncTimeline]);
+
+    // 布局偏移变化时，同一共享视口对应的绘制坐标也会变化。
+    // 重新按当前偏移计算状态，让同步对齐始终使用最新几何位置。
+    useEffect(() => {
+        if (!s.paramEditorSyncTimeline) return;
+        const store = timelineViewportSync.get();
+        const drawingScrollLeft = timelineViewportNativeToState(
+            store.scrollLeft,
+            timelineOffsetRef.current,
+        );
+        timelineSyncApplyingRef.current = true;
+        pendingParamSyncViewportRef.current = {
+            nativeScrollLeft: store.scrollLeft,
+            pxPerSec: store.pxPerSec,
+        };
+        setScrollLeft(drawingScrollLeft);
+        timelineSyncApplyingRef.current = false;
+    }, [timelineOffsetPx, s.paramEditorSyncTimeline]);
+
+    // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
+    // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
+    // 形成“缩放已变、滚动没变”的水平漂移。
+    useLayoutEffect(() => {
+        const pending = pendingParamSyncViewportRef.current;
+        if (!pending || !s.paramEditorSyncTimeline) return;
+        if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
+        if (Math.abs(timelineOffsetPx - timelineOffsetRef.current) > 0.5) return;
+
+        const offset = timelineOffsetRef.current;
+        const drawingScrollLeft = timelineViewportNativeToState(pending.nativeScrollLeft, offset);
+        if (Math.abs(scrollLeft - drawingScrollLeft) > 0.5) return;
+
+        pendingParamSyncViewportRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
-        keyboardZoomPendingRef.current = null;
-        scroller.scrollLeft = pending.nextScrollLeft;
+        timelineSyncApplyingRef.current = true;
+        pxPerSecRef.current = pending.pxPerSec;
+        pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
+        scrollLeftRef.current = drawingScrollLeft;
+        scroller.scrollLeft = pending.nativeScrollLeft;
         syncScrollLeft(scroller);
-    }, [pxPerSec]);
+        applyScrollLayers(drawingScrollLeft);
+        timelineSyncApplyingRef.current = false;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, timelineOffsetPx]);
+
+    useLayoutEffect(() => {
+        const pending = horizontalZoomPendingRef.current;
+        if (!pending) return;
+        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        horizontalZoomPendingRef.current = null;
+        horizontalZoomChainRef.current = null;
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+
+        const syncEnabled = s.paramEditorSyncTimeline;
+        const offset = syncEnabled ? timelineOffsetRef.current : 0;
+        const native = pending.nextScrollLeft;
+        const next = timelineViewportNativeToState(native, offset);
+        scroller.scrollLeft = native;
+        if (lastScrollLeftRef.current !== next) {
+            lastScrollLeftRef.current = next;
+            scrollLeftRef.current = next;
+            if (syncEnabled && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport({
+                    scrollLeft: native,
+                    pxPerSec,
+                });
+            }
+        }
+        applyScrollLayers(next);
+        // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
+        const expectedNative = timelineViewportStateToNative(next, offset);
+        if (Math.abs(scroller.scrollLeft - expectedNative) > 0.5) {
+            scroller.scrollLeft = expectedNative;
+        }
+        // 同步更新状态：让标尺/网格与画布在同一帧对齐，消除缩放闪屏。
+        setScrollLeft(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
         playheadSec: s.playheadSec,
-        projectSec: s.projectSec,
+        projectSec: dynamicProjectSec,
     });
     useLayoutEffect(() => {
         zoomTimelineStateRef.current = {
             playheadSec: s.playheadSec,
-            projectSec: s.projectSec,
+            projectSec: dynamicProjectSec,
         };
     });
+
+    const queueHorizontalZoom = useCallback(
+        (nextPxPerSec: number, nextNativeScrollLeft: number) => {
+            pxPerBeatRef.current = nextPxPerSec * (60 / Math.max(1e-6, s.bpm));
+            pxPerSecRef.current = nextPxPerSec;
+            horizontalZoomPendingRef.current = {
+                nextScale: nextPxPerSec,
+                nextScrollLeft: nextNativeScrollLeft,
+            };
+            setPxPerSec(nextPxPerSec);
+        },
+        [s.bpm, setPxPerSec],
+    );
 
     useEffect(() => {
         function onZoomFocused(e: Event) {
@@ -533,39 +700,45 @@ export const PianoRollPanel: React.FC = () => {
             const scroller = scrollerRef.current;
             if (!scroller) return;
 
-            const zoom = computeAnchoredHorizontalZoom({
-                currentScale: pxPerSecRef.current,
+            const syncEnabled = s.paramEditorSyncTimeline;
+            const zoom = resolveHorizontalWheelZoom({
                 factor,
-                minScale: MIN_PX_PER_SEC,
-                maxScale: MAX_PX_PER_SEC,
-                scrollLeft: scroller.scrollLeft,
+                basePxPerSec: pxPerSecRef.current,
+                baseScrollLeft: syncEnabled
+                    ? timelineViewportSync.get().scrollLeft
+                    : scrollLeftRef.current,
+                totalSec: projectSec,
                 viewportWidth: scroller.clientWidth,
-                anchorSec: Number(playheadSec ?? 0) || 0,
-                contentSec: projectSec,
+                playheadZoomEnabled: true,
+                playheadSec: Number(playheadSec ?? 0) || 0,
+                anchorScreenX: 0,
+                minPxPerSec: resolveTimelineMinPxPerSec({
+                    baseMinPxPerSec: MIN_PX_PER_SEC,
+                    projectSec,
+                    viewportWidthPx: scroller.clientWidth,
+                }),
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
 
-            keyboardZoomPendingRef.current = {
-                nextScale: zoom.nextScale,
-                nextScrollLeft: zoom.nextScrollLeft,
-            };
-            setPxPerSec(zoom.nextScale);
+            queueHorizontalZoom(zoom.nextPxPerSec, zoom.nextScrollLeft);
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, []); // 空依赖
+    }, [s.paramEditorSyncTimeline, queueHorizontalZoom]);
 
-    const setPxPerBeatImmediate = useCallback(
-        (next: number) => {
-            // next 是新的 pxPerBeat，需要反推回 pxPerSec
-            const nextPxPerSec = next / (60 / Math.max(1e-6, s.bpm));
-            pxPerBeatRef.current = next;
-            pxPerSecRef.current = nextPxPerSec;
-            setPxPerSec(nextPxPerSec);
+    const handleHorizontalZoom = useCallback(
+        (nextPxPerSec: number, nextScrollLeft: number) => {
+            // 计算结果为绘制坐标；同步时需换算回原生（轨道）坐标再交给 layout effect。
+            const nativeNextScrollLeft = timelineViewportStateToNative(
+                nextScrollLeft,
+                s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
+            );
+            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
         },
-        [s.bpm, setPxPerSec],
+        [s.paramEditorSyncTimeline, queueHorizontalZoom],
     );
     // 副参数独立显示开关，默认全部关闭
     const [secondaryParamVisible, setSecondaryParamVisible] = useState<
@@ -948,8 +1121,6 @@ export const PianoRollPanel: React.FC = () => {
         });
     }, [editParam, processorParams, secondaryParamVisible]);
 
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
-
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
             dispatch(setVisibleReferenceRootTrackIds(nextTrackIds));
@@ -1013,6 +1184,16 @@ export const PianoRollPanel: React.FC = () => {
     const viewSizeRef = useRef({ w: 1, h: 1 });
     const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
+    // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
+    // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
+    // 想让原生最大滚动位置为“工程宽 + 同步偏移”，spacer 需再加一个视口宽。
+    const paddedContentWidth = useMemo(
+        () =>
+            contentWidth +
+            viewSize.w +
+            (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
+        [contentWidth, viewSize.w, s.paramEditorSyncTimeline, timelineOffsetPx],
+    );
 
     useLayoutEffect(() => {
         const el = scrollerRef.current;
@@ -1048,7 +1229,7 @@ export const PianoRollPanel: React.FC = () => {
                 if (rulerPlayheadHeadRef.current) {
                     rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
                 }
-                if (s.autoScrollEnabled && s.runtime.isPlaying) {
+                if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
                     if (scroller) {
                         const next = computeAutoFollowScrollLeft({
@@ -1065,7 +1246,13 @@ export const PianoRollPanel: React.FC = () => {
                 }
                 invalidate();
             },
-            [contentWidth, invalidate, s.autoScrollEnabled, s.runtime.isPlaying],
+            [
+                contentWidth,
+                invalidate,
+                s.paramEditorSyncTimeline,
+                s.autoScrollEnabled,
+                s.runtime.isPlaying,
+            ],
         ),
     });
 
@@ -1078,14 +1265,7 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, []);
 
-    function syncScrollLeft(scroller: HTMLDivElement) {
-        const next = scroller.scrollLeft;
-        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
-            return;
-        }
-        lastScrollLeftRef.current = next;
-        scrollLeftRef.current = next;
-
+    function applyScrollLayers(next: number) {
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
@@ -1105,14 +1285,32 @@ export const PianoRollPanel: React.FC = () => {
                 left >= -2 && left <= viewSizeRef.current.w + 2 ? "0.9" : "0";
         }
 
+        invalidate();
+    }
+
+    function syncScrollLeft(scroller: HTMLDivElement) {
+        const syncEnabled = s.paramEditorSyncTimeline;
+        const offset = syncEnabled ? timelineOffsetRef.current : 0;
+        const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
+        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
+            return;
+        }
+        lastScrollLeftRef.current = next;
+        scrollLeftRef.current = next;
+        if (syncEnabled && !timelineSyncApplyingRef.current) {
+            // 原生滚动位置 == 共享视口值（轨道坐标），直接推送。
+            timelineViewportSync.setViewport({
+                scrollLeft: scroller.scrollLeft,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
+        applyScrollLayers(next);
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
                 scrollStateRafRef.current = null;
                 setScrollLeft(scrollLeftRef.current);
             });
         }
-
-        invalidate();
     }
 
     useLayoutEffect(() => {
@@ -1746,12 +1944,14 @@ export const PianoRollPanel: React.FC = () => {
         pitchEnabled,
         toolMode: s.toolMode,
         secPerBeat,
-        bpm: s.bpm,
         dynamicProjectSec,
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
-        setPxPerBeat: setPxPerBeatImmediate,
+        horizontalZoomChainRef,
+        onHorizontalZoom: handleHorizontalZoom,
+        syncTimelineEnabled: s.paramEditorSyncTimeline,
+        timelineOffsetRef,
         setPitchView,
         setParamViewport,
         pitchViewRef,
@@ -1894,6 +2094,7 @@ export const PianoRollPanel: React.FC = () => {
 
     // Auto-scroll: keep playhead visible in parameter editor during playback
     useEffect(() => {
+        if (s.paramEditorSyncTimeline) return;
         if (!s.autoScrollEnabled || !s.runtime.isPlaying) return;
         const scroller = scrollerRef.current;
         if (!scroller) return;
@@ -1907,7 +2108,14 @@ export const PianoRollPanel: React.FC = () => {
             scroller.scrollLeft = next;
             syncScrollLeft(scroller);
         }
-    }, [s.autoScrollEnabled, s.runtime.isPlaying, s.playheadSec, pxPerSec, contentWidth]);
+    }, [
+        s.paramEditorSyncTimeline,
+        s.autoScrollEnabled,
+        s.runtime.isPlaying,
+        s.playheadSec,
+        pxPerSec,
+        contentWidth,
+    ]);
 
     // Piano keys (axis) area: keep touchpad wheel behavior aligned with the main editor.
     useEffect(() => {
@@ -1995,6 +2203,12 @@ export const PianoRollPanel: React.FC = () => {
             if (wheelAction === "vertical-pan") {
                 e.preventDefault();
                 applyVerticalPanDelta(e.deltaY);
+                return;
+            }
+
+            if (wheelAction === "horizontal-zoom") {
+                // 主画布/轨道视图负责水平缩放；钢琴键区只拦截，避免原生滚动抢走事件。
+                e.preventDefault();
                 return;
             }
 
@@ -3244,6 +3458,20 @@ export const PianoRollPanel: React.FC = () => {
                 className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
                 <Flex align="center" gap="2">
+                    <IconButton
+                        size="1"
+                        variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
+                        color="gray"
+                        data-tooltip={tAny("sync_timeline_view_tooltip")}
+                        aria-label={tAny("sync_timeline_view")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
+                    </IconButton>
                     <Text size="1" weight="bold" color="gray">
                         {t("param_editor")}
                     </Text>
@@ -4117,6 +4345,7 @@ export const PianoRollPanel: React.FC = () => {
                         pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
                         secPerBeat={secPerBeat}
+                        viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}
                         playheadLineRef={rulerPlayheadLineRef}
                         playheadHeadRef={rulerPlayheadHeadRef}
@@ -4208,7 +4437,7 @@ export const PianoRollPanel: React.FC = () => {
                         <div
                             className="relative"
                             style={{
-                                width: contentWidth,
+                                width: paddedContentWidth,
                                 height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
                                 pointerEvents: "none",
                             }}

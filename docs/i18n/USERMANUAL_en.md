@@ -168,6 +168,8 @@ The parameter editor is one of HiFiShifter's core features, allowing you to edit
 
 To enable parameter editing for a track, you must first press the track's `C` (Compose) button and wait for audio analysis to complete. HiFiShifter uses offline rendering; after each parameter edit, you must wait for the parameters to re-render before auditioning.
 
+The `Sync Timeline View` button (link icon) to the left of the `Parameter Editor` label in the parameter editor header toggles horizontal synchronization with the track view. When enabled, the two views share the same horizontal position and zoom in both directions: scrolling or zooming in either view updates the other, and enabling sync aligns the parameter editor to the track view as the reference. Because the track view has a track-header area on its left, the parameter editor automatically compensates for the horizontal offset so grid lines and time-axis ticks line up at the same on-screen positions in both panels. When disabled (default), the two views zoom and scroll independently.
+
 ### 1. Algorithms and Parameters
 
 The current version of HiFiShifter supports three vocal tuning algorithms and their parameters:

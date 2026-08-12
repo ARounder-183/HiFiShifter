@@ -46,6 +46,7 @@ export const persistUiSettings = createAsyncThunk(
             secondaryTimeUnit: s.secondaryTimeUnit,
             rulerLabelSpacingPx: s.rulerLabelSpacingPx,
             showPlayheadTimeInTrackHeader: s.showPlayheadTimeInTrackHeader,
+            paramEditorSyncTimeline: s.paramEditorSyncTimeline,
             pitchSnap: s.pitchSnapEnabled,
             pitchSnapUnit: s.pitchSnapUnit,
             pitchSnapToleranceCents: s.pitchSnapToleranceCents,

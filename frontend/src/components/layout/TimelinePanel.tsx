@@ -1086,7 +1086,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimelineScrollArea
                     scrollRef={scrollRef}
                     projectSec={dynamicProjectSec}
-                    bpm={s.bpm}
                     pxPerSec={pxPerSec}
                     setPxPerSec={setPxPerSec}
                     rowHeight={rowHeight}

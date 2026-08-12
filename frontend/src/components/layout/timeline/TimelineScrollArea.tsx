@@ -5,20 +5,14 @@ import { clamp } from "./math";
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { getTimelineWheelAction } from "../wheelGesture";
-import { resolveWheelZoom } from "./runtime/timelineInteractionController";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
-import { screenXToWorldSec } from "./runtime/timelineWorld";
-import {
-    resolvePlayheadZoomScrollLeft,
-    resolveTimelineScrollRange,
-} from "./runtime/timelineScrollRange";
+import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
         scrollRef: React.MutableRefObject<HTMLDivElement | null>;
         projectSec: number;
-        bpm: number;
         pxPerSec: number;
         setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
         rowHeight: number;
@@ -34,7 +28,6 @@ export const TimelineScrollArea: React.FC<
 > = ({
     scrollRef,
     projectSec,
-    bpm,
     pxPerSec,
     setPxPerSec,
     rowHeight,
@@ -133,7 +126,7 @@ export const TimelineScrollArea: React.FC<
         pendingZoomRef.current = null;
         scroller.scrollLeft = pending.nextScrollLeft;
         syncScrollLeft(scroller);
-    }, [projectSec, bpm, pxPerSec, scrollRef]);
+    }, [projectSec, pxPerSec, scrollRef]);
 
     useLayoutEffect(() => {
         const scroller = scrollRef.current;
@@ -253,54 +246,23 @@ export const TimelineScrollArea: React.FC<
                 projectSec: totalSec,
                 viewportWidthPx: scroller.clientWidth,
             });
-            const nextPxPerSec = clamp(basePxPerSec * factor, minPxPerSec, MAX_PX_PER_SEC);
-            if (Math.abs(nextPxPerSec - basePxPerSec) < 1e-9) return;
-
-            let nextScrollLeft: number;
-            if (playheadZoomEnabled && getPlayheadSec) {
-                const playheadSec = clamp(getPlayheadSec(), 0, totalSec);
-                // 播放光标在画面内时以光标当前位置为锚点；
-                // 不在画面内时才校正偏移，使其出现在画面正中心。
-                nextScrollLeft = resolvePlayheadZoomScrollLeft({
-                    playheadSec,
-                    basePxPerSec,
-                    baseScrollLeft,
-                    nextPxPerSec,
-                    viewportWidth: scroller.clientWidth,
-                });
-            } else {
-                const anchorX = clamp(
-                    e.clientX - bounds.left,
-                    0,
-                    Math.max(1, scroller.clientWidth),
-                );
-                const anchorSec = screenXToWorldSec(anchorX, {
-                    pxPerSec: basePxPerSec,
-                    rowHeight: rowHeightRef.current,
-                    scrollLeftPx: baseScrollLeft,
-                    scrollTopPx: scroller.scrollTop,
-                });
-                const zoom = resolveWheelZoom({
-                    anchorScreenX: anchorX,
-                    anchorSec,
-                    nextPxPerSec,
-                });
-                nextScrollLeft = zoom.nextScrollLeftPx;
-            }
-
-            const range = resolveTimelineScrollRange({
-                contentWidth: totalSec * nextPxPerSec,
+            const zoom = resolveHorizontalWheelZoom({
+                factor,
+                basePxPerSec,
+                baseScrollLeft,
+                totalSec,
                 viewportWidth: scroller.clientWidth,
+                playheadZoomEnabled: Boolean(playheadZoomEnabled),
+                playheadSec: getPlayheadSec?.() ?? null,
+                anchorScreenX: e.clientX - bounds.left,
+                minPxPerSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
-            const nextScrollLeftClamped = clamp(
-                nextScrollLeft,
-                range.minScrollLeft,
-                range.maxScrollLeft,
-            );
+            if (!zoom) return;
 
             zoomPendingRef.current = {
-                nextPxPerSec,
-                nextScrollLeft: nextScrollLeftClamped,
+                nextPxPerSec: zoom.nextPxPerSec,
+                nextScrollLeft: zoom.nextScrollLeft,
             };
 
             if (zoomRafRef.current == null) {
@@ -322,7 +284,6 @@ export const TimelineScrollArea: React.FC<
             scroller.removeEventListener("wheel", handler);
         };
     }, [
-        pxPerSec,
         scrollRef,
         setPxPerSec,
         setRowHeight,

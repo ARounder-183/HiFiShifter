@@ -19,7 +19,7 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
-import { computeAnchoredHorizontalZoom } from "../../../../utils/horizontalZoom";
+import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import type { ClipTemplate } from "../../../../features/session/sessionTypes";
@@ -313,27 +313,29 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const scroller = scrollRef.current;
             if (!scroller) return;
 
-            const zoom = computeAnchoredHorizontalZoom({
-                currentScale: pxPerSecRef.current,
+            const zoom = resolveHorizontalWheelZoom({
                 factor,
-                minScale: resolveTimelineMinPxPerSec({
+                basePxPerSec: pxPerSecRef.current,
+                baseScrollLeft: scroller.scrollLeft,
+                totalSec: dynamicProjectSec,
+                viewportWidth: scroller.clientWidth,
+                playheadZoomEnabled: true,
+                playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
+                anchorScreenX: 0,
+                minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
                     projectSec: dynamicProjectSec,
                     viewportWidthPx: scroller.clientWidth,
                 }),
-                maxScale: MAX_PX_PER_SEC,
-                scrollLeft: scroller.scrollLeft,
-                viewportWidth: scroller.clientWidth,
-                anchorSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
-                contentSec: dynamicProjectSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
 
             keyboardZoomPendingRef.current = {
-                nextScale: zoom.nextScale,
+                nextScale: zoom.nextPxPerSec,
                 nextScrollLeft: zoom.nextScrollLeft,
             };
-            setPxPerSec(zoom.nextScale);
+            setPxPerSec(zoom.nextPxPerSec);
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);

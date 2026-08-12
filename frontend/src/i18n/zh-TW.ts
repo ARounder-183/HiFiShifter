@@ -580,6 +580,8 @@ export const zhTW = {
     ruler_label_spacing: "標籤間距",
     show_playhead_time_in_track_header: "在軌道標題列顯示播放游標時間",
     copy_playhead_time: "複製播放游標時間",
+    sync_timeline_view: "同步時間軸檢視",
+    sync_timeline_view_tooltip: "將參數編輯器的水平位置與縮放同步到時間軸",
     grid_snap_dotted_half: "附點2分音符",
     grid_snap_dotted_quarter: "附點4分音符",
     grid_snap_dotted_8th: "附點8分音符",

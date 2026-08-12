@@ -19,6 +19,7 @@ import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
+import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -50,6 +51,7 @@ type TimelineSessionSlice = Pick<
     | "clipFormantToolWindow"
     | "grid"
     | "gridSnapEnabled"
+    | "paramEditorSyncTimeline"
     | "primaryTimeUnit"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
@@ -201,6 +203,7 @@ export function useTimelineState(): TimelineStateResult {
             grid: state.session.grid,
             gridSnapEnabled: state.session.gridSnapEnabled,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
+            paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
             primaryTimeUnit: state.session.primaryTimeUnit,
             playbackRateVersion: state.session.playbackRateVersion,
             rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
@@ -227,6 +230,13 @@ export function useTimelineState(): TimelineStateResult {
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
+    const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
+    paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
+    const timelineSyncApplyingRef = useRef(false);
+    const pendingTimelineSyncViewportRef = useRef<{
+        scrollLeft: number;
+        pxPerSec: number;
+    } | null>(null);
     const playheadDragRef = useRef<{
         pointerId: number;
         lastBeat: number;
@@ -304,6 +314,12 @@ export function useTimelineState(): TimelineStateResult {
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
+        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport({
+                scrollLeft: next,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
@@ -325,6 +341,56 @@ export function useTimelineState(): TimelineStateResult {
                 : action;
         syncScrollLeft(next);
     };
+
+    // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
+    useEffect(() => {
+        if (!s.paramEditorSyncTimeline) return;
+        const apply = () => {
+            const store = timelineViewportSync.get();
+            timelineSyncApplyingRef.current = true;
+            pendingTimelineSyncViewportRef.current = {
+                scrollLeft: store.scrollLeft,
+                pxPerSec: store.pxPerSec,
+            };
+            setScrollLeft(store.scrollLeft);
+            setPxPerSec(store.pxPerSec);
+            timelineSyncApplyingRef.current = false;
+        };
+        const unsubscribe = timelineViewportSync.subscribe(apply);
+        return () => {
+            unsubscribe();
+            pendingTimelineSyncViewportRef.current = null;
+        };
+    }, [s.paramEditorSyncTimeline]);
+
+    // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
+    useEffect(() => {
+        if (s.paramEditorSyncTimeline) {
+            timelineViewportSync.setViewport({
+                scrollLeft: scrollLeftRef.current,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
+    }, [s.paramEditorSyncTimeline]);
+
+    // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
+    // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
+    // 形成“缩放已变、滚动没变”的水平漂移。
+    useLayoutEffect(() => {
+        const pending = pendingTimelineSyncViewportRef.current;
+        if (!pending || !s.paramEditorSyncTimeline) return;
+        if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
+        if (Math.abs(scrollLeft - pending.scrollLeft) > 0.5) return;
+
+        pendingTimelineSyncViewportRef.current = null;
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+
+        timelineSyncApplyingRef.current = true;
+        scroller.scrollLeft = pending.scrollLeft;
+        syncScrollLeft(pending.scrollLeft);
+        timelineSyncApplyingRef.current = false;
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {

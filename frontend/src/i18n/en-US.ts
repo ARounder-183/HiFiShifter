@@ -594,6 +594,9 @@ export const enUS = {
     ruler_label_spacing: "Label Spacing",
     show_playhead_time_in_track_header: "Show playhead time in track header",
     copy_playhead_time: "Copy Playhead Time",
+    sync_timeline_view: "Sync Timeline View",
+    sync_timeline_view_tooltip:
+        "Sync the parameter editor's horizontal position and zoom with the timeline",
     grid_snap_dotted_half: "Dotted Half Note",
     grid_snap_dotted_quarter: "Dotted Quarter Note",
     grid_snap_dotted_8th: "Dotted 8th Note",

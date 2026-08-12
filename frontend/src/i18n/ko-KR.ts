@@ -676,6 +676,9 @@ export const koKR = {
     ruler_label_spacing: "라벨 간격",
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",
+    sync_timeline_view: "타임라인 뷰 동기화",
+    sync_timeline_view_tooltip:
+        "파라미터 에디터의 가로 위치와 확대/축소를 타임라인에 동기화합니다",
     grid_snap_dotted_half: "점2분음표",
     grid_snap_dotted_quarter: "점4분음표",
     grid_snap_dotted_8th: "점8분음표",
