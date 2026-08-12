@@ -243,7 +243,7 @@ fn default_hifigan_mel_stretch() -> bool {
 }
 
 fn default_split_transition_mode() -> String {
-    "fade".to_string()
+    "overlap".to_string()
 }
 
 fn default_split_transition_duration_sec() -> f64 {
@@ -386,7 +386,7 @@ mod tests {
         );
         assert!(settings.default_hifigan_mel_stretch);
         assert!(settings.split_transition_enabled);
-        assert_eq!(settings.split_transition_mode, "fade");
+        assert_eq!(settings.split_transition_mode, "overlap");
         assert_eq!(settings.split_transition_duration_unit, "seconds");
         assert!((settings.split_transition_duration_sec - 0.01).abs() < 1e-12);
         assert!((settings.split_transition_duration_percent - 1.0).abs() < 1e-12);
@@ -406,7 +406,7 @@ mod tests {
             ..UiSettings::default()
         };
         settings.normalize_split_transition();
-        assert_eq!(settings.split_transition_mode, "fade");
+        assert_eq!(settings.split_transition_mode, "overlap");
         assert_eq!(settings.split_transition_duration_unit, "seconds");
         assert!((settings.split_transition_duration_sec - 10.0).abs() < 1e-12);
         assert!((settings.split_transition_duration_percent - 100.0).abs() < 1e-12);

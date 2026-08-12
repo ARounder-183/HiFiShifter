@@ -128,8 +128,8 @@ Track view toolbar buttons:
 
 The `Split Transition` toolbar button is located to the right of `Auto Crossfade`. Left-click toggles the feature; right-click opens detailed settings.
 
-- `Fades Only` (default): After splitting, automatically adds a fade-out of length X to the left clip and a fade-in of length X to the right clip. The two clips do not overlap.
-- `Extend & Overlap`: After splitting, automatically extends the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. The extension keeps the source material at the same timeline position and correctly accounts for playback rate. Extensions are clamped to the clip source's actual length. When `Auto Crossfade` is also enabled, a crossfade is automatically created across this overlap.
+- `Fades Only`: After splitting, automatically adds a fade-out of length X to the left clip and a fade-in of length X to the right clip. The two clips do not overlap.
+- `Extend & Overlap` (default): After splitting, automatically extends the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. The extension keeps the source material at the same timeline position and correctly accounts for playback rate. Extensions are clamped to the clip source's actual length. When `Auto Crossfade` is also enabled, a crossfade is automatically created across this overlap.
 - `Transition Length X`: The fade/overlap length used by both modes, 0.01 seconds by default.
 - `Transition Length Unit`: Choose `Seconds` or `Percent`. Percent defaults to 1% and is calculated from the combined full length of the two clips created by the split; for example, two clips totaling 10 seconds at 1% gives 0.1 seconds.
 - `Fade Curve`: Selects the fade curve used by split transitions.

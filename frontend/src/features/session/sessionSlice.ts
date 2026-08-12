@@ -971,7 +971,7 @@ const initialState: SessionState = {
 
     autoCrossfadeEnabled: true,
     splitTransitionEnabled: true,
-    splitTransitionMode: "fade",
+    splitTransitionMode: "overlap",
     splitTransitionDurationUnit: "seconds",
     splitTransitionDurationSec: 0.01,
     splitTransitionDurationPercent: 1,
@@ -1889,7 +1889,7 @@ const sessionSlice = createSlice({
                     (s as any).splitTransitionEnabled ?? true,
                 );
                 state.splitTransitionMode =
-                    (s as any).splitTransitionMode === "overlap" ? "overlap" : "fade";
+                    (s as any).splitTransitionMode === "fade" ? "fade" : "overlap";
                 state.splitTransitionDurationUnit =
                     (s as any).splitTransitionDurationUnit === "percent"
                         ? "percent"
