@@ -363,7 +363,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
                 viewportWidth: scroller.clientWidth,
-                contentWidth: scroller.scrollWidth,
+                contentWidth: dynamicProjectSec * pxPerSec,
             });
             scroller.scrollLeft = next;
             syncScrollLeft(next);

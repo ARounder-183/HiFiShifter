@@ -9,6 +9,10 @@ import { resolveWheelZoom } from "./runtime/timelineInteractionController";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
 import { screenXToWorldSec } from "./runtime/timelineWorld";
+import {
+    resolvePlayheadZoomScrollLeft,
+    resolveTimelineScrollRange,
+} from "./runtime/timelineScrollRange";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
@@ -244,41 +248,59 @@ export const TimelineScrollArea: React.FC<
             const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
 
             const totalSec = Math.max(0, projectSec);
-            let anchorSec: number;
+            const minPxPerSec = resolveTimelineMinPxPerSec({
+                baseMinPxPerSec: MIN_PX_PER_SEC,
+                projectSec: totalSec,
+                viewportWidthPx: scroller.clientWidth,
+            });
+            const nextPxPerSec = clamp(basePxPerSec * factor, minPxPerSec, MAX_PX_PER_SEC);
+            if (Math.abs(nextPxPerSec - basePxPerSec) < 1e-9) return;
 
-            // Playhead-based zoom: use playhead as anchor instead of pointer
+            let nextScrollLeft: number;
             if (playheadZoomEnabled && getPlayheadSec) {
-                anchorSec = clamp(getPlayheadSec(), 0, totalSec);
+                const playheadSec = clamp(getPlayheadSec(), 0, totalSec);
+                // 播放光标在画面内时以光标当前位置为锚点；
+                // 不在画面内时才校正偏移，使其出现在画面正中心。
+                nextScrollLeft = resolvePlayheadZoomScrollLeft({
+                    playheadSec,
+                    basePxPerSec,
+                    baseScrollLeft,
+                    nextPxPerSec,
+                    viewportWidth: scroller.clientWidth,
+                });
             } else {
-                const anchorX = clamp(e.clientX - bounds.left, 0, Math.max(1, bounds.width));
-                anchorSec = screenXToWorldSec(anchorX, {
+                const anchorX = clamp(
+                    e.clientX - bounds.left,
+                    0,
+                    Math.max(1, scroller.clientWidth),
+                );
+                const anchorSec = screenXToWorldSec(anchorX, {
                     pxPerSec: basePxPerSec,
                     rowHeight: rowHeightRef.current,
                     scrollLeftPx: baseScrollLeft,
                     scrollTopPx: scroller.scrollTop,
                 });
+                const zoom = resolveWheelZoom({
+                    anchorScreenX: anchorX,
+                    anchorSec,
+                    nextPxPerSec,
+                });
+                nextScrollLeft = zoom.nextScrollLeftPx;
             }
 
-            const minPxPerSec = resolveTimelineMinPxPerSec({
-                baseMinPxPerSec: MIN_PX_PER_SEC,
-                projectSec: totalSec,
-                viewportWidthPx: bounds.width,
+            const range = resolveTimelineScrollRange({
+                contentWidth: totalSec * nextPxPerSec,
+                viewportWidth: scroller.clientWidth,
             });
-            const nextPxPerSec = clamp(basePxPerSec * factor, minPxPerSec, MAX_PX_PER_SEC);
-            if (Math.abs(nextPxPerSec - basePxPerSec) < 1e-9) return;
-
-            const anchorScreenX = clamp(e.clientX - bounds.left, 0, Math.max(1, bounds.width));
-            const zoom = resolveWheelZoom({
-                anchorScreenX,
-                anchorSec,
-                nextPxPerSec,
-            });
-            const maxScrollLeft = Math.max(0, totalSec * nextPxPerSec - Math.max(1, bounds.width));
-            const nextScrollLeft = clamp(zoom.nextScrollLeftPx, 0, maxScrollLeft);
+            const nextScrollLeftClamped = clamp(
+                nextScrollLeft,
+                range.minScrollLeft,
+                range.maxScrollLeft,
+            );
 
             zoomPendingRef.current = {
                 nextPxPerSec,
-                nextScrollLeft,
+                nextScrollLeft: nextScrollLeftClamped,
             };
 
             if (zoomRafRef.current == null) {
