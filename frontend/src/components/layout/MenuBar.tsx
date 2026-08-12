@@ -19,9 +19,14 @@ import {
     setDefaultStretchAlgorithm,
     setOrtEp,
     setOrtDeviceId,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
+import type { TimeUnit } from "../../features/session/sessionTypes";
+import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 
 
@@ -71,6 +76,19 @@ interface MenuBarProps {
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
 }
 
+function timeUnitLabelKey(unit: TimeUnit): string {
+    switch (unit) {
+        case "barBeats":
+            return "time_unit_bar_beats";
+        case "barDivisions":
+            return "time_unit_bar_divisions";
+        case "seconds":
+            return "time_unit_seconds";
+        case "clock":
+            return "time_unit_clock";
+    }
+}
+
 export const MenuBar: React.FC<MenuBarProps> = ({
     onNewProject,
     onOpenProject,
@@ -88,6 +106,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
@@ -560,6 +579,68 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
                         {tAny("menu_appearance_settings")}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+
+                    {/* Time Display */}
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {tAny("time_display")}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_primary")}:{" "}
+                                    {tAny(timeUnitLabelKey(s.primaryTimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNITS.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setPrimaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.primaryTimeUnit === unit,
+                                                tAny(timeUnitLabelKey(unit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_secondary")}:{" "}
+                                    {s.secondaryTimeUnit === "none"
+                                        ? tAny("time_unit_none")
+                                        : tAny(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNIT_CHOICES.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setSecondaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.secondaryTimeUnit === unit,
+                                                unit === "none"
+                                                    ? tAny("time_unit_none")
+                                                    : tAny(timeUnitLabelKey(unit as TimeUnit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item onSelect={() => setTimeDisplaySettingsOpen(true)}>
+                                {tAny("timeline_display_settings")}
+                            </DropdownMenu.Item>
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
@@ -878,6 +959,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <AppearanceSettingsDialog
                 open={appearanceDialogOpen}
                 onOpenChange={setAppearanceDialogOpen}
+            />
+
+            <TimelineDisplaySettingsDialog
+                open={timeDisplaySettingsOpen}
+                onOpenChange={setTimeDisplaySettingsOpen}
             />
 
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />

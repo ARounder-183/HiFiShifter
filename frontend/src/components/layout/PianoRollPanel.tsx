@@ -33,6 +33,8 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     createClipsRemote,
@@ -68,8 +70,12 @@ import {
     MAX_PX_PER_SEC,
     MIN_PX_PER_SEC,
     TimeRuler,
+    buildRulerTicks,
     clamp,
+    formatCursorTime,
 } from "./timeline";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
@@ -1006,6 +1012,7 @@ export const PianoRollPanel: React.FC = () => {
 
     const viewSizeRef = useRef({ w: 1, h: 1 });
     const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
 
     useLayoutEffect(() => {
         const el = scrollerRef.current;
@@ -3165,17 +3172,68 @@ export const PianoRollPanel: React.FC = () => {
 
     const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
 
-    const timeRulerBars = useMemo(() => {
-        const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        const totalBeats = Math.max(1, Math.ceil(s.projectSec / secPerBeat));
-        const result: Array<{ beat: number; label: string }> = [];
-        let barIndex = 1;
-        for (let beat = 0; beat <= totalBeats; beat += beatsPerBar) {
-            result.push({ beat, label: `${barIndex}.1` });
-            barIndex += 1;
+    const timeRulerTicks = useMemo(
+        () =>
+            buildRulerTicks({
+                pxPerSec,
+                scrollLeft,
+                viewportWidth: viewSize.w,
+                projectSec: dynamicProjectSec,
+                bpm: s.bpm,
+                beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+                grid: s.grid,
+                primaryUnit: s.primaryTimeUnit,
+                secondaryUnit: s.secondaryTimeUnit,
+                minLabelSpacingPx: s.rulerLabelSpacingPx,
+            }),
+        [
+            pxPerSec,
+            scrollLeft,
+            viewSize.w,
+            dynamicProjectSec,
+            s.bpm,
+            s.beats,
+            s.grid,
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            s.rulerLabelSpacingPx,
+        ],
+    );
+    const timeContext = useMemo<TimeFormatContext>(
+        () => ({
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+        }),
+        [s.bpm, s.beats, s.grid],
+    );
+    const handlePrimaryUnitChange = useCallback(
+        (unit: TimeUnit) => {
+            dispatch(setPrimaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleSecondaryUnitChange = useCallback(
+        (unit: TimeUnitChoice) => {
+            dispatch(setSecondaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleCopyPlayheadTime = useCallback(async () => {
+        const text = formatCursorTime(
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            Number(s.playheadSec ?? 0),
+            timeContext,
+        ).combined;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            // 忽略复制失败
         }
-        return result;
-    }, [s.beats, s.projectSec, secPerBeat]);
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
 
     return (
         <Flex direction="column" className="h-full w-full bg-qt-graph-bg border-t border-qt-border">
@@ -3701,6 +3759,10 @@ export const PianoRollPanel: React.FC = () => {
 
                 {/* Pitch Snap 设置弹窗 */}
                 <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
+                <TimelineDisplaySettingsDialog
+                    open={timeDisplaySettingsOpen}
+                    onOpenChange={setTimeDisplaySettingsOpen}
+                />
 
                 <Flex gap="2" align="center">
                     <Flex gap="1" align="center">
@@ -4034,7 +4096,7 @@ export const PianoRollPanel: React.FC = () => {
                 {/* Left axis + corner */}
                 <Flex direction="column" className="shrink-0">
                     <Box
-                        className="h-6 bg-qt-window border-b border-qt-border"
+                        className="h-12 bg-qt-window border-b border-qt-border"
                         style={{ width: AXIS_W }}
                     />
                     <div
@@ -4051,7 +4113,7 @@ export const PianoRollPanel: React.FC = () => {
                     <TimeRuler
                         contentWidth={contentWidth}
                         scrollLeft={scrollLeft}
-                        bars={timeRulerBars}
+                        ticks={timeRulerTicks}
                         pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
                         secPerBeat={secPerBeat}
@@ -4059,6 +4121,14 @@ export const PianoRollPanel: React.FC = () => {
                         playheadLineRef={rulerPlayheadLineRef}
                         playheadHeadRef={rulerPlayheadHeadRef}
                         contentRef={rulerContentRef}
+                        timeContext={timeContext}
+                        primaryUnit={s.primaryTimeUnit}
+                        secondaryUnit={s.secondaryTimeUnit}
+                        onPrimaryUnitChange={handlePrimaryUnitChange}
+                        onSecondaryUnitChange={handleSecondaryUnitChange}
+                        onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                        onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                        t={t as (key: string) => string}
                         onMouseDown={(e) => {
                             document.body.setAttribute("data-hs-focus-window", "pianoRoll");
                             interactions.onRulerMouseDown(e);

@@ -33,8 +33,10 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
     TRACK_ADD_ROW_HEIGHT,
+    buildRulerTicks,
     gridStepBeats,
 } from "../";
+import type { RulerTick } from "../timeFormat.js";
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -48,6 +50,10 @@ type TimelineSessionSlice = Pick<
     | "clipFormantToolWindow"
     | "grid"
     | "gridSnapEnabled"
+    | "primaryTimeUnit"
+    | "secondaryTimeUnit"
+    | "rulerLabelSpacingPx"
+    | "showPlayheadTimeInTrackHeader"
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
@@ -104,7 +110,7 @@ export interface TimelineStateResult {
     contentWidth: number;
     contentHeight: number;
     dynamicProjectSec: number;
-    bars: Array<{ beat: number; label: string }>;
+    ticks: RulerTick[];
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -195,9 +201,13 @@ export function useTimelineState(): TimelineStateResult {
             grid: state.session.grid,
             gridSnapEnabled: state.session.gridSnapEnabled,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
+            primaryTimeUnit: state.session.primaryTimeUnit,
             playbackRateVersion: state.session.playbackRateVersion,
+            rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
+            secondaryTimeUnit: state.session.secondaryTimeUnit,
             selectedClipId: state.session.selectedClipId,
             selectedTrackId: state.session.selectedTrackId,
+            showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
             trackMeters: state.session.trackMeters,
             tracks: state.session.tracks,
         }),
@@ -442,37 +452,33 @@ export function useTimelineState(): TimelineStateResult {
         (dropPreview && !dropPreview.trackId ? 1 : 0) + (clipDropNewTrack ? 1 : 0);
     const contentHeight = (s.tracks.length + dropExtraRows) * rowHeight + TRACK_ADD_ROW_HEIGHT;
 
-    // ── bars ─────────────────────────────────────────────────
-    const bars = useMemo(() => {
+    // ── ticks（自适应标尺刻度）──────────────────────────────────
+    const ticks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        const secPerBeatLocal = 60 / Math.max(1, s.bpm);
-        const totalBeats = Math.max(1, Math.ceil(dynamicProjectSec / secPerBeatLocal));
-        const totalBars = Math.max(1, Math.ceil(totalBeats / beatsPerBar));
-
-        let startBarIndex = 0;
-        let endBarIndex = totalBars;
-
-        if (Number.isFinite(viewportWidth) && viewportWidth > 0) {
-            const beatPx = Math.max(1e-9, secPerBeatLocal * pxPerSec);
-            const bufferPx = Math.max(240, viewportWidth * 0.5);
-            const leftPx = Math.max(0, scrollLeft - bufferPx);
-            const rightPx = scrollLeft + viewportWidth + bufferPx;
-
-            const leftBeat = leftPx / beatPx;
-            const rightBeat = rightPx / beatPx;
-
-            startBarIndex = Math.max(0, Math.floor(leftBeat / beatsPerBar) - 1);
-            endBarIndex = Math.min(totalBars, Math.ceil(rightBeat / beatsPerBar) + 1);
-        }
-
-        const result: Array<{ beat: number; label: string }> = [];
-        for (let barIndex = startBarIndex; barIndex <= endBarIndex; barIndex += 1) {
-            const beat = barIndex * beatsPerBar;
-            if (beat > totalBeats) break;
-            result.push({ beat, label: `${barIndex + 1}.1` });
-        }
-        return result;
-    }, [s.beats, dynamicProjectSec, s.bpm, viewportWidth, pxPerSec, scrollLeft]);
+        return buildRulerTicks({
+            pxPerSec,
+            scrollLeft,
+            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            projectSec: dynamicProjectSec,
+            bpm: s.bpm,
+            beatsPerBar,
+            grid: s.grid,
+            primaryUnit: s.primaryTimeUnit,
+            secondaryUnit: s.secondaryTimeUnit,
+            minLabelSpacingPx: s.rulerLabelSpacingPx,
+        });
+    }, [
+        s.beats,
+        s.bpm,
+        s.grid,
+        s.primaryTimeUnit,
+        s.secondaryTimeUnit,
+        s.rulerLabelSpacingPx,
+        dynamicProjectSec,
+        viewportWidth,
+        pxPerSec,
+        scrollLeft,
+    ]);
 
     // ── clipsByTrackId ───────────────────────────────────────
     const clipsByTrackId = useMemo(() => {
@@ -782,7 +788,7 @@ export function useTimelineState(): TimelineStateResult {
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        bars,
+        ticks,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,

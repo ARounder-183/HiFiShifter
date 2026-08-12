@@ -6,6 +6,8 @@ export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
 export type DrawDragDirection = "free" | "x-only";
 export type FadeCurveType = "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+export type TimeUnit = "barBeats" | "barDivisions" | "seconds" | "clock";
+export type TimeUnitChoice = TimeUnit | "none";
 // EditParam 是一个字符串，可以是 "pitch" 或声码器额外参数 ID（如 "breath_gain"、"hifigan_tension"）
 // 具体可用值由后端 `get_processor_params` 动态返回
 export type EditParam = string;

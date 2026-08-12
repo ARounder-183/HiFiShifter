@@ -9,6 +9,7 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         UiSettings::default()
     };
     settings.normalize_split_transition();
+    settings.normalize_time_display();
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -30,6 +31,7 @@ pub(super) fn save_ui_settings(
     mut settings: UiSettings,
 ) -> serde_json::Value {
     settings.normalize_split_transition();
+    settings.normalize_time_display();
     let prev_settings = if let Some(dir) = state.config_dir.get() {
         crate::config::load_ui_settings(dir)
     } else {

@@ -35,6 +35,9 @@ import {
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
     removeClipsRemote,
+    persistUiSettings,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     setTrackName,
     setTrackVolume,
 } from "../../features/session/sessionSlice";
@@ -65,8 +68,11 @@ import {
     TrackList,
     detectExternalPathAction,
     extractLocalFilePath,
+    formatCursorTime,
     hasFileDrag,
 } from "./timeline";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
@@ -112,9 +118,9 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
         isTransportAdvancing,
-        onFrame: React.useCallback(
-            (visualPlayheadSec: number) => {
-                const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
+                onFrame: React.useCallback(
+                    (visualPlayheadSec: number) => {
+                        const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
                 if (playheadRef.current) {
                     playheadRef.current.style.left = `${playheadLeftPx}px`;
                 }
@@ -235,6 +241,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clipId: string | null;
         midiPath: string | null;
     }>({ open: false, clipId: null, midiPath: null });
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = React.useState(false);
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
@@ -269,7 +276,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        bars,
+        ticks,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -300,6 +307,53 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
+
+    const timeContext = React.useMemo<TimeFormatContext>(
+        () => ({
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+        }),
+        [s.bpm, s.beats, s.grid],
+    );
+    const handlePrimaryUnitChange = React.useCallback(
+        (unit: TimeUnit) => {
+            dispatch(setPrimaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleSecondaryUnitChange = React.useCallback(
+        (unit: TimeUnitChoice) => {
+            dispatch(setSecondaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleCopyPlayheadTime = React.useCallback(async () => {
+        const text = formatCursorTime(
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            Number(sessionRef.current.playheadSec ?? 0) || 0,
+            timeContext,
+        ).combined;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            try {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                textarea.remove();
+            } catch {
+                // 忽略复制失败
+            }
+        }
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, sessionRef, timeContext]);
 
     // ── 记录最近点击的 clientX，用于 Shift 范围选择的锚点位置
     const lastClickedClientXRef = React.useRef<number | null>(null);
@@ -988,7 +1042,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimeRuler
                     contentWidth={contentWidth}
                     scrollLeft={scrollLeft}
-                    bars={bars}
+                    ticks={ticks}
                     pxPerBeat={pxPerBeat}
                     pxPerSec={pxPerSec}
                     secPerBeat={secPerBeat}
@@ -997,6 +1051,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     playheadLineRef={rulerPlayheadLineRef}
                     playheadHeadRef={rulerPlayheadHeadRef}
                     contentRef={rulerContentRef}
+                    timeContext={timeContext}
+                    primaryUnit={s.primaryTimeUnit}
+                    secondaryUnit={s.secondaryTimeUnit}
+                    onPrimaryUnitChange={handlePrimaryUnitChange}
+                    onSecondaryUnitChange={handleSecondaryUnitChange}
+                    onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                    onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                    t={t as (key: string) => string}
                     onMouseDown={(e) => {
                         if (e.button !== 0) return;
                         document.body.setAttribute("data-hs-focus-window", "timeline");
@@ -2038,6 +2100,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     scrollRef={scrollRef}
                     syncScrollLeft={syncScrollLeft}
                     autoScrollEnabled={s.autoScrollEnabled}
+                />
+
+                <TimelineDisplaySettingsDialog
+                    open={timeDisplaySettingsOpen}
+                    onOpenChange={setTimeDisplaySettingsOpen}
                 />
             </Flex>
         </Flex>

@@ -38,6 +38,14 @@ pub struct UiSettings {
     pub grid_snap: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
+    #[serde(default = "default_primary_time_unit")]
+    pub primary_time_unit: String,
+    #[serde(default = "default_secondary_time_unit")]
+    pub secondary_time_unit: String,
+    #[serde(default = "default_ruler_label_spacing_px")]
+    pub ruler_label_spacing_px: u32,
+    #[serde(default = "default_true")]
+    pub show_playhead_time_in_track_header: bool,
     #[serde(default)]
     pub pitch_snap: bool,
     #[serde(default = "default_pitch_snap_unit")]
@@ -231,6 +239,15 @@ fn default_pitch_snap_unit() -> String {
 fn default_grid_size() -> String {
     "1/4".to_string()
 }
+fn default_primary_time_unit() -> String {
+    "barBeats".to_string()
+}
+fn default_secondary_time_unit() -> String {
+    "clock".to_string()
+}
+fn default_ruler_label_spacing_px() -> u32 {
+    110
+}
 fn default_drag_direction() -> String {
     "y-only".to_string()
 }
@@ -295,6 +312,10 @@ impl Default for UiSettings {
             split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
             grid_snap: true,
             grid_size: default_grid_size(),
+            primary_time_unit: default_primary_time_unit(),
+            secondary_time_unit: default_secondary_time_unit(),
+            ruler_label_spacing_px: default_ruler_label_spacing_px(),
+            show_playhead_time_in_track_header: true,
             pitch_snap: false,
             pitch_snap_unit: default_pitch_snap_unit(),
             pitch_snap_tolerance_cents: 0,
@@ -369,6 +390,21 @@ impl UiSettings {
             self.split_transition_overlap_crossfade =
                 default_split_transition_overlap_crossfade();
         }
+        self.normalize_time_display();
+    }
+
+    /// 规范化时间轴时间显示相关设置，避免损坏/越界的持久化值影响界面。
+    pub fn normalize_time_display(&mut self) {
+        const VALID_UNITS: [&str; 4] = ["barBeats", "barDivisions", "seconds", "clock"];
+        if !VALID_UNITS.contains(&self.primary_time_unit.as_str()) {
+            self.primary_time_unit = default_primary_time_unit();
+        }
+        if self.secondary_time_unit != "none"
+            && !VALID_UNITS.contains(&self.secondary_time_unit.as_str())
+        {
+            self.secondary_time_unit = default_secondary_time_unit();
+        }
+        self.ruler_label_spacing_px = self.ruler_label_spacing_px.clamp(40, 320);
     }
 }
 

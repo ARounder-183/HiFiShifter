@@ -586,6 +586,22 @@ export const jaJP = {
     grid_snap_16th: "16分音符",
     grid_snap_32nd: "32分音符",
     grid_snap_64th: "64分音符",
+
+    // タイムラインの時間表示
+    time_display: "時間表示",
+    time_unit_primary: "主時間単位",
+    time_unit_secondary: "副時間単位",
+    time_unit_none: "なし",
+    time_unit_bar_beats: "小節.拍.小単位",
+    time_unit_bar_divisions: "小節.分割",
+    time_unit_seconds: "秒",
+    time_unit_clock: "時:分:秒.ミリ秒",
+    timeline_display_settings: "タイムライン表示設定...",
+    timeline_display_settings_desc:
+        "ルーラーの時間単位、ラベル密度、再生ヘッド時間表示を設定します。",
+    ruler_label_spacing: "ラベル間隔",
+    show_playhead_time_in_track_header: "トラックヘッダーに再生ヘッド時間を表示",
+    copy_playhead_time: "再生ヘッド時間をコピー",
     grid_snap_dotted_half: "付点2分音符",
     grid_snap_dotted_quarter: "付点4分音符",
     grid_snap_dotted_8th: "付点8分音符",

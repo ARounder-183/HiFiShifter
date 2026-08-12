@@ -12,6 +12,8 @@ import type {
     FadeCurveType,
     GridSize,
     PitchSnapUnit,
+    TimeUnit,
+    TimeUnitChoice,
     TrackMeterInfo,
     ToolMode,
     ToolModeGroup,
@@ -133,6 +135,16 @@ const VALID_GRID_SIZES = new Set<GridSize>([
     "1/64t",
 ]);
 
+const VALID_TIME_UNITS = new Set<TimeUnit>([
+    "barBeats",
+    "barDivisions",
+    "seconds",
+    "clock",
+]);
+const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
+const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
+const DEFAULT_RULER_LABEL_SPACING_PX = 110;
+
 export type {
     AutomationPoint,
     ClipInfo,
@@ -168,6 +180,10 @@ export interface SessionState {
     beats: number;
     projectSec: number;
     grid: GridSize;
+    primaryTimeUnit: TimeUnit;
+    secondaryTimeUnit: TimeUnitChoice;
+    rulerLabelSpacingPx: number;
+    showPlayheadTimeInTrackHeader: boolean;
 
     autoCrossfadeEnabled: boolean;
     /** 分割过渡 */
@@ -968,6 +984,10 @@ const initialState: SessionState = {
     beats: 4,
     projectSec: 30, // 默认 30 秒工程边界
     grid: "1/4",
+    primaryTimeUnit: DEFAULT_PRIMARY_TIME_UNIT,
+    secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
+    rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
+    showPlayheadTimeInTrackHeader: true,
 
     autoCrossfadeEnabled: true,
     splitTransitionEnabled: true,
@@ -1238,6 +1258,25 @@ const sessionSlice = createSlice({
         },
         setGrid(state, action: PayloadAction<GridSize>) {
             state.grid = action.payload;
+        },
+        setPrimaryTimeUnit(state, action: PayloadAction<TimeUnit>) {
+            if (VALID_TIME_UNITS.has(action.payload)) {
+                state.primaryTimeUnit = action.payload;
+            }
+        },
+        setSecondaryTimeUnit(state, action: PayloadAction<TimeUnitChoice>) {
+            if (action.payload === "none" || VALID_TIME_UNITS.has(action.payload)) {
+                state.secondaryTimeUnit = action.payload;
+            }
+        },
+        setRulerLabelSpacingPx(state, action: PayloadAction<number>) {
+            state.rulerLabelSpacingPx = Math.max(
+                40,
+                Math.min(320, Math.round(Number(action.payload) || 110)),
+            );
+        },
+        setShowPlayheadTimeInTrackHeader(state, action: PayloadAction<boolean>) {
+            state.showPlayheadTimeInTrackHeader = Boolean(action.payload);
         },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
@@ -1915,6 +1954,29 @@ const sessionSlice = createSlice({
                         ? "always"
                         : "auto";
                 state.gridSnapEnabled = s.gridSnap;
+                const loadedPrimaryUnit = (s as any).primaryTimeUnit as unknown;
+                if (VALID_TIME_UNITS.has(loadedPrimaryUnit as TimeUnit)) {
+                    state.primaryTimeUnit = loadedPrimaryUnit as TimeUnit;
+                }
+                const loadedSecondaryUnit = (s as any).secondaryTimeUnit as unknown;
+                if (
+                    loadedSecondaryUnit === "none" ||
+                    VALID_TIME_UNITS.has(loadedSecondaryUnit as TimeUnit)
+                ) {
+                    state.secondaryTimeUnit = loadedSecondaryUnit as TimeUnitChoice;
+                }
+                const loadedSpacing = Number((s as any).rulerLabelSpacingPx);
+                if (Number.isFinite(loadedSpacing)) {
+                    state.rulerLabelSpacingPx = Math.max(
+                        40,
+                        Math.min(320, Math.round(loadedSpacing)),
+                    );
+                }
+                if ((s as any).showPlayheadTimeInTrackHeader != null) {
+                    state.showPlayheadTimeInTrackHeader = Boolean(
+                        (s as any).showPlayheadTimeInTrackHeader,
+                    );
+                }
                 state.pitchSnapEnabled = s.pitchSnap;
                 // Validate pitchSnapUnit
                 const validUnits: PitchSnapUnit[] = ["semitone", "scale"];
@@ -3397,6 +3459,10 @@ export const {
     setBpm,
     setBeats,
     setGrid,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
+    setRulerLabelSpacingPx,
+    setShowPlayheadTimeInTrackHeader,
     toggleAutoCrossfade,
     toggleSplitTransition,
     setSplitTransitionMode,

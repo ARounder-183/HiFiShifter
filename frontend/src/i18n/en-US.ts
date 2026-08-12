@@ -578,6 +578,22 @@ export const enUS = {
     grid_snap_16th: "16th Note",
     grid_snap_32nd: "32nd Note",
     grid_snap_64th: "64th Note",
+
+    // Timeline time display
+    time_display: "Time Display",
+    time_unit_primary: "Primary Time Unit",
+    time_unit_secondary: "Secondary Time Unit",
+    time_unit_none: "None",
+    time_unit_bar_beats: "Bar.Beat.Subdivision",
+    time_unit_bar_divisions: "Bar.Division",
+    time_unit_seconds: "Seconds",
+    time_unit_clock: "H:MM:SS.mmm",
+    timeline_display_settings: "Timeline Display Settings...",
+    timeline_display_settings_desc:
+        "Configure ruler time units, label density and playhead time display.",
+    ruler_label_spacing: "Label Spacing",
+    show_playhead_time_in_track_header: "Show playhead time in track header",
+    copy_playhead_time: "Copy Playhead Time",
     grid_snap_dotted_half: "Dotted Half Note",
     grid_snap_dotted_quarter: "Dotted Quarter Note",
     grid_snap_dotted_8th: "Dotted 8th Note",

@@ -1,10 +1,15 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
+import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
+import { useAppSelector } from "../../../app/hooks";
+import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { formatCursorTime } from "./timeFormat";
+import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
 import { AppTooltipBubble } from "../../AppTooltip";
@@ -23,6 +28,234 @@ const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
     { value: "#996d68", key: "color_red" },
 ];
 const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
+
+function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
+    const parts: Array<{ text: string; digits: boolean }> = [];
+    let current = "";
+    let currentDigits = false;
+    const flush = () => {
+        if (current.length > 0) {
+            parts.push({ text: current, digits: currentDigits });
+            current = "";
+        }
+    };
+    for (const ch of text) {
+        const isDigit = ch >= "0" && ch <= "9";
+        if (isDigit !== currentDigits) {
+            flush();
+            currentDigits = isDigit;
+        }
+        current += ch;
+    }
+    flush();
+    return parts;
+}
+
+/**
+ * 将时间文本中的每个数字放入固定宽度的槽位（宽度按当前字体测量），
+ * 非数字字符保持自然宽度。这样即使使用不等宽字体，数字变化时文本也不会左右晃动。
+ */
+const SlotTimeText = React.memo(function SlotTimeText({
+    text,
+    digitWidthPx,
+    className,
+    style,
+    tooltip,
+}: {
+    text: string;
+    digitWidthPx: number | null;
+    className?: string;
+    style?: React.CSSProperties;
+    tooltip?: string;
+}) {
+    const parts = React.useMemo(() => splitDigitRuns(text), [text]);
+    return (
+        <Text
+            size="2"
+            weight="medium"
+            className={className}
+            style={style}
+            data-tooltip={tooltip}
+        >
+            {parts.map((part, index) =>
+                part.digits && digitWidthPx != null && digitWidthPx > 0 ? (
+                    <React.Fragment key={index}>
+                        {part.text.split("").map((ch, chIndex) => (
+                            <span
+                                key={chIndex}
+                                style={{
+                                    display: "inline-block",
+                                    width: digitWidthPx,
+                                    textAlign: "center",
+                                }}
+                            >
+                                {ch}
+                            </span>
+                        ))}
+                    </React.Fragment>
+                ) : (
+                    <span key={index}>{part.text}</span>
+                ),
+            )}
+        </Text>
+    );
+});
+
+const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
+    const selector = useAppSelector(
+        (state) => ({
+            playheadSec: state.session.playheadSec,
+            isPlaying: state.session.runtime.isPlaying,
+            playbackPositionSec: state.session.runtime.playbackPositionSec,
+            primaryTimeUnit: state.session.primaryTimeUnit,
+            secondaryTimeUnit: state.session.secondaryTimeUnit,
+            bpm: state.session.bpm,
+            beats: state.session.beats,
+            grid: state.session.grid,
+            projectSec: state.session.projectSec,
+            show: state.session.showPlayheadTimeInTrackHeader,
+        }),
+        shallowEqual,
+    );
+    const [visualSec, setVisualSec] = useState(selector.playheadSec);
+    const isTransportAdvancing = selector.isPlaying && selector.playbackPositionSec > 1e-4;
+    useVisualPlayhead({
+        syncedPlayheadSec: selector.playheadSec,
+        isTransportAdvancing,
+        onFrame: React.useCallback((sec: number) => setVisualSec(sec), []),
+    });
+    const timeContext = React.useMemo<TimeFormatContext>(
+        () => ({
+            bpm: selector.bpm,
+            beatsPerBar: Math.max(1, Math.round(selector.beats || 4)),
+            grid: selector.grid,
+        }),
+        [selector.bpm, selector.beats, selector.grid],
+    );
+    const formatted = React.useMemo(
+        () =>
+            formatCursorTime(
+                selector.primaryTimeUnit,
+                selector.secondaryTimeUnit,
+                visualSec,
+                timeContext,
+            ),
+        [selector.primaryTimeUnit, selector.secondaryTimeUnit, visualSec, timeContext],
+    );
+    // 为光标时间文本预留固定宽度，并把每个数字放进等宽槽位：
+    // 宽度按“当前时间单位下的最长可能文本”用真实字体度量，字体仍完全跟随用户自定义字体。
+    const maxLabelSpanRef = useRef<HTMLSpanElement | null>(null);
+    const digitProbeRef = useRef<HTMLSpanElement | null>(null);
+    const [boxWidth, setBoxWidth] = useState<number | null>(null);
+    const [digitWidth, setDigitWidth] = useState<number | null>(null);
+    const maxLabel = React.useMemo(() => {
+        const maxSec = Math.max(1, selector.projectSec, selector.playheadSec);
+        return formatCursorTime(
+            selector.primaryTimeUnit,
+            selector.secondaryTimeUnit,
+            maxSec,
+            timeContext,
+        ).combined;
+    }, [
+        selector.primaryTimeUnit,
+        selector.secondaryTimeUnit,
+        selector.projectSec,
+        selector.playheadSec,
+        timeContext,
+    ]);
+
+    const updateDigitWidth = React.useCallback(() => {
+        const probe = digitProbeRef.current;
+        if (!probe) return;
+        const font = window.getComputedStyle(probe).font;
+        const probeWidth = probe.getBoundingClientRect().width;
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            setDigitWidth(probeWidth);
+            return;
+        }
+        ctx.font = font;
+        let max = 0;
+        for (const digit of "0123456789") {
+            max = Math.max(max, ctx.measureText(digit).width);
+        }
+        // 槽位宽度至少不能小于页面中“0”的真实渲染宽度，避免个别字体下墨迹溢出。
+        const slotWidth = Math.max(max, probeWidth);
+        setDigitWidth((prev) =>
+            prev != null && Math.abs(prev - slotWidth) < 0.01 ? prev : slotWidth,
+        );
+    }, []);
+
+    useLayoutEffect(() => {
+        const el = maxLabelSpanRef.current;
+        if (!el) return;
+        const update = () => {
+            const width = el.getBoundingClientRect().width;
+            // 预留缓冲：既避免亚像素/墨迹溢出被裁掉，也让时间文本两侧不显得拥挤。
+            const paddedWidth = Math.ceil(width) + 12;
+            setBoxWidth((prev) =>
+                prev != null && Math.abs(prev - paddedWidth) < 0.01 ? prev : paddedWidth,
+            );
+        };
+        update();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(update);
+            observer.observe(el);
+            return () => observer.disconnect();
+        }
+    }, [maxLabel]);
+
+    useLayoutEffect(() => {
+        const probe = digitProbeRef.current;
+        if (!probe) return;
+        updateDigitWidth();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(updateDigitWidth);
+            observer.observe(probe);
+            return () => observer.disconnect();
+        }
+        if (document.fonts?.ready) {
+            void document.fonts.ready.then(updateDigitWidth);
+        }
+    }, [updateDigitWidth]);
+
+    if (!selector.show) return null;
+    return (
+        <div
+            className="min-w-0 flex-1 flex justify-end"
+            data-playhead-sec={visualSec.toFixed(6)}
+        >
+            <span
+                ref={maxLabelSpanRef}
+                aria-hidden
+                className="absolute invisible whitespace-nowrap"
+            >
+                <SlotTimeText text={maxLabel} digitWidthPx={digitWidth} className="tabular-nums" />
+            </span>
+            <Text
+                ref={digitProbeRef}
+                size="2"
+                weight="medium"
+                aria-hidden
+                className="absolute invisible whitespace-nowrap tabular-nums"
+            >
+                0
+            </Text>
+            <SlotTimeText
+                text={formatted.combined}
+                digitWidthPx={digitWidth}
+                className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
+                style={
+                    boxWidth != null
+                        ? { minWidth: boxWidth, display: "inline-block" }
+                        : undefined
+                }
+                tooltip={formatted.combined}
+            />
+        </div>
+    );
+});
 
 const TRACK_METER_MIN_DB = -48;
 const TRACK_METER_MAX_DB = 3;
@@ -871,10 +1104,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
     return (
         <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
-            <Box className="h-6 border-b border-qt-border px-2 flex items-center bg-qt-window shadow-sm z-10">
-                <Text size="1" weight="bold" color="gray">
+            <Box className="h-12 border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10">
+                <Text size="2" weight="bold" color="gray" className="shrink-0">
                     {t("tracks")}
                 </Text>
+                <TrackHeaderPlayheadTime />
             </Box>
             <div
                 ref={(el) => {

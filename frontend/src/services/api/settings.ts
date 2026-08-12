@@ -13,6 +13,10 @@ export interface UiSettings {
     splitTransitionOverlapCrossfade?: "auto" | "always";
     gridSnap: boolean;
     gridSize?: string;
+    primaryTimeUnit?: string;
+    secondaryTimeUnit?: string;
+    rulerLabelSpacingPx?: number;
+    showPlayheadTimeInTrackHeader?: boolean;
     pitchSnap: boolean;
     pitchSnapUnit: string;
     pitchSnapScale?: string;

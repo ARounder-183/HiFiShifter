@@ -60,6 +60,10 @@ The `Edit` menu allows various editing operations. Besides regular track and par
     - Audio clip data: Imports as note clips in HiFiShifter, preserving various parameter curve data.
     - Track data: Imports tracks along with their audio clips into HiFiShifter. Note that HiFiShifter currently cannot distinguish whether your last copied content was an audio clip or a track. If you intend to import a track, before performing the copy track operation in VocalShifter, ensure that no audio clip is selected in the VocalShifter project; otherwise, only the selected audio clips will be imported.
 
+The `View` menu contains options related to the interface display.
+
+- `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
+
 The `Options` menu allows you to modify various settings of HiFiShifter.
 
 - `Project Stretch Override`: Allows you to modify the current project's stretching algorithm.
@@ -134,6 +138,23 @@ The `Split Transition` toolbar button is located to the right of `Auto Crossfade
 - `Transition Length Unit`: Choose `Seconds` or `Percent`. Percent defaults to 1% and is calculated from the combined full length of the two clips created by the split; for example, two clips totaling 10 seconds at 1% gives 0.1 seconds.
 - `Fade Curve`: Selects the fade curve used by split transitions.
 - `Overlap Crossfade`: With `Follow Auto Crossfade`, crossfades are only added to the overlap when `Auto Crossfade` is enabled. With `Always Apply`, crossfades are always added to the overlap.
+
+### Timeline Time Display
+
+The ruler at the top of the timeline automatically refines its tick labels as you zoom horizontally: at a small zoom level only bars are shown (`1.1`, `2.1`); zooming in progressively refines to half notes (`1.1`, `1.3`), quarter notes (`1.1`, `1.2`), eighth notes (`1.1`, `1.1.500`), and further to 16th/32nd notes. The finest precision is limited by the `Grid` setting.
+
+Four time units are supported:
+
+- `Bar.Beat.Subdivision` (default primary unit): `1.2.500` means bar 1, beat 2, plus 0.5 beat (1000 subdivisions = 1 beat). `..` is appended when the value is inexact (e.g. `1.1.333..`).
+- `Bar.Division`: `1.17/32` means the 17th division of bar 1 using a `1/32` grid. Divisions follow the `Grid` setting; triplet grids produce integer division counts (e.g. `1.2/12`), while dotted grids may produce fractional counts (e.g. `1.2/2.6667`).
+- `Seconds`: absolute seconds, e.g. `1234.5678`; `..` is appended when inexact.
+- `H:MM:SS.mmm` (default secondary unit): the hour is omitted when zero and milliseconds always use 3 digits (e.g. `4:43.750`, `1:4:43.750`).
+
+Right-click the ruler to choose the primary and secondary time units; the secondary unit can also be set to `None`. The same controls are available in `View -> Time Display` and the `Timeline Display Settings...` dialog. When both units are shown, they appear as two rows separated by a short faint line; when the secondary unit is `None` or identical to the primary unit, only the primary unit is shown, vertically centered.
+
+The `TRACKS` header row on the left side of the track view shows the live playhead time on its right, formatted as `primary / secondary` (only the primary unit when no secondary is used), and refreshes automatically during playback and when the time format changes. The playhead time text is kept at fixed digit alignment (e.g. `1.1.000`, `0.000`) for easy reading.
+
+Moving the mouse over the ruler shows the time at the pointer. The right-click menu also offers `Copy Playhead Time`, which copies the current playhead time as text to the clipboard. `Timeline Display Settings...` additionally lets you adjust the ruler label spacing and toggle the playhead time display in the track header.
 
 ## 4. File Browser
 
