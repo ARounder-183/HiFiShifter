@@ -28,6 +28,7 @@ import {
     setEdgeSmoothnessPercent,
     setTrackStateRemote,
     togglePitchSnap,
+    setPitchSnapUnit,
     setScaleHighlightMode,
     toggleLockParamLines,
     cycleDragDirection,
@@ -345,6 +346,8 @@ export const PianoRollPanel: React.FC = () => {
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
     const drawToolMenuRef = useRef<HTMLDivElement | null>(null);
+    const [pitchSnapMenuOpen, setPitchSnapMenuOpen] = useState(false);
+    const pitchSnapMenuRef = useRef<HTMLDivElement | null>(null);
     const [paramValuePreview, setParamValuePreview] = useState<{
         clientX: number;
         clientY: number;
@@ -394,15 +397,18 @@ export const PianoRollPanel: React.FC = () => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
+            if (pitchSnapMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
+            setPitchSnapMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
+                setPitchSnapMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -411,7 +417,7 @@ export const PianoRollPanel: React.FC = () => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
     const handleOpenMidiDialog = useCallback(() => {
         midiDialogSourceRef.current = "paramEditor";
@@ -3382,6 +3388,59 @@ export const PianoRollPanel: React.FC = () => {
         </svg>
     );
 
+    const pitchSnapSemitoneIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <path
+                d="M2.5 12.5H6.5V9.5H10.5V5.5H12.5"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    );
+
+    const pitchSnapScaleIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <rect
+                x="2.5"
+                y="10.5"
+                width="4"
+                height="2"
+                rx="0.5"
+                fill="currentColor"
+            />
+            <rect
+                x="6.5"
+                y="7.5"
+                width="4"
+                height="2"
+                rx="0.5"
+                fill="currentColor"
+            />
+            <rect
+                x="10.5"
+                y="4.5"
+                width="2.5"
+                height="2"
+                rx="0.5"
+                fill="currentColor"
+            />
+        </svg>
+    );
+
     const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
 
     const timeRulerTicks = useMemo(
@@ -3521,13 +3580,24 @@ export const PianoRollPanel: React.FC = () => {
                                             position: "absolute",
                                             right: -1,
                                             bottom: -1,
-                                            width: 0,
-                                            height: 0,
-                                            borderLeft: "4px solid transparent",
-                                            borderTop: "4px solid currentColor",
+                                            width: 6,
+                                            height: 6,
                                             opacity: 0.7,
                                         }}
-                                    />
+                                    >
+                                        <svg
+                                            width="6"
+                                            height="6"
+                                            viewBox="0 0 6 6"
+                                            fill="none"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                            <path
+                                                d="M0 6L6 0V6Z"
+                                                fill="currentColor"
+                                            />
+                                        </svg>
+                                    </Box>
                                 </Box>
                             </IconButton>
 
@@ -3535,18 +3605,7 @@ export const PianoRollPanel: React.FC = () => {
                                 <Box
                                     ref={drawToolMenuRef}
                                     data-hs-context-menu
-                                    style={{
-                                        position: "absolute",
-                                        left: 0,
-                                        top: "calc(100% + 4px)",
-                                        minWidth: 190,
-                                        padding: 4,
-                                        borderRadius: 6,
-                                        border: "1px solid var(--gray-6)",
-                                        background: "var(--gray-2)",
-                                        boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
-                                        zIndex: 30,
-                                    }}
+                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                                 >
                                     {[
                                         {
@@ -3562,23 +3621,15 @@ export const PianoRollPanel: React.FC = () => {
                                     ].map((item) => {
                                         const active = currentDrawTool === item.mode;
                                         return (
-                                            <Flex
+                                            <button
                                                 key={item.mode}
-                                                align="center"
-                                                justify="between"
-                                                px="2"
-                                                py="1"
-                                                style={{
-                                                    cursor: "pointer",
-                                                    borderRadius: 4,
-                                                    background: active
-                                                        ? "var(--accent-4)"
-                                                        : "transparent",
-                                                }}
+                                                type="button"
+                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover`}
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
                                                 }}
+                                                onPointerDown={(e) => e.stopPropagation()}
                                             >
                                                 <Flex align="center" gap="2">
                                                     <Box
@@ -3595,7 +3646,7 @@ export const PianoRollPanel: React.FC = () => {
                                                     <Text size="1">{item.label}</Text>
                                                 </Flex>
                                                 {active ? <CheckIcon /> : null}
-                                            </Flex>
+                                            </button>
                                         );
                                     })}
                                 </Box>
@@ -3673,93 +3724,181 @@ export const PianoRollPanel: React.FC = () => {
                                 </svg>
                             )}
                         </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={effectivePitchSnapVisual ? "solid" : "ghost"}
-                            color="gray"
-                            data-tooltip={`${t("pitch_snap")}: ${
-                                effectivePitchSnapVisual
-                                    ? s.pitchSnapUnit === "semitone"
-                                        ? tAny("quantize_semitone")
-                                        : tAny("quantize_scale")
-                                    : tAny("pitch_snap_off")
-                            }`}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(togglePitchSnap());
-                                void dispatch(persistUiSettings());
-                            }}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setPitchSnapOpen(true);
-                            }}
-                        >
+                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                            <IconButton
+                                size="1"
+                                variant={effectivePitchSnapVisual ? "solid" : "ghost"}
+                                color="gray"
+                                data-tooltip={`${t("pitch_snap")}: ${
+                                    effectivePitchSnapVisual
+                                        ? s.pitchSnapUnit === "semitone"
+                                            ? tAny("quantize_semitone")
+                                            : tAny("quantize_scale")
+                                        : tAny("pitch_snap_off")
+                                }`}
+                                tabIndex={-1}
+                                onClick={() => {
+                                    dispatch(togglePitchSnap());
+                                    void dispatch(persistUiSettings());
+                                }}
+                                onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    setPitchSnapMenuOpen(true);
+                                }}
+                            >
+                                <Box
+                                    style={{
+                                        position: "relative",
+                                        width: 15,
+                                        height: 15,
+                                    }}
+                                >
+                                    <Box
+                                        style={{
+                                            position: "absolute",
+                                            inset: 0,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                        }}
+                                    >
                             {!effectivePitchSnapVisual ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
+                                <Box
+                                    style={{
+                                        position: "relative",
+                                        width: 15,
+                                        height: 15,
+                                        opacity: 0.45,
+                                    }}
                                 >
-                                    <path
-                                        d="M3 12L12 3"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M10 2V10.5C10 11.88 8.88 13 7.5 13C6.12 13 5 11.88 5 10.5C5 9.12 6.12 8 7.5 8"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        opacity="0.6"
-                                    />
-                                </svg>
+                                    {pitchSnapSemitoneIcon}
+                                    <svg
+                                        className="absolute inset-0"
+                                        width="15"
+                                        height="15"
+                                        viewBox="0 0 15 15"
+                                        fill="none"
+                                        xmlns="http://www.w3.org/2000/svg"
+                                    >
+                                        <path
+                                            d="M3 3L12 12"
+                                            stroke="currentColor"
+                                            strokeWidth="1.2"
+                                            strokeLinecap="round"
+                                        />
+                                    </svg>
+                                </Box>
                             ) : s.pitchSnapUnit === "semitone" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M3 5.5H12M3 9.5H12"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <circle
-                                        cx="7.5"
-                                        cy="7.5"
-                                        r="4.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        opacity="0.7"
-                                    />
-                                </svg>
+                                pitchSnapSemitoneIcon
                             ) : (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M2.5 10.5L5.5 4.5L8.5 10.5L11.5 6"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                    <circle cx="2.5" cy="10.5" r="1" fill="currentColor" />
-                                    <circle cx="5.5" cy="4.5" r="1" fill="currentColor" />
-                                    <circle cx="8.5" cy="10.5" r="1" fill="currentColor" />
-                                    <circle cx="11.5" cy="6" r="1" fill="currentColor" />
-                                </svg>
+                                pitchSnapScaleIcon
                             )}
-                        </IconButton>
+                                    </Box>
+                                    <Box
+                                        style={{
+                                            position: "absolute",
+                                            right: -1,
+                                            bottom: -1,
+                                            width: 6,
+                                            height: 6,
+                                            opacity: 0.7,
+                                        }}
+                                    >
+                                        <svg
+                                            width="6"
+                                            height="6"
+                                            viewBox="0 0 6 6"
+                                            fill="none"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                            <path
+                                                d="M0 6L6 0V6Z"
+                                                fill="currentColor"
+                                            />
+                                        </svg>
+                                    </Box>
+                                </Box>
+                            </IconButton>
+
+                            {pitchSnapMenuOpen && (
+                                <Box
+                                    ref={pitchSnapMenuRef}
+                                    data-hs-context-menu
+                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                                >
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            dispatch(setPitchSnapUnit("semitone"));
+                                            if (!s.pitchSnapEnabled) {
+                                                dispatch(togglePitchSnap());
+                                            }
+                                            void dispatch(persistUiSettings());
+                                            setPitchSnapMenuOpen(false);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <Flex align="center" gap="2">
+                                            <Box
+                                                style={{
+                                                    display: "flex",
+                                                    width: 15,
+                                                    height: 15,
+                                                    alignItems: "center",
+                                                    justifyContent: "center",
+                                                }}
+                                            >
+                                                {pitchSnapSemitoneIcon}
+                                            </Box>
+                                            <span>{tAny("pitch_snap_menu_semitone")}</span>
+                                        </Flex>
+                                        {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            dispatch(setPitchSnapUnit("scale"));
+                                            if (!s.pitchSnapEnabled) {
+                                                dispatch(togglePitchSnap());
+                                            }
+                                            void dispatch(persistUiSettings());
+                                            setPitchSnapMenuOpen(false);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <Flex align="center" gap="2">
+                                            <Box
+                                                style={{
+                                                    display: "flex",
+                                                    width: 15,
+                                                    height: 15,
+                                                    alignItems: "center",
+                                                    justifyContent: "center",
+                                                }}
+                                            >
+                                                {pitchSnapScaleIcon}
+                                            </Box>
+                                            <span>{tAny("pitch_snap_menu_scale")}</span>
+                                        </Flex>
+                                        {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
+                                    </button>
+                                    <div className="my-1 border-t border-qt-border" />
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            setPitchSnapMenuOpen(false);
+                                            setPitchSnapOpen(true);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span>{tAny("pitch_snap_settings_action")}</span>
+                                    </button>
+                                </Box>
+                            )}
+                        </Box>
                         <IconButton
                             size="1"
                             variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
