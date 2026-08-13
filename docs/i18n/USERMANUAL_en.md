@@ -62,7 +62,11 @@ The `Edit` menu allows various editing operations. Besides regular track and par
 
 The `View` menu contains options related to the interface display.
 
+- `Clipboard Preview`: Toggle the parameter editor clipboard preview.
+- `Popup Param Values`: Toggle the parameter value popup.
 - `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
+- `Theme: Dark / Light`: Switch the current theme.
+- `Appearance Settings`: Open the appearance settings window.
 
 The `Options` menu allows you to modify various settings of HiFiShifter.
 
@@ -306,8 +310,8 @@ Select a Pitch Reference Clip and choose `Update Pitch` from the context menu to
 
 Additional convenient features of the parameter editor:
 
-- `Clipboard Preview`: After copying a parameter curve with the Select tool, the clipboard curve is displayed in real-time within the selection area to help with paste positioning.
-- `Popup Param Values`: Shows parameter values when the mouse is near the curve or during drawing edits.
+- `Clipboard Preview`: After copying a parameter curve with the Select tool, the clipboard curve is displayed in real-time within the selection area to help with paste positioning. This option is in the `View` menu and no longer appears in the parameter editor toolbar.
+- `Popup Param Values`: Shows parameter values when the mouse is near the curve or during drawing edits. This option is in the `View` menu and no longer appears in the parameter editor toolbar.
 - `Lock Param Lines`: When dragging an audio clip on the track, whether to also move its corresponding parameter curves. All parameter editing in HiFiShifter is track-based; if not locked, edited curves will not follow the clip.
 - `Smoothness`: Whether to automatically smooth parameter edits and the smoothing strength.
 - `Reference Track Group`: When the parameter is `Pitch`, lets you choose other tracks and display pitch curves from other track groups as references in the pitch editor.

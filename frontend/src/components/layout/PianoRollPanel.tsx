@@ -29,8 +29,6 @@ import {
     setTrackStateRemote,
     togglePitchSnap,
     setScaleHighlightMode,
-    toggleClipboardPreview,
-    toggleParamValuePopup,
     toggleLockParamLines,
     cycleDragDirection,
     setToolMode,
@@ -3475,7 +3473,7 @@ export const PianoRollPanel: React.FC = () => {
                     <Text size="1" weight="bold" color="gray">
                         {t("param_editor")}
                     </Text>
-                    {/* 音高吸附和剪贴板预览按钮，紧邻 param_editor 右侧，留 8px 空白 */}
+                    {/* 音高吸附按钮，紧邻 param_editor 右侧，留 8px 空白 */}
                     <Flex gap="1" align="center" style={{ marginLeft: 8 }}>
                         <IconButton
                             size="1"
@@ -3829,85 +3827,6 @@ export const PianoRollPanel: React.FC = () => {
                                     />
                                 </svg>
                             )}
-                        </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={s.showClipboardPreview ? "solid" : "ghost"}
-                            color="gray"
-                            data-tooltip={t("clipboard_preview")}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(toggleClipboardPreview());
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <rect
-                                    x="3"
-                                    y="1"
-                                    width="9"
-                                    height="13"
-                                    rx="1"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                                <path
-                                    d="M5.5 1V2.5H9.5V1"
-                                    stroke="currentColor"
-                                    strokeWidth="0.8"
-                                />
-                                <path
-                                    d="M5 6L7 8L10 5"
-                                    stroke="currentColor"
-                                    strokeWidth="1.2"
-                                    opacity="0.7"
-                                />
-                            </svg>
-                        </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={s.showParamValuePopup ? "solid" : "ghost"}
-                            color="gray"
-                            data-tooltip={t("param_value_popup")}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(toggleParamValuePopup());
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <path
-                                    d="M2.5 3.5H12.5V10.5H6.2L3.2 13.5V10.5H2.5V3.5Z"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                                <path
-                                    d="M5 6H10"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    strokeLinecap="round"
-                                />
-                                <path
-                                    d="M5 8H8.8"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    strokeLinecap="round"
-                                />
-                            </svg>
                         </IconButton>
                         <IconButton
                             size="1"

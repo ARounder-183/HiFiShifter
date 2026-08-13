@@ -22,6 +22,8 @@ import {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
+    toggleClipboardPreview,
+    toggleParamValuePopup,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
 import type { TimeUnit } from "../../features/session/sessionTypes";
@@ -563,21 +565,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
                         onSelect={() => {
-                            const nextMode = theme.mode === "dark" ? "light" : "dark";
-                            theme.applySettings({
-                                mode: nextMode,
-                                accentColor: theme.accentColor,
-                                grayColor: theme.grayColor,
-                                radius: theme.radius,
-                                fontFamily: theme.fontFamily,
-                                activeCustomThemeId: theme.activeCustomThemeId,
-                            });
+                            dispatch(toggleClipboardPreview());
+                            void dispatch(persistUiSettings());
                         }}
                     >
-                        {t("theme")}: {theme.mode === "dark" ? t("theme_dark") : t("theme_light")}
+                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
-                        {tAny("menu_appearance_settings")}
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleParamValuePopup());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
@@ -641,6 +641,25 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            const nextMode = theme.mode === "dark" ? "light" : "dark";
+                            theme.applySettings({
+                                mode: nextMode,
+                                accentColor: theme.accentColor,
+                                grayColor: theme.grayColor,
+                                radius: theme.radius,
+                                fontFamily: theme.fontFamily,
+                                activeCustomThemeId: theme.activeCustomThemeId,
+                            });
+                        }}
+                    >
+                        {t("theme")}: {theme.mode === "dark" ? t("theme_dark") : t("theme_light")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
+                        {tAny("menu_appearance_settings")}
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
