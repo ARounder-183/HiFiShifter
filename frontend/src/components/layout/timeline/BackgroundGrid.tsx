@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import { gridStepBeats } from "./grid";
+import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -44,15 +44,23 @@ export const BackgroundGrid: React.FC<{
         Number.isFinite(scrollLeft);
     const isSticky = sticky && useViewport;
 
-    const weakStepPx = Math.max(1e-6, pxPerBeat * gridStepBeats(grid));
-    const barStepPx = Math.max(1e-6, pxPerBeat * Math.max(1, beatsPerBar));
+    const samplingViewportWidth =
+        viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+            ? viewportWidth
+            : contentWidth;
+    const samplingPlan = resolveGridLineSamplingPlan({
+        pxPerBeat,
+        grid,
+        beatsPerBar: Math.max(1, Math.round(beatsPerBar)),
+        viewportWidth: samplingViewportWidth,
+    });
 
     const width = isSticky ? Math.max(1, Math.floor(viewportWidth as number)) : contentWidth;
     const height = contentHeight;
 
     const latestRef = useRef({
-        weakStepPx,
-        barStepPx,
+        weakStepPx: samplingPlan.weakStepPx,
+        strongStepPx: samplingPlan.strongStepPx,
         width,
         height,
         contentWidth,
@@ -64,8 +72,8 @@ export const BackgroundGrid: React.FC<{
         isSticky,
     });
     latestRef.current = {
-        weakStepPx,
-        barStepPx,
+        weakStepPx: samplingPlan.weakStepPx,
+        strongStepPx: samplingPlan.strongStepPx,
         width,
         height,
         contentWidth,
@@ -76,6 +84,8 @@ export const BackgroundGrid: React.FC<{
         scrollLeft: scrollLeft ?? 0,
         isSticky,
     };
+
+    const lastDrawKeyRef = useRef<string | null>(null);
 
     const draw = useCallback((nextScrollLeft?: number) => {
         const svg = svgRef.current;
@@ -94,6 +104,19 @@ export const BackgroundGrid: React.FC<{
             ? latest.width
             : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
+        const drawKey = [
+            sl,
+            latest.weakStepPx,
+            latest.strongStepPx,
+            latest.width,
+            latest.height,
+            latest.contentWidth,
+            latest.viewportWidth,
+            latest.isSticky,
+        ].join("|");
+        if (lastDrawKeyRef.current === drawKey) return;
+        lastDrawKeyRef.current = drawKey;
+
         const buildPath = (stepPx: number): string => {
             if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
             const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
@@ -101,9 +124,8 @@ export const BackgroundGrid: React.FC<{
                 firstIndex,
                 Math.ceil((visibleEnd + offset) / stepPx),
             );
-            const increment = Math.max(1, Math.ceil(1 / Math.max(1e-9, stepPx)));
             const parts: string[] = [];
-            for (let index = firstIndex; index <= lastIndex; index += increment) {
+            for (let index = firstIndex; index <= lastIndex; index += 1) {
                 const x = index * stepPx - offset;
                 if (x < -1 || x > latest.width + 1) continue;
                 parts.push(`M${x} 0V${latest.height}`);
@@ -111,8 +133,14 @@ export const BackgroundGrid: React.FC<{
             return parts.join("");
         };
 
-        paths[0].setAttribute("d", buildPath(latest.weakStepPx));
-        paths[1].setAttribute("d", buildPath(latest.barStepPx));
+        paths[0].setAttribute(
+            "d",
+            buildPath(latest.weakStepPx),
+        );
+        paths[1].setAttribute(
+            "d",
+            buildPath(latest.strongStepPx),
+        );
     }, []);
 
     useEffect(() => {
@@ -120,8 +148,8 @@ export const BackgroundGrid: React.FC<{
     }, [
         draw,
         scrollLeft,
-        weakStepPx,
-        barStepPx,
+        samplingPlan.weakStepPx,
+        samplingPlan.strongStepPx,
         width,
         height,
         contentWidth,
