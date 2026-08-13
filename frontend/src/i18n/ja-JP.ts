@@ -568,6 +568,7 @@ export const jaJP = {
     playhead_zoom: "再生ヘッドでズーム",
     param_editor_seek_playhead: "パラメータエディターで再生ヘッド移動を許可",
     auto_scroll: "自動スクロール",
+    param_editor_timeline_click_select_track: "タイムラインクリックでトラックを切り替える",
     clipboard_preview: "クリップボードプレビュー",
     param_value_popup: "パラメータ値ポップアップ",
     lock_param_lines: "パラメータ線をロック",

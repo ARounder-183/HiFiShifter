@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
-import { PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
+import { PauseIcon, Pencil1Icon, PlayIcon, StopIcon, TrackNextIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -22,6 +22,7 @@ import {
     toggleAutoScroll,
     toggleIgnoreGrouping,
     toggleParamEditorSeekPlayhead,
+    toggleParamEditorTimelineClickSelectTrack,
     persistUiSettings,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
@@ -529,6 +530,8 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
+                <Separator orientation="vertical" size="2" />
+
                 {/* Playhead Zoom */}
                 <IconButton
                     size="1"
@@ -556,7 +559,34 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                {/* Auto Scroll */}
+                {/* Auto Scroll (horizontal arrows) */}
+                <IconButton
+                    size="1"
+                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
+                    color="gray"
+                    data-tooltip={tAny("auto_scroll")}
+                    tabIndex={-1}
+                    onClick={() => {
+                        dispatch(toggleAutoScroll());
+                        void dispatch(persistUiSettings());
+                    }}
+                >
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 15 15"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                    >
+                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M3 6L1.5 7.5L3 9" stroke="currentColor" strokeWidth="1" />
+                        <path d="M12 6L13.5 7.5L12 9" stroke="currentColor" strokeWidth="1" />
+                        <path d="M2 7.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
+                    </svg>
+                </IconButton>
+
+                <Separator orientation="vertical" size="2" />
+
                 <IconButton
                     size="1"
                     variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
@@ -591,31 +621,22 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                {/* Auto Scroll (horizontal arrows) */}
+                {/* Allow timeline clicks to switch the parameter editor track */}
                 <IconButton
                     size="1"
-                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
+                    variant={s.paramEditorTimelineClickSelectTrackEnabled ? "solid" : "ghost"}
                     color="gray"
-                    data-tooltip={tAny("auto_scroll")}
+                    data-tooltip={tAny("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
-                        dispatch(toggleAutoScroll());
+                        dispatch(toggleParamEditorTimelineClickSelectTrack());
                         void dispatch(persistUiSettings());
                     }}
                 >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3 6L1.5 7.5L3 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M12 6L13.5 7.5L12 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M2 7.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                    </svg>
+                    <TrackNextIcon width="15" height="15" />
                 </IconButton>
+
+                <Separator orientation="vertical" size="2" />
 
                 {/* Ignore Grouping (broken chain) */}
                 <IconButton

@@ -48,6 +48,8 @@ pub struct UiSettings {
     pub show_playhead_time_in_track_header: bool,
     #[serde(default)]
     pub param_editor_sync_timeline: bool,
+    #[serde(default = "default_true")]
+    pub param_editor_timeline_click_select_track: bool,
     #[serde(default)]
     pub pitch_snap: bool,
     #[serde(default = "default_pitch_snap_unit")]
@@ -319,6 +321,7 @@ impl Default for UiSettings {
             ruler_label_spacing_px: default_ruler_label_spacing_px(),
             show_playhead_time_in_track_header: true,
             param_editor_sync_timeline: false,
+            param_editor_timeline_click_select_track: true,
             pitch_snap: false,
             pitch_snap_unit: default_pitch_snap_unit(),
             pitch_snap_tolerance_cents: 0,

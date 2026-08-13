@@ -560,6 +560,7 @@ export const enUS = {
     playhead_zoom: "Zoom at Playhead",
     param_editor_seek_playhead: "Allow Param Editor to Move Playhead",
     auto_scroll: "Auto Scroll",
+    param_editor_timeline_click_select_track: "Allow Timeline Clicks to Switch Track",
     clipboard_preview: "Clipboard Preview",
     param_value_popup: "Popup Param Values",
     lock_param_lines: "Lock Param Lines",

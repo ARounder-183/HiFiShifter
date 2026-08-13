@@ -642,6 +642,7 @@ export const koKR = {
     playhead_zoom: "재생 헤드 기준 줌",
     param_editor_seek_playhead: "파라미터 에디터에서 재생 헤드 이동 허용",
     auto_scroll: "자동 스크롤",
+    param_editor_timeline_click_select_track: "타임라인 클릭으로 트랙 전환",
     clipboard_preview: "클립보드 미리보기",
     param_value_popup: "파라미터 값 팝업",
     lock_param_lines: "파라미터 라인 잠금",

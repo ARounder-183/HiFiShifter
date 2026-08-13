@@ -122,8 +122,9 @@ Track view toolbar buttons:
 - `Split Transition`: Modeled after Reaper/VEGAS Pro split fades, enabled by default. After splitting, it automatically adds a fade-out to the left clip and a fade-in to the right clip at the split point, or extends both clips into an overlap, to reduce clicks. Left-click toggles it; right-click opens detailed settings.
 - `Grid Snap`: When enabled, all clip adjustments attempt to snap to grid. Hold `Shift` to temporarily toggle snap.
 - `Zoom at Playhead`: When enabled, horizontal zoom centers on the playhead; otherwise, centers on the mouse cursor.
-- `Allow Param Editor to Move Playhead`: When disabled, clicking in the parameter editor will not move the playhead; only clicking the track view or the timecode area of the parameter editor moves the playhead.
 - `Auto Scroll`: When enabled, the view automatically scrolls horizontally during playback to follow the playhead.
+- `Allow Param Editor to Move Playhead`: When disabled, clicking in the parameter editor will not move the playhead; only clicking the track view or the timecode area of the parameter editor moves the playhead.
+- `Allow Timeline Clicks to Switch Track`: Enabled by default. When enabled, clicking a clip or empty area in the timeline switches the current track, and the parameter editor follows the newly selected track. When disabled, only clicking a track header changes the current track.
 - `Ignore Grouping`: When enabled, edits to grouped audio clips will globally ignore group-linked editing.
 
 ### Split Transition

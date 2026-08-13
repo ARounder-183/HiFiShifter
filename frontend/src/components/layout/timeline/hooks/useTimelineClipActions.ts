@@ -654,9 +654,9 @@ export function useTimelineClipActions(
             ) {
                 return;
             }
-            const preserveTrackFocus = Boolean(
-                clip && clip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(clip && clip.trackId === sessionRef.current.selectedTrackId);
             void dispatch(
                 selectClipRemote({
                     clipId,
@@ -701,9 +701,12 @@ export function useTimelineClipActions(
             const nextPrimaryClip = sessionRef.current.clips.find(
                 (entry) => entry.id === nextPrimaryClipId,
             );
-            const preserveTrackFocus = Boolean(
-                nextPrimaryClip && nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(
+                    nextPrimaryClip &&
+                        nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
+                );
 
             void dispatch(
                 selectClipRemote({

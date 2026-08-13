@@ -546,6 +546,7 @@ export const zhCN = {
     playhead_zoom: "基于播放光标缩放",
     auto_scroll: "自动滚屏",
     param_editor_seek_playhead: "允许参数编辑器调整播放头",
+    param_editor_timeline_click_select_track: "允许时间轴点击切换轨道",
     clipboard_preview: "剪贴板预览",
     param_value_popup: "弹出展示参数",
     lock_param_lines: "锁定参数线",

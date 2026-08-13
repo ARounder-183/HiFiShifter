@@ -216,6 +216,8 @@ export interface SessionState {
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */
     paramEditorSeekPlayheadEnabled: boolean;
+    /** 允许时间轴上的点击操作自动切换当前轨道 */
+    paramEditorTimelineClickSelectTrackEnabled: boolean;
     /** 剪贴板预览（在参数编辑器选区内显示剪贴板曲线预览） */
     showClipboardPreview: boolean;
     /** 参数线附近显示参数值浮窗 */
@@ -1010,6 +1012,7 @@ const initialState: SessionState = {
     ignoreGrouping: false,
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
+    paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
     selectDragDirection: "y-only" as DragDirection,
@@ -1437,6 +1440,10 @@ const sessionSlice = createSlice({
         },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
+        },
+        toggleParamEditorTimelineClickSelectTrack(state) {
+            state.paramEditorTimelineClickSelectTrackEnabled =
+                !state.paramEditorTimelineClickSelectTrackEnabled;
         },
         toggleClipboardPreview(state) {
             state.showClipboardPreview = !state.showClipboardPreview;
@@ -2011,6 +2018,11 @@ const sessionSlice = createSlice({
                     state.paramEditorSeekPlayheadEnabled = Boolean(
                         (s as any).paramEditorSeekPlayhead,
                     );
+                if (s.paramEditorTimelineClickSelectTrack != null) {
+                    state.paramEditorTimelineClickSelectTrackEnabled = Boolean(
+                        s.paramEditorTimelineClickSelectTrack,
+                    );
+                }
                 if (s.showClipboardPreview != null)
                     state.showClipboardPreview = s.showClipboardPreview;
                 if ((s as any).showParamValuePopup != null)
@@ -3488,6 +3500,7 @@ export const {
     toggleAutoScroll,
     toggleIgnoreGrouping,
     toggleParamEditorSeekPlayhead,
+    toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
     cycleDragDirection,

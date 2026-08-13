@@ -547,6 +547,7 @@ export const zhTW = {
     playhead_zoom: "基於播放游標縮放",
     auto_scroll: "自動捲動",
     param_editor_seek_playhead: "允許參數編輯器調整播放頭",
+    param_editor_timeline_click_select_track: "允許時間軸點擊切換軌道",
     clipboard_preview: "剪貼簿預覽",
     param_value_popup: "彈出顯示參數",
     lock_param_lines: "鎖定參數線",

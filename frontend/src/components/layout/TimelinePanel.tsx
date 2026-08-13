@@ -1371,7 +1371,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         setMultiSelectedClipIds([]);
                         if (!scroller) return;
                         const trackId = trackIdFromClientY(e.clientY);
-                        if (trackId && trackId !== sessionRef.current.selectedTrackId) {
+                        if (
+                            s.paramEditorTimelineClickSelectTrackEnabled &&
+                            trackId &&
+                            trackId !== sessionRef.current.selectedTrackId
+                        ) {
                             void dispatch(selectTrackRemote(trackId));
                         }
                         startDeferredPlayheadSeek({

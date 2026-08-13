@@ -18,6 +18,7 @@ export interface UiSettings {
     rulerLabelSpacingPx?: number;
     showPlayheadTimeInTrackHeader?: boolean;
     paramEditorSyncTimeline?: boolean;
+    paramEditorTimelineClickSelectTrack?: boolean;
     pitchSnap: boolean;
     pitchSnapUnit: string;
     pitchSnapScale?: string;

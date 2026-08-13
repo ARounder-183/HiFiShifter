@@ -52,6 +52,7 @@ type TimelineSessionSlice = Pick<
     | "grid"
     | "gridSnapEnabled"
     | "paramEditorSyncTimeline"
+    | "paramEditorTimelineClickSelectTrackEnabled"
     | "primaryTimeUnit"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
@@ -204,6 +205,8 @@ export function useTimelineState(): TimelineStateResult {
             gridSnapEnabled: state.session.gridSnapEnabled,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+            paramEditorTimelineClickSelectTrackEnabled:
+                state.session.paramEditorTimelineClickSelectTrackEnabled,
             primaryTimeUnit: state.session.primaryTimeUnit,
             playbackRateVersion: state.session.playbackRateVersion,
             rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
