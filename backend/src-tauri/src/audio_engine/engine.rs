@@ -1328,6 +1328,20 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         s.snapshot.store(Arc::new(snap));
         idle_track_meter_state(s.meter_state, s.meter_generation);
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
+
+        // 若此前后台预渲染因为音高分析未完成而跳过了一些 clip，
+        // 现在缓存已经就绪，补触发一次后台渲染，避免用户等待进度结束后
+        // 首次播放时仍要重新渲染。
+        if crate::commands::playback::AUTO_BG_RENDER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+            && crate::commands::playback::BG_RENDER_PITCH_PENDING.swap(
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+            )
+        {
+            if let Some(app) = s.app_handle.as_ref() {
+                let _ = crate::commands::playback::request_background_render(app);
+            }
+        }
     }
 }
 

@@ -667,6 +667,21 @@ pub(crate) fn build_snapshot(
                         // 【优雅降级】：尝试获取该 Clip 最近一次成功的渲染结果作为过渡垫音
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
+                        let needs_breath = processor_params.map_or(false, |(
+                            _,
+                            _,
+                            _,
+                            renderer_id,
+                            entry,
+                            _,
+                            _,
+                        )| {
+                            renderer_id == "nsf_hifigan_onnx"
+                                && crate::pitch_editing::extra_param_enabled(
+                                    &entry.extra_params,
+                                    "breath_enabled",
+                                )
+                        });
 
                         let needs_tension = processor_params.map_or(
                             false,
@@ -690,6 +705,12 @@ pub(crate) fn build_snapshot(
                                 fallback_pcm = Some(p);
                                 fallback_breath = b;
                             }
+                        }
+
+                        // 气声开启时，绝不能回退到不含独立 breath stem 的旧渲染：
+                        // 否则首次播放会听到“没有气声”的旧音频，第二次播放缓存就绪后才恢复。
+                        if needs_breath && fallback_breath.is_none() {
+                            fallback_pcm = None;
                         }
 
                         if let Some(old_pcm) = fallback_pcm {

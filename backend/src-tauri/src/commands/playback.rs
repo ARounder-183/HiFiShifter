@@ -29,6 +29,11 @@ pub(crate) static BG_RENDER_CANCEL: std::sync::atomic::AtomicBool =
 pub(crate) static BG_RENDER_RESTART_NEEDED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 后台渲染开始时因音高分析未完成而跳过了 clip。
+/// 音高分析完成后由 `handle_clip_pitch_ready` 消费此标记并自动补启动渲染。
+pub(crate) static BG_RENDER_PITCH_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
     let state = app.state::<AppState>();
     state
@@ -1312,14 +1317,21 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     let sr = if engine_sr > 0 { engine_sr } else { 44100 };
 
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
+    let unfiltered_total = clips_to_render.len();
     clips_to_render.retain(|info| is_clip_pitch_analysis_ready(&timeline, &info.clip));
+    let skipped_not_ready = unfiltered_total.saturating_sub(clips_to_render.len());
+    BG_RENDER_PITCH_PENDING.store(skipped_not_ready > 0, Ordering::Release);
     clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
 
     // Save len before clips_to_render is moved into the thread closure
     let total = clips_to_render.len();
 
     if total == 0 {
-        eprintln!("[bg_render] no clips need rendering (might be waiting for pitch analysis)");
+        eprintln!(
+            "[bg_render] no clips need rendering (ready={} skipped_not_ready={})",
+            clips_to_render.len(),
+            skipped_not_ready
+        );
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
         // 不发送渲染事件，避免前端状态栏闪烁。
@@ -1377,14 +1389,6 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         );
     })));
 
-    let _ = app_clone.emit(
-        "playback_rendering_state",
-        PlaybackRenderingStateEvent {
-            active: true,
-            progress: Some(0.0),
-            target: Some("background".to_string()),
-        },
-    );
     // Explicitly drop app_clone's state borrow before moving app into the thread
     drop(state);
     drop(app_clone);
@@ -1408,6 +1412,9 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         let mut cancelled = false;
         let mut pending_clip_ids_written: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // 只有真正开始合成时才向前端发出进度事件。若本轮全部命中缓存，
+        // 则完全不需要展示渲染进度，避免打开工程后的首次播放闪一下进度条。
+        let mut rendering_started = false;
 
         for clip_render_info in &clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
@@ -1460,6 +1467,17 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                     eprintln!(
                         "[bg_render][cache] MISS clip_id={} hash={:#018x}",
                         clip_render_info.clip.id, clip_render_info.cache_key.param_hash
+                    );
+                }
+                if !rendering_started {
+                    rendering_started = true;
+                    let _ = app.emit(
+                        "playback_rendering_state",
+                        PlaybackRenderingStateEvent {
+                            active: true,
+                            progress: Some(0.0),
+                            target: Some("background".to_string()),
+                        },
                     );
                 }
                 if let Ok(mut state_mgr) =
@@ -1531,8 +1549,19 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                     clip_render_info.cache_key.param_hash,
                     base_entry.pcm_stereo.as_slice(),
                 ) {
-                    Ok((_, _tension_generated)) => {
+                    Ok((_, tension_generated)) => {
                         tension_elapsed += tension_started_at.elapsed();
+                        if tension_generated && !rendering_started {
+                            rendering_started = true;
+                            let _ = app.emit(
+                                "playback_rendering_state",
+                                PlaybackRenderingStateEvent {
+                                    active: true,
+                                    progress: Some(0.0),
+                                    target: Some("background".to_string()),
+                                },
+                            );
+                        }
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
                         {
@@ -1637,6 +1666,18 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
+
+        // 第一轮可能因为音高分析尚未完成而跳过了部分 clip。
+        // 音高分析完成后没有新的“缓存失效”事件，因此这里主动补一轮渲染，
+        // 保证用户等待后台渲染进度结束后，所有需要渲染的 clip 都真正进入缓存。
+        if skipped_not_ready > 0 && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed) {
+            eprintln!(
+                "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready during first pass",
+                skipped_not_ready
+            );
+            start_background_render(app.clone());
+            return;
+        }
 
         // 若完成时恰好有新编辑触发的重启请求，立即启动新一轮渲染
         if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
