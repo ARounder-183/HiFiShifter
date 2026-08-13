@@ -1,7 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
-import { PauseIcon, Pencil1Icon, PlayIcon, StopIcon, TrackNextIcon } from "@radix-ui/react-icons";
+import {
+    DoubleArrowRightIcon,
+    PauseIcon,
+    Pencil1Icon,
+    PlayIcon,
+    StopIcon,
+} from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -552,10 +558,10 @@ export function ActionBar() {
                         xmlns="http://www.w3.org/2000/svg"
                     >
                         <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 3L7.5 1.5L9 3" stroke="currentColor" strokeWidth="1" />
-                        <path d="M4 7.5H2M13 7.5H11" stroke="currentColor" strokeWidth="1" />
-                        <path d="M3.5 5L2 7.5L3.5 10" stroke="currentColor" strokeWidth="0.8" />
-                        <path d="M11.5 5L13 7.5L11.5 10" stroke="currentColor" strokeWidth="0.8" />
+                        <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
+                        <path d="M5.5 5.5L4 7.5L5.5 9.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M9.5 5.5L11 7.5L9.5 9.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M3 12H12" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
                     </svg>
                 </IconButton>
 
@@ -571,18 +577,7 @@ export function ActionBar() {
                         void dispatch(persistUiSettings());
                     }}
                 >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3 6L1.5 7.5L3 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M12 6L13.5 7.5L12 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M2 7.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                    </svg>
+                    <DoubleArrowRightIcon width="15" height="15" />
                 </IconButton>
 
                 <Separator orientation="vertical" size="2" />
@@ -633,7 +628,55 @@ export function ActionBar() {
                         void dispatch(persistUiSettings());
                     }}
                 >
-                    <TrackNextIcon width="15" height="15" />
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 15 15"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                    >
+                        <defs>
+                            <marker
+                                id="hs-track-switch-arrow"
+                                viewBox="0 0 6 6"
+                                refX="3"
+                                refY="3"
+                                markerWidth="5"
+                                markerHeight="5"
+                                orient="auto-start-reverse"
+                            >
+                                <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                            </marker>
+                        </defs>
+                        <rect
+                            x="1.5"
+                            y="2"
+                            width="8"
+                            height="3"
+                            rx="1"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                        />
+                        <rect
+                            x="5.5"
+                            y="10"
+                            width="8"
+                            height="3"
+                            rx="1"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                        />
+                        <line
+                            x1="9.5"
+                            y1="4.5"
+                            x2="5.5"
+                            y2="10.5"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                            markerStart="url(#hs-track-switch-arrow)"
+                            markerEnd="url(#hs-track-switch-arrow)"
+                        />
+                    </svg>
                 </IconButton>
 
                 <Separator orientation="vertical" size="2" />
