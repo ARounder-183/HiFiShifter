@@ -1169,19 +1169,50 @@ export function usePianoRollInteractions(args: {
     const onRulerMouseDown = useCallback(
         (e: ReactMouseEvent<HTMLDivElement>) => {
             if (e.button !== 0) return;
-            const bounds = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-            const sec = clamp(
-                secFromViewportClientX({
-                    clientX: e.clientX,
-                    viewportLeft: bounds.left,
-                    scrollLeft: scrollLeftRef.current,
-                    pxPerSec: pxPerSecRef.current,
-                }),
-                0,
-                1e12,
-            );
-            dispatch(setplayheadSec(sec));
-            void dispatch(seekPlayhead(sec));
+            const ruler = e.currentTarget as HTMLDivElement;
+            let moved = false;
+            let lastSec = 0;
+
+            const updateAt = (clientX: number, commit: boolean): number => {
+                const bounds = ruler.getBoundingClientRect();
+                const sec = clamp(
+                    secFromViewportClientX({
+                        clientX,
+                        viewportLeft: bounds.left,
+                        scrollLeft: scrollLeftRef.current,
+                        pxPerSec: pxPerSecRef.current,
+                    }),
+                    0,
+                    1e12,
+                );
+
+                dispatch(setplayheadSec(sec));
+                if (commit) {
+                    void dispatch(seekPlayhead(sec));
+                }
+                return sec;
+            };
+
+            // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+            lastSec = updateAt(e.clientX, true);
+
+            const onMove = (ev: MouseEvent) => {
+                moved = true;
+                lastSec = updateAt(ev.clientX, false);
+            };
+
+            const onEnd = (ev: MouseEvent) => {
+                window.removeEventListener("mousemove", onMove, true);
+                window.removeEventListener("mouseup", onEnd, true);
+                window.removeEventListener("mouseleave", onEnd, true);
+                if (!moved) return;
+                lastSec = updateAt(ev.clientX, false);
+                void dispatch(seekPlayhead(lastSec));
+            };
+
+            window.addEventListener("mousemove", onMove, true);
+            window.addEventListener("mouseup", onEnd, true);
+            window.addEventListener("mouseleave", onEnd, true);
         },
         [dispatch, scrollLeftRef, pxPerSecRef],
     );

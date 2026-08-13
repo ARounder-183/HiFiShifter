@@ -1072,13 +1072,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         document.body.setAttribute("data-hs-focus-window", "timeline");
                         const scroller = scrollRef.current;
                         if (!scroller) return;
-                        const bounds = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                        startDeferredPlayheadSeek({
-                            startClientX: e.clientX,
-                            startClientY: e.clientY,
-                            getBounds: () => bounds,
-                            getScrollLeft: () => scroller.scrollLeft,
-                        });
+                        const ruler = e.currentTarget as HTMLDivElement;
+                        let moved = false;
+                        let lastSec = 0;
+
+                        const updateAt = (clientX: number, commit: boolean): number =>
+                            setPlayheadFromClientX(
+                                clientX,
+                                ruler.getBoundingClientRect(),
+                                scroller.scrollLeft,
+                                commit,
+                            );
+
+                        // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+                        lastSec = updateAt(e.clientX, true);
+
+                        const onMove = (ev: MouseEvent) => {
+                            moved = true;
+                            lastSec = updateAt(ev.clientX, false);
+                        };
+
+                        const onEnd = (ev: MouseEvent) => {
+                            window.removeEventListener("mousemove", onMove, true);
+                            window.removeEventListener("mouseup", onEnd, true);
+                            window.removeEventListener("mouseleave", onEnd, true);
+                            if (!moved) return;
+                            lastSec = updateAt(ev.clientX, false);
+                            void dispatch(seekPlayhead(lastSec));
+                        };
+
+                        window.addEventListener("mousemove", onMove, true);
+                        window.addEventListener("mouseup", onEnd, true);
+                        window.addEventListener("mouseleave", onEnd, true);
                     }}
                 />
 
