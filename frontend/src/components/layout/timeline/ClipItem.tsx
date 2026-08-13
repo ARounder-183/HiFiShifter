@@ -165,6 +165,13 @@ export const ClipItem = React.memo(function ClipItem({
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
             const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
             const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+            const primedSelection = shouldPrimeSelection && !selected;
+
+            if (primedSelection) {
+                ensureSelected(clip.id);
+                selectClipRemote(clip.id);
+                recordLastClickPosition?.(e.clientX);
+            }
 
             const startX = e.clientX;
             const startY = e.clientY;
@@ -203,7 +210,7 @@ export const ClipItem = React.memo(function ClipItem({
                         onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
                         return;
                     }
-                    if (shouldPrimeSelection) {
+                    if (shouldPrimeSelection && !primedSelection) {
                         if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                             ensureSelected(clip.id);
                         }
@@ -230,6 +237,7 @@ export const ClipItem = React.memo(function ClipItem({
             recordLastClickPosition,
             seekFromClientX,
             selectClipRemote,
+            selected,
             startEditDrag,
             altPressed,
         ],
@@ -287,6 +295,13 @@ export const ClipItem = React.memo(function ClipItem({
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
                 const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const primedSelection = shouldPrimeSelection && !selected;
+
+                if (primedSelection) {
+                    ensureSelected(clip.id);
+                    selectClipRemote(clip.id);
+                    recordLastClickPosition?.(e.clientX);
+                }
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
@@ -310,7 +325,7 @@ export const ClipItem = React.memo(function ClipItem({
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                                 ensureSelected(clip.id);
                             }
