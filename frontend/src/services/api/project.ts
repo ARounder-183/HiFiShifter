@@ -55,11 +55,20 @@ export const projectApi = {
             customScale,
         ),
 
-    setProjectTimelineSettings: (beatsPerBar: number, gridSize: string) =>
+    setProjectTimelineSettings: (
+        beatsPerBar: number,
+        timeSignatureDenominator: number,
+        gridSize: string,
+    ) =>
         invoke<{
             ok: boolean;
-            project?: { beats_per_bar?: number; grid_size?: string; dirty?: boolean };
-        }>("set_project_timeline_settings", beatsPerBar, gridSize),
+            project?: {
+                beats_per_bar?: number;
+                time_signature_denominator?: number;
+                grid_size?: string;
+                dirty?: boolean;
+            };
+        }>("set_project_timeline_settings", beatsPerBar, timeSignatureDenominator, gridSize),
 
     setProjectStretchSettings: (payload: {
         stretchAlgorithmOverride?: StretchAlgorithmOption | null;

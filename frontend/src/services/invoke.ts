@@ -325,7 +325,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { customScale: args[0] };
 
         case "set_project_timeline_settings":
-            return { beatsPerBar: args[0], gridSize: args[1] };
+            return {
+                beatsPerBar: args[0],
+                timeSignatureDenominator: args[1],
+                gridSize: args[2],
+            };
 
         case "set_project_stretch_settings":
             return {

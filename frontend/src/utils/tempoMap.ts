@@ -9,7 +9,8 @@
  * - 音乐时间（拍 / 小节.拍）完全由 Tempo Map 推导，编辑变化点不会移动任何音频。
  *
  * 拍号为“每小节拍数”的概念：一小节的拍数 = numerator * 4 / denominator。
- * 变化点处的音阶为 null 时表示“跟随工程音阶”。
+ * 变化点处的音阶为 null 时表示“跟随工程音阶”；
+ * 变化点处的拍号为 null 时表示“跟随之前的拍号”（0 位置初始点必须显式携带拍号）。
  */
 
 import type { ScaleLike } from "./musicalScales";
@@ -29,16 +30,20 @@ export interface TempoMapScaleData {
     notes?: number[];
 }
 
+/** 拍号（如 3/4 的分子 3、分母 4）。 */
+export interface TempoTimeSignature {
+    numerator: number;
+    denominator: number;
+}
+
 export interface TempoPoint {
     id: string;
     /** 绝对秒位置（时间锚定）。 */
     positionSec: number;
     /** BPM。 */
     bpm: number;
-    /** 拍号分子（如 3/4 的 3）。 */
-    numerator: number;
-    /** 拍号分母（如 3/4 的 4）。 */
-    denominator: number;
+    /** 拍号；null = 跟随之前的拍号（0 位置初始点必须显式）。 */
+    timeSignature: TempoTimeSignature | null;
     /** 音阶覆盖；null = 跟随工程音阶。 */
     scale: TempoMapScaleData | null;
 }
@@ -105,9 +110,29 @@ export function isTempoMapEmpty(map: TempoMap | null | undefined): boolean {
 }
 
 /** 每小节拍数（拍号为“分子个 4/分母 音符”，一小节 = numerator * 4 / denominator 拍）。 */
-export function beatsPerBarOf(point: Pick<TempoPoint, "numerator" | "denominator">): number {
-    const denominator = clampDenominator(point.denominator);
-    return (clampNumerator(point.numerator) * 4) / denominator;
+export function beatsPerBarOf(sig: TempoTimeSignature): number {
+    const denominator = clampDenominator(sig.denominator);
+    return (clampNumerator(sig.numerator) * 4) / denominator;
+}
+
+/** 构造已钳制的拍号。 */
+export function makeTimeSignature(numerator: number, denominator: number): TempoTimeSignature {
+    return {
+        numerator: clampNumerator(numerator),
+        denominator: clampDenominator(denominator),
+    };
+}
+
+/** 从不可信数据构造拍号；分子/分母任一缺失或非法时返回 null。 */
+export function normalizeTimeSignature(value: {
+    numerator?: number | null;
+    denominator?: number | null;
+} | null | undefined): TempoTimeSignature | null {
+    if (!value) return null;
+    const numerator = Number(value.numerator);
+    const denominator = Number(value.denominator);
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
+    return makeTimeSignature(numerator, denominator);
 }
 
 /** 格式化 BPM 显示（整数则无小数）。 */
@@ -117,8 +142,8 @@ export function formatTempoBpm(bpm: number): string {
 }
 
 /** 拍号显示文本，如 "4/4"、"3/4"。 */
-export function formatTimeSignature(point: Pick<TempoPoint, "numerator" | "denominator">): string {
-    return `${clampNumerator(point.numerator)}/${clampDenominator(point.denominator)}`;
+export function formatTimeSignature(sig: TempoTimeSignature): string {
+    return `${clampNumerator(sig.numerator)}/${clampDenominator(sig.denominator)}`;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -129,17 +154,25 @@ export function formatTimeSignature(point: Pick<TempoPoint, "numerator" | "denom
  * 规范化 TempoMap：
  * - 按位置排序；位置过近（< 1e-6s）的重复点只保留第一个；
  * - 第一个点必须位于 0（不足则用 fallback 值补一个，并携带工程音阶 —— 初始点即工程基准记录）；
+ * - 第一个点必须显式携带拍号（它是工程基准记录，不存在“之前”可跟随）；
+ *   其余点拍号为 null 时表示“跟随之前的拍号”。
  * - 无点返回 null。
  */
 export function normalizeTempoMap(
     map: TempoMap | null | undefined,
     fallbackBpm: number,
     fallbackBeatsPerBar: number,
-    opts?: { projectScale?: ScaleLike; projectScaleName?: string },
+    opts?: {
+        projectScale?: ScaleLike;
+        projectScaleName?: string;
+        /** 工程基准拍号分母（无 Tempo Map 时的工程记录值；默认 4）。 */
+        projectDenominator?: number;
+    },
 ): TempoMap | null {
     if (!map || !Array.isArray(map.points)) return null;
 
     const fallback = clampNumerator(fallbackBeatsPerBar || 4);
+    const fallbackDenominator = clampDenominator(opts?.projectDenominator ?? 4);
     const points: TempoPoint[] = [];
     for (const raw of map.points) {
         if (!raw || typeof raw.id !== "string" || !raw.id) continue;
@@ -151,8 +184,7 @@ export function normalizeTempoMap(
             id: raw.id,
             positionSec,
             bpm: clampBpm(Number(raw.bpm)),
-            numerator: clampNumerator(Number(raw.numerator)),
-            denominator: clampDenominator(Number(raw.denominator)),
+            timeSignature: normalizeTimeSignature(raw.timeSignature),
             scale: normalizeScaleData(raw.scale),
         });
     }
@@ -164,13 +196,19 @@ export function normalizeTempoMap(
             id: createTempoPointId(),
             positionSec: 0,
             bpm: clampBpm(fallbackBpm),
-            numerator: fallback,
-            denominator: 4,
+            timeSignature: { numerator: fallback, denominator: fallbackDenominator },
             // 初始点即工程基准记录：携带工程音阶（键或自定义音级）。
             scale: scaleLikeToScaleData(opts?.projectScale, opts?.projectScaleName),
         });
     }
     points[0].positionSec = 0;
+    // 初始点必须显式携带拍号：缺失（非法输入）时用工程基准值物化。
+    if (!points[0].timeSignature) {
+        points[0] = {
+            ...points[0],
+            timeSignature: { numerator: fallback, denominator: fallbackDenominator },
+        };
+    }
     return { points };
 }
 
@@ -197,7 +235,11 @@ export function fromBackendTempoMap(
     data: unknown,
     fallbackBpm: number,
     fallbackBeatsPerBar: number,
-    opts?: { projectScale?: ScaleLike; projectScaleName?: string },
+    opts?: {
+        projectScale?: ScaleLike;
+        projectScaleName?: string;
+        projectDenominator?: number;
+    },
 ): TempoMap | null {
     const maybeWrapped = data as { points?: unknown } | null;
     const rawPoints: unknown = Array.isArray(data) ? data : maybeWrapped?.points;
@@ -209,16 +251,19 @@ export function fromBackendTempoMap(
                     id?: string;
                     positionSec?: number;
                     bpm?: number;
-                    numerator?: number;
-                    denominator?: number;
+                    numerator?: number | null;
+                    denominator?: number | null;
                     scale?: TempoMapScaleData | null;
                 };
+                const timeSignature =
+                    item.numerator != null && item.denominator != null
+                        ? makeTimeSignature(Number(item.numerator), Number(item.denominator))
+                        : null;
                 return {
                     id: String(item.id ?? createTempoPointId()),
                     positionSec: Number(item.positionSec ?? 0),
                     bpm: Number(item.bpm ?? fallbackBpm),
-                    numerator: Number(item.numerator ?? fallbackBeatsPerBar),
-                    denominator: Number(item.denominator ?? 4),
+                    timeSignature,
                     scale: item.scale ?? null,
                 };
             }),
@@ -232,6 +277,7 @@ export function fromBackendTempoMap(
 /**
  * 前端 TempoMap → 后端（camelCase）载荷：变化点“裸数组”（null = 清除）。
  * 与后端 `set_timeline_tempo_map(tempoMap: Option<Vec<TempoPointPayload>>)` 参数一致。
+ * 拍号跟随之前的拍号时 numerator/denominator 序列化为 null。
  */
 export function toBackendTempoMap(
     map: TempoMap | null,
@@ -239,8 +285,8 @@ export function toBackendTempoMap(
     id: string;
     positionSec: number;
     bpm: number;
-    numerator: number;
-    denominator: number;
+    numerator: number | null;
+    denominator: number | null;
     scale: {
         key: string | null;
         name: string | null;
@@ -252,8 +298,8 @@ export function toBackendTempoMap(
         id: p.id,
         positionSec: p.positionSec,
         bpm: p.bpm,
-        numerator: p.numerator,
-        denominator: p.denominator,
+        numerator: p.timeSignature?.numerator ?? null,
+        denominator: p.timeSignature?.denominator ?? null,
         scale: p.scale
             ? {
                   key: p.scale.key ?? null,
@@ -282,6 +328,61 @@ export function pointIndexAtSec(map: TempoMap, sec: number): number {
     return lo;
 }
 
+/** 工程基准拍号（无 Tempo Map 时退化为该值；防御性默认 4/4）。 */
+export const DEFAULT_TIME_SIGNATURE: TempoTimeSignature = { numerator: 4, denominator: 4 };
+
+/**
+ * 计算每个变化点“生效拍号”的一趟扫描结果（与 points 等长）：
+ * 从前往后携带最近一个显式拍号；0 位置点必须显式（规范化保证），
+ * 因此任何位置都有确定的值。
+ */
+export function effectiveTimeSignatures(map: TempoMap): TempoTimeSignature[] {
+    let carry: TempoTimeSignature | null = null;
+    return map.points.map((point) => {
+        if (point.timeSignature) carry = point.timeSignature;
+        return carry ?? DEFAULT_TIME_SIGNATURE;
+    });
+}
+
+/** 下标处变化点的生效拍号（跟随之前的拍号时解析为实际值）。 */
+export function effectiveTimeSignatureAt(map: TempoMap, index: number): TempoTimeSignature {
+    const safeIndex = Math.min(Math.max(0, index), map.points.length - 1);
+    return effectiveTimeSignatures(map)[safeIndex];
+}
+
+/** 某绝对秒位置生效的拍号；无 Tempo Map 时退化为工程基准值。 */
+export function timeSignatureAtSec(
+    map: TempoMap | null,
+    sec: number,
+    fallback: { beatsPerBar: number; denominator?: number },
+): TempoTimeSignature {
+    if (!map || map.points.length === 0) {
+        return {
+            numerator: clampNumerator(fallback.beatsPerBar || 4),
+            denominator: clampDenominator(fallback.denominator ?? 4),
+        };
+    }
+    return effectiveTimeSignatureAt(map, pointIndexAtSec(map, sec));
+}
+
+/**
+ * 查询某个变化点“之前”生效的拍号（用于“跟随之前的拍号”文案与解析）：
+ * 0 位置初始点之前的拍号即工程基准记录；其它位置返回其前一个点的生效拍号。
+ */
+export function previousTimeSignatureAtSec(
+    map: TempoMap | null,
+    positionSec: number,
+    fallback: { beatsPerBar: number; denominator?: number },
+): TempoTimeSignature {
+    if (positionSec <= 1e-9) {
+        return {
+            numerator: clampNumerator(fallback.beatsPerBar || 4),
+            denominator: clampDenominator(fallback.denominator ?? 4),
+        };
+    }
+    return timeSignatureAtSec(map, positionSec - 1e-6, fallback);
+}
+
 export function tempoAtSec(
     map: TempoMap | null,
     sec: number,
@@ -292,10 +393,11 @@ export function tempoAtSec(
         return { bpm: clampBpm(fallback.bpm), numerator: beatsPerBar, denominator: 4 };
     }
     const point = map.points[pointIndexAtSec(map, sec)];
+    const sig = effectiveTimeSignatureAt(map, pointIndexAtSec(map, sec));
     return {
         bpm: point.bpm,
-        numerator: point.numerator,
-        denominator: point.denominator,
+        numerator: sig.numerator,
+        denominator: sig.denominator,
     };
 }
 
@@ -491,12 +593,14 @@ export function beatToBarBeat(
 
     const cache = buildBeatCache(map, fallbackBpm);
     const { points } = map;
+    // 每段生效拍号（跟随之前的拍号时解析为实际值）。
+    const segmentSigs = effectiveTimeSignatures(map);
     let bar = 1;
 
     for (let i = 0; i < points.length; i += 1) {
         const segStartBeat = cache.pointBeats[i];
         const segEndBeat = i + 1 < points.length ? cache.pointBeats[i + 1] : Infinity;
-        const bpb = Math.max(1, beatsPerBarOf(points[i]));
+        const bpb = Math.max(1, beatsPerBarOf(segmentSigs[i]));
 
         if (safeBeat < segEndBeat || !Number.isFinite(segEndBeat)) {
             const rel = safeBeat - segStartBeat;
@@ -529,8 +633,7 @@ export function beatToBarBeat(
 
     // 超出工程末尾：按最后一段外推。
     const lastIndex = points.length - 1;
-    const last = points[lastIndex];
-    const bpb = Math.max(1, beatsPerBarOf(last));
+    const bpb = Math.max(1, beatsPerBarOf(segmentSigs[lastIndex]));
     const rel = safeBeat - cache.pointBeats[lastIndex];
     let fullBars = Math.floor(rel / bpb);
     const inBar = rel - fullBars * bpb;
@@ -640,7 +743,7 @@ export function buildTempoGridLines(args: {
         const segment = segments[i];
         const segBpm = Math.max(1, segment.point.bpm);
         const segSecPerBeat = 60 / segBpm;
-        const segBpb = Math.max(1, beatsPerBarOf(segment.point));
+        const segBpb = Math.max(1, segment.beatsPerBar);
         const clampedStart = Math.max(segment.startSec, startSec);
         const clampedEnd = Math.min(segment.endSec, endSec);
         if (clampedEnd < clampedStart - 1e-9) continue;
@@ -691,8 +794,12 @@ export function updateTempoPoint(map: TempoMap, id: string, patch: Partial<Omit<
                 ...patch,
                 positionSec: Math.max(0, Number(patch.positionSec ?? p.positionSec) || 0),
                 bpm: clampBpm(Number(patch.bpm ?? p.bpm)),
-                numerator: clampNumerator(Number(patch.numerator ?? p.numerator)),
-                denominator: clampDenominator(Number(patch.denominator ?? p.denominator)),
+                timeSignature:
+                    patch.timeSignature === undefined
+                        ? p.timeSignature
+                        : patch.timeSignature == null
+                          ? null
+                          : makeTimeSignature(patch.timeSignature.numerator, patch.timeSignature.denominator),
                 scale: patch.scale === undefined ? p.scale : normalizeScaleData(patch.scale),
             };
         }),
@@ -706,16 +813,25 @@ export function removeTempoPoint(map: TempoMap, id: string): TempoMap | null {
     // 第一个点必须位于 0：若删除了 0 位置的点，把下一个点钉到 0。
     if (points[0].positionSec > 1e-9) {
         points[0] = { ...points[0], positionSec: 0 };
+        // 钉到 0 的点成为工程基准记录：必须显式携带拍号。
+        if (!points[0].timeSignature) {
+            const sig = effectiveTimeSignatureAt(map, map.points.findIndex((p) => p.id === points[0].id));
+            points[0] = { ...points[0], timeSignature: sig };
+        }
     }
     return { points };
 }
 
-/** 创建位于 sec 的新变化点（继承该位置当前生效的 BPM/拍号；音阶跟随之前的音阶）。
- * 首次创建（map 为 null）时，0 位置初始点即工程基准记录：携带工程 BPM/拍号/音阶。 */
+/**
+ * 创建位于 sec 的新变化点：
+ * - BPM 继承该位置当前生效值；拍号默认“跟随之前的拍号”（timeSignature: null）；
+ * - 音阶默认“跟随工程音阶”（scale: null）。
+ * 首次创建（map 为 null）时，0 位置初始点即工程基准记录：携带工程 BPM/拍号/音阶。
+ */
 export function createTempoPointAt(
     map: TempoMap | null,
     sec: number,
-    fallback: { bpm: number; beatsPerBar: number },
+    fallback: { bpm: number; beatsPerBar: number; denominator?: number },
     opts?: { projectScale?: ScaleLike; projectScaleName?: string },
 ): { map: TempoMap; point: TempoPoint } {
     const at = tempoAtSec(map, sec, fallback);
@@ -723,8 +839,8 @@ export function createTempoPointAt(
         id: createTempoPointId(),
         positionSec: Math.max(0, sec),
         bpm: at.bpm,
-        numerator: at.numerator,
-        denominator: at.denominator,
+        // 新添加的变化点默认“跟随之前的拍号”。
+        timeSignature: null,
         scale: null,
     };
     if (!map) {
@@ -732,8 +848,11 @@ export function createTempoPointAt(
             id: createTempoPointId(),
             positionSec: 0,
             bpm: clampBpm(fallback.bpm),
-            numerator: clampNumerator(fallback.beatsPerBar || 4),
-            denominator: 4,
+            // 初始点即工程基准记录：显式携带工程拍号。
+            timeSignature: {
+                numerator: clampNumerator(fallback.beatsPerBar || 4),
+                denominator: clampDenominator(fallback.denominator ?? 4),
+            },
             // 初始点即工程基准记录：携带工程音阶（键或自定义音级）。
             scale: scaleLikeToScaleData(opts?.projectScale, opts?.projectScaleName),
         };
@@ -747,20 +866,32 @@ export function createTempoPointAt(
 
 /**
  * 时间轴上产生 Tempo Map 数据时同步的“工程基准值”：
- * 始终取 0 位置点的 BPM / 每小节拍数，保证删除 Tempo Map 后工程回退一致。
+ * 始终取 0 位置点的 BPM / 每小节拍数 / 拍号分母，保证删除 Tempo Map 后工程回退一致。
  */
-export function tempoMapFallbackValues(map: TempoMap | null, fallback: { bpm: number; beatsPerBar: number }) {
+export function tempoMapFallbackValues(
+    map: TempoMap | null,
+    fallback: { bpm: number; beatsPerBar: number; denominator?: number },
+): { bpm: number; beatsPerBar: number; denominator: number } {
     if (map && map.points.length > 0) {
         const first = map.points[0];
-        return { bpm: first.bpm, beatsPerBar: first.numerator };
+        const sig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+        return {
+            bpm: first.bpm,
+            beatsPerBar: sig.numerator,
+            denominator: sig.denominator,
+        };
     }
-    return fallback;
+    return {
+        bpm: fallback.bpm,
+        beatsPerBar: fallback.beatsPerBar,
+        denominator: clampDenominator(fallback.denominator ?? 4),
+    };
 }
 
 /** 将 map 中 0 位置点的 BPM/拍号替换为给定工程值（保持其他点不变）。 */
 export function withProjectFallbackValues(
     map: TempoMap | null,
-    fallback: { bpm: number; beatsPerBar: number },
+    fallback: { bpm: number; beatsPerBar: number; denominator?: number },
 ): TempoMap | null {
     if (!map || map.points.length === 0) return map;
     const first = map.points[0];
@@ -769,7 +900,10 @@ export function withProjectFallbackValues(
             {
                 ...first,
                 bpm: clampBpm(fallback.bpm),
-                numerator: clampNumerator(fallback.beatsPerBar || 4),
+                timeSignature: {
+                    numerator: clampNumerator(fallback.beatsPerBar || 4),
+                    denominator: clampDenominator(fallback.denominator ?? 4),
+                },
             },
             ...map.points.slice(1),
         ],
@@ -863,18 +997,33 @@ function dedupeSorted(values: number[]): number[] {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * 变化点旗帜的展示文本：`BPM 拍号 - 音阶`（音阶仅在显式设置时显示）。
+ * 变化点旗帜的展示文本：
+ * - 拍号与音阶都跟随：`120`；
+ * - 仅拍号显式：`120 4/4`；
+ * - 仅音阶显式：`120 - C / Am`；
+ * - 都显式：`120 4/4 - C / Am`。
  * 标尺行旗帜与视口左侧悬浮标签共用，保证内容一致。
  */
 export function tempoPointFlagLabel(point: TempoPoint): string {
-    const base = `${formatTempoBpm(point.bpm)} ${formatTimeSignature(point)}`;
-    const scale = point.scale;
-    if (!scale) return base;
-    if (scale.key) {
-        return `${base} - ${SCALE_LABELS[scale.key as keyof typeof SCALE_LABELS] ?? scale.key}`;
+    let label = formatTempoBpm(point.bpm);
+    if (point.timeSignature) {
+        label += ` ${formatTimeSignature(point.timeSignature)}`;
     }
-    if (scale.name) return `${base} - ${scale.name}`;
-    return `${base} - …`;
+    const scaleLabel = tempoPointScaleShortLabel(point.scale);
+    if (scaleLabel) {
+        label += ` - ${scaleLabel}`;
+    }
+    return label;
+}
+
+/** 变化点音阶的短标签（无音阶数据时返回 null）。 */
+export function tempoPointScaleShortLabel(scale: TempoMapScaleData | null | undefined): string | null {
+    if (!scale) return null;
+    if (scale.key) {
+        return SCALE_LABELS[scale.key as keyof typeof SCALE_LABELS] ?? scale.key;
+    }
+    if (scale.name) return scale.name;
+    return "…";
 }
 
 /** 旗帜文本宽度估算（px，9px 字号等宽近似：每字符 6px + 内边距 16px）。 */
@@ -959,62 +1108,60 @@ export function tempoPointHitTest(
 }
 
 /**
- * 解析变化点旗帜文本（如 `120 4/4 - C / Am`、`150.5 3/8`、`90 4/4 - 自定义音阶`），
- * 供旗帜内联编辑使用。解析失败返回 null（调用方静默放弃、不应用）。
+ * 解析变化点旗帜文本，供旗帜内联编辑使用。解析失败返回 null（调用方静默放弃、不应用）。
+ *
+ * 支持的格式与旗帜展示完全一致：
+ * - `120`                    → 仅 BPM（拍号、音阶都跟随之前）；
+ * - `120 4/4`                → BPM + 显式拍号（音阶跟随）；
+ * - `120 - C / Am`           → BPM + 显式音阶（拍号跟随）；
+ * - `120 4/4 - C / Am`       → BPM + 拍号 + 音阶。
  *
  * 规则：
  * - BPM：浮点数（钳制 10-960）；
  * - 拍号：`分子/分母`，分子 1-32、分母限 {1,2,4,8,16,32}；
  * - 音阶（可选，` - ` 之后）：匹配内置音阶显示标签（如 "C / Am"）、
  *   裸键名（如 "C"）或自定义音阶预设名；无法识别时整体解析失败；
- * - 无音阶部分 → scale = null（跟随之前的音阶）。
+ * - 无音阶部分 → scale = null（跟随工程音阶）；无拍号部分 → timeSignature = null（跟随之前的拍号）。
  */
 export function parseTempoPointText(
     text: string,
     customPresets: ReadonlyArray<{ id: string | number; name: string; notes: number[] }>,
-): { bpm: number; numerator: number; denominator: number; scale: TempoMapScaleData | null } | null {
+): { bpm: number; timeSignature: TempoTimeSignature | null; scale: TempoMapScaleData | null } | null {
     const raw = text.trim();
     if (!raw) return null;
 
-    // `BPM 拍号[- 音阶]`（BPM 可能带小数；音阶部分用第一个 ` - ` 分隔，
-    // 音阶名自身可以包含 `-`）。
-    const headMatch = /^(\d+(?:\.\d+)?)\s+(\d+)\s*\/\s*(\d+)(?:\s*-\s*(.*))?$/.exec(raw);
+    // `BPM [拍号][ - 音阶]`（BPM 可能带小数；音阶部分用第一个 ` - ` 分隔，
+    // 音阶名自身可以包含 `-`；拍号部分仅在以数字开头时识别，避免误吞
+    // `120 - C / Am` 这种“拍号跟随、音阶显式”的输入）。
+    const headMatch = /^(\d+(?:\.\d+)?)(?:\s+(\d+)\s*\/\s*(\d+))?(?:\s*-\s*(.*))?$/.exec(raw);
     if (!headMatch) return null;
     const bpm = clampBpm(Number(headMatch[1]));
-    const numerator = Number(headMatch[2]);
-    const denominator = Number(headMatch[3]);
+    const sigText = headMatch[2];
+    const denText = headMatch[3];
     const scaleText = (headMatch[4] ?? "").trim();
-    if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
-    if (numerator < 1 || numerator > TEMPO_NUMERATOR_MAX) return null;
-    if (!(TEMPO_DENOMINATORS as readonly number[]).includes(denominator)) return null;
+
+    let timeSignature: TempoTimeSignature | null = null;
+    if (sigText !== undefined && denText !== undefined) {
+        const numerator = Number(sigText);
+        const denominator = Number(denText);
+        if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
+        if (numerator < 1 || numerator > TEMPO_NUMERATOR_MAX) return null;
+        if (!(TEMPO_DENOMINATORS as readonly number[]).includes(denominator)) return null;
+        timeSignature = { numerator: clampNumerator(numerator), denominator: clampDenominator(denominator) };
+    }
 
     if (!scaleText) {
-        return {
-            bpm,
-            numerator: clampNumerator(numerator),
-            denominator: clampDenominator(denominator),
-            scale: null,
-        };
+        return { bpm, timeSignature, scale: null };
     }
 
     // 内置键（直接键名）。
     if ((SCALE_KEYS as readonly string[]).includes(scaleText)) {
-        return {
-            bpm,
-            numerator: clampNumerator(numerator),
-            denominator: clampDenominator(denominator),
-            scale: { key: scaleText },
-        };
+        return { bpm, timeSignature, scale: { key: scaleText } };
     }
     // 内置音阶显示标签（"C / Am" 等，反向查表）。
     for (const key of SCALE_KEYS) {
         if (SCALE_LABELS[key] === scaleText) {
-            return {
-                bpm,
-                numerator: clampNumerator(numerator),
-                denominator: clampDenominator(denominator),
-                scale: { key },
-            };
+            return { bpm, timeSignature, scale: { key } };
         }
     }
     // 自定义音阶预设名。
@@ -1022,8 +1169,7 @@ export function parseTempoPointText(
     if (preset) {
         return {
             bpm,
-            numerator: clampNumerator(numerator),
-            denominator: clampDenominator(denominator),
+            timeSignature,
             scale: { name: preset.name, notes: [...preset.notes] },
         };
     }
@@ -1036,6 +1182,10 @@ export interface TempoSegment {
     point: TempoPoint;
     /** 该段生效音阶（null = 跟随工程音阶）。 */
     scale: ScaleLike | null;
+    /** 该段生效拍号（跟随之前的拍号时已解析为实际值）。 */
+    timeSignature: TempoTimeSignature;
+    /** 该段生效每小节拍数。 */
+    beatsPerBar: number;
 }
 
 /** 把 TempoMap 展开为显示段（截断到 [0, projectSec]）。 */
@@ -1044,17 +1194,21 @@ export function tempoMapSegments(map: TempoMap | null, projectSec: number): Temp
     if (!map || map.points.length === 0) {
         return [];
     }
+    const segmentSigs = effectiveTimeSignatures(map);
     const segments: TempoSegment[] = [];
     for (let i = 0; i < map.points.length; i += 1) {
         const startSec = map.points[i].positionSec;
         const nextSec = i + 1 < map.points.length ? map.points[i + 1].positionSec : endSec;
         if (startSec > endSec) break;
+        const timeSignature = segmentSigs[i];
         segments.push({
             startSec,
             endSec: Math.max(startSec, Math.min(nextSec, endSec)),
             point: map.points[i],
             // 仅当该变化点显式携带音阶覆盖时才非 null（null = 跟随工程音阶）。
             scale: scaleDataToScaleLike(map.points[i].scale),
+            timeSignature,
+            beatsPerBar: Math.max(1, beatsPerBarOf(timeSignature)),
         });
     }
     return segments;

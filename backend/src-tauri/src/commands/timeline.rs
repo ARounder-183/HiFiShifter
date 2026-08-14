@@ -992,7 +992,8 @@ pub(super) fn set_timeline_tempo_map(
         tl.bpm = first.bpm.clamp(10.0, 960.0);
         {
             let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-            p.beats_per_bar = first.numerator.clamp(1, 32);
+            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+            p.time_signature_denominator = first.denominator.unwrap_or(4);
             p.dirty = true;
         }
     }

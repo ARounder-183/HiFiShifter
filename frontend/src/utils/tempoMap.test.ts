@@ -9,6 +9,7 @@ import {
     computeTempoFloatingLabelState,
     createTempoPointAt,
     effectiveScaleAtSec,
+    effectiveTimeSignatureAt,
     fromBackendTempoMap,
     normalizeTempoMap,
     parseTempoPointText,
@@ -23,7 +24,7 @@ import {
     toBackendTempoMap,
     updateTempoPoint,
 } from "./tempoMap";
-import type { TempoMap, TempoPoint } from "./tempoMap";
+import type { TempoMap, TempoPoint, TempoTimeSignature } from "./tempoMap";
 
 let checks = 0;
 
@@ -43,17 +44,21 @@ function assertNear(actual: number, expected: number, label: string): void {
 
 type RawPoint = Partial<Omit<TempoPoint, "id">> & { positionSec: number };
 
+/** 构造 Tempo Map：未指定拍号时显式 4/4（0 位置初始点必须显式）。 */
 function mapWith(points: RawPoint[]): TempoMap {
     return {
         points: points.map((p, i) => ({
             id: `p${i}`,
             bpm: 120,
-            numerator: 4,
-            denominator: 4,
+            timeSignature: { numerator: 4, denominator: 4 },
             scale: null,
             ...p,
         })),
     };
+}
+
+function sig(numerator: number, denominator: number): TempoTimeSignature {
+    return { numerator, denominator };
 }
 
 // ── 基础转换 ──────────────────────────────────────────────────────────────────
@@ -91,8 +96,8 @@ function mapWith(points: RawPoint[]): TempoMap {
 {
     // 0s 起 4/4 @120（每拍 0.5s），2s（=4 拍）处切 3/4。
     const map = mapWith([
-        { positionSec: 0, bpm: 120, numerator: 4 },
-        { positionSec: 2, bpm: 120, numerator: 3 },
+        { positionSec: 0, bpm: 120, timeSignature: sig(4, 4) },
+        { positionSec: 2, bpm: 120, timeSignature: sig(3, 4) },
     ]);
     const at2 = barBeatAtSec(map, 2, 120, 4);
     assertEqual(at2.bar, 2, "bar number at meter change");
@@ -104,7 +109,7 @@ function mapWith(points: RawPoint[]): TempoMap {
 
 {
     // 浮点边界：1.999999999999 拍（≈ 第 3 拍起点）→ 应进位为 1.3，而不是 "1.2.1000"。
-    const map = mapWith([{ positionSec: 0, bpm: 120, numerator: 4 }]);
+    const map = mapWith([{ positionSec: 0, bpm: 120, timeSignature: sig(4, 4) }]);
     const bbt = barBeatAtSec(map, 0.9999999999995, 120, 4);
     assertEqual(bbt.bar, 1, "barBeat: near-boundary bar");
     assertEqual(bbt.beat, 3, "barBeat: near-boundary beat carries");
@@ -125,8 +130,20 @@ function mapWith(points: RawPoint[]): TempoMap {
 {
     const raw: TempoMap = {
         points: [
-            { id: "b", positionSec: 5, bpm: 9999, numerator: 99, denominator: 7, scale: null },
-            { id: "a", positionSec: 2, bpm: 140, numerator: 3, denominator: 8, scale: null },
+            {
+                id: "b",
+                positionSec: 5,
+                bpm: 9999,
+                timeSignature: { numerator: 99, denominator: 7 },
+                scale: null,
+            },
+            {
+                id: "a",
+                positionSec: 2,
+                bpm: 140,
+                timeSignature: { numerator: 3, denominator: 8 },
+                scale: null,
+            },
         ],
     };
     const normalized = normalizeTempoMap(raw, 120, 4);
@@ -138,18 +155,47 @@ function mapWith(points: RawPoint[]): TempoMap {
         "0,2,5",
         "normalize: sorted",
     );
-    assertEqual(normalized.points[1].denominator, 8, "normalize: denominator kept");
+    assertEqual(
+        normalized.points[1].timeSignature?.denominator,
+        8,
+        "normalize: denominator kept",
+    );
     assertEqual(normalized.points[2].bpm, 960, "normalize: bpm clamped");
-    assertEqual(normalized.points[2].denominator, 4, "normalize: invalid denominator");
+    assertEqual(
+        normalized.points[2].timeSignature?.numerator,
+        32,
+        "normalize: numerator clamped",
+    );
+    assertEqual(
+        normalized.points[2].timeSignature?.denominator,
+        4,
+        "normalize: invalid denominator",
+    );
 }
 
 {
-    const { map, point } = createTempoPointAt(null, 3, { bpm: 150, beatsPerBar: 3 });
+    const { map, point } = createTempoPointAt(null, 3, {
+        bpm: 150,
+        beatsPerBar: 3,
+        denominator: 8,
+    });
     assertEqual(map.points.length, 2, "create: two points");
     assertEqual(map.points[0].positionSec, 0, "create: first at 0");
-    assertEqual(map.points[0].numerator, 3, "create: fallback beats");
+    assertEqual(
+        map.points[0].timeSignature?.numerator,
+        3,
+        "create: fallback beats numerator",
+    );
+    assertEqual(
+        map.points[0].timeSignature?.denominator,
+        8,
+        "create: fallback denominator",
+    );
     assertEqual(point.positionSec, 3, "create: point position");
     assertEqual(point.bpm, 150, "create: inherited bpm");
+    // 新添加的变化点默认“跟随之前的拍号”。
+    assertEqual(point.timeSignature, null, "create: new point follows previous time signature");
+    assertEqual(point.scale, null, "create: new point follows project scale");
 }
 
 {
@@ -166,10 +212,26 @@ function mapWith(points: RawPoint[]): TempoMap {
 }
 
 {
+    // 删除 0 位置点后，被钉到 0 的“跟随拍号”点必须物化为显式拍号。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, timeSignature: sig(3, 4) },
+        { positionSec: 4, bpm: 120, timeSignature: null },
+    ]);
+    const after = removeTempoPoint(map, "p0");
+    if (!after) throw new Error("removeTempoPoint (follow) returned null");
+    assertEqual(after.points[0].timeSignature?.numerator, 3, "remove: pinned point materializes sig");
+    assertEqual(after.points[0].timeSignature?.denominator, 4, "remove: pinned denominator");
+}
+
+{
     const map = mapWith([{ positionSec: 0, bpm: 120 }]);
-    const updated = updateTempoPoint(map, "p0", { bpm: 5, numerator: 100 });
+    const updated = updateTempoPoint(map, "p0", {
+        bpm: 5,
+        timeSignature: { numerator: 100, denominator: 3 },
+    });
     assertEqual(updated.points[0].bpm, 10, "update: bpm clamped");
-    assertEqual(updated.points[0].numerator, 32, "update: numerator clamped");
+    assertEqual(updated.points[0].timeSignature?.numerator, 32, "update: numerator clamped");
+    assertEqual(updated.points[0].timeSignature?.denominator, 4, "update: denominator clamped");
 }
 
 // ── 音阶 ──────────────────────────────────────────────────────────────────────
@@ -201,10 +263,78 @@ function mapWith(points: RawPoint[]): TempoMap {
     assertEqual(segments[1].scale, "G", "scale segment 1 scale");
 }
 
+// ── 拍号“跟随之前的拍号” ─────────────────────────────────────────────────────
+
+{
+    // 0 位置 3/4；5s 处拍号跟随（继续 3/4）；10s 处切 6/8。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, timeSignature: sig(3, 4) },
+        { positionSec: 5, bpm: 120, timeSignature: null },
+        { positionSec: 10, bpm: 120, timeSignature: sig(6, 8) },
+    ]);
+    const eff = effectiveTimeSignatureAt(map, 1);
+    assertEqual(eff.numerator, 3, "effective sig: follow resolves numerator");
+    assertEqual(eff.denominator, 4, "effective sig: follow resolves denominator");
+    assertEqual(
+        tempoAtSec(map, 5, { bpm: 120, beatsPerBar: 4 }).numerator,
+        3,
+        "tempoAtSec: effective numerator at following point",
+    );
+    assertEqual(
+        tempoAtSec(map, 7.5, { bpm: 120, beatsPerBar: 4 }).denominator,
+        4,
+        "tempoAtSec: effective denominator in following segment",
+    );
+    assertEqual(
+        tempoAtSec(map, 12, { bpm: 120, beatsPerBar: 4 }).denominator,
+        8,
+        "tempoAtSec: explicit denominator after change",
+    );
+}
+
+{
+    // 跟随拍号的小节对齐：0s 3/4（每小节 1.5s @120），3s 处变化点跟随 → 小节按 3/4 连续。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, timeSignature: sig(3, 4) },
+        { positionSec: 3, bpm: 120, timeSignature: null },
+    ]);
+    const at3 = barBeatAtSec(map, 3, 120, 4);
+    assertEqual(at3.bar, 3, "follow sig: bar continues across following point");
+    assertEqual(at3.beat, 1, "follow sig: segment start is bar start");
+    const at45 = barBeatAtSec(map, 4.5, 120, 4);
+    assertEqual(at45.bar, 4, "follow sig: bar number in following segment");
+}
+
+{
+    // 网格线：跟随拍号的段继续按 3/4 生成小节线（每 1.5s）。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, timeSignature: sig(3, 4) },
+        { positionSec: 3, bpm: 120, timeSignature: null },
+    ]);
+    const lines = buildTempoGridLines({
+        startSec: 3,
+        endSec: 6,
+        map,
+        stepBeats: 1,
+        fallbackBpm: 120,
+        fallbackBeatsPerBar: 4,
+    });
+    const barLines = lines.filter((l) => l.isBar).map((l) => l.sec);
+    if (!barLines.some((s) => Math.abs(s - 3) < 1e-9)) {
+        throw new Error("follow sig: missing bar line at segment start");
+    }
+    if (!barLines.some((s) => Math.abs(s - 4.5) < 1e-9)) {
+        throw new Error("follow sig: missing 3/4 bar line at 4.5s");
+    }
+    if (!barLines.some((s) => Math.abs(s - 6) < 1e-9)) {
+        throw new Error("follow sig: missing 3/4 bar line at 6s");
+    }
+}
+
 // ── 网格线 ────────────────────────────────────────────────────────────────────
 
 {
-    const map = mapWith([{ positionSec: 0, bpm: 120, numerator: 4 }]);
+    const map = mapWith([{ positionSec: 0, bpm: 120, timeSignature: sig(4, 4) }]);
     const lines = buildTempoGridLines({
         startSec: 0,
         endSec: 2,
@@ -228,8 +358,8 @@ function mapWith(points: RawPoint[]): TempoMap {
     // 空工程 120bpm 4/4（每小节 2s），在 7.25s（旧标尺 4.3.500）插入变化点（同 BPM）。
     // 变化点后网格必须以该点为原点重新对齐 —— 不允许出现旧的 7.5/8.0/8.5 位置。
     const map = mapWith([
-        { positionSec: 0, bpm: 120, numerator: 4 },
-        { positionSec: 7.25, bpm: 120, numerator: 4 },
+        { positionSec: 0, bpm: 120, timeSignature: sig(4, 4) },
+        { positionSec: 7.25, bpm: 120, timeSignature: sig(4, 4) },
     ]);
     const lines = buildTempoGridLines({
         startSec: 7,
@@ -274,8 +404,18 @@ function mapWith(points: RawPoint[]): TempoMap {
 
 {
     const map = mapWith([
-        { positionSec: 0, bpm: 120, numerator: 4, denominator: 4, scale: { key: "C" } },
-        { positionSec: 7.25, bpm: 150, numerator: 3, denominator: 4, scale: { key: "G" } },
+        {
+            positionSec: 0,
+            bpm: 120,
+            timeSignature: sig(4, 4),
+            scale: { key: "C" },
+        },
+        {
+            positionSec: 7.25,
+            bpm: 150,
+            timeSignature: sig(3, 4),
+            scale: { key: "G" },
+        },
     ]);
     const pxPerSec = 100;
 
@@ -303,6 +443,55 @@ function mapWith(points: RawPoint[]): TempoMap {
     assertEqual(st.label, "150 3/4 - G / Em", "float: second segment label");
 }
 
+// ── 旗帜文本（展示与解析必须完全一致）───────────────────────────────────────
+
+{
+    assertEqual(
+        tempoPointFlagLabel({
+            id: "x",
+            positionSec: 0,
+            bpm: 120,
+            timeSignature: null,
+            scale: null,
+        }),
+        "120",
+        "label: sig+scale follow → bpm only",
+    );
+    assertEqual(
+        tempoPointFlagLabel({
+            id: "x",
+            positionSec: 0,
+            bpm: 120,
+            timeSignature: sig(4, 4),
+            scale: null,
+        }),
+        "120 4/4",
+        "label: explicit sig, scale follows",
+    );
+    assertEqual(
+        tempoPointFlagLabel({
+            id: "x",
+            positionSec: 0,
+            bpm: 120,
+            timeSignature: null,
+            scale: { key: "C" },
+        }),
+        "120 - C / Am",
+        "label: sig follows, explicit scale",
+    );
+    assertEqual(
+        tempoPointFlagLabel({
+            id: "x",
+            positionSec: 0,
+            bpm: 120,
+            timeSignature: sig(4, 4),
+            scale: { key: "C" },
+        }),
+        "120 4/4 - C / Am",
+        "label: both explicit",
+    );
+}
+
 // ── 旗帜文本解析（内联编辑）─────────────────────────────────────────────────
 
 {
@@ -310,14 +499,24 @@ function mapWith(points: RawPoint[]): TempoMap {
 
     const full = parseTempoPointText("120 4/4 - C / Am", presets);
     assertEqual(full?.bpm, 120, "parse: bpm");
-    assertEqual(full?.numerator, 4, "parse: numerator");
-    assertEqual(full?.denominator, 4, "parse: denominator");
+    assertEqual(full?.timeSignature?.numerator, 4, "parse: numerator");
+    assertEqual(full?.timeSignature?.denominator, 4, "parse: denominator");
     assertEqual(full?.scale?.key, "C", "parse: scale by label");
 
-    const bare = parseTempoPointText("150.5 3/8", presets);
-    assertEqual(bare?.bpm, 150.5, "parse: decimal bpm");
-    assertEqual(bare?.denominator, 8, "parse: denominator 8");
-    assertEqual(bare?.scale, null, "parse: no scale = inherit");
+    const sigOnly = parseTempoPointText("150.5 3/8", presets);
+    assertEqual(sigOnly?.bpm, 150.5, "parse: decimal bpm");
+    assertEqual(sigOnly?.timeSignature?.denominator, 8, "parse: denominator 8");
+    assertEqual(sigOnly?.scale, null, "parse: no scale = inherit");
+
+    const bpmOnly = parseTempoPointText("120", presets);
+    assertEqual(bpmOnly?.bpm, 120, "parse: bpm only");
+    assertEqual(bpmOnly?.timeSignature, null, "parse: no sig = follow previous");
+    assertEqual(bpmOnly?.scale, null, "parse: no scale = inherit");
+
+    const scaleOnly = parseTempoPointText("120 - C / Am", presets);
+    assertEqual(scaleOnly?.bpm, 120, "parse: scale-only bpm");
+    assertEqual(scaleOnly?.timeSignature, null, "parse: scale-only follows sig");
+    assertEqual(scaleOnly?.scale?.key, "C", "parse: scale-only scale");
 
     const bareKey = parseTempoPointText("90 4/4 - G", presets);
     assertEqual(bareKey?.scale?.key, "G", "parse: bare key");
@@ -330,19 +529,24 @@ function mapWith(points: RawPoint[]): TempoMap {
         "parse: custom preset notes",
     );
 
+    const customScaleOnly = parseTempoPointText("90 - 自定义音阶", presets);
+    assertEqual(customScaleOnly?.timeSignature, null, "parse: custom scale-only follows sig");
+    assertEqual(customScaleOnly?.scale?.name, "自定义音阶", "parse: custom scale-only name");
+
     assertEqual(parseTempoPointText("abc", presets), null, "parse: garbage fails");
     assertEqual(parseTempoPointText("", presets), null, "parse: empty fails");
     assertEqual(parseTempoPointText("120 5/3", presets), null, "parse: invalid denominator fails");
     assertEqual(parseTempoPointText("120 4/4 - X / Y", presets), null, "parse: unknown scale fails");
     assertEqual(parseTempoPointText("99999 4/4", presets)?.bpm, 960, "parse: bpm clamped");
+    assertEqual(parseTempoPointText("120 4/4 leftover", presets), null, "parse: trailing garbage fails");
 }
 
 // ── 旗帜命中检测（右键菜单）─────────────────────────────────────────────────
 
 {
     const map = mapWith([
-        { positionSec: 0, bpm: 120, numerator: 4, scale: { key: "C" } },
-        { positionSec: 7.25, bpm: 150, numerator: 3, scale: { key: "G" } },
+        { positionSec: 0, bpm: 120, timeSignature: sig(4, 4), scale: { key: "C" } },
+        { positionSec: 7.25, bpm: 150, timeSignature: sig(3, 4), scale: { key: "G" } },
     ]);
     const pxPerSec = 100;
     const secondLabel = tempoPointFlagLabel(map.points[1]);
@@ -364,8 +568,13 @@ function mapWith(points: RawPoint[]): TempoMap {
 
 {
     const map = mapWith([
-        { positionSec: 0, bpm: 130, numerator: 4, denominator: 4, scale: null },
-        { positionSec: 2.5, bpm: 90, numerator: 3, denominator: 8, scale: { key: "G" } },
+        { positionSec: 0, bpm: 130, timeSignature: sig(4, 4), scale: null },
+        {
+            positionSec: 2.5,
+            bpm: 90,
+            timeSignature: sig(3, 8),
+            scale: { key: "G" },
+        },
     ]);
 
     // 前端 → 后端：必须是“裸数组”（后端 set_timeline_tempo_map 参数为 Vec<TempoPointPayload>）。
@@ -382,7 +591,7 @@ function mapWith(points: RawPoint[]): TempoMap {
     assertEqual(parsed.points.length, 2, "wire: parsed point count");
     assertNear(parsed.points[1].positionSec, 2.5, "wire: parsed positionSec");
     assertEqual(parsed.points[1].bpm, 90, "wire: parsed bpm");
-    assertEqual(parsed.points[1].denominator, 8, "wire: parsed denominator");
+    assertEqual(parsed.points[1].timeSignature?.denominator, 8, "wire: parsed denominator");
     assertEqual(parsed.points[1].scale?.key, "G", "wire: parsed scale key");
 
     // 无 Tempo Map：null 往返。
@@ -415,16 +624,26 @@ function mapWith(points: RawPoint[]): TempoMap {
             denominator: 8,
             scale: { key: null, name: "custom", notes: [0, 2, 4, 5, 7, 9, 11] },
         },
+        {
+            id: "tp2",
+            positionSec: 8,
+            bpm: 100,
+            numerator: null,
+            denominator: null,
+            scale: null,
+        },
     ];
     const parsed = fromBackendTempoMap(backendSnapshot, 120, 4);
     if (!parsed) throw new Error("fromBackendTempoMap: snapshot parse failed");
-    assertEqual(parsed.points[1].numerator, 6, "wire: numerator from snapshot");
+    assertEqual(parsed.points[1].timeSignature?.numerator, 6, "wire: numerator from snapshot");
     assertEqual(parsed.points[1].scale?.name, "custom", "wire: custom scale name");
     assertEqual(
         JSON.stringify(parsed.points[1].scale?.notes),
         "[0,2,4,5,7,9,11]",
         "wire: custom scale notes",
     );
+    // 跟随拍号的点：null → timeSignature null。
+    assertEqual(parsed.points[2].timeSignature, null, "wire: null sig = follow previous");
 
     // 编辑后再发送回后端：保持裸数组 + camelCase，且内容与快照一致。
     const reserialized = toBackendTempoMap(parsed);
@@ -433,6 +652,25 @@ function mapWith(points: RawPoint[]): TempoMap {
         JSON.stringify(backendSnapshot),
         "wire: full round-trip stable",
     );
+}
+
+{
+    // 初始点缺失拍号（非法数据）：规范化时用工程基准值物化，不允许“跟随”初始点。
+    const raw: TempoMap = {
+        points: [
+            { id: "a", positionSec: 0, bpm: 120, timeSignature: null, scale: null },
+            { id: "b", positionSec: 2, bpm: 120, timeSignature: null, scale: null },
+        ],
+    };
+    const normalized = normalizeTempoMap(raw, 120, 7, { projectDenominator: 8 });
+    if (!normalized) throw new Error("normalizeTempoMap (null sig) returned null");
+    assertEqual(normalized.points[0].timeSignature?.numerator, 7, "normalize: point-0 numerator");
+    assertEqual(
+        normalized.points[0].timeSignature?.denominator,
+        8,
+        "normalize: point-0 project denominator",
+    );
+    assertEqual(normalized.points[1].timeSignature, null, "normalize: later point stays follow");
 }
 
 console.log(`tempoMap.test.ts: all ${checks} checks passed.`);

@@ -157,6 +157,7 @@ export const jaJP = {
     tension: "テンション",
     breath: "ブレス",
     beats_per_bar: "拍子",
+    time_signature: "拍子記号",
     grid: "グリッド",
     add_clip: "+ クリップを追加",
     delete_clip: "- クリップを削除",
@@ -663,6 +664,18 @@ export const jaJP = {
     tempo_map_bpm_range: "（10-960）",
     tempo_map_actionbar_tip:
         "テンポマップ有効：変更は再生ヘッドより前の直近の変更点に適用されます",
+    tempo_map_ts_inherit: "前の拍子に従う",
+    tempo_map_tooltip_position: "位置：",
+    tempo_map_tooltip_bpm: "BPM：",
+    tempo_map_tooltip_time_signature: "拍子：",
+    tempo_map_tooltip_scale: "スケール：",
+    tempo_map_show_tooltip: "テンポマップを表示",
+    tempo_map_active_tooltip: "テンポマップ有効：クリックで消去または非表示のみ",
+    tempo_map_clear_dialog_title: "テンポマップ",
+    tempo_map_clear_dialog_message:
+        "消去するとすべてのテンポマップデータが削除されます。表示のみ非表示にすることもできます（データは保持されます）。",
+    tempo_map_clear_confirm: "消去",
+    tempo_map_hide_only: "非表示のみ",
     scale_builtin_group: "組み込みスケール",
     scale_custom_group: "カスタムスケール",
 

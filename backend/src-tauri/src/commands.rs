@@ -210,9 +210,15 @@ pub fn set_project_custom_scale(
 pub fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
-    project::set_project_timeline_settings(state, beats_per_bar, grid_size)
+    project::set_project_timeline_settings(
+        state,
+        beats_per_bar,
+        time_signature_denominator,
+        grid_size,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]

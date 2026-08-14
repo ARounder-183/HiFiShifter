@@ -84,6 +84,7 @@ import {
     gridStepBeats,
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
+import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
@@ -4558,7 +4559,7 @@ export const PianoRollPanel: React.FC = () => {
                 {/* Left axis + corner */}
                 <Flex direction="column" className="shrink-0">
                     <Box
-                        className="bg-qt-window border-b border-qt-border"
+                        className="bg-qt-window border-b border-qt-border relative"
                         style={{
                             width: AXIS_W,
                             height: timeRulerHeightPx(
@@ -4569,7 +4570,10 @@ export const PianoRollPanel: React.FC = () => {
                                 ),
                             ),
                         }}
-                    />
+                    >
+                        {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
+                        <TempoMapCornerButton />
+                    </Box>
                     <div
                         ref={axisWrapRef}
                         className="bg-qt-window border-r border-qt-border relative"
@@ -4612,6 +4616,7 @@ export const PianoRollPanel: React.FC = () => {
                                 ? (s.project.customScale?.name ?? undefined)
                                 : undefined
                         }
+                        fallbackDenominator={s.project.timeSignatureDenominator}
                         customScalePresets={s.customScalePresets}
                         onTempoMapChange={handleTempoMapChange}
                         onTempoMapCommit={handleTempoMapCommit}

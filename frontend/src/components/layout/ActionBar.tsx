@@ -35,12 +35,13 @@ import {
     setTempoMap,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
-import type { TempoMapScaleData } from "../../utils/tempoMap";
+import type { TempoMapScaleData, TempoTimeSignature } from "../../utils/tempoMap";
 import {
     clampBpm,
     effectiveScaleAtSec,
     pointIndexAtSec,
     scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
     tempoAtSec,
     updateTempoPoint,
 } from "../../utils/tempoMap";
@@ -98,7 +99,7 @@ export function ActionBar() {
         return Math.round(s.beats || 4);
     }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
 
-    // Tempo Map 存在时，拍号分母显示播放头位置的实际值（如 3/8、6/8）。
+    // Tempo Map 存在时，拍号分母显示播放头位置的实际值（如 3/8、6/8）；否则为工程基准值。
     const displayDenominator = useMemo(() => {
         if (s.tempoMap && s.tempoMap.points.length > 0) {
             const at = tempoAtSec(s.tempoMap, s.playheadSec, {
@@ -107,8 +108,8 @@ export function ActionBar() {
             });
             return at.denominator;
         }
-        return 4;
-    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+        return s.project.timeSignatureDenominator || 4;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats, s.project.timeSignatureDenominator]);
 
     // 工程音阶（无 Tempo Map 时的显示与回退值）。
     const projectScaleLike = useMemo<ScaleLike | null>(
@@ -185,7 +186,11 @@ export function ActionBar() {
      * （初始点即工程基准记录，同样参与更新；不再自动新建变化点）。
      */
     const updateTempoPointAtPlayhead = useCallback(
-        (patch: { bpm?: number; numerator?: number; scale?: TempoMapScaleData | null }) => {
+        (patch: {
+            bpm?: number;
+            timeSignature?: TempoTimeSignature | null;
+            scale?: TempoMapScaleData | null;
+        }) => {
             if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
             const map = s.tempoMap;
             const idx = pointIndexAtSec(map, s.playheadSec);
@@ -305,7 +310,7 @@ export function ActionBar() {
                     }}
                 />
                 <Text size="1" className="text-qt-text-muted">
-                    {t("beats_per_bar")}:
+                    {t("time_signature")}:
                 </Text>
                 <Flex align="center" gap="1">
                     <TextField.Root
@@ -326,12 +331,18 @@ export function ActionBar() {
                             // 与显示值比较（Tempo Map 下为播放头位置生效值）。
                             if (clamped === Math.round(displayBeats)) return;
                             if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                updateTempoPointAtPlayhead({ numerator: clamped });
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: clamped,
+                                        denominator: displayDenominator,
+                                    },
+                                });
                                 return;
                             }
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: clamped,
+                                    timeSignatureDenominator: displayDenominator,
                                     gridSize: s.grid,
                                 }),
                             );
@@ -346,12 +357,18 @@ export function ActionBar() {
                             const next = Math.max(1, Math.min(32, current + direction));
                             if (next === current) return;
                             if (s.tempoMap && s.tempoMap.points.length > 0) {
-                                updateTempoPointAtPlayhead({ numerator: next });
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: next,
+                                        denominator: displayDenominator,
+                                    },
+                                });
                                 return;
                             }
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: next,
+                                    timeSignatureDenominator: displayDenominator,
                                     gridSize: s.grid,
                                 }),
                             );
@@ -363,8 +380,74 @@ export function ActionBar() {
                         }}
                     />
                     <Text size="1" className="text-qt-text-muted">
-                        / {displayDenominator}
+                        /
                     </Text>
+                    <Select.Root
+                        size="1"
+                        value={String(displayDenominator)}
+                        onValueChange={(v) => {
+                            const next = Number(v) || 4;
+                            if (next === displayDenominator) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: displayBeats,
+                                        denominator: next,
+                                    },
+                                });
+                                return;
+                            }
+                            void dispatch(
+                                setProjectTimelineSettingsRemote({
+                                    beatsPerBar: s.beats,
+                                    timeSignatureDenominator: next,
+                                    gridSize: s.grid,
+                                }),
+                            );
+                        }}
+                    >
+                        <Select.Trigger
+                            style={{
+                                width: 48,
+                                backgroundColor: "var(--qt-base)",
+                                justifyContent: "center",
+                            }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: String(displayDenominator),
+                                    options: TEMPO_DENOMINATORS.map((d) => String(d)),
+                                    onChange: (v) => {
+                                        const next = Number(v) || 4;
+                                        if (next === displayDenominator) return;
+                                        if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                            updateTempoPointAtPlayhead({
+                                                timeSignature: {
+                                                    numerator: displayBeats,
+                                                    denominator: next,
+                                                },
+                                            });
+                                            return;
+                                        }
+                                        void dispatch(
+                                            setProjectTimelineSettingsRemote({
+                                                beatsPerBar: s.beats,
+                                                timeSignatureDenominator: next,
+                                                gridSize: s.grid,
+                                            }),
+                                        );
+                                    },
+                                });
+                            }}
+                        />
+                        <Select.Content>
+                            {TEMPO_DENOMINATORS.map((d) => (
+                                <Select.Item key={d} value={String(d)}>
+                                    {d}
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
                 </Flex>
 
                 <Text size="1" className="text-qt-text-muted">
@@ -377,6 +460,7 @@ export function ActionBar() {
                         void dispatch(
                             setProjectTimelineSettingsRemote({
                                 beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
                                 gridSize: v,
                             }),
                         );
@@ -413,6 +497,7 @@ export function ActionBar() {
                                     void dispatch(
                                         setProjectTimelineSettingsRemote({
                                             beatsPerBar: s.beats,
+                                            timeSignatureDenominator: displayDenominator,
                                             gridSize: next,
                                         }),
                                     );
@@ -942,6 +1027,7 @@ export function ActionBar() {
                         void dispatch(
                             setProjectTimelineSettingsRemote({
                                 beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
                                 gridSize: grid,
                             }),
                         );

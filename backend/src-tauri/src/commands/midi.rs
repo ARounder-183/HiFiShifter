@@ -613,7 +613,8 @@ pub(super) fn import_midi_as_clip(
                     if let Some(first) = tl.tempo_map.as_ref().and_then(|p| p.first()).cloned() {
                         tl.bpm = first.bpm.clamp(10.0, 960.0);
                         if let Ok(mut p) = state.project.lock() {
-                            p.beats_per_bar = first.numerator.clamp(1, 32);
+                            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+                            p.time_signature_denominator = first.denominator.unwrap_or(4);
                             p.dirty = true;
                         }
                     }
@@ -626,7 +627,8 @@ pub(super) fn import_midi_as_clip(
                     if let Some(first) = points.first() {
                         tl.bpm = first.bpm.clamp(10.0, 960.0);
                         if let Ok(mut p) = state.project.lock() {
-                            p.beats_per_bar = first.numerator.clamp(1, 32);
+                            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+                            p.time_signature_denominator = first.denominator.unwrap_or(4);
                             if let Some(scale) = first.scale.as_ref() {
                                 if let Some(key) = scale.key.as_deref() {
                                     p.base_scale = key.to_string();

@@ -489,6 +489,7 @@ fn make_conductor_track(
 
     // 0 位置点：初始速度 / 拍号 / 调号。
     let first = &map[0];
+    let (first_num, first_den) = crate::state::TimelineState::effective_time_signature_at(map, 0);
     let tempo_us_per_beat = (60_000_000.0 / first.bpm.max(1.0)).round() as u32;
     push_meta(
         &mut events,
@@ -499,8 +500,8 @@ fn make_conductor_track(
         &mut events,
         0,
         MetaMessage::TimeSignature(
-            first.numerator.clamp(1, 32) as u8,
-            denominator_to_midi_pow2(first.denominator),
+            first_num.clamp(1, 32) as u8,
+            denominator_to_midi_pow2(first_den),
             24,
             8,
         ),
@@ -513,14 +514,14 @@ fn make_conductor_track(
     }
 
     let mut prev_bpm = first.bpm;
-    let mut prev_num = first.numerator;
-    let mut prev_den = first.denominator;
+    let mut prev_num = first_num;
+    let mut prev_den = first_den;
     let mut prev_scale: Option<String> = first
         .scale
         .as_ref()
         .and_then(|s| s.key.clone());
 
-    for point in &map[1..] {
+    for (index, point) in map.iter().enumerate().skip(1) {
         let tick = converter.sec_to_ticks(point.position_sec);
         if (point.bpm - prev_bpm).abs() > 1e-9 {
             let us = (60_000_000.0 / point.bpm.max(1.0)).round() as u32;
@@ -531,19 +532,22 @@ fn make_conductor_track(
             );
             prev_bpm = point.bpm;
         }
-        if point.numerator != prev_num || point.denominator != prev_den {
+        // 拍号跟随之前的拍号时解析为实际生效值；仅在实际值变化时写入。
+        let (eff_num, eff_den) =
+            crate::state::TimelineState::effective_time_signature_at(map, index);
+        if eff_num != prev_num || eff_den != prev_den {
             push_meta(
                 &mut events,
                 tick,
                 MetaMessage::TimeSignature(
-                    point.numerator.clamp(1, 32) as u8,
-                    denominator_to_midi_pow2(point.denominator),
+                    eff_num.clamp(1, 32) as u8,
+                    denominator_to_midi_pow2(eff_den),
                     24,
                     8,
                 ),
             );
-            prev_num = point.numerator;
-            prev_den = point.denominator;
+            prev_num = eff_num;
+            prev_den = eff_den;
         }
         let scale_key = point.scale.as_ref().and_then(|s| s.key.clone());
         if scale_key != prev_scale {

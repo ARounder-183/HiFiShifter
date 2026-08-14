@@ -283,8 +283,20 @@ assertEqual(
     // 空工程 120bpm 4/4，在 7.25s（旧标尺 4.3.500）插入变化点（同 BPM）。
     const map = {
         points: [
-            { id: "p0", positionSec: 0, bpm: 120, numerator: 4, denominator: 4, scale: null },
-            { id: "p1", positionSec: 7.25, bpm: 120, numerator: 4, denominator: 4, scale: null },
+            {
+                id: "p0",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
+            {
+                id: "p1",
+                positionSec: 7.25,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
         ],
     };
     const ticks = buildRulerTicks({
@@ -315,6 +327,39 @@ assertEqual(
     const at925 = ticks.find((t) => Math.abs(t.sec - 9.25) < 1e-9);
     assertEqual(at925?.primaryLabel, "6.1", "tempo ruler: next bar at 9.25");
     assertEqual(at925?.isBarStart, true, "tempo ruler: bar tick flagged");
+}
+
+// ── Tempo Map 标尺：跟随之前的拍号继续按前段拍号分小节 ──
+{
+    // 0s 起 3/4（每小节 1.5s @120），3s 处变化点“跟随之前的拍号” → 继续 3/4 对齐。
+    const map = {
+        points: [
+            {
+                id: "p0",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 3, denominator: 4 },
+                scale: null,
+            },
+            { id: "p1", positionSec: 3, bpm: 120, timeSignature: null, scale: null },
+        ],
+    };
+    const ticks = buildRulerTicks({
+        pxPerSec: 480,
+        scrollLeft: 0,
+        viewportWidth: 4000,
+        projectSec: 6,
+        bpm: 120,
+        beatsPerBar: 4,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+        tempoMap: map,
+    });
+    const at45 = ticks.find((t) => Math.abs(t.sec - 4.5) < 1e-9);
+    assertEqual(at45?.primaryLabel, "4.1", "tempo ruler follow-sig: 3/4 bar continues");
+    assertEqual(at45?.isBarStart, true, "tempo ruler follow-sig: bar tick flagged");
 }
 
 console.log(`timeFormat checks passed (${checks})`);

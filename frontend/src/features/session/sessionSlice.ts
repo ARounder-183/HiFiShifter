@@ -98,7 +98,12 @@ import type { ScaleLike } from "../../utils/musicalScales";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import type { TempoMap } from "../../utils/tempoMap";
-import { fromBackendTempoMap, normalizeTempoMap } from "../../utils/tempoMap";
+import {
+    clampDenominator,
+    fromBackendTempoMap,
+    normalizeTempoMap,
+    TEMPO_DENOMINATORS,
+} from "../../utils/tempoMap";
 import { setTempoMapRemote } from "./thunks/tempoMapThunks";
 import {
     importAudioAtPosition,
@@ -334,6 +339,8 @@ export interface SessionState {
         useCustomScale: boolean;
         customScale: CustomScalePreset | null;
         beatsPerBar: number;
+        /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+        timeSignatureDenominator: number;
         gridSize: GridSize;
         stretchAlgorithmOverride: StretchAlgorithmOption | null;
         hifiganMelStretchOverride: boolean | null;
@@ -828,6 +835,7 @@ function applyTimelineState(
                   notes?: number[];
               } | null;
               beats_per_bar?: number;
+              time_signature_denominator?: number;
               grid_size?: string;
               stretch_algorithm_override?: StretchAlgorithmOption | null;
               hifigan_mel_stretch_override?: boolean | null;
@@ -843,6 +851,11 @@ function applyTimelineState(
             1,
             32,
         );
+        const nextTimeSignatureDenominator = (
+            TEMPO_DENOMINATORS as readonly number[]
+        ).includes(Number(project.time_signature_denominator))
+            ? Number(project.time_signature_denominator)
+            : clampDenominator(state.project.timeSignatureDenominator);
         const nextGridSizeRaw = String(project.grid_size ?? state.project.gridSize);
         const nextGridSize = VALID_GRID_SIZES.has(nextGridSizeRaw as GridSize)
             ? (nextGridSizeRaw as GridSize)
@@ -863,6 +876,7 @@ function applyTimelineState(
                 ? sanitizeCustomScalePreset(project.custom_scale)
                 : null,
             beatsPerBar: nextBeatsPerBar,
+            timeSignatureDenominator: nextTimeSignatureDenominator,
             gridSize: nextGridSize,
             stretchAlgorithmOverride:
                 project.stretch_algorithm_override === undefined
@@ -890,12 +904,17 @@ function applyTimelineState(
             projectScaleName: state.project.useCustomScale
                 ? (state.project.customScale?.name ?? undefined)
                 : undefined,
+            projectDenominator: state.project.timeSignatureDenominator,
         });
         if (state.tempoMap) {
-            // 0 位置点与工程基准 BPM 保持一致（后端同步保证）。
+            // 0 位置点与工程基准 BPM/拍号保持一致（后端同步保证）。
             const first = state.tempoMap.points[0];
             state.bpm = clamp(first.bpm, 10, 960);
-            state.beats = Math.min(32, Math.max(1, Math.round(first.numerator)));
+            const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+            state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+            state.project.timeSignatureDenominator = clampDenominator(
+                firstSig.denominator,
+            );
         }
     }
 
@@ -1139,6 +1158,7 @@ const initialState: SessionState = {
         useCustomScale: false,
         customScale: null,
         beatsPerBar: 4,
+        timeSignatureDenominator: 4,
         gridSize: "1/4",
         stretchAlgorithmOverride: null,
         hifiganMelStretchOverride: null,
@@ -1398,11 +1418,17 @@ const sessionSlice = createSlice({
                 projectScaleName: state.project.useCustomScale
                     ? (state.project.customScale?.name ?? undefined)
                     : undefined,
+                projectDenominator: state.project.timeSignatureDenominator,
             });
-            // 保持工程基准值（bpm / beats）与 0 位置点一致，删除 Tempo Map 后回退一致。
+            // 保持工程基准值（bpm / 拍号）与 0 位置点一致，删除 Tempo Map 后回退一致。
             if (state.tempoMap) {
-                state.bpm = clamp(state.tempoMap.points[0].bpm, 10, 960);
-                state.beats = Math.min(32, Math.max(1, Math.round(state.tempoMap.points[0].numerator)));
+                const first = state.tempoMap.points[0];
+                state.bpm = clamp(first.bpm, 10, 960);
+                const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+                state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+                state.project.timeSignatureDenominator = clampDenominator(
+                    firstSig.denominator,
+                );
             }
         },
         setTempoMapVisible(state, action: PayloadAction<boolean>) {
@@ -3071,6 +3097,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     project?: {
                         beats_per_bar?: number;
+                        time_signature_denominator?: number;
                         grid_size?: string;
                         dirty?: boolean;
                     };
@@ -3079,6 +3106,11 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const beats = clamp(Number(payload.project?.beats_per_bar ?? state.beats), 1, 32);
+                const denominator = (
+                    TEMPO_DENOMINATORS as readonly number[]
+                ).includes(Number(payload.project?.time_signature_denominator))
+                    ? Number(payload.project?.time_signature_denominator)
+                    : clampDenominator(state.project.timeSignatureDenominator);
                 const gridRaw = String(payload.project?.grid_size ?? state.grid);
                 const valid = VALID_GRID_SIZES.has(gridRaw as GridSize);
                 const grid = (valid ? gridRaw : "1/4") as GridSize;
@@ -3086,6 +3118,7 @@ const sessionSlice = createSlice({
                 state.beats = beats;
                 state.grid = grid;
                 state.project.beatsPerBar = beats;
+                state.project.timeSignatureDenominator = denominator;
                 state.project.gridSize = grid;
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;

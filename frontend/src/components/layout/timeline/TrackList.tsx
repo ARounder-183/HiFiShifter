@@ -13,6 +13,7 @@ import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
 import { AppTooltipBubble } from "../../AppTooltip";
+import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 
@@ -1110,13 +1111,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
     return (
         <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
             <Box
-                className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10"
+                className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
                 style={{ height: headerHeight }}
             >
                 <Text size="2" weight="bold" color="gray" className="shrink-0">
                     {t("tracks")}
                 </Text>
                 <TrackHeaderPlayheadTime />
+                {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
+                <TempoMapCornerButton />
             </Box>
             <div
                 ref={(el) => {

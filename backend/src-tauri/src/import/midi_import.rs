@@ -564,8 +564,8 @@ pub fn build_tempo_map_points_from_midi(
             id: format!("midi_tp_{index}"),
             position_sec: event.sec,
             bpm: current_bpm,
-            numerator: current_num,
-            denominator: current_den,
+            numerator: Some(current_num),
+            denominator: Some(current_den),
             scale: event.scale_key.as_ref().map(|key| crate::state::TempoScaleData {
                 key: Some(key.clone()),
                 name: None,
@@ -583,8 +583,8 @@ pub fn build_tempo_map_points_from_midi(
                 id: "midi_tp_0".to_string(),
                 position_sec: 0.0,
                 bpm: fallback_bpm.clamp(10.0, 960.0),
-                numerator: fallback_beats_per_bar.clamp(1, 32),
-                denominator: 4,
+                numerator: Some(fallback_beats_per_bar.clamp(1, 32)),
+                denominator: Some(4),
                 scale: None,
             },
         );

@@ -450,14 +450,15 @@ pub struct TempoScaleData {
 }
 
 /// Tempo Map 变化点（时间锚定：position_sec 绝对秒）。
+/// 拍号为 None 表示“跟随之前的拍号”（0 位置初始点必须显式携带拍号）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TempoPointData {
     pub id: String,
     pub position_sec: f64,
     pub bpm: f64,
-    pub numerator: u32,
-    pub denominator: u32,
+    pub numerator: Option<u32>,
+    pub denominator: Option<u32>,
     pub scale: Option<TempoScaleData>,
 }
 
@@ -507,6 +508,8 @@ pub struct ProjectState {
     pub use_custom_scale: bool,
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
+    /// 工程基准拍号分母（1/2/4/8/16/32）。
+    pub time_signature_denominator: u32,
     pub grid_size: String,
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
     pub hifigan_mel_stretch_override: Option<bool>,
@@ -526,6 +529,7 @@ impl Default for ProjectState {
             use_custom_scale: false,
             custom_scale: None,
             beats_per_bar: 4,
+            time_signature_denominator: 4,
             grid_size: "1/4".to_string(),
             stretch_algorithm_override: None,
             hifigan_mel_stretch_override: None,
@@ -1380,6 +1384,7 @@ impl AppState {
             use_custom_scale: p.use_custom_scale,
             custom_scale: p.custom_scale,
             beats_per_bar: p.beats_per_bar,
+            time_signature_denominator: p.time_signature_denominator,
             grid_size: p.grid_size,
             stretch_algorithm_override: p.stretch_algorithm_override,
             hifigan_mel_stretch_override: p.hifigan_mel_stretch_override,
@@ -1547,8 +1552,8 @@ mod tests {
             id: "p1".to_string(),
             position_sec: sec,
             bpm: 120.0,
-            numerator: 4,
-            denominator: 4,
+            numerator: Some(4),
+            denominator: Some(4),
             scale: Some(TempoScaleData {
                 key: Some(key.to_string()),
                 name: None,
@@ -1559,8 +1564,8 @@ mod tests {
             id: "p0".to_string(),
             position_sec: 0.0,
             bpm: 120.0,
-            numerator: 4,
-            denominator: 4,
+            numerator: Some(4),
+            denominator: Some(4),
             scale: None,
         };
 
@@ -1580,6 +1585,55 @@ mod tests {
 
         // 删除音阶 → 签名改变（回到空串）。
         assert_ne!(a, "", "removing scale data must change the signature");
+    }
+
+    #[test]
+    fn tempo_map_normalize_materializes_initial_time_signature() {
+        let mut timeline = TimelineState::default();
+        timeline.bpm = 150.0;
+        timeline.tempo_map = Some(vec![
+            TempoPointData {
+                id: "a".to_string(),
+                position_sec: 0.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "b".to_string(),
+                position_sec: 2.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "c".to_string(),
+                position_sec: 4.0,
+                bpm: 120.0,
+                numerator: Some(6),
+                denominator: Some(8),
+                scale: None,
+            },
+        ]);
+        timeline.normalize_tempo_map();
+        let points = timeline.tempo_map.as_ref().unwrap();
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        assert_eq!(points[0].numerator, Some(4));
+        assert_eq!(points[0].denominator, Some(4));
+        // 其它点保持“跟随之前的拍号”。
+        assert_eq!(points[1].numerator, None);
+        assert_eq!(points[1].denominator, None);
+        // 生效拍号解析：跟随点解析为 4/4，显式点解析为 6/8。
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 1),
+            (4, 4)
+        );
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 2),
+            (6, 8)
+        );
     }
 
     #[test]
@@ -2536,6 +2590,7 @@ impl TimelineState {
     }
 
     /// 规范化 Tempo Map：排序、钳制、确保首点位于 0；无有效点返回 None。
+    /// 0 位置初始点即工程基准记录，必须显式携带拍号（缺失时按 4/4 物化）。
     pub fn normalize_tempo_map(&mut self) {
         let Some(points) = self.tempo_map.take() else {
             return;
@@ -2547,10 +2602,12 @@ impl TimelineState {
             }
             p.position_sec = p.position_sec.max(0.0);
             p.bpm = p.bpm.clamp(10.0, 960.0);
-            p.numerator = p.numerator.clamp(1, 32);
-            if !matches!(p.denominator, 1 | 2 | 4 | 8 | 16 | 32) {
-                p.denominator = 4;
-            }
+            p.numerator = p.numerator.map(|n| n.clamp(1, 32));
+            p.denominator = match p.denominator {
+                Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => Some(d),
+                Some(_) => Some(4),
+                None => None,
+            };
             if valid
                 .last()
                 .map(|last: &TempoPointData| (p.position_sec - last.position_sec).abs() < 1e-6)
@@ -2572,8 +2629,8 @@ impl TimelineState {
                     id: new_id("tp"),
                     position_sec: 0.0,
                     bpm: self.bpm,
-                    numerator: 4,
-                    denominator: 4,
+                    numerator: Some(4),
+                    denominator: Some(4),
                     // 初始点即工程基准记录：携带工程音阶（内置键反查，否则保留音级集合）。
                     scale: Some(TempoScaleData {
                         key: key_for_scale_notes(&self.project_scale_notes),
@@ -2584,7 +2641,27 @@ impl TimelineState {
             );
         }
         valid[0].position_sec = 0.0;
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        if valid[0].numerator.is_none() || valid[0].denominator.is_none() {
+            valid[0].numerator = Some(valid[0].numerator.unwrap_or(4));
+            valid[0].denominator = Some(valid[0].denominator.unwrap_or(4));
+        }
         self.tempo_map = Some(valid);
+    }
+
+    /// 下标处变化点的生效拍号（跟随之前的拍号时向前解析为实际值）。
+    /// 0 位置初始点由规范化保证显式携带拍号，因此任何下标都有确定值。
+    pub fn effective_time_signature_at(points: &[TempoPointData], index: usize) -> (u32, u32) {
+        let mut carry: (u32, u32) = (4, 4);
+        for (i, point) in points.iter().enumerate() {
+            if let (Some(n), Some(d)) = (point.numerator, point.denominator) {
+                carry = (n.clamp(1, 32), d);
+            }
+            if i >= index {
+                break;
+            }
+        }
+        carry
     }
 
     /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。

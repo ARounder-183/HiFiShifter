@@ -24,6 +24,7 @@ pub struct ProjectMetaPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
+    pub time_signature_denominator: u32,
     pub grid_size: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
@@ -137,14 +138,15 @@ pub struct TempoScalePayload {
 }
 
 /// Tempo Map 变化点（前端载荷，camelCase；同时用于 `set_timeline_tempo_map` 命令参数）。
+/// 拍号 numerator/denominator 为 null 表示“跟随之前的拍号”。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TempoPointPayload {
     pub id: String,
     pub position_sec: f64,
     pub bpm: f64,
-    pub numerator: u32,
-    pub denominator: u32,
+    pub numerator: Option<u32>,
+    pub denominator: Option<u32>,
     pub scale: Option<TempoScalePayload>,
 }
 

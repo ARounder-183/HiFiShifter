@@ -13,6 +13,7 @@ import type { TempoMap, BarBeat } from "../../../utils/tempoMap.ts";
 import {
     barBeatAtSec,
     beatsPerBarOf,
+    effectiveTimeSignatureAt,
     pointIndexAtSec,
     secToBeat,
     tempoMapSegments,
@@ -251,8 +252,10 @@ export function formatTempoRulerTick(
 }
 
 function segmentTempoAtSec(map: TempoMap, sec: number): { bpm: number; beatsPerBar: number } {
-    const point = map.points[pointIndexAtSec(map, sec)];
-    return { bpm: point.bpm, beatsPerBar: beatsPerBarOf(point) };
+    const idx = pointIndexAtSec(map, sec);
+    const point = map.points[idx];
+    const sig = effectiveTimeSignatureAt(map, idx);
+    return { bpm: point.bpm, beatsPerBar: beatsPerBarOf(sig) };
 }
 
 export function formatTempoCursorUnit(
@@ -575,7 +578,7 @@ export function buildRulerTicks(args: {
 
         const segBpm = Math.max(1, segment.point.bpm);
         const segSecPerBeat = 60 / segBpm;
-        const segBpb = Math.max(1, beatsPerBarOf(segment.point));
+        const segBpb = Math.max(1, segment.beatsPerBar);
         const segPxPerBeat = Math.max(1e-9, segSecPerBeat * Math.max(0, pxPerSec));
         const step = selectRulerStep({
             pxPerBeat: segPxPerBeat,

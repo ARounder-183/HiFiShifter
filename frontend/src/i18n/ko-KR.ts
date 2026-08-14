@@ -236,6 +236,7 @@ export const koKR = {
     tension: "텐션",
     breath: "브레스",
     beats_per_bar: "박자",
+    time_signature: "박자표",
     grid: "그리드",
     add_clip: "+ 클립 추가",
     delete_clip: "- 클립 삭제",
@@ -737,6 +738,18 @@ export const koKR = {
     tempo_map_bpm_range: "(10-960)",
     tempo_map_actionbar_tip:
         "템포 맵 활성화: 변경이 재생 헤드 이전의 가장 가까운 변경점에 적용됩니다",
+    tempo_map_ts_inherit: "이전 박자표 따르기",
+    tempo_map_tooltip_position: "위치: ",
+    tempo_map_tooltip_bpm: "BPM: ",
+    tempo_map_tooltip_time_signature: "박자표: ",
+    tempo_map_tooltip_scale: "스케일: ",
+    tempo_map_show_tooltip: "템포 맵 표시",
+    tempo_map_active_tooltip: "템포 맵 활성화됨: 클릭하여 지우기 또는 숨기기만",
+    tempo_map_clear_dialog_title: "템포 맵",
+    tempo_map_clear_dialog_message:
+        "지우면 모든 템포 맵 데이터가 삭제됩니다. 표시만 숨길 수도 있습니다(데이터 유지).",
+    tempo_map_clear_confirm: "지우기",
+    tempo_map_hide_only: "숨기기만",
     scale_builtin_group: "내장 스케일",
     scale_custom_group: "사용자 정의 스케일",
 

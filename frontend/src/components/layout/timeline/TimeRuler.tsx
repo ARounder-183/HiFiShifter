@@ -1,14 +1,20 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import type { RulerTick, TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
+import { SCALE_LABELS } from "../../../utils/musicalScales.ts";
 import type { CustomScalePreset } from "../../../utils/customScales.ts";
 import type { TempoMap } from "../../../utils/tempoMap.ts";
 import {
     computeTempoFloatingLabelState,
+    effectiveScaleAtSec,
+    effectiveTimeSignatureAt,
+    formatTempoBpm,
+    formatTimeSignature,
+    pointIndexAtSec,
     removeTempoPoint,
     tempoPointHitTest,
 } from "../../../utils/tempoMap.ts";
@@ -191,12 +197,12 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
         <>
             <div
                 ref={lineRef}
-                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20"
+                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 pointer-events-none"
                 style={{ left: playheadLeft }}
             />
             <div
                 ref={headRef}
-                className="absolute top-0 z-30"
+                className="absolute top-0 z-30 pointer-events-none"
                 style={{
                     left: playheadLeft,
                     transform: "translateX(-6px)",
@@ -220,10 +226,13 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
     tempoMap,
     scrollLeft,
     pxPerSec,
+    tooltip,
 }: {
     tempoMap: TempoMap;
     scrollLeft: number;
     pxPerSec: number;
+    /** 自定义悬浮提示（与变化点旗帜一致的“位置/BPM/拍号/音阶”内容）。 */
+    tooltip: string;
 }) {
     const { label, governingOffscreen, blocked } = computeTempoFloatingLabelState({
         tempoMap,
@@ -258,11 +267,12 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
             >
                 {/* 与变化点旗帜同款尺寸（9px / 行高 11px / px-1），仅加投影以示“悬浮”。 */}
                 <div
-                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md"
+                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md pointer-events-auto"
                     style={{
                         backgroundColor: "var(--qt-highlight)",
                         color: "var(--qt-window)",
                     }}
+                    data-tooltip={tooltip}
                 >
                     <span key={label} className="hs-tempo-float-label">
                         {label}
@@ -481,6 +491,8 @@ export const TimeRuler: React.FC<{
     gridSnapEnabled?: boolean;
     projectScale?: ScaleLike | null;
     projectScaleName?: string;
+    /** 工程基准拍号分母（无 Tempo Map 时新建首点 / 初始点拍号物化用）。 */
+    fallbackDenominator?: number;
     customScalePresets?: readonly CustomScalePreset[];
     /** 本地即时更新（拖动中，仅 Redux）。 */
     onTempoMapChange?: (next: TempoMap | null) => void;
@@ -515,12 +527,16 @@ export const TimeRuler: React.FC<{
     gridSnapEnabled = true,
     projectScale = null,
     projectScaleName,
+    fallbackDenominator,
     customScalePresets = [],
     onTempoMapChange,
     onTempoMapCommit,
 }) => {
     void _pxPerBeat;
-    const tAny = t ?? ((key: string) => key);
+    const tAny = useMemo(
+        () => t ?? ((key: string) => key),
+        [t],
+    );
     const boundaryLeft = contentWidth - 1;
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
@@ -557,6 +573,51 @@ export const TimeRuler: React.FC<{
     const handleClearTempoMap = useCallback(() => {
         onTempoMapCommit?.(null);
     }, [onTempoMapCommit]);
+
+    /** 视口左侧悬浮标签的自定义提示：管辖点的“位置/BPM/拍号/音阶”（跟随值解析为实际值）。 */
+    const floatingTooltip = useMemo(() => {
+        if (!tempoMap || tempoMap.points.length === 0) return "";
+        const leftSec = Math.max(0, scrollLeft / Math.max(1e-9, pxPerSec));
+        const idx = pointIndexAtSec(tempoMap, leftSec);
+        const point = tempoMap.points[idx];
+        const cursor = formatCursorTime(
+            primaryUnit,
+            secondaryUnit,
+            point.positionSec,
+            timeContext,
+        );
+        const positionLine = cursor.secondaryLabel
+            ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
+            : cursor.primaryLabel;
+        const sig = effectiveTimeSignatureAt(tempoMap, idx);
+        const effScale = effectiveScaleAtSec(
+            tempoMap,
+            point.positionSec,
+            projectScale ?? undefined,
+        );
+        let effScaleLabel = "—";
+        if (typeof effScale === "string") {
+            effScaleLabel = SCALE_LABELS[effScale as keyof typeof SCALE_LABELS] ?? effScale;
+        } else if (Array.isArray(effScale)) {
+            effScaleLabel = projectScaleName || "…";
+        }
+        return [
+            `${tAny("tempo_map_tooltip_position")}${positionLine}`,
+            `${tAny("tempo_map_tooltip_bpm")}${formatTempoBpm(point.bpm)}`,
+            `${tAny("tempo_map_tooltip_time_signature")}${formatTimeSignature(sig)}`,
+            `${tAny("tempo_map_tooltip_scale")}${effScaleLabel}`,
+        ].join("\n");
+    }, [
+        tempoMap,
+        scrollLeft,
+        pxPerSec,
+        primaryUnit,
+        secondaryUnit,
+        timeContext,
+        projectScale,
+        projectScaleName,
+        tAny,
+    ]);
 
     useEffect(() => {
         if (!ctxMenu) return;
@@ -691,9 +752,13 @@ export const TimeRuler: React.FC<{
                     gridSnapEnabled={gridSnapEnabled}
                     fallbackBpm={timeContext.bpm}
                     fallbackBeatsPerBar={timeContext.beatsPerBar}
+                    fallbackDenominator={fallbackDenominator}
                     projectScale={projectScale}
                     projectScaleName={projectScaleName}
                     customScalePresets={customScalePresets}
+                    primaryUnit={primaryUnit}
+                    secondaryUnit={secondaryUnit}
+                    timeContext={timeContext}
                     t={tAny}
                     onChange={onTempoMapChange ?? (() => undefined)}
                     onCommit={onTempoMapCommit ?? onTempoMapChange ?? (() => undefined)}
@@ -729,6 +794,7 @@ export const TimeRuler: React.FC<{
                     tempoMap={tempoMap}
                     scrollLeft={scrollLeft}
                     pxPerSec={pxPerSec}
+                    tooltip={floatingTooltip}
                 />
             ) : null}
 

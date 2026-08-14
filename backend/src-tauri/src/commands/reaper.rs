@@ -157,7 +157,8 @@ pub(super) fn import_reaper_project(
             .as_ref()
             .and_then(|points| points.first())
         {
-            p.beats_per_bar = first.numerator.clamp(1, 32);
+            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+            p.time_signature_denominator = first.denominator.unwrap_or(4);
         } else {
             p.beats_per_bar = result.beats_per_bar.clamp(1, 32);
         }

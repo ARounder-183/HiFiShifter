@@ -1132,6 +1132,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     projectScaleName={
                         s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
                     }
+                    fallbackDenominator={s.project.timeSignatureDenominator}
                     customScalePresets={s.customScalePresets}
                     onTempoMapChange={handleTempoMapChange}
                     onTempoMapCommit={handleTempoMapCommit}

@@ -160,6 +160,7 @@ export const enUS = {
     tension: "Tension",
     breath: "Breath",
     beats_per_bar: "Beats/Bar",
+    time_signature: "Time Sig.",
     grid: "Grid",
     add_clip: "+ Add Audio Clip",
     delete_clip: "- Delete Clip",
@@ -655,6 +656,18 @@ export const enUS = {
     tempo_map_bpm_range: "(10-960)",
     tempo_map_actionbar_tip:
         "Tempo Map is active: edits apply to the nearest point at or before the playhead",
+    tempo_map_ts_inherit: "Follow Previous Time Signature",
+    tempo_map_tooltip_position: "Position: ",
+    tempo_map_tooltip_bpm: "BPM: ",
+    tempo_map_tooltip_time_signature: "Time Signature: ",
+    tempo_map_tooltip_scale: "Scale: ",
+    tempo_map_show_tooltip: "Show Tempo Map",
+    tempo_map_active_tooltip: "Tempo Map active: click to clear or hide only",
+    tempo_map_clear_dialog_title: "Tempo Map",
+    tempo_map_clear_dialog_message:
+        "Clearing deletes all Tempo Map data. You can also hide it only (data is kept).",
+    tempo_map_clear_confirm: "Clear",
+    tempo_map_hide_only: "Hide Only",
     scale_builtin_group: "Built-in Scales",
     scale_custom_group: "Custom Scales",
 

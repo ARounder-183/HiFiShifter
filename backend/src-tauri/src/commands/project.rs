@@ -405,6 +405,7 @@ fn build_project_file_snapshot(
         use_custom_scale,
         custom_scale,
         beats_per_bar,
+        time_signature_denominator,
         grid_size,
         notes_markdown,
         stretch_algorithm_override,
@@ -416,6 +417,11 @@ fn build_project_file_snapshot(
             p.use_custom_scale,
             normalize_custom_scale(p.custom_scale.clone()),
             normalize_beats_per_bar(p.beats_per_bar),
+            if matches!(p.time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                p.time_signature_denominator
+            } else {
+                4
+            },
             normalize_grid_size(&p.grid_size),
             p.notes_markdown.clone(),
             p.stretch_algorithm_override,
@@ -429,6 +435,7 @@ fn build_project_file_snapshot(
         tl_saved,
         base_scale,
         beats_per_bar,
+        time_signature_denominator,
         grid_size,
     );
     pf.use_custom_scale = use_custom_scale && custom_scale.is_some();
@@ -897,15 +904,15 @@ pub(super) fn open_project(
         );
         state.audio_engine.update_timeline(tl.clone());
     }
-    // Tempo Map 存在时，工程基准拍号同步为 0 位置点的拍号分子。
-    let tempo_map_initial_numerator = state
+    // Tempo Map 存在时，工程基准拍号同步为 0 位置点的拍号（分子/分母）。
+    let tempo_map_initial_signature = state
         .timeline
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .tempo_map
         .as_ref()
         .and_then(|points| points.first())
-        .map(|first| first.numerator);
+        .map(|first| (first.numerator, first.denominator));
     state.clear_history();
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -917,8 +924,15 @@ pub(super) fn open_project(
         p.custom_scale = normalize_custom_scale(pf.custom_scale);
         p.use_custom_scale = pf.use_custom_scale && p.custom_scale.is_some();
         p.beats_per_bar = normalize_beats_per_bar(pf.beats_per_bar);
-        if let Some(initial_numerator) = tempo_map_initial_numerator {
-            p.beats_per_bar = initial_numerator.clamp(1, 32);
+        p.time_signature_denominator =
+            if matches!(pf.time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                pf.time_signature_denominator
+            } else {
+                4
+            };
+        if let Some((initial_numerator, initial_denominator)) = tempo_map_initial_signature {
+            p.beats_per_bar = initial_numerator.unwrap_or(4).clamp(1, 32);
+            p.time_signature_denominator = initial_denominator.unwrap_or(4);
         }
         p.grid_size = normalize_grid_size(&pf.grid_size);
         p.stretch_algorithm_override = pf.synth_config.stretch_algorithm_override;
@@ -1146,19 +1160,28 @@ pub(super) fn set_project_custom_scale(
 pub(super) fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
     let normalized_beats = normalize_beats_per_bar(beats_per_bar);
+    let normalized_denominator = if matches!(time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+        time_signature_denominator
+    } else {
+        4
+    };
     let normalized_grid = normalize_grid_size(&grid_size);
 
     let (name, changed, was_clean) = {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = p.beats_per_bar != normalized_beats || p.grid_size != normalized_grid;
+        let changed = p.beats_per_bar != normalized_beats
+            || p.time_signature_denominator != normalized_denominator
+            || p.grid_size != normalized_grid;
         if !changed {
             return serde_json::json!({ "ok": true, "project": state.project_meta_payload() });
         }
         let was_clean = !p.dirty;
         p.beats_per_bar = normalized_beats;
+        p.time_signature_denominator = normalized_denominator;
         p.grid_size = normalized_grid;
         p.dirty = true;
         (p.name.clone(), true, was_clean)
@@ -1169,7 +1192,8 @@ pub(super) fn set_project_timeline_settings(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(points) = tl.tempo_map.as_mut() {
             if let Some(first) = points.first_mut() {
-                first.numerator = normalized_beats;
+                first.numerator = Some(normalized_beats);
+                first.denominator = Some(normalized_denominator);
             }
             state.audio_engine.update_timeline(tl.clone());
         }

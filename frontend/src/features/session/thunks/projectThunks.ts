@@ -127,8 +127,15 @@ export const setProjectCustomScaleRemote = createAsyncThunk(
 
 export const setProjectTimelineSettingsRemote = createAsyncThunk(
     "session/setProjectTimelineSettingsRemote",
-    async (payload: { beatsPerBar: number; gridSize: string }, { rejectWithValue }) => {
-        const res = await webApi.setProjectTimelineSettings(payload.beatsPerBar, payload.gridSize);
+    async (
+        payload: { beatsPerBar: number; timeSignatureDenominator?: number; gridSize: string },
+        { rejectWithValue },
+    ) => {
+        const res = await webApi.setProjectTimelineSettings(
+            payload.beatsPerBar,
+            payload.timeSignatureDenominator ?? 4,
+            payload.gridSize,
+        );
         if (!res || res.ok === false) {
             return rejectWithValue("set_project_timeline_settings_failed");
         }

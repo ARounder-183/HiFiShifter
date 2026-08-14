@@ -92,6 +92,8 @@ export interface ProjectMeta {
         notes: number[];
     } | null;
     beats_per_bar?: number;
+    /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+    time_signature_denominator?: number;
     grid_size?: string;
     stretch_algorithm_override?: "linear" | "signalsmith" | "soundtouch" | null;
     hifigan_mel_stretch_override?: boolean | null;
@@ -118,8 +120,10 @@ export interface TempoPointPayload {
     id: string;
     positionSec: number;
     bpm: number;
-    numerator: number;
-    denominator: number;
+    /** 拍号分子；null 表示“跟随之前的拍号”（0 位置初始点必须显式）。 */
+    numerator: number | null;
+    /** 拍号分母；null 表示“跟随之前的拍号”。 */
+    denominator: number | null;
     scale: {
         key?: string | null;
         name?: string | null;

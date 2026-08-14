@@ -636,8 +636,8 @@ fn build_tempo_map_from_reaper(data: &ReaperData, fallback_bpm: f64) -> Option<V
         if let Some(last) = points.last_mut() {
             if (last.position_sec - position_sec).abs() < 1e-6 {
                 last.bpm = bpm;
-                last.numerator = numerator;
-                last.denominator = denominator;
+                last.numerator = Some(numerator);
+                last.denominator = Some(denominator);
                 return;
             }
         }
@@ -645,8 +645,8 @@ fn build_tempo_map_from_reaper(data: &ReaperData, fallback_bpm: f64) -> Option<V
             id: format!("reaper_tp_{}", points.len()),
             position_sec,
             bpm,
-            numerator,
-            denominator,
+            numerator: Some(numerator),
+            denominator: Some(denominator),
             scale: None,
         });
     };

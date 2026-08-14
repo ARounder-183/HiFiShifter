@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
 import type { GridSize } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
@@ -9,6 +9,8 @@ import {
     clampDenominator,
     clampNumerator,
     createTempoPointAt,
+    effectiveScaleAtSec,
+    effectiveTimeSignatureAt,
     formatTempoBpm,
     formatTimeSignature,
     normalizeScaleData,
@@ -19,9 +21,12 @@ import {
     TEMPO_DENOMINATORS,
     tempoMapSegments,
     tempoPointFlagLabel,
+    tempoPointScaleShortLabel,
     updateTempoPoint,
 } from "../../../utils/tempoMap";
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
+import { formatCursorTime } from "./timeFormat";
 import { gridStepBeats } from "./grid";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
@@ -48,13 +53,18 @@ interface TempoMapRulerRowProps {
     projectSec: number;
     grid: GridSize;
     gridSnapEnabled: boolean;
-    /** 工程基准 BPM / 每小节拍数（无 Tempo Map 时新建首点用）。 */
+    /** 工程基准 BPM / 每小节拍数 / 拍号分母（无 Tempo Map 时新建首点用）。 */
     fallbackBpm: number;
     fallbackBeatsPerBar: number;
+    fallbackDenominator?: number;
     /** 工程音阶（跟随工程音阶时显示用）。 */
     projectScale: ScaleLike | null;
     projectScaleName?: string;
     customScalePresets: readonly CustomScalePreset[];
+    /** 时间单位与上下文（变化点 ToolTip 的“位置”行按用户主/副时间单位显示）。 */
+    primaryUnit: TimeUnit;
+    secondaryUnit: TimeUnitChoice;
+    timeContext: TimeFormatContext;
     t: (key: string) => string;
     /** 本地即时更新（拖动过程中频繁调用，仅更新 Redux，不同步后端）。 */
     onChange: (next: TempoMap | null) => void;
@@ -65,13 +75,6 @@ interface TempoMapRulerRowProps {
     onEditRequestHandled: () => void;
     /** 编辑对话框打开/关闭通知（用于抑制标尺悬浮时间提示）。 */
     onDialogOpenChange?: (open: boolean) => void;
-}
-
-function scaleShortLabel(scale: TempoMapScaleData | null | undefined): string | null {
-    if (!scale) return null;
-    if (scale.key) return SCALE_LABELS[scale.key as keyof typeof SCALE_LABELS] ?? scale.key;
-    if (scale.name) return scale.name;
-    return "…";
 }
 
 /** ScaleLike → 显示文本（键音阶显示 "C / Am"，自定义音阶显示名称）。 */
@@ -91,6 +94,10 @@ interface TempoPointDialogProps {
     open: boolean;
     point: TempoPoint | null;
     isFirst: boolean;
+    /** “跟随之前的拍号”选项展示的上一变化点拍号标签。 */
+    previousTimeSignatureLabel: string;
+    /** “跟随之前的拍号”时字段展示/解除跟随用的上一变化点实际拍号。 */
+    previousTimeSignature: { numerator: number; denominator: number };
     /** “跟随之前的音阶”选项展示的上一变化点音阶标签。 */
     previousScaleLabel: string;
     customScalePresets: readonly CustomScalePreset[];
@@ -99,8 +106,7 @@ interface TempoPointDialogProps {
     onCancel: () => void;
     onConfirm: (patch: {
         bpm: number;
-        numerator: number;
-        denominator: number;
+        timeSignature: { numerator: number; denominator: number } | null;
         scale: TempoMapScaleData | null;
     }) => void;
     onDelete: () => void;
@@ -110,6 +116,8 @@ function TempoPointDialog({
     open,
     point,
     isFirst,
+    previousTimeSignatureLabel,
+    previousTimeSignature,
     previousScaleLabel,
     customScalePresets,
     focus,
@@ -122,8 +130,19 @@ function TempoPointDialog({
     const [bpmText, setBpmText] = useState(() =>
         point ? formatTempoBpm(point.bpm) : "120",
     );
-    const [numText, setNumText] = useState(() => (point ? String(point.numerator) : "4"));
-    const [denominator, setDenominator] = useState(() => point?.denominator ?? 4);
+    // 拍号：跟随之前的拍号时，输入框展示“上一变化点实际生效”的拍号（禁用态）。
+    // 初始点即工程基准记录，必须显式携带拍号，不能跟随。
+    const [sigFollow, setSigFollow] = useState(() =>
+        point ? !isFirst && point.timeSignature == null : false,
+    );
+    const [numText, setNumText] = useState(() =>
+        point
+            ? String(point.timeSignature?.numerator ?? previousTimeSignature.numerator)
+            : "4",
+    );
+    const [denominator, setDenominator] = useState(() =>
+        point?.timeSignature?.denominator ?? previousTimeSignature.denominator,
+    );
     const [scaleValue, setScaleValue] = useState(() => {
         if (!point?.scale) return "inherit";
         if (point.scale.key) return `key:${point.scale.key}`;
@@ -159,8 +178,13 @@ function TempoPointDialog({
     const commit = useCallback(() => {
         if (!point) return;
         const bpm = clampBpm(Number(bpmText) || 120);
-        const numerator = clampNumerator(Number(numText) || 4);
-        const nextDenominator = clampDenominator(denominator);
+        let timeSignature: { numerator: number; denominator: number } | null = null;
+        if (!sigFollow) {
+            timeSignature = {
+                numerator: clampNumerator(Number(numText) || 4),
+                denominator: clampDenominator(denominator),
+            };
+        }
         let scale: TempoMapScaleData | null = null;
         if (scaleValue.startsWith("key:")) {
             const key = scaleValue.slice(4);
@@ -172,10 +196,11 @@ function TempoPointDialog({
             const preset = customScalePresets.find((p) => String(p.id) === presetId);
             if (preset) scale = { name: preset.name, notes: [...preset.notes] };
         }
-        onConfirm({ bpm, numerator, denominator: nextDenominator, scale });
+        onConfirm({ bpm, timeSignature, scale });
     }, [
         point,
         bpmText,
+        sigFollow,
         numText,
         denominator,
         scaleValue,
@@ -206,12 +231,14 @@ function TempoPointDialog({
         setBpmText(formatTempoBpm(clampBpm(next)));
     };
 
+    // 拍号分子滚轮：跟随状态下先解除跟随（以实际生效值为基础继续调节）。
     const applyNumeratorWheel = (e: React.WheelEvent<HTMLInputElement>) => {
         e.preventDefault();
         e.stopPropagation();
         const direction = e.deltaY < 0 ? 1 : -1;
         const current = Number(numText);
         const base = Number.isFinite(current) && current >= 1 ? Math.round(current) : 4;
+        setSigFollow(false);
         setNumText(String(Math.min(32, Math.max(1, base + direction))));
     };
 
@@ -251,9 +278,11 @@ function TempoPointDialog({
                             size="1"
                             ref={numRef}
                             value={numText}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setNumText(e.target.value)
-                            }
+                            disabled={sigFollow}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                if (sigFollow) return;
+                                setNumText(e.target.value);
+                            }}
                             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                                 if (e.key === "Enter") commit();
                             }}
@@ -264,7 +293,11 @@ function TempoPointDialog({
                         <Select.Root
                             size="1"
                             value={String(denominator)}
-                            onValueChange={(v) => setDenominator(Number(v) || 4)}
+                            disabled={sigFollow}
+                            onValueChange={(v) => {
+                                if (sigFollow) return;
+                                setDenominator(Number(v) || 4);
+                            }}
                         >
                             <Select.Trigger
                                 style={{ width: 56 }}
@@ -273,7 +306,10 @@ function TempoPointDialog({
                                         event,
                                         currentValue: String(denominator),
                                         options: TEMPO_DENOMINATORS.map((d) => String(d)),
-                                        onChange: (v) => setDenominator(Number(v) || 4),
+                                        onChange: (v) => {
+                                            setSigFollow(false);
+                                            setDenominator(Number(v) || 4);
+                                        },
                                     });
                                 }}
                             />
@@ -286,6 +322,19 @@ function TempoPointDialog({
                             </Select.Content>
                         </Select.Root>
                     </Flex>
+                    {!isFirst ? (
+                        <Flex gap="2" align="center" style={{ marginTop: -8 }}>
+                            <Checkbox
+                                size="1"
+                                checked={sigFollow}
+                                disabled={isFirst}
+                                onCheckedChange={(checked) => setSigFollow(checked === true)}
+                            />
+                            <Text size="1" className="text-qt-text-muted">
+                                {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
+                            </Text>
+                        </Flex>
+                    ) : null}
                     <Flex gap="2" align="center">
                         <Text size="1" className="text-qt-text-muted shrink-0" style={{ width: 96 }}>
                             {t("tempo_map_scale")}
@@ -385,9 +434,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     gridSnapEnabled,
     fallbackBpm,
     fallbackBeatsPerBar,
+    fallbackDenominator,
     projectScale,
     projectScaleName,
     customScalePresets,
+    primaryUnit,
+    secondaryUnit,
+    timeContext,
     t,
     onChange,
     onCommit,
@@ -455,8 +508,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     const visibleRow = visible && tempoMap != null && tempoMap.points.length > 0;
     const fallback = useMemo(
-        () => ({ bpm: fallbackBpm, beatsPerBar: fallbackBeatsPerBar }),
-        [fallbackBpm, fallbackBeatsPerBar],
+        () => ({
+            bpm: fallbackBpm,
+            beatsPerBar: fallbackBeatsPerBar,
+            denominator: fallbackDenominator ?? 4,
+        }),
+        [fallbackBpm, fallbackBeatsPerBar, fallbackDenominator],
+    );
+
+    /** 新建变化点用的工程基准值：有 Tempo Map 时取 0 位置点，否则取工程记录。 */
+    const baseFallbackOf = useCallback(
+        (base: TempoMap | null) => {
+            if (base && base.points.length > 0) {
+                const sig =
+                    base.points[0].timeSignature ?? { numerator: 4, denominator: 4 };
+                return {
+                    bpm: base.points[0].bpm,
+                    beatsPerBar: sig.numerator,
+                    denominator: sig.denominator,
+                };
+            }
+            return fallback;
+        },
+        [fallback],
     );
 
     // ── 处理时间标尺右键菜单发来的编辑/新建请求 ──
@@ -484,10 +558,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
         // 新建变化点（暂存，不提交）。
         const base = tempoMap ?? null;
-        const mapFallback =
-            base && base.points.length > 0
-                ? { bpm: base.points[0].bpm, beatsPerBar: base.points[0].numerator }
-                : { bpm: fallback.bpm, beatsPerBar: fallback.beatsPerBar };
+        const mapFallback = baseFallbackOf(base);
         const { map, point } = createTempoPointAt(base, positionSec, mapFallback, {
             projectScale: projectScale ?? undefined,
             projectScaleName,
@@ -505,7 +576,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     }, [
         editRequest,
         tempoMap,
-        fallback,
+        baseFallbackOf,
         projectScale,
         projectScaleName,
         onEditRequestHandled,
@@ -518,10 +589,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const bounds = e.currentTarget.getBoundingClientRect();
             let sec = Math.max(0, (e.clientX - bounds.left + scrollLeft) / Math.max(1e-9, pxPerSec));
             const base = tempoMap ?? null;
-            const mapFallback =
-                base && base.points.length > 0
-                    ? { bpm: base.points[0].bpm, beatsPerBar: base.points[0].numerator }
-                    : { bpm: fallback.bpm, beatsPerBar: fallback.beatsPerBar };
+            const mapFallback = baseFallbackOf(base);
             if (gridSnapEnabled) {
                 sec = snapSecToTempoGrid(sec, base, gridStepBeats(grid), mapFallback.bpm);
             }
@@ -541,7 +609,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             pxPerSec,
             gridSnapEnabled,
             grid,
-            fallback,
+            baseFallbackOf,
             projectScale,
             projectScaleName,
             openDialogState,
@@ -577,10 +645,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             if (!drag || !tempoMap) return;
             const dx = e.clientX - drag.startClientX;
             let sec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
-            const mapFallback = {
-                bpm: tempoMap.points[0].bpm,
-                beatsPerBar: tempoMap.points[0].numerator,
-            };
+            const mapFallback = baseFallbackOf(tempoMap);
             if (gridSnapEnabled) {
                 sec = snapSecToTempoGrid(sec, tempoMap, gridStepBeats(grid), mapFallback.bpm);
             }
@@ -609,7 +674,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
         };
-    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, grid, onChange, onCommit]);
+    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, grid, baseFallbackOf, onChange, onCommit]);
 
     // ── 可见性计算 ──
     const visibleState = useMemo(() => {
@@ -617,11 +682,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         const bufferPx = Math.max(120, viewportWidth * 0.3);
         const leftPx = scrollLeft - bufferPx;
         const rightPx = scrollLeft + viewportWidth + bufferPx;
-        const flags: Array<{ point: TempoPoint; left: number; isFirst: boolean }> = [];
+        const flags: Array<{ point: TempoPoint; left: number; isFirst: boolean; index: number }> = [];
         for (let i = 0; i < tempoMap.points.length; i += 1) {
             const left = tempoMap.points[i].positionSec * pxPerSec;
             if (left >= leftPx - 220 && left <= rightPx + 220) {
-                flags.push({ point: tempoMap.points[i], left, isFirst: i === 0 });
+                flags.push({ point: tempoMap.points[i], left, isFirst: i === 0, index: i });
             }
         }
         const segments = tempoMapSegments(tempoMap, projectSec);
@@ -649,10 +714,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         inlineEditLockRef.current = true;
         setEditingPointId(null);
         if (!tempoMap) return;
-        const point = tempoMap.points.find((p) => p.id === id);
+        const pointIndex = tempoMap.points.findIndex((p) => p.id === id);
+        const point = pointIndex >= 0 ? tempoMap.points[pointIndex] : null;
         if (!point) return;
         const parsed = parseTempoPointText(editingText, customScalePresets);
         if (!parsed) return;
+        // 初始点（工程基准记录）不能“跟随之前的拍号”：输入未含拍号时保持原拍号。
+        if (pointIndex === 0 && !parsed.timeSignature) {
+            parsed.timeSignature =
+                point.timeSignature ?? { numerator: 4, denominator: 4 };
+        }
         onCommit(updateTempoPoint(tempoMap, id, parsed));
     }, [editingPointId, editingText, tempoMap, customScalePresets, onCommit]);
 
@@ -665,8 +736,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     const confirmDialog = (patch: {
         bpm: number;
-        numerator: number;
-        denominator: number;
+        timeSignature: { numerator: number; denominator: number } | null;
         scale: TempoMapScaleData | null;
     }) => {
         const st = dialogStateRef.current;
@@ -675,13 +745,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             return;
         }
         const pointId = st.pointId;
+        // 初始点即工程基准记录，不能“跟随之前的拍号”：防御性保持显式拍号。
+        if (st.isFirst && !patch.timeSignature) {
+            patch.timeSignature = {
+                numerator: Math.max(1, Math.min(32, Math.round(fallback.beatsPerBar || 4))),
+                denominator: clampDenominator(fallback.denominator ?? 4),
+            };
+        }
         // 暂存的新建点：此刻一次性创建并应用表单值（取消则不产生任何数据）。
         if (st.pendingCreate && st.pendingPositionSec != null) {
             const base = st.pendingBaseMap ?? null;
-            const mapFallback =
-                base && base.points.length > 0
-                    ? { bpm: base.points[0].bpm, beatsPerBar: base.points[0].numerator }
-                    : { bpm: fallback.bpm, beatsPerBar: fallback.beatsPerBar };
+            const mapFallback = baseFallbackOf(base);
             const { map } = createTempoPointAt(base, st.pendingPositionSec, mapFallback, {
                 projectScale: projectScale ?? undefined,
                 projectScaleName,
@@ -722,6 +796,65 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [tempoMap, projectScale, projectScaleName],
     );
 
+    /** 某位置“之前”生效的拍号（用于“跟随之前的拍号”展示/解析；初始点之前即工程基准记录）。 */
+    const previousTimeSignatureFor = useCallback(
+        (positionSec: number): { numerator: number; denominator: number } => {
+            if (positionSec <= 1e-9) {
+                return {
+                    numerator: Math.max(1, Math.min(32, Math.round(fallbackBeatsPerBar || 4))),
+                    denominator: clampDenominator(fallbackDenominator ?? 4),
+                };
+            }
+            if (!tempoMap || tempoMap.points.length === 0) {
+                return {
+                    numerator: Math.max(1, Math.min(32, Math.round(fallbackBeatsPerBar || 4))),
+                    denominator: clampDenominator(fallbackDenominator ?? 4),
+                };
+            }
+            const idx = tempoMap.points.findIndex((p) => p.positionSec >= positionSec - 1e-6);
+            // 前一个点（若本身即第一个点则为其自身）。
+            const prevIndex = Math.max(0, idx - 1);
+            return effectiveTimeSignatureAt(tempoMap, prevIndex);
+        },
+        [tempoMap, fallbackBeatsPerBar, fallbackDenominator],
+    );
+
+    const previousTimeSignatureLabelFor = useCallback(
+        (positionSec: number): string =>
+            formatTimeSignature(previousTimeSignatureFor(positionSec)),
+        [previousTimeSignatureFor],
+    );
+
+    /**
+     * 变化点旗帜的自定义悬浮提示（项目统一 ToolTip 样式，data-tooltip + AppTooltip）：
+     * 位置按用户主/副时间单位显示；拍号/音阶为“跟随”时展示实际生效值。
+     */
+    const buildFlagTooltip = useCallback(
+        (pointIndex: number): string => {
+            if (!tempoMap) return "";
+            const point = tempoMap.points[pointIndex];
+            const cursor = formatCursorTime(
+                primaryUnit,
+                secondaryUnit,
+                point.positionSec,
+                timeContext,
+            );
+            const positionLine = cursor.secondaryLabel
+                ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
+                : cursor.primaryLabel;
+            const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
+            const effScale = effectiveScaleAtSec(tempoMap, point.positionSec, projectScale ?? undefined);
+            const effScaleLabel = scaleLikeLabel(effScale, projectScaleName) ?? "—";
+            return [
+                `${t("tempo_map_tooltip_position")}${positionLine}`,
+                `${t("tempo_map_tooltip_bpm")}${formatTempoBpm(point.bpm)}`,
+                `${t("tempo_map_tooltip_time_signature")}${formatTimeSignature(sig)}`,
+                `${t("tempo_map_tooltip_scale")}${effScaleLabel}`,
+            ].join("\n");
+        },
+        [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
+    );
+
     // 行隐藏（无 Tempo Map 数据）时对话框仍必须能打开：
     // “新建第一个变化点”是暂存模式，此时 map 尚未提交，行仍处于隐藏状态。
     if (!visibleRow) {
@@ -731,6 +864,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 open
                 point={dialogState.point}
                 isFirst={dialogState.isFirst}
+                previousTimeSignatureLabel={
+                    dialogState.point
+                        ? previousTimeSignatureLabelFor(dialogState.point.positionSec)
+                        : "—"
+                }
+                previousTimeSignature={
+                    dialogState.point
+                        ? previousTimeSignatureFor(dialogState.point.positionSec)
+                        : { numerator: 4, denominator: 4 }
+                }
                 previousScaleLabel={
                     dialogState.point
                         ? previousScaleLabelFor(dialogState.point.positionSec)
@@ -764,8 +907,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                         />
                     ))}
                     {/* 变化点旗帜 */}
-                    {visibleState.flags.map(({ point, left, isFirst }) => {
+                    {visibleState.flags.map(({ point, left, isFirst, index }) => {
                         const inlineEditing = editingPointId === point.id;
+                        const sigText = point.timeSignature
+                            ? formatTimeSignature(point.timeSignature)
+                            : null;
+                        const scaleText = tempoPointScaleShortLabel(point.scale);
+                        const tooltipText = buildFlagTooltip(index);
                         return (
                             <div
                                 key={point.id}
@@ -838,22 +986,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                                     : "none",
                                             outlineOffset: 1,
                                         }}
-                                        title={`${formatTempoBpm(point.bpm)} BPM - ${formatTimeSignature(point)}${
-                                            point.scale
-                                                ? ` - ${scaleShortLabel(point.scale)}`
-                                                : ""
-                                        }`}
+                                        data-tooltip={tooltipText}
                                     >
                                         {formatTempoBpm(point.bpm)}
-                                        <span className="opacity-85">
-                                            {" "}
-                                            {formatTimeSignature(point)}
-                                        </span>
-                                        {point.scale ? (
-                                            <span className="opacity-85">
-                                                {" "}
-                                                - {scaleShortLabel(point.scale)}
-                                            </span>
+                                        {sigText ? (
+                                            <span className="opacity-85"> {sigText}</span>
+                                        ) : null}
+                                        {scaleText ? (
+                                            <span className="opacity-85"> - {scaleText}</span>
                                         ) : null}
                                     </div>
                                 )}
@@ -869,6 +1009,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     open
                     point={dialogState.point}
                     isFirst={dialogState.isFirst}
+                    previousTimeSignatureLabel={
+                        dialogState.point
+                            ? previousTimeSignatureLabelFor(dialogState.point.positionSec)
+                            : "—"
+                    }
+                    previousTimeSignature={
+                        dialogState.point
+                            ? previousTimeSignatureFor(dialogState.point.positionSec)
+                            : { numerator: 4, denominator: 4 }
+                    }
                     previousScaleLabel={
                         dialogState.point
                             ? previousScaleLabelFor(dialogState.point.positionSec)
