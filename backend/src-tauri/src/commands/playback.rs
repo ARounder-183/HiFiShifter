@@ -41,6 +41,24 @@ fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
         .load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// 一轮后台渲染结束后是否应该“补一轮”。
+///
+/// 补轮的目的是：第一轮可能因为音高分析尚未完成而跳过了部分 clip，
+/// 而这些 clip 在分析完成后并没有新的“缓存失效”事件，因此主动再跑一轮，
+/// 把它们也渲染进缓存。
+///
+/// ★ 必须要求本轮有实际进展（render_success_count > 0）：
+/// `collect_clips_needing_render` 不会排除已命中渲染缓存的 clip，
+/// 若无条件补轮，那些“永远无法就绪”的 clip（音高分析不可用、源文件缺失、
+/// 非合成轨道上的手动音高编辑等）会让 skipped_not_ready 永远大于 0，
+/// 每轮都“渲染成功 → 补轮 → 全部命中缓存 → 补轮 → …”，形成 100% CPU 的
+/// 无限后台渲染循环，把整个应用拖到未响应。当本轮没有任何新渲染成功时，
+/// 再补一轮也不可能有进展，必须停止；之后由音高分析完成事件
+/// （`handle_clip_pitch_ready` 消费 `BG_RENDER_PITCH_PENDING`）主动补触发。
+fn should_follow_up_render(skipped_not_ready: usize, render_success_count: u32) -> bool {
+    skipped_not_ready > 0 && render_success_count > 0
+}
+
 /// 检查 clip 的音高分析是否完成（clip_midi 非空）。
 ///
 /// 当音高分析未完成时，不应将渲染结果存入 RenderedClipCache，
@@ -1670,13 +1688,23 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         // 第一轮可能因为音高分析尚未完成而跳过了部分 clip。
         // 音高分析完成后没有新的“缓存失效”事件，因此这里主动补一轮渲染，
         // 保证用户等待后台渲染进度结束后，所有需要渲染的 clip 都真正进入缓存。
-        if skipped_not_ready > 0 && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed) {
+        // ★ 补轮必须受“本轮是否有实际进展”约束（见 should_follow_up_render），
+        // 否则会形成 100% CPU 的无限后台渲染循环，把整个应用拖到未响应。
+        if should_follow_up_render(skipped_not_ready, render_success_count)
+            && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed)
+        {
             eprintln!(
-                "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready during first pass",
-                skipped_not_ready
+                "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready, {} clip(s) newly rendered in this pass",
+                skipped_not_ready, render_success_count
             );
             start_background_render(app.clone());
             return;
+        }
+        if skipped_not_ready > 0 && render_success_count == 0 {
+            eprintln!(
+                "[bg_render] {} clip(s) still not pitch-ready but this pass made no new progress; waiting for pitch analysis completion instead of re-rendering",
+                skipped_not_ready
+            );
         }
 
         // 若完成时恰好有新编辑触发的重启请求，立即启动新一轮渲染
@@ -1704,6 +1732,14 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
 /// Unlike `start_background_render`, this is safe to call even while a render is
 /// already running: it cancels the in-flight render and requests a restart with
 /// the fresh cache state. It is a no-op when background pre-render is disabled.
+///
+/// ★ 线程安全约定（防死锁）：
+/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
+/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
+/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
+/// 调用方会自我死锁 —— 命令线程永久阻塞，整个应用进入“未响应”。
+/// 因此这里把真正的启动工作转移到新线程：本函数只做原子的状态检查与
+/// 标记（无锁），渲染启动线程会等待时间线锁自然释放后再开始收集。
 pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
@@ -1720,7 +1756,15 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
 
     // A fresh render request supersedes any stale restart marker.
     BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-    start_background_render(app.clone())
+
+    // 在新线程上启动渲染：既避免调用方持有时间线锁时自我死锁，
+    // 也让命令线程尽快返回、界面保持响应。
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = start_background_render(app);
+    });
+
+    serde_json::json!({"ok": true, "starting": true})
 }
 
 /// 取消当前正在运行的后台预渲染（如果有）。
@@ -1729,4 +1773,20 @@ pub(super) fn cancel_background_render() -> serde_json::Value {
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
     eprintln!("[bg_render] cancel requested, was_active={was_active}");
     serde_json::json!({"ok": true, "was_active": was_active})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_follow_up_render;
+
+    #[test]
+    fn bg_render_follow_up_requires_progress() {
+        // 有跳过 + 有进展 → 补一轮。
+        assert!(should_follow_up_render(1, 1));
+        // 有跳过但本轮没有任何新渲染（全部命中缓存或全部失败）→ 不补轮。
+        // 这是防止“永远无法就绪的 clip”造成 100% CPU 无限后台渲染循环的关键。
+        assert!(!should_follow_up_render(1, 0));
+        // 没有跳过 → 不补轮。
+        assert!(!should_follow_up_render(0, 3));
+    }
 }

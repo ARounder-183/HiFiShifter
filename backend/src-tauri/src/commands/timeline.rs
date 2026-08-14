@@ -940,6 +940,8 @@ pub(super) fn get_track_summary(
 ///
 /// 前端是 Tempo Map 的唯一编辑入口；本命令：
 /// - 校验并规范化变化点（排序、钳制、确保 0 位置点）；
+/// - 幂等：载荷规范化后与当前 Tempo Map 完全一致时不产生撤销快照、
+///   不更新引擎、不失效缓存、不触发后台预渲染；
 /// - 同步工程基准 BPM / 每小节拍数（与 0 位置点一致）；
 /// - 音阶部分发生变化时失效渲染缓存并触发后台预渲染
 ///   （子轨道“度数差”等依赖音阶的渲染需要重建）。
@@ -948,14 +950,16 @@ pub(super) fn set_timeline_tempo_map(
     tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
     let had_map = tl.tempo_map.is_some();
 
     // 比较音阶签名（仅音阶变化才需要失效渲染缓存）。
     let scale_signature_before =
         crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
 
-    tl.tempo_map = tempo_map.map(|points| {
+    // 先在候选副本上应用载荷与规范化，便于与当前状态做幂等比较
+    // （此时不产生撤销快照、不修改真实状态）。
+    let mut incoming = tl.clone();
+    incoming.tempo_map = tempo_map.map(|points| {
         points
             .into_iter()
             .map(|p| crate::state::TempoPointData {
@@ -972,11 +976,11 @@ pub(super) fn set_timeline_tempo_map(
             })
             .collect()
     });
-    tl.normalize_tempo_map();
+    incoming.normalize_tempo_map();
 
     // 首次创建 Tempo Map：初始点即工程基准记录，音阶为空时物化为工程音阶。
     if !had_map {
-        if let Some(points) = tl.tempo_map.as_mut() {
+        if let Some(points) = incoming.tempo_map.as_mut() {
             if let Some(first) = points.first_mut() {
                 if first.scale.is_none() {
                     let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -985,6 +989,18 @@ pub(super) fn set_timeline_tempo_map(
             }
         }
     }
+
+    // ★ 幂等提交：内容与当前完全一致时不产生撤销快照。
+    // 典型场景：内联编辑/对话框确认时内容未修改 —— 若每次都无条件
+    // checkpoint，一次编辑会产生两个撤销步，用户需要按两次撤销。
+    if incoming.tempo_map == tl.tempo_map {
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
+
+    state.checkpoint_timeline(&tl);
+    *tl = incoming;
 
     // 同步工程基准 BPM / 拍号（与 0 位置点一致）。
     let initial = tl.tempo_map.as_ref().and_then(|points| points.first().cloned());
@@ -1056,12 +1072,23 @@ pub(super) fn set_timeline_tempo_map(
         for clip in &tl.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }
+    }
+
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+
+    // ★ 触发后台预渲染前必须先释放时间线锁：
+    // `request_background_render` → `start_background_render` 内部会再次锁定
+    // `state.timeline`（克隆时间线以收集待渲染 clip）。std Mutex 不可重入，
+    // 若此处仍持有 `tl`，命令线程会在自己的锁上自我死锁，整个应用
+    // “未响应”（后台预渲染开启时必现）。
+    drop(tl);
+
+    if scale_changed {
         if let Some(handle) = state.app_handle.get() {
             crate::commands::playback::request_background_render(handle);
         }
     }
 
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
     payload
 }

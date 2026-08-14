@@ -216,30 +216,41 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
 
 /**
  * 视口左侧的“悬浮标签”：当管辖画面最左侧的 Tempo Map 变化点旗帜
- * （蓝色标签）滚出画面左侧后，在最左侧浮一个同款蓝色标签展示该段参数。
+ * （蓝色标签）滚出画面左侧后，在最左侧浮一个同款标签展示该段参数。
  *
- * - 外观与变化点旗帜一致（高亮底色 + 阴影），一眼可识别为“悬浮”的旗帜标签；
+ * - 外观与变化点旗帜一致，一眼可识别为“悬浮”的旗帜标签；
  * - 内容切换使用 key 重挂载 + 淡入动画（旧文本立即移除、新文本淡入，绝不重叠）；
- * - 任何旗帜与悬浮标签区域重叠时整体淡出，避免互相遮挡。
+ * - 任何旗帜与悬浮标签区域重叠时整体淡出，避免互相遮挡；
+ * - 与固定标签提供完全相同的交互：双击进入输入编辑状态、
+ *   右键直接弹出“速度映射变化点”编辑窗口。
  */
 const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
     tempoMap,
     scrollLeft,
     pxPerSec,
     tooltip,
+    onInlineEdit,
+    onOpenDialog,
+    hidden,
 }: {
     tempoMap: TempoMap;
     scrollLeft: number;
     pxPerSec: number;
     /** 自定义悬浮提示（与变化点旗帜一致的“位置/BPM/拍号/音阶”内容）。 */
     tooltip: string;
+    /** 双击：进入管辖变化点的输入编辑状态。 */
+    onInlineEdit: () => void;
+    /** 右键：弹出管辖变化点的编辑窗口。 */
+    onOpenDialog: () => void;
+    /** 输入编辑进行中：隐藏自身，避免遮挡显示在视口左侧的内联输入框。 */
+    hidden?: boolean;
 }) {
     const { label, governingOffscreen, blocked } = computeTempoFloatingLabelState({
         tempoMap,
         scrollLeft,
         pxPerSec,
     });
-    const visible = governingOffscreen && !blocked;
+    const visible = governingOffscreen && !blocked && !hidden;
 
     return (
         <>
@@ -266,13 +277,29 @@ const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
                 }}
             >
                 {/* 与变化点旗帜同款尺寸（9px / 行高 11px / px-1），仅加投影以示“悬浮”。 */}
+                {/* 注意：仅在可见时接收指针事件 —— 隐藏（opacity: 0）时若仍可点击， */}
+                {/* 会挡住其下方的初始变化点旗帜（双击无法进入编辑模式）。 */}
                 <div
-                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md pointer-events-auto"
+                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md"
                     style={{
-                        backgroundColor: "var(--qt-highlight)",
-                        color: "var(--qt-window)",
+                        backgroundColor: "var(--qt-panel)",
+                        color: "var(--qt-text)",
+                        boxShadow:
+                            "inset 0 0 0 1px color-mix(in srgb, var(--qt-border) 70%, transparent), 0 2px 8px var(--qt-overlay)",
+                        pointerEvents: visible ? "auto" : "none",
+                        cursor: "pointer",
                     }}
                     data-tooltip={tooltip}
+                    onDoubleClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (visible) onInlineEdit();
+                    }}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (visible) onOpenDialog();
+                    }}
                 >
                     <span key={label} className="hs-tempo-float-label">
                         {label}
@@ -544,6 +571,8 @@ export const TimeRuler: React.FC<{
     const [tempoEditRequest, setTempoEditRequest] = useState<TempoPointEditRequest | null>(null);
     /** Tempo Map 编辑对话框打开时抑制标尺悬浮时间提示。 */
     const [tempoDialogOpen, setTempoDialogOpen] = useState(false);
+    /** 标签内联输入编辑进行中：隐藏悬浮标签，避免遮挡视口左侧的输入框。 */
+    const [tempoInlineEditing, setTempoInlineEditing] = useState(false);
     const rulerRef = useRef<HTMLDivElement | null>(null);
 
     const showTempoRow = Boolean(tempoMap && tempoMap.points.length > 0 && tempoMapVisible);
@@ -560,8 +589,39 @@ export const TimeRuler: React.FC<{
         if (open) setHover(null);
     }, []);
     const handleEditTempoPoint = useCallback((id: string) => {
-        setTempoEditRequest({ pointId: id, positionSec: null, focus: null });
+        setTempoEditRequest({ pointId: id, positionSec: null, focus: null, mode: "dialog" });
     }, []);
+
+    /** 悬浮标签管辖的变化点 id（画面最左侧生效的变化点）。 */
+    const floatingGoverningPointId = useMemo(() => {
+        if (!tempoMap || tempoMap.points.length === 0) return null;
+        const leftSec = Math.max(0, scrollLeft / Math.max(1e-9, pxPerSec));
+        return tempoMap.points[pointIndexAtSec(tempoMap, leftSec)].id;
+    }, [tempoMap, scrollLeft, pxPerSec]);
+
+    /** 悬浮标签双击：进入管辖变化点的输入编辑状态。 */
+    const handleFloatingInlineEdit = useCallback(() => {
+        if (floatingGoverningPointId) {
+            setTempoEditRequest({
+                pointId: floatingGoverningPointId,
+                positionSec: null,
+                focus: null,
+                mode: "inline",
+            });
+        }
+    }, [floatingGoverningPointId]);
+
+    /** 悬浮标签右键：弹出管辖变化点的编辑窗口。 */
+    const handleFloatingOpenDialog = useCallback(() => {
+        if (floatingGoverningPointId) {
+            setTempoEditRequest({
+                pointId: floatingGoverningPointId,
+                positionSec: null,
+                focus: null,
+                mode: "dialog",
+            });
+        }
+    }, [floatingGoverningPointId]);
     const handleDeleteTempoPoint = useCallback(
         (id: string) => {
             if (tempoMap && onTempoMapCommit) {
@@ -649,6 +709,12 @@ export const TimeRuler: React.FC<{
                 setHover(null);
                 return;
             }
+            // 门户内容（如弹出对话框）上的移动不触发标尺悬浮提示。
+            const box = e.currentTarget as HTMLElement | null;
+            if (!box || !target || !box.contains(target)) {
+                setHover(null);
+                return;
+            }
             const bounds = e.currentTarget.getBoundingClientRect();
             const sec = Math.max(
                 0,
@@ -672,12 +738,27 @@ export const TimeRuler: React.FC<{
             ? Math.min(Math.max(4, hover.x + 10), Math.max(4, viewportWidth - 260))
             : 4;
 
+    /**
+     * 事件是否来自标尺自身 DOM 子树之外（如 Radix Dialog 门户到 body 的
+     * 弹窗内容）。React 门户事件会沿 React 树冒泡到本 Box，但这类点击
+     * 完全不应触发标尺行为（播放头定位 / 右键菜单）。
+     */
+    const isForeignEvent = (e: React.SyntheticEvent) => {
+        const target = e.target as Node | null;
+        if (!target) return true;
+        const box = e.currentTarget as HTMLElement | null;
+        if (!box) return true;
+        return !box.contains(target);
+    };
+
     return (
         <Box
             ref={rulerRef}
             className="bg-qt-window border-b border-qt-border relative overflow-hidden shrink-0 select-none"
             style={{ height: rulerHeight }}
             onMouseDown={(e) => {
+                // 编辑对话框等门户内容上的点击不影响标尺（播放头定位）。
+                if (isForeignEvent(e)) return;
                 if (e.button === 1) {
                     e.preventDefault();
                     return;
@@ -696,9 +777,11 @@ export const TimeRuler: React.FC<{
                 onMouseDown(e);
             }}
             onAuxClick={(e) => {
+                if (isForeignEvent(e)) return;
                 if (e.button === 1) e.preventDefault();
             }}
             onContextMenu={(e) => {
+                if (isForeignEvent(e)) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const bounds = e.currentTarget.getBoundingClientRect();
@@ -765,6 +848,7 @@ export const TimeRuler: React.FC<{
                     editRequest={tempoEditRequest}
                     onEditRequestHandled={() => setTempoEditRequest(null)}
                     onDialogOpenChange={handleTempoDialogOpenChange}
+                    onFloatingInlineEditChange={setTempoInlineEditing}
                 />
                 <TimeRulerPlayhead
                     playheadSec={playheadSec}
@@ -795,6 +879,9 @@ export const TimeRuler: React.FC<{
                     scrollLeft={scrollLeft}
                     pxPerSec={pxPerSec}
                     tooltip={floatingTooltip}
+                    onInlineEdit={handleFloatingInlineEdit}
+                    onOpenDialog={handleFloatingOpenDialog}
+                    hidden={tempoInlineEditing}
                 />
             ) : null}
 
