@@ -168,15 +168,32 @@ function trimTrailingZeros(value: string): string {
 /**
  * 小节.节拍.小单位 —— Tempo Map 版本。
  * 小节号来自 `barBeatAtSec`（各段拍号独立分小节）。
+ * 拍内余量无限接近 1 时进位到下一拍（消除浮点误差产生的 "4.2.1000"）。
  */
-export function formatTempoBarBeatsLabel(bbt: BarBeat, mode: "ruler" | "cursor"): string {
-    if (Math.abs(bbt.sub) < 1e-9) {
-        if (mode === "cursor") {
-            return `${bbt.bar}.${bbt.beat}.000`;
+export function formatTempoBarBeatsLabel(
+    bbt: BarBeat,
+    mode: "ruler" | "cursor",
+    beatsPerBar: number,
+): string {
+    const bpb = Math.max(1, Math.round(beatsPerBar || 4));
+    let bar = bbt.bar;
+    let beat = bbt.beat;
+    let sub = bbt.sub;
+    if (sub > 1 - 1e-9) {
+        beat += 1;
+        sub = 0;
+        if (beat > bpb) {
+            bar += 1;
+            beat = 1;
         }
-        return `${bbt.bar}.${bbt.beat}`;
     }
-    return `${bbt.bar}.${bbt.beat}.${formatSubdivision(bbt.sub * 1000, mode)}`;
+    if (Math.abs(sub) < 1e-9) {
+        if (mode === "cursor") {
+            return `${bar}.${beat}.000`;
+        }
+        return `${bar}.${beat}`;
+    }
+    return `${bar}.${beat}.${formatSubdivision(sub * 1000, mode)}`;
 }
 
 /**
@@ -215,7 +232,8 @@ export function formatTempoRulerTick(
                 );
             }
             const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
-            return formatTempoBarBeatsLabel(bbt, "ruler");
+            const tempo = segmentTempoAtSec(ctx.tempoMap, sec);
+            return formatTempoBarBeatsLabel(bbt, "ruler", tempo.beatsPerBar);
         }
         case "barDivisions": {
             if (!ctx.tempoMap) {
@@ -248,7 +266,8 @@ export function formatTempoCursorUnit(
                 return formatBarBeatsLabel(beatFromSec(sec, ctx.bpm), ctx.beatsPerBar, "cursor");
             }
             const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
-            return formatTempoBarBeatsLabel(bbt, "cursor");
+            const tempo = segmentTempoAtSec(ctx.tempoMap, sec);
+            return formatTempoBarBeatsLabel(bbt, "cursor", tempo.beatsPerBar);
         }
         case "barDivisions": {
             if (!ctx.tempoMap) {
@@ -571,24 +590,17 @@ export function buildRulerTicks(args: {
         }
 
         const segLenBeats = (segEndSec - segStartSec) / segSecPerBeat;
-        const isLastSegment = i === segments.length - 1;
         // 段内局部拍：k*step。
         const maxK = Math.floor(segLenBeats / step + 1e-9);
         for (let k = 0; k <= maxK; k += 1) {
             const localBeat = k * step;
             const sec = segStartSec + localBeat * segSecPerBeat;
-            // 非末段跳过右边界（下一段起始已单独生成）。
-            if (!isLastSegment && Math.abs(sec - segEndSec) < 1e-6) continue;
+            // 跳过段右边界：非末段由下一段起始刻度承担；末段的工程结束位置
+            // 不展示时间单位字符串（与无 Tempo Map 时一致，边界由网格边界线表示）。
+            if (Math.abs(sec - segEndSec) < 1e-6) continue;
             const rem = (localBeat / segBpb) % 1;
             const isBarStart = rem < 1e-9 || rem > 1 - 1e-9;
             pushTick(sec, isBarStart);
-        }
-
-        // 末段末尾（工程边界）补一个刻度。
-        if (isLastSegment && segEndSec > segStartSec + 1e-9) {
-            const endLocalBeat = (segEndSec - segStartSec) / segSecPerBeat;
-            const rem = (endLocalBeat / segBpb) % 1;
-            pushTick(segEndSec, rem < 1e-9 || rem > 1 - 1e-9);
         }
     }
 

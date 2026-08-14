@@ -6,15 +6,20 @@ import {
     beatToSec,
     buildScaleSegments,
     buildTempoGridLines,
+    computeTempoFloatingLabelState,
     createTempoPointAt,
     effectiveScaleAtSec,
     fromBackendTempoMap,
     normalizeTempoMap,
+    parseTempoPointText,
     pointIndexAtSec,
     removeTempoPoint,
     secToBeat,
     snapSecToTempoGrid,
     tempoAtSec,
+    tempoFlagLabelWidthPx,
+    tempoPointFlagLabel,
+    tempoPointHitTest,
     toBackendTempoMap,
     updateTempoPoint,
 } from "./tempoMap";
@@ -95,6 +100,15 @@ function mapWith(points: RawPoint[]): TempoMap {
     const at25 = barBeatAtSec(map, 2.5, 120, 4);
     assertEqual(at25.bar, 2, "bar number in 3/4 segment");
     assertEqual(at25.beat, 2, "beat number in 3/4 segment");
+}
+
+{
+    // 浮点边界：1.999999999999 拍（≈ 第 3 拍起点）→ 应进位为 1.3，而不是 "1.2.1000"。
+    const map = mapWith([{ positionSec: 0, bpm: 120, numerator: 4 }]);
+    const bbt = barBeatAtSec(map, 0.9999999999995, 120, 4);
+    assertEqual(bbt.bar, 1, "barBeat: near-boundary bar");
+    assertEqual(bbt.beat, 3, "barBeat: near-boundary beat carries");
+    assertNear(bbt.sub, 0, "barBeat: near-boundary sub zero");
 }
 
 {
@@ -254,6 +268,96 @@ function mapWith(points: RawPoint[]): TempoMap {
     assertNear(snapSecToTempoGrid(1.1, map, 1, 120), 1.0, "snap: to segment start bar");
     assertNear(snapSecToTempoGrid(1.14, map, 1, 120), 1.25, "snap: segment-local grid");
     assertNear(snapSecToTempoGrid(0.4, map, 1, 120), 0.5, "snap: first segment grid");
+}
+
+// ── 悬浮标签状态（viewport 左侧黏性参数标签）─────────────────────────────
+
+{
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, numerator: 4, denominator: 4, scale: { key: "C" } },
+        { positionSec: 7.25, bpm: 150, numerator: 3, denominator: 4, scale: { key: "G" } },
+    ]);
+    const pxPerSec = 100;
+
+    // 滚动 0：首点旗帜可见 → 无需悬浮标签。
+    let st = computeTempoFloatingLabelState({ tempoMap: map, scrollLeft: 0, pxPerSec });
+    assertEqual(st.governingOffscreen, false, "float: hidden when flag visible");
+
+    // 首点旗帜完全滚出画面左侧 → 显示悬浮标签（120 段）。
+    st = computeTempoFloatingLabelState({ tempoMap: map, scrollLeft: 120, pxPerSec });
+    assertEqual(st.governingOffscreen, true, "float: shown when flag offscreen");
+    assertEqual(st.blocked, false, "float: not blocked far from next flag");
+    assertEqual(st.label, "120 4/4 - C / Am", "float: first segment label");
+
+    // 下一旗帜（7.25s = 725px）进入画面左侧 → 与悬浮标签区域重叠 → 隐藏。
+    st = computeTempoFloatingLabelState({ tempoMap: map, scrollLeft: 722, pxPerSec });
+    assertEqual(st.blocked, true, "float: blocked while next flag overlaps");
+
+    // 下一旗帜越过左边缘但仍在标签区内 → 依然隐藏。
+    st = computeTempoFloatingLabelState({ tempoMap: map, scrollLeft: 727, pxPerSec });
+    assertEqual(st.blocked, true, "float: blocked while flag inside chip area");
+
+    // 下一旗帜完全滚出画面左侧 → 显示新段标签（150 段）。
+    st = computeTempoFloatingLabelState({ tempoMap: map, scrollLeft: 850, pxPerSec });
+    assertEqual(st.blocked, false, "float: unblocked after flag exits");
+    assertEqual(st.label, "150 3/4 - G / Em", "float: second segment label");
+}
+
+// ── 旗帜文本解析（内联编辑）─────────────────────────────────────────────────
+
+{
+    const presets = [{ id: "c1", name: "自定义音阶", notes: [0, 2, 4, 5, 7, 9, 11] }];
+
+    const full = parseTempoPointText("120 4/4 - C / Am", presets);
+    assertEqual(full?.bpm, 120, "parse: bpm");
+    assertEqual(full?.numerator, 4, "parse: numerator");
+    assertEqual(full?.denominator, 4, "parse: denominator");
+    assertEqual(full?.scale?.key, "C", "parse: scale by label");
+
+    const bare = parseTempoPointText("150.5 3/8", presets);
+    assertEqual(bare?.bpm, 150.5, "parse: decimal bpm");
+    assertEqual(bare?.denominator, 8, "parse: denominator 8");
+    assertEqual(bare?.scale, null, "parse: no scale = inherit");
+
+    const bareKey = parseTempoPointText("90 4/4 - G", presets);
+    assertEqual(bareKey?.scale?.key, "G", "parse: bare key");
+
+    const custom = parseTempoPointText("90 4/4 - 自定义音阶", presets);
+    assertEqual(custom?.scale?.name, "自定义音阶", "parse: custom preset name");
+    assertEqual(
+        JSON.stringify(custom?.scale?.notes),
+        "[0,2,4,5,7,9,11]",
+        "parse: custom preset notes",
+    );
+
+    assertEqual(parseTempoPointText("abc", presets), null, "parse: garbage fails");
+    assertEqual(parseTempoPointText("", presets), null, "parse: empty fails");
+    assertEqual(parseTempoPointText("120 5/3", presets), null, "parse: invalid denominator fails");
+    assertEqual(parseTempoPointText("120 4/4 - X / Y", presets), null, "parse: unknown scale fails");
+    assertEqual(parseTempoPointText("99999 4/4", presets)?.bpm, 960, "parse: bpm clamped");
+}
+
+// ── 旗帜命中检测（右键菜单）─────────────────────────────────────────────────
+
+{
+    const map = mapWith([
+        { positionSec: 0, bpm: 120, numerator: 4, scale: { key: "C" } },
+        { positionSec: 7.25, bpm: 150, numerator: 3, scale: { key: "G" } },
+    ]);
+    const pxPerSec = 100;
+    const secondLabel = tempoPointFlagLabel(map.points[1]);
+    // 旗帜文本向右延伸：点击文本中部（位置 + 文本宽度的一半）也必须命中。
+    const textHalfPx = tempoFlagLabelWidthPx(secondLabel) / 2;
+    const clickPx = map.points[1].positionSec * pxPerSec + textHalfPx;
+    assertEqual(tempoPointHitTest(map, clickPx / pxPerSec, pxPerSec), 1, "hit: flag text body");
+    // 点击位置本体（旗帜线）命中。
+    assertEqual(
+        tempoPointHitTest(map, map.points[0].positionSec, pxPerSec),
+        0,
+        "hit: flag line",
+    );
+    // 远离旗帜 → 不命中。
+    assertEqual(tempoPointHitTest(map, 3.0, pxPerSec), null, "hit: empty area misses");
 }
 
 // ── 后端载荷序列化契约（裸数组，两端必须一致）───────────────────────────────

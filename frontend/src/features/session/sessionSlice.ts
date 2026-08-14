@@ -805,7 +805,8 @@ function applyTimelineState(
 
     state.selectedTrackId = timeline.selected_track_id;
     state.selectedClipId = timeline.selected_clip_id;
-    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 300);
+    // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 960);
     state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
     state.projectSec = Math.max(4, Number(timeline.project_sec ?? state.projectSec));
     state.disabledGroupIds = Array.isArray(timeline.disabled_group_ids)
@@ -893,7 +894,7 @@ function applyTimelineState(
         if (state.tempoMap) {
             // 0 位置点与工程基准 BPM 保持一致（后端同步保证）。
             const first = state.tempoMap.points[0];
-            state.bpm = clamp(first.bpm, 10, 300);
+            state.bpm = clamp(first.bpm, 10, 960);
             state.beats = Math.min(32, Math.max(1, Math.round(first.numerator)));
         }
     }
@@ -1291,7 +1292,8 @@ const sessionSlice = createSlice({
             state.selectedPointId = null;
         },
         setBpm(state, action: PayloadAction<number>) {
-            state.bpm = clamp(action.payload, 10, 300);
+            // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+            state.bpm = clamp(action.payload, 10, 960);
         },
         setBeats(state, action: PayloadAction<number>) {
             state.beats = clamp(action.payload, 1, 32);
@@ -1399,7 +1401,7 @@ const sessionSlice = createSlice({
             });
             // 保持工程基准值（bpm / beats）与 0 位置点一致，删除 Tempo Map 后回退一致。
             if (state.tempoMap) {
-                state.bpm = clamp(state.tempoMap.points[0].bpm, 10, 300);
+                state.bpm = clamp(state.tempoMap.points[0].bpm, 10, 960);
                 state.beats = Math.min(32, Math.max(1, Math.round(state.tempoMap.points[0].numerator)));
             }
         },
@@ -3099,6 +3101,12 @@ const sessionSlice = createSlice({
                 }
                 // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
                 applyTimelineState(state, payload, { force: true });
+                // 显式触发后台预渲染：Tempo Map 音阶变化会影响子轨道“度数差”等
+                // 依赖音阶的渲染。applyTimelineState 已使 paramsEpoch 递增，
+                // App 层据此调用 startBackgroundRender（与工程音阶变更路径
+                // setProjectBaseScaleRemote.fulfilled 保持一致）；此处再显式递增，
+                // 确保该触发不依赖 applyTimelineState 的内部实现细节。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
                 state.status = "Tempo map updated";
             })
             .addCase(setTempoMapRemote.rejected, setRejected)
@@ -3430,7 +3438,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 300);
+                // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
                 if (payload.tracks && payload.clips) {
                     applyTimelineState(state, payload as TimelineState, { force: true });
                 }

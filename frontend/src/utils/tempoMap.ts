@@ -13,7 +13,7 @@
  */
 
 import type { ScaleLike } from "./musicalScales";
-import { isScaleKey, normalizeCustomScaleNotes } from "./musicalScales";
+import { SCALE_KEYS, SCALE_LABELS, isScaleKey, normalizeCustomScaleNotes } from "./musicalScales";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 类型
@@ -500,13 +500,24 @@ export function beatToBarBeat(
 
         if (safeBeat < segEndBeat || !Number.isFinite(segEndBeat)) {
             const rel = safeBeat - segStartBeat;
-            const fullBars = Math.floor(rel / bpb);
+            let fullBars = Math.floor(rel / bpb);
             const inBar = rel - fullBars * bpb;
-            const beatIndex = Math.floor(inBar);
+            let beatIndex = Math.floor(inBar);
+            let sub = inBar - beatIndex;
+            // 消除浮点误差：拍内余量无限接近 1 时进位到下一拍
+            // （否则标尺会出现 "4.2.1000" 这类不存在的格式）。
+            if (sub > 1 - 1e-9) {
+                beatIndex += 1;
+                sub = 0;
+                if (beatIndex >= bpb) {
+                    fullBars += 1;
+                    beatIndex = 0;
+                }
+            }
             return {
                 bar: bar + fullBars,
                 beat: beatIndex + 1,
-                sub: inBar - beatIndex,
+                sub,
             };
         }
 
@@ -521,10 +532,19 @@ export function beatToBarBeat(
     const last = points[lastIndex];
     const bpb = Math.max(1, beatsPerBarOf(last));
     const rel = safeBeat - cache.pointBeats[lastIndex];
-    const fullBars = Math.floor(rel / bpb);
+    let fullBars = Math.floor(rel / bpb);
     const inBar = rel - fullBars * bpb;
-    const beatIndex = Math.floor(inBar);
-    return { bar: bar + fullBars, beat: beatIndex + 1, sub: inBar - beatIndex };
+    let beatIndex = Math.floor(inBar);
+    let sub = inBar - beatIndex;
+    if (sub > 1 - 1e-9) {
+        beatIndex += 1;
+        sub = 0;
+        if (beatIndex >= bpb) {
+            fullBars += 1;
+            beatIndex = 0;
+        }
+    }
+    return { bar: bar + fullBars, beat: beatIndex + 1, sub };
 }
 
 /** 秒 → 小节.拍.余量。 */
@@ -836,6 +856,178 @@ function dedupeSorted(values: number[]): number[] {
         }
     }
     return out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 变化点旗帜文本与“悬浮标签”（viewport 左侧的黏性参数标签）
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 变化点旗帜的展示文本：`BPM 拍号 - 音阶`（音阶仅在显式设置时显示）。
+ * 标尺行旗帜与视口左侧悬浮标签共用，保证内容一致。
+ */
+export function tempoPointFlagLabel(point: TempoPoint): string {
+    const base = `${formatTempoBpm(point.bpm)} ${formatTimeSignature(point)}`;
+    const scale = point.scale;
+    if (!scale) return base;
+    if (scale.key) {
+        return `${base} - ${SCALE_LABELS[scale.key as keyof typeof SCALE_LABELS] ?? scale.key}`;
+    }
+    if (scale.name) return `${base} - ${scale.name}`;
+    return `${base} - …`;
+}
+
+/** 旗帜文本宽度估算（px，9px 字号等宽近似：每字符 6px + 内边距 16px）。 */
+export function tempoFlagLabelWidthPx(label: string): number {
+    return label.length * 6 + 16;
+}
+
+export interface TempoFloatingLabelState {
+    /** 悬浮标签应展示的文本（画面最左侧可见位置所在段的参数）。 */
+    label: string;
+    /** 管辖画面最左侧的旗帜是否已完全滚出画面左侧（此时才需要悬浮标签）。 */
+    governingOffscreen: boolean;
+    /** 是否有任何旗帜与悬浮标签显示区域重叠（重叠时隐藏悬浮标签）。 */
+    blocked: boolean;
+}
+/**
+ * 计算视口左侧“悬浮标签”的显示状态。
+ *
+ * 时间轴是连续的画布，而画面只是其中一个小窗口：当管辖画面最左侧的
+ * 变化点旗帜（蓝色标签）滚出画面左侧后，用户无从得知该段的参数，
+ * 因此在标尺行最左侧显示一个悬浮标签。规则：
+ * - 管辖旗帜完全在画面左侧之外时才显示；
+ * - 任何旗帜（尤其是从左侧进入画面的下一个旗帜）与悬浮标签区域
+ *   重叠时隐藏，避免互相遮挡。
+ */
+export function computeTempoFloatingLabelState(args: {
+    tempoMap: TempoMap;
+    scrollLeft: number;
+    pxPerSec: number;
+    chipExtraWidthPx?: number;
+    marginPx?: number;
+}): TempoFloatingLabelState {
+    const { tempoMap, scrollLeft, pxPerSec, chipExtraWidthPx = 14, marginPx = 10 } = args;
+    const safePx = Math.max(1e-9, pxPerSec);
+    const leftSec = Math.max(0, scrollLeft / safePx);
+    const idx = pointIndexAtSec(tempoMap, leftSec);
+    const governing = tempoMap.points[idx];
+    const label = tempoPointFlagLabel(governing);
+    const chipWidthEst = tempoFlagLabelWidthPx(label) + chipExtraWidthPx;
+    const gx = governing.positionSec * safePx - scrollLeft;
+    const governingOffscreen = gx + tempoFlagLabelWidthPx(label) < -2;
+    let blocked = false;
+    for (const p of tempoMap.points) {
+        const x = p.positionSec * safePx - scrollLeft;
+        if (
+            x < chipWidthEst + marginPx &&
+            x + tempoFlagLabelWidthPx(tempoPointFlagLabel(p)) > -2
+        ) {
+            blocked = true;
+            break;
+        }
+    }
+    return { label, governingOffscreen, blocked };
+}
+
+/**
+ * 判断某个内容坐标点击（秒）是否命中一个变化点旗帜的可视范围
+ * （从点的位置向右延伸整个旗帜文本的宽度）。返回命中点的下标，未命中返回 null。
+ */
+export function tempoPointHitTest(
+    map: TempoMap,
+    clickedSec: number,
+    pxPerSec: number,
+): number | null {
+    const clickPx = Math.max(0, clickedSec) * Math.max(1e-9, pxPerSec);
+    let bestIndex: number | null = null;
+    let bestDist = Infinity;
+    for (let i = 0; i < map.points.length; i += 1) {
+        const p = map.points[i];
+        const left = p.positionSec * Math.max(1e-9, pxPerSec);
+        const width = tempoFlagLabelWidthPx(tempoPointFlagLabel(p));
+        const hitRight = left + width + 8;
+        if (clickPx < left - 4 || clickPx > hitRight) continue;
+        // 命中的点：与旗帜边缘的最小距离（用于多个旗帜重叠时选择最近者）。
+        const dist = Math.min(Math.abs(clickPx - left), Math.abs(clickPx - hitRight));
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+        }
+    }
+    return bestIndex;
+}
+
+/**
+ * 解析变化点旗帜文本（如 `120 4/4 - C / Am`、`150.5 3/8`、`90 4/4 - 自定义音阶`），
+ * 供旗帜内联编辑使用。解析失败返回 null（调用方静默放弃、不应用）。
+ *
+ * 规则：
+ * - BPM：浮点数（钳制 10-960）；
+ * - 拍号：`分子/分母`，分子 1-32、分母限 {1,2,4,8,16,32}；
+ * - 音阶（可选，` - ` 之后）：匹配内置音阶显示标签（如 "C / Am"）、
+ *   裸键名（如 "C"）或自定义音阶预设名；无法识别时整体解析失败；
+ * - 无音阶部分 → scale = null（跟随之前的音阶）。
+ */
+export function parseTempoPointText(
+    text: string,
+    customPresets: ReadonlyArray<{ id: string | number; name: string; notes: number[] }>,
+): { bpm: number; numerator: number; denominator: number; scale: TempoMapScaleData | null } | null {
+    const raw = text.trim();
+    if (!raw) return null;
+
+    // `BPM 拍号[- 音阶]`（BPM 可能带小数；音阶部分用第一个 ` - ` 分隔，
+    // 音阶名自身可以包含 `-`）。
+    const headMatch = /^(\d+(?:\.\d+)?)\s+(\d+)\s*\/\s*(\d+)(?:\s*-\s*(.*))?$/.exec(raw);
+    if (!headMatch) return null;
+    const bpm = clampBpm(Number(headMatch[1]));
+    const numerator = Number(headMatch[2]);
+    const denominator = Number(headMatch[3]);
+    const scaleText = (headMatch[4] ?? "").trim();
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
+    if (numerator < 1 || numerator > TEMPO_NUMERATOR_MAX) return null;
+    if (!(TEMPO_DENOMINATORS as readonly number[]).includes(denominator)) return null;
+
+    if (!scaleText) {
+        return {
+            bpm,
+            numerator: clampNumerator(numerator),
+            denominator: clampDenominator(denominator),
+            scale: null,
+        };
+    }
+
+    // 内置键（直接键名）。
+    if ((SCALE_KEYS as readonly string[]).includes(scaleText)) {
+        return {
+            bpm,
+            numerator: clampNumerator(numerator),
+            denominator: clampDenominator(denominator),
+            scale: { key: scaleText },
+        };
+    }
+    // 内置音阶显示标签（"C / Am" 等，反向查表）。
+    for (const key of SCALE_KEYS) {
+        if (SCALE_LABELS[key] === scaleText) {
+            return {
+                bpm,
+                numerator: clampNumerator(numerator),
+                denominator: clampDenominator(denominator),
+                scale: { key },
+            };
+        }
+    }
+    // 自定义音阶预设名。
+    const preset = customPresets.find((p) => p.name === scaleText);
+    if (preset) {
+        return {
+            bpm,
+            numerator: clampNumerator(numerator),
+            denominator: clampDenominator(denominator),
+            scale: { name: preset.name, notes: [...preset.notes] },
+        };
+    }
+    return null;
 }
 
 export interface TempoSegment {

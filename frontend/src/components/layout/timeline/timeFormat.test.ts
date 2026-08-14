@@ -7,6 +7,7 @@ import {
     formatCursorTime,
     formatSecondsCursor,
     formatSecondsRuler,
+    formatTempoBarBeatsLabel,
     gridDivisionsPerBar,
     rulerStepCandidates,
     selectRulerStep,
@@ -254,6 +255,28 @@ assertEqual(
 
 assertNear(beatFromSec(0.5, 120), 1, "beatFromSec");
 assertNear(secFromBeat(1, 120), 0.5, "secFromBeat");
+
+// ── Tempo Map 标签进位（浮点误差不得产生 "4.2.1000"） ──────────
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 2, sub: 0.9999999999 }, "ruler", 4),
+    "4.3",
+    "tempo label carries near-beat sub",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 2, sub: 1 }, "ruler", 4),
+    "4.3",
+    "tempo label carries sub=1",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 4, sub: 0.9999999999 }, "ruler", 4),
+    "5.1",
+    "tempo label carries across bar",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 4, sub: 0.9999999999 }, "cursor", 4),
+    "5.1.000",
+    "tempo cursor carries across bar",
+);
 
 // ── Tempo Map 标尺：变化点后重新对齐（不得沿用旧均匀网格位置） ──
 {

@@ -7,9 +7,14 @@ import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
 import type { CustomScalePreset } from "../../../utils/customScales.ts";
 import type { TempoMap } from "../../../utils/tempoMap.ts";
-import { removeTempoPoint } from "../../../utils/tempoMap.ts";
+import {
+    computeTempoFloatingLabelState,
+    removeTempoPoint,
+    tempoPointHitTest,
+} from "../../../utils/tempoMap.ts";
 import {
     TempoMapRulerRow,
+    TEMPO_ROW_HEIGHT_PX,
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
@@ -97,8 +102,18 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 
     return (
         <>
-            {visibleTicks.map((tick) => {
+            {visibleTicks.map((tick, index) => {
                 const left = tick.sec * pxPerSec;
+                // 每个刻度文本的显示区域限定在“到下一刻度”的间距内：
+                // - 间距足够时，文本右侧裁切到下一刻度之前（主/副单位与分隔线一起裁切）；
+                // - 间距过近（放不下任何有意义的文本片段）时，完全隐藏本刻度文本，
+                //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
+                const nextTick = visibleTicks[index + 1];
+                const gapPx =
+                    nextTick != null ? (nextTick.sec - tick.sec) * pxPerSec : null;
+                const labelHidden = gapPx != null && gapPx < 26;
+                const labelMaxWidth =
+                    gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
                 return (
                     <div
                         key={tick.beat}
@@ -116,7 +131,14 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                                 opacity: tick.isBarStart ? 1 : 0.6,
                             }}
                         />
-                        <div className="flex flex-col justify-center h-full pl-2 pr-1 select-none">
+                        <div
+                            className="flex flex-col justify-center h-full pl-2 pr-1 select-none"
+                            style={{
+                                maxWidth: labelMaxWidth,
+                                overflow: "hidden",
+                                visibility: labelHidden ? "hidden" : undefined,
+                            }}
+                        >
                             <div
                                 className={
                                     tick.isBarStart
@@ -186,6 +208,71 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     );
 });
 
+/**
+ * 视口左侧的“悬浮标签”：当管辖画面最左侧的 Tempo Map 变化点旗帜
+ * （蓝色标签）滚出画面左侧后，在最左侧浮一个同款蓝色标签展示该段参数。
+ *
+ * - 外观与变化点旗帜一致（高亮底色 + 阴影），一眼可识别为“悬浮”的旗帜标签；
+ * - 内容切换使用 key 重挂载 + 淡入动画（旧文本立即移除、新文本淡入，绝不重叠）；
+ * - 任何旗帜与悬浮标签区域重叠时整体淡出，避免互相遮挡。
+ */
+const TempoMapFloatingLabel = React.memo(function TempoMapFloatingLabel({
+    tempoMap,
+    scrollLeft,
+    pxPerSec,
+}: {
+    tempoMap: TempoMap;
+    scrollLeft: number;
+    pxPerSec: number;
+}) {
+    const { label, governingOffscreen, blocked } = computeTempoFloatingLabelState({
+        tempoMap,
+        scrollLeft,
+        pxPerSec,
+    });
+    const visible = governingOffscreen && !blocked;
+
+    return (
+        <>
+            <style>{`
+                @keyframes hs-tempo-float-in {
+                    from { opacity: 0; transform: translateY(1px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+                .hs-tempo-float-label {
+                    animation: hs-tempo-float-in 140ms ease-out;
+                }
+            `}</style>
+            <div
+                className="absolute select-none pointer-events-none"
+                style={{
+                    top: RULER_BASE_HEIGHT_PX + 4,
+                    left: 2,
+                    height: TEMPO_ROW_HEIGHT_PX,
+                    display: "flex",
+                    alignItems: "center",
+                    opacity: visible ? 1 : 0,
+                    transition: "opacity 150ms ease",
+                    zIndex: 25,
+                }}
+            >
+                {/* 与变化点旗帜同款尺寸（9px / 行高 11px / px-1），仅加投影以示“悬浮”。 */}
+                <div
+                    className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium shadow-md"
+                    style={{
+                        backgroundColor: "var(--qt-highlight)",
+                        color: "var(--qt-window)",
+                    }}
+                >
+                    <span key={label} className="hs-tempo-float-label">
+                        {label}
+                    </span>
+                </div>
+            </div>
+        </>
+    );
+});
+
 function TimeRulerContextMenu({
     x,
     y,
@@ -238,20 +325,12 @@ function TimeRulerContextMenu({
         }
     }, [x, y]);
 
-    // 找到点击位置附近的变化点（8px 内）。
+    // 找到点击位置命中的变化点（旗帜可视范围：点的位置向右延伸整个旗帜文本宽度）。
     const nearPoint = React.useMemo(() => {
         if (!tempoMap) return null;
-        const nearPx = 8;
-        let best: { point: (typeof tempoMap.points)[number]; isFirst: boolean } | null = null;
-        let bestDist = nearPx;
-        for (let i = 0; i < tempoMap.points.length; i += 1) {
-            const dist = Math.abs(tempoMap.points[i].positionSec - clickedSec) * Math.max(1e-9, pxPerSec);
-            if (dist <= bestDist) {
-                bestDist = dist;
-                best = { point: tempoMap.points[i], isFirst: i === 0 };
-            }
-        }
-        return best;
+        const index = tempoPointHitTest(tempoMap, clickedSec, pxPerSec);
+        if (index == null) return null;
+        return { point: tempoMap.points[index], isFirst: index === 0 };
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
@@ -447,6 +526,8 @@ export const TimeRuler: React.FC<{
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
     const [hover, setHover] = useState<{ x: number; y: number; sec: number } | null>(null);
     const [tempoEditRequest, setTempoEditRequest] = useState<TempoPointEditRequest | null>(null);
+    /** Tempo Map 编辑对话框打开时抑制标尺悬浮时间提示。 */
+    const [tempoDialogOpen, setTempoDialogOpen] = useState(false);
     const rulerRef = useRef<HTMLDivElement | null>(null);
 
     const showTempoRow = Boolean(tempoMap && tempoMap.points.length > 0 && tempoMapVisible);
@@ -458,6 +539,10 @@ export const TimeRuler: React.FC<{
         },
         [],
     );
+    const handleTempoDialogOpenChange = useCallback((open: boolean) => {
+        setTempoDialogOpen(open);
+        if (open) setHover(null);
+    }, []);
     const handleEditTempoPoint = useCallback((id: string) => {
         setTempoEditRequest({ pointId: id, positionSec: null, focus: null });
     }, []);
@@ -493,8 +578,8 @@ export const TimeRuler: React.FC<{
 
     const handleMouseMove = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
-            // 右键菜单打开期间不显示标尺悬浮时间；菜单内部的事件也不触发。
-            if (ctxMenu) {
+            // 右键菜单或 Tempo Map 编辑对话框打开期间不显示标尺悬浮时间。
+            if (ctxMenu || tempoDialogOpen) {
                 setHover(null);
                 return;
             }
@@ -515,7 +600,7 @@ export const TimeRuler: React.FC<{
             );
             setHover({ x: e.clientX - bounds.left, y: e.clientY - bounds.top, sec });
         },
-        [ctxMenu, pxPerSec, scrollLeft],
+        [ctxMenu, tempoDialogOpen, pxPerSec, scrollLeft],
     );
 
     const hoverTime = hover
@@ -614,6 +699,7 @@ export const TimeRuler: React.FC<{
                     onCommit={onTempoMapCommit ?? onTempoMapChange ?? (() => undefined)}
                     editRequest={tempoEditRequest}
                     onEditRequestHandled={() => setTempoEditRequest(null)}
+                    onDialogOpenChange={handleTempoDialogOpenChange}
                 />
                 <TimeRulerPlayhead
                     playheadSec={playheadSec}
@@ -622,6 +708,29 @@ export const TimeRuler: React.FC<{
                     headRef={playheadHeadRef}
                 />
             </div>
+
+            {/* 时间标尺与 Tempo Map 行之间的分隔横线：固定在标尺盒内（视口宽度），
+                不随内容平移/缩放伸缩 —— 与标尺底部边框等其他横线一致。 */}
+            {showTempoRow ? (
+                <div
+                    className="absolute left-0 right-0 pointer-events-none"
+                    style={{
+                        top: RULER_BASE_HEIGHT_PX,
+                        height: 1,
+                        backgroundColor: "var(--qt-border)",
+                        opacity: 0.6,
+                    }}
+                />
+            ) : null}
+
+            {/* 视口左侧悬浮标签（在 contentRef 之外，跟随视口而非内容滚动）。 */}
+            {showTempoRow && tempoMap ? (
+                <TempoMapFloatingLabel
+                    tempoMap={tempoMap}
+                    scrollLeft={scrollLeft}
+                    pxPerSec={pxPerSec}
+                />
+            ) : null}
 
             {hover && hoverTime ? (
                 <div

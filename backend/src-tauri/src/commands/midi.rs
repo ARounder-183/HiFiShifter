@@ -30,31 +30,6 @@ fn error_payload(error: &str) -> crate::models::TimelineStatePayload {
     }
 }
 
-/// Tempo Map 音阶签名（用于判断音阶部分是否变化、是否需要失效渲染缓存）。
-fn tempo_map_scale_signature(points: Option<&[crate::state::TempoPointData]>) -> String {
-    let Some(points) = points else {
-        return String::new();
-    };
-    points
-        .iter()
-        .filter(|p| p.scale.is_some())
-        .map(|p| {
-            let s = p.scale.as_ref().expect("filtered");
-            format!(
-                "{:.6}:{}:{}:{}",
-                p.position_sec,
-                s.key.as_deref().unwrap_or(""),
-                s.name.as_deref().unwrap_or(""),
-                s.notes
-                    .as_ref()
-                    .map(|n| n.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))
-                    .unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
 /// 设置工程 BPM，并在 Tempo Map 存在时同步 0 位置点（保持回退一致）。
 fn set_project_bpm_syncing_tempo_map(tl: &mut crate::state::TimelineState, bpm: f64) {
     let clamped = bpm.clamp(10.0, 960.0);
@@ -613,7 +588,8 @@ pub(super) fn import_midi_as_clip(
             tl.bpm,
             project_beats_per_bar,
         );
-        let scale_signature_before = tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_signature_before =
+            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
         state.checkpoint_timeline(&tl);
         match points {
             Some(points) => {
@@ -676,7 +652,8 @@ pub(super) fn import_midi_as_clip(
                 midi_log("import_midi_as_clip: no tempo map events found; cleared");
             }
         }
-        let scale_signature_after = tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_signature_after =
+            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
         if scale_signature_before != scale_signature_after {
             for clip in &tl.clips {
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);

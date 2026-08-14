@@ -37,6 +37,7 @@ import {
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import type { TempoMapScaleData } from "../../utils/tempoMap";
 import {
+    clampBpm,
     effectiveScaleAtSec,
     pointIndexAtSec,
     scaleLikeToScaleData,
@@ -225,7 +226,8 @@ export function ActionBar() {
             setBpmText(formatBpmValue(displayBpm));
             return;
         }
-        const clamped = Math.min(300, Math.max(10, next));
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
         if (s.tempoMap && s.tempoMap.points.length > 0) {
             updateTempoPointAtPlayhead({ bpm: clamped });
             setBpmText(formatBpmValue(clamped));
@@ -285,7 +287,8 @@ export function ActionBar() {
                         const base = Number.isFinite(current) ? current : Number(displayBpm);
                         const nextRaw = base + direction * step;
                         const next = Math.round(nextRaw * 1000) / 1000;
-                        const clamped = Math.min(300, Math.max(10, next));
+                        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                        const clamped = clampBpm(next);
                         if (s.tempoMap && s.tempoMap.points.length > 0) {
                             updateTempoPointAtPlayhead({ bpm: clamped });
                         } else {
@@ -320,7 +323,8 @@ export function ActionBar() {
                             if (!Number.isFinite(parsed)) return;
                             // Clamp locally to avoid sending huge values to backend
                             const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
-                            if (clamped === Math.round(s.beats || 0)) return;
+                            // 与显示值比较（Tempo Map 下为播放头位置生效值）。
+                            if (clamped === Math.round(displayBeats)) return;
                             if (s.tempoMap && s.tempoMap.points.length > 0) {
                                 updateTempoPointAtPlayhead({ numerator: clamped });
                                 return;
@@ -336,7 +340,9 @@ export function ActionBar() {
                             e.preventDefault();
                             e.stopPropagation();
                             const direction = e.deltaY < 0 ? 1 : -1;
-                            const current = Math.max(1, Math.min(32, Math.round(s.beats || 4)));
+                            // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
+                            // 与 BPM / 基准音阶一致。
+                            const current = Math.max(1, Math.min(32, Math.round(displayBeats)));
                             const next = Math.max(1, Math.min(32, current + direction));
                             if (next === current) return;
                             if (s.tempoMap && s.tempoMap.points.length > 0) {

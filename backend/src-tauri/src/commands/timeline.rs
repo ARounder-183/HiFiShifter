@@ -952,30 +952,8 @@ pub(super) fn set_timeline_tempo_map(
     let had_map = tl.tempo_map.is_some();
 
     // 比较音阶签名（仅音阶变化才需要失效渲染缓存）。
-    let scale_signature_before = tl.tempo_map.as_ref().map(|points| {
-        points
-            .iter()
-            .filter(|p| p.scale.is_some())
-            .map(|p| {
-                let s = p.scale.as_ref().expect("filtered");
-                format!(
-                    "{:.6}:{}:{}:{}",
-                    p.position_sec,
-                    s.key.as_deref().unwrap_or(""),
-                    s.name.as_deref().unwrap_or(""),
-                    s.notes
-                        .as_ref()
-                        .map(|n| n
-                            .iter()
-                            .map(|v| v.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","))
-                        .unwrap_or_default()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    });
+    let scale_signature_before =
+        crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
 
     tl.tempo_map = tempo_map.map(|points| {
         points
@@ -1019,30 +997,8 @@ pub(super) fn set_timeline_tempo_map(
         }
     }
 
-    let scale_signature_after = tl.tempo_map.as_ref().map(|points| {
-        points
-            .iter()
-            .filter(|p| p.scale.is_some())
-            .map(|p| {
-                let s = p.scale.as_ref().expect("filtered");
-                format!(
-                    "{:.6}:{}:{}:{}",
-                    p.position_sec,
-                    s.key.as_deref().unwrap_or(""),
-                    s.name.as_deref().unwrap_or(""),
-                    s.notes
-                        .as_ref()
-                        .map(|n| n
-                            .iter()
-                            .map(|v| v.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","))
-                        .unwrap_or_default()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    });
+    let scale_signature_after =
+        crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
 
     state.audio_engine.update_timeline(tl.clone());
 

@@ -12,11 +12,13 @@ import {
     formatTempoBpm,
     formatTimeSignature,
     normalizeScaleData,
+    parseTempoPointText,
     previousScaleAtSec,
     removeTempoPoint,
     snapSecToTempoGrid,
     TEMPO_DENOMINATORS,
     tempoMapSegments,
+    tempoPointFlagLabel,
     updateTempoPoint,
 } from "../../../utils/tempoMap";
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
@@ -61,6 +63,8 @@ interface TempoMapRulerRowProps {
     /** 由时间标尺右键菜单发出的编辑/新建请求。 */
     editRequest: TempoPointEditRequest | null;
     onEditRequestHandled: () => void;
+    /** 编辑对话框打开/关闭通知（用于抑制标尺悬浮时间提示）。 */
+    onDialogOpenChange?: (open: boolean) => void;
 }
 
 function scaleShortLabel(scale: TempoMapScaleData | null | undefined): string | null {
@@ -389,8 +393,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     onCommit,
     editRequest,
     onEditRequestHandled,
+    onDialogOpenChange,
 }) => {
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    /** 旗帜内联编辑（双击蓝色标签 → 原地 TextBox）。 */
+    const [editingPointId, setEditingPointId] = useState<string | null>(null);
+    const [editingText, setEditingText] = useState("");
     const [dialogState, setDialogState] = useState<{
         seq: number;
         pointId: string | null;
@@ -413,6 +421,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         dialogStateRef.current = dialogState;
     }, [dialogState]);
     const dialogSeqRef = useRef(0);
+
+    // 编辑对话框打开/关闭时通知父级（用于抑制标尺悬浮时间提示）。
+    useEffect(() => {
+        onDialogOpenChange?.(dialogState != null);
+    }, [dialogState, onDialogOpenChange]);
     const dragDraftRef = useRef<TempoMap | null>(null);
     /** 已消费的编辑请求：防止同一个请求在 effect 重跑时被重复处理（重复建点）。 */
     const consumedEditRequestRef = useRef<TempoPointEditRequest | null>(null);
@@ -612,43 +625,41 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             }
         }
         const segments = tempoMapSegments(tempoMap, projectSec);
-        const captions: Array<{
-            left: number;
-            label: string;
-            hasScale: boolean;
-            pointId: string;
-        }> = [];
-        for (const segment of segments) {
-            const startLeft = segment.startSec * pxPerSec;
-            const endLeft = segment.endSec * pxPerSec;
-            if (endLeft < leftPx || startLeft > rightPx) continue;
-            const scaleLabel = scaleShortLabel(segment.point.scale);
-            const base = `${formatTempoBpm(segment.point.bpm)} ${formatTimeSignature(segment.point)}`;
-            const label = scaleLabel ? `${base} · ${scaleLabel}` : base;
-            const estWidth = label.length * 6 + 16;
-            const repeatPx = Math.max(150, estWidth + 56);
-            for (let x = startLeft; x < endLeft - 12; x += repeatPx) {
-                if (x < leftPx - 80) continue;
-                if (x > rightPx) break;
-                captions.push({
-                    left: x,
-                    label,
-                    hasScale: scaleLabel != null,
-                    pointId: segment.point.id,
-                });
-            }
-        }
-        return { flags, captions, segments };
+        // 段内参数不再以重复文字展示（由变化点旗帜 + 视口左侧悬浮标签承担）。
+        return { flags, segments };
     }, [visibleRow, tempoMap, pxPerSec, scrollLeft, viewportWidth, projectSec]);
 
     const segmentsForBoundaries = visibleState?.segments ?? [];
     const segmentBoundaries = segmentsForBoundaries.map((seg) => seg.startSec * pxPerSec);
 
-    const openDialog = (point: TempoPoint, focus: "tempo" | "timeSignature" | "scale" | null) => {
-        if (!tempoMap) return;
+    // ── 旗帜内联编辑（双击蓝色标签 → 原地 TextBox）──
+    /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
+    const inlineEditLockRef = useRef(false);
+    const startInlineEdit = useCallback((point: TempoPoint) => {
+        inlineEditLockRef.current = false;
         setSelectedId(point.id);
-        openDialogState(point.id, point, tempoMap.points[0].id === point.id, focus);
-    };
+        setEditingPointId(point.id);
+        setEditingText(tempoPointFlagLabel(point));
+    }, []);
+
+    /** 确认：解析成功则应用到变化点；解析失败静默放弃（不应用）。 */
+    const commitInlineEdit = useCallback(() => {
+        const id = editingPointId;
+        if (!id || inlineEditLockRef.current) return;
+        inlineEditLockRef.current = true;
+        setEditingPointId(null);
+        if (!tempoMap) return;
+        const point = tempoMap.points.find((p) => p.id === id);
+        if (!point) return;
+        const parsed = parseTempoPointText(editingText, customScalePresets);
+        if (!parsed) return;
+        onCommit(updateTempoPoint(tempoMap, id, parsed));
+    }, [editingPointId, editingText, tempoMap, customScalePresets, onCommit]);
+
+    const cancelInlineEdit = useCallback(() => {
+        inlineEditLockRef.current = true;
+        setEditingPointId(null);
+    }, []);
 
     const closeDialog = () => setDialogState(null);
 
@@ -741,11 +752,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             style={{ top: 48, height: TEMPO_ROW_HEIGHT_PX + 4, paddingTop: 4 }}
             onDoubleClick={handleRowDoubleClick}
         >
-            {/* 分隔小横线 */}
-            <div
-                className="absolute left-0 right-0"
-                style={{ top: 1, height: 1, backgroundColor: "var(--qt-border)", opacity: 0.6 }}
-            />
+            {/* 与时间标尺的分隔横线由 TimeRuler 在标尺盒内渲染（视口固定宽度，不随缩放伸缩）。 */}
             {visibleState ? (
                 <div className="absolute inset-0" style={{ top: 4 }}>
                     {/* 段分隔标记 */}
@@ -756,75 +763,103 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                             style={{ left, backgroundColor: "var(--qt-border)", opacity: 0.9 }}
                         />
                     ))}
-                    {/* 段说明文字 */}
-                    {visibleState.captions.map((caption, index) => (
-                        <div
-                            key={`c_${caption.pointId}_${index}`}
-                            className="absolute top-0 bottom-0 flex items-center pl-1 select-none pointer-events-none"
-                            style={{ left: caption.left }}
-                        >
-                            <span
-                                className={
-                                    caption.hasScale
-                                        ? "text-[10px] leading-none whitespace-nowrap text-qt-highlight/90 tabular-nums"
-                                        : "text-[10px] leading-none whitespace-nowrap text-qt-text-muted/60 tabular-nums"
-                                }
-                            >
-                                {caption.label}
-                            </span>
-                        </div>
-                    ))}
                     {/* 变化点旗帜 */}
-                    {visibleState.flags.map(({ point, left, isFirst }) => (
-                        <div
-                            key={point.id}
-                            className="absolute top-0 bottom-0 flex items-center group select-none"
-                            style={{
-                                left,
-                                cursor:
-                                    isFirst ? "pointer" : draggingId === point.id ? "grabbing" : "grab",
-                            }}
-                            onPointerDown={(e) => startFlagDrag(point, isFirst, e)}
-                            onDoubleClick={(e) => {
-                                e.stopPropagation();
-                                openDialog(point, null);
-                            }}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedId(point.id);
-                            }}
-                        >
+                    {visibleState.flags.map(({ point, left, isFirst }) => {
+                        const inlineEditing = editingPointId === point.id;
+                        return (
                             <div
-                                className="w-px h-full shrink-0"
-                                style={{ backgroundColor: "var(--qt-highlight)" }}
-                            />
-                            <div
-                                className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium"
+                                key={point.id}
+                                className="absolute top-0 bottom-0 flex items-center group select-none"
                                 style={{
-                                    backgroundColor: "var(--qt-highlight)",
-                                    color: "var(--qt-window)",
-                                    opacity: draggingId === point.id ? 1 : 0.92,
-                                    outline:
-                                        selectedId === point.id
-                                            ? "1px solid var(--qt-highlight)"
-                                            : "none",
-                                    outlineOffset: 1,
+                                    left,
+                                    cursor:
+                                        isFirst
+                                            ? "pointer"
+                                            : draggingId === point.id
+                                              ? "grabbing"
+                                              : "grab",
                                 }}
-                                title={`${formatTempoBpm(point.bpm)} BPM · ${formatTimeSignature(point)}${
-                                    point.scale ? ` · ${scaleShortLabel(point.scale)}` : ""
-                                }`}
+                                onPointerDown={(e) => startFlagDrag(point, isFirst, e)}
+                                onDoubleClick={(e) => {
+                                    e.stopPropagation();
+                                    startInlineEdit(point);
+                                }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedId(point.id);
+                                }}
                             >
-                                {formatTempoBpm(point.bpm)}
-                                <span className="opacity-85"> {formatTimeSignature(point)}</span>
-                                {point.scale ? (
-                                    <span className="opacity-85">
-                                        {" "}
-                                        · {scaleShortLabel(point.scale)}
-                                    </span>
-                                ) : null}
+                                <div
+                                    className="w-px h-full shrink-0"
+                                    style={{ backgroundColor: "var(--qt-highlight)" }}
+                                />
+                                {inlineEditing ? (
+                                    <input
+                                        autoFocus
+                                        value={editingText}
+                                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                                            setEditingText(e.target.value)
+                                        }
+                                        onFocus={(e) => e.target.select()}
+                                        onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                                            e.stopPropagation();
+                                            if (e.key === "Enter") {
+                                                e.preventDefault();
+                                                commitInlineEdit();
+                                            } else if (e.key === "Escape") {
+                                                e.preventDefault();
+                                                cancelInlineEdit();
+                                            }
+                                        }}
+                                        onBlur={commitInlineEdit}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                        onDoubleClick={(e) => e.stopPropagation()}
+                                        className="text-[9px] leading-[11px] font-medium rounded-[2px] outline-none border-none"
+                                        style={{
+                                            backgroundColor: "var(--qt-highlight)",
+                                            color: "var(--qt-window)",
+                                            width: Math.max(40, editingText.length * 6 + 18),
+                                            padding: "0 4px",
+                                            height: 15,
+                                            boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--qt-window) 55%, transparent)",
+                                        }}
+                                    />
+                                ) : (
+                                    <div
+                                        className="px-1 rounded-[2px] text-[9px] leading-[11px] whitespace-nowrap font-medium"
+                                        style={{
+                                            backgroundColor: "var(--qt-highlight)",
+                                            color: "var(--qt-window)",
+                                            opacity: draggingId === point.id ? 1 : 0.92,
+                                            outline:
+                                                selectedId === point.id
+                                                    ? "1px solid var(--qt-highlight)"
+                                                    : "none",
+                                            outlineOffset: 1,
+                                        }}
+                                        title={`${formatTempoBpm(point.bpm)} BPM - ${formatTimeSignature(point)}${
+                                            point.scale
+                                                ? ` - ${scaleShortLabel(point.scale)}`
+                                                : ""
+                                        }`}
+                                    >
+                                        {formatTempoBpm(point.bpm)}
+                                        <span className="opacity-85">
+                                            {" "}
+                                            {formatTimeSignature(point)}
+                                        </span>
+                                        {point.scale ? (
+                                            <span className="opacity-85">
+                                                {" "}
+                                                - {scaleShortLabel(point.scale)}
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                )}
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             ) : null}
 
