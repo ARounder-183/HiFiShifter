@@ -653,16 +653,21 @@ pub(crate) fn build_clip_input_pitch_curve(
     let timeline_midi = if let Some(ref cfg) = child_offset_cfg {
         let fp = frame_period_ms.max(0.1);
         let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+        // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
+        let scale_segments = timeline.scale_segments();
+        let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
         timeline_midi_raw
             .iter()
             .enumerate()
             .map(|(local_idx, &midi)| {
                 let frame_idx = start_idx.saturating_add(local_idx);
+                let sec = (frame_idx as f64) * fp / 1000.0;
+                let scale_notes = cursor.notes_at(sec);
                 apply_child_pitch_offset_to_midi(
                     midi as f64,
                     cfg,
                     frame_idx,
-                    &timeline.project_scale_notes,
+                    scale_notes,
                 ) as f32
             })
             .collect()
@@ -671,6 +676,30 @@ pub(crate) fn build_clip_input_pitch_curve(
     };
 
     Some(timeline_midi)
+}
+
+/// 单调帧时间的音阶段游标（scale_segments 按时间升序）。
+pub(crate) struct ScaleSegmentsCursor<'a> {
+    segments: &'a [(f64, Vec<u8>)],
+    index: usize,
+}
+
+impl<'a> ScaleSegmentsCursor<'a> {
+    pub(crate) fn new(segments: &'a [(f64, Vec<u8>)]) -> Self {
+        Self { segments, index: 0 }
+    }
+
+    pub(crate) fn notes_at(&mut self, sec: f64) -> &'a [u8] {
+        while self.index + 1 < self.segments.len()
+            && self.segments[self.index + 1].0 <= sec + 1e-9
+        {
+            self.index += 1;
+        }
+        self.segments
+            .get(self.index)
+            .map(|(_, notes)| notes.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 fn root_pitch_edit_state<'a>(
@@ -1074,13 +1103,18 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
     let mut effective_pitch_edit: Vec<f32> = pitch_edit.to_vec();
     if let Some(ref cfg) = child_offset_cfg {
+        // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
+        let scale_segments = timeline.scale_segments();
+        let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
         for (frame_idx, value) in effective_pitch_edit.iter_mut().enumerate() {
             if *value > 0.0 {
+                let sec = (frame_idx as f64) * frame_period_ms / 1000.0;
+                let scale_notes = cursor.notes_at(sec);
                 *value = apply_child_pitch_offset_to_midi(
                     *value as f64,
                     cfg,
                     frame_idx,
-                    &timeline.project_scale_notes,
+                    scale_notes,
                 ) as f32;
             }
         }

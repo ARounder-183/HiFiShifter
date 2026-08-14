@@ -13,6 +13,8 @@ export interface UiSettings {
     splitTransitionOverlapCrossfade?: "auto" | "always";
     gridSnap: boolean;
     gridSize?: string;
+    /** Tempo Map 标尺行可见性（默认开启）。 */
+    tempoMapVisible?: boolean;
     primaryTimeUnit?: string;
     secondaryTimeUnit?: string;
     rulerLabelSpacingPx?: number;
@@ -50,6 +52,10 @@ export interface UiSettings {
     midiImportTargetDragDrop?: string;
     midiImportTargetReaperClipboard?: string;
     midiImportTargetParamEditor?: string;
+    midiImportAsTempoMap?: boolean;
+    midiImportTempoMapTempo?: boolean;
+    midiImportTempoMapTimeSignature?: boolean;
+    midiImportTempoMapKeySignature?: boolean;
     ortEp?: string;
     gpuDeviceId?: number;
     ortDeviceId?: number | null;

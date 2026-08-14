@@ -207,6 +207,11 @@ export function usePianoRollInteractions(args: {
     pitchSnapUnit?: "semitone" | "scale";
     /** 音高吸附调式（支持内置与自定义） */
     projectScale?: ScaleLike;
+    /**
+     * Tempo Map 感知的音阶解析：给定绝对秒返回生效音阶。
+     * 未提供时退化为全局 projectScale。
+     */
+    scaleAtSec?: (sec: number) => ScaleLike | undefined;
     /** 音高吸附容差（音分） */
     pitchSnapToleranceCents?: number;
     /** 快捷键映射表 */
@@ -298,6 +303,7 @@ export function usePianoRollInteractions(args: {
         pitchSnapEnabled,
         pitchSnapUnit,
         projectScale,
+        scaleAtSec,
         pitchSnapToleranceCents,
         keybindingMap,
         onEditAction,
@@ -791,7 +797,7 @@ export function usePianoRollInteractions(args: {
     /** Apply pitch snap to a drawn value when editParam is "pitch" and snap is enabled.
      *  When snapToggleHeld=true, the snap state is toggled (XOR with pitchSnapEnabled). */
     const snapDrawValue = useCallback(
-        (v: number, snapToggleHeld = false): number => {
+        (v: number, snapToggleHeld = false, frame?: number): number => {
             const effective = snapToggleHeld ? !pitchSnapEnabled : pitchSnapEnabled;
             if (!effective) return v;
 
@@ -803,9 +809,17 @@ export function usePianoRollInteractions(args: {
             }
 
             if (editParam !== "pitch") return v;
+            // Tempo Map 感知：优先按帧时刻解析生效音阶。
+            const framePeriodMs = paramViewRef.current?.framePeriodMs;
+            const effectiveScale =
+                pitchSnapUnit === "scale"
+                    ? (frame != null && framePeriodMs != null
+                          ? (scaleAtSec?.((frame * framePeriodMs) / 1000) ?? projectScale)
+                          : projectScale)
+                    : undefined;
             const snapped =
-                pitchSnapUnit === "scale" && projectScale
-                    ? snapToScale(v, projectScale)
+                pitchSnapUnit === "scale" && effectiveScale
+                    ? snapToScale(v, effectiveScale)
                     : snapToSemitone(v);
             const toleranceSemitone = Math.max(0, Number(pitchSnapToleranceCents ?? 0) / 100);
             if (Math.abs(v - snapped) <= toleranceSemitone) {
@@ -813,7 +827,15 @@ export function usePianoRollInteractions(args: {
             }
             return snapped + (v - snapped > 0 ? 1 : -1) * toleranceSemitone;
         },
-        [pitchSnapEnabled, pitchSnapUnit, projectScale, pitchSnapToleranceCents, editParam],
+        [
+            pitchSnapEnabled,
+            pitchSnapUnit,
+            projectScale,
+            scaleAtSec,
+            pitchSnapToleranceCents,
+            editParam,
+            paramViewRef,
+        ],
     );
 
     const pitchDeltaToDegreeSteps = useCallback(
@@ -861,6 +883,7 @@ export function usePianoRollInteractions(args: {
             clipboardPitch: number[],
             mode: "cents" | "degrees",
         ): Promise<number[] | null> => {
+            const fp = paramViewRef.current?.framePeriodMs;
             return buildChildOffsetPasteValuesHelper({
                 tracks,
                 rootTrackId,
@@ -872,9 +895,13 @@ export function usePianoRollInteractions(args: {
                 paramsApi,
                 pitchDeltaToDegreeSteps,
                 projectScale,
+                scaleAtFrame:
+                    fp != null
+                        ? (frame: number) => scaleAtSec?.((frame * fp) / 1000) ?? projectScale
+                        : undefined,
             });
         },
-        [tracks, pitchDeltaToDegreeSteps, projectScale, rootTrackId],
+        [tracks, pitchDeltaToDegreeSteps, projectScale, scaleAtSec, rootTrackId],
     );
 
     const updateSelectionUi = useCallback(
@@ -907,7 +934,7 @@ export function usePianoRollInteractions(args: {
                 const t = denom === 0 ? 1 : (f - startFrame) / denom;
                 const base = startValue + (endValue - startValue) * t;
                 const wave = amplitude * Math.sin(2 * Math.PI * safeFreq * t);
-                dense[f - minF] = snapDrawValue(base + wave, shiftHeld);
+                dense[f - minF] = snapDrawValue(base + wave, shiftHeld, f);
             }
             return { minF, maxF, dense };
         },
@@ -1821,7 +1848,8 @@ export function usePianoRollInteractions(args: {
                                   rawValue: rawPreviewValue,
                                   effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
                                   pitchSnapUnit,
-                                  projectScale,
+                                  projectScale:
+                                      scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
                                   pitchSnapToleranceCents,
                               })
                             : rawPreviewValue;
@@ -1864,6 +1892,7 @@ export function usePianoRollInteractions(args: {
             isEffectivePitchSnapActive,
             pitchSnapUnit,
             projectScale,
+            scaleAtSec,
             pitchSnapToleranceCents,
             getCurveValueNearPointer,
             panRef,
@@ -1906,7 +1935,7 @@ export function usePianoRollInteractions(args: {
                               rawValue: rawPreviewValue,
                               effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
                               pitchSnapUnit,
-                              projectScale,
+                              projectScale: scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
                               pitchSnapToleranceCents,
                           })
                         : rawPreviewValue;
@@ -2832,6 +2861,10 @@ export function usePianoRollInteractions(args: {
                                     Math.round((selEndFrame - pv.startFrame) / stride),
                                 );
                                 const origValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
+                                // Tempo Map 感知：度数差以拖动锚点帧的生效音阶计算。
+                                const dragAnchorFrame = pv.startFrame + selStartIdx * stride;
+                                const dragAnchorScale =
+                                    scaleAtSec?.((dragAnchorFrame * fp) / 1000) ?? projectScale;
                                 ensureLiveEditBase(pv);
                                 if (liveEditActiveRef) liveEditActiveRef.current = true;
                                 if (
@@ -2866,12 +2899,12 @@ export function usePianoRollInteractions(args: {
                                     const effectiveSnap = isEffectivePitchSnapActive(ev);
                                     const yDragEnabled = currentDragDir !== "x-only";
                                     if (effectiveSnap && editParam === "pitch" && yDragEnabled) {
-                                        if (pitchSnapUnit === "scale" && projectScale) {
+                                        if (pitchSnapUnit === "scale" && dragAnchorScale) {
                                             useScaleDegreeTranspose = true;
                                             lastScaleStepDelta = scaleStepDeltaBetween(
                                                 startMouseVal,
                                                 currentVal,
-                                                projectScale,
+                                                dragAnchorScale,
                                             );
                                             rawValueDelta = 0;
                                         } else {
@@ -2980,15 +3013,19 @@ export function usePianoRollInteractions(args: {
                                             if (
                                                 useScaleDegreeTranspose &&
                                                 editParam === "pitch" &&
-                                                projectScale
+                                                dragAnchorScale
                                             ) {
+                                                // 每个帧用其落地时刻的生效音阶做度数移调。
+                                                const frameScale =
+                                                    scaleAtSec?.((targetFrame * fp) / 1000) ??
+                                                    dragAnchorScale;
                                                 dense[denseIdx] =
                                                     orig === 0
                                                         ? 0
                                                         : transposePitchByScaleSteps(
                                                               orig,
                                                               lastScaleStepDelta,
-                                                              projectScale,
+                                                              frameScale,
                                                           );
                                             } else {
                                                 dense[denseIdx] = orig + lastValueDelta;
@@ -3044,7 +3081,9 @@ export function usePianoRollInteractions(args: {
                                                 fineScale: 1,
                                                 effectiveSnap,
                                                 pitchSnapUnit,
-                                                projectScale,
+                                                projectScale:
+                                                    scaleAtSec?.(pointerSec(ev.clientX)) ??
+                                                    projectScale,
                                             }),
                                         });
                                     }
@@ -3126,15 +3165,18 @@ export function usePianoRollInteractions(args: {
                                                 if (
                                                     useScaleDegreeTranspose &&
                                                     editParam === "pitch" &&
-                                                    projectScale
+                                                    dragAnchorScale
                                                 ) {
+                                                    const frameScale =
+                                                        scaleAtSec?.((targetFrame * fp) / 1000) ??
+                                                        dragAnchorScale;
                                                     finalDense[denseIdx] =
                                                         orig === 0
                                                             ? 0
                                                             : transposePitchByScaleSteps(
                                                                   orig,
                                                                   lastScaleStepDelta,
-                                                                  projectScale,
+                                                                  frameScale,
                                                               );
                                                 } else {
                                                     finalDense[denseIdx] = orig + lastValueDelta;
@@ -3389,7 +3431,7 @@ export function usePianoRollInteractions(args: {
             const rawValue = pointerValue(e.clientY);
             const isDrawMode = mode === "draw";
             const snapToggleHeld = isSnapToggleModifierHeld(e.nativeEvent);
-            const value = isDrawMode ? snapDrawValue(rawValue, snapToggleHeld) : rawValue;
+            const value = isDrawMode ? snapDrawValue(rawValue, snapToggleHeld, frame) : rawValue;
 
             const isLineTool = toolMode === "line";
             const isVibratoTool = toolMode === "vibrato";
@@ -3464,7 +3506,7 @@ export function usePianoRollInteractions(args: {
                     const yDragEnabled = currentDragDir !== "x-only";
                     const rawV2 = yDragEnabled ? pointerValue(adjusted.clientY) : value;
                     const moveSnapToggleHeld = isSnapToggleModifierHeld(ev);
-                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld) : rawV2;
+                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld, f2) : rawV2;
 
                     // Update stroke to only have start and current end
                     st.points = [
@@ -3514,7 +3556,7 @@ export function usePianoRollInteractions(args: {
                                     const t = denom === 0 ? 1 : (f - startFrame) / denom;
                                     const raw = startValue + (v2 - startValue) * t;
                                     dense[f - minF] = isDrawMode
-                                        ? snapDrawValue(raw, moveSnapToggleHeld)
+                                        ? snapDrawValue(raw, moveSnapToggleHeld, f)
                                         : raw;
                                 }
                                 applyDenseToLiveEdit(pv2, minF, dense, minF, maxF, mode);
@@ -3625,7 +3667,7 @@ export function usePianoRollInteractions(args: {
                         : (last?.value ?? value);
                     const rawV2 = rawV2Abs;
                     const moveSnapToggleHeld = isSnapToggleModifierHeld(ev);
-                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld) : rawV2;
+                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld, f2) : rawV2;
 
                     const pv2 = paramViewRef.current;
                     if (last && last.frame === f2) {
@@ -3763,6 +3805,7 @@ export function usePianoRollInteractions(args: {
             pitchSnapEnabled,
             pitchSnapUnit,
             projectScale,
+            scaleAtSec,
             pitchSnapToleranceCents,
             isSnapToggleModifierHeld,
             isEffectivePitchSnapActive,

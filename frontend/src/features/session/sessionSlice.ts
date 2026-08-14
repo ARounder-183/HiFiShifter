@@ -94,8 +94,12 @@ import {
 } from "./thunks/audioThunks";
 
 import { SCALE_KEYS } from "../../utils/musicalScales";
+import type { ScaleLike } from "../../utils/musicalScales";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import type { TempoMap } from "../../utils/tempoMap";
+import { fromBackendTempoMap, normalizeTempoMap } from "../../utils/tempoMap";
+import { setTempoMapRemote } from "./thunks/tempoMapThunks";
 import {
     importAudioAtPosition,
     importAudioFileAtPosition,
@@ -197,6 +201,13 @@ export interface SessionState {
     splitTransitionOverlapCrossfade: "auto" | "always";
     /** 网格吸附 */
     gridSnapEnabled: boolean;
+    /**
+     * Tempo Map 数据（null = 无 Tempo Map，使用工程全局 BPM/拍号/音阶）。
+     * 变化点按秒锚定；0 位置点始终存在。
+     */
+    tempoMap: import("../../utils/tempoMap").TempoMap | null;
+    /** Tempo Map 标尺行可见性（视图菜单开关，默认开启）。 */
+    tempoMapVisible: boolean;
     /** 音高吸附 */
     pitchSnapEnabled: boolean;
     pitchSnapUnit: PitchSnapUnit;
@@ -865,6 +876,28 @@ function applyTimelineState(
         state.grid = nextGridSize;
     }
 
+    // Tempo Map（后端载荷始终带 tempo_map 字段；旧后端无此字段时保持现值）。
+    // 在工程元数据之后解析：初始点缺失时用工程音阶物化（初始点即工程基准记录）。
+    const rawTempoMap = (timeline as unknown as { tempo_map?: unknown }).tempo_map;
+    if (rawTempoMap !== undefined) {
+        const projectScale: ScaleLike | null =
+            state.project.useCustomScale && state.project.customScale
+                ? state.project.customScale.notes
+                : state.project.baseScale;
+        state.tempoMap = fromBackendTempoMap(rawTempoMap, state.bpm, state.beats || 4, {
+            projectScale: projectScale ?? undefined,
+            projectScaleName: state.project.useCustomScale
+                ? (state.project.customScale?.name ?? undefined)
+                : undefined,
+        });
+        if (state.tempoMap) {
+            // 0 位置点与工程基准 BPM 保持一致（后端同步保证）。
+            const first = state.tempoMap.points[0];
+            state.bpm = clamp(first.bpm, 10, 300);
+            state.beats = Math.min(32, Math.max(1, Math.round(first.numerator)));
+        }
+    }
+
     const availableClipIds = new Set(state.clips.map((clip) => clip.id));
     for (const clipId of Object.keys(state.clipAutomation)) {
         if (!availableClipIds.has(clipId)) {
@@ -1002,6 +1035,8 @@ const initialState: SessionState = {
     splitTransitionCurve: "sine" as FadeCurveType,
     splitTransitionOverlapCrossfade: "auto",
     gridSnapEnabled: true,
+    tempoMap: null,
+    tempoMapVisible: true,
     pitchSnapEnabled: false,
     pitchSnapUnit: "semitone",
     pitchSnapScale: "C",
@@ -1350,6 +1385,29 @@ const sessionSlice = createSlice({
         },
         setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
+        },
+        setTempoMap(state, action: PayloadAction<TempoMap | null>) {
+            const projectScale: ScaleLike | null =
+                state.project.useCustomScale && state.project.customScale
+                    ? state.project.customScale.notes
+                    : state.project.baseScale;
+            state.tempoMap = normalizeTempoMap(action.payload, state.bpm, state.beats || 4, {
+                projectScale: projectScale ?? undefined,
+                projectScaleName: state.project.useCustomScale
+                    ? (state.project.customScale?.name ?? undefined)
+                    : undefined,
+            });
+            // 保持工程基准值（bpm / beats）与 0 位置点一致，删除 Tempo Map 后回退一致。
+            if (state.tempoMap) {
+                state.bpm = clamp(state.tempoMap.points[0].bpm, 10, 300);
+                state.beats = Math.min(32, Math.max(1, Math.round(state.tempoMap.points[0].numerator)));
+            }
+        },
+        setTempoMapVisible(state, action: PayloadAction<boolean>) {
+            state.tempoMapVisible = action.payload;
+        },
+        toggleTempoMapVisible(state) {
+            state.tempoMapVisible = !state.tempoMapVisible;
         },
         upsertCustomScalePreset(state, action: PayloadAction<CustomScalePreset>) {
             const incoming = sanitizeCustomScalePreset(action.payload);
@@ -1966,6 +2024,9 @@ const sessionSlice = createSlice({
                         ? "always"
                         : "auto";
                 state.gridSnapEnabled = s.gridSnap;
+                if ((s as any).tempoMapVisible != null) {
+                    state.tempoMapVisible = Boolean((s as any).tempoMapVisible);
+                }
                 const loadedPrimaryUnit = (s as any).primaryTimeUnit as unknown;
                 if (VALID_TIME_UNITS.has(loadedPrimaryUnit as TimeUnit)) {
                     state.primaryTimeUnit = loadedPrimaryUnit as TimeUnit;
@@ -2970,6 +3031,8 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectCustomScaleRemote.fulfilled, (state, action) => {
@@ -2997,6 +3060,8 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectTimelineSettingsRemote.fulfilled, (state, action) => {
@@ -3024,6 +3089,19 @@ const sessionSlice = createSlice({
                     state.project.dirty = payload.project.dirty;
                 }
             })
+
+            .addCase(setTempoMapRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                } & TimelineState;
+                if (!payload.ok || !payload.tracks || !payload.clips) {
+                    return;
+                }
+                // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
+                applyTimelineState(state, payload, { force: true });
+                state.status = "Tempo map updated";
+            })
+            .addCase(setTempoMapRemote.rejected, setRejected)
 
             .addCase(setProjectStretchSettingsRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
@@ -3493,6 +3571,9 @@ export const {
     setSplitTransitionCurve,
     setSplitTransitionOverlapCrossfade,
     toggleGridSnap,
+    setTempoMap,
+    setTempoMapVisible,
+    toggleTempoMapVisible,
     togglePitchSnap,
     setPitchSnapUnit,
     setPitchSnapScale,

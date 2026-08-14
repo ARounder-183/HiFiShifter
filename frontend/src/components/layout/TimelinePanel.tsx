@@ -38,9 +38,11 @@ import {
     persistUiSettings,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
+    setTempoMap,
     setTrackName,
     setTrackVolume,
 } from "../../features/session/sessionSlice";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
 import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
 import { useEditDrag } from "./timeline/hooks/useEditDrag";
@@ -71,7 +73,10 @@ import {
     formatCursorTime,
     hasFileDrag,
 } from "./timeline";
+import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import type { TempoMap } from "../../utils/tempoMap";
+import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
 
@@ -193,6 +198,14 @@ interface TimelinePanelProps {
     onImportTargetMenuChange?: (v: string) => void;
     importTargetDragDrop?: string;
     onImportTargetDragDropChange?: (v: string) => void;
+    importTempoMapEnabled?: boolean;
+    onImportTempoMapEnabledChange?: (v: boolean) => void;
+    importTempoMapTempo?: boolean;
+    onImportTempoMapTempoChange?: (v: boolean) => void;
+    importTempoMapTimeSignature?: boolean;
+    onImportTempoMapTimeSignatureChange?: (v: boolean) => void;
+    importTempoMapKeySignature?: boolean;
+    onImportTempoMapKeySignatureChange?: (v: boolean) => void;
 }
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
@@ -225,6 +238,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     onImportTargetMenuChange,
     importTargetDragDrop,
     onImportTargetDragDropChange,
+    importTempoMapEnabled,
+    onImportTempoMapEnabledChange,
+    importTempoMapTempo,
+    onImportTempoMapTempoChange,
+    importTempoMapTimeSignature,
+    onImportTempoMapTimeSignatureChange,
+    importTempoMapKeySignature,
+    onImportTempoMapKeySignatureChange,
 }) => {
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
@@ -281,6 +302,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         contentHeight,
         dynamicProjectSec,
         ticks,
+        tempoGridLineXs,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -317,8 +339,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             bpm: s.bpm,
             beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
             grid: s.grid,
+            tempoMap: s.tempoMap,
         }),
-        [s.bpm, s.beats, s.grid],
+        [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    const projectScale = React.useMemo<ScaleLike | null>(
+        () =>
+            s.project.useCustomScale && s.project.customScale
+                ? s.project.customScale.notes
+                : s.project.baseScale,
+        [s.project.baseScale, s.project.customScale, s.project.useCustomScale],
+    );
+
+    const handleTempoMapChange = React.useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+        },
+        [dispatch],
+    );
+    const handleTempoMapCommit = React.useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+            void dispatch(setTempoMapRemote(next));
+        },
+        [dispatch],
     );
     const handlePrimaryUnitChange = React.useCallback(
         (unit: TimeUnit) => {
@@ -449,6 +494,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             importBpmAsProject?: boolean;
             clipboardGuid?: string;
             closeLeadingGap?: boolean;
+            importAsTempoMap?: boolean;
+            importTempo?: boolean;
+            importTimeSignature?: boolean;
+            importKeySignature?: boolean;
         }) => {
             void dispatch(
                 importMidiAsClip({
@@ -463,6 +512,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     importBpmAsProject: result.importBpmAsProject,
                     clipboardGuid: result.clipboardGuid,
                     closeLeadingGap: result.closeLeadingGap,
+                    importAsTempoMap: result.importAsTempoMap,
+                    importTempo: result.importTempo,
+                    importTimeSignature: result.importTimeSignature,
+                    importKeySignature: result.importKeySignature,
                 }),
             );
         },
@@ -1043,6 +1096,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onDuplicateTrack={handleDuplicateTrack}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
+                headerHeight={timeRulerHeightPx(
+                    Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
+                )}
             />
 
             {/* Timeline View (Right) */}
@@ -1067,6 +1123,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                     onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
                     t={t as (key: string) => string}
+                    tempoMap={s.tempoMap}
+                    tempoMapVisible={s.tempoMapVisible}
+                    projectSec={dynamicProjectSec}
+                    grid={s.grid}
+                    gridSnapEnabled={s.gridSnapEnabled}
+                    projectScale={projectScale}
+                    projectScaleName={
+                        s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
+                    }
+                    customScalePresets={s.customScalePresets}
+                    onTempoMapChange={handleTempoMapChange}
+                    onTempoMapCommit={handleTempoMapCommit}
                     onMouseDown={(e) => {
                         if (e.button !== 0) return;
                         document.body.setAttribute("data-hs-focus-window", "timeline");
@@ -1428,6 +1496,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
                                 viewportWidth={viewportWidth}
                                 scrollLeft={scrollLeft}
+                                weakLineXs={tempoGridLineXs?.weak ?? null}
+                                strongLineXs={tempoGridLineXs?.strong ?? null}
                             />
 
                             {viewportWidth > 0 ? (
@@ -1576,6 +1646,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     scrollLeft={scrollLeft}
                                     lineOpacity={0.38}
                                     showBoundary={false}
+                                    weakLineXs={tempoGridLineXs?.weak ?? null}
+                                    strongLineXs={tempoGridLineXs?.strong ?? null}
                                 />
                             </div>
 
@@ -2075,6 +2147,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     onSpecifiedBpmChange={onSpecifiedBpmChange}
                     closeLeadingGap={closeLeadingGap}
                     onCloseLeadingGapChange={onCloseLeadingGapChange}
+                    importTempoMapEnabled={importTempoMapEnabled}
+                    onImportTempoMapEnabledChange={onImportTempoMapEnabledChange}
+                    importTempoMapTempo={importTempoMapTempo}
+                    onImportTempoMapTempoChange={onImportTempoMapTempoChange}
+                    importTempoMapTimeSignature={importTempoMapTimeSignature}
+                    onImportTempoMapTimeSignatureChange={onImportTempoMapTimeSignatureChange}
+                    importTempoMapKeySignature={importTempoMapKeySignature}
+                    onImportTempoMapKeySignatureChange={onImportTempoMapKeySignatureChange}
                 />
 
                 <MidiTrackSelectDialog

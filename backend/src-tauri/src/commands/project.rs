@@ -875,6 +875,13 @@ pub(super) fn open_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = pf.timeline.clone();
+        // 规范化 Tempo Map（排序/钳制/补 0 位置点），并同步工程基准 BPM。
+        tl.normalize_tempo_map();
+        if let Some(points) = tl.tempo_map.as_ref() {
+            if let Some(first) = points.first() {
+                tl.bpm = first.bpm.clamp(10.0, 960.0);
+            }
+        }
         // 打开工程时为所有含 source_path 的 clip 初始化文件元数据 + 内容指纹，
         // 用于本会话中的外部文件变更检测。此数据仅在程序运行期间有效，不持久化。
         for clip in &mut tl.clips {
@@ -890,6 +897,15 @@ pub(super) fn open_project(
         );
         state.audio_engine.update_timeline(tl.clone());
     }
+    // Tempo Map 存在时，工程基准拍号同步为 0 位置点的拍号分子。
+    let tempo_map_initial_numerator = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .tempo_map
+        .as_ref()
+        .and_then(|points| points.first())
+        .map(|first| first.numerator);
     state.clear_history();
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -901,6 +917,9 @@ pub(super) fn open_project(
         p.custom_scale = normalize_custom_scale(pf.custom_scale);
         p.use_custom_scale = pf.use_custom_scale && p.custom_scale.is_some();
         p.beats_per_bar = normalize_beats_per_bar(pf.beats_per_bar);
+        if let Some(initial_numerator) = tempo_map_initial_numerator {
+            p.beats_per_bar = initial_numerator.clamp(1, 32);
+        }
         p.grid_size = normalize_grid_size(&pf.grid_size);
         p.stretch_algorithm_override = pf.synth_config.stretch_algorithm_override;
         p.hifigan_mel_stretch_override = pf.synth_config.hifigan_mel_stretch_override;
@@ -1042,7 +1061,25 @@ pub(super) fn set_project_base_scale(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         tl.project_scale_notes = base_scale_notes(&normalized);
+        // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.scale = Some(crate::state::TempoScaleData {
+                    key: Some(normalized.clone()),
+                    name: None,
+                    notes: None,
+                });
+            }
+        }
         state.audio_engine.update_timeline(tl.clone());
+        // 工程音阶变化影响子轨道“度数差”等依赖音阶的渲染（未被子轨道 Tempo Map 音阶覆盖的区域），
+        // 失效所有渲染缓存并触发后台预渲染。
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
 
     let payload = state.project_meta_payload();
@@ -1082,7 +1119,25 @@ pub(super) fn set_project_custom_scale(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         tl.project_scale_notes = normalized.notes.clone();
+        // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.scale = Some(crate::state::TempoScaleData {
+                    key: None,
+                    name: Some(normalized.name.clone()),
+                    notes: Some(normalized.notes.clone()),
+                });
+            }
+        }
         state.audio_engine.update_timeline(tl.clone());
+        // 工程音阶变化影响子轨道“度数差”等依赖音阶的渲染（未被子轨道 Tempo Map 音阶覆盖的区域），
+        // 失效所有渲染缓存并触发后台预渲染。
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
 
     serde_json::json!({ "ok": true, "project": state.project_meta_payload() })
@@ -1108,6 +1163,17 @@ pub(super) fn set_project_timeline_settings(
         p.dirty = true;
         (p.name.clone(), true, was_clean)
     };
+
+    // Tempo Map 存在时，工程基准拍号变化同步到 0 位置点（保持“删除 Tempo Map 后回退一致”）。
+    {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.numerator = normalized_beats;
+            }
+            state.audio_engine.update_timeline(tl.clone());
+        }
+    }
 
     if changed && was_clean {
         if let Some(handle) = state.app_handle.get() {

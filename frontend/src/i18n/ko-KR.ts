@@ -720,6 +720,33 @@ export const koKR = {
     custom_scale_short: "커스텀",
     project_scale_prefix: "프로젝트 스케일",
     project_scale_generic: "프로젝트 스케일",
+    project_scale_tempo_map_hint: " (선택 영역이 템포 맵 스케일의 영향을 받습니다)",
+
+    // 템포 맵（템포/박자표/스케일 변경）
+    tempo_map: "템포 맵",
+    menu_view_tempo_map: "템포 맵",
+    tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가…",
+    tempo_map_edit_point: "이 변경점 편집…",
+    tempo_map_delete_point: "이 변경점 삭제",
+    tempo_map_clear_all: "템포 맵 지우기",
+    tempo_map_dialog_title: "템포 맵 변경점",
+    tempo_map_dialog_title_initial: "초기 템포 맵 포인트",
+    tempo_map_time_signature: "박자표",
+    tempo_map_scale: "스케일",
+    tempo_map_scale_inherit: "이전 스케일 따르기",
+    tempo_map_bpm_range: "(10-960)",
+    tempo_map_actionbar_tip:
+        "템포 맵 활성화: 변경이 재생 헤드 이전의 가장 가까운 변경점에 적용됩니다",
+    scale_builtin_group: "내장 스케일",
+    scale_custom_group: "사용자 정의 스케일",
+
+    // MIDI를 템포 맵으로 가져오기
+    midi_import_as_tempo_map: "템포 맵으로 가져오기",
+    midi_import_tempo_map_tempo: "템포 가져오기",
+    midi_import_tempo_map_time_signature: "박자표 가져오기",
+    midi_import_tempo_map_key_signature: "스케일 가져오기",
+    midi_import_as_tempo_map_hint:
+        "활성화하면 MIDI의 템포/박자표/스케일 변경이 프로젝트 템포 맵을 대체합니다. 음표 시간은 MIDI 자체 템포를 사용합니다.",
 
     // Scale highlight setting
     scale_highlight: "스케일 하이라이트",

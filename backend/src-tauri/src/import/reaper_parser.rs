@@ -293,8 +293,73 @@ impl Default for ReaperEnvelope {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReaperTempoEnvelopePoint {
+    /// 位置（秒，时间锚定）。
+    pub position_sec: f64,
+    /// BPM。
+    pub bpm: f64,
+    /// 变化形状：1 = 阶梯（square），0 = 线性渐变到下一个点。
+    pub shape: i32,
+    /// 拍号分子（有拍号信息时为 Some）。
+    pub numerator: Option<u32>,
+    /// 拍号分母（有拍号信息时为 Some）。
+    pub denominator: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaperTempoEnvelope {
-    pub points: Vec<Vec<f64>>,
+    pub points: Vec<ReaperTempoEnvelopePoint>,
+}
+
+/// 解析 TEMPOENVEX `PT` 行第 4 个值（slowcurv）中打包的拍号。
+///
+/// REAPER 将拍号编码为 `denom_base * 1000 + (num_base + num - 1)`：
+/// - 分母基值：65 = 全音符(1)，131 = 2 分音符(2)，262 = 4 分音符(4)，
+///   524 = 8 分音符(8)，1048 = 16 分音符(16)，2097 = 32 分音符(32)，
+///   4194 = 64 分音符(64)，8388 = 128 分音符(128)；
+/// - 分子基值按分母依次为 537 / 73 / 145 / 289 / 577 / 153 / 305 / 609。
+/// 参见 https://wiki.cockos.com/wiki/index.php/RPR_GetSetEnvelopeState
+fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
+    let value = slow_curv.round() as i64;
+    if value <= 0 {
+        return None;
+    }
+    const DENOM_BASES: &[(i64, u32)] = &[
+        (8388, 128),
+        (4194, 64),
+        (2097, 32),
+        (1048, 16),
+        (524, 8),
+        (262, 4),
+        (131, 2),
+        (65, 1),
+    ];
+    const NUM_BASES: &[(i64, i64)] = &[
+        (8388, 609),
+        (4194, 305),
+        (2097, 153),
+        (1048, 577),
+        (524, 289),
+        (262, 145),
+        (131, 73),
+        (65, 537),
+    ];
+    for &(denom_base, denominator) in DENOM_BASES {
+        if value >= denom_base * 1000 && value < (denom_base + 1) * 1000 {
+            let num_part = value - denom_base * 1000;
+            let num_base = NUM_BASES
+                .iter()
+                .find(|(base, _)| *base == denom_base)
+                .map(|(_, nb)| *nb)
+                .unwrap_or(0);
+            let numerator = (num_part - num_base + 1).clamp(1, 32) as u32;
+            // 仅接受 HiFiShifter 支持的分母集合。
+            if matches!(denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                return Some((numerator, denominator));
+            }
+        }
+    }
+    None
 }
 
 // ─── 块解析器 ───
@@ -1052,9 +1117,28 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
         if tokens.is_empty() {
             continue;
         }
-        if tokens[0].to_uppercase() == "PT" {
-            env.points.push(parse_double_array(&tokens));
+        if tokens[0].to_uppercase() != "PT" || tokens.len() < 4 {
+            continue;
         }
+        let position_sec = parse_double(&tokens[1]).max(0.0);
+        let bpm = parse_double(&tokens[2]);
+        let shape = parse_int(&tokens[3]);
+        // 拍号打包在第 4 个值（slowcurv）中；无第 4 个值时继承前一点的拍号。
+        let (numerator, denominator) = if tokens.len() >= 5 {
+            match parse_tempo_env_time_signature(parse_double(&tokens[4])) {
+                Some(ts) => (Some(ts.0), Some(ts.1)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        env.points.push(ReaperTempoEnvelopePoint {
+            position_sec,
+            bpm,
+            shape,
+            numerator,
+            denominator,
+        });
     }
 
     env
@@ -1062,4 +1146,60 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
 
 fn is_envelope_type(s: &str) -> bool {
     ENVELOPE_TYPES.iter().any(|&e| e.eq_ignore_ascii_case(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_tempo_env_time_signature() {
+        // 4/4 → 262 * 1000 + (145 + 4 - 1) = 262148
+        assert_eq!(parse_tempo_env_time_signature(262148.0), Some((4, 4)));
+        // 3/4 → 262 * 1000 + (145 + 3 - 1) = 262147
+        assert_eq!(parse_tempo_env_time_signature(262147.0), Some((3, 4)));
+        // 6/8 → 524 * 1000 + (289 + 6 - 1) = 524294
+        assert_eq!(parse_tempo_env_time_signature(524294.0), Some((6, 8)));
+        // 非法值
+        assert_eq!(parse_tempo_env_time_signature(1.0), None);
+    }
+
+    #[test]
+    fn parses_tempo_envelope_from_example_rpp() {
+        // 来自 C:\Users\z\Desktop\Reaper_Example.rpp 的 TEMPOENVEX 块（节选）。
+        let block_text = "<TEMPOENVEX\n\
+EGUID {2A001931-7D16-4259-A7F4-7ED6A60C53C6}\n\
+ACT 1 -1\n\
+VIS 1 0 1\n\
+LANEHEIGHT 0 0\n\
+ARM 1\n\
+DEFSHAPE 1 -1 -1\n\
+PT 0.000000000000 169.6000000000 1 262148 0 1 0 \"\" 0 169 0 ABBB\n\
+PT 0.353773584906 184.0000000000 1\n\
+PT 0.679860541427 198.4000000000 1\n\
+PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
+>";
+        let lines: Vec<String> = block_text.lines().map(|s| s.to_string()).collect();
+        let block = parse_blocks(&lines);
+        let envelope = parse_tempo_envelope_block(&block);
+
+        assert_eq!(envelope.points.len(), 4);
+        // 首点：169.6 BPM、4/4。
+        let first = &envelope.points[0];
+        assert!((first.position_sec - 0.0).abs() < 1e-12);
+        assert!((first.bpm - 169.6).abs() < 1e-9);
+        assert_eq!(first.shape, 1);
+        assert_eq!(first.numerator, Some(4));
+        assert_eq!(first.denominator, Some(4));
+        // 普通点：无拍号信息（继承前一点）。
+        let second = &envelope.points[1];
+        assert!((second.bpm - 184.0).abs() < 1e-9);
+        assert_eq!(second.numerator, None);
+        // 末点：145.6 BPM、3/4（ABB 拍型）。
+        let last = &envelope.points[3];
+        assert!((last.position_sec - 4.904195314949).abs() < 1e-12);
+        assert!((last.bpm - 145.6).abs() < 1e-9);
+        assert_eq!(last.numerator, Some(3));
+        assert_eq!(last.denominator, Some(4));
+    }
 }

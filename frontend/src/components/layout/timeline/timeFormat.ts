@@ -9,6 +9,14 @@
  */
 import type { TimeUnit, TimeUnitChoice } from "../../../features/session/sessionTypes.ts";
 import { gridStepBeats } from "./grid.ts";
+import type { TempoMap, BarBeat } from "../../../utils/tempoMap.ts";
+import {
+    barBeatAtSec,
+    beatsPerBarOf,
+    pointIndexAtSec,
+    secToBeat,
+    tempoMapSegments,
+} from "../../../utils/tempoMap.ts";
 
 export type { TimeUnit, TimeUnitChoice } from "../../../features/session/sessionTypes.ts";
 
@@ -28,6 +36,8 @@ export interface TimeFormatContext {
     bpm: number;
     beatsPerBar: number;
     grid: string;
+    /** 存在 Tempo Map 数据时，时间标尺/光标时间按 Tempo Map 计算。 */
+    tempoMap?: TempoMap | null;
 }
 
 export interface RulerTick {
@@ -151,6 +161,110 @@ function trimTrailingZeros(value: string): string {
     return value.replace(/0+$/, "").replace(/\.$/, "");
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Tempo Map 感知的格式化（基于绝对秒）
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 小节.节拍.小单位 —— Tempo Map 版本。
+ * 小节号来自 `barBeatAtSec`（各段拍号独立分小节）。
+ */
+export function formatTempoBarBeatsLabel(bbt: BarBeat, mode: "ruler" | "cursor"): string {
+    if (Math.abs(bbt.sub) < 1e-9) {
+        if (mode === "cursor") {
+            return `${bbt.bar}.${bbt.beat}.000`;
+        }
+        return `${bbt.bar}.${bbt.beat}`;
+    }
+    return `${bbt.bar}.${bbt.beat}.${formatSubdivision(bbt.sub * 1000, mode)}`;
+}
+
+/**
+ * 小节.切分 —— Tempo Map 版本。
+ * 切分编号与总数由该位置所在段的拍号与网格决定。
+ */
+export function formatTempoBarDivisionsLabel(
+    bbt: BarBeat,
+    beatsPerBar: number,
+    grid: string,
+): string {
+    const bpb = Math.max(1, beatsPerBar);
+    const step = Math.max(1e-9, gridStepBeats(grid));
+    const inBarBeat = bbt.beat - 1 + bbt.sub;
+    const index = Math.max(1, Math.floor(inBarBeat / step + 1e-9) + 1);
+    const divisions = gridDivisionsPerBar(grid, bpb);
+    return `${bbt.bar}.${index}/${formatDivisionCount(divisions)}`;
+}
+
+/**
+ * 将某个秒位置格式化为指定时间单位（Tempo Map 感知）。
+ * 无 Tempo Map 时行为与 beat 版本完全一致。
+ */
+export function formatTempoRulerTick(
+    unit: TimeUnit,
+    sec: number,
+    ctx: TimeFormatContext,
+): string {
+    switch (unit) {
+        case "barBeats": {
+            if (!ctx.tempoMap) {
+                return formatBarBeatsLabel(
+                    beatFromSec(sec, ctx.bpm),
+                    ctx.beatsPerBar,
+                    "ruler",
+                );
+            }
+            const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
+            return formatTempoBarBeatsLabel(bbt, "ruler");
+        }
+        case "barDivisions": {
+            if (!ctx.tempoMap) {
+                return formatBarDivisionsLabel(beatFromSec(sec, ctx.bpm), ctx);
+            }
+            const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
+            const tempo = segmentTempoAtSec(ctx.tempoMap, sec);
+            return formatTempoBarDivisionsLabel(bbt, tempo.beatsPerBar, ctx.grid);
+        }
+        case "seconds":
+            return formatSecondsRuler(sec);
+        case "clock":
+            return formatClockLabel(sec);
+    }
+}
+
+function segmentTempoAtSec(map: TempoMap, sec: number): { bpm: number; beatsPerBar: number } {
+    const point = map.points[pointIndexAtSec(map, sec)];
+    return { bpm: point.bpm, beatsPerBar: beatsPerBarOf(point) };
+}
+
+export function formatTempoCursorUnit(
+    unit: TimeUnit,
+    sec: number,
+    ctx: TimeFormatContext,
+): string {
+    switch (unit) {
+        case "barBeats": {
+            if (!ctx.tempoMap) {
+                return formatBarBeatsLabel(beatFromSec(sec, ctx.bpm), ctx.beatsPerBar, "cursor");
+            }
+            const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
+            return formatTempoBarBeatsLabel(bbt, "cursor");
+        }
+        case "barDivisions": {
+            if (!ctx.tempoMap) {
+                return formatBarDivisionsLabel(beatFromSec(sec, ctx.bpm), ctx);
+            }
+            const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
+            const tempo = segmentTempoAtSec(ctx.tempoMap, sec);
+            return formatTempoBarDivisionsLabel(bbt, tempo.beatsPerBar, ctx.grid);
+        }
+        case "seconds":
+            return formatSecondsCursor(sec);
+        case "clock":
+            return formatClockLabel(sec);
+    }
+}
+
 /**
  * 秒：标尺保留小数点后 4 位并采取舍去；不精确时追加 `..`。
  */
@@ -204,8 +318,12 @@ export function formatRulerTick(unit: TimeUnit, beat: number, ctx: TimeFormatCon
 
 /**
  * 将某个秒位置格式化为指定时间单位（光标场景，使用光标精度规则）。
+ * 存在 Tempo Map 时，小节/节拍单位按 Tempo Map 计算。
  */
 export function formatCursorUnit(unit: TimeUnit, sec: number, ctx: TimeFormatContext): string {
+    if (ctx.tempoMap) {
+        return formatTempoCursorUnit(unit, sec, ctx);
+    }
     switch (unit) {
         case "barBeats":
             return formatBarBeatsLabel(beatFromSec(sec, ctx.bpm), ctx.beatsPerBar, "cursor");
@@ -321,6 +439,7 @@ export function selectRulerStep(args: {
 /**
  * 生成当前可见范围内的标尺刻度（主/副标签），并按拍升序返回。
  * 刻度始终落在网格线上；小节起始位置会额外补入并标记为强刻度。
+ * 提供 tempoMap 时按 Tempo Map 分段计算（不等距网格）。
  */
 export function buildRulerTicks(args: {
     pxPerSec: number;
@@ -333,6 +452,7 @@ export function buildRulerTicks(args: {
     primaryUnit: TimeUnit;
     secondaryUnit: TimeUnitChoice;
     minLabelSpacingPx: number;
+    tempoMap?: TempoMap | null;
 }): RulerTick[] {
     const {
         pxPerSec,
@@ -345,31 +465,71 @@ export function buildRulerTicks(args: {
         primaryUnit,
         secondaryUnit,
         minLabelSpacingPx,
+        tempoMap,
     } = args;
     const bpb = normalizeBeatsPerBar(beatsPerBar);
     const secPerBeat = 60 / Math.max(1, bpm);
-    const pxPerBeat = Math.max(1e-9, secPerBeat * Math.max(0, pxPerSec));
-    const step = selectRulerStep({
-        pxPerBeat,
-        grid,
-        beatsPerBar: bpb,
-        minLabelSpacingPx,
-    });
-    const totalBeats = Math.max(0, projectSec / secPerBeat);
+    const ctx: TimeFormatContext = { bpm, beatsPerBar: bpb, grid, tempoMap };
+    const showSecondary =
+        secondaryUnit !== "none" && secondaryUnit !== primaryUnit;
     const bufferPx = Math.max(320, Math.max(0, viewportWidth) * 0.5);
     const leftPx = Math.max(0, scrollLeft - bufferPx);
     const rightPx = scrollLeft + Math.max(0, viewportWidth) + bufferPx;
-    const leftBeat = leftPx / pxPerBeat;
-    const rightBeat = rightPx / pxPerBeat;
-    const ctx: TimeFormatContext = { bpm, beatsPerBar: bpb, grid };
-    const showSecondary =
-        secondaryUnit !== "none" && secondaryUnit !== primaryUnit;
+
+    if (!tempoMap || tempoMap.points.length === 0) {
+        const pxPerBeat = Math.max(1e-9, secPerBeat * Math.max(0, pxPerSec));
+        const step = selectRulerStep({
+            pxPerBeat,
+            grid,
+            beatsPerBar: bpb,
+            minLabelSpacingPx,
+        });
+        const totalBeats = Math.max(0, projectSec / secPerBeat);
+        const leftBeat = leftPx / pxPerBeat;
+        const rightBeat = rightPx / pxPerBeat;
+        const ticks = new Map<number, RulerTick>();
+
+        const addTick = (beat: number) => {
+            if (!Number.isFinite(beat) || beat < -1e-9 || beat > totalBeats + 1e-9) return;
+            const key = Math.round(beat * 1e9) / 1e9;
+            const isBarStart = Math.abs(key / bpb - Math.round(key / bpb)) < 1e-9;
+            const existing = ticks.get(key);
+            if (existing) {
+                if (isBarStart) existing.isBarStart = true;
+                return;
+            }
+            ticks.set(key, {
+                beat: key,
+                sec: key * secPerBeat,
+                primaryLabel: formatRulerTick(primaryUnit, key, ctx),
+                secondaryLabel: showSecondary
+                    ? formatRulerTick(secondaryUnit as TimeUnit, key, ctx)
+                    : null,
+                isBarStart,
+            });
+        };
+
+        const firstTickIndex = Math.max(0, Math.floor(leftBeat / step));
+        const lastTickIndex = Math.max(firstTickIndex, Math.ceil(rightBeat / step));
+        for (let index = firstTickIndex; index <= lastTickIndex; index += 1) {
+            addTick(index * step);
+        }
+
+        return [...ticks.values()].sort((a, b) => a.beat - b.beat);
+    }
+
+    // ── Tempo Map 路径：逐段局部对齐生成不等距刻度 ─────────────────────
+    // 每个变化点处重新对齐小节/节拍（与 barBeatAtSec、背景网格、网格吸附一致），
+    // 因此刻度必须在每段内以段起点为原点等距生成（段内拍 = k*step，按该段 BPM 折算秒）。
+    const visStartSec = Math.max(0, leftPx / Math.max(1e-9, pxPerSec));
+    const visEndSec = Math.min(projectSec, rightPx / Math.max(1e-9, pxPerSec));
     const ticks = new Map<number, RulerTick>();
 
-    const addTick = (beat: number) => {
-        if (!Number.isFinite(beat) || beat < -1e-9 || beat > totalBeats + 1e-9) return;
-        const key = Math.round(beat * 1e9) / 1e9;
-        const isBarStart = Math.abs(key / bpb - Math.round(key / bpb)) < 1e-9;
+    const pushTick = (sec: number, isBarStart: boolean) => {
+        if (!Number.isFinite(sec) || sec < visStartSec - 1e-6 || sec > visEndSec + 1e-6) return;
+        if (sec > projectSec + 1e-6) return;
+        const beat = secToBeat(tempoMap, sec, bpm);
+        const key = Math.round(beat * 1e6) / 1e6;
         const existing = ticks.get(key);
         if (existing) {
             if (isBarStart) existing.isBarStart = true;
@@ -377,19 +537,59 @@ export function buildRulerTicks(args: {
         }
         ticks.set(key, {
             beat: key,
-            sec: key * secPerBeat,
-            primaryLabel: formatRulerTick(primaryUnit, key, ctx),
+            sec,
+            primaryLabel: formatTempoRulerTick(primaryUnit, sec, ctx),
             secondaryLabel: showSecondary
-                ? formatRulerTick(secondaryUnit as TimeUnit, key, ctx)
+                ? formatTempoRulerTick(secondaryUnit as TimeUnit, sec, ctx)
                 : null,
             isBarStart,
         });
     };
 
-    const firstTickIndex = Math.max(0, Math.floor(leftBeat / step));
-    const lastTickIndex = Math.max(firstTickIndex, Math.ceil(rightBeat / step));
-    for (let index = firstTickIndex; index <= lastTickIndex; index += 1) {
-        addTick(index * step);
+    const segments = tempoMapSegments(tempoMap, projectSec);
+
+    for (let i = 0; i < segments.length; i += 1) {
+        const segment = segments[i];
+        const segStartSec = segment.startSec;
+        const segEndSec = Math.min(segment.endSec, visEndSec);
+        if (segEndSec < visStartSec - 1e-6 || segStartSec > visEndSec + 1e-6) continue;
+
+        const segBpm = Math.max(1, segment.point.bpm);
+        const segSecPerBeat = 60 / segBpm;
+        const segBpb = Math.max(1, beatsPerBarOf(segment.point));
+        const segPxPerBeat = Math.max(1e-9, segSecPerBeat * Math.max(0, pxPerSec));
+        const step = selectRulerStep({
+            pxPerBeat: segPxPerBeat,
+            grid,
+            beatsPerBar: segBpb,
+            minLabelSpacingPx,
+        });
+
+        // 段起始位置（拍号/速度变化处）本身就是小节对齐点。
+        if (i > 0) {
+            pushTick(segStartSec, true);
+        }
+
+        const segLenBeats = (segEndSec - segStartSec) / segSecPerBeat;
+        const isLastSegment = i === segments.length - 1;
+        // 段内局部拍：k*step。
+        const maxK = Math.floor(segLenBeats / step + 1e-9);
+        for (let k = 0; k <= maxK; k += 1) {
+            const localBeat = k * step;
+            const sec = segStartSec + localBeat * segSecPerBeat;
+            // 非末段跳过右边界（下一段起始已单独生成）。
+            if (!isLastSegment && Math.abs(sec - segEndSec) < 1e-6) continue;
+            const rem = (localBeat / segBpb) % 1;
+            const isBarStart = rem < 1e-9 || rem > 1 - 1e-9;
+            pushTick(sec, isBarStart);
+        }
+
+        // 末段末尾（工程边界）补一个刻度。
+        if (isLastSegment && segEndSec > segStartSec + 1e-9) {
+            const endLocalBeat = (segEndSec - segStartSec) / segSecPerBeat;
+            const rem = (endLocalBeat / segBpb) % 1;
+            pushTick(segEndSec, rem < 1e-9 || rem > 1 - 1e-9);
+        }
     }
 
     return [...ticks.values()].sort((a, b) => a.beat - b.beat);

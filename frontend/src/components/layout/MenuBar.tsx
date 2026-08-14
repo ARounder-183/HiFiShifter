@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -24,11 +24,17 @@ import {
     toggleAutoBackgroundRender,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
 import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
+import { scaleChangesInRange } from "../../utils/tempoMap";
+import {
+    getPianoRollSelection,
+    subscribePianoRollSelection,
+} from "../../utils/pianoRollSelectionBus";
 
 
 
@@ -190,6 +196,40 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         s.project.useCustomScale && s.project.customScale
             ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
             : `${tAny("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
+
+    // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
+    // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
+    // 无选区时按整个工程判断（存在音阶变化点即提示）。
+    const selectionVersionRef = useRef(0);
+    const [, setSelectionVersion] = useState(0);
+    useEffect(
+        () =>
+            subscribePianoRollSelection(() => {
+                selectionVersionRef.current += 1;
+                setSelectionVersion(selectionVersionRef.current);
+            }),
+        [],
+    );
+    const pianoRollSelectionVersion = useSyncExternalStore(
+        subscribePianoRollSelection,
+        () => selectionVersionRef.current,
+        () => 0,
+    );
+    const tempoMapScaleHint = useMemo(() => {
+        if (!s.tempoMap) return null;
+        const sel = getPianoRollSelection();
+        const startSec = sel ? (sel.startFrame * sel.framePeriodMs) / 1000 : 0;
+        const endSec = sel
+            ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
+            : Math.max(1, s.projectSec);
+        const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
+        if (changes.length === 0) return null;
+        return tAny("project_scale_tempo_map_hint");
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.tempoMap, s.projectSec, tAny, pianoRollSelectionVersion]);
+    const projectScaleLabelWithHint = tempoMapScaleHint
+        ? `${projectScaleLabel} ${tempoMapScaleHint}`
+        : projectScaleLabel;
     const effectiveProjectStretchAlgorithm =
         s.project.stretchAlgorithmOverride ?? s.defaultStretchAlgorithm;
     const effectiveProjectHifiganMelStretch =
@@ -578,6 +618,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleTempoMapVisible());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.tempoMapVisible, tAny("menu_view_tempo_map"))}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
@@ -1082,7 +1130,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setTransposeDegreesOpen}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(degrees, scaleValue, edgeSmoothnessPercent) =>
                     dispatchEditOp("transposeDegrees", {
@@ -1136,7 +1184,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("quantize", {
@@ -1156,7 +1204,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("meanQuantize", {

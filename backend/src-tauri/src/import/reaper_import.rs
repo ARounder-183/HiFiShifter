@@ -8,7 +8,9 @@ use crate::reaper_parser::{
     self, stretch_segments_from_markers, ReaperData, ReaperEnvelope, ReaperItem,
     ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
 };
-use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};
+use crate::state::{
+    Clip, PitchAnalysisAlgo, TempoPointData, TimelineState, Track, TrackParamsState,
+};
 use crate::midi_import::MidiNoteEvent;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -350,6 +352,8 @@ pub struct ReaperImportResult {
     pub timeline: TimelineState,
     pub skipped_files: Vec<String>,
     pub beats_per_bar: u32,
+    /// 由工程 TEMPO / TEMPOENVEX 数据构建的 Tempo Map（None = 无实际变化）。
+    pub tempo_map: Option<Vec<TempoPointData>>,
 }
 
 /// 导入 Reaper 工程文件（.rpp）。
@@ -542,6 +546,7 @@ fn convert_reaper_items_to_existing_tracks(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         next_track_order: next_order,
         disabled_group_ids: HashSet::new(),
     };
@@ -555,6 +560,7 @@ fn convert_reaper_items_to_existing_tracks(
         timeline,
         skipped_files,
         beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        tempo_map: None,
     })
 }
 
@@ -600,6 +606,97 @@ fn compute_parent_ids(depths: &[i32], track_ids: &[String]) -> Vec<Option<String
     parent_ids
 }
 
+/// 将 REAPER 工程的 TEMPO 行 + TEMPOENVEX 包络转换为 HiFiShifter Tempo Map。
+///
+/// - 点位置为秒（时间锚定，与 REAPER 存储一致）；
+/// - 线性渐变段（shape=0）采样为若干阶梯点，近似保留拍数；
+/// - 拍号来自 TEMPO 行（初始）与包络点第 4 个值（slowcurv 打包）；
+/// - REAPER 无工程调号概念，音阶全部为“跟随工程音阶”（None）；
+/// - 仅当存在 0 之后的实际变化时返回 Some。
+fn build_tempo_map_from_reaper(data: &ReaperData, fallback_bpm: f64) -> Option<Vec<TempoPointData>> {
+    let initial = data.tempo.as_ref();
+    let initial_bpm = initial
+        .map(|t| t.bpm)
+        .unwrap_or(fallback_bpm)
+        .clamp(10.0, 960.0);
+    let initial_numerator = initial.map(|t| t.beats_per_bar).unwrap_or(4).clamp(1, 32);
+    let initial_denominator = initial
+        .map(|t| {
+            if matches!(t.beat_note, 1 | 2 | 4 | 8 | 16 | 32) {
+                t.beat_note
+            } else {
+                4
+            }
+        })
+        .unwrap_or(4);
+
+    let mut points: Vec<TempoPointData> = Vec::new();
+    let mut push = |position_sec: f64, bpm: f64, numerator: u32, denominator: u32| {
+        let position_sec = position_sec.max(0.0);
+        if let Some(last) = points.last_mut() {
+            if (last.position_sec - position_sec).abs() < 1e-6 {
+                last.bpm = bpm;
+                last.numerator = numerator;
+                last.denominator = denominator;
+                return;
+            }
+        }
+        points.push(TempoPointData {
+            id: format!("reaper_tp_{}", points.len()),
+            position_sec,
+            bpm,
+            numerator,
+            denominator,
+            scale: None,
+        });
+    };
+
+    push(0.0, initial_bpm, initial_numerator, initial_denominator);
+
+    let Some(envelope) = data.tempo_envelope.as_ref() else {
+        return None;
+    };
+    if envelope.points.is_empty() {
+        return None;
+    }
+
+    let mut cur_numerator = initial_numerator;
+    let mut cur_denominator = initial_denominator;
+
+    for (i, pt) in envelope.points.iter().enumerate() {
+        let bpm = pt.bpm.clamp(10.0, 960.0);
+        if let Some(num) = pt.numerator {
+            cur_numerator = num.clamp(1, 32);
+        }
+        if let Some(den) = pt.denominator {
+            cur_denominator = den;
+        }
+        push(pt.position_sec, bpm, cur_numerator, cur_denominator);
+
+        // 线性渐变（shape=0）：到下一个点的速度渐变，采样为阶梯点近似。
+        if pt.shape == 0 {
+            if let Some(next) = envelope.points.get(i + 1) {
+                let next_bpm = next.bpm.clamp(10.0, 960.0);
+                if (next_bpm - bpm).abs() > 0.5 && next.position_sec > pt.position_sec + 1e-6 {
+                    const SAMPLES: usize = 4;
+                    for k in 1..SAMPLES {
+                        let t = pt.position_sec
+                            + (next.position_sec - pt.position_sec) * (k as f64 / SAMPLES as f64);
+                        let bpm_k = bpm + (next_bpm - bpm) * (k as f64 / SAMPLES as f64);
+                        push(t, bpm_k, cur_numerator, cur_denominator);
+                    }
+                }
+            }
+        }
+    }
+
+    if points.len() > 1 {
+        Some(points)
+    } else {
+        None
+    }
+}
+
 /// 将含有 Track 信息的 Reaper 数据转换为完整 TimelineState。
 fn convert_reaper_data(
     data: ReaperData,
@@ -618,6 +715,8 @@ fn convert_reaper_data(
 
     // 从解析的 TEMPO 中获取 BPM（无则用 fallback），后续 MIDI 转换需要
     let bpm = data.tempo.as_ref().map(|t| t.bpm).unwrap_or(fallback_bpm);
+    // 由 TEMPO / TEMPOENVEX 构建 Tempo Map（有实际变化时才返回 Some）。
+    let tempo_map = build_tempo_map_from_reaper(&data, fallback_bpm);
 
     // 预分配 UUID、计算深度和父子关系（两道步）
     let track_ids: Vec<String> = (0..data.tracks.len()).map(|_| new_track_id()).collect();
@@ -724,6 +823,7 @@ fn convert_reaper_data(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: tempo_map.clone(),
         next_track_order: track_order,
         disabled_group_ids: HashSet::new(),
     };
@@ -737,6 +837,7 @@ fn convert_reaper_data(
         timeline,
         skipped_files,
         beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        tempo_map,
     })
 }
 

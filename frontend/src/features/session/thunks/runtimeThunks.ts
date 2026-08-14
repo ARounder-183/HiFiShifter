@@ -42,6 +42,7 @@ export const persistUiSettings = createAsyncThunk(
             splitTransitionCurve: s.splitTransitionCurve,
             splitTransitionOverlapCrossfade: s.splitTransitionOverlapCrossfade,
             gridSnap: s.gridSnapEnabled,
+            tempoMapVisible: s.tempoMapVisible,
             primaryTimeUnit: s.primaryTimeUnit,
             secondaryTimeUnit: s.secondaryTimeUnit,
             rulerLabelSpacingPx: s.rulerLabelSpacingPx,

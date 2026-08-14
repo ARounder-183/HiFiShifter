@@ -128,6 +128,26 @@ pub struct CheckSourceFilesChangedPayload {
     pub changed: Vec<SourceFileChangePayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoScalePayload {
+    pub key: Option<String>,
+    pub name: Option<String>,
+    pub notes: Option<Vec<u8>>,
+}
+
+/// Tempo Map 变化点（前端载荷，camelCase；同时用于 `set_timeline_tempo_map` 命令参数）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPointPayload {
+    pub id: String,
+    pub position_sec: f64,
+    pub bpm: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+    pub scale: Option<TempoScalePayload>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TimelineStatePayload {
@@ -152,6 +172,10 @@ pub struct TimelineStatePayload {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_group_ids: Vec<String>,
+
+    /// Tempo Map（None = 无 Tempo Map）。始终序列化该字段，保证前端能区分“无 Tempo Map”。
+    #[serde(default)]
+    pub tempo_map: Option<Vec<TempoPointPayload>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

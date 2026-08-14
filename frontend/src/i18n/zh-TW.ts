@@ -623,6 +623,32 @@ export const zhTW = {
     custom_scale_short: "自訂",
     project_scale_prefix: "專案音階",
     project_scale_generic: "專案音階",
+    project_scale_tempo_map_hint: "（選區受速度映射音階影響）",
+
+    // 速度映射（變速/變拍/變音階）
+    tempo_map: "速度映射",
+    menu_view_tempo_map: "速度映射",
+    tempo_map_add_point: "在此新增速度/拍號/音階變化…",
+    tempo_map_edit_point: "編輯此變化點…",
+    tempo_map_delete_point: "刪除此變化點",
+    tempo_map_clear_all: "清除速度映射",
+    tempo_map_dialog_title: "速度映射變化點",
+    tempo_map_dialog_title_initial: "初始速度映射點",
+    tempo_map_time_signature: "拍號",
+    tempo_map_scale: "音階",
+    tempo_map_scale_inherit: "跟隨之前的音階",
+    tempo_map_bpm_range: "（10-960）",
+    tempo_map_actionbar_tip: "速度映射已啟用：修改將作用於播放頭之前最近的變化點",
+    scale_builtin_group: "內建音階",
+    scale_custom_group: "自訂音階",
+
+    // MIDI 匯入為速度映射
+    midi_import_as_tempo_map: "匯入為速度映射",
+    midi_import_tempo_map_tempo: "匯入 Tempo",
+    midi_import_tempo_map_time_signature: "匯入拍號",
+    midi_import_tempo_map_key_signature: "匯入音階",
+    midi_import_as_tempo_map_hint:
+        "啟用後，MIDI 的速度、拍號與音階變化將取代專案速度映射；音符時間使用 MIDI 自身速度。",
 
     // 音階醒目提示設定
     scale_highlight: "音階醒目提示",

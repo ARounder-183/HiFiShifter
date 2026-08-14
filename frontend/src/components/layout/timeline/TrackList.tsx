@@ -114,6 +114,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             grid: state.session.grid,
             projectSec: state.session.projectSec,
             show: state.session.showPlayheadTimeInTrackHeader,
+            tempoMap: state.session.tempoMap,
         }),
         shallowEqual,
     );
@@ -129,8 +130,9 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             bpm: selector.bpm,
             beatsPerBar: Math.max(1, Math.round(selector.beats || 4)),
             grid: selector.grid,
+            tempoMap: selector.tempoMap,
         }),
-        [selector.bpm, selector.beats, selector.grid],
+        [selector.bpm, selector.beats, selector.grid, selector.tempoMap],
     );
     const formatted = React.useMemo(
         () =>
@@ -352,6 +354,8 @@ type TrackListProps = {
     onScrollTopChange?: (scrollTop: number) => void;
     /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚�?*/
     listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
+    /** 顶部角落高度（与右侧时间标尺对齐；Tempo Map 行可见时增高）。 */
+    headerHeight?: number;
 };
 
 const TrackListInner: React.FC<TrackListProps> = ({
@@ -380,6 +384,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onDuplicateTrack,
     onScrollTopChange,
     listScrollRef,
+    headerHeight = 48,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     const rowHeightRef = useRef(rowHeight);
@@ -1104,7 +1109,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
     return (
         <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
-            <Box className="h-12 border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10">
+            <Box
+                className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10"
+                style={{ height: headerHeight }}
+            >
                 <Text size="2" weight="bold" color="gray" className="shrink-0">
                     {t("tracks")}
                 </Text>

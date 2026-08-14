@@ -109,7 +109,32 @@ export interface TimelineState {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    /** Tempo Map 数据（null = 无 Tempo Map）。 */
+    tempo_map?: TempoMapPayload;
 }
+
+/** Tempo Map 变化点（后端 camelCase 载荷，与 `TempoPointPayload` 对应）。 */
+export interface TempoPointPayload {
+    id: string;
+    positionSec: number;
+    bpm: number;
+    numerator: number;
+    denominator: number;
+    scale: {
+        key?: string | null;
+        name?: string | null;
+        notes?: number[] | null;
+    } | null;
+}
+
+/**
+ * 后端 Tempo Map 载荷：变化点的“裸数组”（null = 无 Tempo Map）。
+ *
+ * 与后端 `TimelineStatePayload.tempo_map: Option<Vec<TempoPointPayload>>` 及
+ * `set_timeline_tempo_map` 命令参数一一对应 —— 注意是数组本身，
+ * 不是 `{ points: [...] }` 包装对象。
+ */
+export type TempoMapPayload = TempoPointPayload[] | null;
 
 export interface TimelineResult {
     ok: true;
@@ -124,6 +149,7 @@ export interface TimelineResult {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    tempo_map?: TempoMapPayload;
 }
 
 export interface TrackSummaryResult {

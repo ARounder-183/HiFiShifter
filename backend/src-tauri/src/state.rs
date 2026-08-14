@@ -34,6 +34,67 @@ fn default_formant_strength() -> f64 {
     0.50
 }
 
+/// 内置音阶键名 → 音级集合（未知键名返回 None）。
+pub(crate) fn scale_notes_for_key(scale: &str) -> Option<Vec<u8>> {
+    let notes = match scale {
+        "C" => vec![0, 2, 4, 5, 7, 9, 11],
+        "Db" => vec![1, 3, 5, 6, 8, 10, 0],
+        "D" => vec![2, 4, 6, 7, 9, 11, 1],
+        "Eb" => vec![3, 5, 7, 8, 10, 0, 2],
+        "E" => vec![4, 6, 8, 9, 11, 1, 3],
+        "F" => vec![5, 7, 9, 10, 0, 2, 4],
+        "Gb" => vec![6, 8, 10, 11, 1, 3, 5],
+        "G" => vec![7, 9, 11, 0, 2, 4, 6],
+        "Ab" => vec![8, 10, 0, 1, 3, 5, 7],
+        "A" => vec![9, 11, 1, 2, 4, 6, 8],
+        "Bb" => vec![10, 0, 2, 3, 5, 7, 9],
+        "B" => vec![11, 1, 3, 4, 6, 8, 10],
+        _ => return None,
+    };
+    Some(notes)
+}
+
+/// 全部内置音阶键名（与 scale_notes_for_key 对应）。
+pub(crate) const SCALE_KEYS: [&str; 12] = [
+    "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
+];
+
+/// 由音级集合反查内置音阶键名（归一化后完全一致才匹配）。
+pub(crate) fn key_for_scale_notes(notes: &[u8]) -> Option<String> {
+    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    for key in SCALE_KEYS {
+        if let Some(n) = scale_notes_for_key(key) {
+            let mut m: Vec<u8> = n.iter().map(|v| v % 12).collect();
+            m.sort_unstable();
+            m.dedup();
+            if m == normalized {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 工程音阶 → Tempo Map 初始点音阶数据（初始点即工程基准记录，含自定义音阶名）。
+pub(crate) fn tempo_scale_data_from_project(p: &ProjectState) -> TempoScaleData {
+    if p.use_custom_scale {
+        if let Some(custom) = p.custom_scale.as_ref() {
+            return TempoScaleData {
+                key: None,
+                name: Some(custom.name.clone()),
+                notes: Some(custom.notes.clone()),
+            };
+        }
+    }
+    TempoScaleData {
+        key: Some(p.base_scale.clone()),
+        name: None,
+        notes: None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
@@ -349,6 +410,30 @@ pub struct RuntimeState {
     pub synthesized_wav_path: Option<String>,
 }
 
+/// Tempo Map 变化点携带的音阶覆盖数据（None = 跟随工程音阶）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoScaleData {
+    /// 内置音阶键名（如 "C"、"Db"）。
+    pub key: Option<String>,
+    /// 自定义音阶名称。
+    pub name: Option<String>,
+    /// 自定义音阶音级集合（0-11）。
+    pub notes: Option<Vec<u8>>,
+}
+
+/// Tempo Map 变化点（时间锚定：position_sec 绝对秒）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPointData {
+    pub id: String,
+    pub position_sec: f64,
+    pub bpm: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+    pub scale: Option<TempoScaleData>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineState {
     pub tracks: Vec<Track>,
@@ -364,6 +449,11 @@ pub struct TimelineState {
 
     #[serde(default = "default_project_scale_notes")]
     pub project_scale_notes: Vec<u8>,
+
+    /// Tempo Map（None = 无 Tempo Map，使用全局 BPM/拍号/音阶）。
+    /// 点按 position_sec 升序；第一个点必须位于 0。
+    #[serde(default)]
+    pub tempo_map: Option<Vec<TempoPointData>>,
 
     pub next_track_order: i32,
 
@@ -443,6 +533,7 @@ impl Default for TimelineState {
 
             params_by_root_track: BTreeMap::new(),
             project_scale_notes: default_project_scale_notes(),
+            tempo_map: None,
             next_track_order: 1,
             disabled_group_ids: HashSet::new(),
         }
@@ -2156,7 +2247,7 @@ mod tests {
     }
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4().simple())
 }
 
@@ -2253,6 +2344,7 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
@@ -2323,12 +2415,161 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
                 ids
             },
         }
+    }
+
+    // ─── Tempo Map ────────────────────────────────────────────────
+
+    /// 序列化 Tempo Map 供前端载荷使用（None = 无 Tempo Map）。
+    fn tempo_map_payload(&self) -> Option<Vec<crate::models::TempoPointPayload>> {
+        self.tempo_map.as_ref().map(|points| {
+            points
+                .iter()
+                .map(|p| crate::models::TempoPointPayload {
+                    id: p.id.clone(),
+                    position_sec: p.position_sec,
+                    bpm: p.bpm,
+                    numerator: p.numerator,
+                    denominator: p.denominator,
+                    scale: p.scale.as_ref().map(|s| crate::models::TempoScalePayload {
+                        key: s.key.clone(),
+                        name: s.name.clone(),
+                        notes: s.notes.clone(),
+                    }),
+                })
+                .collect()
+        })
+    }
+
+    /// 规范化 Tempo Map：排序、钳制、确保首点位于 0；无有效点返回 None。
+    pub fn normalize_tempo_map(&mut self) {
+        let Some(points) = self.tempo_map.take() else {
+            return;
+        };
+        let mut valid: Vec<TempoPointData> = Vec::new();
+        for mut p in points {
+            if p.id.trim().is_empty() {
+                continue;
+            }
+            p.position_sec = p.position_sec.max(0.0);
+            p.bpm = p.bpm.clamp(10.0, 960.0);
+            p.numerator = p.numerator.clamp(1, 32);
+            if !matches!(p.denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                p.denominator = 4;
+            }
+            if valid
+                .last()
+                .map(|last: &TempoPointData| (p.position_sec - last.position_sec).abs() < 1e-6)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            valid.push(p);
+        }
+        valid.sort_by(|a, b| a.position_sec.partial_cmp(&b.position_sec).unwrap_or(std::cmp::Ordering::Equal));
+        if valid.is_empty() {
+            self.tempo_map = None;
+            return;
+        }
+        if valid[0].position_sec > 1e-9 {
+            valid.insert(
+                0,
+                TempoPointData {
+                    id: new_id("tp"),
+                    position_sec: 0.0,
+                    bpm: self.bpm,
+                    numerator: 4,
+                    denominator: 4,
+                    // 初始点即工程基准记录：携带工程音阶（内置键反查，否则保留音级集合）。
+                    scale: Some(TempoScaleData {
+                        key: key_for_scale_notes(&self.project_scale_notes),
+                        name: None,
+                        notes: Some(self.project_scale_notes.clone()),
+                    }),
+                },
+            );
+        }
+        valid[0].position_sec = 0.0;
+        self.tempo_map = Some(valid);
+    }
+
+    /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。
+    pub fn effective_scale_notes_at_sec(&self, sec: f64) -> Vec<u8> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return self.project_scale_notes.clone();
+        };
+        let target = sec.max(0.0);
+        for point in points.iter().rev() {
+            if point.position_sec <= target + 1e-9 {
+                if let Some(scale) = point.scale.as_ref() {
+                    if let Some(key) = scale.key.as_deref() {
+                        if let Some(notes) = scale_notes_for_key(key) {
+                            return notes;
+                        }
+                    }
+                    if let Some(notes) = scale.notes.as_ref() {
+                        let mut normalized: Vec<u8> = notes
+                            .iter()
+                            .map(|v| v % 12)
+                            .collect();
+                        normalized.sort_unstable();
+                        normalized.dedup();
+                        if !normalized.is_empty() {
+                            return normalized;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        self.project_scale_notes.clone()
+    }
+
+    /// 逐段生效音阶（(段起始秒, 音级集合)，按时间升序；首段从 0 开始）。
+    /// 供逐帧渲染路径使用（帧时间单调递增，可用游标快速查询）。
+    pub fn scale_segments(&self) -> Vec<(f64, Vec<u8>)> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return vec![(0.0, self.project_scale_notes.clone())];
+        };
+        let mut segments: Vec<(f64, Vec<u8>)> = Vec::new();
+        let mut current: Option<Vec<u8>> = None;
+        let mut last_sec = 0.0f64;
+        for point in points {
+            let sec = point.position_sec.max(last_sec);
+            if sec > last_sec + 1e-9 {
+                let notes = current
+                    .clone()
+                    .unwrap_or_else(|| self.project_scale_notes.clone());
+                segments.push((last_sec, notes));
+            }
+            last_sec = sec;
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        current = Some(notes);
+                    }
+                }
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        current = Some(normalized);
+                    }
+                }
+            }
+        }
+        let notes = current.unwrap_or_else(|| self.project_scale_notes.clone());
+        if segments.is_empty() || (segments.last().map(|(sec, _)| *sec) < Some(last_sec)) {
+            segments.push((last_sec, notes));
+        }
+        segments
     }
 
     pub fn add_track(

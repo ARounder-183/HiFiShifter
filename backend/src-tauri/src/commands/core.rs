@@ -105,6 +105,12 @@ pub(super) fn set_transport(
             // BPM is project-affecting: checkpoint for undo.
             state.checkpoint_timeline(&tl);
             tl.bpm = v;
+            // Tempo Map 存在时，工程 BPM 与 0 位置点保持一致。
+            if let Some(points) = tl.tempo_map.as_mut() {
+                if let Some(first) = points.first_mut() {
+                    first.bpm = v;
+                }
+            }
         }
     }
 

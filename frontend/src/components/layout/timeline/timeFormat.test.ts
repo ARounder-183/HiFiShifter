@@ -255,4 +255,43 @@ assertEqual(
 assertNear(beatFromSec(0.5, 120), 1, "beatFromSec");
 assertNear(secFromBeat(1, 120), 0.5, "secFromBeat");
 
+// ── Tempo Map 标尺：变化点后重新对齐（不得沿用旧均匀网格位置） ──
+{
+    // 空工程 120bpm 4/4，在 7.25s（旧标尺 4.3.500）插入变化点（同 BPM）。
+    const map = {
+        points: [
+            { id: "p0", positionSec: 0, bpm: 120, numerator: 4, denominator: 4, scale: null },
+            { id: "p1", positionSec: 7.25, bpm: 120, numerator: 4, denominator: 4, scale: null },
+        ],
+    };
+    const ticks = buildRulerTicks({
+        pxPerSec: 480,
+        scrollLeft: 0,
+        viewportWidth: 4000,
+        projectSec: 10,
+        bpm: 120,
+        beatsPerBar: 4,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+        tempoMap: map,
+    });
+    const secs = ticks.map((t) => t.sec);
+    for (const bad of [7.5, 8.0, 8.5]) {
+        if (secs.some((s) => Math.abs(s - bad) < 1e-9)) {
+            throw new Error(`tempo ruler: stale old-grid tick at ${bad}`);
+        }
+    }
+    const at725 = ticks.find((t) => Math.abs(t.sec - 7.25) < 1e-9);
+    assertEqual(at725?.primaryLabel, "5.1", "tempo ruler: segment start label");
+    assertEqual(at725?.isBarStart, true, "tempo ruler: segment start is bar");
+    const at775 = ticks.find((t) => Math.abs(t.sec - 7.75) < 1e-9);
+    assertEqual(at775?.primaryLabel, "5.2", "tempo ruler: next beat at 7.75");
+    assertEqual(at775?.isBarStart, false, "tempo ruler: beat tick not bar");
+    const at925 = ticks.find((t) => Math.abs(t.sec - 9.25) < 1e-9);
+    assertEqual(at925?.primaryLabel, "6.1", "tempo ruler: next bar at 9.25");
+    assertEqual(at925?.isBarStart, true, "tempo ruler: bar tick flagged");
+}
+
 console.log(`timeFormat checks passed (${checks})`);

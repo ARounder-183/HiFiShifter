@@ -638,6 +638,33 @@ export const enUS = {
     custom_scale_short: "Custom",
     project_scale_prefix: "Project Scale",
     project_scale_generic: "Project Scale",
+    project_scale_tempo_map_hint: " (selection is affected by Tempo Map scale)",
+
+    // Tempo Map (tempo / time-signature / scale changes)
+    tempo_map: "Tempo Map",
+    menu_view_tempo_map: "Tempo Map",
+    tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here…",
+    tempo_map_edit_point: "Edit This Point…",
+    tempo_map_delete_point: "Delete This Point",
+    tempo_map_clear_all: "Clear Tempo Map",
+    tempo_map_dialog_title: "Tempo Map Point",
+    tempo_map_dialog_title_initial: "Initial Tempo Map Point",
+    tempo_map_time_signature: "Time Signature",
+    tempo_map_scale: "Scale",
+    tempo_map_scale_inherit: "Follow Previous Scale",
+    tempo_map_bpm_range: "(10-960)",
+    tempo_map_actionbar_tip:
+        "Tempo Map is active: edits apply to the nearest point at or before the playhead",
+    scale_builtin_group: "Built-in Scales",
+    scale_custom_group: "Custom Scales",
+
+    // MIDI import as Tempo Map
+    midi_import_as_tempo_map: "Import as Tempo Map",
+    midi_import_tempo_map_tempo: "Import Tempo",
+    midi_import_tempo_map_time_signature: "Import Time Signature",
+    midi_import_tempo_map_key_signature: "Import Key Signature",
+    midi_import_as_tempo_map_hint:
+        "When enabled, tempo/time-signature/key changes from the MIDI replace the project Tempo Map; note times keep the MIDI's own tempo.",
 
     // Scale highlight setting
     scale_highlight: "Scale Highlight",

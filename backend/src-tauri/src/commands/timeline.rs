@@ -935,3 +935,176 @@ pub(super) fn get_track_summary(
         "pitch_range": {"min": -24, "max": 24}
     })
 }
+
+/// 设置工程 Tempo Map（None = 清除）。
+///
+/// 前端是 Tempo Map 的唯一编辑入口；本命令：
+/// - 校验并规范化变化点（排序、钳制、确保 0 位置点）；
+/// - 同步工程基准 BPM / 每小节拍数（与 0 位置点一致）；
+/// - 音阶部分发生变化时失效渲染缓存并触发后台预渲染
+///   （子轨道“度数差”等依赖音阶的渲染需要重建）。
+pub(super) fn set_timeline_tempo_map(
+    state: State<'_, AppState>,
+    tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl);
+    let had_map = tl.tempo_map.is_some();
+
+    // 比较音阶签名（仅音阶变化才需要失效渲染缓存）。
+    let scale_signature_before = tl.tempo_map.as_ref().map(|points| {
+        points
+            .iter()
+            .filter(|p| p.scale.is_some())
+            .map(|p| {
+                let s = p.scale.as_ref().expect("filtered");
+                format!(
+                    "{:.6}:{}:{}:{}",
+                    p.position_sec,
+                    s.key.as_deref().unwrap_or(""),
+                    s.name.as_deref().unwrap_or(""),
+                    s.notes
+                        .as_ref()
+                        .map(|n| n
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    });
+
+    tl.tempo_map = tempo_map.map(|points| {
+        points
+            .into_iter()
+            .map(|p| crate::state::TempoPointData {
+                id: p.id,
+                position_sec: p.position_sec,
+                bpm: p.bpm,
+                numerator: p.numerator,
+                denominator: p.denominator,
+                scale: p.scale.map(|s| crate::state::TempoScaleData {
+                    key: s.key,
+                    name: s.name,
+                    notes: s.notes,
+                }),
+            })
+            .collect()
+    });
+    tl.normalize_tempo_map();
+
+    // 首次创建 Tempo Map：初始点即工程基准记录，音阶为空时物化为工程音阶。
+    if !had_map {
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                if first.scale.is_none() {
+                    let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                    first.scale = Some(crate::state::tempo_scale_data_from_project(&p));
+                }
+            }
+        }
+    }
+
+    // 同步工程基准 BPM / 拍号（与 0 位置点一致）。
+    let initial = tl.tempo_map.as_ref().and_then(|points| points.first().cloned());
+    if let Some(first) = initial {
+        tl.bpm = first.bpm.clamp(10.0, 960.0);
+        {
+            let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.beats_per_bar = first.numerator.clamp(1, 32);
+            p.dirty = true;
+        }
+    }
+
+    let scale_signature_after = tl.tempo_map.as_ref().map(|points| {
+        points
+            .iter()
+            .filter(|p| p.scale.is_some())
+            .map(|p| {
+                let s = p.scale.as_ref().expect("filtered");
+                format!(
+                    "{:.6}:{}:{}:{}",
+                    p.position_sec,
+                    s.key.as_deref().unwrap_or(""),
+                    s.name.as_deref().unwrap_or(""),
+                    s.notes
+                        .as_ref()
+                        .map(|n| n
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    });
+
+    state.audio_engine.update_timeline(tl.clone());
+
+    let scale_changed = scale_signature_before != scale_signature_after;
+    if scale_changed {
+        // 初始点即工程基准记录：初始点音阶变化同步回工程音阶（双向）。
+        let first_scale = tl
+            .tempo_map
+            .as_ref()
+            .and_then(|points| points.first())
+            .and_then(|first| first.scale.clone());
+        if let Some(scale) = first_scale {
+            let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(key) = scale.key.as_deref() {
+                if p.base_scale != key || p.use_custom_scale {
+                    p.base_scale = key.to_string();
+                    p.use_custom_scale = false;
+                    p.custom_scale = None;
+                    p.dirty = true;
+                }
+                if let Some(notes) = crate::state::scale_notes_for_key(key) {
+                    tl.project_scale_notes = notes;
+                }
+            } else if let Some(notes) = scale.notes.as_ref() {
+                let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+                normalized.sort_unstable();
+                normalized.dedup();
+                if !normalized.is_empty() {
+                    let name = scale
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "Custom Scale".to_string());
+                    let changed = !p.use_custom_scale
+                        || p.custom_scale.as_ref().map(|c| (&c.name, &c.notes))
+                            != Some((&name, &normalized));
+                    if changed {
+                        p.custom_scale = Some(crate::project::CustomScale {
+                            id: p
+                                .custom_scale
+                                .as_ref()
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| crate::state::new_id("cs")),
+                            name,
+                            notes: normalized.clone(),
+                        });
+                        p.use_custom_scale = true;
+                        p.dirty = true;
+                    }
+                    tl.project_scale_notes = normalized;
+                }
+            }
+        }
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+        if let Some(handle) = state.app_handle.get() {
+            crate::commands::playback::request_background_render(handle);
+        }
+    }
+
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}

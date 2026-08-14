@@ -622,6 +622,32 @@ export const zhCN = {
     custom_scale_short: "自定义",
     project_scale_prefix: "工程音阶",
     project_scale_generic: "工程音阶",
+    project_scale_tempo_map_hint: "（选区受速度映射音阶影响）",
+
+    // 速度映射（变速/变拍/变音阶）
+    tempo_map: "速度映射",
+    menu_view_tempo_map: "速度映射",
+    tempo_map_add_point: "在此添加速度/拍号/音阶变化…",
+    tempo_map_edit_point: "编辑此变化点…",
+    tempo_map_delete_point: "删除此变化点",
+    tempo_map_clear_all: "清除速度映射",
+    tempo_map_dialog_title: "速度映射变化点",
+    tempo_map_dialog_title_initial: "初始速度映射点",
+    tempo_map_time_signature: "拍号",
+    tempo_map_scale: "音阶",
+    tempo_map_scale_inherit: "跟随之前的音阶",
+    tempo_map_bpm_range: "（10-960）",
+    tempo_map_actionbar_tip: "速度映射已启用：修改将作用于播放头之前最近的变化点",
+    scale_builtin_group: "内置音阶",
+    scale_custom_group: "自定义音阶",
+
+    // MIDI 导入为速度映射
+    midi_import_as_tempo_map: "导入为速度映射",
+    midi_import_tempo_map_tempo: "导入 Tempo",
+    midi_import_tempo_map_time_signature: "导入拍号",
+    midi_import_tempo_map_key_signature: "导入音阶",
+    midi_import_as_tempo_map_hint:
+        "启用后，MIDI 的速度、拍号与音阶变化将替换工程速度映射；音符时间使用 MIDI 自身速度。",
 
     // 音阶高亮设置
     scale_highlight: "音阶高亮",
