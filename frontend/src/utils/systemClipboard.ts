@@ -39,12 +39,20 @@ function parseClipboardObject(raw: string): ClipClipboardObject | ParamClipboard
     }
 }
 
+function clipboardSummary(payload: ClipClipboardObject | ParamClipboardObject): string {
+    if (payload.kind === "param") {
+        return `HiFiShifter: ${payload.values.length} parameter frame(s) copied. Paste in HiFiShifter Parameter Editor.`;
+    }
+    return `HiFiShifter: ${payload.templates.length} clip(s) copied. Paste in HiFiShifter timeline.`;
+}
+
 export async function writeSystemClipboardObject(
     payload: ClipClipboardObject | ParamClipboardObject,
 ): Promise<void> {
     const result = await invoke<{ ok: boolean; error?: string }>(
         "write_system_clipboard_object",
         JSON.stringify(payload),
+        clipboardSummary(payload),
     );
     if (!result.ok) {
         throw new Error(result.error ?? "clipboard_write_failed");

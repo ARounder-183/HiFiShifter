@@ -271,6 +271,15 @@ export const timelineApi = {
             trackIds,
         ),
 
+    copyClipsToReaperClipboard: (clipIds: string[]) =>
+        invoke<{
+            ok: boolean;
+            error?: string;
+            exportedClipCount?: number;
+            skippedClipCount?: number;
+            trackCount?: number;
+        }>("copy_clips_to_reaper_clipboard", clipIds),
+
     pasteTimelineClipboard: () =>
         invoke<
             TimelineResult & {

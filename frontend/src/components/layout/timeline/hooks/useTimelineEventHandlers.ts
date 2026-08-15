@@ -52,6 +52,7 @@ export interface UseTimelineEventHandlersArgs {
     // clipboard
     copyClips: (ids: string[]) => Promise<boolean>;
     cutClips: (ids: string[]) => void;
+    copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // clip actions
     pasteClipsAtPlayhead: () => void;
@@ -112,6 +113,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         setMultiSelectedClipIds,
         copyClips,
         cutClips,
+        copyClipsToReaper,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -207,7 +209,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     : sessionRef.current.selectedClipId
                       ? [sessionRef.current.selectedClipId]
                       : [];
-            if (op === "copy" || op === "cut") {
+            if (op === "copy" || op === "cut" || op === "copyReaper") {
                 if (selectedIds.length === 0) return;
                 const s = sessionRef.current;
                 const expandedIds = expandClipIdsWithGroups(
@@ -217,7 +219,8 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     s.disabledGroupIds,
                 );
                 if (op === "copy") void copyClips(expandedIds);
-                else cutClips(expandedIds);
+                else if (op === "cut") cutClips(expandedIds);
+                else void copyClipsToReaper(expandedIds);
                 return;
             }
             if (op === "paste") {
@@ -227,7 +230,14 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
         return () =>
             window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
-    }, [copyClips, cutClips, multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef]);
+    }, [
+        copyClips,
+        cutClips,
+        copyClipsToReaper,
+        multiSelectedClipIds,
+        pasteClipsAtPlayhead,
+        sessionRef,
+    ]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {

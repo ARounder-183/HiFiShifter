@@ -80,6 +80,7 @@ export const koKR = {
     import_project_tempo_map_unavailable: "현재 프로젝트에 이미 템포 맵이 있어 가져온 템포 맵은 건너뜁니다.",
     import_project_import: "가져오기",
     menu_import_midi: "MIDI 가져오기...",
+    menu_copy_reaper_clipboard: "선택한 클립을 REAPER 클립보드로 복사",
     menu_paste_reaper_clipboard: "Reaper 클립보드 데이터 붙여넣기",
     menu_paste_vocalshifter_clipboard: "VocalShifter 클립보드 데이터 붙여넣기",
     ctx_quick_export: "빠른 내보내기",

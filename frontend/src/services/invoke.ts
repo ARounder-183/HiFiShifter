@@ -353,13 +353,19 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "copy_timeline_tracks":
             return { trackIds: args[0] };
 
+        case "copy_clips_to_reaper_clipboard":
+            return { clipIds: args[0] };
+
         case "paste_timeline_clipboard":
         case "has_timeline_clipboard":
         case "read_system_clipboard_object":
             return {};
 
         case "write_system_clipboard_object":
-            return { payload: args[0] };
+            return {
+                payload: args[0],
+                ...(args[1] !== undefined ? { textSummary: args[1] } : {}),
+            };
 
         case "save_project_as":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };

@@ -84,6 +84,8 @@ mod hfspeaks_v2;
 mod midi_import;
 mod project;
 mod project_fragment;
+#[path = "import/reaper_export.rs"]
+mod reaper_export;
 #[path = "import/reaper_import.rs"]
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
@@ -410,6 +412,7 @@ pub fn run() {
             commands::paste_vocalshifter_clipboard,
             commands::open_reaper_dialog,
             commands::import_reaper_project,
+            commands::copy_clips_to_reaper_clipboard,
             commands::paste_reaper_clipboard,
             commands::clear_cache,
             commands::get_processor_params,

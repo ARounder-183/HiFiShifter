@@ -324,7 +324,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             document.body.getAttribute("data-hs-focus-window") === "timeline";
 
         if (
-            (op === "copy" || op === "cut" || op === "paste") &&
+            (op === "copy" || op === "cut" || op === "paste" || op === "copyReaper") &&
             inTimeline &&
             !inPianoRoll &&
             !inTrackHeader
@@ -588,6 +588,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copyReaper")}>
+                        {t("menu_copy_reaper_clipboard")}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteReaper")}>
                         {t("menu_paste_reaper_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">

@@ -79,6 +79,7 @@ export const zhCN = {
     import_project_tempo_map_unavailable: "当前工程已有速度轨，导入工程的速度轨将被跳过。",
     import_project_import: "导入",
     menu_import_midi: "导入 MIDI...",
+    menu_copy_reaper_clipboard: "将选中 Clip 复制到 REAPER 剪贴板",
     menu_paste_reaper_clipboard: "粘贴 Reaper 剪贴板数据",
     menu_paste_vocalshifter_clipboard: "粘贴 VocalShifter 剪贴板数据",
     ctx_quick_export: "快速导出",

@@ -22,8 +22,28 @@ fn current_project_name(state: &AppState) -> String {
         .clone()
 }
 
+fn fragment_summary(fragment: &ProjectFragment) -> String {
+    let clip_count = fragment.timeline.clips.len();
+    let track_count = fragment.timeline.tracks.len();
+    match fragment.kind {
+        ProjectFragmentKind::Clips => format!(
+            "HiFiShifter: {} clip(s) copied ({} track path(s)). Paste in HiFiShifter.",
+            clip_count, track_count
+        ),
+        ProjectFragmentKind::Tracks => format!(
+            "HiFiShifter: {} track(s) copied ({} clip(s)). Paste in HiFiShifter.",
+            track_count, clip_count
+        ),
+        ProjectFragmentKind::Project => format!(
+            "HiFiShifter: project fragment copied ({} track(s), {} clip(s)). Paste in HiFiShifter.",
+            track_count, clip_count
+        ),
+    }
+}
+
 fn write_fragment(fragment: &ProjectFragment) -> Result<(), String> {
-    system_clipboard::write_bytes(&fragment.encode()?)
+    let summary = fragment_summary(fragment);
+    system_clipboard::write_bytes(&fragment.encode()?, &summary)
 }
 
 fn read_fragment() -> Result<ProjectFragment, String> {

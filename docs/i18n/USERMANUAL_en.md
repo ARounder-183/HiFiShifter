@@ -60,11 +60,12 @@ The automatic backup feature allows you to configure backups for your project fi
 
 ### Cross-Process Copy / Cut / Paste
 
-Structured HiFiShifter clipboard operations are now written by the backend directly to the operating-system clipboard (native private format first, with a text fallback), so they no longer depend on WebView clipboard permissions. The following operations work between two running HiFiShifter processes:
+Structured HiFiShifter clipboard operations are now written by the backend directly to the operating-system clipboard. Binary data is stored in a native private clipboard format, while the normal text slot only receives a short human-readable summary such as `HiFiShifter: 3 clip(s) copied...`. Pasting into a regular text box therefore no longer produces base64 garbage. Readers still understand the legacy text envelope. The following operations work between two running HiFiShifter processes:
 
 - Select clips in the timeline and press `Ctrl + C` (or use the context-menu `Copy`), then press `Ctrl + V` (or `Paste` from the empty track-area context menu) in the other process. Clip automation curves are pasted together with the clips.
 - Right-click a track header and choose `Copy Track` / `Cut Track`; in the other process press `Ctrl + V` or use the empty track-area context menu to paste the complete track group (child tracks, clips and full parameter curves).
 - Parameter-curve copy/paste in the Parameter Editor also uses the backend clipboard and works across processes.
+- Select one or more clips and choose `Edit → Copy Selected Clips to REAPER Clipboard`. This writes REAPERMedia data containing the audio source, position, length, play rate, reverse, fades, mute and MIDI notes; press `Ctrl + V` in REAPER to paste. Clips without a usable source are skipped.
 
 
 The `Edit` menu allows various editing operations. Besides regular track and parameter editing, there are two special items: `Paste Reaper Clipboard Data` and `Paste VocalShifter Clipboard Data`.

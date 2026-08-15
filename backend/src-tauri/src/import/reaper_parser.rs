@@ -667,6 +667,7 @@ fn update_source_paths(data: &mut ReaperData, folder: &Path) {
 fn parse_data_block(block: &Block) -> ReaperData {
     let mut data = ReaperData::default();
     let mut current_track: Option<ReaperTrack> = None;
+    let mut current_track_has_content = false;
     let mut cumulative_track_offset: usize = 0;
     let mut pending_offset: usize = 0;
 
@@ -690,8 +691,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
 
         if block_type.as_deref() == Some("TRACK") {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             let track = parse_track_block(child);
             data.is_track_data = true;
@@ -699,6 +702,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
             data.tracks.push(track);
             cumulative_track_offset += 1;
             current_track = None;
+            current_track_has_content = false;
             continue;
         }
 
@@ -709,6 +713,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                 current_track = Some(ReaperTrack::default());
             }
             current_track.as_mut().unwrap().items.push(item);
+            current_track_has_content = true;
             continue;
         }
 
@@ -725,6 +730,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                     current_track = Some(ReaperTrack::default());
                 }
                 current_track.as_mut().unwrap().envelopes.push(env);
+                current_track_has_content = true;
                 continue;
             }
         }
@@ -737,8 +743,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
             .unwrap_or(false)
         {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             // 解析跳过的轨道数（TRACKSKIP N ...）
             let skip_n = child
@@ -750,12 +758,15 @@ fn parse_data_block(block: &Block) -> ReaperData {
             cumulative_track_offset += skip_n;
             pending_offset = cumulative_track_offset;
             current_track = Some(ReaperTrack::default());
+            current_track_has_content = false;
         }
     }
 
     if let Some(t) = current_track {
-        data.track_offsets.push(pending_offset);
-        data.tracks.push(t);
+        if current_track_has_content {
+            data.track_offsets.push(pending_offset);
+            data.tracks.push(t);
+        }
     }
 
     // 如果顶层没有 track/item，尝试递归查找
@@ -1146,6 +1157,246 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
 
 fn is_envelope_type(s: &str) -> bool {
     ENVELOPE_TYPES.iter().any(|&e| e.eq_ignore_ascii_case(s))
+}
+
+// ---------------------------------------------------------------------------
+// REAPER clipboard serialization
+// ---------------------------------------------------------------------------
+
+fn format_reaper_f64(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let mut text = format!("{:.12}", value);
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn quote_reaper_string(value: &str) -> String {
+    // Double quotes inside a path are sanitized because REAPERMedia has no
+    // reliable escape sequence for them. Backslashes are preserved.
+    let escaped = value.replace('"', "'");
+    format!("\"{}\"", escaped)
+}
+
+fn push_reaper_token(out: &mut Vec<u8>, token: String) {
+    out.extend_from_slice(token.as_bytes());
+    out.push(0);
+}
+
+fn push_reaper_array(out: &mut Vec<u8>, key: &str, values: &[f64]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(|value| format_reaper_f64(*value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_int_array(out: &mut Vec<u8>, key: &str, values: &[i32]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_source(out: &mut Vec<u8>, source: &ReaperSource) {
+    let source_type = source.source_type.to_uppercase();
+
+    if source_type == "SECTION" {
+        push_reaper_token(out, "<SOURCE SECTION".to_string());
+        if let Some(length) = source.section_length_sec {
+            push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(length)));
+        }
+        push_reaper_token(out, format!("MODE {}", source.section_mode));
+        if let Some(start) = source.section_start_sec {
+            push_reaper_token(out, format!("STARTPOS {}", format_reaper_f64(start)));
+        }
+        push_reaper_token(out, "OVERLAP 0.01".to_string());
+
+        let mut inner = source.clone();
+        inner.source_type = "WAVE".to_string();
+        inner.section_mode = 0;
+        inner.section_start_sec = None;
+        inner.section_length_sec = None;
+        inner.midi_source = None;
+        push_reaper_source(out, &inner);
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    if source_type == "MIDI" {
+        push_reaper_token(out, "<SOURCE MIDI".to_string());
+        let ppq = source
+            .midi_source
+            .as_ref()
+            .map(|midi| midi.ticks_per_qn.max(1))
+            .unwrap_or(960);
+        push_reaper_token(out, format!("HASDATA 1 {ppq} QN"));
+        push_reaper_token(out, "CCINTERP 32".to_string());
+        if let Some(igntempo) = source
+            .midi_source
+            .as_ref()
+            .and_then(|midi| midi.igntempo.as_ref())
+        {
+            push_reaper_token(
+                out,
+                format!(
+                    "IGNTEMPO {} {} {} {}",
+                    if igntempo.ignore_project { 1 } else { 0 },
+                    format_reaper_f64(igntempo.tempo),
+                    igntempo.beats,
+                    igntempo.beat_note,
+                ),
+            );
+        } else {
+            push_reaper_token(out, "IGNTEMPO 0 120 4 4".to_string());
+        }
+        if let Some(midi) = source.midi_source.as_ref() {
+            for event in &midi.events {
+                push_reaper_token(
+                    out,
+                    format!(
+                        "E {} {:02X} {:02X} {:02X}",
+                        event.tick_offset, event.status, event.data1, event.data2
+                    ),
+                );
+            }
+        }
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    push_reaper_token(
+        out,
+        format!(
+            "<SOURCE {}",
+            if source_type.is_empty() { "WAVE" } else { &source_type }
+        ),
+    );
+    push_reaper_token(out, format!("FILE {}", quote_reaper_string(&source.file_path)));
+    push_reaper_token(out, ">".to_string());
+}
+
+fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool) {
+    if !is_item_default {
+        push_reaper_token(
+            out,
+            if take.selected {
+                "TAKE SEL".to_string()
+            } else {
+                "TAKE".to_string()
+            },
+        );
+    }
+    push_reaper_token(out, format!("NAME {}", quote_reaper_string(&take.name)));
+    push_reaper_array(
+        out,
+        if is_item_default { "VOLPAN" } else { "TAKEVOLPAN" },
+        &take.vol_pan,
+    );
+    if !is_item_default {
+        push_reaper_array(out, "FADEIN", &take.fade_in);
+        push_reaper_array(out, "FADEOUT", &take.fade_out);
+    }
+    push_reaper_token(out, format!("SOFFS {}", format_reaper_f64(take.s_offs)));
+    push_reaper_array(out, "PLAYRATE", &take.play_rate);
+    push_reaper_token(out, format!("CHANMODE {}", take.chan_mode));
+    if let Some(source) = take.source.as_ref() {
+        push_reaper_source(out, source);
+    }
+}
+
+fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
+    push_reaper_token(out, "<ITEM".to_string());
+    push_reaper_token(out, format!("POSITION {}", format_reaper_f64(item.position)));
+    push_reaper_token(out, format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)));
+    push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length)));
+    push_reaper_token(out, format!("LOOP {}", if item.is_loop { 1 } else { 0 }));
+    push_reaper_token(out, format!("ALLTAKES {}", if item.all_takes { 1 } else { 0 }));
+    push_reaper_array(out, "FADEIN", &item.fade_in);
+    push_reaper_array(out, "FADEOUT", &item.fade_out);
+    push_reaper_int_array(out, "MUTE", &item.mute);
+    push_reaper_token(out, format!("SEL {}", if item.selected { 1 } else { 0 }));
+    push_reaper_take(out, &item.default_take, true);
+    for take in &item.takes {
+        push_reaper_take(out, take, false);
+    }
+    for envelope in &item.envelopes {
+        push_reaper_token(out, format!("<{}", envelope.env_type));
+        if let Some(range) = envelope.seg_range.as_ref() {
+            push_reaper_array(out, "SEG_RANGE", range);
+        }
+        for point in &envelope.points {
+            push_reaper_array(out, "PT", point);
+        }
+        push_reaper_token(out, ">".to_string());
+    }
+    push_reaper_token(out, ">".to_string());
+}
+
+/// Serialize parsed REAPER data into the REAPERMedia clipboard byte format.
+/// `as_track_data = false` writes ITEM + TRACKSKIP blocks; `true` writes
+/// `<TRACK ...>` wrapped track data.
+pub fn serialize_reaper_clipboard(data: &ReaperData, as_track_data: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+
+    let offsets = if data.track_offsets.len() == data.tracks.len() {
+        data.track_offsets.clone()
+    } else {
+        (0..data.tracks.len()).collect::<Vec<_>>()
+    };
+
+    for (index, track) in data.tracks.iter().enumerate() {
+        if as_track_data {
+            push_reaper_token(&mut out, "<TRACK".to_string());
+            push_reaper_token(&mut out, format!("NAME {}", quote_reaper_string(&track.name)));
+            push_reaper_array(&mut out, "VOLPAN", &track.vol_pan);
+            push_reaper_int_array(&mut out, "MUTESOLO", &track.mute_solo);
+            push_reaper_token(&mut out, format!("IPHASE {}", if track.iphase { 1 } else { 0 }));
+        }
+
+        for item in &track.items {
+            push_reaper_item(&mut out, item);
+        }
+        for envelope in &track.envelopes {
+            push_reaper_token(&mut out, format!("<{}", envelope.env_type));
+            for point in &envelope.points {
+                push_reaper_array(&mut out, "PT", point);
+            }
+            push_reaper_token(&mut out, ">".to_string());
+        }
+
+        if as_track_data {
+            push_reaper_token(&mut out, ">".to_string());
+        } else {
+            let current = offsets.get(index).copied().unwrap_or(0);
+            let next = offsets
+                .get(index + 1)
+                .copied()
+                .unwrap_or(current.saturating_add(1));
+            let skip = next.saturating_sub(current).max(1);
+            push_reaper_token(&mut out, format!("TRACKSKIP {skip} 1"));
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

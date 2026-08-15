@@ -727,8 +727,14 @@ pub fn has_timeline_clipboard() -> serde_json::Value {
 // ===================== generic system object clipboard =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn write_system_clipboard_object(payload: String) -> serde_json::Value {
-    match crate::system_clipboard::write_bytes(payload.as_bytes()) {
+pub fn write_system_clipboard_object(
+    payload: String,
+    text_summary: Option<String>,
+) -> serde_json::Value {
+    let summary = text_summary
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
+    match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     }
@@ -1067,6 +1073,14 @@ pub fn import_reaper_project(
     rpp_path: String,
 ) -> serde_json::Value {
     reaper::import_reaper_project(state.inner(), &window, rpp_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_clips_to_reaper_clipboard(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> serde_json::Value {
+    reaper_clipboard::copy_clips_to_reaper_clipboard(&state, clip_ids)
 }
 
 #[tauri::command(rename_all = "camelCase")]

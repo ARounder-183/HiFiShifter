@@ -2,27 +2,21 @@
 //!
 //! WebView clipboard APIs are permission-gated and unreliable on some
 //! platforms, so all structured copy/paste data is written through this
-//! module.  The payload is stored twice:
+//! module.
 //!
-//! 1. As a platform-native custom format (where available).
-//! 2. As a base64 text envelope (`HIFISHIFTER_CLIPBOARD_V1:<base64>`).
+//! The binary payload is stored in a platform-native private clipboard
+//! format.  The normal `text/plain` slot is deliberately *not* used for the
+//! binary payload: instead it receives a short human-readable summary such
+//! as "HiFiShifter: 3 clips copied".  Pasting into a regular text box
+//! therefore never produces base64 garbage.
 //!
-//! Another HiFiShifter process prefers the custom format and falls back to
-//! the text envelope, which makes cross-process copy/paste work on all
-//! supported desktop platforms.
+//! For backwards compatibility, readers still understand the old
+//! `HIFISHIFTER_CLIPBOARD_V1:<base64>` text envelope.
 
 use base64::Engine;
 
 pub const OBJECT_FORMAT: &str = "application/x-hifishifter-object";
 const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
-
-fn encode_text_envelope(bytes: &[u8]) -> String {
-    format!(
-        "{}{}",
-        TEXT_PREFIX,
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
-}
 
 fn decode_text_envelope(text: &str) -> Option<Vec<u8>> {
     let body = text.strip_prefix(TEXT_PREFIX)?;
@@ -34,7 +28,7 @@ fn decode_text_envelope(text: &str) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub fn write_bytes(bytes: &[u8]) -> Result<(), String> {
+pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     use clipboard_win::{raw, register_format, Clipboard};
 
     let _clipboard =
@@ -47,8 +41,7 @@ pub fn write_bytes(bytes: &[u8]) -> Result<(), String> {
             .map_err(|e| format!("clipboard_write_custom_failed: {}", e))?;
     }
 
-    let text = encode_text_envelope(bytes);
-    raw::set_string_with(&text, clipboard_win::options::NoClear)
+    raw::set_string_with(text_summary, clipboard_win::options::NoClear)
         .map_err(|e| format!("clipboard_write_text_failed: {}", e))?;
 
     Ok(())
@@ -87,15 +80,14 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-pub fn write_bytes(bytes: &[u8]) -> Result<(), String> {
+pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::{NSData, NSString};
 
     let pasteboard = NSPasteboard::generalPasteboard();
     let _ = pasteboard.clearContents();
 
-    let text = encode_text_envelope(bytes);
-    let text_ns = NSString::from_str(&text);
+    let text_ns = NSString::from_str(text_summary);
     let text_type = NSString::from_str("public.utf8-plain-text");
     if !pasteboard.setString_forType(&text_ns, &text_type) {
         return Err("clipboard_write_text_failed".to_string());
@@ -138,22 +130,22 @@ fn is_wayland_session() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub fn write_bytes(bytes: &[u8]) -> Result<(), String> {
+pub fn write_bytes(bytes: &[u8], _text_summary: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let text = encode_text_envelope(bytes);
     let is_wayland = is_wayland_session();
 
     let mut child = if is_wayland {
         Command::new("wl-copy")
+            .args(["--type", OBJECT_FORMAT])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
     } else {
         Command::new("xclip")
-            .args(["-selection", "clipboard", "-i"])
+            .args(["-selection", "clipboard", "-target", OBJECT_FORMAT, "-i"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -168,7 +160,7 @@ pub fn write_bytes(bytes: &[u8]) -> Result<(), String> {
         .stdin
         .take()
         .ok_or_else(|| "clipboard_write_failed: no stdin".to_string())?
-        .write_all(text.as_bytes())
+        .write_all(bytes)
         .map_err(|e| format!("clipboard_write_failed: {}", e))?;
 
     let status = child
@@ -186,25 +178,35 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
     use std::process::Command;
 
     let is_wayland = is_wayland_session();
-    let output = if is_wayland {
-        Command::new("wl-paste").args(["--no-newline"]).output()
+
+    let custom = if is_wayland {
+        Command::new("wl-paste")
+            .args(["--type", OBJECT_FORMAT])
+            .output()
     } else {
         Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
+            .args(["-selection", "clipboard", "-target", OBJECT_FORMAT, "-o"])
             .output()
     };
 
-    let output = output.map_err(|e| {
-        let tool = if is_wayland { "wl-paste" } else { "xclip" };
-        format!("clipboard_read_failed: failed to run {}: {}", tool, e)
-    })?;
-
-    if !output.status.success() {
-        return Ok(None);
+    if let Ok(output) = custom {
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok(Some(output.stdout));
+        }
     }
-    Ok(decode_text_envelope(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+
+    let text = if is_wayland {
+        Command::new("wl-paste").args(["--no-newline"]).output()
+    } else {
+        Command::new("xclip").args(["-selection", "clipboard", "-o"]).output()
+    };
+
+    match text {
+        Ok(output) if output.status.success() => {
+            Ok(decode_text_envelope(String::from_utf8_lossy(&output.stdout).trim()))
+        }
+        _ => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +214,7 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-pub fn write_bytes(_bytes: &[u8]) -> Result<(), String> {
+pub fn write_bytes(_bytes: &[u8], _text_summary: &str) -> Result<(), String> {
     Err("clipboard_unsupported_platform".to_string())
 }
 

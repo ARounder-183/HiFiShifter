@@ -126,6 +126,7 @@ export const webApi = {
     selectClip: timelineApi.selectClip,
     copyTimelineClips: timelineApi.copyTimelineClips,
     copyTimelineTracks: timelineApi.copyTimelineTracks,
+    copyClipsToReaperClipboard: timelineApi.copyClipsToReaperClipboard,
     pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
     hasTimelineClipboard: timelineApi.hasTimelineClipboard,
 
