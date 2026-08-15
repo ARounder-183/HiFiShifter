@@ -98,7 +98,7 @@ function context(
     };
 }
 
-// 网格吸附：1/4 = 0.5s @120BPM。
+// 吸附到网格：1/4 = 0.5s @120BPM。
 assertNear(snapToConfiguredGrid(0.51, null, 1, 120, baseSettings), 0.5, "grid snap quarter");
 // Swing：奇数格延迟 25%（100% → 0.25s）。
 assertNear(
@@ -128,7 +128,7 @@ assertNear(
     const result = snapTimelinePosition(ctx, 0.53);
     assertNear(result.sec, 0.53, "no snap outside threshold");
 }
-// 任意距离网格吸附。
+// 任意距离吸附到网格。
 {
     const ctx = context({ snapMediaItemsToGrid: true, snapToGridAnyDistance: true });
     assertNear(snapTimelinePosition(ctx, 0.49).sec, 0.5, "any-distance grid snap");
@@ -161,7 +161,7 @@ assertNear(
         snapMediaItemsToGrid: true,
         snapMediaItemsToSelectionMarkersCursor: false,
         gridVisible: false,
-        gridSnapFollowsGridVisibility: true,
+        snapFollowsGridVisibility: true,
         snapDistancePx: 40,
         playheadSec: 10,
     });

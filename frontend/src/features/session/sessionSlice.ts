@@ -175,7 +175,7 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         snapSelectionToGrid: true,
         snapCursorToSelectionMarkersCursor: true,
         snapCursorToGrid: true,
-        gridSnapFollowsGridVisibility: true,
+        snapFollowsGridVisibility: true,
         snapToGridAnyDistance: false,
         useIndependentSnapSpacing: false,
         snapSpacing: "1/4",
@@ -236,9 +236,9 @@ function normalizeTimelineSnapSettings(
             base.snapCursorToSelectionMarkersCursor,
         ),
         snapCursorToGrid: bool(patch.snapCursorToGrid, base.snapCursorToGrid),
-        gridSnapFollowsGridVisibility: bool(
-            patch.gridSnapFollowsGridVisibility,
-            base.gridSnapFollowsGridVisibility,
+        snapFollowsGridVisibility: bool(
+            patch.snapFollowsGridVisibility,
+            base.snapFollowsGridVisibility,
         ),
         snapToGridAnyDistance: bool(
             patch.snapToGridAnyDistance,
@@ -335,9 +335,9 @@ export interface SessionState {
     splitTransitionDurationPercent: number;
     splitTransitionCurve: FadeCurveType;
     splitTransitionOverlapCrossfade: "auto" | "always";
-    /** 网格吸附 */
-    gridSnapEnabled: boolean;
-    /** 完整的时间轴吸附/网格设置（gridSnapEnabled 仅作为旧字段镜像 enabled）。 */
+    /** 吸附总开关（兼容旧字段 gridSnapEnabled）。 */
+    snapEnabled: boolean;
+    /** 完整的时间轴吸附/网格设置（snapEnabled 仅作为旧字段镜像 enabled）。 */
     timelineSnap: TimelineSnapSettings;
     /**
      * Tempo Map 数据（null = 无 Tempo Map，使用工程全局 BPM/拍号/音阶）。
@@ -1187,7 +1187,7 @@ const initialState: SessionState = {
     splitTransitionDurationPercent: 1,
     splitTransitionCurve: "sine" as FadeCurveType,
     splitTransitionOverlapCrossfade: "auto",
-    gridSnapEnabled: true,
+    snapEnabled: true,
     timelineSnap: createDefaultTimelineSnapSettings(),
     tempoMap: null,
     tempoMapVisible: true,
@@ -1524,10 +1524,10 @@ const sessionSlice = createSlice({
         ) {
             state.splitTransitionOverlapCrossfade = action.payload;
         },
-        toggleGridSnap(state) {
+        toggleSnap(state) {
             const next = !state.timelineSnap.enabled;
             state.timelineSnap.enabled = next;
-            state.gridSnapEnabled = next;
+            state.snapEnabled = next;
         },
         setTimelineSnapSettings(
             state,
@@ -1537,7 +1537,7 @@ const sessionSlice = createSlice({
                 state.timelineSnap,
                 action.payload,
             );
-            state.gridSnapEnabled = state.timelineSnap.enabled;
+            state.snapEnabled = state.timelineSnap.enabled;
         },
         togglePitchSnap(state) {
             state.pitchSnapEnabled = !state.pitchSnapEnabled;
@@ -2200,14 +2200,16 @@ const sessionSlice = createSlice({
                     (s as any).splitTransitionOverlapCrossfade === "always"
                         ? "always"
                         : "auto";
-                state.gridSnapEnabled = s.gridSnap;
+                const loadedSnapEnabled =
+                    (s as any).snapEnabled ?? (s as any).gridSnap ?? true;
+                state.snapEnabled = loadedSnapEnabled;
                 if ((s as any).timelineSnap && typeof (s as any).timelineSnap === "object") {
                     state.timelineSnap = normalizeTimelineSnapSettings(
                         createDefaultTimelineSnapSettings(),
                         (s as any).timelineSnap as Partial<TimelineSnapSettings>,
                     );
-                    state.timelineSnap.enabled = Boolean(s.gridSnap);
-                    state.gridSnapEnabled = state.timelineSnap.enabled;
+                    state.timelineSnap.enabled = Boolean(loadedSnapEnabled);
+                    state.snapEnabled = state.timelineSnap.enabled;
                 }
                 if ((s as any).tempoMapVisible != null) {
                     state.tempoMapVisible = Boolean((s as any).tempoMapVisible);
@@ -3902,7 +3904,7 @@ export const {
     setSplitTransitionDurationPercent,
     setSplitTransitionCurve,
     setSplitTransitionOverlapCrossfade,
-    toggleGridSnap,
+    toggleSnap,
     setTimelineSnapSettings,
     setTempoMap,
     setTempoMapVisible,

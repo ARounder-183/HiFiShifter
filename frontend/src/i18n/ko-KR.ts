@@ -258,7 +258,7 @@ export const koKR = {
     output_path: "출력 경로",
     hints: "힌트",
     hint_drag_clip:
-        "타임라인의 클립을 드래그하여 시작 위치 이동 (기본은 그리드 스냅, Shift를 누르면 자유 이동)",
+        "타임라인의 클립을 드래그하여 시작 위치 이동 (기본은 스냅, Shift를 누르면 자유 이동)",
     hint_add_point: "파라미터 패널을 더블 클릭하여 포인트 추가",
     hint_drag_point: "포인트를 드래그하여 커브 편집",
     hint_drop_audio: "오디오 파일을 드롭하여 가져오기 및 분석",
@@ -536,7 +536,7 @@ export const koKR = {
     kb_pianoroll_vibrato_drag_freq_decrease: "비브라토 드래그: 주파수 감소",
     kb_modifier_slip_edit: "Slip 편집 (클립 드래그 중 누르기)",
     kb_modifier_stretch: "타임 스트레치 (엣지 드래그 중 누르기)",
-    kb_modifier_no_snap: "드래그 중 그리드 스냅을 전환합니다 (누르면 현재 그리드 스냅을 반전)",
+    kb_modifier_no_snap: "드래그 중 스냅을 전환합니다 (누르면 현재 스냅을 반전)",
     kb_modifier_copy_drag: "복사 드래그 (클립 드래그 중 누르기)",
     kb_modifier_horizontal_zoom: "수평 줌 (누른 채 스크롤)",
     kb_modifier_pr_vzoom: "수직 줌 (누른 채 스크롤)",
@@ -654,7 +654,7 @@ export const koKR = {
     split_transition_overlap_crossfade_always: "항상 적용",
     split_transition_overlap_hint:
         "확장 및 겹치기 모드는 앞 클립을 뒤로 X초, 뒤 클립을 앞으로 X초 늘려 2X초의 겹치는 구간을 만듭니다. 연장 범위는 클립 원본 소재의 실제 길이 범위 안으로 제한됩니다.",
-    grid_snap: "그리드 스냅",
+    snap: "스냅",
     snap_grid_settings_title: "스냅/그리드 설정",
     snap_section_grid: "그리드",
     snap_grid_show_lines: "그리드 선 표시",
@@ -673,10 +673,10 @@ export const koKR = {
     snap_media_items: "미디어 항목",
     snap_selection: "선택 영역",
     snap_cursor: "커서",
-    snap_section_grid_behavior: "그리드 스냅 연동",
-    snap_follow_grid_visibility: "그리드 표시 설정 따르기",
+    snap_section_grid_behavior: "스냅 동작",
+    snap_follow_grid_visibility: "스냅 설정을 그리드 표시에 따르기",
     snap_any_distance: "임의 거리에서 그리드로 스냅",
-    snap_independent_spacing: "독립 그리드 스냅 간격 사용",
+    snap_independent_spacing: "독립 스냅 간격 사용",
     snap_spacing_min_px: "스냅 간격 최소값",
     snap_section_interactions: "항목 및 특수 요소 상호작용",
     snap_item_start: "항목 시작점 스냅",
@@ -708,7 +708,7 @@ export const koKR = {
     grid_note_dotted: "점음표",
     grid_note_triplet: "셋잇단",
 
-    // 그리드 스냅 음표 이름 (컨텍스트 메뉴)
+    // 스냅 간격용 그리드 음표 이름 (컨텍스트 메뉴)
     grid_snap_whole: "온음표",
     grid_snap_half: "2분음표",
     grid_snap_quarter: "4분음표",

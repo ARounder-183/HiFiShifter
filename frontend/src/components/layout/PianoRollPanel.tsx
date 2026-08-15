@@ -4611,7 +4611,7 @@ export const PianoRollPanel: React.FC = () => {
                         tempoMapVisible={s.tempoMapVisible}
                         projectSec={dynamicProjectSec}
                         grid={s.grid}
-                        gridSnapEnabled={s.gridSnapEnabled}
+                        snapEnabled={s.snapEnabled}
                         timelineSnap={s.timelineSnap}
                         projectScale={effectiveProjectScale}
                         projectScaleName={

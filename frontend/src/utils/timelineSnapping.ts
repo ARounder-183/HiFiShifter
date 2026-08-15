@@ -2,7 +2,7 @@
  * 时间轴吸附引擎（对标 REAPER Snap/Grid Settings 的行为矩阵）。
  *
  * 设计目标：
- * - 网格吸附与网格显示使用同一套 Swing/间距规则，保证“看到哪里、吸到哪里”。
+ * - 吸附规则与网格显示使用同一套 Swing/间距规则，保证“看到哪里、吸到哪里”。
  * - 候选目标可组合：网格、媒体项（Clip）边缘、选区边缘、播放光标、采样率边界。
  * - 所有候选按像素距离选择最近者；`snapToGridAnyDistance` 会让网格无条件胜出。
  * - `snapRelativeToGrid` 保留拖动起点相对网格的偏移（REAPER 语义）。
@@ -82,7 +82,7 @@ function snapSpacingGrid(settings: TimelineSnapSettings, grid: GridSize): GridSi
     return settings.useIndependentSnapSpacing ? settings.snapSpacing : grid;
 }
 
-/** 当前生效的网格吸附步长（拍）。 */
+/** 当前生效的吸附步长（拍）。 */
 export function snapStepBeats(settings: TimelineSnapSettings, grid: GridSize): number {
     return Math.max(1e-9, gridStepBeats(snapSpacingGrid(settings, grid)));
 }
@@ -186,7 +186,7 @@ function swingGridCandidatesAround(
     return deduped;
 }
 
-/** 吸附到（可选 Swing）网格；关闭 Swing 时等价于原有网格吸附。 */
+/** 吸附到（可选 Swing）网格；关闭 Swing 时等价于普通网格对齐。 */
 export function snapToConfiguredGrid(
     rawSec: number,
     tempoMap: TempoMap | null,
@@ -221,7 +221,7 @@ export function snapToConfiguredGrid(
  */
 function collectGridCandidates(ctx: TimelineSnapContext, rawSec: number): SnapCandidate[] {
     const { settings } = ctx;
-    if (!settings.gridVisible && settings.gridSnapFollowsGridVisibility) return [];
+    if (!settings.gridVisible && settings.snapFollowsGridVisibility) return [];
     const step = snapStepBeatsForZoom(
         settings,
         ctx.grid,

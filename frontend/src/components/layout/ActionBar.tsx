@@ -23,7 +23,7 @@ import {
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
     toggleSplitTransition,
-    toggleGridSnap,
+    toggleSnap,
     togglePlayheadZoom,
     toggleAutoScroll,
     toggleIgnoreGrouping,
@@ -63,7 +63,7 @@ export function ActionBar() {
     const tAny = t as (key: string) => string;
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
-    const [snapGridOpen, setSnapGridOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
 
@@ -784,20 +784,20 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                {/* Grid Snap */}
+                {/* Snap */}
                 <IconButton
                     size="1"
-                    variant={s.gridSnapEnabled ? "solid" : "ghost"}
+                    variant={s.snapEnabled ? "solid" : "ghost"}
                     color="gray"
-                    data-tooltip={tAny("grid_snap")}
+                    data-tooltip={tAny("snap")}
                     tabIndex={-1}
                     onClick={() => {
-                        dispatch(toggleGridSnap());
+                        dispatch(toggleSnap());
                         void dispatch(persistUiSettings());
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();
-                        setSnapGridOpen(true);
+                        setSnapSettingsOpen(true);
                     }}
                 >
                     <svg
@@ -1017,11 +1017,11 @@ export function ActionBar() {
                 <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
             )}
 
-            {snapGridOpen && (
-                <SnapGridSettingsDialog open={snapGridOpen} onOpenChange={setSnapGridOpen} />
+            {snapSettingsOpen && (
+                <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
             )}
 
-            {/* Grid Snap Context Menu removed: right-click opens the settings dialog above. */}
+            {/* Snap Context Menu removed: right-click opens the settings dialog above. */}
         </Flex>
     );
 }

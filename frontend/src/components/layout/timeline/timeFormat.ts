@@ -545,7 +545,7 @@ export function buildRulerTicks(args: {
     }
 
     // ── Tempo Map 路径：逐段局部对齐生成不等距刻度 ─────────────────────
-    // 每个变化点处重新对齐小节/节拍（与 barBeatAtSec、背景网格、网格吸附一致），
+    // 每个变化点处重新对齐小节/节拍（与 barBeatAtSec、背景网格、吸附规则一致），
     // 因此刻度必须在每段内以段起点为原点等距生成（段内拍 = k*step，按该段 BPM 折算秒）。
     const visStartSec = Math.max(0, leftPx / Math.max(1e-9, pxPerSec));
     const visEndSec = Math.min(projectSec, rightPx / Math.max(1e-9, pxPerSec));

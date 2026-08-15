@@ -27,7 +27,7 @@ import {
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatCursorTime } from "./timeFormat";
-import { snapStepBeatsForZoom, snapToConfiguredGrid } from "../../../utils/timelineSnapping";
+import { snapTimelinePosition } from "../../../utils/timelineSnapping";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
@@ -67,7 +67,7 @@ interface TempoMapRulerRowProps {
     viewportWidth: number;
     projectSec: number;
     grid: GridSize;
-    gridSnapEnabled: boolean;
+    snapEnabled: boolean;
     /** 完整吸附/网格设置（与工具栏一致）。 */
     snapSettings?: TimelineSnapSettings;
     /** 工程基准 BPM / 每小节拍数 / 拍号分母（无 Tempo Map 时新建首点用）。 */
@@ -454,7 +454,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     viewportWidth,
     projectSec,
     grid,
-    gridSnapEnabled,
+    snapEnabled,
     snapSettings,
     fallbackBpm,
     fallbackBeatsPerBar,
@@ -499,6 +499,22 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         dialogStateRef.current = dialogState;
     }, [dialogState]);
     const dialogSeqRef = useRef(0);
+
+    // Tempo Map 标签拖动使用与 Clip 相同的吸附候选/阈值逻辑，因此直接读取
+    // 当前时间轴中的 Clip / 轨道 / 选区 / 播放头作为候选目标。
+    const timelineClips = useAppSelector((state) => state.session.clips);
+    const timelineTracks = useAppSelector((state) => state.session.tracks);
+    const selectedClipIds = useAppSelector((state) =>
+        state.session.multiSelectedClipIds.length > 0
+            ? state.session.multiSelectedClipIds
+            : state.session.selectedClipId
+              ? [state.session.selectedClipId]
+              : [],
+    );
+    const playheadSec = useAppSelector((state) => state.session.playheadSec);
+    const noSnapKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipNoSnap"),
+    );
 
     // 编辑对话框打开/关闭时通知父级（用于抑制标尺悬浮时间提示）。
     useEffect(() => {
@@ -572,20 +588,44 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [fallback],
     );
 
-    /** 按吸附/网格设置对 Tempo Map 位置进行吸附（与时间轴剪辑共用 Swing 规则）。 */
+    /** 使用与 Clip 完全相同的吸附引擎对 Tempo Map 位置进行吸附。 */
     const snapTempoPosition = useCallback(
-        (sec: number, base: TempoMap | null, baseBpm: number) => {
-            if (!gridSnapEnabled || !snapSettings?.enabled) return sec;
-            if (
-                snapSettings.gridSnapFollowsGridVisibility &&
-                !snapSettings.gridVisible
-            ) {
-                return sec;
-            }
-            const step = snapStepBeatsForZoom(snapSettings, grid, baseBpm, pxPerSec, base, sec);
-            return snapToConfiguredGrid(sec, base, step, baseBpm, snapSettings);
+        (sec: number, base: TempoMap | null, baseBpm: number, originSec?: number) => {
+            if (!snapEnabled || !snapSettings?.enabled) return sec;
+            const beatsPerBar =
+                base && base.points.length > 0
+                    ? (base.points[0].timeSignature?.numerator ?? fallbackBeatsPerBar)
+                    : fallbackBeatsPerBar;
+            return snapTimelinePosition(
+                {
+                    settings: snapSettings,
+                    grid,
+                    bpm: baseBpm,
+                    beatsPerBar,
+                    tempoMap: base,
+                    pxPerSec,
+                    clips: timelineClips,
+                    tracks: timelineTracks,
+                    selectedClipIds,
+                    playheadSec,
+                    object: "mediaItem",
+                    originSec,
+                    anchorTrackId: null,
+                },
+                sec,
+            ).sec;
         },
-        [gridSnapEnabled, snapSettings, grid, pxPerSec],
+        [
+            snapEnabled,
+            snapSettings,
+            grid,
+            fallbackBeatsPerBar,
+            pxPerSec,
+            timelineClips,
+            timelineTracks,
+            selectedClipIds,
+            playheadSec,
+        ],
     );
 
     /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
@@ -631,9 +671,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 新建变化点（暂存，不提交）。
         const base = tempoMap ?? null;
         const mapFallback = baseFallbackOf(base);
-        // 与双击新增一致：网格吸附开启时吸附到网格线。
+        // 与双击新增一致：吸附开启时使用 Clip 吸附规则。
         let sec = positionSec;
-        if (gridSnapEnabled && base) {
+        if (snapEnabled && base) {
             sec = snapTempoPosition(positionSec, base, mapFallback.bpm);
         }
         const { map, point } = createTempoPointAt(base, sec, mapFallback, {
@@ -653,7 +693,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     }, [
         editRequest,
         tempoMap,
-        gridSnapEnabled,
+        snapEnabled,
         snapTempoPosition,
         baseFallbackOf,
         projectScale,
@@ -914,7 +954,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             let sec = Math.max(0, (e.clientX - bounds.left) / Math.max(1e-9, pxPerSec));
             const base = tempoMap ?? null;
             const mapFallback = baseFallbackOf(base);
-            if (gridSnapEnabled) {
+            if (snapEnabled) {
                 sec = snapTempoPosition(sec, base, mapFallback.bpm);
             }
             const { map, point } = createTempoPointAt(base, sec, mapFallback, {
@@ -940,7 +980,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [
             tempoMap,
             pxPerSec,
-            gridSnapEnabled,
+            snapEnabled,
             snapTempoPosition,
             baseFallbackOf,
             projectScale,
@@ -979,10 +1019,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const drag = dragRef.current;
             if (!drag || !tempoMap) return;
             const dx = e.clientX - drag.startClientX;
-            let sec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
+            const rawSec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
             const mapFallback = baseFallbackOf(tempoMap);
-            if (gridSnapEnabled) {
-                sec = snapTempoPosition(sec, tempoMap, mapFallback.bpm);
+            let sec = rawSec;
+            if (snapEnabled && !isModifierActive(noSnapKb, e)) {
+                sec = snapTempoPosition(rawSec, tempoMap, mapFallback.bpm, drag.startSec);
             }
             // 不与其它点重叠、不越过相邻点、不越过工程末尾：
             // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。
@@ -1019,7 +1060,18 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
         };
-    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, snapTempoPosition, baseFallbackOf, onChange, commitMap, projectSec]);
+    }, [
+        draggingId,
+        tempoMap,
+        pxPerSec,
+        snapEnabled,
+        noSnapKb,
+        snapTempoPosition,
+        baseFallbackOf,
+        onChange,
+        commitMap,
+        projectSec,
+    ]);
 
     // ── 可见性计算 ──
     const visibleState = useMemo(() => {

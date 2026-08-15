@@ -460,7 +460,7 @@ export const jaJP = {
     kb_pianoroll_vibrato_drag_freq_decrease: "ビブラートドラッグ：周波数を減少",
     kb_modifier_slip_edit: "Slip 編集（クリップドラッグ中に押す）",
     kb_modifier_stretch: "タイムストレッチ（エッジドラッグ中に押す）",
-    kb_modifier_no_snap: "ドラッグ中にグリッド吸着を切り替えます（押すと現在のグリッド吸着を反転）",
+    kb_modifier_no_snap: "ドラッグ中にスナップを切り替えます（押すと現在のスナップを反転）",
     kb_modifier_copy_drag: "コピードラッグ（クリップドラッグ中に押す）",
     kb_modifier_horizontal_zoom: "水平ズーム（押しながらスクロール）",
     kb_modifier_pr_vzoom: "垂直ズーム（押しながらスクロール）",
@@ -580,7 +580,7 @@ export const jaJP = {
     split_transition_overlap_crossfade_always: "常に適用",
     split_transition_overlap_hint:
         "拡張オーバーラップでは、前のクリップを後方へ X 秒、後ろのクリップを前方へ X 秒延長して 2X 秒の重なりを作ります。延長範囲はクリップの元素材の実際の長さの範囲内に制限されます。",
-    grid_snap: "グリッドスナップ",
+    snap: "スナップ",
     snap_grid_settings_title: "スナップ/グリッド設定",
     snap_section_grid: "グリッド",
     snap_grid_show_lines: "グリッド線を表示",
@@ -599,8 +599,8 @@ export const jaJP = {
     snap_media_items: "メディアアイテム",
     snap_selection: "選択範囲",
     snap_cursor: "カーソル",
-    snap_section_grid_behavior: "グリッドスナップ連動",
-    snap_follow_grid_visibility: "グリッド表示に追従",
+    snap_section_grid_behavior: "スナップ動作",
+    snap_follow_grid_visibility: "スナップ設定をグリッド表示に追従",
     snap_any_distance: "任意の距離でグリッドにスナップ",
     snap_independent_spacing: "独立したスナップ間隔を使用",
     snap_spacing_min_px: "スナップ間隔の最小値",
@@ -634,7 +634,7 @@ export const jaJP = {
     grid_note_dotted: "付点",
     grid_note_triplet: "三連符",
 
-    // グリッドスナップ音符名（コンテキストメニュー）
+    // スナップ間隔用のグリッド音符名（コンテキストメニュー）
     grid_snap_whole: "全音符",
     grid_snap_half: "2分音符",
     grid_snap_quarter: "4分音符",

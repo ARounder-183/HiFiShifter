@@ -369,8 +369,8 @@ export function useEditDrag(deps: {
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** 忽略编组 */
     ignoreGrouping: boolean;
     /** modifier.paramFineAdjust 绑定 */
@@ -385,7 +385,7 @@ export function useEditDrag(deps: {
         snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         ignoreGrouping,
         paramFineAdjustKb,
     } = deps;
@@ -528,7 +528,7 @@ export function useEditDrag(deps: {
                     drag.type === "stretch_left" ||
                     drag.type === "stretch_right";
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
-                const effectiveSnap = gridSnapEnabled && !noSnapActive;
+                const effectiveSnap = snapEnabled && !noSnapActive;
                 if (shouldSnap && effectiveSnap) {
                     const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
                     beat = snapTimeline(beat, "mediaItem", {

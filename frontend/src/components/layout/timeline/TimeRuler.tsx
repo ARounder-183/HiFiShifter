@@ -515,7 +515,7 @@ export const TimeRuler: React.FC<{
     tempoMapVisible?: boolean;
     projectSec?: number;
     grid?: GridSize;
-    gridSnapEnabled?: boolean;
+    snapEnabled?: boolean;
     timelineSnap?: import("../../../features/session/sessionTypes").TimelineSnapSettings;
     projectScale?: ScaleLike | null;
     projectScaleName?: string;
@@ -552,7 +552,7 @@ export const TimeRuler: React.FC<{
     tempoMapVisible = true,
     projectSec = 0,
     grid = "1/4",
-    gridSnapEnabled = true,
+    snapEnabled = true,
     timelineSnap,
     projectScale = null,
     projectScaleName,
@@ -834,7 +834,7 @@ export const TimeRuler: React.FC<{
                     viewportWidth={viewportWidth ?? 0}
                     projectSec={projectSec}
                     grid={grid}
-                    gridSnapEnabled={gridSnapEnabled}
+                    snapEnabled={snapEnabled}
                     snapSettings={timelineSnap}
                     fallbackBpm={timeContext.bpm}
                     fallbackBeatsPerBar={timeContext.beatsPerBar}

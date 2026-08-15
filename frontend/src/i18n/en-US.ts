@@ -456,7 +456,7 @@ export const enUS = {
     kb_pianoroll_vibrato_drag_freq_decrease: "Vibrato Drag: Decrease Frequency",
     kb_modifier_slip_edit: "Slip Edit (hold while dragging clip)",
     kb_modifier_stretch: "Time Stretch (hold while dragging edge)",
-    kb_modifier_no_snap: "Toggle grid snap while dragging (hold to invert current grid snap)",
+    kb_modifier_no_snap: "Toggle snap while dragging (hold to invert current snap)",
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip)",
     kb_modifier_horizontal_zoom: "Horizontal Zoom (hold + scroll)",
     kb_modifier_pr_vzoom: "Vertical Zoom (hold + scroll)",
@@ -574,7 +574,7 @@ export const enUS = {
     split_transition_overlap_crossfade_always: "Always Apply",
     split_transition_overlap_hint:
         "Extend & Overlap moves the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. Extensions are clamped to the clip source's actual length.",
-    grid_snap: "Grid Snap",
+    snap: "Snap",
     snap_grid_settings_title: "Snap/Grid Settings",
     snap_section_grid: "Grid",
     snap_grid_show_lines: "Show grid lines",
@@ -593,10 +593,10 @@ export const enUS = {
     snap_media_items: "Media items",
     snap_selection: "Selection",
     snap_cursor: "Cursor",
-    snap_section_grid_behavior: "Grid Snap Behavior",
-    snap_follow_grid_visibility: "Grid snap settings follow grid visibility",
+    snap_section_grid_behavior: "Snap Behavior",
+    snap_follow_grid_visibility: "Snap settings follow grid visibility",
     snap_any_distance: "Snap to grid at any distance",
-    snap_independent_spacing: "Use independent grid snap spacing",
+    snap_independent_spacing: "Use independent snap spacing",
     snap_spacing_min_px: "Snap spacing min.",
     snap_section_interactions: "Item & Special Interactions",
     snap_item_start: "Snap item start",
@@ -628,7 +628,7 @@ export const enUS = {
     grid_note_dotted: "Dotted",
     grid_note_triplet: "Triplet",
 
-    // Grid snap note names (context menu)
+    // Grid note names for snap spacing (context menu)
     grid_snap_whole: "Whole Note",
     grid_snap_half: "Half Note",
     grid_snap_quarter: "Quarter Note",

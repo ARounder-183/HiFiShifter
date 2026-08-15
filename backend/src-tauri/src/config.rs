@@ -35,8 +35,8 @@ pub struct TimelineSnapSettings {
     pub snap_cursor_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
     pub snap_cursor_to_grid: bool,
-    #[serde(default = "default_true")]
-    pub grid_snap_follows_grid_visibility: bool,
+    #[serde(default = "default_true", alias = "gridSnapFollowsGridVisibility", alias = "grid_snap_follows_grid_visibility")]
+    pub snap_follows_grid_visibility: bool,
     #[serde(default)]
     pub snap_to_grid_any_distance: bool,
     #[serde(default)]
@@ -92,7 +92,7 @@ impl Default for TimelineSnapSettings {
             snap_selection_to_grid: true,
             snap_cursor_to_selection_markers_cursor: true,
             snap_cursor_to_grid: true,
-            grid_snap_follows_grid_visibility: true,
+            snap_follows_grid_visibility: true,
             snap_to_grid_any_distance: false,
             use_independent_snap_spacing: false,
             snap_spacing: default_grid_size(),
@@ -184,8 +184,8 @@ pub struct UiSettings {
     pub split_transition_curve: String,
     #[serde(default = "default_split_transition_overlap_crossfade")]
     pub split_transition_overlap_crossfade: String,
-    #[serde(default = "default_true")]
-    pub grid_snap: bool,
+    #[serde(default = "default_true", alias = "gridSnap", alias = "grid_snap")]
+    pub snap_enabled: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
     /// 完整时间轴吸附/网格设置。
@@ -482,7 +482,7 @@ impl Default for UiSettings {
             split_transition_duration_percent: default_split_transition_duration_percent(),
             split_transition_curve: default_split_transition_curve(),
             split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
-            grid_snap: true,
+            snap_enabled: true,
             grid_size: default_grid_size(),
             timeline_snap: TimelineSnapSettings::default(),
             tempo_map_visible: true,

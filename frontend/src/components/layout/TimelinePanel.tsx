@@ -715,7 +715,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled: s.timelineSnap.enabled,
+        snapEnabled: s.timelineSnap.enabled,
         ignoreGrouping,
         paramFineAdjustKb,
     });
@@ -750,7 +750,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled: s.timelineSnap.enabled,
+        snapEnabled: s.timelineSnap.enabled,
         copyDragKb,
         autoCrossfadeEnabled: s.autoCrossfadeEnabled,
         ignoreGrouping,
@@ -1134,7 +1134,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     tempoMapVisible={s.tempoMapVisible}
                     projectSec={dynamicProjectSec}
                     grid={s.grid}
-                    gridSnapEnabled={s.gridSnapEnabled}
+                    snapEnabled={s.snapEnabled}
                     timelineSnap={s.timelineSnap}
                     projectScale={projectScale}
                     projectScaleName={

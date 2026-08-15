@@ -119,7 +119,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
-    const [snapGridSettingsOpen, setSnapGridSettingsOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
@@ -768,7 +768,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => setSnapGridSettingsOpen(true)}>
+                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
                         {tAny("snap_grid_settings_title")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
@@ -1090,8 +1090,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             <SnapGridSettingsDialog
-                open={snapGridSettingsOpen}
-                onOpenChange={setSnapGridSettingsOpen}
+                open={snapSettingsOpen}
+                onOpenChange={setSnapSettingsOpen}
             />
 
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />

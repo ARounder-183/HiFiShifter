@@ -75,8 +75,8 @@ export interface TimelineSnapSettings {
     snapCursorToGrid: boolean;
 
     // ── Grid snap behavior ──
-    /** 网格吸附跟随网格显示状态。 */
-    gridSnapFollowsGridVisibility: boolean;
+    /** 吸附设置跟随网格显示状态。 */
+    snapFollowsGridVisibility: boolean;
     /** 任意距离吸附网格（激进模式）。 */
     snapToGridAnyDistance: boolean;
     /** 使用独立于显示网格的吸附间距。 */

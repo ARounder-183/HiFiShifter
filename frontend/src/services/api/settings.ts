@@ -12,7 +12,7 @@ export interface UiSettings {
     splitTransitionDurationPercent?: number;
     splitTransitionCurve?: string;
     splitTransitionOverlapCrossfade?: "auto" | "always";
-    gridSnap: boolean;
+    snapEnabled: boolean;
     gridSize?: string;
     timelineSnap?: TimelineSnapSettings;
     /** Tempo Map 标尺行可见性（默认开启）。 */

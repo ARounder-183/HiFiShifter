@@ -391,9 +391,9 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                         </Text>
                         <Flex align="center" gap="2">
                             <Checkbox
-                                checked={snap.gridSnapFollowsGridVisibility}
+                                checked={snap.snapFollowsGridVisibility}
                                 onCheckedChange={(v) => {
-                                    patch({ gridSnapFollowsGridVisibility: Boolean(v) });
+                                    patch({ snapFollowsGridVisibility: Boolean(v) });
                                     persist();
                                 }}
                             />

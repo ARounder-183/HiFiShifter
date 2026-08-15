@@ -58,7 +58,7 @@ type TimelineSessionSlice = Pick<
     | "clipFormantToolWindow"
     | "customScalePresets"
     | "grid"
-    | "gridSnapEnabled"
+    | "snapEnabled"
     | "timelineSnap"
     | "paramEditorSyncTimeline"
     | "paramEditorTimelineClickSelectTrackEnabled"
@@ -226,7 +226,7 @@ export function useTimelineState(): TimelineStateResult {
             clipFormantToolWindow: state.session.clipFormantToolWindow,
             customScalePresets: state.session.customScalePresets,
             grid: state.session.grid,
-            gridSnapEnabled: state.session.gridSnapEnabled,
+            snapEnabled: state.session.snapEnabled,
             timelineSnap: state.session.timelineSnap,
             playheadSec: state.session.playheadSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,

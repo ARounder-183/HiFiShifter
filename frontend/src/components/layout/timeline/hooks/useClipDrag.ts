@@ -107,8 +107,8 @@ export function useClipDrag(deps: {
     slipEditKb: Keybinding;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** modifier.clipCopyDrag 绑定 */
     copyDragKb: Keybinding;
     /** 自动交叉淡入淡出 */
@@ -132,13 +132,13 @@ export function useClipDrag(deps: {
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         copyDragKb,
         autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick,
     } = deps;
-    void gridSnapEnabled;
+    void snapEnabled;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);
@@ -322,7 +322,7 @@ export function useClipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
             const noSnapActive = isModifierActive(noSnapKb, ev);
-            const effectiveSnap = gridSnapEnabled && !noSnapActive;
+            const effectiveSnap = snapEnabled && !noSnapActive;
             if (effectiveSnap) {
                 nextStart = snapTimeline(nextStart, "mediaItem", {
                     originSec: drag.initialAnchorstartSec,
