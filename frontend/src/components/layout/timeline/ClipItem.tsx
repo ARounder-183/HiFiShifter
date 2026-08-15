@@ -124,11 +124,15 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
 
-    const left = Math.max(0, Math.round(clip.startSec * pxPerSec));
-    const width = Math.max(1, Math.round(clip.lengthSec * pxPerSec));
+    // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
+    // 若这里 Math.round，Clip 会相对网格最多向右偏 0.5px；在常用缩放
+    // (100-200 px/s) 下就是约 2.5-5ms 的“网格偏右”观感，且随 pxPerSec
+    // 与 BPM 改变而变化。保留浮点像素可让 Clip 与网格完全对齐。
+    const left = Math.max(0, clip.startSec * pxPerSec);
+    const width = Math.max(1, clip.lengthSec * pxPerSec);
     const leadingOverlapPx = Math.max(
         0,
-        Math.min(width, Math.round(Math.max(0, leadingOverlapSec) * pxPerSec)),
+        Math.min(width, Math.max(0, leadingOverlapSec) * pxPerSec),
     );
     const leadingOverlapMaskImage =
         leadingOverlapPx > 0
