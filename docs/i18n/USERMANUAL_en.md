@@ -71,7 +71,7 @@ Structured HiFiShifter clipboard operations are now written by the backend direc
 - `Edit → Paste into Selected Track` force-flattens everything onto the selected track; `Edit → Paste as New Tracks` force-creates new root-track groups using the source hierarchy.
 
 
-The `Edit` menu allows various editing operations. Besides regular track and parameter editing, there are two special items: `Paste Reaper Clipboard Data` and `Paste VocalShifter Clipboard Data`.
+The `Edit` menu contains common track / timeline editing and clipboard import operations; it no longer includes parameter-curve processing items. Operations such as `Initialize`, `Transpose by Cents`, `Transpose by Degrees`, `Set To`, `Average`, `Smooth`, `Add Vibrato`, `Quantize`, and `Mean Quantize` are available only from the Parameter Editor context menu.
 
 - **Paste Reaper Clipboard Data**: After you copy Items, tracks, or MIDI notes in Reaper, this function quickly imports the Reaper clipboard data into HiFiShifter.
     - Item data: Imports as note clips in HiFiShifter, preserving tuning data (both global tuning and pitch envelopes) from Reaper.

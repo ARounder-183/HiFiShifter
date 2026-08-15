@@ -536,69 +536,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("initialize")}>
-                        {tAny("menu_initialize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.initialize")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    {isPitchParam && (
-                        <>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => setTransposeCentsOpen(true)}>
-                                {tAny("menu_transpose_cents")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeCents")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item onSelect={() => setTransposeDegreesOpen(true)}>
-                                {tAny("menu_transpose_degrees")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeDegrees")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
-                    <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
-                        {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.setPitch")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setAverageOpen(true)}>
-                        {tAny("menu_average")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.average")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setSmoothOpen(true)}>
-                        {tAny("menu_smooth")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.smooth")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setVibratoOpen(true)}>
-                        {tAny("menu_add_vibrato")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.addVibrato")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
-                        {tAny("menu_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.quantize")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
-                        {tAny("menu_mean_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.meanQuantize")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("copyReaper")}>
                         {t("menu_copy_reaper_clipboard")}
                     </DropdownMenu.Item>
