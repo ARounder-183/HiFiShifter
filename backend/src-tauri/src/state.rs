@@ -780,6 +780,14 @@ impl TimelineState {
         let kind = self.root_track_kind(root_track_id);
         let has_pitch = !linked_params.pitch_edit.is_empty();
 
+        // 粘贴/导入带 pitch_edit 的曲线时，目标根轨道必须进入合成模式，
+        // 否则后续异步 pitch_orig 分析会跳过该轨道，声码器也会直接返回原声。
+        if has_pitch {
+            if let Some(track) = self.tracks.iter_mut().find(|track| track.id == root_track_id) {
+                track.compose_enabled = true;
+            }
+        }
+
         let target_existing_keys = self
             .params_by_root_track
             .get(root_track_id)

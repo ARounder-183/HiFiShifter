@@ -496,6 +496,17 @@ pub fn merge_project_fragment(
             timeline
                 .params_by_root_track
                 .insert(mapped_root_id.clone(), params.clone());
+            // Full-track fragments carry pitch_orig/pitch_edit. Ensure the
+            // target root is in compose mode so those curves actually render.
+            if params.pitch_edit_user_modified {
+                if let Some(track) = timeline
+                    .tracks
+                    .iter_mut()
+                    .find(|track| track.id == *mapped_root_id)
+                {
+                    track.compose_enabled = true;
+                }
+            }
         }
     }
 
@@ -711,6 +722,54 @@ mod tests {
             .find(|clip| clip.id == merge.created_clip_ids[0])
             .unwrap();
         assert_eq!(pasted.track_id, target_child);
+    }
+
+    #[test]
+    fn pasting_pitch_edit_enables_compose_on_target_root() {
+        let mut source = timeline_with_child();
+        let root_id = source
+            .tracks
+            .iter()
+            .find(|track| track.parent_id.is_none())
+            .unwrap()
+            .id
+            .clone();
+        source.ensure_params_for_root(&root_id);
+        if let Some(entry) = source.params_by_root_track.get_mut(&root_id) {
+            entry.pitch_edit.resize(1600, 61.0);
+            entry.pitch_edit_user_modified = true;
+        }
+        let child_id = source
+            .tracks
+            .iter()
+            .find(|track| track.name == "Child")
+            .unwrap()
+            .id
+            .clone();
+        let clip_id = source
+            .clips
+            .iter()
+            .find(|clip| clip.track_id == child_id)
+            .unwrap()
+            .id
+            .clone();
+        let fragment = build_clip_fragment(&source, &[clip_id.clone()], "src".into()).unwrap();
+        assert!(!fragment.linked_params_by_clip[&clip_id].pitch_edit.is_empty());
+
+        let mut target = TimelineState::default();
+        let target_root = target.tracks[0].id.clone();
+        target.selected_track_id = Some(target_root.clone());
+        assert!(!target.tracks[0].compose_enabled);
+        merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(0.0),
+                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
+            },
+        )
+        .unwrap();
+        assert!(target.tracks.iter().find(|track| track.id == target_root).unwrap().compose_enabled);
     }
 
     #[test]
