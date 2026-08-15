@@ -295,6 +295,29 @@ export const setClipsStateBulkRemote = createAsyncThunk(
     },
 );
 
+export const pasteTimelineClipboardRemote = createAsyncThunk(
+    "session/pasteTimelineClipboardRemote",
+    async (_, { rejectWithValue }) => {
+        const result = await webApi.pasteTimelineClipboard();
+        if (!result?.ok) {
+            return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");
+        }
+        const createdClipIds = Array.isArray(result.created_clip_ids)
+            ? result.created_clip_ids
+            : Array.isArray((result as { createdClipIds?: string[] }).createdClipIds)
+              ? ((result as { createdClipIds?: string[] }).createdClipIds as string[])
+              : [];
+        return {
+            ok: true,
+            timeline: result,
+            newClipIds: createdClipIds,
+            sourceProject: (result as { sourceProject?: string }).sourceProject,
+            importedTrackCount: (result as { importedTrackCount?: number }).importedTrackCount,
+            importedClipCount: (result as { importedClipCount?: number }).importedClipCount,
+        } as const;
+    },
+);
+
 export const duplicateClipsBulkRemote = createAsyncThunk<
     TimelineState & { createdClipIds?: string[]; created_clip_ids?: string[] },
     {

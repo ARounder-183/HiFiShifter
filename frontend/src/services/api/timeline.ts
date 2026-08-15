@@ -258,6 +258,39 @@ export const timelineApi = {
 
     selectClip: (clipId: string | null) => invoke<TimelineResult>("select_clip", clipId),
 
+    // Native cross-process timeline clipboard (backend system clipboard)
+    copyTimelineClips: (clipIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_clips",
+            clipIds,
+        ),
+
+    copyTimelineTracks: (trackIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_tracks",
+            trackIds,
+        ),
+
+    pasteTimelineClipboard: () =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+            }
+        >("paste_timeline_clipboard"),
+
+    hasTimelineClipboard: () =>
+        invoke<{
+            ok: boolean;
+            available?: boolean;
+            kind?: "clips" | "tracks" | "project";
+            clipCount?: number;
+            trackCount?: number;
+            sourceProject?: string;
+        }>("has_timeline_clipboard"),
+
     /// 检查所有已导入的音频源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。
     checkSourceFilesChanged: () =>

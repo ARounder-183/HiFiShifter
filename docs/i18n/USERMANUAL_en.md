@@ -48,6 +48,25 @@ The automatic backup feature allows you to configure backups for your project fi
 - `Backup on save`: When you overwrite the project file via save, the previous project file will automatically be renamed to a backup file with `-bak` appended to the original filename (for example, `.hshp-bak` or `.hsp-bak`). Enabled by default.
 - `Timed backups`: Automatically create backup project files at the interval and path you set while you edit the project. Disabled by default.
 
+### Importing a HiFiShifter Project
+
+`File → Import HiFiShifter Project...` merges all content from another `.hshp` / `.hsp` / `.json` project into the current project without closing it.
+
+- `Keep original timeline position`: Imported clips stay at their original timeline positions.
+- `Place at playhead`: The imported content is shifted so its earliest clip starts at the current playhead.
+- `Import tempo map`: Only available when the current project has no tempo map. After import, the source project's initial BPM, time signature and scale become the current project's baseline.
+- All tracks, child tracks, clips, parameter curves and group relationships are assigned fresh IDs, so they never collide with the current project. Audio source files are resolved relative to the imported project file first; missing files still trigger the interactive relink dialog.
+- Notes from the imported project are appended to the current project notebook instead of replacing it.
+
+### Cross-Process Copy / Cut / Paste
+
+Structured HiFiShifter clipboard operations are now written by the backend directly to the operating-system clipboard (native private format first, with a text fallback), so they no longer depend on WebView clipboard permissions. The following operations work between two running HiFiShifter processes:
+
+- Select clips in the timeline and press `Ctrl + C` (or use the context-menu `Copy`), then press `Ctrl + V` (or `Paste` from the empty track-area context menu) in the other process. Clip automation curves are pasted together with the clips.
+- Right-click a track header and choose `Copy Track` / `Cut Track`; in the other process press `Ctrl + V` or use the empty track-area context menu to paste the complete track group (child tracks, clips and full parameter curves).
+- Parameter-curve copy/paste in the Parameter Editor also uses the backend clipboard and works across processes.
+
+
 The `Edit` menu allows various editing operations. Besides regular track and parameter editing, there are two special items: `Paste Reaper Clipboard Data` and `Paste VocalShifter Clipboard Data`.
 
 - **Paste Reaper Clipboard Data**: After you copy Items, tracks, or MIDI notes in Reaper, this function quickly imports the Reaper clipboard data into HiFiShifter.
@@ -109,7 +128,7 @@ Right-click a clip to open the context menu, which includes functions like `Reve
 
 Select multiple clips, then choose `Group` (or press `G`) in the context menu to group them. Similar to Reaper or VEGAS Pro, clips in the same group are linked during edits. Click the chain button at the top-left of a clip to temporarily disable or enable the group's linked editing. Select grouped clips and choose `Ungroup` (or press `U`) to remove them from the group.
 
-On the left side of the track view is the track header area, where you can add or delete tracks, adjust track parameters, etc. Right-click a track to clone it.
+On the left side of the track view is the track header area, where you can add or delete tracks, adjust track parameters, etc. Right-click a track to clone, copy or cut it; right-click empty track space to paste clips or a complete copied track group.
 
 Similar to Reaper, HiFiShifter tracks support track groups. Drag one track header onto another in the track header area to create a track group. A track group shares a single parameter panel. In practice, it is recommended to organize by "one voice part per track group".
 

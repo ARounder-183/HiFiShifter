@@ -82,6 +82,7 @@ interface MenuBarProps {
     onOpenRecentProject: (projectPath: string) => void;
     onExit: () => void;
     onImportMidiFromMenu: () => void;
+    onImportProject: () => void;
     autoBackupSettings: AutoBackupSettings;
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
 }
@@ -105,6 +106,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     onOpenRecentProject,
     onExit,
     onImportMidiFromMenu,
+    onImportProject,
     autoBackupSettings,
     onAutoBackupSettingsSaved,
 }) => {
@@ -306,8 +308,33 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return formatKeybinding(kb, "");
     }
 
-    /** 派发编辑操作事件给 PianoRollPanel */
+    /** 派发编辑操作事件给 PianoRollPanel / TimelinePanel */
     const dispatchEditOp = useCallback((op: string, data?: Record<string, unknown>) => {
+        const active = document.activeElement as HTMLElement | null;
+        const inPianoRoll =
+            active?.hasAttribute("data-piano-roll-scroller") ||
+            active?.closest?.("[data-piano-roll-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
+        const inTrackHeader =
+            Boolean(active?.closest?.("[data-track-list-panel]")) ||
+            document.body.getAttribute("data-hs-focus-window") === "trackHeader";
+        const inTimeline =
+            active?.hasAttribute("data-timeline-scroller") ||
+            active?.closest?.("[data-timeline-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "timeline";
+
+        if (
+            (op === "copy" || op === "cut" || op === "paste") &&
+            inTimeline &&
+            !inPianoRoll &&
+            !inTrackHeader
+        ) {
+            window.dispatchEvent(
+                new CustomEvent("hifi:timelineEditOp", { detail: { op, ...data } }),
+            );
+            return;
+        }
+
         window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op, ...data } }));
     }, []);
 
@@ -420,6 +447,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_midi")}{" "}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={onImportProject}>
+                        {t("menu_import_hifishifter")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => void dispatch(openReaperFromDialog())}>
                         {t("menu_import_reaper")}

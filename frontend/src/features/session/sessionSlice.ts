@@ -25,6 +25,7 @@ import {
     addClipOnTrack,
     addTrackRemote,
     createClipsRemote,
+    pasteTimelineClipboardRemote,
     duplicateClipsBulkRemote,
     duplicateTrackRemote,
     fetchSelectedTrackSummary,
@@ -55,6 +56,8 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromDialog,
     openVocalShifterFromPath,
     openReaperFromDialog,
@@ -1308,6 +1311,8 @@ export {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromDialog,
     openVocalShifterFromPath,
     openReaperFromDialog,
@@ -1338,6 +1343,7 @@ export {
     fetchSelectedTrackSummary,
     addClipOnTrack,
     createClipsRemote,
+    pasteTimelineClipboardRemote,
     removeClipRemote,
     removeClipsRemote,
     moveClipRemote,
@@ -2944,6 +2950,62 @@ const sessionSlice = createSlice({
                 state.status = "Open failed";
             })
 
+            .addCase(pickProjectToImport.pending, (state) =>
+                setPending(state, "Picking project to import..."),
+            )
+            .addCase(pickProjectToImport.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as
+                    | { ok: true; canceled: true }
+                    | { ok: true; canceled: false; path: string };
+                if (!payload || (payload as { canceled?: boolean }).canceled) {
+                    state.status = "Import canceled";
+                }
+            })
+            .addCase(pickProjectToImport.rejected, (state, action) => {
+                state.busy = false;
+                state.error = action.error?.message ?? "Import project failed";
+                state.status = "Import failed";
+            })
+
+            .addCase(importProjectFromPath.pending, (state) =>
+                setPending(state, "Importing project..."),
+            )
+            .addCase(importProjectFromPath.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as
+                    | { ok: true; canceled: true }
+                    | {
+                          ok: true;
+                          canceled: false;
+                          timeline: TimelineState;
+                          newClipIds?: string[];
+                          sourceProject?: string;
+                      };
+                if (!payload || (payload as { canceled?: boolean }).canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
+                applyTimelineState(state, (payload as any).timeline, {
+                    force: true,
+                    preserveProjectNotes: false,
+                });
+                const newClipIds = (payload as any).newClipIds;
+                if (newClipIds && newClipIds.length > 0) {
+                    state.multiSelectedClipIds = newClipIds;
+                    state.selectedClipId = newClipIds[0] ?? null;
+                }
+                state.status = "Project imported";
+            })
+            .addCase(importProjectFromPath.rejected, (state, action) => {
+                state.busy = false;
+                state.error =
+                    (action.payload as string) ??
+                    action.error?.message ??
+                    "Import project failed";
+                state.status = "Import failed";
+            })
+
             .addCase(openVocalShifterFromDialog.pending, (state) =>
                 setPending(state, "Importing VocalShifter project..."),
             )
@@ -3397,6 +3459,36 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineState(state, payload, { force: true });
                 state.status = "Clips created";
+            })
+
+            .addCase(pasteTimelineClipboardRemote.pending, (state) =>
+                setPending(state, "Pasting timeline clipboard..."),
+            )
+            .addCase(pasteTimelineClipboardRemote.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    timeline?: TimelineState;
+                    newClipIds?: string[];
+                };
+                if (!payload?.ok || !payload.timeline?.tracks) {
+                    state.status = "Paste timeline clipboard failed";
+                    return;
+                }
+                applyTimelineState(state, payload.timeline, { force: true });
+                if (payload.newClipIds && payload.newClipIds.length > 0) {
+                    state.multiSelectedClipIds = payload.newClipIds;
+                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                }
+                state.status = "Timeline clipboard pasted";
+            })
+            .addCase(pasteTimelineClipboardRemote.rejected, (state, action) => {
+                state.busy = false;
+                state.error =
+                    (action.payload as string) ??
+                    action.error?.message ??
+                    "Paste timeline clipboard failed";
+                state.status = "Paste timeline clipboard failed";
             })
 
             .addCase(duplicateClipsBulkRemote.fulfilled, (state, action) => {

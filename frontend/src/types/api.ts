@@ -144,6 +144,8 @@ export interface TimelineResult {
     ok: true;
     tracks: TimelineTrack[];
     clips: TimelineClip[];
+    created_clip_ids?: string[];
+    created_track_ids?: string[];
     selected_track_id: string | null;
     selected_clip_id: string | null;
     bpm: number;

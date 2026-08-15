@@ -20,6 +20,8 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromPath,
     openReaperFromPath,
     importAudioFromPath,
@@ -37,6 +39,7 @@ import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysi
 import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { NotebookPanel } from "./components/layout/NotebookPanel";
+import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import type { ActionId } from "./features/keybindings/types";
@@ -142,6 +145,7 @@ function AppInner() {
         projectDirtyRef.current = projectDirty;
     }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
+    const hasExistingTempoMap = useAppSelector((state) => Boolean(state.session.tempoMap));
     // 当工程路径变更时（新建/打开/关闭工程），重置已忽略的源文件路径集合
     useEffect(() => {
         ignoredSourcePathsRef.current = new Set();
@@ -169,6 +173,10 @@ function AppInner() {
         open: boolean;
         mode: "switch" | "exit";
     }>({ open: false, mode: "switch" });
+    const [projectImportPick, setProjectImportPick] = useState<{
+        open: boolean;
+        path: string | null;
+    }>({ open: false, path: null });
     const [missingFileDialog, setMissingFileDialog] = useState<{
         open: boolean;
         missingPath: string;
@@ -886,6 +894,34 @@ function AppInner() {
             });
         },
         [dispatch, runOrPromptUnsavedAction],
+    );
+
+    const handleImportProject = useCallback(async () => {
+        try {
+            const picked = await dispatch(pickProjectToImport()).unwrap();
+            if (!picked?.ok || picked.canceled || !picked.path) {
+                return;
+            }
+            setProjectImportPick({ open: true, path: picked.path });
+        } catch {
+            // Reducer already surfaces the error.
+        }
+    }, [dispatch]);
+
+    const handleImportProjectConfirmed = useCallback(
+        (options: { placeAtPlayhead: boolean; importTempoMap: boolean }) => {
+            const { path } = projectImportPick;
+            setProjectImportPick({ open: false, path: null });
+            if (!path) return;
+            void dispatch(
+                importProjectFromPath({
+                    projectPath: path,
+                    placeAtPlayhead: options.placeAtPlayhead,
+                    importTempoMap: options.importTempoMap,
+                }),
+            );
+        },
+        [dispatch, projectImportPick],
     );
 
     const handleExternalFileAction = useCallback(
@@ -1805,10 +1841,20 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
+            <ImportProjectDialog
+                key={projectImportPick.open ? (projectImportPick.path ?? "open") : "closed"}
+                open={projectImportPick.open}
+                projectPath={projectImportPick.path}
+                hasExistingTempoMap={hasExistingTempoMap}
+                onOpenChange={(open) => setProjectImportPick((prev) => ({ ...prev, open }))}
+                onConfirm={handleImportProjectConfirmed}
+            />
+
             <MenuBar
                 onNewProject={handleNewProject}
                 onOpenProject={handleOpenProject}
                 onOpenRecentProject={handleOpenRecentProject}
+                onImportProject={handleImportProject}
                 onExit={handleExitApp}
                 onImportMidiFromMenu={handleImportMidiFromMenu}
                 autoBackupSettings={autoBackupSettings}

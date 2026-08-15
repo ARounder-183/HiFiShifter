@@ -13,10 +13,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import { useI18n } from "../../../../i18n/I18nProvider";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import {
-    checkpointHistory,
-    createClipsRemote,
+    pasteTimelineClipboardRemote,
+    removeClipsRemote,
+    removeTrackRemote,
     seekPlayhead,
     selectClipRemote,
     setClipGain,
@@ -40,7 +40,6 @@ import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
-import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
@@ -124,13 +123,11 @@ export interface UseTimelineClipActionsResult {
     onSelectionRectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 
     // Clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    clipboardAvailable: boolean;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
+    copyTracks: (ids: string[]) => Promise<boolean>;
+    cutTracks: (ids: string[]) => void;
 
     // Clip operations
     groupClips: (ids: string[]) => void;
@@ -298,29 +295,74 @@ export function useTimelineClipActions(
     });
 
     // ── Clipboard ────────────────────────────────────────────
-    const clipClipboardRef = useRef<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>(null);
+    const [clipboardAvailable, setClipboardAvailable] = useState(false);
 
-    const buildClipClipboardTemplates = React.useCallback(async (ids: string[]) => {
-        const clips = sessionRef.current.clips.filter((c) => ids.includes(c.id));
-        const groupIds = clips.map((c) => c.groupId).filter((g): g is string => g != null);
-        const templates = await Promise.all(
-            clips.map(async (clip) => {
-                const linkedParamsResult = await webApi.getClipLinkedParams(clip.id);
-                return {
-                    ...clip,
-                    sourceClipId: clip.id,
-                    waveformPreview: sessionRef.current.clipWaveforms[clip.id],
-                    linkedParams: linkedParamsResult.ok
-                        ? linkedParamsResult.linkedParams
-                        : undefined,
-                };
-            }),
-        );
-        return { templates, groupIds };
+    useEffect(() => {
+        let cancelled = false;
+        const refresh = () => {
+            void webApi
+                .hasTimelineClipboard()
+                .then((result) => {
+                    if (!cancelled) setClipboardAvailable(Boolean(result?.ok && result?.available));
+                })
+                .catch(() => {
+                    if (!cancelled) setClipboardAvailable(false);
+                });
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 2000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
     }, []);
+
+    const copyClips = React.useCallback(async (ids: string[]) => {
+        if (ids.length === 0) return false;
+        try {
+            const result = await webApi.copyTimelineClips(ids);
+            setClipboardAvailable(Boolean(result?.ok));
+            return Boolean(result?.ok);
+        } catch {
+            setClipboardAvailable(false);
+            return false;
+        }
+    }, []);
+
+    const cutClips = React.useCallback(
+        (ids: string[]) => {
+            void (async () => {
+                const copied = await copyClips(ids);
+                if (!copied) return;
+                setMultiSelectedClipIds([]);
+                void dispatch(removeClipsRemote(ids));
+            })();
+        },
+        [copyClips, dispatch, setMultiSelectedClipIds],
+    );
+
+    const copyTracks = React.useCallback(async (ids: string[]) => {
+        if (ids.length === 0) return false;
+        try {
+            const result = await webApi.copyTimelineTracks(ids);
+            setClipboardAvailable(Boolean(result?.ok));
+            return Boolean(result?.ok);
+        } catch {
+            setClipboardAvailable(false);
+            return false;
+        }
+    }, []);
+
+    const cutTracks = React.useCallback(
+        (ids: string[]) => {
+            void (async () => {
+                const copied = await copyTracks(ids);
+                if (!copied) return;
+                void dispatch(removeTrackRemote(ids[0]));
+            })();
+        },
+        [copyTracks, dispatch],
+    );
 
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
@@ -540,64 +582,19 @@ export function useTimelineClipActions(
     // ── pasteClipsAtPlayhead ─────────────────────────────────
     const pasteClipsAtPlayhead = React.useCallback(() => {
         void (async () => {
-            let tpl: ClipTemplate[] | null = null;
-            let groupIds: string[] = [];
-            const internal = clipClipboardRef.current;
-            if (internal) {
-                tpl = internal.templates;
-                groupIds = internal.groupIds;
-            }
             try {
-                const fromSystem = await readSystemClipboardObject("clip");
-                if (fromSystem?.kind === "clip" && Array.isArray(fromSystem.templates)) {
-                    tpl = fromSystem.templates;
-                    groupIds = ((fromSystem as any).groupIds ?? []).filter(
-                        (g: any) => typeof g === "string",
-                    );
-                    clipClipboardRef.current = { templates: fromSystem.templates, groupIds };
-                }
-            } catch {
-                // ignore and fallback to internal clipboard
-            }
-            if (!tpl || tpl.length === 0) return;
-
-            const playhead = sessionRef.current.playheadSec ?? 0;
-            const minStart = tpl
-                .map((c) => c.startSec)
-                .reduce((a, b) => Math.min(a, b), Number.POSITIVE_INFINITY);
-            const delta =
-                Number.isFinite(minStart) && minStart !== Number.POSITIVE_INFINITY
-                    ? playhead - minStart
-                    : 0;
-            const templates = tpl.map((c) => ({
-                ...c,
-                startSec: Math.max(0, c.startSec + delta),
-            }));
-            dispatch(checkpointHistory());
-            await webApi.beginUndoGroup();
-            try {
-                const payload = await dispatch(
-                    createClipsRemote({
-                        templates,
-                        options: { placeOnSelectedTrack: true },
-                    }),
-                ).unwrap();
-                const created: string[] = payload?.createdClipIds ?? [];
-                if (!Array.isArray(created) || created.length === 0) return;
+                const result = await dispatch(pasteTimelineClipboardRemote()).unwrap();
+                setClipboardAvailable(true);
+                const created = result.newClipIds ?? [];
+                if (created.length === 0) return;
 
                 setMultiSelectedClipIds(created);
                 void dispatch(selectClipRemote(created[0]));
-                const targetStartSec = templates.reduce(
-                    (min, t) => Math.min(min, t.startSec),
-                    Number.POSITIVE_INFINITY,
-                );
-                if (Number.isFinite(targetStartSec)) {
-                    dispatch(setplayheadSec(targetStartSec));
-                    void dispatch(seekPlayhead(targetStartSec));
-                }
+                dispatch(setplayheadSec(result.timeline?.playhead_sec ?? 0));
+                void dispatch(seekPlayhead(result.timeline?.playhead_sec ?? 0));
 
                 if (sessionRef.current.autoCrossfadeEnabled) {
-                    const allClips = (payload?.clips ?? []) as Array<{
+                    const allClips = (result.timeline?.clips ?? []) as Array<{
                         id?: string;
                         track_id?: string;
                         start_sec?: number;
@@ -627,28 +624,10 @@ export function useTimelineClipActions(
                         ).unwrap();
                     }
                 }
-
-                // Re-group pasted clips: original grouped clips get new independent groups
-                if (groupIds.length === created.length) {
-                    const groupMap = new Map<string, string[]>();
-                    for (let i = 0; i < groupIds.length; i++) {
-                        const gid = groupIds[i];
-                        if (gid && created[i]) {
-                            const list = groupMap.get(gid);
-                            if (list) list.push(created[i]);
-                            else groupMap.set(gid, [created[i]]);
-                        }
-                    }
-                    for (const newClipIds of groupMap.values()) {
-                        if (newClipIds.length >= 2) {
-                            await dispatch(groupClipsRemote(newClipIds)).unwrap();
-                        }
-                    }
-                }
-            } finally {
-                void webApi.endUndoGroup();
+            } catch {
+                setClipboardAvailable(false);
             }
-        })().catch(() => undefined);
+        })();
     }, [dispatch, setMultiSelectedClipIds]);
 
     // ── TrackLane callbacks ───────────────────────────────────
@@ -867,8 +846,11 @@ export function useTimelineClipActions(
         selectionRect,
         onSelectionRectPointerDown,
 
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        clipboardAvailable,
+        copyClips,
+        cutClips,
+        copyTracks,
+        cutTracks,
 
         groupClips,
         ungroupClips,

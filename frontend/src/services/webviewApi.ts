@@ -71,6 +71,8 @@ export const webApi = {
 
     openReaperDialog: projectApi.openReaperDialog,
     importReaperProject: projectApi.importReaperProject,
+    importProjectDialog: projectApi.importProjectDialog,
+    importProject: projectApi.importProject,
 
     // Waveform peaks (Mix)
     getRootMixWaveformPeaksSegment: waveformApi.getRootMixWaveformPeaksSegment,
@@ -122,6 +124,10 @@ export const webApi = {
     convertClipsToPitchReference: timelineApi.convertClipsToPitchReference,
     updatePitchReference: timelineApi.updatePitchReference,
     selectClip: timelineApi.selectClip,
+    copyTimelineClips: timelineApi.copyTimelineClips,
+    copyTimelineTracks: timelineApi.copyTimelineTracks,
+    pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
+    hasTimelineClipboard: timelineApi.hasTimelineClipboard,
 
     // 检查已导入音频源文件是否被外部修改或删除
     checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,

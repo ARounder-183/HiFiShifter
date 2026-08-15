@@ -668,7 +668,7 @@ impl TimelineState {
         }
     }
 
-    fn extract_linked_params_from_root_range(
+    pub(crate) fn extract_linked_params_from_root_range(
         &mut self,
         root_track_id: &str,
         start_sec: f64,
@@ -766,7 +766,7 @@ impl TimelineState {
         }
     }
 
-    fn apply_linked_params_to_root_range(
+    pub(crate) fn apply_linked_params_to_root_range(
         &mut self,
         root_track_id: &str,
         start_sec: f64,
@@ -2546,7 +2546,7 @@ fn default_fade_curve() -> String {
 }
 
 impl TimelineState {
-    fn ensure_project_end_sec(&mut self, end_sec: f64) {
+    pub(crate) fn ensure_project_end_sec(&mut self, end_sec: f64) {
         if !(end_sec.is_finite()) {
             return;
         }

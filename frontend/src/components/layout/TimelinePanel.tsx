@@ -88,7 +88,6 @@ import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandl
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { writeSystemClipboardObject } from "../../utils/systemClipboard";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
@@ -436,8 +435,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         renamingClipId,
         selectionRect,
         onSelectionRectPointerDown,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        clipboardAvailable,
+        copyClips,
+        cutClips,
+        copyTracks,
+        cutTracks,
         groupClips,
         ungroupClips,
         toggleGroupDisabled,
@@ -685,8 +687,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -1095,6 +1097,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onAlgoChange={handleTrackAlgoChange}
                 onTrackNameChange={handleTrackNameChange}
                 onDuplicateTrack={handleDuplicateTrack}
+                onCopyTrack={(trackId) => void copyTracks([trackId])}
+                onCutTrack={(trackId) => cutTracks([trackId])}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
                 headerHeight={timeRulerHeightPx(
@@ -1956,58 +1960,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       clipActions.setRenamingClipId(clipId);
                                   }}
                                   onCopy={(ids) => {
-                                      void (async () => {
-                                          const s = sessionRef.current;
-                                          const expandedIds = expandClipIdsWithGroups(
-                                              ids,
-                                              s.clips,
-                                              s.ignoreGrouping,
-                                              s.disabledGroupIds,
-                                          );
-                                          const result =
-                                              await buildClipClipboardTemplates(expandedIds);
-                                          if (result.templates.length > 0) {
-                                              clipClipboardRef.current = result;
-                                              try {
-                                                  await writeSystemClipboardObject({
-                                                      version: 1,
-                                                      kind: "clip",
-                                                      templates: result.templates,
-                                                      groupIds: result.groupIds,
-                                                  });
-                                              } catch {
-                                                  // ignore clipboard write errors
-                                              }
-                                          }
-                                      })();
+                                      const s = sessionRef.current;
+                                      const expandedIds = expandClipIdsWithGroups(
+                                          ids,
+                                          s.clips,
+                                          s.ignoreGrouping,
+                                          s.disabledGroupIds,
+                                      );
+                                      void copyClips(expandedIds);
                                   }}
                                   onCut={(ids) => {
-                                      void (async () => {
-                                          const s = sessionRef.current;
-                                          const expandedIds = expandClipIdsWithGroups(
-                                              ids,
-                                              s.clips,
-                                              s.ignoreGrouping,
-                                              s.disabledGroupIds,
-                                          );
-                                          const result =
-                                              await buildClipClipboardTemplates(expandedIds);
-                                          if (result.templates.length === 0) return;
-                                          clipClipboardRef.current = result;
-                                          try {
-                                              await writeSystemClipboardObject({
-                                                  version: 1,
-                                                  kind: "clip",
-                                                  templates: result.templates,
-                                                  groupIds: result.groupIds,
-                                              });
-                                          } catch {
-                                              // ignore clipboard write errors
-                                          }
-                                          setContextMenu(null);
-                                          setMultiSelectedClipIds([]);
-                                          void dispatch(removeClipsRemote(expandedIds));
-                                      })();
+                                      const s = sessionRef.current;
+                                      const expandedIds = expandClipIdsWithGroups(
+                                          ids,
+                                          s.clips,
+                                          s.ignoreGrouping,
+                                          s.disabledGroupIds,
+                                      );
+                                      setContextMenu(null);
+                                      cutClips(expandedIds);
                                   }}
                                   onReplace={(ids) => {
                                       void replaceClipSources(ids);
@@ -2102,10 +2073,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <TrackAreaContextMenu
                         x={trackAreaMenu.x}
                         y={trackAreaMenu.y}
-                        canPaste={
-                            Boolean(clipClipboardRef.current) &&
-                            (clipClipboardRef.current?.templates.length ?? 0) > 0
-                        }
+                        canPaste={clipboardAvailable}
                         canSplit={(multiSelectedClipIds.length > 0
                             ? multiSelectedClipIds
                             : sessionRef.current.selectedClipId

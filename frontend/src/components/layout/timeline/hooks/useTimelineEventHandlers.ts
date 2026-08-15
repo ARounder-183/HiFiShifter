@@ -22,10 +22,10 @@ import {
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
+import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 // ── Args 类型 ─────────────────────────────────────────────────
 export interface UseTimelineEventHandlersArgs {
@@ -50,13 +50,8 @@ export interface UseTimelineEventHandlersArgs {
     setMultiSelectedClipIds: (ids: string[] | ((prev: string[]) => string[])) => void;
 
     // clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
 
     // clip actions
     pasteClipsAtPlayhead: () => void;
@@ -115,8 +110,8 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -137,8 +132,8 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         dispatch,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         isEditableTarget,
         onNormalize: normalizeClips,
         onPaste: pasteClipsAtPlayhead,
@@ -201,6 +196,38 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
     }, [pasteClipsAtPlayhead, splitSelectedAtPlayhead]);
+
+    // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
+    useEffect(() => {
+        function onTimelineEditOp(e: Event) {
+            const op = (e as CustomEvent<{ op?: string }>).detail?.op;
+            const selectedIds =
+                multiSelectedClipIds.length > 0
+                    ? [...multiSelectedClipIds]
+                    : sessionRef.current.selectedClipId
+                      ? [sessionRef.current.selectedClipId]
+                      : [];
+            if (op === "copy" || op === "cut") {
+                if (selectedIds.length === 0) return;
+                const s = sessionRef.current;
+                const expandedIds = expandClipIdsWithGroups(
+                    selectedIds,
+                    s.clips,
+                    s.ignoreGrouping,
+                    s.disabledGroupIds,
+                );
+                if (op === "copy") void copyClips(expandedIds);
+                else cutClips(expandedIds);
+                return;
+            }
+            if (op === "paste") {
+                pasteClipsAtPlayhead();
+            }
+        }
+        window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+        return () =>
+            window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+    }, [copyClips, cutClips, multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {

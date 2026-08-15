@@ -129,4 +129,29 @@ export const projectApi = {
             "import_reaper_project",
             rppPath,
         ),
+
+    importProjectDialog: () =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("import_project_dialog"),
+
+    importProject: (payload: {
+        projectPath: string;
+        placeAtPlayhead?: boolean;
+        importTempoMap?: boolean;
+    }) =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                empty?: boolean;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+                tempoMapImported?: boolean;
+                tempoMapSkipped?: boolean;
+            }
+        >(
+            "import_project",
+            payload.projectPath,
+            payload.placeAtPlayhead,
+            payload.importTempoMap,
+        ),
 };

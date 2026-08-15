@@ -35,6 +35,8 @@ pub(crate) mod playback;
 mod processor_caps;
 #[path = "commands/project.rs"]
 mod project;
+#[path = "commands/project_import.rs"]
+mod project_import;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
@@ -43,6 +45,8 @@ mod reaper_clipboard;
 mod synth;
 #[path = "commands/timeline.rs"]
 mod timeline;
+#[path = "commands/timeline_clipboard.rs"]
+mod timeline_clipboard;
 #[path = "commands/ui_settings.rs"]
 mod ui_settings;
 #[path = "commands/vocalshifter.rs"]
@@ -218,6 +222,28 @@ pub fn set_project_timeline_settings(
         beats_per_bar,
         time_signature_denominator,
         grid_size,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project_dialog() -> serde_json::Value {
+    project_import::import_project_dialog()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    place_at_playhead: Option<bool>,
+    import_tempo_map: Option<bool>,
+) -> serde_json::Value {
+    project_import::import_project(
+        state,
+        window,
+        project_path,
+        place_at_playhead,
+        import_tempo_map,
     )
 }
 
@@ -666,6 +692,58 @@ pub fn select_clip(
     clip_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     timeline::select_clip(state, clip_id)
+}
+
+// ===================== native timeline clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_clips(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_clips(&state, clip_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_tracks(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_tracks(&state, track_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn paste_timeline_clipboard(
+    state: State<'_, AppState>,
+) -> serde_json::Value {
+    timeline_clipboard::paste_timeline_clipboard(&state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_timeline_clipboard() -> serde_json::Value {
+    timeline_clipboard::has_timeline_clipboard()
+}
+
+// ===================== generic system object clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn write_system_clipboard_object(payload: String) -> serde_json::Value {
+    match crate::system_clipboard::write_bytes(payload.as_bytes()) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn read_system_clipboard_object() -> serde_json::Value {
+    match crate::system_clipboard::read_bytes() {
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
+            Err(_) => serde_json::json!({ "ok": true, "available": false }),
+        },
+        Ok(None) => serde_json::json!({ "ok": true, "available": false }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

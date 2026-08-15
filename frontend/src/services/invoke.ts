@@ -340,6 +340,27 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_project":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 
+        case "import_project":
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { placeAtPlayhead: args[1] } : {}),
+                ...(args[2] !== undefined ? { importTempoMap: args[2] } : {}),
+            };
+
+        case "copy_timeline_clips":
+            return { clipIds: args[0] };
+
+        case "copy_timeline_tracks":
+            return { trackIds: args[0] };
+
+        case "paste_timeline_clipboard":
+        case "has_timeline_clipboard":
+        case "read_system_clipboard_object":
+            return {};
+
+        case "write_system_clipboard_object":
+            return { payload: args[0] };
+
         case "save_project_as":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 

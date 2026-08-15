@@ -215,6 +215,53 @@ export const openVocalShifterFromPath = createAsyncThunk(
     },
 );
 
+export const pickProjectToImport = createAsyncThunk(
+    "session/pickProjectToImport",
+    async (_, { rejectWithValue }) => {
+        const picked = await webApi.importProjectDialog();
+        if (!picked.ok) return rejectWithValue("import_project_dialog_failed");
+        if (picked.canceled || !picked.path) {
+            return { ok: true, canceled: true } as const;
+        }
+        return { ok: true, canceled: false, path: picked.path } as const;
+    },
+);
+
+export const importProjectFromPath = createAsyncThunk(
+    "session/importProjectFromPath",
+    async (
+        payload: {
+            projectPath: string;
+            placeAtPlayhead?: boolean;
+            importTempoMap?: boolean;
+        },
+        { rejectWithValue, getState },
+    ) => {
+        let result = await webApi.importProject(payload);
+        if (!result?.ok) {
+            return rejectWithValue(result?.error ?? "import_project_failed");
+        }
+        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
+        const newClipIds = ((result as { clips?: Array<{ id?: string }> }).clips ?? [])
+            .map((c) => c.id)
+            .filter((id): id is string => !!id && !beforeClipIds.has(id));
+        return {
+            ok: true,
+            canceled: false,
+            timeline: result,
+            newClipIds,
+            sourceProject: (result as { sourceProject?: string }).sourceProject,
+            importedTrackCount: (result as { importedTrackCount?: number }).importedTrackCount,
+            importedClipCount: (result as { importedClipCount?: number }).importedClipCount,
+            tempoMapImported: (result as { tempoMapImported?: boolean }).tempoMapImported,
+            tempoMapSkipped: (result as { tempoMapSkipped?: boolean }).tempoMapSkipped,
+        } as const;
+    },
+);
+
 export const openReaperFromDialog = createAsyncThunk(
     "session/openReaperFromDialog",
     async (_, { rejectWithValue, getState }) => {
