@@ -803,19 +803,31 @@ export function ActionBar() {
                     <svg
                         width="15"
                         height="15"
-                        viewBox="0 0 15 15"
+                        viewBox="0 0 24 24"
                         fill="none"
                         xmlns="http://www.w3.org/2000/svg"
                     >
                         <path
-                            d="M2 2V13M5.5 2V13M9 2V13M12.5 2V13"
+                            d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
                             stroke="currentColor"
-                            strokeWidth="0.8"
-                            opacity="0.5"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                         />
-                        <path d="M7.5 4L7.5 11" stroke="currentColor" strokeWidth="1.5" />
-                        <path d="M5.5 6L7.5 4L9.5 6" stroke="currentColor" strokeWidth="1" />
-                        <path d="M5.5 9L7.5 11L9.5 9" stroke="currentColor" strokeWidth="1" />
+                        <path
+                            d="m5 8 4 4"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                        <path
+                            d="m12 15 4 4"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
                     </svg>
                 </IconButton>
 
