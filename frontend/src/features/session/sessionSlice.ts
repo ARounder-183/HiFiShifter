@@ -172,7 +172,6 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         snapSelectionToGrid: true,
         snapCursorToSelectionMarkersCursor: true,
         snapCursorToGrid: true,
-        snapToTakeMarkers: false,
         gridSnapFollowsGridVisibility: true,
         snapToGridAnyDistance: false,
         useIndependentSnapSpacing: false,
@@ -182,8 +181,6 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         snapItemSnapOffset: true,
         snapAcrossTracks: true,
         snapTrackDistance: 0,
-        snapFixedLaneCompAreas: false,
-        snapAutomationItems: false,
         snapRazorEdits: true,
         snapToProjectSampleRate: false,
         snapMediaEdgesToSource: true,
@@ -236,7 +233,6 @@ function normalizeTimelineSnapSettings(
             base.snapCursorToSelectionMarkersCursor,
         ),
         snapCursorToGrid: bool(patch.snapCursorToGrid, base.snapCursorToGrid),
-        snapToTakeMarkers: bool(patch.snapToTakeMarkers, base.snapToTakeMarkers),
         gridSnapFollowsGridVisibility: bool(
             patch.gridSnapFollowsGridVisibility,
             base.gridSnapFollowsGridVisibility,
@@ -265,11 +261,6 @@ function normalizeTimelineSnapSettings(
             0,
             32,
         ),
-        snapFixedLaneCompAreas: bool(
-            patch.snapFixedLaneCompAreas,
-            base.snapFixedLaneCompAreas,
-        ),
-        snapAutomationItems: bool(patch.snapAutomationItems, base.snapAutomationItems),
         snapRazorEdits: bool(patch.snapRazorEdits, base.snapRazorEdits),
         snapToProjectSampleRate: bool(
             patch.snapToProjectSampleRate,

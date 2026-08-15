@@ -73,8 +73,6 @@ export interface TimelineSnapSettings {
     snapCursorToSelectionMarkersCursor: boolean;
     /** 光标吸附到网格。 */
     snapCursorToGrid: boolean;
-    /** 光标/选区吸附 take markers（当前无 marker 数据时仅保留设置）。 */
-    snapToTakeMarkers: boolean;
 
     // ── Grid snap behavior ──
     /** 网格吸附跟随网格显示状态。 */
@@ -97,10 +95,6 @@ export interface TimelineSnapSettings {
     snapAcrossTracks: boolean;
     /** 允许跨多少条轨道吸附（0 = 仅本轨）。 */
     snapTrackDistance: number;
-    /** 固定轨道的 Comp 区域吸附（当前数据模型无 fixed lanes，保留设置）。 */
-    snapFixedLaneCompAreas: boolean;
-    /** 自动化项目参与吸附。 */
-    snapAutomationItems: boolean;
     /** 剃刀/分割边缘吸附。 */
     snapRazorEdits: boolean;
 

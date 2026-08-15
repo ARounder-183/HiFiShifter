@@ -131,6 +131,21 @@ Track view toolbar buttons:
 - `Allow Timeline Clicks to Switch Track`: Enabled by default. When enabled, clicking a clip or empty area in the timeline switches the current track, and the parameter editor follows the newly selected track. When disabled, only clicking a track header changes the current track.
 - `Ignore Grouping`: When enabled, edits to grouped audio clips will globally ignore group-linked editing.
 
+### Snap / Grid Settings
+
+The `Grid Snap` button on the timeline toolbar is the quick toggle for snapping. Left-click toggles the snap master switch; right-click opens the `Snap / Grid Settings` dialog directly. The same dialog is available from `Options -> Snap / Grid Settings`. All settings are persisted and restored on the next launch.
+
+Settings:
+
+- `Grid`: show/hide grid lines, choose the grid spacing (normal / dotted / triplet, from `1/1` to `1/64`), and set a minimum pixel spacing so dense grids stay readable. With `Swing` enabled, odd grid lines are shifted by a percentage (0–100%); when `Adjust all items when changing swing` is checked, existing clips are automatically re-aligned to the new swing grid.
+- `Snap Master`: `Enable snapping` is the master switch; `Snap distance` defines how close (in pixels, default 4) the pointer must be to a target for snapping to trigger; `Snap relative to grid` preserves the item's original offset relative to the grid instead of snapping to absolute grid positions.
+- `Snap Targets / Objects`: independently configure whether `Media items`, `Selection`, and `Cursor` snap to `Selection / cursor` or to the grid. For example, clips can snap only to the grid while the playhead snaps to both the grid and clip edges.
+- `Grid Snap Behavior`: `Follow grid visibility` stops grid snapping when grid lines are hidden; `Snap to grid at any distance` is an aggressive mode that always forces the drag to the grid; `Use independent snap spacing` provides a dedicated snap spacing (separate from the display grid) with its own minimum pixel value.
+- `Item & Special Interactions`: choose whether only the item start snaps or the `snap offset` (content start) is also used; enable `Snap across tracks` and set how many tracks away targets are considered; `Snap razor edits` applies snapping to split operations (`S`).
+- `Advanced`: `Snap to project sample rate` provides sample-accurate snapping; `Snap media item edges to source media start/end` pulls trimmed clip edges back to the original source bounds; `Force selections to be multiples of` rounds marquee selections to the selected grid; `Use the same grid division in arrange view and MIDI editor` keeps the timeline and parameter editor grid precision synchronized.
+
+HiFiShifter's current data model has no REAPER-style take markers, fixed-lane comp areas, or standalone automation items, so those concepts are intentionally not present in the dialog. All other snapping behaviors are implemented for HiFiShifter's Clip model.
+
 ### Split Transition
 
 `Split Transition` is designed to reduce clicks at split points and is enabled by default. Due to time-stretching algorithms and similar factors, clips can click at the newly created boundary after a split. This feature follows the approach used by Reaper/VEGAS Pro and automatically handles the boundary after every split.

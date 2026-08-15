@@ -35,8 +35,6 @@ pub struct TimelineSnapSettings {
     pub snap_cursor_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
     pub snap_cursor_to_grid: bool,
-    #[serde(default)]
-    pub snap_to_take_markers: bool,
     #[serde(default = "default_true")]
     pub grid_snap_follows_grid_visibility: bool,
     #[serde(default)]
@@ -55,10 +53,6 @@ pub struct TimelineSnapSettings {
     pub snap_across_tracks: bool,
     #[serde(default)]
     pub snap_track_distance: u32,
-    #[serde(default)]
-    pub snap_fixed_lane_comp_areas: bool,
-    #[serde(default)]
-    pub snap_automation_items: bool,
     #[serde(default = "default_true")]
     pub snap_razor_edits: bool,
     #[serde(default)]
@@ -98,7 +92,6 @@ impl Default for TimelineSnapSettings {
             snap_selection_to_grid: true,
             snap_cursor_to_selection_markers_cursor: true,
             snap_cursor_to_grid: true,
-            snap_to_take_markers: false,
             grid_snap_follows_grid_visibility: true,
             snap_to_grid_any_distance: false,
             use_independent_snap_spacing: false,
@@ -108,8 +101,6 @@ impl Default for TimelineSnapSettings {
             snap_item_snap_offset: true,
             snap_across_tracks: true,
             snap_track_distance: 0,
-            snap_fixed_lane_comp_areas: false,
-            snap_automation_items: false,
             snap_razor_edits: true,
             snap_to_project_sample_rate: false,
             snap_media_edges_to_source: true,

@@ -382,16 +382,6 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                                 }}
                             />
                         </Flex>
-                        <Flex align="center" gap="2">
-                            <Checkbox
-                                checked={snap.snapToTakeMarkers}
-                                onCheckedChange={(v) => {
-                                    patch({ snapToTakeMarkers: Boolean(v) });
-                                    persist();
-                                }}
-                            />
-                            <Text size="2">{tAny("snap_take_markers")}</Text>
-                        </Flex>
 
                         <Separator size="4" />
 
@@ -518,26 +508,6 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                                     persist();
                                 }}
                             />
-                        </Flex>
-                        <Flex align="center" gap="2">
-                            <Checkbox
-                                checked={snap.snapFixedLaneCompAreas}
-                                onCheckedChange={(v) => {
-                                    patch({ snapFixedLaneCompAreas: Boolean(v) });
-                                    persist();
-                                }}
-                            />
-                            <Text size="2">{tAny("snap_fixed_lane_comp_areas")}</Text>
-                        </Flex>
-                        <Flex align="center" gap="2">
-                            <Checkbox
-                                checked={snap.snapAutomationItems}
-                                onCheckedChange={(v) => {
-                                    patch({ snapAutomationItems: Boolean(v) });
-                                    persist();
-                                }}
-                            />
-                            <Text size="2">{tAny("snap_automation_items")}</Text>
                         </Flex>
                         <Flex align="center" gap="2">
                             <Checkbox

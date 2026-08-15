@@ -387,11 +387,6 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
         }
     }
 
-    if (settings.snapAutomationItems) {
-        // 当前时间轴没有独立的 automation items；参数自动化点使用同一 clip 时间。
-        // 保留设置开关，并复用媒体项候选（见 addClipCandidates）。
-    }
-
     candidates.push(...collectSampleRateCandidates(ctx, safeRaw));
 
     if (ctx.object === "selection" && settings.forceSelectionsToMultiples) {
