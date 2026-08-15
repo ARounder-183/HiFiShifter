@@ -395,8 +395,15 @@ fn smooth_curve(values: &[f32], window: usize) -> Vec<f32> {
 // ── Conductor Track ──────────────────────────────────────────────────────────
 
 /// Tempo Map 感知的 秒→tick 转换器（积分各段 BPM）。
+///
+/// 构建时一次性积分各段 BPM 得到每个变化点处的累计 tick 数（O(n)），
+/// 之后每次查询用二分查找定位所在段（O(log n)），避免在逐帧弯音导出
+/// 等热点路径中退化为 O(points × frames)。
 struct TempoTickConverter {
-    points: Vec<(f64, f64)>, // (sec, bpm)，按 sec 升序，首点位于 0
+    /// (sec, bpm)，按 sec 升序，首点位于 0。
+    points: Vec<(f64, f64)>,
+    /// cumulative_ticks[i] = 从 0 到 points[i].sec 的累计 tick 数。
+    cumulative_ticks: Vec<f64>,
 }
 
 impl TempoTickConverter {
@@ -411,24 +418,40 @@ impl TempoTickConverter {
         if points.is_empty() || points[0].0 > 1e-9 {
             points.insert(0, (0.0, fallback_bpm.max(10.0).min(960.0)));
         }
-        Self { points }
+
+        let mut cumulative_ticks = Vec::with_capacity(points.len());
+        let mut cumulative = 0.0f64;
+        cumulative_ticks.push(cumulative);
+        let mut last_sec = points[0].0;
+        let mut last_bpm = points[0].1;
+        for &(point_sec, point_bpm) in points.iter().skip(1) {
+            cumulative +=
+                (point_sec - last_sec).max(0.0) * (last_bpm / 60.0) * TICKS_PER_BEAT as f64;
+            cumulative_ticks.push(cumulative);
+            last_sec = point_sec;
+            last_bpm = point_bpm;
+        }
+
+        Self {
+            points,
+            cumulative_ticks,
+        }
     }
 
     fn sec_to_ticks(&self, sec: f64) -> u64 {
         let sec = sec.max(0.0);
-        let mut ticks = 0.0f64;
-        let mut last_sec = 0.0f64;
-        let mut bpm = self.points[0].1;
-        for &(point_sec, point_bpm) in &self.points {
-            if point_sec >= sec {
-                break;
-            }
-            ticks += (point_sec - last_sec) * (bpm / 60.0) * TICKS_PER_BEAT as f64;
-            last_sec = point_sec;
-            bpm = point_bpm;
-        }
-        ticks += (sec - last_sec).max(0.0) * (bpm / 60.0) * TICKS_PER_BEAT as f64;
-        ticks.round() as u64
+        // 最后一个 position_sec < sec 的点：其 bpm 作用于 (points[idx-1].sec, sec)。
+        let idx = self
+            .points
+            .partition_point(|&(point_sec, _)| point_sec < sec);
+        let (base_ticks, last_sec, bpm) = if idx == 0 {
+            (0.0, 0.0, self.points[0].1)
+        } else {
+            let (last_sec, bpm) = self.points[idx - 1];
+            (self.cumulative_ticks[idx - 1], last_sec, bpm)
+        };
+        (base_ticks + (sec - last_sec).max(0.0) * (bpm / 60.0) * TICKS_PER_BEAT as f64).round()
+            as u64
     }
 }
 
@@ -908,5 +931,89 @@ pub(super) fn export_pitch_to_midi(
         Err(e) => {
             serde_json::json!({"ok": false, "error": format!("midi_write_error: {}", e)})
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TempoTickConverter;
+    use crate::state::{TempoPointData, TimelineState};
+
+    fn point(id: &str, position_sec: f64, bpm: f64) -> TempoPointData {
+        TempoPointData {
+            id: id.to_string(),
+            position_sec,
+            bpm,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: None,
+        }
+    }
+
+    fn converter_with(points: &[TempoPointData], fallback_bpm: f64) -> TempoTickConverter {
+        let mut timeline = TimelineState::default();
+        timeline.tempo_map = Some(points.to_vec());
+        TempoTickConverter::new(&timeline, fallback_bpm)
+    }
+
+    #[test]
+    fn fallback_converts_at_constant_tempo() {
+        let converter = TempoTickConverter::new(&TimelineState::default(), 90.0);
+        // 90 BPM = 1.5 beat/s × 480 ticks/beat = 720 ticks/s。
+        assert_eq!(converter.sec_to_ticks(0.0), 0);
+        assert_eq!(converter.sec_to_ticks(1.0), 720);
+        assert_eq!(converter.sec_to_ticks(2.5), 1_800);
+        assert_eq!(converter.sec_to_ticks(-5.0), 0);
+    }
+
+    #[test]
+    fn integrates_each_segment_at_its_own_bpm() {
+        let points = [
+            point("a", 0.0, 120.0),
+            point("b", 10.0, 60.0),
+            point("c", 20.0, 180.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(0.0), 0);
+        // 变化点边界处仍按前一段的 BPM 计算。
+        assert_eq!(converter.sec_to_ticks(10.0), 9_600);
+        assert_eq!(converter.sec_to_ticks(15.0), 12_000);
+        assert_eq!(converter.sec_to_ticks(20.0), 14_400);
+        assert_eq!(converter.sec_to_ticks(21.0), 15_840);
+    }
+
+    #[test]
+    fn sorts_points_before_integration() {
+        let points = [
+            point("c", 20.0, 180.0),
+            point("b", 10.0, 60.0),
+            point("a", 0.0, 120.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(15.0), 12_000);
+        assert_eq!(converter.sec_to_ticks(21.0), 15_840);
+    }
+
+    #[test]
+    fn duplicate_positions_keep_the_last_bpm_after_the_boundary() {
+        let points = [
+            point("a", 0.0, 120.0),
+            point("b", 10.0, 60.0),
+            point("b2", 10.0, 180.0),
+            point("c", 20.0, 120.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(10.0), 9_600);
+        assert_eq!(converter.sec_to_ticks(15.0), 16_800);
+        assert_eq!(converter.sec_to_ticks(21.0), 24_960);
+    }
+
+    #[test]
+    fn inserts_fallback_point_when_map_does_not_start_at_zero() {
+        let points = [point("a", 5.0, 120.0)];
+        let converter = converter_with(&points, 90.0);
+        assert_eq!(converter.sec_to_ticks(4.0), 2_880);
+        assert_eq!(converter.sec_to_ticks(5.0), 3_600);
+        assert_eq!(converter.sec_to_ticks(6.0), 4_560);
     }
 }

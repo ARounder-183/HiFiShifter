@@ -1,3 +1,13 @@
+/**
+ * `gridLineKey.ts` 的回归测试（自执行断言脚本，运行方式：
+ * npx tsx src/components/layout/timeline/gridLineKey.test.ts）。
+ *
+ * 覆盖两个层面：
+ * - 拖动 Tempo Map 的“中间”变化点时，旧实现的抽样校验和会被
+ *   不变的长度/首尾几条线欺骗，完整内容键必须识别中部的线移动；
+ * - `explicitGridLinesKey` 的基础语义：null / 空数组 / 相同数组 /
+ *   任意单线移动 / 长度变化。
+ */
 import type { TempoMap } from "../../../utils/tempoMap.ts";
 import { buildTempoGridLineXsForViewport } from "../../../utils/tempoMap.ts";
 import { explicitGridLinesKey } from "./gridLineKey.ts";

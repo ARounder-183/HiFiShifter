@@ -92,6 +92,8 @@ export const TempoMapCornerButton: React.FC = () => {
     const hasMap = s.tempoMap != null && s.tempoMap.points.length > 0;
     /** 存在 Tempo Map 且正在显示（红色提醒模式）。 */
     const active = hasMap && s.tempoMapVisible;
+    /** 图标按钮的无障碍名称（与悬浮提示共用同一份文案）。 */
+    const buttonLabel = active ? tAny("tempo_map_active_tooltip") : tAny("tempo_map_show_tooltip");
 
     const projectScaleLike = useMemo<ScaleLike | null>(
         () =>
@@ -160,11 +162,9 @@ export const TempoMapCornerButton: React.FC = () => {
                     padding: 0,
                     cursor: "pointer",
                 }}
-                data-tooltip={
-                    active
-                        ? tAny("tempo_map_active_tooltip")
-                        : tAny("tempo_map_show_tooltip")
-                }
+                data-tooltip={buttonLabel}
+                aria-label={buttonLabel}
+                aria-haspopup={active ? "dialog" : undefined}
                 onMouseEnter={(e) => {
                     (e.currentTarget as HTMLButtonElement).style.backgroundColor =
                         "color-mix(in srgb, var(--qt-hover) 80%, transparent)";
