@@ -149,11 +149,17 @@ fn default_grid_size() -> String {
 /// 优先尝试 MessagePack 格式（v2），失败后 fallback 到 JSON（v1 兼容）。
 pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     // 先尝试 MessagePack（新格式）
-    if let Ok(pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+    if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+        pf.timeline.migrate_legacy_common_param_curves();
         return Ok(pf);
     }
     // fallback：JSON（兼容旧工程文件）
-    serde_json::from_slice(bytes).map_err(|e| format!("无法解析工程文件: {}", e))
+    serde_json::from_slice(bytes)
+        .map_err(|e| format!("无法解析工程文件: {}", e))
+        .map(|mut pf: ProjectFile| {
+            pf.timeline.migrate_legacy_common_param_curves();
+            pf
+        })
 }
 
 pub fn is_json_project_path(path: &Path) -> bool {

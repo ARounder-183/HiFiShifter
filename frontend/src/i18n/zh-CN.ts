@@ -194,6 +194,8 @@ export const zhCN = {
     hifigan_tension_label: "张力",
     formant_shift_label: "共振峰偏移",
     hifigan_volume_label: "音量",
+    volume_label: "音量",
+    pan_label: "声像",
     vslib_volume_label: "音量",
     vslib_synth_mode_label: "合成模式",
     vslib_pan_label: "声像",

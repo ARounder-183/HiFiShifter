@@ -1005,13 +1005,12 @@ export const PianoRollPanel: React.FC = () => {
                 case "formant_shift_cents":
                     return t("formant_shift_label");
                 case "hifigan_volume":
-                    return t("hifigan_volume_label");
                 case "volume":
-                    return t("vslib_volume_label");
+                    return t("volume_label");
                 case "synth_mode":
                     return t("vslib_synth_mode_label");
                 case "pan":
-                    return t("vslib_pan_label");
+                    return t("pan_label");
                 case "breathiness":
                     return t("vslib_breathiness_label");
                 default:

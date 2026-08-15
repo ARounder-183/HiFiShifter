@@ -188,8 +188,9 @@ pub struct TrackParamsState {
     #[serde(skip)]
     pub pending_pitch_offset: Option<Vec<f32>>,
 
-    /// 声码器专属逐帧自动化曲线（key = ParamDescriptor::id）。
-    /// 例："formant_shift_cents", "volume" 等；缺失 key = 使用参数默认值。
+    /// 自动化曲线（key = ParamDescriptor::id）。
+    /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
+    /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
     #[serde(default)]
     pub extra_curves: HashMap<String, Vec<f32>>,
 
@@ -935,6 +936,10 @@ impl TimelineState {
                 ..TrackParamsState::default()
             });
 
+        // 旧工程使用算法专有的 `hifigan_volume`；统一迁移到共通 `volume`，
+        // 保证切换算法时曲线仍然生效。
+        Self::migrate_legacy_common_curves_in_entry(entry);
+
         entry.frame_period_ms = fp;
 
         // CRITICAL FIX: Detect stale pitch curves and clear them when clip/timeline changes.
@@ -992,6 +997,37 @@ impl TimelineState {
                     }
                 }
                 i += stride;
+            }
+        }
+    }
+
+    fn migrate_legacy_common_curves_in_entry(entry: &mut TrackParamsState) {
+        // `hifigan_volume` → 共通 `volume`。
+        if !entry.extra_curves.contains_key("volume") {
+            if let Some(legacy) = entry.extra_curves.remove("hifigan_volume") {
+                entry.extra_curves.insert("volume".to_string(), legacy);
+            }
+        } else {
+            // 已存在共通曲线时，旧键不再参与渲染，直接移除避免缓存键重复计算。
+            entry.extra_curves.remove("hifigan_volume");
+        }
+    }
+
+    /// 工程加载/导入时执行参数迁移：
+    /// 旧版 NSF-HiFiGAN 的 `hifigan_volume` 曲线统一迁移到共通 `volume` 曲线。
+    pub fn migrate_legacy_common_param_curves(&mut self) {
+        for entry in self.params_by_root_track.values_mut() {
+            Self::migrate_legacy_common_curves_in_entry(entry);
+        }
+        for clip in &mut self.clips {
+            if let Some(curves) = clip.extra_curves.as_mut() {
+                if !curves.contains_key("volume") {
+                    if let Some(legacy) = curves.remove("hifigan_volume") {
+                        curves.insert("volume".to_string(), legacy);
+                    }
+                } else {
+                    curves.remove("hifigan_volume");
+                }
             }
         }
     }

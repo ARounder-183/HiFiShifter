@@ -486,11 +486,18 @@ pub fn compute_rendered_clip_hash(
     let mut h: u64 = 14695981039346656037u64;
 
     fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
+        // vslib 把全部曲线烘焙进合成输出（含共通 volume/pan），
+        // 因此这些曲线必须参与渲染缓存 key。
+        if renderer_id == "vslib" {
+            return true;
+        }
+        // 共通 volume/pan 在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+        if crate::renderer::common_params::is_common_mix_param(param_id) {
+            return false;
+        }
+        // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
         !(renderer_id == "nsf_hifigan_onnx"
-            && matches!(
-                param_id,
-                "breath_gain" | "hifigan_tension" | "hifigan_volume"
-            ))
+            && matches!(param_id, "breath_gain" | "hifigan_tension"))
     }
 
     macro_rules! mix_bytes {

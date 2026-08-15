@@ -201,6 +201,99 @@ pub(crate) fn hifigan_tension_active_for_clip(
     )
 }
 
+/// 解析 clip 级覆盖优先、轨道级兜底的 extra_curve。
+pub(crate) fn extra_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+    param_id: &str,
+) -> Option<&'a [f32]> {
+    clip.extra_curves
+        .as_ref()
+        .and_then(|curves| curves.get(param_id))
+        .or_else(|| entry.extra_curves.get(param_id))
+        .map(|v| v.as_slice())
+}
+
+/// 共通音量曲线（新 key `volume`，兼容旧 `hifigan_volume`）。
+pub(crate) fn common_volume_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, "volume")
+        .or_else(|| extra_curve_for_clip(entry, clip, "hifigan_volume"))
+}
+
+/// 共通声像曲线。
+pub(crate) fn common_pan_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, "pan")
+}
+
+/// 该合成链路是否在 processor 内部消费 volume/pan（如 vslib 控制点）。
+///
+/// 返回 true 时，音频引擎 mix 阶段不得再次应用这两个曲线，
+/// 否则会出现二次增益/声像；未开启 Compose 时按该算法约定不生效。
+pub(crate) fn processor_bakes_common_mix_curves(kind: SynthPipelineKind) -> bool {
+    #[cfg(feature = "vslib")]
+    {
+        return matches!(kind, SynthPipelineKind::VocalShifterVslib);
+    }
+    #[cfg(not(feature = "vslib"))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+#[cfg(feature = "vslib")]
+fn vslib_curve_active_for_clip(
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> bool {
+    // (key, default)：volume/pan 现在与其它算法共用，但在 vslib 路径由
+    // processor 消费，因此任何非默认段都必须触发 vslib 预渲染。
+    let defaults: &[(&str, f32)] = &[
+        ("volume", 1.0),
+        ("pan", 0.0),
+        ("formant_shift_cents", 0.0),
+        ("breathiness", 0.0),
+        ("dyn_edit", 1.0),
+        ("dyn_orig", 1.0),
+    ];
+    defaults.iter().any(|&(key, default)| {
+        let curve = extra_curve_for_clip(entry, clip, key);
+        curve_differs_from_default_in_range(
+            curve,
+            entry.frame_period_ms.max(0.1),
+            clip_start_sec,
+            clip_start_sec + clip.length_sec.max(0.0),
+            default,
+        )
+    })
+}
+
+fn track_requests_extra_processing(
+    algo: PitchEditAlgorithm,
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> bool {
+    match algo {
+        PitchEditAlgorithm::NsfHifiganOnnx => {
+            let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
+            extra_param_enabled(extra_params, "breath_enabled")
+        }
+        #[cfg(feature = "vslib")]
+        PitchEditAlgorithm::VocalShifterVslib => {
+            vslib_curve_active_for_clip(entry, clip, clip_start_sec)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn hifigan_formant_shift_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
     clip: &'a crate::state::Clip,
@@ -226,16 +319,6 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
         0.0,
         0.5,
     )
-}
-
-fn track_requests_extra_processing(
-    algo: PitchEditAlgorithm,
-    entry: &crate::state::TrackParamsState,
-    clip: &crate::state::Clip,
-) -> bool {
-    let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
-    matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && extra_param_enabled(extra_params, "breath_enabled")
 }
 
 impl PitchEditAlgorithm {
@@ -281,7 +364,14 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
-    use super::hifigan_formant_shift_active_for_clip;
+    #[cfg(feature = "vslib")]
+    use super::processor_bakes_common_mix_curves;
+    use super::{
+        common_pan_curve_for_clip, common_volume_curve_for_clip, extra_curve_for_clip,
+        hifigan_formant_shift_active_for_clip,
+    };
+    #[cfg(feature = "vslib")]
+    use crate::state::SynthPipelineKind;
     use crate::state::{Clip, TrackParamsState};
     use std::collections::HashMap;
 
@@ -330,7 +420,11 @@ mod tests {
         };
         entry.extra_curves = HashMap::from([("formant_shift_cents".to_string(), vec![0.1; 500])]);
 
-        assert!(!hifigan_formant_shift_active_for_clip(&entry, &make_clip(), 0.0));
+        assert!(!hifigan_formant_shift_active_for_clip(
+            &entry,
+            &make_clip(),
+            0.0
+        ));
     }
 
     #[test]
@@ -341,7 +435,62 @@ mod tests {
         };
         entry.extra_curves = HashMap::from([("formant_shift_cents".to_string(), vec![1.0; 500])]);
 
-        assert!(hifigan_formant_shift_active_for_clip(&entry, &make_clip(), 0.0));
+        assert!(hifigan_formant_shift_active_for_clip(
+            &entry,
+            &make_clip(),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn common_volume_curve_reads_legacy_hifigan_volume_key() {
+        let mut entry = TrackParamsState::default();
+        entry.extra_curves = HashMap::from([("hifigan_volume".to_string(), vec![0.5, 0.75, 1.0])]);
+        let clip = make_clip();
+        assert_eq!(
+            common_volume_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![0.5, 0.75, 1.0])
+        );
+        assert_eq!(common_pan_curve_for_clip(&entry, &clip), None);
+    }
+
+    #[test]
+    fn clip_level_common_curves_take_precedence_over_track_curves() {
+        let mut entry = TrackParamsState::default();
+        entry.extra_curves = HashMap::from([
+            ("volume".to_string(), vec![1.0, 1.0]),
+            ("pan".to_string(), vec![0.0, 0.0]),
+        ]);
+        let mut clip = make_clip();
+        clip.extra_curves = Some(HashMap::from([("pan".to_string(), vec![0.5, -0.5])]));
+
+        // clip 覆盖 pan；clip 没有覆盖 volume，回退到 track 级曲线。
+        assert_eq!(
+            extra_curve_for_clip(&entry, &clip, "pan").map(|v| v.to_vec()),
+            Some(vec![0.5, -0.5])
+        );
+        assert_eq!(
+            common_volume_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![1.0, 1.0])
+        );
+        assert_eq!(
+            common_pan_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![0.5, -0.5])
+        );
+    }
+
+    #[cfg(feature = "vslib")]
+    #[test]
+    fn only_vslib_bakes_common_mix_curves_into_processor_output() {
+        assert!(processor_bakes_common_mix_curves(
+            SynthPipelineKind::VocalShifterVslib
+        ));
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::NsfHifiganOnnx
+        ));
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::WorldVocoder
+        ));
     }
 }
 
@@ -981,7 +1130,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
@@ -1343,7 +1492,7 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)

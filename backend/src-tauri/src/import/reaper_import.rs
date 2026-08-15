@@ -782,13 +782,13 @@ fn convert_reaper_data(
     // 构建 pitch 参数
     let mut params_by_root_track: BTreeMap<String, TrackParamsState> = BTreeMap::new();
     let frame_period_ms = FRAME_PERIOD * 1000.0;
+    let total_frames = ((project_end * 1000.0 / frame_period_ms).ceil() as usize).max(1);
 
     for track in &hs_tracks {
         if let Some(points) = pitch_data_by_track.get(&track.id) {
             if points.is_empty() {
                 continue;
             }
-            let total_frames = ((project_end * 1000.0 / frame_period_ms).ceil() as usize).max(1);
             let offset_frames = build_pitch_frames(points, total_frames);
 
             // 只在有非零偏移时才记录
@@ -811,6 +811,30 @@ fn convert_reaper_data(
                 );
             }
         }
+    }
+
+    // REAPER 轨道 pan（VOLPAN 第二个值）导入为共通声像曲线；
+    // 音量（VOLPAN 第一个值）已经作为 Track.volume 导入，无需重复。
+    for (i, reaper_track) in data.tracks.iter().enumerate() {
+        let pan = reaper_track.vol_pan.get(1).copied().unwrap_or(0.0);
+        if !(pan.is_finite() && pan.abs() > 1e-9) {
+            continue;
+        }
+        let Some(track_id) = track_ids.get(i) else {
+            continue;
+        };
+        let entry = params_by_root_track
+            .entry(track_id.clone())
+            .or_insert_with(|| TrackParamsState {
+                frame_period_ms,
+                ..TrackParamsState::default()
+            });
+        let pan_curve = entry
+            .extra_curves
+            .entry("pan".to_string())
+            .or_insert_with(|| vec![0.0f32; total_frames]);
+        pan_curve.resize(total_frames, 0.0);
+        pan_curve.fill(pan.clamp(-1.0, 1.0) as f32);
     }
 
     let mut timeline = TimelineState {

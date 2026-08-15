@@ -204,6 +204,8 @@ export const enUS = {
     hifigan_tension_label: "Tension",
     formant_shift_label: "Formant Shift",
     hifigan_volume_label: "Volume",
+    volume_label: "Volume",
+    pan_label: "Pan",
     vslib_volume_label: "Volume",
     vslib_synth_mode_label: "Synth Mode",
     vslib_pan_label: "Pan",

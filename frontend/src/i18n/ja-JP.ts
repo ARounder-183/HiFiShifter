@@ -205,6 +205,8 @@ export const jaJP = {
     hifigan_tension_label: "テンション",
     formant_shift_label: "フォルマントシフト",
     hifigan_volume_label: "ボリューム",
+    volume_label: "ボリューム",
+    pan_label: "パン",
     vslib_volume_label: "ボリューム",
     vslib_synth_mode_label: "合成モード",
     vslib_pan_label: "パン",

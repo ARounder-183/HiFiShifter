@@ -280,6 +280,8 @@ export const koKR = {
     hifigan_tension_label: "텐션",
     formant_shift_label: "포먼트 시프트",
     hifigan_volume_label: "볼륨",
+    volume_label: "볼륨",
+    pan_label: "팬",
     vslib_volume_label: "볼륨",
     vslib_synth_mode_label: "합성 모드",
     vslib_pan_label: "팬",
