@@ -125,10 +125,12 @@ export function formatBarBeatsLabel(
 
 /**
  * 单小节切分数。正常网格为整数；附点网格可能是循环小数。
+ * 注意：Tempo Map 段的每小节拍数可能是小数（3/8 → 1.5、7/16 → 1.75），
+ * 这里不能取整，否则 3/8 会渲染成 “x.4/4” 之类的错误计数。
  */
 export function gridDivisionsPerBar(grid: string, beatsPerBar: number): number {
     const step = Math.max(1e-9, gridStepBeats(grid));
-    return Math.max(1, normalizeBeatsPerBar(beatsPerBar) / step);
+    return Math.max(1, Math.max(1, beatsPerBar || BEATS_PER_BAR_DEFAULT) / step);
 }
 
 function formatDivisionCount(count: number): string {
@@ -176,7 +178,9 @@ export function formatTempoBarBeatsLabel(
     mode: "ruler" | "cursor",
     beatsPerBar: number,
 ): string {
-    const bpb = Math.max(1, Math.round(beatsPerBar || 4));
+    // 与 beatToBarBeat 一致：使用原始（可能为小数的）每小节拍数，
+    // 取整会导致 3/8（1.5 拍/小节）在拍 2 上不产生进位。
+    const bpb = Math.max(1, beatsPerBar || 4);
     let bar = bbt.bar;
     let beat = bbt.beat;
     let sub = bbt.sub;

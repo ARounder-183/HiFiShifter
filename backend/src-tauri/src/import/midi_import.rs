@@ -459,6 +459,7 @@ fn key_signature_to_scale_key(sf: i8) -> Option<String> {
 /// - 事件时间用 MIDI 自身的 Tempo 事件积分换算为秒；
 /// - 返回的列表已按位置升序，第一个点位于 0（始终存在）；
 /// - 仅当存在“0 之后的实际变化”时返回 Some（否则 None，交由调用方按工程基准处理）。
+#[allow(clippy::too_many_arguments)]
 pub fn build_tempo_map_points_from_midi(
     result: &MidiParseResult,
     import_tempo: bool,
@@ -466,6 +467,7 @@ pub fn build_tempo_map_points_from_midi(
     import_key_signature: bool,
     fallback_bpm: f64,
     fallback_beats_per_bar: u32,
+    fallback_denominator: u32,
 ) -> Option<Vec<crate::state::TempoPointData>> {
     // 收集事件（位置为秒；跳过被关闭的导入类型）。
     struct Event {
@@ -546,7 +548,11 @@ pub fn build_tempo_map_points_from_midi(
     // 计算每个位置生效的参数（向前继承；无前值用 fallback）。
     let mut current_bpm = fallback_bpm.clamp(10.0, 960.0);
     let mut current_num = fallback_beats_per_bar.clamp(1, 32);
-    let mut current_den: u32 = 4;
+    let mut current_den: u32 = if matches!(fallback_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+        fallback_denominator
+    } else {
+        4
+    };
 
     let mut points: Vec<crate::state::TempoPointData> = Vec::new();
     let mut index = 0usize;
@@ -584,7 +590,11 @@ pub fn build_tempo_map_points_from_midi(
                 position_sec: 0.0,
                 bpm: fallback_bpm.clamp(10.0, 960.0),
                 numerator: Some(fallback_beats_per_bar.clamp(1, 32)),
-                denominator: Some(4),
+                denominator: Some(if matches!(fallback_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                    fallback_denominator
+                } else {
+                    4
+                }),
                 scale: None,
             },
         );

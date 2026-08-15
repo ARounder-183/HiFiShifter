@@ -1002,16 +1002,11 @@ pub(super) fn set_timeline_tempo_map(
     state.checkpoint_timeline(&tl);
     *tl = incoming;
 
-    // 同步工程基准 BPM / 拍号（与 0 位置点一致）。
-    let initial = tl.tempo_map.as_ref().and_then(|points| points.first().cloned());
-    if let Some(first) = initial {
-        tl.bpm = first.bpm.clamp(10.0, 960.0);
-        {
-            let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
-            p.time_signature_denominator = first.denominator.unwrap_or(4);
-            p.dirty = true;
-        }
+    // 同步工程基准 BPM / 拍号 / 音阶（与 0 位置点一致，初始点即工程基准记录）。
+    // 音阶同步回写会更新 tl.project_scale_notes，因此引擎快照必须在其后获取。
+    {
+        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        state.sync_project_record_from_tempo_map(&mut tl, &mut p);
     }
 
     let scale_signature_after =
@@ -1021,54 +1016,6 @@ pub(super) fn set_timeline_tempo_map(
 
     let scale_changed = scale_signature_before != scale_signature_after;
     if scale_changed {
-        // 初始点即工程基准记录：初始点音阶变化同步回工程音阶（双向）。
-        let first_scale = tl
-            .tempo_map
-            .as_ref()
-            .and_then(|points| points.first())
-            .and_then(|first| first.scale.clone());
-        if let Some(scale) = first_scale {
-            let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(key) = scale.key.as_deref() {
-                if p.base_scale != key || p.use_custom_scale {
-                    p.base_scale = key.to_string();
-                    p.use_custom_scale = false;
-                    p.custom_scale = None;
-                    p.dirty = true;
-                }
-                if let Some(notes) = crate::state::scale_notes_for_key(key) {
-                    tl.project_scale_notes = notes;
-                }
-            } else if let Some(notes) = scale.notes.as_ref() {
-                let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
-                normalized.sort_unstable();
-                normalized.dedup();
-                if !normalized.is_empty() {
-                    let name = scale
-                        .name
-                        .clone()
-                        .filter(|n| !n.trim().is_empty())
-                        .unwrap_or_else(|| "Custom Scale".to_string());
-                    let changed = !p.use_custom_scale
-                        || p.custom_scale.as_ref().map(|c| (&c.name, &c.notes))
-                            != Some((&name, &normalized));
-                    if changed {
-                        p.custom_scale = Some(crate::project::CustomScale {
-                            id: p
-                                .custom_scale
-                                .as_ref()
-                                .map(|c| c.id.clone())
-                                .unwrap_or_else(|| crate::state::new_id("cs")),
-                            name,
-                            notes: normalized.clone(),
-                        });
-                        p.use_custom_scale = true;
-                        p.dirty = true;
-                    }
-                    tl.project_scale_notes = normalized;
-                }
-            }
-        }
         for clip in &tl.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }

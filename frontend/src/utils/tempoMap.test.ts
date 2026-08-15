@@ -5,16 +5,19 @@ import {
     barBeatAtSec,
     beatToSec,
     buildScaleSegments,
+    buildTempoGridLineXsForViewport,
     buildTempoGridLines,
     computeTempoFloatingLabelState,
     createTempoPointAt,
     effectiveScaleAtSec,
     effectiveTimeSignatureAt,
     fromBackendTempoMap,
+    insertTempoPoint,
     normalizeTempoMap,
     parseTempoPointText,
     pointIndexAtSec,
     removeTempoPoint,
+    scaleChangesInRange,
     secToBeat,
     snapSecToTempoGrid,
     tempoAtSec,
@@ -671,6 +674,128 @@ function sig(numerator: number, denominator: number): TempoTimeSignature {
         "normalize: point-0 project denominator",
     );
     assertEqual(normalized.points[1].timeSignature, null, "normalize: later point stays follow");
+}
+
+// ── 回归：不变量修复 ───────────────────────────────────────────────────────────
+
+{
+    // updateTempoPoint 修改 positionSec 后必须重排（拖拽跨越相邻点会乱序，
+    // 破坏 pointIndexAtSec 的二分查找）并钉住 0 位置点。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120 },
+        { positionSec: 2, bpm: 130 },
+        { positionSec: 5, bpm: 140 },
+    ]);
+    // 把 5s 的点拖到 1s（跨过 2s 的点）。
+    const updated = updateTempoPoint(map, "p2", { positionSec: 1 });
+    assertEqual(updated.points[0].positionSec, 0, "update: point-0 stays at 0");
+    assertEqual(updated.points[1].positionSec, 1, "update: dragged point sorted first");
+    assertEqual(updated.points[1].id, "p2", "update: dragged point keeps id");
+    assertEqual(updated.points[2].positionSec, 2, "update: crossed point keeps position");
+    assertEqual(
+        pointIndexAtSec(updated, 1.5),
+        1,
+        "update: binary search works after re-sort",
+    );
+}
+
+{
+    // normalizeTempoMap：乱序输入 + 非相邻重复位置 → 排序后去重。
+    const raw: TempoMap = {
+        points: [
+            { id: "a", positionSec: 5, bpm: 120, timeSignature: sig(4, 4), scale: null },
+            { id: "b", positionSec: 0, bpm: 120, timeSignature: sig(4, 4), scale: null },
+            { id: "c", positionSec: 5, bpm: 130, timeSignature: sig(4, 4), scale: null },
+        ],
+    };
+    const normalized = normalizeTempoMap(raw, 120, 4);
+    if (!normalized) throw new Error("normalizeTempoMap (unsorted dup) returned null");
+    assertEqual(normalized.points.length, 2, "normalize: duplicate position collapsed");
+    assertEqual(normalized.points[0].positionSec, 0, "normalize: sorted first");
+    assertEqual(normalized.points[1].positionSec, 5, "normalize: sorted second");
+}
+
+{
+    // insertTempoPoint：与已有点过近时不插入（契约：不允许重复位置）。
+    const map = mapWith([
+        { positionSec: 0, bpm: 120 },
+        { positionSec: 5, bpm: 120 },
+    ]);
+    const close = insertTempoPoint(map, {
+        id: "dup",
+        positionSec: 5,
+        bpm: 200,
+        timeSignature: null,
+        scale: null,
+    });
+    assertEqual(close.points.length, 2, "insert: too-close point rejected");
+}
+
+{
+    // createTempoPointAt(null, 0)：初始点必须携带显式拍号/音阶（工程基准记录），
+    // 而不是 timeSignature: null 的“跟随”点（序列化后后端会按 4/4 物化）。
+    const { map, point } = createTempoPointAt(null, 0, { bpm: 90, beatsPerBar: 3, denominator: 8 }, {
+        projectScale: "G",
+    });
+    assertEqual(map.points.length, 1, "create at 0: single point");
+    assertEqual(point.timeSignature?.numerator, 3, "create at 0: explicit numerator");
+    assertEqual(point.timeSignature?.denominator, 8, "create at 0: explicit denominator");
+    assertEqual(point.scale?.key, "G", "create at 0: project scale attached");
+}
+
+{
+    // buildBeatCache / secToBeat：非法 BPM（0）不能产生 NaN/Infinity（防御）。
+    const map = mapWith([{ positionSec: 0, bpm: 0 }]);
+    const beat = secToBeat(map, 10, 120);
+    if (!Number.isFinite(beat)) throw new Error("secToBeat with bpm 0 must be finite");
+    const sec = beatToSec(map, beat, 120);
+    if (!Number.isFinite(sec)) throw new Error("beatToSec with bpm 0 must be finite");
+    assertNear(sec, 10, "sec↔beat round-trip with clamped bpm");
+}
+
+{
+    // scaleChangesInRange：管辖范围起点之前的变化点必须包含（范围起点生效音阶
+    // 由它决定），否则 MenuBar 的“选区受 Tempo Map 影响”提示会漏报。
+    const map = mapWith([
+        { positionSec: 0, scale: null },
+        { positionSec: 1, scale: { key: "G" } },
+        { positionSec: 4, scale: { key: "D" } },
+    ]);
+    const changes = scaleChangesInRange(map, 2, 3);
+    assertEqual(changes.length, 1, "scaleChangesInRange: governing change included");
+    assertEqual(changes[0].positionSec, 1, "scaleChangesInRange: governing position");
+    assertEqual(changes[0].scale, "G", "scaleChangesInRange: governing scale");
+    const none = scaleChangesInRange(map, 5, 6);
+    assertEqual(none.length, 1, "scaleChangesInRange: later range still governed");
+    assertEqual(none[0].scale, "D", "scaleChangesInRange: later governing scale");
+}
+
+{
+    // 网格密度上限：细网格 + 长范围必须先估算步长，不能全量生成
+    // （长工程 + 1/64 网格曾先分配数百万条线再过滤，导致界面卡死）。
+    const map = mapWith([
+        { positionSec: 0, bpm: 960, timeSignature: sig(4, 4) },
+        { positionSec: 3600, bpm: 960, timeSignature: sig(4, 4) },
+    ]);
+    const xs = buildTempoGridLineXsForViewport({
+        tempoMap: map,
+        scrollLeft: 0,
+        viewportWidth: 1200,
+        pxPerSec: 0.1,
+        projectSec: 7200,
+        stepBeats: 1 / 64,
+        fallbackBpm: 960,
+        fallbackBeatsPerBar: 4,
+    });
+    if (!xs) throw new Error("buildTempoGridLineXsForViewport returned null");
+    // 2 小时 @960BPM、1/64 网格：全量生成会产生数百万条线；
+    // 修复后弱网格按步长预缩放、强网格按 stride 抽取，总量有界。
+    if (xs.weak.length > 500) {
+        throw new Error(`grid density: weak lines bounded (got ${xs.weak.length})`);
+    }
+    if (xs.strong.length > 52) {
+        throw new Error(`grid density: strong lines bounded (got ${xs.strong.length})`);
+    }
 }
 
 console.log(`tempoMap.test.ts: all ${checks} checks passed.`);

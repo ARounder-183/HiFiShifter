@@ -104,11 +104,14 @@ pub(super) fn set_transport(
         if v.is_finite() && v > 0.0 {
             // BPM is project-affecting: checkpoint for undo.
             state.checkpoint_timeline(&tl);
-            tl.bpm = v;
+            // 与 Tempo Map 规范化/前端 clampBpm 一致：钳制到 10-960，
+            // 否则这里可直接把 Tempo Map 初始点 BPM 写出合法范围。
+            let clamped = v.clamp(10.0, 960.0);
+            tl.bpm = clamped;
             // Tempo Map 存在时，工程 BPM 与 0 位置点保持一致。
             if let Some(points) = tl.tempo_map.as_mut() {
                 if let Some(first) = points.first_mut() {
-                    first.bpm = v;
+                    first.bpm = clamped;
                 }
             }
         }

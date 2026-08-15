@@ -9,18 +9,19 @@
  * - 音乐时间（拍 / 小节.拍）完全由 Tempo Map 推导，编辑变化点不会移动任何音频。
  *
  * 拍号为“每小节拍数”的概念：一小节的拍数 = numerator * 4 / denominator。
- * 变化点处的音阶为 null 时表示“跟随工程音阶”；
+ * 变化点处的音阶为 null 时表示“跟随之前的音阶”（透明：继续使用之前最近的
+ * 显式音阶，全无显式音阶时使用工程音阶）；
  * 变化点处的拍号为 null 时表示“跟随之前的拍号”（0 位置初始点必须显式携带拍号）。
  */
 
-import type { ScaleLike } from "./musicalScales";
-import { SCALE_KEYS, SCALE_LABELS, isScaleKey, normalizeCustomScaleNotes } from "./musicalScales";
+import type { ScaleLike } from "./musicalScales.ts";
+import { SCALE_KEYS, SCALE_LABELS, isScaleKey, normalizeCustomScaleNotes } from "./musicalScales.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 类型
 // ────────────────────────────────────────────────────────────────────────────
 
-/** 变化点携带的音阶数据；null 表示跟随工程音阶。 */
+/** 变化点携带的音阶数据；null 表示跟随之前的音阶（透明，见模块注释）。 */
 export interface TempoMapScaleData {
     /** 内置音阶键名（如 "C"、"Db"）。 */
     key?: string;
@@ -135,10 +136,10 @@ export function normalizeTimeSignature(value: {
     return makeTimeSignature(numerator, denominator);
 }
 
-/** 格式化 BPM 显示（整数则无小数）。 */
+/** 格式化 BPM 显示（整数则无小数；其余保留最多 3 位小数，去除多余尾零）。 */
 export function formatTempoBpm(bpm: number): string {
     const rounded = Math.round(bpm * 1000) / 1000;
-    return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+    return String(rounded);
 }
 
 /** 拍号显示文本，如 "4/4"、"3/4"。 */
@@ -173,22 +174,27 @@ export function normalizeTempoMap(
 
     const fallback = clampNumerator(fallbackBeatsPerBar || 4);
     const fallbackDenominator = clampDenominator(opts?.projectDenominator ?? 4);
-    const points: TempoPoint[] = [];
-    for (const raw of map.points) {
-        if (!raw || typeof raw.id !== "string" || !raw.id) continue;
-        const positionSec = Math.max(0, Number(raw.positionSec) || 0);
-        if (points.length > 0 && Math.abs(points[points.length - 1].positionSec - positionSec) < 1e-6) {
-            continue;
-        }
-        points.push({
-            id: raw.id,
-            positionSec,
-            bpm: clampBpm(Number(raw.bpm)),
-            timeSignature: normalizeTimeSignature(raw.timeSignature),
-            scale: normalizeScaleData(raw.scale),
+    const raw: TempoPoint[] = [];
+    for (const rawPoint of map.points) {
+        if (!rawPoint || typeof rawPoint.id !== "string" || !rawPoint.id) continue;
+        raw.push({
+            id: rawPoint.id,
+            positionSec: Math.max(0, Number(rawPoint.positionSec) || 0),
+            bpm: clampBpm(Number(rawPoint.bpm)),
+            timeSignature: normalizeTimeSignature(rawPoint.timeSignature),
+            scale: normalizeScaleData(rawPoint.scale),
         });
     }
-    points.sort((a, b) => a.positionSec - b.positionSec);
+    // 先排序再去重：输入乱序时，相邻的重复位置（如 [5, 0, 0.0000005]）必须
+    // 在排序后才能可靠合并，否则会同时保留，破坏“位置严格递增”的契约。
+    raw.sort((a, b) => a.positionSec - b.positionSec);
+    const points: TempoPoint[] = [];
+    for (const p of raw) {
+        if (points.length > 0 && Math.abs(points[points.length - 1].positionSec - p.positionSec) < 1e-6) {
+            continue;
+        }
+        points.push(p);
+    }
     if (points.length === 0) return null;
 
     if (points[0].positionSec > 1e-9) {
@@ -429,7 +435,8 @@ export function scaleLikeToScaleData(
 
 /**
  * 查询 sec 位置生效的音阶：
- * - 从该位置向前找最近一个携带音阶的变化点；
+ * - 从该位置向前找最近一个携带音阶的变化点（音阶为 null 的变化点是透明的，
+ *   表示“跟随之前的音阶”，不重置为工程音阶）；
  * - 找不到则返回工程音阶。
  */
 export function effectiveScaleAtSec(
@@ -460,8 +467,11 @@ export function previousScaleAtSec(
 }
 
 /**
- * 查询 [startSec, endSec] 范围内生效过的音阶变化（位置 + 音阶），
- * 用于判断“工程音阶”选项是否受 Tempo Map 影响。
+ * 查询 [startSec, endSec] 范围内生效过的音阶变化（位置 + 音阶）。
+ *
+ * 除范围内的显式变化点外，还包含“管辖范围起点”的变化点（起点之前最近一个
+ * 显式音阶变化）—— 它虽然位于范围之外，但决定了范围起点的生效音阶，
+ * 用于判断“工程音阶”选项是否受 Tempo Map 影响时不能遗漏。
  */
 export function scaleChangesInRange(
     map: TempoMap | null,
@@ -472,9 +482,18 @@ export function scaleChangesInRange(
     const out: Array<{ positionSec: number; scale: ScaleLike }> = [];
     for (const point of map.points) {
         if (point.positionSec > endSec + 1e-9) break;
-        if (point.positionSec < startSec - 1e-9 && point.positionSec > 0) continue;
         const scale = scaleDataToScaleLike(point.scale);
-        if (scale) out.push({ positionSec: point.positionSec, scale });
+        if (!scale) continue;
+        if (point.positionSec < startSec - 1e-9) {
+            // 管辖范围起点的变化点：始终保留（放在结果首位）。
+            if (out.length === 0) {
+                out.push({ positionSec: point.positionSec, scale });
+            } else {
+                out[0] = { positionSec: point.positionSec, scale };
+            }
+            continue;
+        }
+        out.push({ positionSec: point.positionSec, scale });
     }
     return out;
 }
@@ -525,7 +544,9 @@ export function buildBeatCache(map: TempoMap, fallbackBpm: number): TempoMapBeat
     const beatRates: number[] = [];
     for (let i = 0; i < map.points.length; i += 1) {
         const point = map.points[i];
-        const rate = point.bpm / 60;
+        // 与 snapSecToTempoGrid / buildTempoGridLines 一致：BPM 必须钳制，
+        // 否则 0/负 BPM 会产生 0/负拍速（除零 → NaN/Infinity，负值 → 拍数递减）。
+        const rate = Math.max(1, clampBpm(point.bpm)) / 60;
         beatRates.push(rate);
         if (i + 1 < map.points.length) {
             const next = map.points[i + 1];
@@ -705,10 +726,13 @@ export function buildTempoGridLines(args: {
     stepBeats: number;
     fallbackBpm: number;
     fallbackBeatsPerBar: number;
+    /** 强网格（小节线）抽取步长：仅绘制 k % strongStride === 0 的小节线（密度上限优化）。 */
+    strongStride?: number;
 }): TempoGridLine[] {
     const { startSec, endSec, map, stepBeats, fallbackBpm, fallbackBeatsPerBar } = args;
     if (endSec < startSec) return [];
     const safeStep = Math.max(1e-9, stepBeats);
+    const strongStride = Math.max(1, Math.floor(args.strongStride ?? 1));
     const lines: TempoGridLine[] = [];
 
     const add = (sec: number, isBar: boolean) => {
@@ -764,6 +788,7 @@ export function buildTempoGridLines(args: {
         const lastBar = Math.floor(localEndBeat / segBpb + 1e-9);
         for (let k = firstBar; k <= lastBar; k += 1) {
             if (k < 0) continue;
+            if (k % strongStride !== 0) continue;
             add(segment.startSec + k * segBpb * segSecPerBeat, true);
         }
     }
@@ -779,6 +804,10 @@ export function buildTempoGridLines(args: {
 /** 插入变化点（自动排序、去除与已有点过近的点）。 */
 export function insertTempoPoint(map: TempoMap, point: TempoPoint): TempoMap {
     const points = [...map.points];
+    // 与已有点过近（< 1e-6s）时不插入（规范化契约：不允许重复位置）。
+    if (points.some((p) => Math.abs(p.positionSec - point.positionSec) < 1e-6)) {
+        return { points };
+    }
     const idx = points.findIndex((p) => p.positionSec > point.positionSec + 1e-6);
     if (idx < 0) points.push(point);
     else points.splice(idx, 0, point);
@@ -786,24 +815,33 @@ export function insertTempoPoint(map: TempoMap, point: TempoPoint): TempoMap {
 }
 
 export function updateTempoPoint(map: TempoMap, id: string, patch: Partial<Omit<TempoPoint, "id">>): TempoMap {
-    return {
-        points: map.points.map((p) => {
-            if (p.id !== id) return p;
-            return {
-                ...p,
-                ...patch,
-                positionSec: Math.max(0, Number(patch.positionSec ?? p.positionSec) || 0),
-                bpm: clampBpm(Number(patch.bpm ?? p.bpm)),
-                timeSignature:
-                    patch.timeSignature === undefined
-                        ? p.timeSignature
-                        : patch.timeSignature == null
-                          ? null
-                          : makeTimeSignature(patch.timeSignature.numerator, patch.timeSignature.denominator),
-                scale: patch.scale === undefined ? p.scale : normalizeScaleData(patch.scale),
-            };
-        }),
-    };
+    const positionPatched = patch.positionSec !== undefined;
+    const points = map.points.map((p) => {
+        if (p.id !== id) return p;
+        return {
+            ...p,
+            ...patch,
+            positionSec: Math.max(0, Number(patch.positionSec ?? p.positionSec) || 0),
+            bpm: clampBpm(Number(patch.bpm ?? p.bpm)),
+            timeSignature:
+                patch.timeSignature === undefined
+                    ? p.timeSignature
+                    : patch.timeSignature == null
+                      ? null
+                      : makeTimeSignature(patch.timeSignature.numerator, patch.timeSignature.denominator),
+            scale: patch.scale === undefined ? p.scale : normalizeScaleData(patch.scale),
+        };
+    });
+    if (positionPatched) {
+        // 位置变化可能破坏“按 positionSec 升序”的不变量（拖拽快速跨越相邻点等），
+        // 重新排序并钉住 0 位置点 —— 下游 pointIndexAtSec（二分查找）、
+        // buildBeatCache（积分）等都依赖严格升序。
+        points.sort((a, b) => a.positionSec - b.positionSec);
+        if (points.length > 0 && points[0].positionSec > 1e-9) {
+            points[0] = { ...points[0], positionSec: 0 };
+        }
+    }
+    return { points };
 }
 
 /** 删除变化点；删除最后一个点或第一个点（map 只剩它）时返回 null。 */
@@ -857,7 +895,10 @@ export function createTempoPointAt(
             scale: scaleLikeToScaleData(opts?.projectScale, opts?.projectScaleName),
         };
         if (point.positionSec <= 1e-9) {
-            return { map: { points: [point] }, point };
+            // 新建位置即 0：直接以工程基准点作为初始点（必须显式携带拍号/音阶，
+            // 否则后续序列化会把 numerator/denominator 写成 null，后端按 4/4 物化，
+            // 与工程基准（如 3/4）不一致）。
+            return { map: { points: [first] }, point: first };
         }
         return { map: { points: [first, point] }, point };
     }
@@ -949,7 +990,27 @@ export function buildTempoGridLineXsForViewport(args: {
     // 密度上限与均匀网格一致：弱网格 ~160 条、强网格 ~48 条。
     const MAX_WEAK = 160;
     const MAX_STRONG = 48;
+    // ★ 先用“拍跨度”估算所需步长，再开始生成 —— 若先以最细网格全量生成，
+    // 长工程 + 细网格（如 2 小时 @960BPM、1/64）会先分配数百万条网格线，
+    // 与“消除卡死”的目标背道而驰。
+    const spanBeats = Math.max(
+        1e-9,
+        secToBeat(tempoMap, endSec, fallbackBpm) - secToBeat(tempoMap, startSec, fallbackBpm),
+    );
     let weakStep = Math.max(1e-9, stepBeats);
+    while (spanBeats / weakStep > MAX_WEAK && weakStep < 256) {
+        weakStep *= 2;
+    }
+    // 强网格（小节线）抽取步长：按工程拍号近似估算每小节拍数。
+    const bpbEst = Math.max(
+        1,
+        beatsPerBarOf({
+            numerator: fallbackBeatsPerBar || 4,
+            denominator: 4,
+        }),
+    );
+    const strongStride = Math.max(1, Math.ceil(spanBeats / bpbEst / MAX_STRONG));
+
     let weakLines = buildTempoGridLines({
         startSec,
         endSec,
@@ -957,7 +1018,9 @@ export function buildTempoGridLineXsForViewport(args: {
         stepBeats: weakStep,
         fallbackBpm,
         fallbackBeatsPerBar,
+        strongStride,
     });
+    // 兜底：分段对齐可能让估算偏少，仍保留按实际条数加倍的逻辑。
     while (weakLines.filter((l) => !l.isBar).length > MAX_WEAK && weakStep < 256) {
         weakStep *= 2;
         weakLines = buildTempoGridLines({
@@ -967,17 +1030,13 @@ export function buildTempoGridLineXsForViewport(args: {
             stepBeats: weakStep,
             fallbackBpm,
             fallbackBeatsPerBar,
+            strongStride,
         });
     }
     const weak = dedupeSorted(
         weakLines.filter((l) => !l.isBar).map((l) => l.sec * pxPerSec),
     );
-    let strongLines = weakLines.filter((l) => l.isBar);
-    if (strongLines.length > MAX_STRONG) {
-        const stride = Math.ceil(strongLines.length / MAX_STRONG);
-        strongLines = strongLines.filter((_, index) => index % stride === 0);
-    }
-    const strong = dedupeSorted(strongLines.map((l) => l.sec * pxPerSec));
+    const strong = dedupeSorted(weakLines.filter((l) => l.isBar).map((l) => l.sec * pxPerSec));
     return { weak, strong };
 }
 
@@ -1059,6 +1118,10 @@ export function computeTempoFloatingLabelState(args: {
     const { tempoMap, scrollLeft, pxPerSec, chipExtraWidthPx = 14, marginPx = 10 } = args;
     const safePx = Math.max(1e-9, pxPerSec);
     const leftSec = Math.max(0, scrollLeft / safePx);
+    // 空 map 防御：无变化点时不存在管辖旗帜（调用方通常已过滤，但这里不能越界）。
+    if (tempoMap.points.length === 0) {
+        return { label: "", governingOffscreen: false, blocked: false };
+    }
     const idx = pointIndexAtSec(tempoMap, leftSec);
     const governing = tempoMap.points[idx];
     const label = tempoPointFlagLabel(governing);
@@ -1254,7 +1317,8 @@ export function buildScaleSegments(
     return out;
 }
 
-function scaleLikeEquals(a: ScaleLike | null, b: ScaleLike | null): boolean {
+/** 两个音阶是否等价（内置键按名比较；自定义音阶按规范化音级集合比较）。 */
+export function scaleLikeEquals(a: ScaleLike | null | undefined, b: ScaleLike | null | undefined): boolean {
     if (a === b) return true;
     if (!a || !b) return false;
     if (Array.isArray(a) && Array.isArray(b)) {

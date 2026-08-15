@@ -1149,7 +1149,7 @@ pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_ui_settings(
     state: State<'_, AppState>,
-    settings: crate::config::UiSettings,
+    settings: serde_json::Value,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }

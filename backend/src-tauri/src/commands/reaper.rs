@@ -62,8 +62,9 @@ pub(super) fn import_reaper_project(
         let mut order_offset = max_existing_order + 1;
 
         // 应用工程 BPM（如果现有工程为空则直接应用；否则覆盖写入）
+        // 与 Tempo Map 规范化一致：钳制到 10-960，避免非法 BPM 写入工程。
         if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
-            tl.bpm = result.timeline.bpm;
+            tl.bpm = result.timeline.bpm.clamp(10.0, 960.0);
         }
         // 导入文件不含 Tempo Map 时，保持工程现有 Tempo Map 与工程 BPM 一致。
         if result.tempo_map.is_none() {

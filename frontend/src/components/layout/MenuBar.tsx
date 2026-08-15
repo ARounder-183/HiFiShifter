@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -30,7 +30,8 @@ import {
 import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
-import { scaleChangesInRange } from "../../utils/tempoMap";
+import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
+import type { ScaleLike } from "../../utils/musicalScales";
 import {
     getPianoRollSelection,
     subscribePianoRollSelection,
@@ -200,20 +201,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
     // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
     // 无选区时按整个工程判断（存在音阶变化点即提示）。
-    const selectionVersionRef = useRef(0);
-    const [, setSelectionVersion] = useState(0);
+    const [selectionVersion, setSelectionVersion] = useState(0);
     useEffect(
         () =>
             subscribePianoRollSelection(() => {
-                selectionVersionRef.current += 1;
-                setSelectionVersion(selectionVersionRef.current);
+                setSelectionVersion((v) => v + 1);
             }),
         [],
-    );
-    const pianoRollSelectionVersion = useSyncExternalStore(
-        subscribePianoRollSelection,
-        () => selectionVersionRef.current,
-        () => 0,
     );
     const tempoMapScaleHint = useMemo(() => {
         if (!s.tempoMap) return null;
@@ -222,11 +216,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         const endSec = sel
             ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
             : Math.max(1, s.projectSec);
+        const projectScale: ScaleLike | null =
+            s.project.useCustomScale && s.project.customScale
+                ? s.project.customScale.notes
+                : s.project.baseScale;
+        // 仅当范围内存在“与工程音阶不同”的音阶变化（或管辖范围起点的
+        // 变化与工程音阶不同）时才提示 —— 变化点音阶等于工程音阶时
+        // 选区并未真正受到影响。
         const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
         if (changes.length === 0) return null;
+        if (
+            changes.every((c) => scaleLikeEquals(c.scale, projectScale))
+        ) {
+            return null;
+        }
         return tAny("project_scale_tempo_map_hint");
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [s.tempoMap, s.projectSec, tAny, pianoRollSelectionVersion]);
+    }, [s.tempoMap, s.projectSec, s.project, tAny, selectionVersion]);
     const projectScaleLabelWithHint = tempoMapScaleHint
         ? `${projectScaleLabel} ${tempoMapScaleHint}`
         : projectScaleLabel;

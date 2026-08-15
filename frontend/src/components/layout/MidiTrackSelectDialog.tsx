@@ -440,9 +440,16 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     clipboardGuid: effectiveClipboardGuid ?? undefined,
                     closeLeadingGap,
                     importAsTempoMap: tempoMapImportEnabled || undefined,
-                    importTempo: importTempoMapTempo || undefined,
-                    importTimeSignature: importTempoMapTimeSignature || undefined,
-                    importKeySignature: importTempoMapKeySignature || undefined,
+                    // ★ 直接传布尔值：`x || undefined` 会把 false 变成 undefined，
+                    // 而后端对 importTempo/importTimeSignature 的默认值是 true ——
+                    // 用户取消勾选“导入 Tempo/拍号”会无效。
+                    importTempo: tempoMapImportEnabled ? importTempoMapTempo : undefined,
+                    importTimeSignature: tempoMapImportEnabled
+                        ? importTempoMapTimeSignature
+                        : undefined,
+                    importKeySignature: tempoMapImportEnabled
+                        ? importTempoMapKeySignature
+                        : undefined,
                 });
                 onOpenChange(false);
                 return;

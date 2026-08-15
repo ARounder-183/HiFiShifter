@@ -1322,6 +1322,32 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     // 清除可能残留的上一轮取消标志
     BG_RENDER_CANCEL.store(false, Ordering::Release);
 
+    // ★ panic 隔离：收集/启动阶段（native 推理库、缓存锁、AppState 访问等）
+    // 可能 panic。本函数现在也会被 `request_background_render` 放到独立线程
+    // 上调用，panic 不再有命令线程兜底 —— 若不在此处复位 BG_RENDER_ACTIVE，
+    // 后续所有渲染请求都会因 “already active” 被跳过，后台预渲染永久失效，
+    // 且前端进度事件永远不结束。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        start_background_render_inner(app)
+    }));
+    match result {
+        Ok(value) => value,
+        Err(payload) => {
+            eprintln!(
+                "[bg_render] panic during render setup (payload={:?}); resetting active flag",
+                payload
+            );
+            BG_RENDER_ACTIVE.store(false, Ordering::Release);
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            serde_json::json!({"ok": false, "error": "bg_render_setup_panicked"})
+        }
+    }
+}
+
+fn start_background_render_inner(app: tauri::AppHandle) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+
     // Clone app before getting state (state borrows from the clone),
     // so the original app can be moved into the thread.
     let app_clone = app.clone();
@@ -1413,6 +1439,51 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
 
     // 后台渲染线程
     std::thread::spawn(move || {
+        // ★ panic 隔离：渲染循环中的 panic（native 推理、缓存锁等）不能
+        // 让 BG_RENDER_ACTIVE 卡死 —— 否则后续渲染请求全部被跳过、
+        // 前端进度事件永远不结束（直到应用重启）。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_background_pass(
+                app.clone(),
+                &clips_to_render,
+                total,
+                render_timeline_version,
+                &timeline,
+                skipped_not_ready,
+            );
+        }));
+        if outcome.is_err() {
+            eprintln!("[bg_render] render thread panicked; resetting flags");
+            BG_RENDER_ACTIVE.store(false, Ordering::Release);
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            let _ = app.emit(
+                "playback_rendering_state",
+                PlaybackRenderingStateEvent {
+                    active: false,
+                    progress: Some(1.0),
+                    target: Some("background".to_string()),
+                },
+            );
+        }
+    });
+
+    serde_json::json!({"ok": true, "rendering": total})
+}
+
+/// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
+#[allow(clippy::too_many_arguments)]
+fn render_background_pass(
+    app: tauri::AppHandle,
+    clips_to_render: &[ClipRenderInfo],
+    total: usize,
+    render_timeline_version: u64,
+    timeline: &crate::state::TimelineState,
+    skipped_not_ready: usize,
+) {
+    use std::sync::atomic::Ordering;
+
+    {
         let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
             .ok()
             .as_deref()
@@ -1434,7 +1505,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         // 则完全不需要展示渲染进度，避免打开工程后的首次播放闪一下进度条。
         let mut rendering_started = false;
 
-        for clip_render_info in &clips_to_render {
+        for clip_render_info in clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
                 eprintln!(
@@ -1621,6 +1692,9 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
             }
             BG_RENDER_ACTIVE.store(false, Ordering::Release);
             BG_RENDER_CANCEL.store(false, Ordering::Release);
+            // 本轮被取消（新编辑/时间线版本变更）：清除“音高分析未完成”挂起标记，
+            // 避免音高分析稍后完成时触发一次多余的渲染（下一轮新渲染会重新设置它）。
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
 
             // 检查是否需要立即重启（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
@@ -1722,9 +1796,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                 target: Some("background".to_string()),
             },
         );
-    });
-
-    serde_json::json!({"ok": true, "rendering": total})
+    }
 }
 
 /// Request a background pre-render after render caches have been invalidated.

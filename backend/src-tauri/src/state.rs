@@ -1495,6 +1495,12 @@ impl AppState {
         h.redo.push(current);
         drop(h);
         self.bump_timeline_version();
+        // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
+        // 同步工程 BPM/拍号/音阶，避免撤销后工程记录与 Tempo Map 分叉。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
@@ -1518,6 +1524,11 @@ impl AppState {
         h.undo.push_back(current);
         drop(h);
         self.bump_timeline_version();
+        // 与 undo_timeline 一致：重做后同步工程基准记录。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
@@ -1538,6 +1549,88 @@ impl AppState {
         }
         if let Some(handle) = self.app_handle.get() {
             let _ = crate::commands::playback::request_background_render(handle);
+        }
+    }
+
+    /// 从 Tempo Map 0 位置初始点同步“工程基准记录”（BPM / 拍号 / 音阶）。
+    ///
+    /// 初始点即工程基准记录（与 `set_timeline_tempo_map` 的双向同步约定一致），
+    /// 撤销/重做恢复时间线快照后也必须重新同步，否则工程记录与 Tempo Map
+    /// 会永久分叉（例如撤销音阶修改后工程仍显示旧音阶，保存/重开也无法自愈）。
+    /// 仅在实际值变化时写回并标记工程 dirty。
+    pub fn sync_project_record_from_tempo_map(&self, tl: &mut TimelineState, p: &mut ProjectState) {
+        let Some(first) = tl
+            .tempo_map
+            .as_ref()
+            .and_then(|points| points.first())
+            .cloned()
+        else {
+            return;
+        };
+        let mut changed = false;
+
+        let bpm = first.bpm.clamp(10.0, 960.0);
+        if (tl.bpm - bpm).abs() > 1e-9 {
+            tl.bpm = bpm;
+            changed = true;
+        }
+        let beats = first.numerator.unwrap_or(4).clamp(1, 32);
+        if p.beats_per_bar != beats {
+            p.beats_per_bar = beats;
+            changed = true;
+        }
+        let denominator = match first.denominator {
+            Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => d,
+            _ => p.time_signature_denominator,
+        };
+        if p.time_signature_denominator != denominator {
+            p.time_signature_denominator = denominator;
+            changed = true;
+        }
+
+        if let Some(scale) = first.scale.as_ref() {
+            if let Some(key) = scale.key.as_deref() {
+                if p.base_scale != key || p.use_custom_scale {
+                    p.base_scale = key.to_string();
+                    p.use_custom_scale = false;
+                    p.custom_scale = None;
+                    changed = true;
+                }
+                if let Some(notes) = scale_notes_for_key(key) {
+                    tl.project_scale_notes = notes;
+                }
+            } else if let Some(notes) = scale.notes.as_ref() {
+                let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+                normalized.sort_unstable();
+                normalized.dedup();
+                if !normalized.is_empty() {
+                    let name = scale
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "Custom Scale".to_string());
+                    let same = p.use_custom_scale
+                        && p.custom_scale.as_ref().map(|c| (&c.name, &c.notes))
+                            == Some((&name, &normalized));
+                    if !same {
+                        p.custom_scale = Some(crate::project::CustomScale {
+                            id: p
+                                .custom_scale
+                                .as_ref()
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| new_id("cs")),
+                            name,
+                            notes: normalized.clone(),
+                        });
+                        p.use_custom_scale = true;
+                        changed = true;
+                    }
+                    tl.project_scale_notes = normalized;
+                }
+            }
+        }
+        if changed {
+            p.dirty = true;
         }
     }
 }
@@ -2608,16 +2701,12 @@ impl TimelineState {
                 Some(_) => Some(4),
                 None => None,
             };
-            if valid
-                .last()
-                .map(|last: &TempoPointData| (p.position_sec - last.position_sec).abs() < 1e-6)
-                .unwrap_or(false)
-            {
-                continue;
-            }
             valid.push(p);
         }
+        // 先排序再去重：若在排序前去重，输入乱序时相邻的重复点（如 [2,5,2]）
+        // 会同时保留，破坏“位置严格递增”的不变量（下游二分查找/积分依赖它）。
         valid.sort_by(|a, b| a.position_sec.partial_cmp(&b.position_sec).unwrap_or(std::cmp::Ordering::Equal));
+        valid.dedup_by(|a, b| (a.position_sec - b.position_sec).abs() < 1e-6);
         if valid.is_empty() {
             self.tempo_map = None;
             return;
@@ -2665,33 +2754,37 @@ impl TimelineState {
     }
 
     /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。
+    /// 语义与前端 `effectiveScaleAtSec` 及 `scale_segments` 一致：
+    /// 音阶为 null 的变化点表示“跟随之前的音阶”（透明），需继续向前寻找
+    /// 最近一个显式携带音阶的变化点；找不到才回退工程音阶。
     pub fn effective_scale_notes_at_sec(&self, sec: f64) -> Vec<u8> {
         let Some(points) = self.tempo_map.as_ref() else {
             return self.project_scale_notes.clone();
         };
         let target = sec.max(0.0);
         for point in points.iter().rev() {
-            if point.position_sec <= target + 1e-9 {
-                if let Some(scale) = point.scale.as_ref() {
-                    if let Some(key) = scale.key.as_deref() {
-                        if let Some(notes) = scale_notes_for_key(key) {
-                            return notes;
-                        }
-                    }
-                    if let Some(notes) = scale.notes.as_ref() {
-                        let mut normalized: Vec<u8> = notes
-                            .iter()
-                            .map(|v| v % 12)
-                            .collect();
-                        normalized.sort_unstable();
-                        normalized.dedup();
-                        if !normalized.is_empty() {
-                            return normalized;
-                        }
+            if point.position_sec > target + 1e-9 {
+                continue;
+            }
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        return notes;
                     }
                 }
-                break;
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes
+                        .iter()
+                        .map(|v| v % 12)
+                        .collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        return normalized;
+                    }
+                }
             }
+            // 该点音阶为 null（跟随之前的音阶）：继续向前寻找。
         }
         self.project_scale_notes.clone()
     }

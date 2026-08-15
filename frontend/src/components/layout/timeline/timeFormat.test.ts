@@ -8,6 +8,7 @@ import {
     formatSecondsCursor,
     formatSecondsRuler,
     formatTempoBarBeatsLabel,
+    formatTempoBarDivisionsLabel,
     gridDivisionsPerBar,
     rulerStepCandidates,
     selectRulerStep,
@@ -360,6 +361,27 @@ assertEqual(
     const at45 = ticks.find((t) => Math.abs(t.sec - 4.5) < 1e-9);
     assertEqual(at45?.primaryLabel, "4.1", "tempo ruler follow-sig: 3/4 bar continues");
     assertEqual(at45?.isBarStart, true, "tempo ruler follow-sig: bar tick flagged");
+}
+
+// ── 回归：分数每小节拍数（3/8 = 1.5 拍/小节）──
+{
+    // 切分数不得取整：3/8 小节在 1/8 网格下是 3 个切分，而不是 round(1.5)/0.5 = 4。
+    assertNear(gridDivisionsPerBar("1/8", 1.5), 3, "fractional bpb: 3/8 with 1/8 grid → 3");
+    assertNear(gridDivisionsPerBar("1/16", 1.5), 6, "fractional bpb: 3/8 with 1/16 grid → 6");
+    assertNear(gridDivisionsPerBar("1/4", 4), 4, "integer bpb unchanged");
+    // 切分标签：3/8 小节的第 2 拍（最后一个八分音符）→ 第 3 个切分 / 共 3 个。
+    assertEqual(
+        formatTempoBarDivisionsLabel({ bar: 1, beat: 2, sub: 0 }, 1.5, "1/8"),
+        "1.3/3",
+        "fractional bpb: division label 3/3",
+    );
+    // 小节.拍 标签按原始 bpb 进位：1.5 拍/小节中拍内余量接近 1 时（拍 2 末尾）
+    // 必须进位到下一小节（取整为 2 也会进位，但这是对原始 bpb 路径的回归保护）。
+    assertEqual(
+        formatTempoBarBeatsLabel({ bar: 1, beat: 2, sub: 0.9999999995 }, "ruler", 1.5),
+        "2.1",
+        "fractional bpb: near-boundary sub carries to next bar",
+    );
 }
 
 console.log(`timeFormat checks passed (${checks})`);

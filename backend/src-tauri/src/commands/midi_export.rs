@@ -458,6 +458,8 @@ fn make_conductor_track(
     };
 
     let Some(map) = timeline.tempo_map.as_ref() else {
+        // 与 TempoTickConverter::new 的钳制保持一致（10-960）。
+        let fallback_bpm = fallback_bpm.max(10.0).min(960.0);
         let tempo_us_per_beat = (60_000_000.0 / fallback_bpm.max(1.0)).round() as u32;
         let (sharps_flats, major_minor) = scale_to_key_signature(fallback_base_scale);
         push_meta(
@@ -506,20 +508,24 @@ fn make_conductor_track(
             8,
         ),
     );
+    let mut prev_scale: Option<String> = None;
     if let Some(scale) = first.scale.as_ref() {
         if let Some(key) = scale.key.as_deref() {
             let (sf, mi) = scale_to_key_signature(key);
             push_meta(&mut events, 0, MetaMessage::KeySignature(sf, mi));
+            prev_scale = Some(key.to_string());
         }
+    }
+    // 初始点音阶为“跟随工程音阶”（null）时，回退写入工程的调号，
+    // 否则消费方（DAW）会按默认 C 大调理解整首乐曲。
+    if prev_scale.is_none() {
+        let (sf, mi) = scale_to_key_signature(fallback_base_scale);
+        push_meta(&mut events, 0, MetaMessage::KeySignature(sf, mi));
     }
 
     let mut prev_bpm = first.bpm;
     let mut prev_num = first_num;
     let mut prev_den = first_den;
-    let mut prev_scale: Option<String> = first
-        .scale
-        .as_ref()
-        .and_then(|s| s.key.clone());
 
     for (index, point) in map.iter().enumerate().skip(1) {
         let tick = converter.sec_to_ticks(point.position_sec);

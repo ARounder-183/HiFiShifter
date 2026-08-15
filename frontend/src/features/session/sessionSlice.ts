@@ -102,6 +102,7 @@ import {
     clampDenominator,
     fromBackendTempoMap,
     normalizeTempoMap,
+    scaleLikeToScaleData,
     TEMPO_DENOMINATORS,
 } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "./thunks/tempoMapThunks";
@@ -3059,6 +3060,30 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 后端会把工程音阶同步到 Tempo Map 初始点（初始点即工程基准记录）：
+                // 前端镜像该同步，避免 effectiveScaleAtSec 等 UI 计算使用过期音阶
+                // （钢琴卷帘高亮、音高吸附会与音频渲染不一致）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
+                }
                 // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
                 state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
@@ -3087,6 +3112,29 @@ const sessionSlice = createSlice({
                 }
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
+                }
+                // 与 setProjectBaseScaleRemote 一致：镜像后端对 Tempo Map 初始点
+                // 音阶的同步（初始点即工程基准记录）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
                 }
                 // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
                 state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;

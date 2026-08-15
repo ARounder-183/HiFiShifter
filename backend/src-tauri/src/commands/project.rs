@@ -945,6 +945,14 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
+    // 防御性修复旧版本工程文件可能存在的“工程音阶与 Tempo Map 初始点分叉”
+    // （早期撤销路径不回写工程记录，保存的文件可能带有不一致的 base_scale）：
+    // 初始点即工程基准记录，加载后以它为准同步工程记录（含 BPM/拍号/音阶）。
+    {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        state.sync_project_record_from_tempo_map(&mut tl, &mut p);
+    }
     sync_runtime_stretch_settings(state.inner());
     if let Some(handle) = state.app_handle.get() {
         crate::commands::playback::request_background_render(handle);
@@ -1074,6 +1082,12 @@ pub(super) fn set_project_base_scale(
 
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 工程音阶变化会同步到 Tempo Map 初始点：先打撤销快照，
+        // 否则该 Tempo Map 变化无法撤销（与 set_timeline_tempo_map 的
+        // “工程影响性变化先 checkpoint”约定一致）。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
         tl.project_scale_notes = base_scale_notes(&normalized);
         // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
         if let Some(points) = tl.tempo_map.as_mut() {
@@ -1132,6 +1146,10 @@ pub(super) fn set_project_custom_scale(
 
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 与 set_project_base_scale 一致：Tempo Map 初始点会被改写，先打撤销快照。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
         tl.project_scale_notes = normalized.notes.clone();
         // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
         if let Some(points) = tl.tempo_map.as_mut() {
@@ -1190,6 +1208,10 @@ pub(super) fn set_project_timeline_settings(
     // Tempo Map 存在时，工程基准拍号变化同步到 0 位置点（保持“删除 Tempo Map 后回退一致”）。
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 初始点会被改写：先打撤销快照（工程影响性变化，与上面两个命令一致）。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
         if let Some(points) = tl.tempo_map.as_mut() {
             if let Some(first) = points.first_mut() {
                 first.numerator = Some(normalized_beats);

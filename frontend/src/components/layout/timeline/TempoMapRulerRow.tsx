@@ -613,7 +613,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 新建变化点（暂存，不提交）。
         const base = tempoMap ?? null;
         const mapFallback = baseFallbackOf(base);
-        const { map, point } = createTempoPointAt(base, positionSec, mapFallback, {
+        // 与双击新增一致：网格吸附开启时吸附到网格线。
+        let sec = positionSec;
+        if (gridSnapEnabled && base) {
+            sec = snapSecToTempoGrid(positionSec, base, gridStepBeats(grid), mapFallback.bpm);
+        }
+        const { map, point } = createTempoPointAt(base, sec, mapFallback, {
             projectScale: projectScale ?? undefined,
             projectScaleName,
         });
@@ -624,12 +629,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 point,
                 map.points[0].id === point.id,
                 focus,
-                { positionSec, baseMap: base },
+                { positionSec: sec, baseMap: base },
             );
         });
     }, [
         editRequest,
         tempoMap,
+        gridSnapEnabled,
+        grid,
         baseFallbackOf,
         projectScale,
         projectScaleName,
@@ -959,11 +966,21 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             if (gridSnapEnabled) {
                 sec = snapSecToTempoGrid(sec, tempoMap, gridStepBeats(grid), mapFallback.bpm);
             }
-            // 不与其它点重叠（最小间距按当前段 BPM 折算 1/16 拍）。
+            // 不与其它点重叠、不越过相邻点、不越过工程末尾：
+            // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。
+            // 快速拖拽若跨越相邻点，点数组会乱序（updateTempoPoint 虽会
+            // 防御性重排，但 UI 上点会互相穿插），钳制是正确行为。
             const minGapSec = 60 / Math.max(1, mapFallback.bpm) / 16;
-            for (const p of tempoMap.points) {
-                if (p.id === drag.pointId) continue;
-                if (Math.abs(p.positionSec - sec) < minGapSec) return;
+            const idx = tempoMap.points.findIndex((p) => p.id === drag.pointId);
+            if (idx >= 0) {
+                const prevSec =
+                    idx > 0 ? tempoMap.points[idx - 1].positionSec + minGapSec : 0;
+                const nextSec =
+                    idx + 1 < tempoMap.points.length
+                        ? tempoMap.points[idx + 1].positionSec - minGapSec
+                        : projectSec;
+                // 相邻点间距不足 2×minGapSec 时退化为钳到 prevSec。
+                sec = Math.min(Math.max(prevSec, sec), Math.max(nextSec, prevSec));
             }
             const draft = updateTempoPoint(tempoMap, drag.pointId, { positionSec: sec });
             dragDraftRef.current = draft;
@@ -984,7 +1001,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
         };
-    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, grid, baseFallbackOf, onChange, commitMap]);
+    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, grid, baseFallbackOf, onChange, commitMap, projectSec]);
 
     // ── 可见性计算 ──
     const visibleState = useMemo(() => {
@@ -1237,8 +1254,19 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     return (
         <div
-            className="absolute left-0 right-0 select-none"
-            style={{ top: 48, height: TEMPO_ROW_HEIGHT_PX + 4, paddingTop: 4 }}
+            className="absolute left-0 select-none"
+            style={{
+                top: 48,
+                height: TEMPO_ROW_HEIGHT_PX + 4,
+                paddingTop: 4,
+                // 行位于被 translateX(-scrollLeft) 平移的内容层内：`left-0 right-0`
+                // 的宽度只等于视口宽度（内容坐标 0..viewportWidth），水平滚动后
+                // 视口右侧区域不在行的命中范围内，双击“新增变化点”会失效
+                // （事件落到标尺上并误移动播放头）—— 显式撑到视口右缘 + 标签余量。
+                // 注意不要用 projectSec * pxPerSec（高倍缩放时可达数亿像素，
+                // 浏览器布局开销巨大）；右侧只需覆盖可见区域即可。
+                width: scrollLeft + viewportWidth + 400,
+            }}
             onDoubleClick={handleRowDoubleClick}
         >
             {/* 与时间标尺的分隔横线由 TimeRuler 在标尺盒内渲染（视口固定宽度，不随缩放伸缩）。 */}
