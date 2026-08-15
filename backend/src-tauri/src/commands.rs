@@ -715,8 +715,9 @@ pub fn copy_timeline_tracks(
 #[tauri::command(rename_all = "camelCase")]
 pub fn paste_timeline_clipboard(
     state: State<'_, AppState>,
+    mode: Option<String>,
 ) -> serde_json::Value {
-    timeline_clipboard::paste_timeline_clipboard(&state)
+    timeline_clipboard::paste_timeline_clipboard(&state, mode)
 }
 
 #[tauri::command(rename_all = "camelCase")]

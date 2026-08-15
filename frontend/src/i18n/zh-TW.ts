@@ -81,6 +81,8 @@ export const zhTW = {
     import_project_import: "匯入",
     menu_import_midi: "匯入 MIDI...",
     menu_copy_reaper_clipboard: "將選取片段複製到 REAPER 剪貼簿",
+    menu_paste_selected_track: "貼到選取軌道",
+    menu_paste_new_tracks: "作為新軌道群組貼上",
     menu_paste_reaper_clipboard: "貼上 Reaper 剪貼簿資料",
     menu_paste_vocalshifter_clipboard: "貼上 VocalShifter 剪貼簿資料",
     ctx_quick_export: "快速匯出",

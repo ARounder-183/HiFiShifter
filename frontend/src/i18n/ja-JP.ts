@@ -84,6 +84,8 @@ export const jaJP = {
     import_project_import: "インポート",
     menu_import_midi: "MIDI をインポート...",
     menu_copy_reaper_clipboard: "選択クリップを REAPER クリップボードにコピー",
+    menu_paste_selected_track: "選択トラックにペースト",
+    menu_paste_new_tracks: "新しいトラックとしてペースト",
     menu_paste_reaper_clipboard: "Reaper クリップボードデータをペースト",
     menu_paste_vocalshifter_clipboard: "VocalShifter クリップボードデータをペースト",
     ctx_quick_export: "クイック書き出し",

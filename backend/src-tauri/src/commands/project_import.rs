@@ -124,6 +124,24 @@ pub(super) fn import_project(
             }
         }
 
+        let affected_roots: std::collections::HashSet<String> = merge
+            .created_clip_ids
+            .iter()
+            .filter_map(|clip_id| tl.clips.iter().find(|clip| clip.id == *clip_id))
+            .filter_map(|clip| tl.resolve_root_track_id(&clip.track_id))
+            .collect();
+        for clip in &tl.clips {
+            if tl
+                .resolve_root_track_id(&clip.track_id)
+                .as_ref()
+                .map(|root| affected_roots.contains(root))
+                .unwrap_or(false)
+            {
+                crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                crate::formant_cache::invalidate_formant_cache_for_clip(&clip.id);
+            }
+        }
+
         let mut map_imported = false;
         let mut skipped = false;
         if let Some(mut points) = imported_tempo_map {
@@ -177,6 +195,9 @@ pub(super) fn import_project(
 
         for root_id in &midi_root_tracks {
             crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
+        }
+        if let Some(handle) = state.app_handle.get() {
+            crate::commands::playback::request_background_render(handle);
         }
 
         let mut json = serde_json::to_value(&payload).unwrap_or_default();

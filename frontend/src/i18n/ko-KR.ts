@@ -81,6 +81,8 @@ export const koKR = {
     import_project_import: "가져오기",
     menu_import_midi: "MIDI 가져오기...",
     menu_copy_reaper_clipboard: "선택한 클립을 REAPER 클립보드로 복사",
+    menu_paste_selected_track: "선택한 트랙에 붙여넣기",
+    menu_paste_new_tracks: "새 트랙으로 붙여넣기",
     menu_paste_reaper_clipboard: "Reaper 클립보드 데이터 붙여넣기",
     menu_paste_vocalshifter_clipboard: "VocalShifter 클립보드 데이터 붙여넣기",
     ctx_quick_export: "빠른 내보내기",

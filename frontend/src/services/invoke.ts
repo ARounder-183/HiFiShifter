@@ -357,6 +357,8 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { clipIds: args[0] };
 
         case "paste_timeline_clipboard":
+            return args[0] === undefined ? undefined : { mode: args[0] };
+
         case "has_timeline_clipboard":
         case "read_system_clipboard_object":
             return {};

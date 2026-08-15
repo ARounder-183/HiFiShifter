@@ -55,7 +55,7 @@ export interface UseTimelineEventHandlersArgs {
     copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // clip actions
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "auto" | "selected" | "new_tracks") => void;
     splitSelectedAtPlayhead: () => void;
     normalizeClips: (ids: string[]) => void;
     groupClips: (ids: string[]) => void;
@@ -225,6 +225,10 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             }
             if (op === "paste") {
                 pasteClipsAtPlayhead();
+            } else if (op === "pasteSelected") {
+                pasteClipsAtPlayhead("selected");
+            } else if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
             }
         }
         window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);

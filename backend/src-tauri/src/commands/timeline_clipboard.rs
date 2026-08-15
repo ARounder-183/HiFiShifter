@@ -52,16 +52,43 @@ fn read_fragment() -> Result<ProjectFragment, String> {
     ProjectFragment::decode(&bytes)
 }
 
-fn paste_fragment(state: &AppState, fragment: ProjectFragment) -> serde_json::Value {
+fn paste_placement(
+    fragment: &ProjectFragment,
+    mode: Option<&str>,
+) -> FragmentTrackPlacement {
+    match mode.unwrap_or("auto") {
+        "selected" => FragmentTrackPlacement::SelectedTrackOnly,
+        "new_tracks" | "tracks" => FragmentTrackPlacement::AppendAtEnd,
+        _ => {
+            if fragment.kind != ProjectFragmentKind::Clips {
+                return FragmentTrackPlacement::AppendAtEnd;
+            }
+            let clip_track_count = fragment
+                .timeline
+                .clips
+                .iter()
+                .map(|clip| clip.track_id.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            if clip_track_count <= 1 {
+                FragmentTrackPlacement::SelectedTrackOnly
+            } else {
+                FragmentTrackPlacement::SelectedTracksRelative
+            }
+        }
+    }
+}
+
+fn paste_fragment(
+    state: &AppState,
+    fragment: ProjectFragment,
+    mode: Option<String>,
+) -> serde_json::Value {
     let result = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl);
         let playhead_sec = tl.playhead_sec.max(0.0);
-        let track_placement = if fragment.kind == ProjectFragmentKind::Clips {
-            FragmentTrackPlacement::PlaceOnSelected
-        } else {
-            FragmentTrackPlacement::AppendAtEnd
-        };
+        let track_placement = paste_placement(&fragment, mode.as_deref());
         let merge = match merge_project_fragment(
             &mut tl,
             &fragment,
@@ -77,6 +104,28 @@ fn paste_fragment(state: &AppState, fragment: ProjectFragment) -> serde_json::Va
         for clip_id in &merge.created_clip_ids {
             if let Some(clip) = tl.clips.iter_mut().find(|clip| clip.id == *clip_id) {
                 crate::state::TimelineState::populate_clip_file_metadata(clip);
+            }
+        }
+
+        // Pasted clips get brand-new IDs, but linked parameter curves may be
+        // written into an existing target root. Invalidate every clip on all
+        // affected root tracks so playback never reuses a stale render whose
+        // hash was computed before the paste.
+        let affected_roots: std::collections::HashSet<String> = merge
+            .created_clip_ids
+            .iter()
+            .filter_map(|clip_id| tl.clips.iter().find(|clip| clip.id == *clip_id))
+            .filter_map(|clip| tl.resolve_root_track_id(&clip.track_id))
+            .collect();
+        for clip in &tl.clips {
+            if tl
+                .resolve_root_track_id(&clip.track_id)
+                .as_ref()
+                .map(|root| affected_roots.contains(root))
+                .unwrap_or(false)
+            {
+                crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                crate::formant_cache::invalidate_formant_cache_for_clip(&clip.id);
             }
         }
         state.audio_engine.update_timeline(tl.clone());
@@ -98,8 +147,19 @@ fn paste_fragment(state: &AppState, fragment: ProjectFragment) -> serde_json::Va
 
         drop(tl);
 
+        // Clip fragments only carry sliced automation (no pitch_orig). If the
+        // target root has no analyzed pitch_orig yet, schedule analysis so
+        // pasted pitch edits render correctly even before the next reopen.
+        if fragment.kind == ProjectFragmentKind::Clips {
+            for root_id in &affected_roots {
+                crate::pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+            }
+        }
         for root_id in &midi_root_tracks {
             crate::pitch_analysis::maybe_schedule_pitch_orig(state, root_id);
+        }
+        if let Some(handle) = state.app_handle.get() {
+            crate::commands::playback::request_background_render(handle);
         }
 
         let mut json = serde_json::to_value(&payload).unwrap_or_default();
@@ -123,7 +183,7 @@ pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> se
     match write_fragment(&fragment) {
         Ok(()) => json!({
             "ok": true,
-            "kind": "clips",
+            "kind": fragment.kind,
             "clipCount": fragment.timeline.clips.len(),
             "trackCount": fragment.timeline.tracks.len(),
         }),
@@ -150,9 +210,12 @@ pub(super) fn copy_timeline_tracks(state: &AppState, track_ids: Vec<String>) -> 
     }
 }
 
-pub(super) fn paste_timeline_clipboard(state: &AppState) -> serde_json::Value {
+pub(super) fn paste_timeline_clipboard(
+    state: &AppState,
+    mode: Option<String>,
+) -> serde_json::Value {
     match read_fragment() {
-        Ok(fragment) => paste_fragment(state, fragment),
+        Ok(fragment) => paste_fragment(state, fragment, mode),
         Err(error) => json!({ "ok": false, "error": error }),
     }
 }

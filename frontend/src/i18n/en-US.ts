@@ -89,6 +89,8 @@ export const enUS = {
     import_project_import: "Import",
     menu_import_midi: "Import MIDI...",
     menu_copy_reaper_clipboard: "Copy Selected Clips to REAPER Clipboard",
+    menu_paste_selected_track: "Paste into Selected Track",
+    menu_paste_new_tracks: "Paste as New Tracks",
     menu_paste_reaper_clipboard: "Paste Reaper Clipboard Data",
     menu_paste_vocalshifter_clipboard: "Paste VocalShifter Clipboard Data",
     ctx_quick_export: "Quick Export",

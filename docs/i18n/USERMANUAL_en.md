@@ -66,6 +66,8 @@ Structured HiFiShifter clipboard operations are now written by the backend direc
 - Right-click a track header and choose `Copy Track` / `Cut Track`; in the other process press `Ctrl + V` or use the empty track-area context menu to paste the complete track group (child tracks, clips and full parameter curves).
 - Parameter-curve copy/paste in the Parameter Editor also uses the backend clipboard and works across processes.
 - Select one or more clips and choose `Edit → Copy Selected Clips to REAPER Clipboard`. This writes REAPERMedia data containing the audio source, position, length, play rate, reverse, fades, mute and MIDI notes; press `Ctrl + V` in REAPER to paste. Clips without a usable source are skipped.
+- Smart paste: copying a partial clip and pressing `Ctrl + V` pastes it onto the currently selected track without creating extra child tracks. If `Ctrl + A` selects every clip in a root-track group, the copy automatically becomes a full track-group copy, preserving the source root track, child tracks, complete parameter curves and original pitch analysis data.
+- `Edit → Paste into Selected Track` force-flattens everything onto the selected track; `Edit → Paste as New Tracks` force-creates new root-track groups using the source hierarchy.
 
 
 The `Edit` menu allows various editing operations. Besides regular track and parameter editing, there are two special items: `Paste Reaper Clipboard Data` and `Paste VocalShifter Clipboard Data`.

@@ -324,7 +324,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             document.body.getAttribute("data-hs-focus-window") === "timeline";
 
         if (
-            (op === "copy" || op === "cut" || op === "paste" || op === "copyReaper") &&
+            (op === "copy" ||
+                op === "cut" ||
+                op === "paste" ||
+                op === "pasteSelected" ||
+                op === "pasteTracks" ||
+                op === "copyReaper") &&
             inTimeline &&
             !inPianoRoll &&
             !inTrackHeader
@@ -510,6 +515,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.paste")}
                         </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteSelected")}>
+                        {t("menu_paste_selected_track")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteTracks")}>
+                        {t("menu_paste_new_tracks")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>

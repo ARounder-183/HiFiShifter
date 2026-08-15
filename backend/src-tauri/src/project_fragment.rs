@@ -155,6 +155,33 @@ pub fn build_clip_fragment(
         return Err("no_clips_selected".to_string());
     }
 
+    // Smart hierarchy preservation: when the selection covers every clip in
+    // each affected root track, the user is transferring whole track groups
+    // (e.g. Ctrl+A followed by Ctrl+C). In that case produce a full Tracks
+    // fragment so the root track, child tracks, full parameter curves and
+    // pitch_orig are all pasted together.
+    let selected_ids: BTreeSet<String> = clips.iter().map(|clip| clip.id.clone()).collect();
+    let mut affected_roots: BTreeSet<String> = BTreeSet::new();
+    for clip in &clips {
+        if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
+            affected_roots.insert(root);
+        }
+    }
+    let full_subtree_selection = !affected_roots.is_empty()
+        && affected_roots.iter().all(|root| {
+            timeline
+                .clips
+                .iter()
+                .filter(|clip| {
+                    timeline.resolve_root_track_id(&clip.track_id).as_deref() == Some(root.as_str())
+                })
+                .all(|clip| selected_ids.contains(&clip.id))
+        });
+    if full_subtree_selection {
+        let root_ids: Vec<String> = affected_roots.into_iter().collect();
+        return build_track_fragment(timeline, &root_ids, source_project_name);
+    }
+
     let owning_track_ids: BTreeSet<String> =
         clips.iter().map(|clip| clip.track_id.clone()).collect();
     let owning_track_ids_vec: Vec<String> = owning_track_ids.iter().cloned().collect();
@@ -264,10 +291,14 @@ pub fn build_project_fragment(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FragmentTrackPlacement {
     /// Append every imported root track at the end of the current track list.
+    /// Used by track/project paste and by "Paste as New Tracks".
     AppendAtEnd,
-    /// Re-use tracks starting at the currently selected track and create new
-    /// child/root tracks only when required. Mirrors clip paste behavior.
-    PlaceOnSelected,
+    /// Put every copied clip onto the currently selected track. Ancestor-only
+    /// tracks in the fragment are not recreated.
+    SelectedTrackOnly,
+    /// Preserve the relative order of the source clip tracks starting at the
+    /// currently selected track. Missing target tracks are created as roots.
+    SelectedTracksRelative,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -370,7 +401,38 @@ pub fn merge_project_fragment(
                 track_id_map.insert(source.id.clone(), new_id);
             }
         }
-        FragmentTrackPlacement::PlaceOnSelected => {
+        FragmentTrackPlacement::SelectedTrackOnly => {
+            // Map every source track that actually contains clips onto the
+            // currently selected track. Ancestor-only tracks are ignored, so
+            // pasting a child clip never creates an extra child track.
+            let clip_track_ids: BTreeSet<String> = source_timeline
+                .clips
+                .iter()
+                .map(|clip| clip.track_id.clone())
+                .collect();
+            let target_track_id = timeline
+                .selected_track_id
+                .clone()
+                .or_else(|| timeline.tracks.first().map(|track| track.id.clone()))
+                .unwrap_or_else(|| {
+                    push_cloned_track(timeline, &TimelineState::default().tracks[0], None)
+                });
+            let target_root_id = timeline
+                .resolve_root_track_id(&target_track_id)
+                .unwrap_or_else(|| target_track_id.clone());
+            for track_id in clip_track_ids {
+                track_id_map.insert(track_id, target_track_id.clone());
+            }
+            // Forced track-fragment flattening: full root params are written
+            // into the target track's root group even though hierarchy is not
+            // recreated.
+            for source_root_id in source_timeline.params_by_root_track.keys() {
+                track_id_map
+                    .entry(source_root_id.clone())
+                    .or_insert_with(|| target_root_id.clone());
+            }
+        }
+        FragmentTrackPlacement::SelectedTracksRelative => {
             let selected_index = timeline
                 .selected_track_id
                 .as_ref()
@@ -382,28 +444,24 @@ pub fn merge_project_fragment(
                 })
                 .unwrap_or(timeline.tracks.len());
 
-            for (offset, root) in source_roots.iter().enumerate() {
+            let mut clip_tracks: Vec<&Track> = source_tracks
+                .iter()
+                .filter(|track| {
+                    source_timeline
+                        .clips
+                        .iter()
+                        .any(|clip| clip.track_id == track.id)
+                })
+                .collect();
+            clip_tracks.sort_by_key(|track| track.order);
+
+            for (offset, source_track) in clip_tracks.iter().enumerate() {
                 let target_index = selected_index.saturating_add(offset);
                 let mapped_id = match track_id_at_index(timeline, target_index) {
                     Some(existing) => existing,
-                    None => push_cloned_track(timeline, root, None),
+                    None => push_cloned_track(timeline, source_track, None),
                 };
-                track_id_map.insert(root.id.clone(), mapped_id);
-            }
-
-            for source in source_tracks
-                .iter()
-                .filter(|track| track.parent_id.is_some())
-            {
-                let Some(mapped_parent) = source
-                    .parent_id
-                    .as_ref()
-                    .and_then(|parent| track_id_map.get(parent).cloned())
-                else {
-                    continue;
-                };
-                let new_id = push_cloned_track(timeline, source, Some(mapped_parent));
-                track_id_map.insert(source.id.clone(), new_id);
+                track_id_map.insert(source_track.id.clone(), mapped_id);
             }
         }
     }
@@ -473,12 +531,6 @@ pub fn merge_project_fragment(
         .filter_map(|track| track_id_map.get(&track.id).cloned())
         .collect();
 
-    if let Some(first_mapped_track_id) = source_tracks
-        .first()
-        .and_then(|track| track_id_map.get(&track.id).cloned())
-    {
-        timeline.selected_track_id = Some(first_mapped_track_id);
-    }
     if let Some(first_created_clip_id) = created_clip_ids.first() {
         timeline.selected_clip_id = Some(first_created_clip_id.clone());
         if let Some(clip) = timeline
@@ -486,11 +538,17 @@ pub fn merge_project_fragment(
             .iter()
             .find(|clip| clip.id == *first_created_clip_id)
         {
+            timeline.selected_track_id = Some(clip.track_id.clone());
             timeline.playhead_sec = clip.start_sec;
         }
+    } else if let Some(first_mapped_track_id) = source_tracks
+        .first()
+        .and_then(|track| track_id_map.get(&track.id).cloned())
+    {
+        timeline.selected_track_id = Some(first_mapped_track_id);
     }
 
-    let imported_track_count = source_tracks.len();
+    let imported_track_count = track_id_map.values().collect::<BTreeSet<_>>().len();
     let imported_clip_count = created_clip_ids.len();
     Ok(FragmentMergeResult {
         created_track_ids,
@@ -544,6 +602,7 @@ mod tests {
     fn timeline_with_child() -> TimelineState {
         let mut tl = TimelineState::default();
         let root = tl.tracks[0].id.clone();
+        tl.ensure_params_for_root(&root);
         let child = tl.add_track(Some("Child".to_string()), Some(root.clone()), None);
         let sibling = tl.add_track(Some("Sibling".to_string()), Some(root.clone()), None);
         tl.clips.push(clip("a", &root, 1.0, 2.0));
@@ -592,7 +651,7 @@ mod tests {
             &fragment,
             FragmentMergeOptions {
                 anchor_sec: Some(10.0),
-                track_placement: FragmentTrackPlacement::PlaceOnSelected,
+                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
             },
         )
         .unwrap();
@@ -606,6 +665,121 @@ mod tests {
         assert_ne!(pasted.id, source_clip_id);
         assert!((pasted.start_sec - 10.0).abs() < 1e-9);
         assert_eq!(target.selected_clip_id.as_deref(), Some(pasted.id.as_str()));
+    }
+
+    #[test]
+    fn partial_child_clip_pastes_onto_selected_track_without_extra_tracks() {
+        let source = timeline_with_child();
+        let child_id = source
+            .tracks
+            .iter()
+            .find(|track| track.name == "Child")
+            .unwrap()
+            .id
+            .clone();
+        let clip_id = source
+            .clips
+            .iter()
+            .find(|clip| clip.track_id == child_id)
+            .unwrap()
+            .id
+            .clone();
+        let fragment = build_clip_fragment(&source, &[clip_id], "src".into()).unwrap();
+        assert_eq!(fragment.kind, ProjectFragmentKind::Clips);
+
+        let mut target = TimelineState::default();
+        let target_root = target.tracks[0].id.clone();
+        let target_child = target.add_track(Some("Target Child".to_string()), Some(target_root), None);
+        target.selected_track_id = Some(target_child.clone());
+        let track_count_before = target.tracks.len();
+
+        let merge = merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(0.0),
+                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target.tracks.len(), track_count_before);
+        assert_eq!(merge.imported_clip_count, 1);
+        let pasted = target
+            .clips
+            .iter()
+            .find(|clip| clip.id == merge.created_clip_ids[0])
+            .unwrap();
+        assert_eq!(pasted.track_id, target_child);
+    }
+
+    #[test]
+    fn full_subtree_clip_selection_becomes_a_tracks_fragment() {
+        let source = timeline_with_child();
+        let all_clip_ids: Vec<String> = source.clips.iter().map(|clip| clip.id.clone()).collect();
+        let fragment = build_clip_fragment(&source, &all_clip_ids, "src".into()).unwrap();
+        assert_eq!(fragment.kind, ProjectFragmentKind::Tracks);
+        assert_eq!(fragment.timeline.tracks.len(), 3);
+        assert_eq!(fragment.timeline.clips.len(), 3);
+        assert!(fragment.timeline.params_by_root_track.keys().any(|root| {
+            source
+                .tracks
+                .iter()
+                .any(|track| track.parent_id.is_none() && track.id == *root)
+        }));
+    }
+
+    #[test]
+    fn multi_track_clip_paste_maps_clip_tracks_relative_to_selection() {
+        let source = timeline_with_child();
+        let child_id = source
+            .tracks
+            .iter()
+            .find(|track| track.name == "Child")
+            .unwrap()
+            .id
+            .clone();
+        let sibling_id = source
+            .tracks
+            .iter()
+            .find(|track| track.name == "Sibling")
+            .unwrap()
+            .id
+            .clone();
+        let ids = vec![
+            source
+                .clips
+                .iter()
+                .find(|clip| clip.track_id == child_id)
+                .unwrap()
+                .id
+                .clone(),
+            source
+                .clips
+                .iter()
+                .find(|clip| clip.track_id == sibling_id)
+                .unwrap()
+                .id
+                .clone(),
+        ];
+        let fragment = build_clip_fragment(&source, &ids, "src".into()).unwrap();
+        assert_eq!(fragment.kind, ProjectFragmentKind::Clips);
+
+        let mut target = TimelineState::default();
+        target.selected_track_id = Some(target.tracks[0].id.clone());
+        let merge = merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(0.0),
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target.tracks.len(), 2);
+        assert_eq!(merge.imported_clip_count, 2);
+        assert!(target.tracks.iter().all(|track| track.parent_id.is_none()));
     }
 
     #[test]

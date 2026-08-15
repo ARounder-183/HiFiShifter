@@ -145,7 +145,7 @@ export interface UseTimelineClipActionsResult {
     ) => void;
     rangeSelectAnchorClipId: string | null;
     recordLastClickPosition: (clientX: number) => void;
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "auto" | "selected" | "new_tracks") => void;
     clearContextMenu: () => void;
 
     // TrackLane callbacks
@@ -594,55 +594,58 @@ export function useTimelineClipActions(
     );
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
-    const pasteClipsAtPlayhead = React.useCallback(() => {
-        void (async () => {
-            try {
-                const result = await dispatch(pasteTimelineClipboardRemote()).unwrap();
-                setClipboardAvailable(true);
-                const created = result.newClipIds ?? [];
-                if (created.length === 0) return;
+    const pasteClipsAtPlayhead = React.useCallback(
+        (mode?: "auto" | "selected" | "new_tracks") => {
+            void (async () => {
+                try {
+                    const result = await dispatch(pasteTimelineClipboardRemote(mode)).unwrap();
+                    setClipboardAvailable(true);
+                    const created = result.newClipIds ?? [];
+                    if (created.length === 0) return;
 
-                setMultiSelectedClipIds(created);
-                void dispatch(selectClipRemote(created[0]));
-                dispatch(setplayheadSec(result.timeline?.playhead_sec ?? 0));
-                void dispatch(seekPlayhead(result.timeline?.playhead_sec ?? 0));
+                    setMultiSelectedClipIds(created);
+                    void dispatch(selectClipRemote(created[0]));
+                    dispatch(setplayheadSec(result.timeline?.playhead_sec ?? 0));
+                    void dispatch(seekPlayhead(result.timeline?.playhead_sec ?? 0));
 
-                if (sessionRef.current.autoCrossfadeEnabled) {
-                    const allClips = (result.timeline?.clips ?? []) as Array<{
-                        id?: string;
-                        track_id?: string;
-                        start_sec?: number;
-                        length_sec?: number;
-                        fade_in_sec?: number;
-                        fade_out_sec?: number;
-                    }>;
-                    const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
-                    if (fadeUpdates.length > 0) {
-                        const changesById = new Map(
-                            fadeUpdates.map((u) => [
-                                u.clipId,
-                                {
-                                    fadeInSec: u.fadeInSec,
-                                    fadeOutSec: u.fadeOutSec,
-                                },
-                            ]),
-                        );
-                        await dispatch(
-                            setClipsStateBulkRemote({
-                                updates: buildBulkClipStateUpdates({
-                                    clipIds: [...changesById.keys()],
-                                    changesById,
+                    if (sessionRef.current.autoCrossfadeEnabled) {
+                        const allClips = (result.timeline?.clips ?? []) as Array<{
+                            id?: string;
+                            track_id?: string;
+                            start_sec?: number;
+                            length_sec?: number;
+                            fade_in_sec?: number;
+                            fade_out_sec?: number;
+                        }>;
+                        const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
+                        if (fadeUpdates.length > 0) {
+                            const changesById = new Map(
+                                fadeUpdates.map((u) => [
+                                    u.clipId,
+                                    {
+                                        fadeInSec: u.fadeInSec,
+                                        fadeOutSec: u.fadeOutSec,
+                                    },
+                                ]),
+                            );
+                            await dispatch(
+                                setClipsStateBulkRemote({
+                                    updates: buildBulkClipStateUpdates({
+                                        clipIds: [...changesById.keys()],
+                                        changesById,
+                                    }),
+                                    checkpoint: false,
                                 }),
-                                checkpoint: false,
-                            }),
-                        ).unwrap();
+                            ).unwrap();
+                        }
                     }
+                } catch {
+                    setClipboardAvailable(false);
                 }
-            } catch {
-                setClipboardAvailable(false);
-            }
-        })();
-    }, [dispatch, setMultiSelectedClipIds]);
+            })();
+        },
+        [dispatch, setMultiSelectedClipIds],
+    );
 
     // ── TrackLane callbacks ───────────────────────────────────
     const ensureTrackLaneSelected = React.useCallback(
