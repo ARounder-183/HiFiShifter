@@ -94,8 +94,18 @@ import {
 } from "./thunks/audioThunks";
 
 import { SCALE_KEYS } from "../../utils/musicalScales";
+import type { ScaleLike } from "../../utils/musicalScales";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import type { TempoMap } from "../../utils/tempoMap";
+import {
+    clampDenominator,
+    fromBackendTempoMap,
+    normalizeTempoMap,
+    scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
+} from "../../utils/tempoMap";
+import { setTempoMapRemote } from "./thunks/tempoMapThunks";
 import {
     importAudioAtPosition,
     importAudioFileAtPosition,
@@ -197,6 +207,13 @@ export interface SessionState {
     splitTransitionOverlapCrossfade: "auto" | "always";
     /** 网格吸附 */
     gridSnapEnabled: boolean;
+    /**
+     * Tempo Map 数据（null = 无 Tempo Map，使用工程全局 BPM/拍号/音阶）。
+     * 变化点按秒锚定；0 位置点始终存在。
+     */
+    tempoMap: import("../../utils/tempoMap").TempoMap | null;
+    /** Tempo Map 标尺行可见性（视图菜单开关，默认开启）。 */
+    tempoMapVisible: boolean;
     /** 音高吸附 */
     pitchSnapEnabled: boolean;
     pitchSnapUnit: PitchSnapUnit;
@@ -323,6 +340,8 @@ export interface SessionState {
         useCustomScale: boolean;
         customScale: CustomScalePreset | null;
         beatsPerBar: number;
+        /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+        timeSignatureDenominator: number;
         gridSize: GridSize;
         stretchAlgorithmOverride: StretchAlgorithmOption | null;
         hifiganMelStretchOverride: boolean | null;
@@ -794,7 +813,8 @@ function applyTimelineState(
 
     state.selectedTrackId = timeline.selected_track_id;
     state.selectedClipId = timeline.selected_clip_id;
-    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 300);
+    // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 960);
     state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
     state.projectSec = Math.max(4, Number(timeline.project_sec ?? state.projectSec));
     state.disabledGroupIds = Array.isArray(timeline.disabled_group_ids)
@@ -816,6 +836,7 @@ function applyTimelineState(
                   notes?: number[];
               } | null;
               beats_per_bar?: number;
+              time_signature_denominator?: number;
               grid_size?: string;
               stretch_algorithm_override?: StretchAlgorithmOption | null;
               hifigan_mel_stretch_override?: boolean | null;
@@ -831,6 +852,11 @@ function applyTimelineState(
             1,
             32,
         );
+        const nextTimeSignatureDenominator = (
+            TEMPO_DENOMINATORS as readonly number[]
+        ).includes(Number(project.time_signature_denominator))
+            ? Number(project.time_signature_denominator)
+            : clampDenominator(state.project.timeSignatureDenominator);
         const nextGridSizeRaw = String(project.grid_size ?? state.project.gridSize);
         const nextGridSize = VALID_GRID_SIZES.has(nextGridSizeRaw as GridSize)
             ? (nextGridSizeRaw as GridSize)
@@ -851,6 +877,7 @@ function applyTimelineState(
                 ? sanitizeCustomScalePreset(project.custom_scale)
                 : null,
             beatsPerBar: nextBeatsPerBar,
+            timeSignatureDenominator: nextTimeSignatureDenominator,
             gridSize: nextGridSize,
             stretchAlgorithmOverride:
                 project.stretch_algorithm_override === undefined
@@ -863,6 +890,33 @@ function applyTimelineState(
         };
         state.beats = nextBeatsPerBar;
         state.grid = nextGridSize;
+    }
+
+    // Tempo Map（后端载荷始终带 tempo_map 字段；旧后端无此字段时保持现值）。
+    // 在工程元数据之后解析：初始点缺失时用工程音阶物化（初始点即工程基准记录）。
+    const rawTempoMap = (timeline as unknown as { tempo_map?: unknown }).tempo_map;
+    if (rawTempoMap !== undefined) {
+        const projectScale: ScaleLike | null =
+            state.project.useCustomScale && state.project.customScale
+                ? state.project.customScale.notes
+                : state.project.baseScale;
+        state.tempoMap = fromBackendTempoMap(rawTempoMap, state.bpm, state.beats || 4, {
+            projectScale: projectScale ?? undefined,
+            projectScaleName: state.project.useCustomScale
+                ? (state.project.customScale?.name ?? undefined)
+                : undefined,
+            projectDenominator: state.project.timeSignatureDenominator,
+        });
+        if (state.tempoMap) {
+            // 0 位置点与工程基准 BPM/拍号保持一致（后端同步保证）。
+            const first = state.tempoMap.points[0];
+            state.bpm = clamp(first.bpm, 10, 960);
+            const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+            state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+            state.project.timeSignatureDenominator = clampDenominator(
+                firstSig.denominator,
+            );
+        }
     }
 
     const availableClipIds = new Set(state.clips.map((clip) => clip.id));
@@ -1002,6 +1056,8 @@ const initialState: SessionState = {
     splitTransitionCurve: "sine" as FadeCurveType,
     splitTransitionOverlapCrossfade: "auto",
     gridSnapEnabled: true,
+    tempoMap: null,
+    tempoMapVisible: true,
     pitchSnapEnabled: false,
     pitchSnapUnit: "semitone",
     pitchSnapScale: "C",
@@ -1103,6 +1159,7 @@ const initialState: SessionState = {
         useCustomScale: false,
         customScale: null,
         beatsPerBar: 4,
+        timeSignatureDenominator: 4,
         gridSize: "1/4",
         stretchAlgorithmOverride: null,
         hifiganMelStretchOverride: null,
@@ -1256,7 +1313,8 @@ const sessionSlice = createSlice({
             state.selectedPointId = null;
         },
         setBpm(state, action: PayloadAction<number>) {
-            state.bpm = clamp(action.payload, 10, 300);
+            // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+            state.bpm = clamp(action.payload, 10, 960);
         },
         setBeats(state, action: PayloadAction<number>) {
             state.beats = clamp(action.payload, 1, 32);
@@ -1350,6 +1408,35 @@ const sessionSlice = createSlice({
         },
         setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
+        },
+        setTempoMap(state, action: PayloadAction<TempoMap | null>) {
+            const projectScale: ScaleLike | null =
+                state.project.useCustomScale && state.project.customScale
+                    ? state.project.customScale.notes
+                    : state.project.baseScale;
+            state.tempoMap = normalizeTempoMap(action.payload, state.bpm, state.beats || 4, {
+                projectScale: projectScale ?? undefined,
+                projectScaleName: state.project.useCustomScale
+                    ? (state.project.customScale?.name ?? undefined)
+                    : undefined,
+                projectDenominator: state.project.timeSignatureDenominator,
+            });
+            // 保持工程基准值（bpm / 拍号）与 0 位置点一致，删除 Tempo Map 后回退一致。
+            if (state.tempoMap) {
+                const first = state.tempoMap.points[0];
+                state.bpm = clamp(first.bpm, 10, 960);
+                const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+                state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+                state.project.timeSignatureDenominator = clampDenominator(
+                    firstSig.denominator,
+                );
+            }
+        },
+        setTempoMapVisible(state, action: PayloadAction<boolean>) {
+            state.tempoMapVisible = action.payload;
+        },
+        toggleTempoMapVisible(state) {
+            state.tempoMapVisible = !state.tempoMapVisible;
         },
         upsertCustomScalePreset(state, action: PayloadAction<CustomScalePreset>) {
             const incoming = sanitizeCustomScalePreset(action.payload);
@@ -1966,6 +2053,9 @@ const sessionSlice = createSlice({
                         ? "always"
                         : "auto";
                 state.gridSnapEnabled = s.gridSnap;
+                if ((s as any).tempoMapVisible != null) {
+                    state.tempoMapVisible = Boolean((s as any).tempoMapVisible);
+                }
                 const loadedPrimaryUnit = (s as any).primaryTimeUnit as unknown;
                 if (VALID_TIME_UNITS.has(loadedPrimaryUnit as TimeUnit)) {
                     state.primaryTimeUnit = loadedPrimaryUnit as TimeUnit;
@@ -2970,6 +3060,32 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 后端会把工程音阶同步到 Tempo Map 初始点（初始点即工程基准记录）：
+                // 前端镜像该同步，避免 effectiveScaleAtSec 等 UI 计算使用过期音阶
+                // （钢琴卷帘高亮、音高吸附会与音频渲染不一致）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
+                }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectCustomScaleRemote.fulfilled, (state, action) => {
@@ -2997,6 +3113,31 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 与 setProjectBaseScaleRemote 一致：镜像后端对 Tempo Map 初始点
+                // 音阶的同步（初始点即工程基准记录）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
+                }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectTimelineSettingsRemote.fulfilled, (state, action) => {
@@ -3004,6 +3145,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     project?: {
                         beats_per_bar?: number;
+                        time_signature_denominator?: number;
                         grid_size?: string;
                         dirty?: boolean;
                     };
@@ -3012,6 +3154,11 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const beats = clamp(Number(payload.project?.beats_per_bar ?? state.beats), 1, 32);
+                const denominator = (
+                    TEMPO_DENOMINATORS as readonly number[]
+                ).includes(Number(payload.project?.time_signature_denominator))
+                    ? Number(payload.project?.time_signature_denominator)
+                    : clampDenominator(state.project.timeSignatureDenominator);
                 const gridRaw = String(payload.project?.grid_size ?? state.grid);
                 const valid = VALID_GRID_SIZES.has(gridRaw as GridSize);
                 const grid = (valid ? gridRaw : "1/4") as GridSize;
@@ -3019,11 +3166,31 @@ const sessionSlice = createSlice({
                 state.beats = beats;
                 state.grid = grid;
                 state.project.beatsPerBar = beats;
+                state.project.timeSignatureDenominator = denominator;
                 state.project.gridSize = grid;
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
             })
+
+            .addCase(setTempoMapRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                } & TimelineState;
+                if (!payload.ok || !payload.tracks || !payload.clips) {
+                    return;
+                }
+                // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
+                applyTimelineState(state, payload, { force: true });
+                // 显式触发后台预渲染：Tempo Map 音阶变化会影响子轨道“度数差”等
+                // 依赖音阶的渲染。applyTimelineState 已使 paramsEpoch 递增，
+                // App 层据此调用 startBackgroundRender（与工程音阶变更路径
+                // setProjectBaseScaleRemote.fulfilled 保持一致）；此处再显式递增，
+                // 确保该触发不依赖 applyTimelineState 的内部实现细节。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                state.status = "Tempo map updated";
+            })
+            .addCase(setTempoMapRemote.rejected, setRejected)
 
             .addCase(setProjectStretchSettingsRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
@@ -3352,7 +3519,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 300);
+                // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
                 if (payload.tracks && payload.clips) {
                     applyTimelineState(state, payload as TimelineState, { force: true });
                 }
@@ -3493,6 +3661,9 @@ export const {
     setSplitTransitionCurve,
     setSplitTransitionOverlapCrossfade,
     toggleGridSnap,
+    setTempoMap,
+    setTempoMapVisible,
+    toggleTempoMapVisible,
     togglePitchSnap,
     setPitchSnapUnit,
     setPitchSnapScale,

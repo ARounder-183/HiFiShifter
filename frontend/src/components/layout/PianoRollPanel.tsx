@@ -42,6 +42,7 @@ import {
     createClipsRemote,
     addTrackRemote,
     importMidiAsClip,
+    setTempoMap,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -80,8 +81,19 @@ import {
     buildRulerTicks,
     clamp,
     formatCursorTime,
+    gridStepBeats,
 } from "./timeline";
+import { timeRulerHeightPx } from "./timeline/rulerHeight";
+import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import type { TempoMap } from "../../utils/tempoMap";
+import {
+    buildScaleSegments,
+    buildTempoGridLineXsForViewport,
+    effectiveScaleAtSec,
+} from "../../utils/tempoMap";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
 import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
@@ -182,10 +194,24 @@ export const PianoRollPanel: React.FC = () => {
                 : s.project.baseScale,
         [s.project.baseScale, s.project.customScale, s.project.useCustomScale],
     );
+    /**
+     * 某秒位置生效的“工程音阶”（受 Tempo Map 音阶变化点影响）。
+     * 无 Tempo Map 音阶覆盖时即为工程音阶。
+     */
+    const projectScaleAtSec = useCallback(
+        (sec: number): ScaleLike | undefined =>
+            effectiveScaleAtSec(s.tempoMap, sec, effectiveProjectScale),
+        [s.tempoMap, effectiveProjectScale],
+    );
+    /**
+     * 将音阶 token 解析为 ScaleLike。
+     * `__project__` 在提供 `atSec` 时按该时刻的 Tempo Map 生效音阶解析，
+     * 否则使用工程音阶（用于全局场景）。
+     */
     const resolveScaleFromToken = useCallback(
-        (scaleToken: string): ScaleLike => {
+        (scaleToken: string, atSec?: number): ScaleLike => {
             if (scaleToken === "__project__") {
-                return effectiveProjectScale;
+                return atSec != null ? (projectScaleAtSec(atSec) ?? "C") : effectiveProjectScale;
             }
 
             const customScaleId = parseCustomScaleToken(scaleToken);
@@ -198,7 +224,7 @@ export const PianoRollPanel: React.FC = () => {
 
             return isScaleKey(scaleToken) ? scaleToken : "C";
         },
-        [effectiveProjectScale, s.customScalePresets],
+        [effectiveProjectScale, projectScaleAtSec, s.customScalePresets],
     );
     const editParam = s.editParam as ParamName;
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
@@ -296,6 +322,10 @@ export const PianoRollPanel: React.FC = () => {
     const [specifiedBpm, setSpecifiedBpm] = useState<number>(120);
     const [multiTrackMerge, setMultiTrackMerge] = useState<boolean>(true);
     const [closeLeadingGap, setCloseLeadingGap] = useState<boolean>(true);
+    const [importTempoMapEnabled, setImportTempoMapEnabled] = useState(false);
+    const [importTempoMapTempo, setImportTempoMapTempo] = useState(true);
+    const [importTempoMapTimeSignature, setImportTempoMapTimeSignature] = useState(true);
+    const [importTempoMapKeySignature, setImportTempoMapKeySignature] = useState(false);
     const [importTargetReaperClipboard, setImportTargetReaperClipboard] =
         useState<string>("pitchParam");
     const [importTargetParamEditor, setImportTargetParamEditor] = useState<string>("pitchParam");
@@ -323,6 +353,18 @@ export const PianoRollPanel: React.FC = () => {
             }
             if (s?.midiCloseLeadingGap != null) {
                 setCloseLeadingGap(s.midiCloseLeadingGap);
+            }
+            if ((s as any)?.midiImportAsTempoMap != null) {
+                setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+            }
+            if ((s as any)?.midiImportTempoMapTempo != null) {
+                setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+            }
+            if ((s as any)?.midiImportTempoMapTimeSignature != null) {
+                setImportTempoMapTimeSignature(Boolean((s as any).midiImportTempoMapTimeSignature));
+            }
+            if ((s as any)?.midiImportTempoMapKeySignature != null) {
+                setImportTempoMapKeySignature(Boolean((s as any).midiImportTempoMapKeySignature));
             }
             if (s?.midiImportTargetReaperClipboard != null) {
                 setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
@@ -1653,6 +1695,10 @@ export const PianoRollPanel: React.FC = () => {
             noteBpmMode?: string;
             specifiedBpm?: number;
             importBpmAsProject?: boolean;
+            importAsTempoMap?: boolean;
+            importTempo?: boolean;
+            importTimeSignature?: boolean;
+            importKeySignature?: boolean;
             clipboardGuid?: string;
             closeLeadingGap?: boolean;
         }) => {
@@ -1669,6 +1715,10 @@ export const PianoRollPanel: React.FC = () => {
                     importBpmAsProject: result.importBpmAsProject,
                     clipboardGuid: result.clipboardGuid,
                     closeLeadingGap: result.closeLeadingGap,
+                    importAsTempoMap: result.importAsTempoMap,
+                    importTempo: result.importTempo,
+                    importTimeSignature: result.importTimeSignature,
+                    importKeySignature: result.importKeySignature,
                 }),
             );
         },
@@ -1713,6 +1763,23 @@ export const PianoRollPanel: React.FC = () => {
         void settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any);
     }, []);
 
+    const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
+        setImportTempoMapEnabled(v);
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any);
+    }, []);
+    const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
+        setImportTempoMapTempo(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any);
+    }, []);
+    const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapTimeSignature(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any);
+    }, []);
+    const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapKeySignature(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any);
+    }, []);
+
     const handleImportTargetChange = useCallback((v: string) => {
         if (midiDialogSourceRef.current === "reaperClipboard") {
             setImportTargetReaperClipboard(v);
@@ -1751,6 +1818,26 @@ export const PianoRollPanel: React.FC = () => {
         const p = midiDialogOpenParamsRef.current;
         return p.editParam === "pitch" && p.toolMode === "select";
     }, [midiDialogSelection]);
+
+    // 将当前选区（帧范围）发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
+    useEffect(() => {
+        const sel = selectionUi;
+        if (!sel) {
+            publishPianoRollSelection(null);
+            return;
+        }
+        const fp = paramView?.framePeriodMs ?? 5;
+        const a = Math.min(sel.aBeat, sel.bBeat);
+        const b = Math.max(sel.aBeat, sel.bBeat);
+        publishPianoRollSelection({
+            startFrame: Math.max(0, Math.floor((a * secPerBeat * 1000) / fp)),
+            frameCount: Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp)),
+            framePeriodMs: fp,
+        });
+        return () => {
+            publishPianoRollSelection(null);
+        };
+    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
@@ -1882,6 +1969,7 @@ export const PianoRollPanel: React.FC = () => {
         s.pitchSnapUnit,
         effectiveProjectScale,
         s.scaleHighlightMode,
+        s.tempoMap,
         snapToggleHeld,
         invalidate,
     ]);
@@ -1927,6 +2015,17 @@ export const PianoRollPanel: React.FC = () => {
             pitchSnapUnit: s.pitchSnapUnit,
             projectScale: effectiveProjectScale,
             scaleHighlightMode: s.scaleHighlightMode,
+            scaleSegments: buildScaleSegments(
+                s.tempoMap,
+                effectiveProjectScale,
+                Math.max(
+                    0,
+                    scrollLeftRef.current / Math.max(1e-9, pxPerSecRef.current) - 5,
+                ),
+                (scrollLeftRef.current + viewSizeRef.current.w) /
+                    Math.max(1e-9, pxPerSecRef.current) +
+                    5,
+            ),
             toolMode: s.toolMode,
             snapToggleHeld: snapToggleHeld,
             paramMorphOverlay,
@@ -2009,6 +2108,8 @@ export const PianoRollPanel: React.FC = () => {
         pitchSnapEnabled: s.pitchSnapEnabled,
         pitchSnapUnit: s.pitchSnapUnit,
         projectScale: effectiveProjectScale,
+        /** Tempo Map 感知：按帧时刻解析生效音阶。 */
+        scaleAtSec: projectScaleAtSec,
         pitchSnapToleranceCents: s.pitchSnapToleranceCents,
         keybindingMap: mergedKeybindings,
         onEditAction: stableEditAction,
@@ -2751,6 +2852,9 @@ export const PianoRollPanel: React.FC = () => {
                             paramsApi,
                             pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
                             projectScale: effectiveProjectScale,
+                            // Tempo Map 感知：按帧时刻解析生效音阶。
+                            scaleAtFrame: (frame: number) =>
+                                projectScaleAtSec((frame * fp) / 1000) ?? effectiveProjectScale,
                         });
                         if (!converted) return;
 
@@ -2821,20 +2925,31 @@ export const PianoRollPanel: React.FC = () => {
                 case "transposeDegrees": {
                     const degrees = Number(data?.degrees ?? 0);
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：按每个帧的时刻取生效音阶。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const degreeSteps = degreeInputToScaleSteps(degrees);
                     if (degreeSteps === 0) return;
                     await applySelectionEditWithEdgeSmoothing(
-                        (vals) =>
-                            editParam === "pitch"
-                                ? vals.map((midi) =>
-                                      midi === 0
-                                          ? 0
-                                          : transposePitchByScaleSteps(midi, degreeSteps, scale),
-                                  )
-                                : vals.map((midi) =>
-                                      transposePitchByScaleSteps(midi, degreeSteps, scale),
-                                  ),
+                        (vals) => {
+                            const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                            return editParam === "pitch"
+                                ? vals.map((midi, i) => {
+                                      if (midi === 0) return 0;
+                                      const scale =
+                                          fixedScale ??
+                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          "C";
+                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                                  })
+                                : vals.map((midi, i) => {
+                                      const scale =
+                                          fixedScale ??
+                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          "C";
+                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                                  });
+                        },
                         Number(data?.edgeSmoothnessPercent),
                     );
                     break;
@@ -2973,7 +3088,9 @@ export const PianoRollPanel: React.FC = () => {
 
                     const unit = (data?.unit as string) ?? "semitone";
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：按每个帧的时刻取生效音阶。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const toleranceCents = Math.abs(
                         Math.round(Number(data?.toleranceCents ?? 0) || 0),
                     );
@@ -2989,6 +3106,11 @@ export const PianoRollPanel: React.FC = () => {
                     if (!res?.ok) return;
                     const payload = res as ParamFramesPayload;
                     const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                    const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+                    const scaleAt = (i: number): ScaleLike =>
+                        fixedScale ??
+                        projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                        "C";
                     const quantized =
                         unit === "semitone"
                             ? vals.map((v) =>
@@ -3003,11 +3125,11 @@ export const PianoRollPanel: React.FC = () => {
                                                           toleranceSemitone;
                                         })(),
                               )
-                            : vals.map((v) =>
+                            : vals.map((v, i) =>
                                   editParam === "pitch" && v === 0
                                       ? 0
                                       : (() => {
-                                            const snapped = snapToScale(v, scale);
+                                            const snapped = snapToScale(v, scaleAt(i));
                                             return Math.abs(v - snapped) <= toleranceSemitone
                                                 ? v
                                                 : snapped +
@@ -3069,7 +3191,10 @@ export const PianoRollPanel: React.FC = () => {
 
                     const unit = (data?.unit as string) ?? "semitone";
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：均值吸附使用选区中点时刻的生效音阶，
+                    // 整体平移量保持统一（均值量化语义）。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const toleranceCents = Math.abs(
                         Math.round(Number(data?.toleranceCents ?? 0) || 0),
                     );
@@ -3089,8 +3214,16 @@ export const PianoRollPanel: React.FC = () => {
                     const nonZero = editParam === "pitch" ? vals.filter((v) => v !== 0) : vals;
                     if (nonZero.length === 0) return;
                     const avg = nonZero.reduce((a, b) => a + b, 0) / nonZero.length;
+                    const midScale =
+                        fixedScale ??
+                        projectScaleAtSec(
+                            ((startFrame + Math.floor(vals.length / 2)) *
+                                (Number(payload.frame_period_ms ?? fp) || fp)) /
+                                1000,
+                        ) ??
+                        "C";
                     const quantizedAvg =
-                        unit === "semitone" ? snapToSemitone(avg) : snapToScale(avg, scale);
+                        unit === "semitone" ? snapToSemitone(avg) : snapToScale(avg, midScale);
                     const delta = quantizedAvg - avg;
                     const result =
                         editParam === "pitch"
@@ -3128,6 +3261,8 @@ export const PianoRollPanel: React.FC = () => {
             dynamicProjectSec,
             s.edgeSmoothnessPercent,
             effectiveProjectScale,
+            projectScaleAtSec,
+            resolveScaleFromToken,
             currentParamRange,
             currentParamDefaultValue,
             currentParamQuantizeUnit,
@@ -3456,6 +3591,7 @@ export const PianoRollPanel: React.FC = () => {
                 primaryUnit: s.primaryTimeUnit,
                 secondaryUnit: s.secondaryTimeUnit,
                 minLabelSpacingPx: s.rulerLabelSpacingPx,
+                tempoMap: s.tempoMap,
             }),
         [
             pxPerSec,
@@ -3468,6 +3604,7 @@ export const PianoRollPanel: React.FC = () => {
             s.primaryTimeUnit,
             s.secondaryTimeUnit,
             s.rulerLabelSpacingPx,
+            s.tempoMap,
         ],
     );
     const timeContext = useMemo<TimeFormatContext>(
@@ -3475,8 +3612,34 @@ export const PianoRollPanel: React.FC = () => {
             bpm: s.bpm,
             beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
             grid: s.grid,
+            tempoMap: s.tempoMap,
         }),
-        [s.bpm, s.beats, s.grid],
+        [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    // ── Tempo Map 显式网格线（参数编辑器背景网格）─────────────
+    const tempoGridLineXs = useMemo(
+        () =>
+            buildTempoGridLineXsForViewport({
+                tempoMap: s.tempoMap,
+                scrollLeft,
+                viewportWidth: viewSize.w,
+                pxPerSec,
+                projectSec: dynamicProjectSec,
+                stepBeats: gridStepBeats(s.grid),
+                fallbackBpm: s.bpm,
+                fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            }),
+        [
+            s.tempoMap,
+            s.bpm,
+            s.beats,
+            s.grid,
+            scrollLeft,
+            viewSize.w,
+            pxPerSec,
+            dynamicProjectSec,
+        ],
     );
     const handlePrimaryUnitChange = useCallback(
         (unit: TimeUnit) => {
@@ -3489,6 +3652,20 @@ export const PianoRollPanel: React.FC = () => {
         (unit: TimeUnitChoice) => {
             dispatch(setSecondaryTimeUnit(unit));
             void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+
+    const handleTempoMapChange = useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+        },
+        [dispatch],
+    );
+    const handleTempoMapCommit = useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+            void dispatch(setTempoMapRemote(next));
         },
         [dispatch],
     );
@@ -4382,9 +4559,21 @@ export const PianoRollPanel: React.FC = () => {
                 {/* Left axis + corner */}
                 <Flex direction="column" className="shrink-0">
                     <Box
-                        className="h-12 bg-qt-window border-b border-qt-border"
-                        style={{ width: AXIS_W }}
-                    />
+                        className="bg-qt-window border-b border-qt-border relative"
+                        style={{
+                            width: AXIS_W,
+                            height: timeRulerHeightPx(
+                                Boolean(
+                                    s.tempoMap &&
+                                        s.tempoMap.points.length > 0 &&
+                                        s.tempoMapVisible,
+                                ),
+                            ),
+                        }}
+                    >
+                        {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
+                        <TempoMapCornerButton />
+                    </Box>
                     <div
                         ref={axisWrapRef}
                         className="bg-qt-window border-r border-qt-border relative"
@@ -4416,6 +4605,21 @@ export const PianoRollPanel: React.FC = () => {
                         onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
                         onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
                         t={t as (key: string) => string}
+                        tempoMap={s.tempoMap}
+                        tempoMapVisible={s.tempoMapVisible}
+                        projectSec={dynamicProjectSec}
+                        grid={s.grid}
+                        gridSnapEnabled={s.gridSnapEnabled}
+                        projectScale={effectiveProjectScale}
+                        projectScaleName={
+                            s.project.useCustomScale
+                                ? (s.project.customScale?.name ?? undefined)
+                                : undefined
+                        }
+                        fallbackDenominator={s.project.timeSignatureDenominator}
+                        customScalePresets={s.customScalePresets}
+                        onTempoMapChange={handleTempoMapChange}
+                        onTempoMapCommit={handleTempoMapCommit}
                         onMouseDown={(e) => {
                             document.body.setAttribute("data-hs-focus-window", "pianoRoll");
                             interactions.onRulerMouseDown(e);
@@ -4455,6 +4659,8 @@ export const PianoRollPanel: React.FC = () => {
                                     beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
                                     layerRef={gridLayerRef}
                                     boundaryRef={gridBoundaryRef}
+                                    weakLineXs={tempoGridLineXs?.weak ?? null}
+                                    strongLineXs={tempoGridLineXs?.strong ?? null}
                                     sticky
                                 />
 
@@ -4537,6 +4743,14 @@ export const PianoRollPanel: React.FC = () => {
                 onMultiTrackMergeChange={handleMultiTrackMergeChange}
                 closeLeadingGap={closeLeadingGap}
                 onCloseLeadingGapChange={handleCloseLeadingGapChange}
+                importTempoMapEnabled={importTempoMapEnabled}
+                onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+                importTempoMapTempo={importTempoMapTempo}
+                onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+                importTempoMapTimeSignature={importTempoMapTimeSignature}
+                onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
+                importTempoMapKeySignature={importTempoMapKeySignature}
+                onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
             />
             {ctxMenu && s.toolMode === "select" && (
                 <EditContextMenu

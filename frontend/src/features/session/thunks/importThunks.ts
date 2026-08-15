@@ -757,6 +757,10 @@ export const importMidiAsClip = createAsyncThunk(
             importBpmAsProject?: boolean;
             clipboardGuid?: string;
             closeLeadingGap?: boolean;
+            importAsTempoMap?: boolean;
+            importTempo?: boolean;
+            importTimeSignature?: boolean;
+            importKeySignature?: boolean;
         },
         { dispatch, rejectWithValue, getState },
     ) => {
@@ -790,6 +794,10 @@ export const importMidiAsClip = createAsyncThunk(
                 payload.importBpmAsProject,
                 payload.clipboardGuid,
                 payload.closeLeadingGap,
+                payload.importAsTempoMap,
+                payload.importTempo,
+                payload.importTimeSignature,
+                payload.importKeySignature,
             );
             if (!(imported as { ok?: boolean }).ok) {
                 const errMsg =

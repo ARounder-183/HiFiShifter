@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
 import {
@@ -32,8 +32,20 @@ import {
     persistUiSettings,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
+    setTempoMap,
 } from "../../features/session/sessionSlice";
-import { SCALE_KEYS, SCALE_LABELS } from "../../utils/musicalScales";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import type { TempoMapScaleData, TempoTimeSignature } from "../../utils/tempoMap";
+import {
+    clampBpm,
+    effectiveScaleAtSec,
+    pointIndexAtSec,
+    scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
+    tempoAtSec,
+    updateTempoPoint,
+} from "../../utils/tempoMap";
+import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
@@ -55,35 +67,177 @@ export function ActionBar() {
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
     const [gridSnapMenuPos, setGridSnapMenuPos] = useState<{ x: number; y: number } | null>(null);
 
-    const baseScaleWheelOptions = [
-        ...SCALE_KEYS,
-        ...(s.project?.customScale ? (["__custom__"] as const) : []),
-        "__custom_dialog__",
-    ];
-
     function formatBpmValue(value: number): string {
         const normalized = Number(value);
         return Number.isFinite(normalized) ? String(normalized) : "120";
     }
 
     const [bpmText, setBpmText] = useState(() => formatBpmValue(s.bpm || 120));
-    const bpmDirtyRef = useRef(false);
+    /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
+    const [bpmDirty, setBpmDirty] = useState(false);
 
-    useEffect(() => {
-        if (!bpmDirtyRef.current) {
-            setBpmText(formatBpmValue(s.bpm || 120));
+    // Tempo Map 存在时，BPM 显示为播放头位置的生效速度。
+    const displayBpm = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.bpm;
         }
-    }, [s.bpm]);
+        return s.bpm || 120;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    const displayBeats = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.numerator;
+        }
+        return Math.round(s.beats || 4);
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    // Tempo Map 存在时，拍号分母显示播放头位置的实际值（如 3/8、6/8）；否则为工程基准值。
+    const displayDenominator = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.denominator;
+        }
+        return s.project.timeSignatureDenominator || 4;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats, s.project.timeSignatureDenominator]);
+
+    // 工程音阶（无 Tempo Map 时的显示与回退值）。
+    const projectScaleLike = useMemo<ScaleLike | null>(
+        () =>
+            s.project?.useCustomScale && s.project?.customScale
+                ? s.project.customScale.notes
+                : s.project?.baseScale ?? "C",
+        [s.project],
+    );
+
+    // Tempo Map 存在时，基准音阶显示播放头位置及以前最近变化点的生效音阶。
+    const displayScale = useMemo<ScaleLike | null>(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            return (
+                effectiveScaleAtSec(s.tempoMap, s.playheadSec, projectScaleLike ?? undefined) ??
+                null
+            );
+        }
+        return projectScaleLike;
+    }, [s.tempoMap, s.playheadSec, projectScaleLike]);
+
+    /** 播放头位置最近变化点的自定义音阶名称（用于显示）。 */
+    const tempoCustomScaleName = useMemo(() => {
+        if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+        for (let i = pointIndexAtSec(s.tempoMap, s.playheadSec); i >= 0; i -= 1) {
+            const scale = s.tempoMap.points[i].scale;
+            if (scale?.notes && scale.notes.length > 0) {
+                return scale.name || scale.notes.join(", ");
+            }
+            if (scale?.key) return null;
+        }
+        return null;
+    }, [s.tempoMap, s.playheadSec]);
+
+    /** 当前显示音阶是否即工程自定义音阶（显示/选项归并用）。 */
+    const displayScaleMatchesProjectCustom = useMemo(() => {
+        if (!Array.isArray(displayScale)) return false;
+        if (!s.project?.useCustomScale || !s.project?.customScale) return false;
+        const a = displayScale;
+        const b = s.project.customScale.notes;
+        return a.length === b.length && a.every((v, i) => v === b[i]);
+    }, [displayScale, s.project]);
+
+    const showTempoCustomScaleItem =
+        s.tempoMap != null &&
+        s.tempoMap.points.length > 0 &&
+        Array.isArray(displayScale) &&
+        !displayScaleMatchesProjectCustom;
+
+    const displayScaleSelectValue = Array.isArray(displayScale)
+        ? displayScaleMatchesProjectCustom
+            ? "__custom__"
+            : "__tempo_custom__"
+        : typeof displayScale === "string" &&
+            (SCALE_KEYS as readonly string[]).includes(displayScale)
+          ? displayScale
+          : "__custom__";
+
+    const baseScaleWheelOptions = [
+        ...SCALE_KEYS,
+        ...(s.project?.customScale ? (["__custom__"] as const) : []),
+        ...(showTempoCustomScaleItem ? (["__tempo_custom__"] as const) : []),
+        "__custom_dialog__",
+    ];
+
+    // 显示值变化时同步输入框（渲染期调整，避免 effect 级联渲染）。
+    const displayBpmText = formatBpmValue(displayBpm);
+    if (!bpmDirty && displayBpmText !== bpmText) {
+        setBpmText(displayBpmText);
+    }
+
+    /**
+     * Tempo Map 存在时：更新从播放头位置开始、往前寻找的最近一个变化点
+     * （初始点即工程基准记录，同样参与更新；不再自动新建变化点）。
+     */
+    const updateTempoPointAtPlayhead = useCallback(
+        (patch: {
+            bpm?: number;
+            timeSignature?: TempoTimeSignature | null;
+            scale?: TempoMapScaleData | null;
+        }) => {
+            if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+            const map = s.tempoMap;
+            const idx = pointIndexAtSec(map, s.playheadSec);
+            const nextMap = updateTempoPoint(map, map.points[idx].id, patch);
+            dispatch(setTempoMap(nextMap));
+            void dispatch(setTempoMapRemote(nextMap));
+            return nextMap;
+        },
+        [s.tempoMap, s.playheadSec, dispatch],
+    );
+
+    /** 基准音阶变更：有 Tempo Map 时写最近变化点，否则写工程音阶。 */
+    const applyBaseScale = useCallback(
+        (next: ScaleLike | null, customName?: string) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ scale: scaleLikeToScaleData(next, customName) });
+                return;
+            }
+            if (next == null) return;
+            if (Array.isArray(next)) {
+                if (s.project?.customScale) {
+                    dispatch(setProjectCustomScaleRemote(s.project.customScale));
+                }
+                return;
+            }
+            if ((SCALE_KEYS as readonly string[]).includes(next as string)) {
+                dispatch(setProjectBaseScaleRemote(next as (typeof SCALE_KEYS)[number]));
+            }
+        },
+        [s.tempoMap, s.project, dispatch, updateTempoPointAtPlayhead],
+    );
 
     function commitBpm(nextText?: string) {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
-        bpmDirtyRef.current = false;
+        setBpmDirty(false);
         if (!Number.isFinite(next)) {
-            setBpmText(formatBpmValue(s.bpm || 120));
+            setBpmText(formatBpmValue(displayBpm));
             return;
         }
-        const clamped = Math.min(300, Math.max(10, next));
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            updateTempoPointAtPlayhead({ bpm: clamped });
+            setBpmText(formatBpmValue(clamped));
+            return;
+        }
         dispatch(setBpm(clamped));
         void dispatch(updateTransportBpm(clamped));
         setBpmText(formatBpmValue(clamped));
@@ -107,7 +261,13 @@ export function ActionBar() {
                 <TextField.Root
                     size="1"
                     value={bpmText}
+                    title={
+                        s.tempoMap && s.tempoMap.points.length > 0
+                            ? tAny("tempo_map_actionbar_tip")
+                            : undefined
+                    }
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                        setBpmDirty(true);
                         setBpmText(e.target.value);
                     }}
                     onBlur={() => commitBpm()}
@@ -118,8 +278,8 @@ export function ActionBar() {
                             (e.currentTarget as HTMLInputElement).blur();
                         } else if (e.key === "Escape") {
                             e.preventDefault();
-                            bpmDirtyRef.current = false;
-                            setBpmText(formatBpmValue(s.bpm || 120));
+                            setBpmDirty(false);
+                            setBpmText(formatBpmValue(displayBpm));
                             (e.currentTarget as HTMLInputElement).blur();
                         }
                     }}
@@ -129,14 +289,19 @@ export function ActionBar() {
                         const direction = e.deltaY < 0 ? 1 : -1;
                         const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
                         const current = Number(bpmText);
-                        const base = Number.isFinite(current) ? current : Number(s.bpm || 120);
+                        const base = Number.isFinite(current) ? current : Number(displayBpm);
                         const nextRaw = base + direction * step;
                         const next = Math.round(nextRaw * 1000) / 1000;
-                        const clamped = Math.min(300, Math.max(10, next));
-                        dispatch(setBpm(clamped));
-                        void dispatch(updateTransportBpm(clamped));
+                        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                        const clamped = clampBpm(next);
+                        if (s.tempoMap && s.tempoMap.points.length > 0) {
+                            updateTempoPointAtPlayhead({ bpm: clamped });
+                        } else {
+                            dispatch(setBpm(clamped));
+                            void dispatch(updateTransportBpm(clamped));
+                        }
                         setBpmText(formatBpmValue(clamped));
-                        bpmDirtyRef.current = false;
+                        setBpmDirty(false);
                     }}
                     style={{
                         width: 60,
@@ -145,23 +310,39 @@ export function ActionBar() {
                     }}
                 />
                 <Text size="1" className="text-qt-text-muted">
-                    {t("beats_per_bar")}:
+                    {t("time_signature")}:
                 </Text>
                 <Flex align="center" gap="1">
                     <TextField.Root
                         size="1"
                         type="number"
-                        value={Number.isFinite(s.beats) ? Math.round(s.beats).toString() : "4"}
+                        value={String(displayBeats)}
+                        title={
+                            s.tempoMap && s.tempoMap.points.length > 0
+                                ? tAny("tempo_map_actionbar_tip")
+                                : undefined
+                        }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                             const raw = e.target.value.trim();
                             const parsed = Number(raw);
                             if (!Number.isFinite(parsed)) return;
                             // Clamp locally to avoid sending huge values to backend
                             const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
-                            if (clamped === Math.round(s.beats || 0)) return;
+                            // 与显示值比较（Tempo Map 下为播放头位置生效值）。
+                            if (clamped === Math.round(displayBeats)) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: clamped,
+                                        denominator: displayDenominator,
+                                    },
+                                });
+                                return;
+                            }
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: clamped,
+                                    timeSignatureDenominator: displayDenominator,
                                     gridSize: s.grid,
                                 }),
                             );
@@ -170,12 +351,24 @@ export function ActionBar() {
                             e.preventDefault();
                             e.stopPropagation();
                             const direction = e.deltaY < 0 ? 1 : -1;
-                            const current = Math.max(1, Math.min(32, Math.round(s.beats || 4)));
+                            // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
+                            // 与 BPM / 基准音阶一致。
+                            const current = Math.max(1, Math.min(32, Math.round(displayBeats)));
                             const next = Math.max(1, Math.min(32, current + direction));
                             if (next === current) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: next,
+                                        denominator: displayDenominator,
+                                    },
+                                });
+                                return;
+                            }
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: next,
+                                    timeSignatureDenominator: displayDenominator,
                                     gridSize: s.grid,
                                 }),
                             );
@@ -187,8 +380,74 @@ export function ActionBar() {
                         }}
                     />
                     <Text size="1" className="text-qt-text-muted">
-                        / 4
+                        /
                     </Text>
+                    <Select.Root
+                        size="1"
+                        value={String(displayDenominator)}
+                        onValueChange={(v) => {
+                            const next = Number(v) || 4;
+                            if (next === displayDenominator) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: displayBeats,
+                                        denominator: next,
+                                    },
+                                });
+                                return;
+                            }
+                            void dispatch(
+                                setProjectTimelineSettingsRemote({
+                                    beatsPerBar: s.beats,
+                                    timeSignatureDenominator: next,
+                                    gridSize: s.grid,
+                                }),
+                            );
+                        }}
+                    >
+                        <Select.Trigger
+                            style={{
+                                width: 48,
+                                backgroundColor: "var(--qt-base)",
+                                justifyContent: "center",
+                            }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: String(displayDenominator),
+                                    options: TEMPO_DENOMINATORS.map((d) => String(d)),
+                                    onChange: (v) => {
+                                        const next = Number(v) || 4;
+                                        if (next === displayDenominator) return;
+                                        if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                            updateTempoPointAtPlayhead({
+                                                timeSignature: {
+                                                    numerator: displayBeats,
+                                                    denominator: next,
+                                                },
+                                            });
+                                            return;
+                                        }
+                                        void dispatch(
+                                            setProjectTimelineSettingsRemote({
+                                                beatsPerBar: s.beats,
+                                                timeSignatureDenominator: next,
+                                                gridSize: s.grid,
+                                            }),
+                                        );
+                                    },
+                                });
+                            }}
+                        />
+                        <Select.Content>
+                            {TEMPO_DENOMINATORS.map((d) => (
+                                <Select.Item key={d} value={String(d)}>
+                                    {d}
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
                 </Flex>
 
                 <Text size="1" className="text-qt-text-muted">
@@ -201,6 +460,7 @@ export function ActionBar() {
                         void dispatch(
                             setProjectTimelineSettingsRemote({
                                 beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
                                 gridSize: v,
                             }),
                         );
@@ -237,6 +497,7 @@ export function ActionBar() {
                                     void dispatch(
                                         setProjectTimelineSettingsRemote({
                                             beatsPerBar: s.beats,
+                                            timeSignatureDenominator: displayDenominator,
                                             gridSize: next,
                                         }),
                                     );
@@ -281,50 +542,62 @@ export function ActionBar() {
                     {t("base_scale")}:
                 </Text>
                 <Select.Root
-                    value={
-                        s.project?.useCustomScale && s.project?.customScale
-                            ? "__custom__"
-                            : (s.project?.baseScale ?? "C")
-                    }
+                    value={displayScaleSelectValue}
                     size="1"
                     onValueChange={(v) => {
                         if (v === "__custom_dialog__") {
                             setCustomScaleOpen(true);
                             return;
                         }
-                        if (v === "__custom__" && s.project?.customScale) {
-                            dispatch(setProjectCustomScaleRemote(s.project.customScale));
+                        if (v === "__custom__") {
+                            if (s.project?.customScale) {
+                                applyBaseScale(s.project.customScale.notes, s.project.customScale.name);
+                            }
+                            return;
+                        }
+                        if (v === "__tempo_custom__") {
+                            if (Array.isArray(displayScale)) {
+                                applyBaseScale(displayScale, tempoCustomScaleName ?? undefined);
+                            }
                             return;
                         }
                         if ((SCALE_KEYS as readonly string[]).includes(v)) {
-                            dispatch(setProjectBaseScaleRemote(v));
+                            applyBaseScale(v as (typeof SCALE_KEYS)[number]);
                         }
                     }}
                 >
                     <Select.Trigger
                         style={{ backgroundColor: "var(--qt-base)" }}
                         onWheel={(event) => {
-                            const currentValue =
-                                s.project?.useCustomScale && s.project?.customScale
-                                    ? "__custom__"
-                                    : (s.project?.baseScale ?? "C");
                             applySelectWheelChange({
                                 event,
-                                currentValue,
+                                currentValue: displayScaleSelectValue,
                                 options: baseScaleWheelOptions,
                                 onChange: (next) => {
                                     if (next === "__custom_dialog__") {
                                         setCustomScaleOpen(true);
                                         return;
                                     }
-                                    if (next === "__custom__" && s.project?.customScale) {
-                                        dispatch(
-                                            setProjectCustomScaleRemote(s.project.customScale),
-                                        );
+                                    if (next === "__custom__") {
+                                        if (s.project?.customScale) {
+                                            applyBaseScale(
+                                                s.project.customScale.notes,
+                                                s.project.customScale.name,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    if (next === "__tempo_custom__") {
+                                        if (Array.isArray(displayScale)) {
+                                            applyBaseScale(
+                                                displayScale,
+                                                tempoCustomScaleName ?? undefined,
+                                            );
+                                        }
                                         return;
                                     }
                                     if ((SCALE_KEYS as readonly string[]).includes(next)) {
-                                        dispatch(setProjectBaseScaleRemote(next));
+                                        applyBaseScale(next as (typeof SCALE_KEYS)[number]);
                                     }
                                 },
                             });
@@ -338,6 +611,16 @@ export function ActionBar() {
                                 </Select.Item>
                             ))}
                         </Select.Group>
+                        {showTempoCustomScaleItem ? (
+                            <>
+                                <Select.Separator />
+                                <Select.Group>
+                                    <Select.Item value="__tempo_custom__">
+                                        {tempoCustomScaleName ?? tAny("custom_scale_short")}
+                                    </Select.Item>
+                                </Select.Group>
+                            </>
+                        ) : null}
                         {s.project?.customScale ? (
                             <>
                                 <Select.Separator />
@@ -744,6 +1027,7 @@ export function ActionBar() {
                         void dispatch(
                             setProjectTimelineSettingsRemote({
                                 beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
                                 gridSize: grid,
                             }),
                         );

@@ -325,7 +325,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { customScale: args[0] };
 
         case "set_project_timeline_settings":
-            return { beatsPerBar: args[0], gridSize: args[1] };
+            return {
+                beatsPerBar: args[0],
+                timeSignatureDenominator: args[1],
+                gridSize: args[2],
+            };
 
         case "set_project_stretch_settings":
             return {
@@ -477,7 +481,14 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[8] !== undefined ? { importMidiBpmAsProject: args[8] } : {}),
                 ...(args[9] != null ? { clipboardGuid: args[9] } : {}),
                 ...(args[10] !== undefined ? { closeLeadingGap: args[10] } : {}),
+                ...(args[11] !== undefined ? { importMidiAsTempoMap: args[11] } : {}),
+                ...(args[12] !== undefined ? { importMidiTempo: args[12] } : {}),
+                ...(args[13] !== undefined ? { importMidiTimeSignature: args[13] } : {}),
+                ...(args[14] !== undefined ? { importMidiKeySignature: args[14] } : {}),
             };
+
+        case "set_timeline_tempo_map":
+            return { tempoMap: args[0] };
 
         case "replace_midi_clip_data":
             return {

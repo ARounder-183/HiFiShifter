@@ -38,6 +38,9 @@ pub struct UiSettings {
     pub grid_snap: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
+    /// Tempo Map 标尺行可见性（默认开启）。
+    #[serde(default = "default_true")]
+    pub tempo_map_visible: bool,
     #[serde(default = "default_primary_time_unit")]
     pub primary_time_unit: String,
     #[serde(default = "default_secondary_time_unit")]
@@ -108,6 +111,18 @@ pub struct UiSettings {
     pub midi_close_leading_gap: bool,
     #[serde(default = "default_midi_import_target")]
     pub midi_import_target: String,
+    /// MIDI 导入为 Tempo Map（默认关闭）。
+    #[serde(default)]
+    pub midi_import_as_tempo_map: bool,
+    /// 导入 Tempo（默认开启）。
+    #[serde(default = "default_true")]
+    pub midi_import_tempo_map_tempo: bool,
+    /// 导入拍号（默认开启）。
+    #[serde(default = "default_true")]
+    pub midi_import_tempo_map_time_signature: bool,
+    /// 导入音阶（默认关闭：大多数 MIDI 文件只写默认 C 大调）。
+    #[serde(default)]
+    pub midi_import_tempo_map_key_signature: bool,
     /// ONNX Runtime execution provider preference ("auto", "cpu", "gpu").
     /// Persisted so the user's GPU/CPU choice survives restarts.
     #[serde(default = "default_ort_ep")]
@@ -316,6 +331,7 @@ impl Default for UiSettings {
             split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
             grid_snap: true,
             grid_size: default_grid_size(),
+            tempo_map_visible: true,
             primary_time_unit: default_primary_time_unit(),
             secondary_time_unit: default_secondary_time_unit(),
             ruler_label_spacing_px: default_ruler_label_spacing_px(),
@@ -351,6 +367,10 @@ impl Default for UiSettings {
             midi_specified_bpm: None,
             midi_close_leading_gap: true,
             midi_import_target: default_midi_import_target(),
+            midi_import_as_tempo_map: false,
+            midi_import_tempo_map_tempo: true,
+            midi_import_tempo_map_time_signature: true,
+            midi_import_tempo_map_key_signature: false,
             ort_ep: default_ort_ep(),
             ort_device_id: None,
             auto_background_render: true,

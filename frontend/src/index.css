@@ -265,5 +265,7 @@ textarea {
     line-height: 16px;
     border: 1px solid var(--qt-border);
     box-shadow: 0 2px 10px var(--qt-overlay);
-    white-space: nowrap;
+    white-space: pre-line;
+    max-width: 320px;
+    tab-size: 4;
 }

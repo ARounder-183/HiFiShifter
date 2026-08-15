@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
+import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 
 /**
@@ -6,6 +7,9 @@ import { resolveGridLineSamplingPlan } from "./gridLineSampling";
  * Repeating CSS gradients with fractional background sizes can accumulate
  * subpixel rounding drift, which makes the minor grid shift relative to the
  * real beat/snap positions.
+ *
+ * 提供 `weakLineXs` / `strongLineXs`（内容坐标系 x 像素数组）时，
+ * 网格线直接使用这些显式位置（Tempo Map 的不等距网格）。
  */
 export const BackgroundGrid: React.FC<{
     contentWidth: number;
@@ -20,6 +24,9 @@ export const BackgroundGrid: React.FC<{
     lineOpacity?: number;
     showBoundary?: boolean;
     sticky?: boolean;
+    /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
+    weakLineXs?: number[] | null;
+    strongLineXs?: number[] | null;
 }> = ({
     contentWidth,
     contentHeight,
@@ -33,6 +40,8 @@ export const BackgroundGrid: React.FC<{
     lineOpacity = 0.9,
     showBoundary = true,
     sticky = false,
+    weakLineXs = null,
+    strongLineXs = null,
 }) => {
     const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -44,16 +53,20 @@ export const BackgroundGrid: React.FC<{
         Number.isFinite(scrollLeft);
     const isSticky = sticky && useViewport;
 
+    const useExplicitLines = weakLineXs != null && Array.isArray(weakLineXs);
+
     const samplingViewportWidth =
         viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
             ? viewportWidth
             : contentWidth;
-    const samplingPlan = resolveGridLineSamplingPlan({
-        pxPerBeat,
-        grid,
-        beatsPerBar: Math.max(1, Math.round(beatsPerBar)),
-        viewportWidth: samplingViewportWidth,
-    });
+    const samplingPlan = useExplicitLines
+        ? { weakStepPx: 0, strongStepPx: 0 }
+        : resolveGridLineSamplingPlan({
+              pxPerBeat,
+              grid,
+              beatsPerBar: Math.max(1, Math.round(beatsPerBar)),
+              viewportWidth: samplingViewportWidth,
+          });
 
     const width = isSticky ? Math.max(1, Math.floor(viewportWidth as number)) : contentWidth;
     const height = contentHeight;
@@ -61,6 +74,8 @@ export const BackgroundGrid: React.FC<{
     const latestRef = useRef({
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
+        weakLineXs: weakLineXs,
+        strongLineXs: strongLineXs,
         width,
         height,
         contentWidth,
@@ -74,6 +89,8 @@ export const BackgroundGrid: React.FC<{
     latestRef.current = {
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
+        weakLineXs,
+        strongLineXs,
         width,
         height,
         contentWidth,
@@ -104,10 +121,15 @@ export const BackgroundGrid: React.FC<{
             ? latest.width
             : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
+        // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
+        // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
+        // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
         const drawKey = [
             sl,
             latest.weakStepPx,
             latest.strongStepPx,
+            explicitGridLinesKey(latest.weakLineXs),
+            explicitGridLinesKey(latest.strongLineXs),
             latest.width,
             latest.height,
             latest.contentWidth,
@@ -117,7 +139,7 @@ export const BackgroundGrid: React.FC<{
         if (lastDrawKeyRef.current === drawKey) return;
         lastDrawKeyRef.current = drawKey;
 
-        const buildPath = (stepPx: number): string => {
+        const buildUniformPath = (stepPx: number): string => {
             if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
             const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
             const lastIndex = Math.max(
@@ -133,15 +155,45 @@ export const BackgroundGrid: React.FC<{
             return parts.join("");
         };
 
+        const buildExplicitPath = (lineXs: number[] | null): string => {
+            if (!lineXs || lineXs.length === 0) return "";
+            const parts: string[] = [];
+            // 二分定位可见范围
+            const lo = 0;
+            const hi = lineXs.length;
+            const lowerBound = (target: number) => {
+                let l = lo;
+                let h = hi;
+                while (l < h) {
+                    const mid = (l + h) >> 1;
+                    if (lineXs[mid] < target) l = mid + 1;
+                    else h = mid;
+                }
+                return l;
+            };
+            const start = lowerBound(visibleStart + offset);
+            for (let i = start; i < lineXs.length; i += 1) {
+                const x = lineXs[i] - offset;
+                if (x > latest.width + 1) break;
+                if (x < -1) continue;
+                parts.push(`M${x} 0V${latest.height}`);
+            }
+            return parts.join("");
+        };
+
         paths[0].setAttribute(
             "d",
-            buildPath(latest.weakStepPx),
+            useExplicitLines
+                ? buildExplicitPath(latest.weakLineXs)
+                : buildUniformPath(latest.weakStepPx),
         );
         paths[1].setAttribute(
             "d",
-            buildPath(latest.strongStepPx),
+            useExplicitLines
+                ? buildExplicitPath(latest.strongLineXs)
+                : buildUniformPath(latest.strongStepPx),
         );
-    }, []);
+    }, [useExplicitLines]);
 
     useEffect(() => {
         draw(scrollLeft);
@@ -150,6 +202,8 @@ export const BackgroundGrid: React.FC<{
         scrollLeft,
         samplingPlan.weakStepPx,
         samplingPlan.strongStepPx,
+        weakLineXs,
+        strongLineXs,
         width,
         height,
         contentWidth,

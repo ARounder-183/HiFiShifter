@@ -210,9 +210,15 @@ pub fn set_project_custom_scale(
 pub fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
-    project::set_project_timeline_settings(state, beats_per_bar, grid_size)
+    project::set_project_timeline_settings(
+        state,
+        beats_per_bar,
+        time_signature_denominator,
+        grid_size,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -662,6 +668,14 @@ pub fn select_clip(
     timeline::select_clip(state, clip_id)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_timeline_tempo_map(
+    state: State<'_, AppState>,
+    tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_timeline_tempo_map(state, tempo_map)
+}
+
 // ===================== params =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1063,6 +1077,10 @@ pub fn import_midi_as_clip(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
+    import_midi_as_tempo_map: Option<bool>,
+    import_midi_tempo: Option<bool>,
+    import_midi_time_signature: Option<bool>,
+    import_midi_key_signature: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     midi::import_midi_as_clip(
         state.inner(),
@@ -1077,6 +1095,10 @@ pub fn import_midi_as_clip(
         import_midi_bpm_as_project,
         clipboard_guid,
         close_leading_gap,
+        import_midi_as_tempo_map,
+        import_midi_tempo,
+        import_midi_time_signature,
+        import_midi_key_signature,
     )
 }
 
@@ -1127,7 +1149,7 @@ pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_ui_settings(
     state: State<'_, AppState>,
-    settings: crate::config::UiSettings,
+    settings: serde_json::Value,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }

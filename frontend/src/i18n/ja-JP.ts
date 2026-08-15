@@ -157,6 +157,7 @@ export const jaJP = {
     tension: "テンション",
     breath: "ブレス",
     beats_per_bar: "拍子",
+    time_signature: "拍子記号",
     grid: "グリッド",
     add_clip: "+ クリップを追加",
     delete_clip: "- クリップを削除",
@@ -646,6 +647,45 @@ export const jaJP = {
     custom_scale_short: "カスタム",
     project_scale_prefix: "プロジェクトスケール",
     project_scale_generic: "プロジェクトスケール",
+    project_scale_tempo_map_hint: "（選択範囲はテンポマップのスケールの影響を受けます）",
+
+    // テンポマップ（テンポ/拍子/スケールの変化）
+    tempo_map: "テンポマップ",
+    menu_view_tempo_map: "テンポマップ",
+    tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加…",
+    tempo_map_edit_point: "この変更点を編集…",
+    tempo_map_delete_point: "この変更点を削除",
+    tempo_map_clear_all: "テンポマップを消去",
+    tempo_map_dialog_title: "テンポマップ変更点",
+    tempo_map_dialog_title_initial: "テンポマップ初期点",
+    tempo_map_time_signature: "拍子",
+    tempo_map_scale: "スケール",
+    tempo_map_scale_inherit: "前のスケールに従う",
+    tempo_map_bpm_range: "（10-960）",
+    tempo_map_actionbar_tip:
+        "テンポマップ有効：変更は再生ヘッドより前の直近の変更点に適用されます",
+    tempo_map_ts_inherit: "前の拍子に従う",
+    tempo_map_tooltip_position: "位置：",
+    tempo_map_tooltip_bpm: "BPM：",
+    tempo_map_tooltip_time_signature: "拍子：",
+    tempo_map_tooltip_scale: "スケール：",
+    tempo_map_show_tooltip: "テンポマップを表示",
+    tempo_map_active_tooltip: "テンポマップ有効：クリックで消去または非表示のみ",
+    tempo_map_clear_dialog_title: "テンポマップ",
+    tempo_map_clear_dialog_message:
+        "消去するとすべてのテンポマップデータが削除されます。表示のみ非表示にすることもできます（データは保持されます）。",
+    tempo_map_clear_confirm: "消去",
+    tempo_map_hide_only: "非表示のみ",
+    scale_builtin_group: "組み込みスケール",
+    scale_custom_group: "カスタムスケール",
+
+    // MIDI をテンポマップとしてインポート
+    midi_import_as_tempo_map: "テンポマップとしてインポート",
+    midi_import_tempo_map_tempo: "テンポをインポート",
+    midi_import_tempo_map_time_signature: "拍子をインポート",
+    midi_import_tempo_map_key_signature: "スケールをインポート",
+    midi_import_as_tempo_map_hint:
+        "有効にすると、MIDI のテンポ・拍子・スケールの変化がプロジェクトのテンポマップを置き換えます。音符の時間は MIDI 自身のテンポを使用します。",
 
     // 修飾キーリネーム
     // Scale highlight setting

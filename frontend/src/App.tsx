@@ -198,6 +198,10 @@ function AppInner() {
     const [specifiedBpm, setSpecifiedBpm] = useState<number>(120);
     const [importPosition, setImportPosition] = useState<string>("selection");
     const [closeLeadingGap, setCloseLeadingGap] = useState(true);
+    const [importTempoMapEnabled, setImportTempoMapEnabled] = useState(false);
+    const [importTempoMapTempo, setImportTempoMapTempo] = useState(true);
+    const [importTempoMapTimeSignature, setImportTempoMapTimeSignature] = useState(true);
+    const [importTempoMapKeySignature, setImportTempoMapKeySignature] = useState(false);
     const [midiImportTargetMenu, setMidiImportTargetMenu] = useState<string>("pitchRef");
     const [midiImportTargetDragDrop, setMidiImportTargetDragDrop] = useState<string>("pitchRef");
     const [midiDialogSource, setMidiDialogSource] = useState<"menu" | "dragDrop">("menu");
@@ -226,6 +230,22 @@ function AppInner() {
                 }
                 if (s?.midiCloseLeadingGap != null) {
                     setCloseLeadingGap(s.midiCloseLeadingGap);
+                }
+                if ((s as any)?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+                }
+                if ((s as any)?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+                }
+                if ((s as any)?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(
+                        Boolean((s as any).midiImportTempoMapTimeSignature),
+                    );
+                }
+                if ((s as any)?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(
+                        Boolean((s as any).midiImportTempoMapKeySignature),
+                    );
                 }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
@@ -296,6 +316,31 @@ function AppInner() {
         setCloseLeadingGap(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
             settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any),
+        );
+    }, []);
+
+    const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
+        setImportTempoMapEnabled(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any),
+        );
+    }, []);
+    const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
+        setImportTempoMapTempo(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any),
+        );
+    }, []);
+    const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapTimeSignature(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any),
+        );
+    }, []);
+    const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapKeySignature(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any),
         );
     }, []);
 
@@ -1804,6 +1849,18 @@ function AppInner() {
                             onSpecifiedBpmChange={handleSpecifiedBpmChange}
                             onImportPositionChange={handleImportPositionChange}
                             onCloseLeadingGapChange={handleCloseLeadingGapChange}
+                            importTempoMapEnabled={importTempoMapEnabled}
+                            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+                            importTempoMapTempo={importTempoMapTempo}
+                            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+                            importTempoMapTimeSignature={importTempoMapTimeSignature}
+                            onImportTempoMapTimeSignatureChange={
+                                handleImportTempoMapTimeSignatureChange
+                            }
+                            importTempoMapKeySignature={importTempoMapKeySignature}
+                            onImportTempoMapKeySignatureChange={
+                                handleImportTempoMapKeySignatureChange
+                            }
                             midiDialogSource={midiDialogSource}
                             onMidiDialogSourceChange={setMidiDialogSource}
                             importTargetMenu={midiImportTargetMenu}

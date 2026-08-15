@@ -7,6 +7,8 @@ import {
     formatCursorTime,
     formatSecondsCursor,
     formatSecondsRuler,
+    formatTempoBarBeatsLabel,
+    formatTempoBarDivisionsLabel,
     gridDivisionsPerBar,
     rulerStepCandidates,
     selectRulerStep,
@@ -254,5 +256,132 @@ assertEqual(
 
 assertNear(beatFromSec(0.5, 120), 1, "beatFromSec");
 assertNear(secFromBeat(1, 120), 0.5, "secFromBeat");
+
+// ── Tempo Map 标签进位（浮点误差不得产生 "4.2.1000"） ──────────
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 2, sub: 0.9999999999 }, "ruler", 4),
+    "4.3",
+    "tempo label carries near-beat sub",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 2, sub: 1 }, "ruler", 4),
+    "4.3",
+    "tempo label carries sub=1",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 4, sub: 0.9999999999 }, "ruler", 4),
+    "5.1",
+    "tempo label carries across bar",
+);
+assertEqual(
+    formatTempoBarBeatsLabel({ bar: 4, beat: 4, sub: 0.9999999999 }, "cursor", 4),
+    "5.1.000",
+    "tempo cursor carries across bar",
+);
+
+// ── Tempo Map 标尺：变化点后重新对齐（不得沿用旧均匀网格位置） ──
+{
+    // 空工程 120bpm 4/4，在 7.25s（旧标尺 4.3.500）插入变化点（同 BPM）。
+    const map = {
+        points: [
+            {
+                id: "p0",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
+            {
+                id: "p1",
+                positionSec: 7.25,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+                scale: null,
+            },
+        ],
+    };
+    const ticks = buildRulerTicks({
+        pxPerSec: 480,
+        scrollLeft: 0,
+        viewportWidth: 4000,
+        projectSec: 10,
+        bpm: 120,
+        beatsPerBar: 4,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+        tempoMap: map,
+    });
+    const secs = ticks.map((t) => t.sec);
+    for (const bad of [7.5, 8.0, 8.5]) {
+        if (secs.some((s) => Math.abs(s - bad) < 1e-9)) {
+            throw new Error(`tempo ruler: stale old-grid tick at ${bad}`);
+        }
+    }
+    const at725 = ticks.find((t) => Math.abs(t.sec - 7.25) < 1e-9);
+    assertEqual(at725?.primaryLabel, "5.1", "tempo ruler: segment start label");
+    assertEqual(at725?.isBarStart, true, "tempo ruler: segment start is bar");
+    const at775 = ticks.find((t) => Math.abs(t.sec - 7.75) < 1e-9);
+    assertEqual(at775?.primaryLabel, "5.2", "tempo ruler: next beat at 7.75");
+    assertEqual(at775?.isBarStart, false, "tempo ruler: beat tick not bar");
+    const at925 = ticks.find((t) => Math.abs(t.sec - 9.25) < 1e-9);
+    assertEqual(at925?.primaryLabel, "6.1", "tempo ruler: next bar at 9.25");
+    assertEqual(at925?.isBarStart, true, "tempo ruler: bar tick flagged");
+}
+
+// ── Tempo Map 标尺：跟随之前的拍号继续按前段拍号分小节 ──
+{
+    // 0s 起 3/4（每小节 1.5s @120），3s 处变化点“跟随之前的拍号” → 继续 3/4 对齐。
+    const map = {
+        points: [
+            {
+                id: "p0",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 3, denominator: 4 },
+                scale: null,
+            },
+            { id: "p1", positionSec: 3, bpm: 120, timeSignature: null, scale: null },
+        ],
+    };
+    const ticks = buildRulerTicks({
+        pxPerSec: 480,
+        scrollLeft: 0,
+        viewportWidth: 4000,
+        projectSec: 6,
+        bpm: 120,
+        beatsPerBar: 4,
+        grid: "1/4",
+        primaryUnit: "barBeats",
+        secondaryUnit: "none",
+        minLabelSpacingPx: 90,
+        tempoMap: map,
+    });
+    const at45 = ticks.find((t) => Math.abs(t.sec - 4.5) < 1e-9);
+    assertEqual(at45?.primaryLabel, "4.1", "tempo ruler follow-sig: 3/4 bar continues");
+    assertEqual(at45?.isBarStart, true, "tempo ruler follow-sig: bar tick flagged");
+}
+
+// ── 回归：分数每小节拍数（3/8 = 1.5 拍/小节）──
+{
+    // 切分数不得取整：3/8 小节在 1/8 网格下是 3 个切分，而不是 round(1.5)/0.5 = 4。
+    assertNear(gridDivisionsPerBar("1/8", 1.5), 3, "fractional bpb: 3/8 with 1/8 grid → 3");
+    assertNear(gridDivisionsPerBar("1/16", 1.5), 6, "fractional bpb: 3/8 with 1/16 grid → 6");
+    assertNear(gridDivisionsPerBar("1/4", 4), 4, "integer bpb unchanged");
+    // 切分标签：3/8 小节的第 2 拍（最后一个八分音符）→ 第 3 个切分 / 共 3 个。
+    assertEqual(
+        formatTempoBarDivisionsLabel({ bar: 1, beat: 2, sub: 0 }, 1.5, "1/8"),
+        "1.3/3",
+        "fractional bpb: division label 3/3",
+    );
+    // 小节.拍 标签按原始 bpb 进位：1.5 拍/小节中拍内余量接近 1 时（拍 2 末尾）
+    // 必须进位到下一小节（取整为 2 也会进位，但这是对原始 bpb 路径的回归保护）。
+    assertEqual(
+        formatTempoBarBeatsLabel({ bar: 1, beat: 2, sub: 0.9999999995 }, "ruler", 1.5),
+        "2.1",
+        "fractional bpb: near-boundary sub carries to next bar",
+    );
+}
 
 console.log(`timeFormat checks passed (${checks})`);

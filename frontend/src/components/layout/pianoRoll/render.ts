@@ -322,6 +322,12 @@ export function drawPianoRoll(args: {
     // pitch snap visual helpers
     pitchSnapUnit?: "semitone" | "scale";
     projectScale?: ScaleLike | null;
+    /** Tempo Map 音阶高亮分段（null = 无 Tempo Map 音阶数据，使用单音阶路径）。 */
+    scaleSegments?: Array<{
+        startSec: number;
+        endSec: number;
+        scale: ScaleLike | null;
+    }> | null;
     toolMode?: string;
     snapToggleHeld?: boolean;
     scaleHighlightMode?: import("../../../features/session/sessionTypes").ScaleHighlightMode;
@@ -647,23 +653,51 @@ export function drawPianoRoll(args: {
             return mode === "always";
         })();
         const projectScaleNotes = args.projectScale ? resolveScaleNotes(args.projectScale) : [];
+        const scaleSegments = args.scaleSegments ?? null;
 
         for (let midi = startMidi; midi <= endMidi; midi += 1) {
             const y = valueToY("pitch", midi + 0.5, h);
             const pc = ((midi % 12) + 12) % 12;
             const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
 
-            if (isScaleNote) {
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-            } else {
-                ctx.strokeStyle = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
-                ctx.lineWidth = 1;
-            }
+            const normalColor =
+                pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
+            ctx.strokeStyle = normalColor;
+            ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(0, y + 0.5);
             ctx.lineTo(w, y + 0.5);
             ctx.stroke();
+
+            if (!highlightActive) continue;
+
+            if (scaleSegments && scaleSegments.length > 0) {
+                // Tempo Map 路径：按时间段绘制高亮段。
+                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
+                ctx.lineWidth = 2;
+                for (const segment of scaleSegments) {
+                    if (!segment.scale) continue;
+                    const segmentNotes = resolveScaleNotes(segment.scale);
+                    if (!segmentNotes.includes(pc)) continue;
+                    const x0 = segment.startSec * pxPerSec - scrollLeft;
+                    const x1 = segment.endSec * pxPerSec - scrollLeft;
+                    if (x1 < 0 || x0 > w) continue;
+                    ctx.beginPath();
+                    ctx.moveTo(Math.max(0, x0), y + 0.5);
+                    ctx.lineTo(Math.min(w, x1), y + 0.5);
+                    ctx.stroke();
+                }
+                continue;
+            }
+
+            if (isScaleNote) {
+                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(0, y + 0.5);
+                ctx.lineTo(w, y + 0.5);
+                ctx.stroke();
+            }
         }
     } else if (isChildPitchOffsetCentsParam(editParam)) {
         const view = paramViews[editParam] ?? { center: 0, span: 1 };

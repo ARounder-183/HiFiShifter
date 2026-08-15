@@ -1,4 +1,4 @@
-import type { TimelineResult, TrackSummaryResult } from "../../types/api";
+import type { TimelineResult, TrackSummaryResult, TempoMapPayload } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
@@ -37,6 +37,10 @@ export const timelineApi = {
 
     setProjectLength: (projectSec: number) =>
         invoke<TimelineResult>("set_project_length", projectSec),
+
+    // Tempo Map
+    setTimelineTempoMap: (tempoMap: TempoMapPayload | null) =>
+        invoke<TimelineResult>("set_timeline_tempo_map", tempoMap),
 
     // Import
     importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>

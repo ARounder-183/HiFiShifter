@@ -65,6 +65,8 @@ export async function buildChildOffsetPasteValues(args: {
     paramsApi: ChildOffsetParamsApi;
     pitchDeltaToDegreeSteps: (basePitch: number, targetPitch: number, scale: ScaleLike) => number;
     projectScale: ScaleLike | undefined;
+    /** Tempo Map 感知：按绝对帧解析生效音阶；未提供时使用 projectScale。 */
+    scaleAtFrame?: (frame: number) => ScaleLike | undefined;
 }): Promise<number[] | null> {
     const {
         tracks,
@@ -77,9 +79,13 @@ export async function buildChildOffsetPasteValues(args: {
         paramsApi,
         pitchDeltaToDegreeSteps,
         projectScale,
+        scaleAtFrame,
     } = args;
 
     if (!rootTrackId || !projectScale) return null;
+    const safeProjectScale = projectScale;
+    const scaleForFrame = (frame: number): ScaleLike =>
+        (scaleAtFrame ? (scaleAtFrame(frame) ?? safeProjectScale) : safeProjectScale) as ScaleLike;
 
     const rootPitchPayload = await paramsApi.getParamFrames(
         rootTrackId,
@@ -151,7 +157,11 @@ export async function buildChildOffsetPasteValues(args: {
             if (applyDegrees) {
                 const degreeSteps = Number(curves.degrees[i] ?? 0);
                 if (Math.abs(degreeSteps) > 1e-9) {
-                    tempPitch = transposePitchByScaleSteps(tempPitch, degreeSteps, projectScale);
+                    tempPitch = transposePitchByScaleSteps(
+                        tempPitch,
+                        degreeSteps,
+                        scaleForFrame(startFrame + i),
+                    );
                 }
             }
 
@@ -177,7 +187,11 @@ export async function buildChildOffsetPasteValues(args: {
                 CHILD_PITCH_OFFSET_CENTS_RANGE.max,
             );
         } else {
-            const degreeSteps = pitchDeltaToDegreeSteps(tempPitch, targetPitch, projectScale);
+            const degreeSteps = pitchDeltaToDegreeSteps(
+                tempPitch,
+                targetPitch,
+                scaleForFrame(startFrame + i),
+            );
             out[i] = clamp(
                 degreeSteps,
                 CHILD_PITCH_OFFSET_DEGREES_RANGE.min,

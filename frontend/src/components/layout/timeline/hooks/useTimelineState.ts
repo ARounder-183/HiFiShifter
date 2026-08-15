@@ -38,6 +38,10 @@ import {
     gridStepBeats,
 } from "../";
 import type { RulerTick } from "../timeFormat.js";
+import {
+    buildTempoGridLineXsForViewport,
+    snapSecToTempoGrid,
+} from "../../../../utils/tempoMap.js";
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -49,17 +53,21 @@ type TimelineSessionSlice = Pick<
     | "clips"
     | "clipFormantStatus"
     | "clipFormantToolWindow"
+    | "customScalePresets"
     | "grid"
     | "gridSnapEnabled"
     | "paramEditorSyncTimeline"
     | "paramEditorTimelineClickSelectTrackEnabled"
     | "primaryTimeUnit"
+    | "project"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
     | "showPlayheadTimeInTrackHeader"
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "tempoMap"
+    | "tempoMapVisible"
     | "trackMeters"
     | "tracks"
 >;
@@ -114,6 +122,8 @@ export interface TimelineStateResult {
     contentHeight: number;
     dynamicProjectSec: number;
     ticks: RulerTick[];
+    /** Tempo Map 显式网格线（内容坐标 x）；无 Tempo Map 时为 null。 */
+    tempoGridLineXs: { weak: number[]; strong: number[] } | null;
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -201,6 +211,7 @@ export function useTimelineState(): TimelineStateResult {
             clips: state.session.clips,
             clipFormantStatus: state.session.clipFormantStatus,
             clipFormantToolWindow: state.session.clipFormantToolWindow,
+            customScalePresets: state.session.customScalePresets,
             grid: state.session.grid,
             gridSnapEnabled: state.session.gridSnapEnabled,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
@@ -209,11 +220,14 @@ export function useTimelineState(): TimelineStateResult {
                 state.session.paramEditorTimelineClickSelectTrackEnabled,
             primaryTimeUnit: state.session.primaryTimeUnit,
             playbackRateVersion: state.session.playbackRateVersion,
+            project: state.session.project,
             rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
             secondaryTimeUnit: state.session.secondaryTimeUnit,
             selectedClipId: state.session.selectedClipId,
             selectedTrackId: state.session.selectedTrackId,
             showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
+            tempoMap: state.session.tempoMap,
+            tempoMapVisible: state.session.tempoMapVisible,
             trackMeters: state.session.trackMeters,
             tracks: state.session.tracks,
         }),
@@ -535,6 +549,7 @@ export function useTimelineState(): TimelineStateResult {
             primaryUnit: s.primaryTimeUnit,
             secondaryUnit: s.secondaryTimeUnit,
             minLabelSpacingPx: s.rulerLabelSpacingPx,
+            tempoMap: s.tempoMap,
         });
     }, [
         s.beats,
@@ -543,11 +558,26 @@ export function useTimelineState(): TimelineStateResult {
         s.primaryTimeUnit,
         s.secondaryTimeUnit,
         s.rulerLabelSpacingPx,
+        s.tempoMap,
         dynamicProjectSec,
         viewportWidth,
         pxPerSec,
         scrollLeft,
     ]);
+
+    // ── Tempo Map 显式网格线（供 BackgroundGrid 使用）──────────
+    const tempoGridLineXs = useMemo(() => {
+        return buildTempoGridLineXsForViewport({
+            tempoMap: s.tempoMap,
+            scrollLeft,
+            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            pxPerSec,
+            projectSec: dynamicProjectSec,
+            stepBeats: gridStepBeats(s.grid),
+            fallbackBpm: s.bpm,
+            fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+        });
+    }, [s.tempoMap, s.bpm, s.beats, s.grid, scrollLeft, viewportWidth, pxPerSec, dynamicProjectSec]);
 
     // ── clipsByTrackId ───────────────────────────────────────
     const clipsByTrackId = useMemo(() => {
@@ -727,6 +757,9 @@ export function useTimelineState(): TimelineStateResult {
     // ── snapSec / snapBeat ───────────────────────────────────
     function snapSec(sec: number) {
         const stepBeats = gridStepBeats(s.grid);
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            return snapSecToTempoGrid(sec, s.tempoMap, stepBeats, s.bpm);
+        }
         const stepSec = stepBeats * (60 / Math.max(1, s.bpm));
         return Math.round(sec / stepSec) * stepSec;
     }
@@ -858,6 +891,7 @@ export function useTimelineState(): TimelineStateResult {
         contentHeight,
         dynamicProjectSec,
         ticks,
+        tempoGridLineXs,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,

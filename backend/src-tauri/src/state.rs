@@ -34,6 +34,94 @@ fn default_formant_strength() -> f64 {
     0.50
 }
 
+/// 内置音阶键名 → 音级集合（未知键名返回 None）。
+pub(crate) fn scale_notes_for_key(scale: &str) -> Option<Vec<u8>> {
+    let notes = match scale {
+        "C" => vec![0, 2, 4, 5, 7, 9, 11],
+        "Db" => vec![1, 3, 5, 6, 8, 10, 0],
+        "D" => vec![2, 4, 6, 7, 9, 11, 1],
+        "Eb" => vec![3, 5, 7, 8, 10, 0, 2],
+        "E" => vec![4, 6, 8, 9, 11, 1, 3],
+        "F" => vec![5, 7, 9, 10, 0, 2, 4],
+        "Gb" => vec![6, 8, 10, 11, 1, 3, 5],
+        "G" => vec![7, 9, 11, 0, 2, 4, 6],
+        "Ab" => vec![8, 10, 0, 1, 3, 5, 7],
+        "A" => vec![9, 11, 1, 2, 4, 6, 8],
+        "Bb" => vec![10, 0, 2, 3, 5, 7, 9],
+        "B" => vec![11, 1, 3, 4, 6, 8, 10],
+        _ => return None,
+    };
+    Some(notes)
+}
+
+/// 全部内置音阶键名（与 scale_notes_for_key 对应）。
+pub(crate) const SCALE_KEYS: [&str; 12] = [
+    "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
+];
+
+/// 由音级集合反查内置音阶键名（归一化后完全一致才匹配）。
+pub(crate) fn key_for_scale_notes(notes: &[u8]) -> Option<String> {
+    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    for key in SCALE_KEYS {
+        if let Some(n) = scale_notes_for_key(key) {
+            let mut m: Vec<u8> = n.iter().map(|v| v % 12).collect();
+            m.sort_unstable();
+            m.dedup();
+            if m == normalized {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 工程音阶 → Tempo Map 初始点音阶数据（初始点即工程基准记录，含自定义音阶名）。
+pub(crate) fn tempo_scale_data_from_project(p: &ProjectState) -> TempoScaleData {
+    if p.use_custom_scale {
+        if let Some(custom) = p.custom_scale.as_ref() {
+            return TempoScaleData {
+                key: None,
+                name: Some(custom.name.clone()),
+                notes: Some(custom.notes.clone()),
+            };
+        }
+    }
+    TempoScaleData {
+        key: Some(p.base_scale.clone()),
+        name: None,
+        notes: None,
+    }
+}
+
+/// Tempo Map 音阶签名（用于判断音阶部分是否变化、是否需要失效渲染缓存）。
+/// None 与“无显式音阶变化点”返回相同签名（空串）。
+/// 签名包含每个显式音阶变化点的位置与音阶内容 —— 挪动变化点同样会使签名改变。
+pub(crate) fn tempo_map_scale_signature(points: Option<&[TempoPointData]>) -> String {
+    let Some(points) = points else {
+        return String::new();
+    };
+    points
+        .iter()
+        .filter(|p| p.scale.is_some())
+        .map(|p| {
+            let s = p.scale.as_ref().expect("filtered");
+            format!(
+                "{:.6}:{}:{}:{}",
+                p.position_sec,
+                s.key.as_deref().unwrap_or(""),
+                s.name.as_deref().unwrap_or(""),
+                s.notes
+                    .as_ref()
+                    .map(|n| n.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
@@ -349,6 +437,31 @@ pub struct RuntimeState {
     pub synthesized_wav_path: Option<String>,
 }
 
+/// Tempo Map 变化点携带的音阶覆盖数据（None = 跟随工程音阶）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoScaleData {
+    /// 内置音阶键名（如 "C"、"Db"）。
+    pub key: Option<String>,
+    /// 自定义音阶名称。
+    pub name: Option<String>,
+    /// 自定义音阶音级集合（0-11）。
+    pub notes: Option<Vec<u8>>,
+}
+
+/// Tempo Map 变化点（时间锚定：position_sec 绝对秒）。
+/// 拍号为 None 表示“跟随之前的拍号”（0 位置初始点必须显式携带拍号）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPointData {
+    pub id: String,
+    pub position_sec: f64,
+    pub bpm: f64,
+    pub numerator: Option<u32>,
+    pub denominator: Option<u32>,
+    pub scale: Option<TempoScaleData>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineState {
     pub tracks: Vec<Track>,
@@ -364,6 +477,11 @@ pub struct TimelineState {
 
     #[serde(default = "default_project_scale_notes")]
     pub project_scale_notes: Vec<u8>,
+
+    /// Tempo Map（None = 无 Tempo Map，使用全局 BPM/拍号/音阶）。
+    /// 点按 position_sec 升序；第一个点必须位于 0。
+    #[serde(default)]
+    pub tempo_map: Option<Vec<TempoPointData>>,
 
     pub next_track_order: i32,
 
@@ -390,6 +508,8 @@ pub struct ProjectState {
     pub use_custom_scale: bool,
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
+    /// 工程基准拍号分母（1/2/4/8/16/32）。
+    pub time_signature_denominator: u32,
     pub grid_size: String,
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
     pub hifigan_mel_stretch_override: Option<bool>,
@@ -409,6 +529,7 @@ impl Default for ProjectState {
             use_custom_scale: false,
             custom_scale: None,
             beats_per_bar: 4,
+            time_signature_denominator: 4,
             grid_size: "1/4".to_string(),
             stretch_algorithm_override: None,
             hifigan_mel_stretch_override: None,
@@ -443,6 +564,7 @@ impl Default for TimelineState {
 
             params_by_root_track: BTreeMap::new(),
             project_scale_notes: default_project_scale_notes(),
+            tempo_map: None,
             next_track_order: 1,
             disabled_group_ids: HashSet::new(),
         }
@@ -1262,6 +1384,7 @@ impl AppState {
             use_custom_scale: p.use_custom_scale,
             custom_scale: p.custom_scale,
             beats_per_bar: p.beats_per_bar,
+            time_signature_denominator: p.time_signature_denominator,
             grid_size: p.grid_size,
             stretch_algorithm_override: p.stretch_algorithm_override,
             hifigan_mel_stretch_override: p.hifigan_mel_stretch_override,
@@ -1367,11 +1490,19 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
+        let scale_before = tempo_map_scale_signature(tl.tempo_map.as_deref());
         let current = std::mem::replace(&mut *tl, prev);
         h.redo.push(current);
         drop(h);
         self.bump_timeline_version();
+        // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
+        // 同步工程 BPM/拍号/音阶，避免撤销后工程记录与 Tempo Map 分叉。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
+        self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
         payload
@@ -1388,20 +1519,215 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
+        let scale_before = tempo_map_scale_signature(tl.tempo_map.as_deref());
         let current = std::mem::replace(&mut *tl, next);
         h.undo.push_back(current);
         drop(h);
         self.bump_timeline_version();
+        // 与 undo_timeline 一致：重做后同步工程基准记录。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
+        self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
         payload
+    }
+
+    /// Tempo Map 音阶签名发生变化时失效所有渲染缓存，并在
+    /// 「后台预渲染」启用时触发后台渲染（与直接编辑 Tempo Map 的路径一致；
+    /// 撤销/重做恢复的快照同样走这里 —— 引擎的 clip 差分检测不会覆盖 Tempo Map）。
+    fn invalidate_render_caches_if_scale_changed(&self, tl: &TimelineState, scale_before: &str) {
+        let scale_after = tempo_map_scale_signature(tl.tempo_map.as_deref());
+        if scale_before == scale_after.as_str() {
+            return;
+        }
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+        if let Some(handle) = self.app_handle.get() {
+            let _ = crate::commands::playback::request_background_render(handle);
+        }
+    }
+
+    /// 从 Tempo Map 0 位置初始点同步“工程基准记录”（BPM / 拍号 / 音阶）。
+    ///
+    /// 初始点即工程基准记录（与 `set_timeline_tempo_map` 的双向同步约定一致），
+    /// 撤销/重做恢复时间线快照后也必须重新同步，否则工程记录与 Tempo Map
+    /// 会永久分叉（例如撤销音阶修改后工程仍显示旧音阶，保存/重开也无法自愈）。
+    /// 仅在实际值变化时写回并标记工程 dirty。
+    pub fn sync_project_record_from_tempo_map(&self, tl: &mut TimelineState, p: &mut ProjectState) {
+        let Some(first) = tl
+            .tempo_map
+            .as_ref()
+            .and_then(|points| points.first())
+            .cloned()
+        else {
+            return;
+        };
+        let mut changed = false;
+
+        let bpm = first.bpm.clamp(10.0, 960.0);
+        if (tl.bpm - bpm).abs() > 1e-9 {
+            tl.bpm = bpm;
+            changed = true;
+        }
+        let beats = first.numerator.unwrap_or(4).clamp(1, 32);
+        if p.beats_per_bar != beats {
+            p.beats_per_bar = beats;
+            changed = true;
+        }
+        let denominator = match first.denominator {
+            Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => d,
+            _ => p.time_signature_denominator,
+        };
+        if p.time_signature_denominator != denominator {
+            p.time_signature_denominator = denominator;
+            changed = true;
+        }
+
+        if let Some(scale) = first.scale.as_ref() {
+            if let Some(key) = scale.key.as_deref() {
+                if p.base_scale != key || p.use_custom_scale {
+                    p.base_scale = key.to_string();
+                    p.use_custom_scale = false;
+                    p.custom_scale = None;
+                    changed = true;
+                }
+                if let Some(notes) = scale_notes_for_key(key) {
+                    tl.project_scale_notes = notes;
+                }
+            } else if let Some(notes) = scale.notes.as_ref() {
+                let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+                normalized.sort_unstable();
+                normalized.dedup();
+                if !normalized.is_empty() {
+                    let name = scale
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "Custom Scale".to_string());
+                    let same = p.use_custom_scale
+                        && p.custom_scale.as_ref().map(|c| (&c.name, &c.notes))
+                            == Some((&name, &normalized));
+                    if !same {
+                        p.custom_scale = Some(crate::project::CustomScale {
+                            id: p
+                                .custom_scale
+                                .as_ref()
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| new_id("cs")),
+                            name,
+                            notes: normalized.clone(),
+                        });
+                        p.use_custom_scale = true;
+                        changed = true;
+                    }
+                    tl.project_scale_notes = normalized;
+                }
+            }
+        }
+        if changed {
+            p.dirty = true;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tempo_map_scale_signature_detects_scale_relevant_changes() {
+        let point = |sec: f64, key: &str| TempoPointData {
+            id: "p1".to_string(),
+            position_sec: sec,
+            bpm: 120.0,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: Some(TempoScaleData {
+                key: Some(key.to_string()),
+                name: None,
+                notes: None,
+            }),
+        };
+        let no_scale = TempoPointData {
+            id: "p0".to_string(),
+            position_sec: 0.0,
+            bpm: 120.0,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: None,
+        };
+
+        // 无数据与无显式音阶点 → 相同签名（空串）。
+        assert_eq!(tempo_map_scale_signature(None), "");
+        assert_eq!(tempo_map_scale_signature(Some(&[])), "");
+        assert_eq!(tempo_map_scale_signature(Some(&[no_scale])), "");
+
+        // 挪动音阶变化点 → 签名改变（渲染缓存需失效）。
+        let a = tempo_map_scale_signature(Some(&[point(5.0, "G")]));
+        let moved = tempo_map_scale_signature(Some(&[point(6.0, "G")]));
+        assert_ne!(a, moved, "moving a scale point must change the signature");
+
+        // 修改音阶内容 → 签名改变。
+        let edited = tempo_map_scale_signature(Some(&[point(5.0, "D")]));
+        assert_ne!(a, edited, "editing a scale point must change the signature");
+
+        // 删除音阶 → 签名改变（回到空串）。
+        assert_ne!(a, "", "removing scale data must change the signature");
+    }
+
+    #[test]
+    fn tempo_map_normalize_materializes_initial_time_signature() {
+        let mut timeline = TimelineState::default();
+        timeline.bpm = 150.0;
+        timeline.tempo_map = Some(vec![
+            TempoPointData {
+                id: "a".to_string(),
+                position_sec: 0.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "b".to_string(),
+                position_sec: 2.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "c".to_string(),
+                position_sec: 4.0,
+                bpm: 120.0,
+                numerator: Some(6),
+                denominator: Some(8),
+                scale: None,
+            },
+        ]);
+        timeline.normalize_tempo_map();
+        let points = timeline.tempo_map.as_ref().unwrap();
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        assert_eq!(points[0].numerator, Some(4));
+        assert_eq!(points[0].denominator, Some(4));
+        // 其它点保持“跟随之前的拍号”。
+        assert_eq!(points[1].numerator, None);
+        assert_eq!(points[1].denominator, None);
+        // 生效拍号解析：跟随点解析为 4/4，显式点解析为 6/8。
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 1),
+            (4, 4)
+        );
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 2),
+            (6, 8)
+        );
+    }
 
     #[test]
     fn patch_clips_state_updates_multiple_clips_in_one_pass() {
@@ -2156,7 +2482,7 @@ mod tests {
     }
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4().simple())
 }
 
@@ -2253,6 +2579,7 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
@@ -2323,12 +2650,184 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
                 ids
             },
         }
+    }
+
+    // ─── Tempo Map ────────────────────────────────────────────────
+
+    /// 序列化 Tempo Map 供前端载荷使用（None = 无 Tempo Map）。
+    fn tempo_map_payload(&self) -> Option<Vec<crate::models::TempoPointPayload>> {
+        self.tempo_map.as_ref().map(|points| {
+            points
+                .iter()
+                .map(|p| crate::models::TempoPointPayload {
+                    id: p.id.clone(),
+                    position_sec: p.position_sec,
+                    bpm: p.bpm,
+                    numerator: p.numerator,
+                    denominator: p.denominator,
+                    scale: p.scale.as_ref().map(|s| crate::models::TempoScalePayload {
+                        key: s.key.clone(),
+                        name: s.name.clone(),
+                        notes: s.notes.clone(),
+                    }),
+                })
+                .collect()
+        })
+    }
+
+    /// 规范化 Tempo Map：排序、钳制、确保首点位于 0；无有效点返回 None。
+    /// 0 位置初始点即工程基准记录，必须显式携带拍号（缺失时按 4/4 物化）。
+    pub fn normalize_tempo_map(&mut self) {
+        let Some(points) = self.tempo_map.take() else {
+            return;
+        };
+        let mut valid: Vec<TempoPointData> = Vec::new();
+        for mut p in points {
+            if p.id.trim().is_empty() {
+                continue;
+            }
+            p.position_sec = p.position_sec.max(0.0);
+            p.bpm = p.bpm.clamp(10.0, 960.0);
+            p.numerator = p.numerator.map(|n| n.clamp(1, 32));
+            p.denominator = match p.denominator {
+                Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => Some(d),
+                Some(_) => Some(4),
+                None => None,
+            };
+            valid.push(p);
+        }
+        // 先排序再去重：若在排序前去重，输入乱序时相邻的重复点（如 [2,5,2]）
+        // 会同时保留，破坏“位置严格递增”的不变量（下游二分查找/积分依赖它）。
+        valid.sort_by(|a, b| a.position_sec.partial_cmp(&b.position_sec).unwrap_or(std::cmp::Ordering::Equal));
+        valid.dedup_by(|a, b| (a.position_sec - b.position_sec).abs() < 1e-6);
+        if valid.is_empty() {
+            self.tempo_map = None;
+            return;
+        }
+        if valid[0].position_sec > 1e-9 {
+            valid.insert(
+                0,
+                TempoPointData {
+                    id: new_id("tp"),
+                    position_sec: 0.0,
+                    bpm: self.bpm,
+                    numerator: Some(4),
+                    denominator: Some(4),
+                    // 初始点即工程基准记录：携带工程音阶（内置键反查，否则保留音级集合）。
+                    scale: Some(TempoScaleData {
+                        key: key_for_scale_notes(&self.project_scale_notes),
+                        name: None,
+                        notes: Some(self.project_scale_notes.clone()),
+                    }),
+                },
+            );
+        }
+        valid[0].position_sec = 0.0;
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        if valid[0].numerator.is_none() || valid[0].denominator.is_none() {
+            valid[0].numerator = Some(valid[0].numerator.unwrap_or(4));
+            valid[0].denominator = Some(valid[0].denominator.unwrap_or(4));
+        }
+        self.tempo_map = Some(valid);
+    }
+
+    /// 下标处变化点的生效拍号（跟随之前的拍号时向前解析为实际值）。
+    /// 0 位置初始点由规范化保证显式携带拍号，因此任何下标都有确定值。
+    pub fn effective_time_signature_at(points: &[TempoPointData], index: usize) -> (u32, u32) {
+        let mut carry: (u32, u32) = (4, 4);
+        for (i, point) in points.iter().enumerate() {
+            if let (Some(n), Some(d)) = (point.numerator, point.denominator) {
+                carry = (n.clamp(1, 32), d);
+            }
+            if i >= index {
+                break;
+            }
+        }
+        carry
+    }
+
+    /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。
+    /// 语义与前端 `effectiveScaleAtSec` 及 `scale_segments` 一致：
+    /// 音阶为 null 的变化点表示“跟随之前的音阶”（透明），需继续向前寻找
+    /// 最近一个显式携带音阶的变化点；找不到才回退工程音阶。
+    pub fn effective_scale_notes_at_sec(&self, sec: f64) -> Vec<u8> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return self.project_scale_notes.clone();
+        };
+        let target = sec.max(0.0);
+        for point in points.iter().rev() {
+            if point.position_sec > target + 1e-9 {
+                continue;
+            }
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        return notes;
+                    }
+                }
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes
+                        .iter()
+                        .map(|v| v % 12)
+                        .collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        return normalized;
+                    }
+                }
+            }
+            // 该点音阶为 null（跟随之前的音阶）：继续向前寻找。
+        }
+        self.project_scale_notes.clone()
+    }
+
+    /// 逐段生效音阶（(段起始秒, 音级集合)，按时间升序；首段从 0 开始）。
+    /// 供逐帧渲染路径使用（帧时间单调递增，可用游标快速查询）。
+    pub fn scale_segments(&self) -> Vec<(f64, Vec<u8>)> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return vec![(0.0, self.project_scale_notes.clone())];
+        };
+        let mut segments: Vec<(f64, Vec<u8>)> = Vec::new();
+        let mut current: Option<Vec<u8>> = None;
+        let mut last_sec = 0.0f64;
+        for point in points {
+            let sec = point.position_sec.max(last_sec);
+            if sec > last_sec + 1e-9 {
+                let notes = current
+                    .clone()
+                    .unwrap_or_else(|| self.project_scale_notes.clone());
+                segments.push((last_sec, notes));
+            }
+            last_sec = sec;
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        current = Some(notes);
+                    }
+                }
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        current = Some(normalized);
+                    }
+                }
+            }
+        }
+        let notes = current.unwrap_or_else(|| self.project_scale_notes.clone());
+        if segments.is_empty() || (segments.last().map(|(sec, _)| *sec) < Some(last_sec)) {
+            segments.push((last_sec, notes));
+        }
+        segments
     }
 
     pub fn add_track(

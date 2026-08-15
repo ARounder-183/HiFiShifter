@@ -59,6 +59,15 @@ pub struct MidiParseResult {
     pub initial_bpm: f64,
     /// MIDI 文件是否包含实际的 Tempo 事件（非回退值）
     pub has_tempo: bool,
+    /// 全局 Tempo 事件：(abs_tick, 微秒/拍)。
+    pub tempo_events: Vec<(u64, f64)>,
+    /// 全局拍号事件：(abs_tick, 分子, 分母)。
+    pub time_signature_events: Vec<(u64, u32, u32)>,
+    /// 全局音阶（调号）事件：(abs_tick, 升降号数 -7..=7)。
+    pub key_signature_events: Vec<(u64, i8)>,
+    /// 每四分音符 tick 数（SMTPE 时为每秒 tick 数）。
+    pub ticks_per_beat: f64,
+    pub is_smpte: bool,
 }
 
 /// 将弯音轮原始值和弯音灵敏度转换为半音偏移量。
@@ -145,6 +154,35 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
             }
         }
     }
+
+    // 收集全局拍号事件（FF 58 04 nn dd cc bb）。
+    // 注意：MIDI 规格中 dd 是“2 的指数”（2^dd = 以几分音符为一拍），
+    // 例：dd=2 → 四分音符（分母 4）。midly 的 TimeSignature 第二个字段
+    // 就是原始指数字节，需要转换成实际分母值。
+    let mut time_signature_events: Vec<(u64, u32, u32)> = Vec::new();
+    // 收集全局音阶/调号事件（FF 59 02 sf mi）
+    let mut key_signature_events: Vec<(u64, i8)> = Vec::new();
+    for track in &smf.tracks {
+        let mut abs_tick: u64 = 0;
+        for event in track {
+            abs_tick += event.delta.as_int() as u64;
+            match event.kind {
+                TrackEventKind::Meta(MetaMessage::TimeSignature(num, den_pow2, _cc, _bb)) => {
+                    let denominator = (2u32)
+                        .checked_pow(den_pow2 as u32)
+                        .filter(|d| matches!(d, 1 | 2 | 4 | 8 | 16 | 32))
+                        .unwrap_or(4);
+                    time_signature_events.push((abs_tick, num as u32, denominator));
+                }
+                TrackEventKind::Meta(MetaMessage::KeySignature(sf, _mi)) => {
+                    key_signature_events.push((abs_tick, sf));
+                }
+                _ => {}
+            }
+        }
+    }
+    time_signature_events.sort_by_key(|&(tick, _, _)| tick);
+    key_signature_events.sort_by_key(|&(tick, _)| tick);
 
     let has_tempo = !tempo_events.is_empty();
 
@@ -384,7 +422,186 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
         track_notes: all_track_notes,
         initial_bpm,
         has_tempo,
+        tempo_events,
+        time_signature_events,
+        key_signature_events,
+        ticks_per_beat,
+        is_smpte,
     })
+}
+
+/// 将 MIDI 调号（升降号数 -7..=7）映射为 HiFiShifter 内置音阶键名。
+fn key_signature_to_scale_key(sf: i8) -> Option<String> {
+    let key = match sf {
+        0 => "C",
+        1 => "G",
+        2 => "D",
+        3 => "A",
+        4 => "E",
+        5 => "B",
+        6 => "Gb", // F# → Gb
+        7 => "Db", // C# → Db
+        -1 => "F",
+        -2 => "Bb",
+        -3 => "Eb",
+        -4 => "Ab",
+        -5 => "Db",
+        -6 => "Gb",
+        -7 => "B", // Cb → B
+        _ => return None,
+    };
+    Some(key.to_string())
+}
+
+/// 由 MIDI 事件构建 Tempo Map 变化点列表（时间锚定，秒）。
+///
+/// - `import_tempo` / `import_time_signature` / `import_key_signature` 控制导入哪些参数；
+/// - 事件时间用 MIDI 自身的 Tempo 事件积分换算为秒；
+/// - 返回的列表已按位置升序，第一个点位于 0（始终存在）；
+/// - 仅当存在“0 之后的实际变化”时返回 Some（否则 None，交由调用方按工程基准处理）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_tempo_map_points_from_midi(
+    result: &MidiParseResult,
+    import_tempo: bool,
+    import_time_signature: bool,
+    import_key_signature: bool,
+    fallback_bpm: f64,
+    fallback_beats_per_bar: u32,
+    fallback_denominator: u32,
+) -> Option<Vec<crate::state::TempoPointData>> {
+    // 收集事件（位置为秒；跳过被关闭的导入类型）。
+    struct Event {
+        sec: f64,
+        bpm: Option<f64>,
+        numerator: Option<u32>,
+        denominator: Option<u32>,
+        scale_key: Option<String>,
+    }
+    let to_sec = |tick: u64| -> f64 {
+        tick_to_sec(tick, result.ticks_per_beat, &result.tempo_events, result.is_smpte)
+    };
+
+    let mut events: Vec<Event> = Vec::new();
+    if import_tempo {
+        for &(tick, us_per_beat) in &result.tempo_events {
+            if us_per_beat > 0.0 && us_per_beat.is_finite() {
+                events.push(Event {
+                    sec: to_sec(tick),
+                    bpm: Some(60_000_000.0 / us_per_beat),
+                    numerator: None,
+                    denominator: None,
+                    scale_key: None,
+                });
+            }
+        }
+    }
+    if import_time_signature {
+        for &(tick, num, den) in &result.time_signature_events {
+            events.push(Event {
+                sec: to_sec(tick),
+                bpm: None,
+                numerator: Some(num.clamp(1, 32)),
+                denominator: Some(if matches!(den, 1 | 2 | 4 | 8 | 16 | 32) {
+                    den
+                } else {
+                    4
+                }),
+                scale_key: None,
+            });
+        }
+    }
+    if import_key_signature {
+        for &(tick, sf) in &result.key_signature_events {
+            if let Some(key) = key_signature_to_scale_key(sf) {
+                events.push(Event {
+                    sec: to_sec(tick),
+                    bpm: None,
+                    numerator: None,
+                    denominator: None,
+                    scale_key: Some(key),
+                });
+            }
+        }
+    }
+    events.sort_by(|a, b| a.sec.partial_cmp(&b.sec).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 逐事件合并到变化点（同一位置合并多个参数）。
+    let mut merged: Vec<Event> = Vec::new();
+    for event in events {
+        let sec = event.sec.max(0.0);
+        if let Some(last) = merged.last_mut() {
+            if (last.sec - sec).abs() < 1e-6 {
+                last.bpm = event.bpm.or(last.bpm);
+                last.numerator = event.numerator.or(last.numerator);
+                last.denominator = event.denominator.or(last.denominator);
+                last.scale_key = event.scale_key.or_else(|| last.scale_key.clone());
+                continue;
+            }
+        }
+        merged.push(event);
+    }
+
+    if merged.is_empty() {
+        return None;
+    }
+
+    // 计算每个位置生效的参数（向前继承；无前值用 fallback）。
+    let mut current_bpm = fallback_bpm.clamp(10.0, 960.0);
+    let mut current_num = fallback_beats_per_bar.clamp(1, 32);
+    let mut current_den: u32 = if matches!(fallback_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+        fallback_denominator
+    } else {
+        4
+    };
+
+    let mut points: Vec<crate::state::TempoPointData> = Vec::new();
+    let mut index = 0usize;
+    for event in &merged {
+        if let Some(bpm) = event.bpm {
+            current_bpm = bpm.clamp(10.0, 960.0);
+        }
+        if let Some(num) = event.numerator {
+            current_num = num;
+        }
+        if let Some(den) = event.denominator {
+            current_den = den;
+        }
+        points.push(crate::state::TempoPointData {
+            id: format!("midi_tp_{index}"),
+            position_sec: event.sec,
+            bpm: current_bpm,
+            numerator: Some(current_num),
+            denominator: Some(current_den),
+            scale: event.scale_key.as_ref().map(|key| crate::state::TempoScaleData {
+                key: Some(key.clone()),
+                name: None,
+                notes: None,
+            }),
+        });
+        index += 1;
+    }
+
+    // 确保 0 位置点存在。
+    if points.first().map(|p| p.position_sec > 1e-9).unwrap_or(false) {
+        points.insert(
+            0,
+            crate::state::TempoPointData {
+                id: "midi_tp_0".to_string(),
+                position_sec: 0.0,
+                bpm: fallback_bpm.clamp(10.0, 960.0),
+                numerator: Some(fallback_beats_per_bar.clamp(1, 32)),
+                denominator: Some(if matches!(fallback_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                    fallback_denominator
+                } else {
+                    4
+                }),
+                scale: None,
+            },
+        );
+    }
+
+    // 始终返回列表（至少包含 0 位置点）；调用方判断是否存在“0 之后的实际变化”。
+    Some(points)
 }
 
 /// 在写入 MIDI 音符之前，清除 pitch_edit 中将被音符覆盖的帧范围。
