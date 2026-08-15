@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef } from "react";
+import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 
 /**
@@ -120,19 +121,15 @@ export const BackgroundGrid: React.FC<{
             ? latest.width
             : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
-        const linesChecksum = (xs: number[] | null | undefined): string => {
-            if (!xs) return "-";
-            if (xs.length === 0) return "0";
-            const head = xs.slice(0, 3).join(",");
-            const tail = xs.slice(-3).join(",");
-            return `${xs.length}|${head}|${tail}`;
-        };
+        // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
+        // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
+        // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
         const drawKey = [
             sl,
             latest.weakStepPx,
             latest.strongStepPx,
-            linesChecksum(latest.weakLineXs),
-            linesChecksum(latest.strongLineXs),
+            explicitGridLinesKey(latest.weakLineXs),
+            explicitGridLinesKey(latest.strongLineXs),
             latest.width,
             latest.height,
             latest.contentWidth,
