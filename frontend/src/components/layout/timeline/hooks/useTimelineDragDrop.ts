@@ -25,6 +25,16 @@ export interface UseTimelineDragDropArgs {
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     pendingDropDurationPathRef: React.MutableRefObject<string | null>;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
+    /** 吸附引擎入口（媒体项目对象）。 */
+    snapTimeline?: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     trackIdFromClientY: (clientY: number) => string | null;
     rowTopForTrackId: (trackId: string | null) => number;
     setDropPreview: React.Dispatch<
@@ -67,6 +77,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         pxPerSecRef,
         dropPreviewRef,
         beatFromClientX,
+        snapTimeline,
         trackIdFromClientY,
         rowTopForTrackId,
         setDropPreview,
@@ -136,11 +147,18 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
                     const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
                     const fallbackBeat = sessionRef.current.playheadSec ?? 0;
-                    const beat =
+                    const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
+                    const rawBeat =
                         clientX !== undefined && bounds && scroller
                             ? beatFromClientX(clientX, bounds, scroller.scrollLeft)
                             : fallbackBeat;
-                    const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
+                    const beat =
+                        snapTimeline && sessionRef.current.timelineSnap.enabled
+                            ? snapTimeline(rawBeat, "mediaItem", {
+                                  anchorTrackId: trackId,
+                                  originSec: rawBeat,
+                              })
+                            : rawBeat;
 
                     const primaryPath = paths.length > 0 ? paths[0] : null;
 
@@ -297,9 +315,17 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [dispatch]);
+    }, [dispatch, snapTimeline]);
 
     // ── 文件浏览器面板的自定义拖拽事件 ───────────────────────
+    const snapDropBeat = (rawBeat: number, trackId: string | null) =>
+        snapTimeline && sessionRef.current.timelineSnap.enabled
+            ? snapTimeline(rawBeat, "mediaItem", {
+                  anchorTrackId: trackId,
+                  originSec: rawBeat,
+              })
+            : rawBeat;
+
     useEffect(() => {
         function onHifiFileDrag(e: Event) {
             const detail = (e as CustomEvent).detail as {
@@ -342,8 +368,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             // 移动时的 DOM 直通与重绘拦截
             if (detail.type === "move" || detail.type === "start") {
                 if (isOverTimeline && scroller) {
-                    const beat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
+                    const beat = snapDropBeat(rawBeat, trackId);
                     const path = detail.filePath;
                     const fileName = detail.fileName;
 
@@ -380,8 +407,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             if (detail.type === "drop") {
                 setDropPreview(null);
                 if (isOverTimeline && scroller) {
-                    const beat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
+                    const beat = snapDropBeat(rawBeat, trackId);
                     const filePaths: string[] = (detail as any).filePaths;
                     const isMulti = Array.isArray(filePaths) && filePaths.length > 1;
 
@@ -424,7 +452,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         return () => {
             window.removeEventListener("hifi-file-drag", onHifiFileDrag);
         };
-    }, [dispatch, pxPerSec, rowHeight]);
+    }, [dispatch, pxPerSec, rowHeight, snapTimeline]);
 
     return {
         tauriDraggedPathRef,

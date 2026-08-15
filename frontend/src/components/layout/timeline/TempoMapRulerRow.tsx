@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
-import type { GridSize } from "../../../features/session/sessionTypes";
+import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import type { CustomScalePreset } from "../../../utils/customScales";
@@ -17,7 +17,6 @@ import {
     parseTempoPointText,
     previousScaleAtSec,
     removeTempoPoint,
-    snapSecToTempoGrid,
     TEMPO_DENOMINATORS,
     tempoMapSegments,
     tempoFlagLabelWidthPx,
@@ -28,7 +27,7 @@ import {
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatCursorTime } from "./timeFormat";
-import { gridStepBeats } from "./grid";
+import { snapStepBeatsForZoom, snapToConfiguredGrid } from "../../../utils/timelineSnapping";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
@@ -69,6 +68,8 @@ interface TempoMapRulerRowProps {
     projectSec: number;
     grid: GridSize;
     gridSnapEnabled: boolean;
+    /** 完整吸附/网格设置（与工具栏一致）。 */
+    snapSettings?: TimelineSnapSettings;
     /** 工程基准 BPM / 每小节拍数 / 拍号分母（无 Tempo Map 时新建首点用）。 */
     fallbackBpm: number;
     fallbackBeatsPerBar: number;
@@ -454,6 +455,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     projectSec,
     grid,
     gridSnapEnabled,
+    snapSettings,
     fallbackBpm,
     fallbackBeatsPerBar,
     fallbackDenominator,
@@ -570,6 +572,22 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [fallback],
     );
 
+    /** 按吸附/网格设置对 Tempo Map 位置进行吸附（与时间轴剪辑共用 Swing 规则）。 */
+    const snapTempoPosition = useCallback(
+        (sec: number, base: TempoMap | null, baseBpm: number) => {
+            if (!gridSnapEnabled || !snapSettings?.enabled) return sec;
+            if (
+                snapSettings.gridSnapFollowsGridVisibility &&
+                !snapSettings.gridVisible
+            ) {
+                return sec;
+            }
+            const step = snapStepBeatsForZoom(snapSettings, grid, baseBpm, pxPerSec, base, sec);
+            return snapToConfiguredGrid(sec, base, step, baseBpm, snapSettings);
+        },
+        [gridSnapEnabled, snapSettings, grid, pxPerSec],
+    );
+
     /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
     const inlineEditLockRef = useRef(false);
 
@@ -616,7 +634,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 与双击新增一致：网格吸附开启时吸附到网格线。
         let sec = positionSec;
         if (gridSnapEnabled && base) {
-            sec = snapSecToTempoGrid(positionSec, base, gridStepBeats(grid), mapFallback.bpm);
+            sec = snapTempoPosition(positionSec, base, mapFallback.bpm);
         }
         const { map, point } = createTempoPointAt(base, sec, mapFallback, {
             projectScale: projectScale ?? undefined,
@@ -636,7 +654,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         editRequest,
         tempoMap,
         gridSnapEnabled,
-        grid,
+        snapTempoPosition,
         baseFallbackOf,
         projectScale,
         projectScaleName,
@@ -897,7 +915,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const base = tempoMap ?? null;
             const mapFallback = baseFallbackOf(base);
             if (gridSnapEnabled) {
-                sec = snapSecToTempoGrid(sec, base, gridStepBeats(grid), mapFallback.bpm);
+                sec = snapTempoPosition(sec, base, mapFallback.bpm);
             }
             const { map, point } = createTempoPointAt(base, sec, mapFallback, {
                 projectScale: projectScale ?? undefined,
@@ -923,7 +941,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             tempoMap,
             pxPerSec,
             gridSnapEnabled,
-            grid,
+            snapTempoPosition,
             baseFallbackOf,
             projectScale,
             projectScaleName,
@@ -964,7 +982,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             let sec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
             const mapFallback = baseFallbackOf(tempoMap);
             if (gridSnapEnabled) {
-                sec = snapSecToTempoGrid(sec, tempoMap, gridStepBeats(grid), mapFallback.bpm);
+                sec = snapTempoPosition(sec, tempoMap, mapFallback.bpm);
             }
             // 不与其它点重叠、不越过相邻点、不越过工程末尾：
             // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。
@@ -1001,7 +1019,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
         };
-    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, grid, baseFallbackOf, onChange, commitMap, projectSec]);
+    }, [draggingId, tempoMap, pxPerSec, gridSnapEnabled, snapTempoPosition, baseFallbackOf, onChange, commitMap, projectSec]);
 
     // ── 可见性计算 ──
     const visibleState = useMemo(() => {

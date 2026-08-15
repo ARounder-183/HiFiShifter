@@ -37,6 +37,7 @@ import {
 } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
+import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
 import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
@@ -397,7 +398,28 @@ export function useTimelineClipActions(
     // ── splitClipIdsAtPlayhead ────────────────────────────────
     const splitClipIdsAtPlayhead = React.useCallback(
         (clipIds: string[]) => {
-            const splitSec = Math.max(0, Number(sessionRef.current.playheadSec ?? 0) || 0);
+            const session = sessionRef.current;
+            let splitSec = Math.max(0, Number(session.playheadSec ?? 0) || 0);
+            if (session.timelineSnap.enabled && session.timelineSnap.snapRazorEdits) {
+                const snapped = snapTimelinePosition(
+                    {
+                        settings: session.timelineSnap,
+                        grid: session.grid,
+                        bpm: session.bpm,
+                        beatsPerBar: session.beats,
+                        tempoMap: session.tempoMap,
+                        pxPerSec: Math.max(1e-9, pxPerSec),
+                        clips: session.clips,
+                        tracks: session.tracks,
+                        selectedClipIds: clipIds,
+                        playheadSec: splitSec,
+                        object: "cursor",
+                        anchorTrackId: session.selectedTrackId,
+                    },
+                    splitSec,
+                );
+                splitSec = snapped.sec;
+            }
 
             // Expand to include all group members of any input clip
             const expandedIds = new Set(clipIds);
@@ -424,7 +446,7 @@ export function useTimelineClipActions(
             }
             return eligibleIds;
         },
-        [dispatch],
+        [dispatch, pxPerSec],
     );
 
     const splitSelectedAtPlayhead = React.useCallback(() => {

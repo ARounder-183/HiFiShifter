@@ -24,6 +24,12 @@ export const BackgroundGrid: React.FC<{
     lineOpacity?: number;
     showBoundary?: boolean;
     sticky?: boolean;
+    /** 网格显示总开关（Snap/Grid 设置）。 */
+    visible?: boolean;
+    /** 用户配置的最小弱网格线像素间距。 */
+    minSpacingPx?: number;
+    /** Swing 强度（0-100），仅作用于弱网格线的奇数格。 */
+    swingPercent?: number;
     /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
     weakLineXs?: number[] | null;
     strongLineXs?: number[] | null;
@@ -40,6 +46,9 @@ export const BackgroundGrid: React.FC<{
     lineOpacity = 0.9,
     showBoundary = true,
     sticky = false,
+    visible = true,
+    minSpacingPx,
+    swingPercent = 0,
     weakLineXs = null,
     strongLineXs = null,
 }) => {
@@ -66,6 +75,7 @@ export const BackgroundGrid: React.FC<{
               grid,
               beatsPerBar: Math.max(1, Math.round(beatsPerBar)),
               viewportWidth: samplingViewportWidth,
+              minWeakSpacingPx: minSpacingPx,
           });
 
     const width = isSticky ? Math.max(1, Math.floor(viewportWidth as number)) : contentWidth;
@@ -74,6 +84,7 @@ export const BackgroundGrid: React.FC<{
     const latestRef = useRef({
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
+        swingPercent: Math.max(0, Math.min(100, swingPercent)),
         weakLineXs: weakLineXs,
         strongLineXs: strongLineXs,
         width,
@@ -89,6 +100,7 @@ export const BackgroundGrid: React.FC<{
     latestRef.current = {
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
+        swingPercent: Math.max(0, Math.min(100, swingPercent)),
         weakLineXs,
         strongLineXs,
         width,
@@ -128,6 +140,7 @@ export const BackgroundGrid: React.FC<{
             sl,
             latest.weakStepPx,
             latest.strongStepPx,
+            latest.swingPercent,
             explicitGridLinesKey(latest.weakLineXs),
             explicitGridLinesKey(latest.strongLineXs),
             latest.width,
@@ -146,9 +159,12 @@ export const BackgroundGrid: React.FC<{
                 firstIndex,
                 Math.ceil((visibleEnd + offset) / stepPx),
             );
+            const swingPx =
+                (Math.max(0, Math.min(100, latest.swingPercent)) / 100) * 0.5 * stepPx;
             const parts: string[] = [];
             for (let index = firstIndex; index <= lastIndex; index += 1) {
-                const x = index * stepPx - offset;
+                // Swing：奇数网格位置向右偏移（最大半步）。
+                const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
                 if (x < -1 || x > latest.width + 1) continue;
                 parts.push(`M${x} 0V${latest.height}`);
             }
@@ -202,6 +218,7 @@ export const BackgroundGrid: React.FC<{
         scrollLeft,
         samplingPlan.weakStepPx,
         samplingPlan.strongStepPx,
+        swingPercent,
         weakLineXs,
         strongLineXs,
         width,
@@ -234,6 +251,8 @@ export const BackgroundGrid: React.FC<{
     const boundaryVisible =
         Number.isFinite(boundaryLeft) && boundaryLeft >= -2 && boundaryLeft <= width + 2;
     const manualViewportSync = isSticky && (layerRef != null || boundaryRef != null);
+
+    if (!visible) return null;
 
     return (
         <>

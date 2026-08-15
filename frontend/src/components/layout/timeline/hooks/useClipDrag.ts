@@ -90,7 +90,15 @@ export function useClipDrag(deps: {
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
     dispatch: AppDispatch;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
@@ -117,7 +125,7 @@ export function useClipDrag(deps: {
         multiSelectedSet,
         dispatch,
         pxPerSec,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
@@ -314,9 +322,13 @@ export function useClipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
             const noSnapActive = isModifierActive(noSnapKb, ev);
-            const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+            const effectiveSnap = gridSnapEnabled && !noSnapActive;
             if (effectiveSnap) {
-                nextStart = snapBeat(nextStart);
+                nextStart = snapTimeline(nextStart, "mediaItem", {
+                    originSec: drag.initialAnchorstartSec,
+                    anchorTrackId: drag.initialAnchorTrackId,
+                    excludeClipIds: new Set(drag.clipIds),
+                });
             }
 
             let deltaBeat = nextStart - drag.initialAnchorstartSec;

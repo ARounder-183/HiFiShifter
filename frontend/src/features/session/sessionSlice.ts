@@ -12,6 +12,7 @@ import type {
     FadeCurveType,
     GridSize,
     PitchSnapUnit,
+    TimelineSnapSettings,
     TimeUnit,
     TimeUnitChoice,
     TrackMeterInfo,
@@ -155,6 +156,141 @@ const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
 const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
 const DEFAULT_RULER_LABEL_SPACING_PX = 110;
 
+export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
+    return {
+        gridVisible: true,
+        gridMinSpacingPx: 8,
+        swingEnabled: false,
+        swingPercent: 0,
+        adjustItemsOnSwingChange: true,
+        enabled: true,
+        snapDistancePx: 4,
+        snapRelativeToGrid: false,
+        snapMediaItemsToSelectionMarkersCursor: true,
+        snapMediaItemsToGrid: true,
+        snapSelectionToSelectionMarkersCursor: true,
+        snapSelectionToGrid: true,
+        snapCursorToSelectionMarkersCursor: true,
+        snapCursorToGrid: true,
+        snapToTakeMarkers: false,
+        gridSnapFollowsGridVisibility: true,
+        snapToGridAnyDistance: false,
+        useIndependentSnapSpacing: false,
+        snapSpacing: "1/4",
+        snapSpacingMinPx: 8,
+        snapItemStart: true,
+        snapItemSnapOffset: true,
+        snapAcrossTracks: true,
+        snapTrackDistance: 0,
+        snapFixedLaneCompAreas: false,
+        snapAutomationItems: false,
+        snapRazorEdits: true,
+        snapToProjectSampleRate: false,
+        snapMediaEdgesToSource: true,
+        forceSelectionsToMultiples: false,
+        selectionMultiple: "1/4",
+        syncArrangeAndMidiGrid: true,
+    };
+}
+
+function normalizeTimelineSnapSettings(
+    base: TimelineSnapSettings,
+    patch: Partial<TimelineSnapSettings>,
+): TimelineSnapSettings {
+    const grid = (value: unknown): GridSize =>
+        VALID_GRID_SIZES.has(value as GridSize) ? (value as GridSize) : "1/4";
+    const clampedPx = (value: unknown, fallback: number, min: number, max: number) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+    };
+    const clampedNum = (value: unknown, fallback: number, min: number, max: number) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const bool = (value: unknown, fallback: boolean) =>
+        typeof value === "boolean" ? value : fallback;
+    return {
+        gridVisible: bool(patch.gridVisible, base.gridVisible),
+        gridMinSpacingPx: clampedPx(patch.gridMinSpacingPx, base.gridMinSpacingPx, 2, 200),
+        swingEnabled: bool(patch.swingEnabled, base.swingEnabled),
+        swingPercent: clampedNum(patch.swingPercent, base.swingPercent, 0, 100),
+        adjustItemsOnSwingChange: bool(
+            patch.adjustItemsOnSwingChange,
+            base.adjustItemsOnSwingChange,
+        ),
+        enabled: bool(patch.enabled, base.enabled),
+        snapDistancePx: clampedPx(patch.snapDistancePx, base.snapDistancePx, 0, 200),
+        snapRelativeToGrid: bool(patch.snapRelativeToGrid, base.snapRelativeToGrid),
+        snapMediaItemsToSelectionMarkersCursor: bool(
+            patch.snapMediaItemsToSelectionMarkersCursor,
+            base.snapMediaItemsToSelectionMarkersCursor,
+        ),
+        snapMediaItemsToGrid: bool(patch.snapMediaItemsToGrid, base.snapMediaItemsToGrid),
+        snapSelectionToSelectionMarkersCursor: bool(
+            patch.snapSelectionToSelectionMarkersCursor,
+            base.snapSelectionToSelectionMarkersCursor,
+        ),
+        snapSelectionToGrid: bool(patch.snapSelectionToGrid, base.snapSelectionToGrid),
+        snapCursorToSelectionMarkersCursor: bool(
+            patch.snapCursorToSelectionMarkersCursor,
+            base.snapCursorToSelectionMarkersCursor,
+        ),
+        snapCursorToGrid: bool(patch.snapCursorToGrid, base.snapCursorToGrid),
+        snapToTakeMarkers: bool(patch.snapToTakeMarkers, base.snapToTakeMarkers),
+        gridSnapFollowsGridVisibility: bool(
+            patch.gridSnapFollowsGridVisibility,
+            base.gridSnapFollowsGridVisibility,
+        ),
+        snapToGridAnyDistance: bool(
+            patch.snapToGridAnyDistance,
+            base.snapToGridAnyDistance,
+        ),
+        useIndependentSnapSpacing: bool(
+            patch.useIndependentSnapSpacing,
+            base.useIndependentSnapSpacing,
+        ),
+        snapSpacing: grid(patch.snapSpacing ?? base.snapSpacing),
+        snapSpacingMinPx: clampedPx(
+            patch.snapSpacingMinPx,
+            base.snapSpacingMinPx,
+            2,
+            200,
+        ),
+        snapItemStart: bool(patch.snapItemStart, base.snapItemStart),
+        snapItemSnapOffset: bool(patch.snapItemSnapOffset, base.snapItemSnapOffset),
+        snapAcrossTracks: bool(patch.snapAcrossTracks, base.snapAcrossTracks),
+        snapTrackDistance: clampedNum(
+            patch.snapTrackDistance,
+            base.snapTrackDistance,
+            0,
+            32,
+        ),
+        snapFixedLaneCompAreas: bool(
+            patch.snapFixedLaneCompAreas,
+            base.snapFixedLaneCompAreas,
+        ),
+        snapAutomationItems: bool(patch.snapAutomationItems, base.snapAutomationItems),
+        snapRazorEdits: bool(patch.snapRazorEdits, base.snapRazorEdits),
+        snapToProjectSampleRate: bool(
+            patch.snapToProjectSampleRate,
+            base.snapToProjectSampleRate,
+        ),
+        snapMediaEdgesToSource: bool(
+            patch.snapMediaEdgesToSource,
+            base.snapMediaEdgesToSource,
+        ),
+        forceSelectionsToMultiples: bool(
+            patch.forceSelectionsToMultiples,
+            base.forceSelectionsToMultiples,
+        ),
+        selectionMultiple: grid(patch.selectionMultiple ?? base.selectionMultiple),
+        syncArrangeAndMidiGrid: bool(
+            patch.syncArrangeAndMidiGrid,
+            base.syncArrangeAndMidiGrid,
+        ),
+    };
+}
+
 export type {
     AutomationPoint,
     ClipInfo,
@@ -207,6 +343,8 @@ export interface SessionState {
     splitTransitionOverlapCrossfade: "auto" | "always";
     /** 网格吸附 */
     gridSnapEnabled: boolean;
+    /** 完整的时间轴吸附/网格设置（gridSnapEnabled 仅作为旧字段镜像 enabled）。 */
+    timelineSnap: TimelineSnapSettings;
     /**
      * Tempo Map 数据（null = 无 Tempo Map，使用工程全局 BPM/拍号/音阶）。
      * 变化点按秒锚定；0 位置点始终存在。
@@ -1056,6 +1194,7 @@ const initialState: SessionState = {
     splitTransitionCurve: "sine" as FadeCurveType,
     splitTransitionOverlapCrossfade: "auto",
     gridSnapEnabled: true,
+    timelineSnap: createDefaultTimelineSnapSettings(),
     tempoMap: null,
     tempoMapVisible: true,
     pitchSnapEnabled: false,
@@ -1389,7 +1528,19 @@ const sessionSlice = createSlice({
             state.splitTransitionOverlapCrossfade = action.payload;
         },
         toggleGridSnap(state) {
-            state.gridSnapEnabled = !state.gridSnapEnabled;
+            const next = !state.timelineSnap.enabled;
+            state.timelineSnap.enabled = next;
+            state.gridSnapEnabled = next;
+        },
+        setTimelineSnapSettings(
+            state,
+            action: PayloadAction<Partial<TimelineSnapSettings>>,
+        ) {
+            state.timelineSnap = normalizeTimelineSnapSettings(
+                state.timelineSnap,
+                action.payload,
+            );
+            state.gridSnapEnabled = state.timelineSnap.enabled;
         },
         togglePitchSnap(state) {
             state.pitchSnapEnabled = !state.pitchSnapEnabled;
@@ -2053,6 +2204,14 @@ const sessionSlice = createSlice({
                         ? "always"
                         : "auto";
                 state.gridSnapEnabled = s.gridSnap;
+                if ((s as any).timelineSnap && typeof (s as any).timelineSnap === "object") {
+                    state.timelineSnap = normalizeTimelineSnapSettings(
+                        createDefaultTimelineSnapSettings(),
+                        (s as any).timelineSnap as Partial<TimelineSnapSettings>,
+                    );
+                    state.timelineSnap.enabled = Boolean(s.gridSnap);
+                    state.gridSnapEnabled = state.timelineSnap.enabled;
+                }
                 if ((s as any).tempoMapVisible != null) {
                     state.tempoMapVisible = Boolean((s as any).tempoMapVisible);
                 }
@@ -3661,6 +3820,7 @@ export const {
     setSplitTransitionCurve,
     setSplitTransitionOverlapCrossfade,
     toggleGridSnap,
+    setTimelineSnapSettings,
     setTempoMap,
     setTempoMapVisible,
     toggleTempoMapVisible,

@@ -726,18 +726,25 @@ export function buildTempoGridLines(args: {
     stepBeats: number;
     fallbackBpm: number;
     fallbackBeatsPerBar: number;
+    /** Swing 强度（0-100）：弱网格奇数格向后偏移半步的最大百分比。 */
+    swingPercent?: number;
     /** 强网格（小节线）抽取步长：仅绘制 k % strongStride === 0 的小节线（密度上限优化）。 */
     strongStride?: number;
 }): TempoGridLine[] {
     const { startSec, endSec, map, stepBeats, fallbackBpm, fallbackBeatsPerBar } = args;
     if (endSec < startSec) return [];
     const safeStep = Math.max(1e-9, stepBeats);
+    const swingPercent = Math.max(0, Math.min(100, args.swingPercent ?? 0));
     const strongStride = Math.max(1, Math.floor(args.strongStride ?? 1));
     const lines: TempoGridLine[] = [];
 
     const add = (sec: number, isBar: boolean) => {
         if (!Number.isFinite(sec) || sec < startSec - 1e-9 || sec > endSec + 1e-9) return;
         lines.push({ sec, isBar });
+    };
+    const swingAt = (segBpm: number, index: number) => {
+        if (swingPercent <= 0 || index % 2 === 0) return 0;
+        return (swingPercent / 100) * 0.5 * safeStep * (60 / Math.max(1, segBpm));
     };
 
     if (!map || map.points.length === 0) {
@@ -747,9 +754,9 @@ export function buildTempoGridLines(args: {
         const firstIndex = Math.floor(startBeat / safeStep - 1e-9);
         const lastIndex = Math.ceil(endBeat / safeStep + 1e-9);
         for (let index = firstIndex; index <= lastIndex; index += 1) {
+            if (index < 0) continue;
             const beat = index * safeStep;
-            if (beat < 0) continue;
-            add(beatToSec(null, beat, fallbackBpm), false);
+            add(beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index), false);
         }
         const bpb = Math.max(1, beatsPerBarOf({ numerator: fallbackBeatsPerBar || 4, denominator: 4 }));
         const firstBarIndex = Math.floor(startBeat / bpb + 1e-9);
@@ -780,7 +787,10 @@ export function buildTempoGridLines(args: {
         const lastWeak = Math.floor(localEndBeat / safeStep + 1e-9);
         for (let k = firstWeak; k <= lastWeak; k += 1) {
             if (k < 0) continue;
-            add(segment.startSec + k * safeStep * segSecPerBeat, false);
+            add(
+                segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k),
+                false,
+            );
         }
 
         // 强网格线（段内小节边界；段起点本身也是对齐点）。
@@ -968,6 +978,10 @@ export function buildTempoGridLineXsForViewport(args: {
     stepBeats: number;
     fallbackBpm: number;
     fallbackBeatsPerBar: number;
+    /** Swing 强度（0-100）。 */
+    swingPercent?: number;
+    /** 用户配置的最小网格线像素间距（弱线）。 */
+    minSpacingPx?: number;
 }): { weak: number[]; strong: number[] } | null {
     const {
         tempoMap,
@@ -978,6 +992,8 @@ export function buildTempoGridLineXsForViewport(args: {
         stepBeats,
         fallbackBpm,
         fallbackBeatsPerBar,
+        swingPercent = 0,
+        minSpacingPx = 8,
     } = args;
     if (!tempoMap || tempoMap.points.length === 0) return null;
     const bufferPx = Math.max(240, (Number.isFinite(viewportWidth) ? viewportWidth : 0) * 0.5);
@@ -987,9 +1003,17 @@ export function buildTempoGridLineXsForViewport(args: {
         (scrollLeft + viewportWidth + bufferPx) / Math.max(1e-9, pxPerSec),
     );
 
-    // 密度上限与均匀网格一致：弱网格 ~160 条、强网格 ~48 条。
-    const MAX_WEAK = 160;
-    const MAX_STRONG = 48;
+    // 密度上限与均匀网格一致：弱网格 ~160 条、强网格 ~48 条，
+    // 用户自定义最小像素间距时按其换算（仍保留绝对上限防卡死）。
+    const maxWeak = Math.max(
+        1,
+        Math.min(
+            160,
+            Math.floor((Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : 0) / Math.max(1, minSpacingPx)) || 160,
+        ),
+    );
+    const MAX_WEAK = maxWeak;
+    const MAX_STRONG = Math.max(1, Math.ceil(maxWeak / 3));
     // ★ 先用“拍跨度”估算所需步长，再开始生成 —— 若先以最细网格全量生成，
     // 长工程 + 细网格（如 2 小时 @960BPM、1/64）会先分配数百万条网格线，
     // 与“消除卡死”的目标背道而驰。
@@ -1018,6 +1042,7 @@ export function buildTempoGridLineXsForViewport(args: {
         stepBeats: weakStep,
         fallbackBpm,
         fallbackBeatsPerBar,
+        swingPercent,
         strongStride,
     });
     // 兜底：分段对齐可能让估算偏少，仍保留按实际条数加倍的逻辑。
@@ -1030,6 +1055,7 @@ export function buildTempoGridLineXsForViewport(args: {
             stepBeats: weakStep,
             fallbackBpm,
             fallbackBeatsPerBar,
+            swingPercent,
             strongStride,
         });
     }

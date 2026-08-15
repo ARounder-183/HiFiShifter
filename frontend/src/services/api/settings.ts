@@ -1,4 +1,5 @@
 import { invoke } from "../invoke";
+import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
@@ -13,6 +14,7 @@ export interface UiSettings {
     splitTransitionOverlapCrossfade?: "auto" | "always";
     gridSnap: boolean;
     gridSize?: string;
+    timelineSnap?: TimelineSnapSettings;
     /** Tempo Map 标尺行可见性（默认开启）。 */
     tempoMapVisible?: boolean;
     primaryTimeUnit?: string;

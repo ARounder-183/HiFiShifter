@@ -45,7 +45,23 @@ pub(super) fn save_ui_settings(
                 (&mut base, &settings_value)
             {
                 for (key, value) in patch_obj {
-                    base_obj.insert(key.clone(), value.clone());
+                    if key == "timelineSnap" {
+                        // 嵌套设置做深度合并，避免部分保存时清空其它吸附选项。
+                        match base_obj.get_mut("timelineSnap") {
+                            Some(serde_json::Value::Object(base_nested)) => {
+                                if let serde_json::Value::Object(patch_nested) = value {
+                                    for (nested_key, nested_value) in patch_nested {
+                                        base_nested.insert(nested_key.clone(), nested_value.clone());
+                                    }
+                                }
+                            }
+                            _ => {
+                                base_obj.insert(key.clone(), value.clone());
+                            }
+                        }
+                    } else {
+                        base_obj.insert(key.clone(), value.clone());
+                    }
                 }
             }
             base

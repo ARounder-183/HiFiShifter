@@ -325,7 +325,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
-        snapBeat,
+        snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,
         startPanPointer,
@@ -653,6 +653,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             dropPreviewRef,
             pendingDropDurationPathRef,
             beatFromClientX,
+            snapTimeline,
             trackIdFromClientY,
             rowTopForTrackId,
             setDropPreview,
@@ -707,10 +708,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled: s.gridSnapEnabled,
+        gridSnapEnabled: s.timelineSnap.enabled,
         ignoreGrouping,
         paramFineAdjustKb,
     });
@@ -738,14 +739,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedClipIds,
         multiSelectedSet,
         dispatch,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled: s.gridSnapEnabled,
+        gridSnapEnabled: s.timelineSnap.enabled,
         copyDragKb,
         autoCrossfadeEnabled: s.autoCrossfadeEnabled,
         ignoreGrouping,
@@ -1128,6 +1129,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     projectSec={dynamicProjectSec}
                     grid={s.grid}
                     gridSnapEnabled={s.gridSnapEnabled}
+                    timelineSnap={s.timelineSnap}
                     projectScale={projectScale}
                     projectScaleName={
                         s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
@@ -1497,6 +1499,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
                                 viewportWidth={viewportWidth}
                                 scrollLeft={scrollLeft}
+                                visible={s.timelineSnap.gridVisible}
+                                minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                swingPercent={
+                                    s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
+                                }
                                 weakLineXs={tempoGridLineXs?.weak ?? null}
                                 strongLineXs={tempoGridLineXs?.strong ?? null}
                             />
@@ -1645,6 +1652,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
                                     viewportWidth={viewportWidth}
                                     scrollLeft={scrollLeft}
+                                    visible={s.timelineSnap.gridVisible}
+                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                    swingPercent={
+                                        s.timelineSnap.swingEnabled
+                                            ? s.timelineSnap.swingPercent
+                                            : 0
+                                    }
                                     lineOpacity={0.38}
                                     showBoundary={false}
                                     weakLineXs={tempoGridLineXs?.weak ?? null}

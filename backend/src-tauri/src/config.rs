@@ -3,6 +3,165 @@ use crate::time_stretch::UserStretchAlgorithm;
 use std::fs;
 use std::path::Path;
 
+/// 时间轴吸附/网格设置（对标 REAPER Snap/Grid Settings）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSnapSettings {
+    #[serde(default = "default_true")]
+    pub grid_visible: bool,
+    #[serde(default = "default_grid_min_spacing_px")]
+    pub grid_min_spacing_px: u32,
+    #[serde(default)]
+    pub swing_enabled: bool,
+    #[serde(default)]
+    pub swing_percent: u32,
+    #[serde(default = "default_true")]
+    pub adjust_items_on_swing_change: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_snap_distance_px")]
+    pub snap_distance_px: u32,
+    #[serde(default)]
+    pub snap_relative_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_items_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_items_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_selection_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_selection_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_cursor_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_cursor_to_grid: bool,
+    #[serde(default)]
+    pub snap_to_take_markers: bool,
+    #[serde(default = "default_true")]
+    pub grid_snap_follows_grid_visibility: bool,
+    #[serde(default)]
+    pub snap_to_grid_any_distance: bool,
+    #[serde(default)]
+    pub use_independent_snap_spacing: bool,
+    #[serde(default = "default_grid_size")]
+    pub snap_spacing: String,
+    #[serde(default = "default_grid_min_spacing_px")]
+    pub snap_spacing_min_px: u32,
+    #[serde(default = "default_true")]
+    pub snap_item_start: bool,
+    #[serde(default = "default_true")]
+    pub snap_item_snap_offset: bool,
+    #[serde(default = "default_true")]
+    pub snap_across_tracks: bool,
+    #[serde(default)]
+    pub snap_track_distance: u32,
+    #[serde(default)]
+    pub snap_fixed_lane_comp_areas: bool,
+    #[serde(default)]
+    pub snap_automation_items: bool,
+    #[serde(default = "default_true")]
+    pub snap_razor_edits: bool,
+    #[serde(default)]
+    pub snap_to_project_sample_rate: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_edges_to_source: bool,
+    #[serde(default)]
+    pub force_selections_to_multiples: bool,
+    #[serde(default = "default_grid_size")]
+    pub selection_multiple: String,
+    #[serde(default = "default_true")]
+    pub sync_arrange_and_midi_grid: bool,
+}
+
+fn default_grid_min_spacing_px() -> u32 {
+    8
+}
+
+fn default_snap_distance_px() -> u32 {
+    4
+}
+
+impl Default for TimelineSnapSettings {
+    fn default() -> Self {
+        Self {
+            grid_visible: true,
+            grid_min_spacing_px: default_grid_min_spacing_px(),
+            swing_enabled: false,
+            swing_percent: 0,
+            adjust_items_on_swing_change: true,
+            enabled: true,
+            snap_distance_px: default_snap_distance_px(),
+            snap_relative_to_grid: false,
+            snap_media_items_to_selection_markers_cursor: true,
+            snap_media_items_to_grid: true,
+            snap_selection_to_selection_markers_cursor: true,
+            snap_selection_to_grid: true,
+            snap_cursor_to_selection_markers_cursor: true,
+            snap_cursor_to_grid: true,
+            snap_to_take_markers: false,
+            grid_snap_follows_grid_visibility: true,
+            snap_to_grid_any_distance: false,
+            use_independent_snap_spacing: false,
+            snap_spacing: default_grid_size(),
+            snap_spacing_min_px: default_grid_min_spacing_px(),
+            snap_item_start: true,
+            snap_item_snap_offset: true,
+            snap_across_tracks: true,
+            snap_track_distance: 0,
+            snap_fixed_lane_comp_areas: false,
+            snap_automation_items: false,
+            snap_razor_edits: true,
+            snap_to_project_sample_rate: false,
+            snap_media_edges_to_source: true,
+            force_selections_to_multiples: false,
+            selection_multiple: default_grid_size(),
+            sync_arrange_and_midi_grid: true,
+        }
+    }
+}
+
+impl TimelineSnapSettings {
+    fn valid_grid(value: &str) -> bool {
+        matches!(
+            value,
+            "1/1" | "1/2"
+                | "1/4"
+                | "1/8"
+                | "1/16"
+                | "1/32"
+                | "1/64"
+                | "1/1d"
+                | "1/2d"
+                | "1/4d"
+                | "1/8d"
+                | "1/16d"
+                | "1/32d"
+                | "1/64d"
+                | "1/1t"
+                | "1/2t"
+                | "1/4t"
+                | "1/8t"
+                | "1/16t"
+                | "1/32t"
+                | "1/64t"
+        )
+    }
+
+    pub fn normalize(&mut self) {
+        self.grid_min_spacing_px = self.grid_min_spacing_px.clamp(2, 200);
+        self.swing_percent = self.swing_percent.clamp(0, 100);
+        self.snap_distance_px = self.snap_distance_px.clamp(0, 200);
+        self.snap_spacing_min_px = self.snap_spacing_min_px.clamp(2, 200);
+        self.snap_track_distance = self.snap_track_distance.clamp(0, 32);
+        if !Self::valid_grid(&self.snap_spacing) {
+            self.snap_spacing = default_grid_size();
+        }
+        if !Self::valid_grid(&self.selection_multiple) {
+            self.selection_multiple = default_grid_size();
+        }
+    }
+}
+
 // 最小合理窗口尺寸与坐标阈值，用于校验从磁盘读取到的窗口状态，避免异常值导致窗口无法显示。
 const MIN_WINDOW_WIDTH: f64 = 200.0;
 const MIN_WINDOW_HEIGHT: f64 = 160.0;
@@ -38,6 +197,9 @@ pub struct UiSettings {
     pub grid_snap: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
+    /// 完整时间轴吸附/网格设置。
+    #[serde(default)]
+    pub timeline_snap: TimelineSnapSettings,
     /// Tempo Map 标尺行可见性（默认开启）。
     #[serde(default = "default_true")]
     pub tempo_map_visible: bool,
@@ -331,6 +493,7 @@ impl Default for UiSettings {
             split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
             grid_snap: true,
             grid_size: default_grid_size(),
+            timeline_snap: TimelineSnapSettings::default(),
             tempo_map_visible: true,
             primary_time_unit: default_primary_time_unit(),
             secondary_time_unit: default_secondary_time_unit(),
@@ -417,6 +580,7 @@ impl UiSettings {
                 default_split_transition_overlap_crossfade();
         }
         self.normalize_time_display();
+        self.timeline_snap.normalize();
     }
 
     /// 规范化时间轴时间显示相关设置，避免损坏/越界的持久化值影响界面。

@@ -40,8 +40,11 @@ import {
 import type { RulerTick } from "../timeFormat.js";
 import {
     buildTempoGridLineXsForViewport,
-    snapSecToTempoGrid,
 } from "../../../../utils/tempoMap.js";
+import {
+    snapTimelinePosition,
+    type SnapObjectKind,
+} from "../../../../utils/timelineSnapping";
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -56,8 +59,10 @@ type TimelineSessionSlice = Pick<
     | "customScalePresets"
     | "grid"
     | "gridSnapEnabled"
+    | "timelineSnap"
     | "paramEditorSyncTimeline"
     | "paramEditorTimelineClickSelectTrackEnabled"
+    | "playheadSec"
     | "primaryTimeUnit"
     | "project"
     | "secondaryTimeUnit"
@@ -170,8 +175,16 @@ export interface TimelineStateResult {
     rowTopForTrackId: (trackId: string | null) => number;
     ensureDropPreviewDuration: (path: string) => void;
     getDropPreviewWidthPx: (durationSec: number) => number;
-    snapSec: (sec: number) => number;
-    snapBeat: (sec: number) => number;
+    /** 完整吸附引擎入口。 */
+    snapTimeline: (
+        sec: number,
+        object: SnapObjectKind,
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     isEditableTarget: (target: EventTarget | null) => boolean;
     isPointerOnNativeScrollbar: (
         scroller: HTMLDivElement,
@@ -214,6 +227,8 @@ export function useTimelineState(): TimelineStateResult {
             customScalePresets: state.session.customScalePresets,
             grid: state.session.grid,
             gridSnapEnabled: state.session.gridSnapEnabled,
+            timelineSnap: state.session.timelineSnap,
+            playheadSec: state.session.playheadSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
             paramEditorTimelineClickSelectTrackEnabled:
@@ -576,8 +591,10 @@ export function useTimelineState(): TimelineStateResult {
             stepBeats: gridStepBeats(s.grid),
             fallbackBpm: s.bpm,
             fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
+            minSpacingPx: s.timelineSnap.gridMinSpacingPx,
         });
-    }, [s.tempoMap, s.bpm, s.beats, s.grid, scrollLeft, viewportWidth, pxPerSec, dynamicProjectSec]);
+    }, [s.tempoMap, s.bpm, s.beats, s.grid, s.timelineSnap, scrollLeft, viewportWidth, pxPerSec, dynamicProjectSec]);
 
     // ── clipsByTrackId ───────────────────────────────────────
     const clipsByTrackId = useMemo(() => {
@@ -682,10 +699,52 @@ export function useTimelineState(): TimelineStateResult {
         return durationSec > 0 ? Math.max(1, pxPerSecRef.current * durationSec) : 80;
     }
 
+    // ── snapTimeline ─────────────────────────────────────────
+    const snapTimeline = React.useCallback(
+        (
+            sec: number,
+            object: SnapObjectKind,
+            opts?: {
+                originSec?: number;
+                anchorTrackId?: string | null;
+                excludeClipIds?: ReadonlySet<string>;
+            },
+        ) => {
+            const session = sessionRef.current;
+            const result = snapTimelinePosition(
+                {
+                    settings: session.timelineSnap,
+                    grid: session.grid,
+                    bpm: session.bpm,
+                    beatsPerBar: session.beats,
+                    tempoMap: session.tempoMap,
+                    pxPerSec: pxPerSecRef.current,
+                    clips: session.clips,
+                    tracks: session.tracks,
+                    selectedClipIds:
+                        session.multiSelectedClipIds.length > 0
+                            ? session.multiSelectedClipIds
+                            : session.selectedClipId
+                              ? [session.selectedClipId]
+                              : [],
+                    playheadSec: session.playheadSec,
+                    object,
+                    originSec: opts?.originSec,
+                    anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
+                    excludeClipIds: opts?.excludeClipIds,
+                },
+                sec,
+            );
+            return result.sec;
+        },
+        [],
+    );
+
     // ── Playhead helpers ─────────────────────────────────────
     const setPlayheadFromClientX = React.useCallback(
         (clientX: number, bounds: DOMRect, xScroll: number, commit: boolean) => {
-            const beat = beatFromClientX(clientX, bounds, xScroll);
+            const rawBeat = beatFromClientX(clientX, bounds, xScroll);
+            const beat = snapTimeline(rawBeat, "cursor");
 
             if (commit) {
                 dispatch(setplayheadSec(beat));
@@ -700,7 +759,7 @@ export function useTimelineState(): TimelineStateResult {
             }
             return beat;
         },
-        [beatFromClientX, dispatch],
+        [beatFromClientX, dispatch, snapTimeline],
     );
 
     const startDeferredPlayheadSeek = React.useCallback(
@@ -753,17 +812,6 @@ export function useTimelineState(): TimelineStateResult {
         },
         [dispatch, setPlayheadFromClientX],
     );
-
-    // ── snapSec / snapBeat ───────────────────────────────────
-    function snapSec(sec: number) {
-        const stepBeats = gridStepBeats(s.grid);
-        if (s.tempoMap && s.tempoMap.points.length > 0) {
-            return snapSecToTempoGrid(sec, s.tempoMap, stepBeats, s.bpm);
-        }
-        const stepSec = stepBeats * (60 / Math.max(1, s.bpm));
-        return Math.round(sec / stepSec) * stepSec;
-    }
-    const snapBeat = snapSec;
 
     // ── isEditableTarget ─────────────────────────────────────
     function isEditableTarget(target: EventTarget | null): boolean {
@@ -921,8 +969,7 @@ export function useTimelineState(): TimelineStateResult {
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
-        snapSec,
-        snapBeat,
+        snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,
         startPanPointer,

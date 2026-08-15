@@ -3628,12 +3628,15 @@ export const PianoRollPanel: React.FC = () => {
                 stepBeats: gridStepBeats(s.grid),
                 fallbackBpm: s.bpm,
                 fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+                swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
+                minSpacingPx: s.timelineSnap.gridMinSpacingPx,
             }),
         [
             s.tempoMap,
             s.bpm,
             s.beats,
             s.grid,
+            s.timelineSnap,
             scrollLeft,
             viewSize.w,
             pxPerSec,
@@ -4609,6 +4612,7 @@ export const PianoRollPanel: React.FC = () => {
                         projectSec={dynamicProjectSec}
                         grid={s.grid}
                         gridSnapEnabled={s.gridSnapEnabled}
+                        timelineSnap={s.timelineSnap}
                         projectScale={effectiveProjectScale}
                         projectScaleName={
                             s.project.useCustomScale
@@ -4656,6 +4660,13 @@ export const PianoRollPanel: React.FC = () => {
                                     pxPerBeat={pxPerBeat}
                                     grid={s.grid}
                                     beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                    visible={s.timelineSnap.gridVisible}
+                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                    swingPercent={
+                                        s.timelineSnap.swingEnabled
+                                            ? s.timelineSnap.swingPercent
+                                            : 0
+                                    }
                                     layerRef={gridLayerRef}
                                     boundaryRef={gridBoundaryRef}
                                     weakLineXs={tempoGridLineXs?.weak ?? null}

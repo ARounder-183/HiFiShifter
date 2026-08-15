@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useMemo, useState } from "react";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
 import {
     DoubleArrowRightIcon,
@@ -12,6 +11,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
 import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 
@@ -63,9 +63,9 @@ export function ActionBar() {
     const tAny = t as (key: string) => string;
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
+    const [snapGridOpen, setSnapGridOpen] = useState(false);
     const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
-    const [gridSnapMenuPos, setGridSnapMenuPos] = useState<{ x: number; y: number } | null>(null);
 
     function formatBpmValue(value: number): string {
         const normalized = Number(value);
@@ -797,7 +797,7 @@ export function ActionBar() {
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();
-                        setGridSnapMenuPos({ x: e.clientX, y: e.clientY });
+                        setSnapGridOpen(true);
                     }}
                 >
                     <svg
@@ -1017,160 +1017,11 @@ export function ActionBar() {
                 <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
             )}
 
-            {/* Grid Snap Context Menu */}
-            {gridSnapMenuPos && (
-                <GridSnapContextMenu
-                    x={gridSnapMenuPos.x}
-                    y={gridSnapMenuPos.y}
-                    currentGrid={s.grid}
-                    onSelect={(grid) => {
-                        void dispatch(
-                            setProjectTimelineSettingsRemote({
-                                beatsPerBar: s.beats,
-                                timeSignatureDenominator: displayDenominator,
-                                gridSize: grid,
-                            }),
-                        );
-                        setGridSnapMenuPos(null);
-                    }}
-                    onClose={() => setGridSnapMenuPos(null)}
-                    t={tAny}
-                />
+            {snapGridOpen && (
+                <SnapGridSettingsDialog open={snapGridOpen} onOpenChange={setSnapGridOpen} />
             )}
+
+            {/* Grid Snap Context Menu removed: right-click opens the settings dialog above. */}
         </Flex>
-    );
-}
-
-/** Grid snap note type definitions for the context menu */
-const GRID_SNAP_ITEMS: Array<{ value: string; labelKey: string } | "separator"> = [
-    { value: "1/1", labelKey: "grid_snap_whole" },
-    { value: "1/2", labelKey: "grid_snap_half" },
-    { value: "1/4", labelKey: "grid_snap_quarter" },
-    { value: "1/8", labelKey: "grid_snap_8th" },
-    { value: "1/16", labelKey: "grid_snap_16th" },
-    { value: "1/32", labelKey: "grid_snap_32nd" },
-    { value: "1/64", labelKey: "grid_snap_64th" },
-    "separator",
-    { value: "1/2d", labelKey: "grid_snap_dotted_half" },
-    { value: "1/4d", labelKey: "grid_snap_dotted_quarter" },
-    { value: "1/8d", labelKey: "grid_snap_dotted_8th" },
-    { value: "1/16d", labelKey: "grid_snap_dotted_16th" },
-    { value: "1/32d", labelKey: "grid_snap_dotted_32nd" },
-    { value: "1/64d", labelKey: "grid_snap_dotted_64th" },
-    "separator",
-    { value: "1/2t", labelKey: "grid_snap_triplet_half" },
-    { value: "1/4t", labelKey: "grid_snap_triplet_quarter" },
-    { value: "1/8t", labelKey: "grid_snap_triplet_8th" },
-    { value: "1/16t", labelKey: "grid_snap_triplet_16th" },
-    { value: "1/32t", labelKey: "grid_snap_triplet_32nd" },
-    { value: "1/64t", labelKey: "grid_snap_triplet_64th" },
-];
-
-function GridSnapContextMenu({
-    x,
-    y,
-    currentGrid,
-    onSelect,
-    onClose,
-    t,
-}: {
-    x: number;
-    y: number;
-    currentGrid: string;
-    onSelect: (grid: string) => void;
-    onClose: () => void;
-    t: (key: string) => string;
-}) {
-    const menuRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        const handleClick = (e: globalThis.MouseEvent) => {
-            if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-                onClose();
-            }
-        };
-        const handleKey = (e: globalThis.KeyboardEvent) => {
-            if (e.key === "Escape") onClose();
-        };
-        window.addEventListener("mousedown", handleClick, true);
-        window.addEventListener("keydown", handleKey, true);
-        return () => {
-            window.removeEventListener("mousedown", handleClick, true);
-            window.removeEventListener("keydown", handleKey, true);
-        };
-    }, [onClose]);
-
-    useLayoutEffect(() => {
-        const el = menuRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) el.style.left = `${vw - rect.width}px`;
-        if (rect.bottom > vh) el.style.top = `${vh - rect.height}px`;
-    }, [x, y]);
-
-    const style: React.CSSProperties = {
-        position: "fixed",
-        left: x,
-        top: y,
-        zIndex: 10000,
-        minWidth: 180,
-        background: "var(--qt-panel)",
-        border: "1px solid var(--qt-border)",
-        borderRadius: 10,
-        padding: "4px 0",
-        boxShadow: "0 20px 44px rgba(0,0,0,0.28)",
-        display: "block",
-        height: "auto",
-        overflow: "visible",
-    };
-
-    return createPortal(
-        <div ref={menuRef} style={style}>
-            {GRID_SNAP_ITEMS.map((item, i) => {
-                if (item === "separator") {
-                    return (
-                        <div
-                            key={`sep-${i}`}
-                            style={{ height: 1, background: "var(--qt-divider)", margin: "4px 0" }}
-                        />
-                    );
-                }
-                const isActive = item.value === currentGrid;
-                return (
-                    <div
-                        key={item.value}
-                        onClick={() => onSelect(item.value)}
-                        style={{
-                            padding: "5px 12px",
-                            cursor: "pointer",
-                            fontSize: 13,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            background: isActive
-                                ? "color-mix(in oklab, var(--qt-highlight) 22%, transparent)"
-                                : "transparent",
-                            color: isActive ? "var(--qt-text)" : "inherit",
-                        }}
-                        onMouseEnter={(e) => {
-                            if (!isActive)
-                                (e.currentTarget as HTMLDivElement).style.background =
-                                    "var(--qt-hover)";
-                        }}
-                        onMouseLeave={(e) => {
-                            (e.currentTarget as HTMLDivElement).style.background = isActive
-                                ? "color-mix(in oklab, var(--qt-highlight) 22%, transparent)"
-                                : "transparent";
-                        }}
-                    >
-                        <span>{t(item.labelKey)}</span>
-                        {isActive && <span style={{ marginLeft: 8 }}>✓</span>}
-                    </div>
-                );
-            })}
-        </div>,
-        document.body,
     );
 }

@@ -357,7 +357,15 @@ export function useEditDrag(deps: {
     dispatch: AppDispatch;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
@@ -374,7 +382,7 @@ export function useEditDrag(deps: {
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         noSnapKb,
         gridSnapEnabled,
@@ -520,9 +528,15 @@ export function useEditDrag(deps: {
                     drag.type === "stretch_left" ||
                     drag.type === "stretch_right";
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
-                const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+                const effectiveSnap = gridSnapEnabled && !noSnapActive;
                 if (shouldSnap && effectiveSnap) {
-                    beat = snapBeat(beat);
+                    const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
+                    beat = snapTimeline(beat, "mediaItem", {
+                        originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
+                        anchorTrackId: sessionRef.current.clips.find((c) => c.id === drag.clipId)
+                            ?.trackId,
+                        excludeClipIds: new Set(drag.selectedClipIds),
+                    });
                 }
 
                 const minLen = 0.0;

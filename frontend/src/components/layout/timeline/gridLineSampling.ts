@@ -85,16 +85,20 @@ export function resolveGridLineSamplingPlan(args: {
     grid: string;
     beatsPerBar: number;
     viewportWidth: number;
+    /** 用户可配置的最小弱网格线像素间距（默认 8）。 */
+    minWeakSpacingPx?: number;
+    /** 用户可配置的最小强网格线像素间距（默认 16）。 */
+    minStrongSpacingPx?: number;
 }): GridLineSamplingPlan {
     const weakSpacing = resolveGridLineSpacing(
         args.viewportWidth,
         MAX_WEAK_GRID_LINES,
-        MIN_WEAK_GRID_LINE_SPACING_PX,
+        Math.max(1, args.minWeakSpacingPx ?? MIN_WEAK_GRID_LINE_SPACING_PX),
     );
     const strongSpacing = resolveGridLineSpacing(
         args.viewportWidth,
         MAX_STRONG_GRID_LINES,
-        MIN_STRONG_GRID_LINE_SPACING_PX,
+        Math.max(1, args.minStrongSpacingPx ?? MIN_STRONG_GRID_LINE_SPACING_PX),
     );
     const weakStepBeats = selectUniformGridStepBeats({
         pxPerBeat: args.pxPerBeat,

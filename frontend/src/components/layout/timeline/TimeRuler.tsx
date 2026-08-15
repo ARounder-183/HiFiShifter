@@ -516,6 +516,7 @@ export const TimeRuler: React.FC<{
     projectSec?: number;
     grid?: GridSize;
     gridSnapEnabled?: boolean;
+    timelineSnap?: import("../../../features/session/sessionTypes").TimelineSnapSettings;
     projectScale?: ScaleLike | null;
     projectScaleName?: string;
     /** 工程基准拍号分母（无 Tempo Map 时新建首点 / 初始点拍号物化用）。 */
@@ -552,6 +553,7 @@ export const TimeRuler: React.FC<{
     projectSec = 0,
     grid = "1/4",
     gridSnapEnabled = true,
+    timelineSnap,
     projectScale = null,
     projectScaleName,
     fallbackDenominator,
@@ -833,6 +835,7 @@ export const TimeRuler: React.FC<{
                     projectSec={projectSec}
                     grid={grid}
                     gridSnapEnabled={gridSnapEnabled}
+                    snapSettings={timelineSnap}
                     fallbackBpm={timeContext.bpm}
                     fallbackBeatsPerBar={timeContext.beatsPerBar}
                     fallbackDenominator={fallbackDenominator}
