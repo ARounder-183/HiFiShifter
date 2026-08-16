@@ -902,6 +902,8 @@ export function usePianoRollInteractions(args: {
                         : undefined,
             });
         },
+        // paramViewRef is a ref; it is intentionally not a dependency.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         [tracks, pitchDeltaToDegreeSteps, projectScale, scaleAtSec, rootTrackId],
     );
 
@@ -1087,7 +1089,6 @@ export function usePianoRollInteractions(args: {
         setMorphOverlay,
         strokeRef,
         toolMode,
-        liveEditActiveRef,
     ]);
 
     useEffect(() => {

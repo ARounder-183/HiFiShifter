@@ -239,31 +239,31 @@ function AppInner() {
                 if (s?.midiCloseLeadingGap != null) {
                     setCloseLeadingGap(s.midiCloseLeadingGap);
                 }
-                if ((s as any)?.midiImportAsTempoMap != null) {
-                    setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
                 }
-                if ((s as any)?.midiImportTempoMapTempo != null) {
-                    setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
                 }
-                if ((s as any)?.midiImportTempoMapTimeSignature != null) {
+                if (s?.midiImportTempoMapTimeSignature != null) {
                     setImportTempoMapTimeSignature(
-                        Boolean((s as any).midiImportTempoMapTimeSignature),
+                        Boolean(s.midiImportTempoMapTimeSignature),
                     );
                 }
-                if ((s as any)?.midiImportTempoMapKeySignature != null) {
+                if (s?.midiImportTempoMapKeySignature != null) {
                     setImportTempoMapKeySignature(
-                        Boolean((s as any).midiImportTempoMapKeySignature),
+                        Boolean(s.midiImportTempoMapKeySignature),
                     );
                 }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetMenu((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetMenu(s.midiImportTarget);
                 }
                 if (s?.midiImportTargetDragDrop != null) {
                     setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetDragDrop((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetDragDrop(s.midiImportTarget);
                 }
             });
         });
@@ -281,88 +281,88 @@ function AppInner() {
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiFillGaps: v } as any),
+            settingsApi.saveUiSettings({ midiFillGaps: v }),
         );
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any),
+            settingsApi.saveUiSettings({ midiMultiTrackMerge: v }),
         );
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any),
+            settingsApi.saveUiSettings({ midiImportBpmAsProject: v }),
         );
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any),
+            settingsApi.saveUiSettings({ midiNoteBpmMode: v }),
         );
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any),
+            settingsApi.saveUiSettings({ midiSpecifiedBpm: v }),
         );
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportPosition: position } as any),
+            settingsApi.saveUiSettings({ midiImportPosition: position }),
         );
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any),
+            settingsApi.saveUiSettings({ midiCloseLeadingGap: v }),
         );
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any),
+            settingsApi.saveUiSettings({ midiImportAsTempoMap: v }),
         );
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }),
         );
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }),
         );
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }),
         );
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetMenu: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetMenu: v }),
         );
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }),
         );
     }, []);
 

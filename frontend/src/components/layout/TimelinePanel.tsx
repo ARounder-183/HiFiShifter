@@ -1725,9 +1725,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 ref={playheadRef}
                                 className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 cursor-ew-resize"
                                 style={{
-                                    left:
-                                        (Number(sessionRef.current.playheadSec ?? 0) || 0) *
-                                        pxPerSec,
+                                    left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
                                 }}
                                 onPointerDown={(e) => {
                                     if (e.button !== 0) return;

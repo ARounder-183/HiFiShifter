@@ -200,6 +200,17 @@ export function useTimelineClipActions(
     const multiSelectedClipIds = useAppSelector(
         (state: RootState) => state.session.multiSelectedClipIds,
     );
+    const selectedClipId = useAppSelector((state: RootState) => state.session.selectedClipId);
+    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<
+        string | null
+    >(null);
+    const updateRangeSelectAnchor = React.useCallback(
+        (clipId: string | null) => {
+            lastClickedClipIdRef.current = clipId;
+            setRangeSelectAnchorClipIdState(clipId);
+        },
+        [lastClickedClipIdRef],
+    );
     const multiSelectedClipIdsRef = useRef(multiSelectedClipIds);
     useEffect(() => {
         multiSelectedClipIdsRef.current = multiSelectedClipIds;
@@ -448,7 +459,7 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, t],
+        [dispatch, t, sessionRef, sameSourceConfirmResolverRef, setSameSourceConfirmOpen],
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
@@ -502,7 +513,7 @@ export function useTimelineClipActions(
             }
             return eligibleIds;
         },
-        [dispatch, pxPerSec],
+        [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
     const splitSelectedAtPlayhead = React.useCallback(() => {
@@ -514,7 +525,7 @@ export function useTimelineClipActions(
                   : [];
         if (selectedIds.length === 0) return;
         splitClipIdsAtPlayhead(selectedIds);
-    }, [splitClipIdsAtPlayhead]);
+    }, [splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
     const recordLastClickPosition = React.useCallback(
@@ -544,7 +555,7 @@ export function useTimelineClipActions(
             if (anchorTrackIndex == null || targetTrackIndex == null) {
                 setMultiSelectedClipIds([targetClipId]);
                 dispatch(setSelectedClip(targetClipId));
-                lastClickedClipIdRef.current = targetClipId;
+                updateRangeSelectAnchor(targetClipId);
                 lastClickedClientXRef.current = targetClientX ?? null;
                 return;
             }
@@ -587,10 +598,19 @@ export function useTimelineClipActions(
             const next = selected.length > 0 ? selected : [targetClipId];
             setMultiSelectedClipIds(next);
             dispatch(setSelectedClip(targetClipId));
-            lastClickedClipIdRef.current = targetClipId;
+            updateRangeSelectAnchor(targetClipId);
             lastClickedClientXRef.current = targetClientX ?? null;
         },
-        [dispatch, setMultiSelectedClipIds, pxPerSec],
+        [
+            dispatch,
+            setMultiSelectedClipIds,
+            pxPerSec,
+            sessionRef,
+            lastClickedClipIdRef,
+            updateRangeSelectAnchor,
+            lastClickedClientXRef,
+            scrollRef,
+        ],
     );
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
@@ -644,25 +664,25 @@ export function useTimelineClipActions(
                 }
             })();
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, setMultiSelectedClipIds, sessionRef],
     );
 
     // ── TrackLane callbacks ───────────────────────────────────
     const ensureTrackLaneSelected = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const selectedIds = multiSelectedClipIdsRef.current;
             const selectedSet = multiSelectedSetRef.current;
             if (!selectedSet.has(clipId) || selectedIds.length > 1) {
                 setMultiSelectedClipIds([clipId]);
             }
         },
-        [setMultiSelectedClipIds],
+        [setMultiSelectedClipIds, updateRangeSelectAnchor],
     );
 
     const selectTrackLaneClipRemote = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
             const clipTrackId = clip?.trackId ?? null;
             if (
@@ -682,12 +702,12 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch],
+        [dispatch, updateRangeSelectAnchor, sessionRef],
     );
 
     const toggleTrackLaneCtrlSelection = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
 
             const currentSelectionIds =
                 multiSelectedClipIdsRef.current.length > 0
@@ -733,11 +753,10 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, setMultiSelectedClipIds, updateRangeSelectAnchor, sessionRef],
     );
 
-    const rangeSelectAnchorClipId =
-        lastClickedClipIdRef.current ?? sessionRef.current.selectedClipId ?? null;
+    const rangeSelectAnchorClipId = rangeSelectAnchorClipIdState ?? selectedClipId;
 
     const openTrackLaneContextMenu = React.useCallback(
         (clipId: string, clientX: number, clientY: number) => {
@@ -758,7 +777,7 @@ export function useTimelineClipActions(
             const bounds = scroller.getBoundingClientRect();
             setPlayheadFromClientX(clientX, bounds, scroller.scrollLeft, commit);
         },
-        [setPlayheadFromClientX],
+        [setPlayheadFromClientX, scrollRef],
     );
 
     const toggleTrackLaneClipMuted = React.useCallback(

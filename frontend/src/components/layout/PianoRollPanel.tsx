@@ -86,6 +86,7 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
+import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
@@ -411,7 +412,7 @@ export const PianoRollPanel: React.FC = () => {
         const kb = mergedKeybindings["modifier.clipNoSnap"];
         if (!kb) return;
         const onKey = (e: KeyboardEvent) => {
-            const active = isModifierActive(kb, e as any);
+            const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
         };
         window.addEventListener("keydown", onKey as EventListener);
@@ -481,27 +482,27 @@ export const PianoRollPanel: React.FC = () => {
             if (s?.midiCloseLeadingGap != null) {
                 setCloseLeadingGap(s.midiCloseLeadingGap);
             }
-            if ((s as any)?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+            if (s?.midiImportAsTempoMap != null) {
+                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
             }
-            if ((s as any)?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+            if (s?.midiImportTempoMapTempo != null) {
+                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
             }
-            if ((s as any)?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean((s as any).midiImportTempoMapTimeSignature));
+            if (s?.midiImportTempoMapTimeSignature != null) {
+                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
             }
-            if ((s as any)?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean((s as any).midiImportTempoMapKeySignature));
+            if (s?.midiImportTempoMapKeySignature != null) {
+                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
             }
             if (s?.midiImportTargetReaperClipboard != null) {
                 setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetReaperClipboard((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetReaperClipboard(s.midiImportTarget);
             }
             if (s?.midiImportTargetParamEditor != null) {
                 setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetParamEditor((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetParamEditor(s.midiImportTarget);
             }
         });
     }, []);
@@ -1458,6 +1459,9 @@ export const PianoRollPanel: React.FC = () => {
                 }
                 invalidate();
             },
+            // syncScrollLeft reads the latest scroll state through refs and is called
+            // imperatively; including the plain render-scope function would defeat memoization.
+            // eslint-disable-next-line react-hooks/exhaustive-deps
             [
                 contentWidth,
                 invalidate,
@@ -1483,11 +1487,7 @@ export const PianoRollPanel: React.FC = () => {
         }
 
         if (gridLayerRef.current) {
-            (
-                gridLayerRef.current as unknown as {
-                    __hifiGridRedraw?: (scrollLeft: number) => void;
-                }
-            ).__hifiGridRedraw?.(next);
+            invokeGridRedrawHandler(gridLayerRef.current, next);
         }
 
         if (gridBoundaryRef.current) {
@@ -1894,65 +1894,65 @@ export const PianoRollPanel: React.FC = () => {
     // 导入位置变更时持久化保存
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        void settingsApi.saveUiSettings({ midiImportPosition: position } as any);
+        void settingsApi.saveUiSettings({ midiImportPosition: position });
     }, []);
 
     // 填补空隙选项变更时持久化保存
     const handleFillGapsChange = useCallback((value: boolean) => {
         setFillGaps(value);
-        void settingsApi.saveUiSettings({ midiFillGaps: value } as any);
+        void settingsApi.saveUiSettings({ midiFillGaps: value });
     }, []);
 
     // BPM 选项变更时持久化保存
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any);
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        void settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any);
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v });
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any);
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any);
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any);
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any);
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
     }, []);
 
     const handleImportTargetChange = useCallback((v: string) => {
         if (midiDialogSourceRef.current === "reaperClipboard") {
             setImportTargetReaperClipboard(v);
-            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v });
         } else {
             setImportTargetParamEditor(v);
-            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v });
         }
     }, []);
 
@@ -2379,6 +2379,8 @@ export const PianoRollPanel: React.FC = () => {
             scroller.scrollLeft = next;
             syncScrollLeft(scroller);
         }
+        // syncScrollLeft reads the latest scroll state through refs; see onFrame above.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         s.paramEditorSyncTimeline,
         s.autoScrollEnabled,
@@ -2404,7 +2406,7 @@ export const PianoRollPanel: React.FC = () => {
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
                 if (isNoneBinding(kb)) return noModifierPressed;
-                return isModifierActive(kb, e as any);
+                return isModifierActive(kb, e);
             };
             const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
             const pianoVerticalScrollRequested = isWheelBindingRequested(pianoKeysVerticalScrollKb);
@@ -4766,7 +4768,7 @@ export const PianoRollPanel: React.FC = () => {
                 <Flex className="px-3 py-2 bg-qt-base border-b border-qt-border">
                     <ProgressBar
                         percentage={asyncRefresh.progress}
-                        label={(t as any)("refreshing_pitch_data") || "Refreshing pitch data"}
+                        label={tAny("refreshing_pitch_data") || "Refreshing pitch data"}
                         showCancel={true}
                         onCancel={async () => {
                             // Task 6.6: 取消按钮点击时调 ?cancelRefresh()
@@ -4803,7 +4805,7 @@ export const PianoRollPanel: React.FC = () => {
                         color="red"
                         onClick={() => rootTrackId && void asyncRefresh.startRefresh(rootTrackId)}
                     >
-                        {(t as any)("retry") || "Retry"}
+                        {tAny("retry") || "Retry"}
                     </Button>
                 </Flex>
             )}

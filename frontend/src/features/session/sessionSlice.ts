@@ -2172,23 +2172,23 @@ const sessionSlice = createSlice({
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
                 state.splitTransitionEnabled = Boolean(
-                    (s as any).splitTransitionEnabled ?? true,
+                    s.splitTransitionEnabled ?? true,
                 );
                 state.splitTransitionMode =
-                    (s as any).splitTransitionMode === "fade" ? "fade" : "overlap";
+                    s.splitTransitionMode === "fade" ? "fade" : "overlap";
                 state.splitTransitionDurationUnit =
-                    (s as any).splitTransitionDurationUnit === "percent"
+                    s.splitTransitionDurationUnit === "percent"
                         ? "percent"
                         : "seconds";
-                const splitDuration = Number((s as any).splitTransitionDurationSec);
+                const splitDuration = Number(s.splitTransitionDurationSec);
                 if (Number.isFinite(splitDuration)) {
                     state.splitTransitionDurationSec = clamp(splitDuration, 0.001, 10);
                 }
-                const splitPercent = Number((s as any).splitTransitionDurationPercent);
+                const splitPercent = Number(s.splitTransitionDurationPercent);
                 if (Number.isFinite(splitPercent)) {
                     state.splitTransitionDurationPercent = clamp(splitPercent, 0.01, 100);
                 }
-                const splitCurve = (s as any).splitTransitionCurve as string;
+                const splitCurve = s.splitTransitionCurve as string;
                 if (
                     ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(
                         splitCurve,
@@ -2197,44 +2197,44 @@ const sessionSlice = createSlice({
                     state.splitTransitionCurve = splitCurve as FadeCurveType;
                 }
                 state.splitTransitionOverlapCrossfade =
-                    (s as any).splitTransitionOverlapCrossfade === "always"
+                    s.splitTransitionOverlapCrossfade === "always"
                         ? "always"
                         : "auto";
                 const loadedSnapEnabled =
-                    (s as any).snapEnabled ?? (s as any).gridSnap ?? true;
+                    s.snapEnabled ?? s.gridSnap ?? true;
                 state.snapEnabled = loadedSnapEnabled;
-                if ((s as any).timelineSnap && typeof (s as any).timelineSnap === "object") {
+                if (s.timelineSnap && typeof s.timelineSnap === "object") {
                     state.timelineSnap = normalizeTimelineSnapSettings(
                         createDefaultTimelineSnapSettings(),
-                        (s as any).timelineSnap as Partial<TimelineSnapSettings>,
+                        s.timelineSnap as Partial<TimelineSnapSettings>,
                     );
                     state.timelineSnap.enabled = Boolean(loadedSnapEnabled);
                     state.snapEnabled = state.timelineSnap.enabled;
                 }
-                if ((s as any).tempoMapVisible != null) {
-                    state.tempoMapVisible = Boolean((s as any).tempoMapVisible);
+                if (s.tempoMapVisible != null) {
+                    state.tempoMapVisible = Boolean(s.tempoMapVisible);
                 }
-                const loadedPrimaryUnit = (s as any).primaryTimeUnit as unknown;
+                const loadedPrimaryUnit = s.primaryTimeUnit as unknown;
                 if (VALID_TIME_UNITS.has(loadedPrimaryUnit as TimeUnit)) {
                     state.primaryTimeUnit = loadedPrimaryUnit as TimeUnit;
                 }
-                const loadedSecondaryUnit = (s as any).secondaryTimeUnit as unknown;
+                const loadedSecondaryUnit = s.secondaryTimeUnit as unknown;
                 if (
                     loadedSecondaryUnit === "none" ||
                     VALID_TIME_UNITS.has(loadedSecondaryUnit as TimeUnit)
                 ) {
                     state.secondaryTimeUnit = loadedSecondaryUnit as TimeUnitChoice;
                 }
-                const loadedSpacing = Number((s as any).rulerLabelSpacingPx);
+                const loadedSpacing = Number(s.rulerLabelSpacingPx);
                 if (Number.isFinite(loadedSpacing)) {
                     state.rulerLabelSpacingPx = Math.max(
                         40,
                         Math.min(320, Math.round(loadedSpacing)),
                     );
                 }
-                if ((s as any).showPlayheadTimeInTrackHeader != null) {
+                if (s.showPlayheadTimeInTrackHeader != null) {
                     state.showPlayheadTimeInTrackHeader = Boolean(
-                        (s as any).showPlayheadTimeInTrackHeader,
+                        s.showPlayheadTimeInTrackHeader,
                     );
                 }
                 if (s.paramEditorSyncTimeline != null) {
@@ -2248,23 +2248,23 @@ const sessionSlice = createSlice({
                     : "semitone";
                 // Validate pitchSnapScale
                 state.pitchSnapScale = (SCALE_KEYS as readonly string[]).includes(
-                    (s as any).pitchSnapScale,
+                    s.pitchSnapScale ?? "C",
                 )
-                    ? ((s as any).pitchSnapScale as typeof state.pitchSnapScale)
+                    ? ((s.pitchSnapScale ?? "C") as typeof state.pitchSnapScale)
                     : "C";
                 // Load pitch snap tolerance (cents) if present in saved settings
-                if ((s as any).pitchSnapToleranceCents != null) {
+                if (s.pitchSnapToleranceCents != null) {
                     state.pitchSnapToleranceCents = clamp(
-                        Number((s as any).pitchSnapToleranceCents) || 0,
+                        Number(s.pitchSnapToleranceCents) || 0,
                         0,
                         1000,
                     );
                 }
                 state.playheadZoomEnabled = s.playheadZoom;
                 if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
-                if ((s as any).paramEditorSeekPlayhead != null)
+                if (s.paramEditorSeekPlayhead != null)
                     state.paramEditorSeekPlayheadEnabled = Boolean(
-                        (s as any).paramEditorSeekPlayhead,
+                        s.paramEditorSeekPlayhead,
                     );
                 if (s.paramEditorTimelineClickSelectTrack != null) {
                     state.paramEditorTimelineClickSelectTrackEnabled = Boolean(
@@ -2273,25 +2273,25 @@ const sessionSlice = createSlice({
                 }
                 if (s.showClipboardPreview != null)
                     state.showClipboardPreview = s.showClipboardPreview;
-                if ((s as any).showParamValuePopup != null)
-                    state.showParamValuePopup = Boolean((s as any).showParamValuePopup);
+                if (s.showParamValuePopup != null)
+                    state.showParamValuePopup = Boolean(s.showParamValuePopup);
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
-                if ((s as any).ignoreGrouping != null)
-                    state.ignoreGrouping = Boolean((s as any).ignoreGrouping);
+                if (s.ignoreGrouping != null)
+                    state.ignoreGrouping = Boolean(s.ignoreGrouping);
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
-                if ((s as any).quickSearchAutoNormalize != null)
+                if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(
-                        (s as any).quickSearchAutoNormalize,
+                        s.quickSearchAutoNormalize,
                     );
-                if (Array.isArray((s as any).visibleReferenceRootTrackIds)) {
-                    state.visibleReferenceRootTrackIds = (s as any).visibleReferenceRootTrackIds
+                if (Array.isArray(s.visibleReferenceRootTrackIds)) {
+                    state.visibleReferenceRootTrackIds = s.visibleReferenceRootTrackIds
                         .filter((id: unknown): id is string => typeof id === "string")
                         .map((id: string) => id.trim())
                         .filter((id: string) => id.length > 0);
                 }
-                const defaultStretchAlgorithm = (s as any).defaultStretchAlgorithm;
+                const defaultStretchAlgorithm = s.defaultStretchAlgorithm;
                 if (
                     defaultStretchAlgorithm != null &&
                     ["linear", "signalsmith", "soundtouch"].includes(defaultStretchAlgorithm)
@@ -2299,8 +2299,8 @@ const sessionSlice = createSlice({
                     state.defaultStretchAlgorithm =
                         defaultStretchAlgorithm as StretchAlgorithmOption;
                 }
-                if ((s as any).defaultHifiganMelStretch != null) {
-                    state.defaultHifiganMelStretch = Boolean((s as any).defaultHifiganMelStretch);
+                if (s.defaultHifiganMelStretch != null) {
+                    state.defaultHifiganMelStretch = Boolean(s.defaultHifiganMelStretch);
                 }
                 if (s.ortEp != null) {
                     const normalized = String(s.ortEp).toLowerCase();
@@ -2309,31 +2309,31 @@ const sessionSlice = createSlice({
                 if (s.gpuDeviceId != null) {
                     state.gpuDeviceId = Number(s.gpuDeviceId);
                 }
-                if ((s as any).ortDeviceId !== undefined) {
-                    const val = (s as any).ortDeviceId;
+                if (s.ortDeviceId !== undefined) {
+                    const val = s.ortDeviceId;
                     state.ortDeviceId = val == null ? null : Number(val);
                 }
-                if ((s as any).autoBackgroundRender != null) {
-                    state.autoBackgroundRender = Boolean((s as any).autoBackgroundRender);
+                if (s.autoBackgroundRender != null) {
+                    state.autoBackgroundRender = Boolean(s.autoBackgroundRender);
                 }
-                const selectDir = (s as any).selectDragDirection;
+                const selectDir = s.selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
                     state.selectDragDirection = selectDir as DragDirection;
                 }
-                const drawDir = (s as any).drawDragDirection;
+                const drawDir = s.drawDragDirection;
                 if (drawDir != null && ["free", "x-only"].includes(drawDir)) {
                     state.drawDragDirection = drawDir as DrawDragDirection;
                 }
-                const lineVibratoDir = (s as any).lineVibratoDragDirection;
+                const lineVibratoDir = s.lineVibratoDragDirection;
                 if (lineVibratoDir != null && ["free", "x-only"].includes(lineVibratoDir)) {
                     state.lineVibratoDragDirection = lineVibratoDir as DrawDragDirection;
                 }
-                const smoothness = (s as any).smoothnessPercent ?? (s as any).edgeSmoothnessPercent;
+                const smoothness = s.smoothnessPercent ?? s.edgeSmoothnessPercent;
                 if (smoothness != null) {
                     state.edgeSmoothnessPercent = clamp(Number(smoothness) || 0, 0, 100);
                 }
-                if (Array.isArray((s as any).customScalePresets)) {
-                    state.customScalePresets = (s as any).customScalePresets.map(
+                if (Array.isArray(s.customScalePresets)) {
+                    state.customScalePresets = s.customScalePresets.map(
                         (preset: unknown) =>
                             sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
                     );
@@ -2984,15 +2984,15 @@ const sessionSlice = createSlice({
                           newClipIds?: string[];
                           sourceProject?: string;
                       };
-                if (!payload || (payload as { canceled?: boolean }).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
                 });
-                const newClipIds = (payload as any).newClipIds;
+                const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
                     state.selectedClipId = newClipIds[0] ?? null;

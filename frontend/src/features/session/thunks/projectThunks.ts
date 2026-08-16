@@ -1,10 +1,14 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import type { SessionState } from "../sessionSlice";
+import type { TimelineResult } from "../../../types/api";
 import { requestMissingFileReplacement } from "./missingFilePrompt";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
-async function resolveMissingFilesInteractively(timeline: any, missingFiles: string[] | undefined) {
+async function resolveMissingFilesInteractively<T extends TimelineResult>(
+    timeline: T,
+    missingFiles: string[] | undefined,
+): Promise<T> {
     let latestTimeline = timeline;
     const uniquePaths = Array.from(
         new Set((missingFiles ?? []).filter((p) => typeof p === "string" && p.trim().length > 0)),
@@ -18,8 +22,8 @@ async function resolveMissingFilesInteractively(timeline: any, missingFiles: str
         if (!picked.ok || picked.canceled || !picked.path) continue;
 
         const targetClipIds = (latestTimeline?.clips ?? [])
-            .filter((clip: any) => clip?.source_path === missingPath)
-            .map((clip: any) => clip.id)
+            .filter((clip) => clip?.source_path === missingPath)
+            .map((clip) => clip.id)
             .filter((id: unknown): id is string => typeof id === "string");
 
         if (targetClipIds.length === 0) continue;
@@ -31,7 +35,7 @@ async function resolveMissingFilesInteractively(timeline: any, missingFiles: str
         });
         if (replaced?.ok) {
             waveformMipmapStore.invalidate(picked.path);
-            latestTimeline = replaced;
+            latestTimeline = replaced as T;
         }
     }
 
@@ -172,7 +176,10 @@ export const openVocalShifterFromDialog = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        result = await resolveMissingFilesInteractively(
+            result,
+            result.missing_files,
+        );
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -197,7 +204,7 @@ export const openVocalShifterFromPath = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -241,7 +248,7 @@ export const importProjectFromPath = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_project_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -274,7 +281,7 @@ export const openReaperFromDialog = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -299,7 +306,7 @@ export const openReaperFromPath = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
+        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );

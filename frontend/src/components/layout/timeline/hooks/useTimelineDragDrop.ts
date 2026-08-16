@@ -315,6 +315,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             disposed = true;
             if (unlisten) unlisten();
         };
+        // The helper functions intentionally read refs to avoid re-registering the
+        // native drag-drop listener on every render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dispatch, snapTimeline]);
 
     // ── 文件浏览器面板的自定义拖拽事件 ───────────────────────
@@ -452,6 +455,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         return () => {
             window.removeEventListener("hifi-file-drag", onHifiFileDrag);
         };
+        // Re-registering this DOM listener whenever transient helpers change would
+        // interrupt in-flight drag state; the helpers read the latest refs instead.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dispatch, pxPerSec, rowHeight, snapTimeline]);
 
     return {

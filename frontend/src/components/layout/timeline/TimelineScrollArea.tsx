@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "./constants";
 import { clamp } from "./math";
@@ -77,7 +77,7 @@ export const TimelineScrollArea: React.FC<
         rowHeightRef.current = rowHeight;
     }, [rowHeight]);
 
-    function syncScrollLeft(scroller: HTMLDivElement) {
+    const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
         const next = scroller.scrollLeft;
         const nextSnapshot = {
             scrollLeft: next,
@@ -95,13 +95,13 @@ export const TimelineScrollArea: React.FC<
         lastViewportDispatchRef.current = nextSnapshot;
         lastScrollLeftRef.current = next;
         setScrollLeft(next);
-    }
+    }, [setScrollLeft]);
 
     useEffect(() => {
         const scroller = scrollRef.current;
         if (!scroller) return;
         syncScrollLeft(scroller);
-    }, [scrollRef, setScrollLeft]);
+    }, [scrollRef, syncScrollLeft]);
 
     useEffect(() => {
         return () => {};
@@ -126,7 +126,7 @@ export const TimelineScrollArea: React.FC<
         pendingZoomRef.current = null;
         scroller.scrollLeft = pending.nextScrollLeft;
         syncScrollLeft(scroller);
-    }, [projectSec, pxPerSec, scrollRef]);
+    }, [projectSec, pxPerSec, scrollRef, syncScrollLeft]);
 
     useLayoutEffect(() => {
         const scroller = scrollRef.current;
