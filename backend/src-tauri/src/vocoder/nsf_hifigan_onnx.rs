@@ -23,6 +23,62 @@ fn session_time_frames() -> Option<usize> {
     }
 }
 
+#[derive(Debug)]
+enum ModelRunError {
+    Message(String),
+    TimedOut,
+}
+
+fn run_session_once(
+    session: &Arc<Mutex<Session>>,
+    n_mels: usize,
+    mel_buf: Vec<f32>,
+    f0_buf: Vec<f32>,
+    t: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<f32>, ModelRunError> {
+    let sess = Arc::clone(session);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<Vec<f32>, String> {
+            let mel_tensor = Tensor::from_array(([1usize, n_mels, t], mel_buf.into_boxed_slice()))
+                .map_err(|e| format!("build mel tensor failed: {e}"))?;
+            let f0_tensor = Tensor::from_array(([1usize, t], f0_buf.into_boxed_slice()))
+                .map_err(|e| format!("build f0 tensor failed: {e}"))?;
+            let mut session_guard = sess
+                .lock()
+                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            let outputs = session_guard
+                .run(ort::inputs![mel_tensor, f0_tensor])
+                .map_err(|e| format!("ort run failed: {e}"))?;
+            let output0 = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "onnx returned no outputs".to_string())?;
+            let (_shape, data) = output0
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("ort output type mismatch: {e}"))?;
+            Ok(data.to_vec())
+        })();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(e)) => Err(ModelRunError::Message(e)),
+        Err(_) => Err(ModelRunError::TimedOut),
+    }
+}
+
+fn reset_shared_session() {
+    if let Some(mutex) = SHARED_SESSION.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            *guard = None;
+        }
+    }
+}
+
 /// Global progress callback for chunk rendering. Set before render, cleared after.
 static CHUNK_PROGRESS_CB: OnceLock<Mutex<Option<Box<dyn Fn(f64) + Send + Sync>>>> = OnceLock::new();
 static CHUNK_PROGRESS_TOTAL: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
@@ -797,38 +853,81 @@ impl NsfHifiganOnnx {
     }
 
     fn run_model(&mut self, mel: Vec<f32>, f0: Vec<f32>, t: usize) -> Result<Vec<f32>, String> {
-        let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
-        let t_total = if debug { Some(std::time::Instant::now()) } else { None };
-        let mel_tensor =
-            Tensor::from_array(([1usize, self.cfg.num_mels, t], mel.into_boxed_slice()))
-                .map_err(|e| format!("build mel tensor failed: {e}"))?;
-        let f0_tensor = Tensor::from_array(([1usize, t], f0.into_boxed_slice()))
-            .map_err(|e| format!("build f0 tensor failed: {e}"))?;
-
-        // 通过 Mutex 获取 &mut Session 来调用 run()。
-        // 用块作用域限制 guard 的生命周期，确保 lock 尽快释放。
-        let result: Vec<f32> = {
-            let mut session_guard = self
-                .session
-                .lock()
-                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            let outputs = session_guard
-                .run(ort::inputs![mel_tensor, f0_tensor])
-                .map_err(|e| format!("ort run failed: {e}"))?;
-            let output0 = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "onnx returned no outputs".to_string())?;
-            let (_shape, data) = output0
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("ort output type mismatch: {e}"))?;
-            data.to_vec()
+        let n_mels = self.cfg.num_mels;
+        let fixed_t = session_time_frames();
+        let (mel_buf, f0_buf) = match fixed_t {
+            Some(fixed) if fixed > t => {
+                let mut padded_mel = vec![0.0f32; n_mels * fixed];
+                for m in 0..n_mels {
+                    padded_mel[m * fixed..m * fixed + t].copy_from_slice(&mel[m * t..(m + 1) * t]);
+                }
+                let mut padded_f0 = vec![0.0f32; fixed];
+                padded_f0[..t].copy_from_slice(&f0[..t]);
+                (padded_mel, padded_f0)
+            }
+            _ => (mel, f0),
         };
-        if let Some(t0) = t_total {
-            eprintln!("[nsf_hifigan] run_model t={t}: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+        self.run_model_impl(mel_buf, f0_buf, t, fixed_t.unwrap_or(t))
+    }
+
+    fn run_model_impl(
+        &mut self,
+        mel_buf: Vec<f32>,
+        f0_buf: Vec<f32>,
+        original_t: usize,
+        shape_t: usize,
+    ) -> Result<Vec<f32>, String> {
+        let n_mels = self.cfg.num_mels;
+        let timeout = if session_time_frames().is_some() {
+            std::time::Duration::from_secs(30)
+        } else {
+            std::time::Duration::from_secs(120)
+        };
+
+        // Clone the inputs before the first attempt.  If CoreML/WebGPU hangs,
+        // the first attempt owns the original buffers on its worker thread and
+        // we need fresh copies for the automatic EP-fallback retry.
+        let retry_mel = mel_buf.clone();
+        let retry_f0 = f0_buf.clone();
+
+        let first = run_session_once(&self.session, n_mels, mel_buf, f0_buf, shape_t, timeout);
+        let data = match first {
+            Ok(data) => data,
+            Err(ModelRunError::Message(e)) => return Err(e),
+            Err(ModelRunError::TimedOut) => {
+                eprintln!(
+                    "[nsf_hifigan] model inference timed out after {timeout:?}; disabling the hung EP and retrying with a fresh session"
+                );
+                crate::vocoder_ort_session::disable_coreml("vocoder inference timed out");
+                crate::vocoder_ort_session::reset_coreml_pinned_state();
+                reset_shared_session();
+                self.session = get_or_init_shared_session()?;
+
+                match run_session_once(
+                    &self.session,
+                    n_mels,
+                    retry_mel,
+                    retry_f0,
+                    shape_t,
+                    std::time::Duration::from_secs(120),
+                ) {
+                    Ok(data) => data,
+                    Err(ModelRunError::Message(e)) => return Err(e),
+                    Err(ModelRunError::TimedOut) => {
+                        return Err(format!(
+                            "model inference timed out again after EP fallback ({shape_t} frames)"
+                        ));
+                    }
+                }
+            }
+        };
+
+        if shape_t != original_t {
+            let expected_len = original_t.saturating_mul(self.cfg.hop_size);
+            Ok(data.into_iter().take(expected_len).collect())
+        } else {
+            Ok(data)
         }
-        Ok(result)
     }
 
     /// 从预提取的 mel/f0 切片直接推理，复用 scratch buffer 避免 per-chunk 堆分配。
@@ -867,38 +966,7 @@ impl NsfHifiganOnnx {
             _ => std::mem::take(&mut self.f0_scratch),
         };
 
-        let mel_tensor = Tensor::from_array(
-            ([1usize, n_mels, fixed_t.unwrap_or(t)], mel_buf.into_boxed_slice()),
-        )
-        .map_err(|e| format!("build mel tensor failed: {e}"))?;
-        let f0_tensor = Tensor::from_array(
-            ([1usize, fixed_t.unwrap_or(t)], f0_buf.into_boxed_slice()),
-        )
-        .map_err(|e| format!("build f0 tensor failed: {e}"))?;
-
-        let result: Vec<f32> = {
-            let mut session_guard = self
-                .session
-                .lock()
-                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            let outputs = session_guard
-                .run(ort::inputs![mel_tensor, f0_tensor])
-                .map_err(|e| format!("ort run failed: {e}"))?;
-            let output0 = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "onnx returned no outputs".to_string())?;
-            let (_shape, data) = output0
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("ort output type mismatch: {e}"))?;
-            data.to_vec()
-        };
-        if fixed_t.is_some() {
-            let expect = t.saturating_mul(self.cfg.hop_size);
-            return Ok(result.into_iter().take(expect).collect());
-        }
-        Ok(result)
+        self.run_model_impl(mel_buf, f0_buf, t, fixed_t.unwrap_or(t))
     }
 
     /// Each item is (mel_vec, f0_vec, t) where t is the mel frame count.
@@ -2637,6 +2705,11 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                                 "{ep} warmup inference timed out after {timeout:?}"
                             ));
                             eprintln!("[benchmark] WARNING: {ep} warmup inference TIMED OUT");
+                            if ep == "coreml" {
+                                crate::vocoder_ort_session::disable_coreml(
+                                    "benchmark warmup inference timed out",
+                                );
+                            }
                             false
                         }
                         Err(e) => {
@@ -2661,6 +2734,11 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                                     "{ep} inference timed out after {timeout:?}"
                                 ));
                                 eprintln!("[benchmark] WARNING: {ep} inference TIMED OUT");
+                                if ep == "coreml" {
+                                    crate::vocoder_ort_session::disable_coreml(
+                                        "benchmark inference timed out",
+                                    );
+                                }
                                 break;
                             }
                             Err(e) => {

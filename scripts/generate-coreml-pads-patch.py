@@ -6,6 +6,10 @@ compile.  For the fixed 4096-frame input the derived values are constant;
 this script evaluates them with ONNX Runtime and writes the patch that
 build.rs applies when generating pc_nsf_hifigan_coreml.onnx.
 
+build.rs also removes the explicit `kernel_shape` attributes from the
+ConvTranspose upsampling nodes because CoreML EP only accepts those nodes
+when kernel_shape is inferred from the constant weight.
+
 Usage:  python scripts/generate-coreml-pads-patch.py
 Re-run this whenever the stock ONNX model changes.
 """

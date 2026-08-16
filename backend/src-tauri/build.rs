@@ -1063,9 +1063,12 @@ mod coreml_pb {
     }
 }
 
-/// Rewrite the Pad node's dynamic `pads` input to a constant initializer.
-/// Only the node input list and the initializer list are touched; all other
-/// bytes (including the ~54 MB weight raw_data) are preserved verbatim.
+/// Rewrite CoreML-incompatible parts of the stock model:
+/// - Pad: dynamic `pads` inputs become constant initializers.
+/// - ConvTranspose: explicit `kernel_shape` attributes are removed so CoreML EP
+///   accepts the upsampling layers.
+/// Only the node/initializer protobuf fields are touched; all other bytes
+/// (including the ~54 MB weight raw_data) are preserved verbatim.
 #[cfg(target_os = "macos")]
 fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     use coreml_pb::{Field, encode, parse};
@@ -1182,9 +1185,13 @@ fn rewrite_graph(
     Ok(out)
 }
 
-/// Rewrite a Pad node whose `pads` input (input[1]) is listed in the patch:
-/// replace it with a fresh constant initializer name and record the
-/// initializer in `new_inits`.
+/// Rewrite CoreML-incompatible nodes:
+/// - Pad: replace a dynamic `pads` input listed in the patch with a fresh
+///   constant initializer.
+/// - ConvTranspose: remove the explicit `kernel_shape` attribute.  CoreML EP
+///   only accepts ConvTranspose nodes when `kernel_shape` is not present
+///   (inferred from the constant weight), while the stock model exports it
+///   explicitly for every upsampling layer.
 #[cfg(target_os = "macos")]
 fn rewrite_node(
     node: &[u8],
@@ -1205,6 +1212,27 @@ fn rewrite_node(
             inputs.push(f.payload.clone());
         }
     }
+
+    if op_type == "ConvTranspose" {
+        let mut out = Vec::new();
+        for f in &nf {
+            if f.num == 5 && f.wire == 2 {
+                let attr = parse(&f.payload)?;
+                let mut name = String::new();
+                for af in &attr {
+                    if af.num == 1 && af.wire == 2 {
+                        name = String::from_utf8_lossy(&af.payload).into_owned();
+                    }
+                }
+                if name == "kernel_shape" {
+                    continue;
+                }
+            }
+            out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
+        }
+        return Ok(out);
+    }
+
     if op_type == "Pad" && inputs.len() >= 2 {
         let pads_name = String::from_utf8_lossy(&inputs[1]).into_owned();
         if let Some(vals) = patch.get(&pads_name) {
@@ -1231,7 +1259,8 @@ fn rewrite_node(
 
 /// Generate the CoreML-compatible model variant during macOS ARM64 builds.
 /// The output file lives in the resources tree (so Tauri bundles it) but is
-/// gitignored; it is regenerated whenever the stock model changes.
+/// gitignored; it is regenerated whenever the stock model, the pads patch or
+/// this build script changes.
 #[cfg(target_os = "macos")]
 fn generate_coreml_model_variant() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1242,12 +1271,15 @@ fn generate_coreml_model_variant() {
         return;
     }
     let patch_path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
+    let build_script = std::path::Path::new(file!());
     let src_m = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
     let patch_m = std::fs::metadata(&patch_path).and_then(|m| m.modified()).ok();
+    let build_m = std::fs::metadata(build_script).and_then(|m| m.modified()).ok();
     let dst_m = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
     if dst.is_file()
         && dst_m >= src_m
         && (patch_m.is_none() || dst_m >= patch_m)
+        && (build_m.is_none() || dst_m >= build_m)
     {
         return;
     }

@@ -86,28 +86,32 @@ vslib = []
 # stable GPU path for Windows. WebGPU on Linux & macOS ARM uses
 # Dawn/Vulkan and Dawn/Metal respectively, which are stable.
 
+# ORT 1.28 (ort 2.0.0-rc.13) includes the CoreML EP fixes required by the
+# NSF-HiFiGAN model (native reflect-Pad/Split/scalar-Gather support plus
+# repeated-run stability improvements over the previous 1.24 runtime).
+#
 # Windows — DirectML (DX12, stable)
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "directml", "copy-dylibs"] }
 # DXGI adapter enumeration for DirectML device discovery (all GPU vendors)
 windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
 
 # Linux x86_64 — WebGPU (Dawn/Vulkan backend, prebuilt binaries available)
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "webgpu", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "webgpu", "copy-dylibs"] }
 
 # Linux ARM64 — CPU only (no WebGPU prebuilt binary for aarch64)
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "copy-dylibs"] }
 
 # macOS Apple Silicon — CoreML (Apple Neural Engine) + WebGPU (Dawn/Metal)
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "webgpu", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "tls-native", "download-binaries", "coreml", "webgpu", "copy-dylibs"] }
 
 # macOS Intel — CPU only via ort-tract (no GPU acceleration available)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
-ort-tract = { version = "0.3.0+0.22", optional = true }
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ort-tract = { version = "0.4.0+0.23", optional = true }
 
 [profile.release]
 lto = false

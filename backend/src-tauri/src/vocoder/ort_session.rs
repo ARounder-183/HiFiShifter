@@ -44,7 +44,7 @@ fn coreml_disabled() -> bool {
         .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn disable_coreml(reason: &str) {
+pub(crate) fn disable_coreml(reason: &str) {
     eprintln!("ort_session: disabling CoreML EP for this process: {reason}");
     COREML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
@@ -108,7 +108,7 @@ fn set_coreml_pinned(_role: OrtSessionRole, _pinned: bool) {}
 /// - A persistent model cache avoids recompiling the CoreML model on every
 ///   session creation (can take tens of seconds for this 56 MB model).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn build_coreml_ep() -> ort::ep::CoreML {
+fn build_coreml_ep(role: OrtSessionRole) -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
 
     let mut ep = ort::ep::CoreML::default()
@@ -119,7 +119,13 @@ fn build_coreml_ep() -> ort::ep::CoreML {
         // model on the Metal GPU where these layers run correctly.
         .with_compute_units(ComputeUnits::CPUAndGPU)
         .with_model_format(ModelFormat::MLProgram)
-        .with_static_input_shapes(false);
+        // Keep FP32 accumulation for the vocoder: HiFi-GAN audio quality is
+        // sensitive to low-precision GPU accumulation.
+        .with_low_precision_accumulation_on_gpu(false)
+        // The vocoder session is built with `time`/`batch` dimension
+        // overrides, so require static shapes for that role.  FCPE and HNSEP
+        // intentionally keep their dynamic shapes.
+        .with_static_input_shapes(matches!(role, OrtSessionRole::Vocoder));
 
     // Cache compiled CoreML programs under ~/Library/Caches/HiFiShifter so
     // repeated session creation (e.g. after an EP switch) does not recompile
@@ -130,7 +136,10 @@ fn build_coreml_ep() -> ort::ep::CoreML {
             .join("Library")
             .join("Caches")
             .join("HiFiShifter")
-            .join("coreml");
+            // Versioned separately from the old ORT 1.24 cache: compiled
+            // CoreML artifacts from the previous runtime can reuse stale
+            // partitions and must not be loaded by the new build.
+            .join("coreml-ort1.28");
         if std::fs::create_dir_all(&cache).is_ok() {
             // with_model_cache_dir takes `impl ToString`, so convert the
             // PathBuf explicitly (PathBuf itself does not implement
@@ -379,10 +388,10 @@ fn try_register_webgpu_ep(
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn try_register_coreml_ep(
     builder: ort::session::builder::SessionBuilder,
-    _role: OrtSessionRole,
+    role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
     let build_result = std::panic::catch_unwind(|| {
-        build_coreml_ep().build()
+        build_coreml_ep(role).build()
     });
     let ep = match build_result {
         Ok(ep) => ep,
@@ -775,18 +784,29 @@ fn build_gpu_session_finalize(
         env_ep_choice(),
     );
 
+    let coreml_session = ep_name == "CoreML";
     builder = builder
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("set graph optimization level failed: {e}"))?
-        .with_memory_pattern(true)
-        .map_err(|e| format!("set memory pattern failed: {e}"))?;
+        // CoreML MLProgram sessions have their own execution queues.  ORT's
+        // CPU memory-pattern/parallel-execution optimizers have been observed
+        // to leave CoreML sessions stuck on repeated runs, so disable both for
+        // CoreML and let Apple's runtime manage its buffers.
+        .with_memory_pattern(!coreml_session)
+        .map_err(|e| format!("set memory pattern failed: {e}"))?
+        .with_parallel_execution(!coreml_session)
+        .map_err(|e| format!("set parallel execution failed: {e}"))?;
 
     let cores = std::thread::available_parallelism()
         .map(|n| n.get()).unwrap_or(4).max(2);
-    let threads = match role {
-        OrtSessionRole::Separator => cores,
-        OrtSessionRole::Vocoder => (cores / 2).max(2),
-        OrtSessionRole::PitchDetector => (cores / 2).max(2),
+    let threads = if coreml_session {
+        0
+    } else {
+        match role {
+            OrtSessionRole::Separator => cores,
+            OrtSessionRole::Vocoder => (cores / 2).max(2),
+            OrtSessionRole::PitchDetector => (cores / 2).max(2),
+        }
     };
     builder = builder
         .with_intra_threads(threads)
@@ -1103,7 +1123,7 @@ fn probe_coreml_ep_available() -> bool {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match Session::builder() {
             Ok(builder) => {
-                let ep = build_coreml_ep().build();
+                let ep = build_coreml_ep(OrtSessionRole::Vocoder).build();
                 match builder.with_execution_providers([ep]) {
                     Ok(_) => {
                         eprintln!("ort_session: probe_coreml_ep - AVAILABLE");
