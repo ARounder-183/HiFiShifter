@@ -29,11 +29,34 @@ pub(crate) static BG_RENDER_CANCEL: std::sync::atomic::AtomicBool =
 pub(crate) static BG_RENDER_RESTART_NEEDED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 后台渲染开始时因音高分析未完成而跳过了 clip。
+/// 音高分析完成后由 `handle_clip_pitch_ready` 消费此标记并自动补启动渲染。
+pub(crate) static BG_RENDER_PITCH_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
     let state = app.state::<AppState>();
     state
         .timeline_version
         .load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// 一轮后台渲染结束后是否应该“补一轮”。
+///
+/// 补轮的目的是：第一轮可能因为音高分析尚未完成而跳过了部分 clip，
+/// 而这些 clip 在分析完成后并没有新的“缓存失效”事件，因此主动再跑一轮，
+/// 把它们也渲染进缓存。
+///
+/// ★ 必须要求本轮有实际进展（render_success_count > 0）：
+/// `collect_clips_needing_render` 不会排除已命中渲染缓存的 clip，
+/// 若无条件补轮，那些“永远无法就绪”的 clip（音高分析不可用、源文件缺失、
+/// 非合成轨道上的手动音高编辑等）会让 skipped_not_ready 永远大于 0，
+/// 每轮都“渲染成功 → 补轮 → 全部命中缓存 → 补轮 → …”，形成 100% CPU 的
+/// 无限后台渲染循环，把整个应用拖到未响应。当本轮没有任何新渲染成功时，
+/// 再补一轮也不可能有进展，必须停止；之后由音高分析完成事件
+/// （`handle_clip_pitch_ready` 消费 `BG_RENDER_PITCH_PENDING`）主动补触发。
+fn should_follow_up_render(skipped_not_ready: usize, render_success_count: u32) -> bool {
+    skipped_not_ready > 0 && render_success_count > 0
 }
 
 /// 检查 clip 的音高分析是否完成（clip_midi 非空）。
@@ -1299,6 +1322,32 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     // 清除可能残留的上一轮取消标志
     BG_RENDER_CANCEL.store(false, Ordering::Release);
 
+    // ★ panic 隔离：收集/启动阶段（native 推理库、缓存锁、AppState 访问等）
+    // 可能 panic。本函数现在也会被 `request_background_render` 放到独立线程
+    // 上调用，panic 不再有命令线程兜底 —— 若不在此处复位 BG_RENDER_ACTIVE，
+    // 后续所有渲染请求都会因 “already active” 被跳过，后台预渲染永久失效，
+    // 且前端进度事件永远不结束。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        start_background_render_inner(app)
+    }));
+    match result {
+        Ok(value) => value,
+        Err(payload) => {
+            eprintln!(
+                "[bg_render] panic during render setup (payload={:?}); resetting active flag",
+                payload
+            );
+            BG_RENDER_ACTIVE.store(false, Ordering::Release);
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            serde_json::json!({"ok": false, "error": "bg_render_setup_panicked"})
+        }
+    }
+}
+
+fn start_background_render_inner(app: tauri::AppHandle) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+
     // Clone app before getting state (state borrows from the clone),
     // so the original app can be moved into the thread.
     let app_clone = app.clone();
@@ -1312,14 +1361,21 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     let sr = if engine_sr > 0 { engine_sr } else { 44100 };
 
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
+    let unfiltered_total = clips_to_render.len();
     clips_to_render.retain(|info| is_clip_pitch_analysis_ready(&timeline, &info.clip));
+    let skipped_not_ready = unfiltered_total.saturating_sub(clips_to_render.len());
+    BG_RENDER_PITCH_PENDING.store(skipped_not_ready > 0, Ordering::Release);
     clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
 
     // Save len before clips_to_render is moved into the thread closure
     let total = clips_to_render.len();
 
     if total == 0 {
-        eprintln!("[bg_render] no clips need rendering (might be waiting for pitch analysis)");
+        eprintln!(
+            "[bg_render] no clips need rendering (ready={} skipped_not_ready={})",
+            clips_to_render.len(),
+            skipped_not_ready
+        );
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
         // 不发送渲染事件，避免前端状态栏闪烁。
@@ -1377,20 +1433,57 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         );
     })));
 
-    let _ = app_clone.emit(
-        "playback_rendering_state",
-        PlaybackRenderingStateEvent {
-            active: true,
-            progress: Some(0.0),
-            target: Some("background".to_string()),
-        },
-    );
     // Explicitly drop app_clone's state borrow before moving app into the thread
     drop(state);
     drop(app_clone);
 
     // 后台渲染线程
     std::thread::spawn(move || {
+        // ★ panic 隔离：渲染循环中的 panic（native 推理、缓存锁等）不能
+        // 让 BG_RENDER_ACTIVE 卡死 —— 否则后续渲染请求全部被跳过、
+        // 前端进度事件永远不结束（直到应用重启）。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_background_pass(
+                app.clone(),
+                &clips_to_render,
+                total,
+                render_timeline_version,
+                &timeline,
+                skipped_not_ready,
+            );
+        }));
+        if outcome.is_err() {
+            eprintln!("[bg_render] render thread panicked; resetting flags");
+            BG_RENDER_ACTIVE.store(false, Ordering::Release);
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            let _ = app.emit(
+                "playback_rendering_state",
+                PlaybackRenderingStateEvent {
+                    active: false,
+                    progress: Some(1.0),
+                    target: Some("background".to_string()),
+                },
+            );
+        }
+    });
+
+    serde_json::json!({"ok": true, "rendering": total})
+}
+
+/// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
+#[allow(clippy::too_many_arguments)]
+fn render_background_pass(
+    app: tauri::AppHandle,
+    clips_to_render: &[ClipRenderInfo],
+    total: usize,
+    render_timeline_version: u64,
+    timeline: &crate::state::TimelineState,
+    skipped_not_ready: usize,
+) {
+    use std::sync::atomic::Ordering;
+
+    {
         let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
             .ok()
             .as_deref()
@@ -1408,8 +1501,11 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         let mut cancelled = false;
         let mut pending_clip_ids_written: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // 只有真正开始合成时才向前端发出进度事件。若本轮全部命中缓存，
+        // 则完全不需要展示渲染进度，避免打开工程后的首次播放闪一下进度条。
+        let mut rendering_started = false;
 
-        for clip_render_info in &clips_to_render {
+        for clip_render_info in clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
                 eprintln!(
@@ -1460,6 +1556,17 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                     eprintln!(
                         "[bg_render][cache] MISS clip_id={} hash={:#018x}",
                         clip_render_info.clip.id, clip_render_info.cache_key.param_hash
+                    );
+                }
+                if !rendering_started {
+                    rendering_started = true;
+                    let _ = app.emit(
+                        "playback_rendering_state",
+                        PlaybackRenderingStateEvent {
+                            active: true,
+                            progress: Some(0.0),
+                            target: Some("background".to_string()),
+                        },
                     );
                 }
                 if let Ok(mut state_mgr) =
@@ -1531,8 +1638,19 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                     clip_render_info.cache_key.param_hash,
                     base_entry.pcm_stereo.as_slice(),
                 ) {
-                    Ok((_, _tension_generated)) => {
+                    Ok((_, tension_generated)) => {
                         tension_elapsed += tension_started_at.elapsed();
+                        if tension_generated && !rendering_started {
+                            rendering_started = true;
+                            let _ = app.emit(
+                                "playback_rendering_state",
+                                PlaybackRenderingStateEvent {
+                                    active: true,
+                                    progress: Some(0.0),
+                                    target: Some("background".to_string()),
+                                },
+                            );
+                        }
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
                         {
@@ -1574,6 +1692,9 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
             }
             BG_RENDER_ACTIVE.store(false, Ordering::Release);
             BG_RENDER_CANCEL.store(false, Ordering::Release);
+            // 本轮被取消（新编辑/时间线版本变更）：清除“音高分析未完成”挂起标记，
+            // 避免音高分析稍后完成时触发一次多余的渲染（下一轮新渲染会重新设置它）。
+            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
 
             // 检查是否需要立即重启（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
@@ -1638,6 +1759,28 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
 
+        // 第一轮可能因为音高分析尚未完成而跳过了部分 clip。
+        // 音高分析完成后没有新的“缓存失效”事件，因此这里主动补一轮渲染，
+        // 保证用户等待后台渲染进度结束后，所有需要渲染的 clip 都真正进入缓存。
+        // ★ 补轮必须受“本轮是否有实际进展”约束（见 should_follow_up_render），
+        // 否则会形成 100% CPU 的无限后台渲染循环，把整个应用拖到未响应。
+        if should_follow_up_render(skipped_not_ready, render_success_count)
+            && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed)
+        {
+            eprintln!(
+                "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready, {} clip(s) newly rendered in this pass",
+                skipped_not_ready, render_success_count
+            );
+            start_background_render(app.clone());
+            return;
+        }
+        if skipped_not_ready > 0 && render_success_count == 0 {
+            eprintln!(
+                "[bg_render] {} clip(s) still not pitch-ready but this pass made no new progress; waiting for pitch analysis completion instead of re-rendering",
+                skipped_not_ready
+            );
+        }
+
         // 若完成时恰好有新编辑触发的重启请求，立即启动新一轮渲染
         if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
             eprintln!("[bg_render] completed but restart was requested during finalization, starting new render");
@@ -1653,9 +1796,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
                 target: Some("background".to_string()),
             },
         );
-    });
-
-    serde_json::json!({"ok": true, "rendering": total})
+    }
 }
 
 /// Request a background pre-render after render caches have been invalidated.
@@ -1663,6 +1804,14 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
 /// Unlike `start_background_render`, this is safe to call even while a render is
 /// already running: it cancels the in-flight render and requests a restart with
 /// the fresh cache state. It is a no-op when background pre-render is disabled.
+///
+/// ★ 线程安全约定（防死锁）：
+/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
+/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
+/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
+/// 调用方会自我死锁 —— 命令线程永久阻塞，整个应用进入“未响应”。
+/// 因此这里把真正的启动工作转移到新线程：本函数只做原子的状态检查与
+/// 标记（无锁），渲染启动线程会等待时间线锁自然释放后再开始收集。
 pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
@@ -1679,7 +1828,15 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
 
     // A fresh render request supersedes any stale restart marker.
     BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-    start_background_render(app.clone())
+
+    // 在新线程上启动渲染：既避免调用方持有时间线锁时自我死锁，
+    // 也让命令线程尽快返回、界面保持响应。
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = start_background_render(app);
+    });
+
+    serde_json::json!({"ok": true, "starting": true})
 }
 
 /// 取消当前正在运行的后台预渲染（如果有）。
@@ -1688,4 +1845,20 @@ pub(super) fn cancel_background_render() -> serde_json::Value {
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
     eprintln!("[bg_render] cancel requested, was_active={was_active}");
     serde_json::json!({"ok": true, "was_active": was_active})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_follow_up_render;
+
+    #[test]
+    fn bg_render_follow_up_requires_progress() {
+        // 有跳过 + 有进展 → 补一轮。
+        assert!(should_follow_up_render(1, 1));
+        // 有跳过但本轮没有任何新渲染（全部命中缓存或全部失败）→ 不补轮。
+        // 这是防止“永远无法就绪的 clip”造成 100% CPU 无限后台渲染循环的关键。
+        assert!(!should_follow_up_render(1, 0));
+        // 没有跳过 → 不补轮。
+        assert!(!should_follow_up_render(0, 3));
+    }
 }

@@ -13,10 +13,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import { useI18n } from "../../../../i18n/I18nProvider";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import {
-    checkpointHistory,
-    createClipsRemote,
+    pasteTimelineClipboardRemote,
+    removeClipsRemote,
+    removeTrackRemote,
     seekPlayhead,
     selectClipRemote,
     setClipGain,
@@ -37,9 +37,9 @@ import {
 } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
+import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
-import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
@@ -123,13 +123,12 @@ export interface UseTimelineClipActionsResult {
     onSelectionRectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 
     // Clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    clipboardAvailable: boolean;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
+    copyTracks: (ids: string[]) => Promise<boolean>;
+    cutTracks: (ids: string[]) => void;
+    copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // Clip operations
     groupClips: (ids: string[]) => void;
@@ -146,7 +145,7 @@ export interface UseTimelineClipActionsResult {
     ) => void;
     rangeSelectAnchorClipId: string | null;
     recordLastClickPosition: (clientX: number) => void;
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     clearContextMenu: () => void;
 
     // TrackLane callbacks
@@ -200,6 +199,17 @@ export function useTimelineClipActions(
     // ── multiSelectedClipIds ─────────────────────────────────
     const multiSelectedClipIds = useAppSelector(
         (state: RootState) => state.session.multiSelectedClipIds,
+    );
+    const selectedClipId = useAppSelector((state: RootState) => state.session.selectedClipId);
+    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<
+        string | null
+    >(null);
+    const updateRangeSelectAnchor = React.useCallback(
+        (clipId: string | null) => {
+            lastClickedClipIdRef.current = clipId;
+            setRangeSelectAnchorClipIdState(clipId);
+        },
+        [lastClickedClipIdRef],
     );
     const multiSelectedClipIdsRef = useRef(multiSelectedClipIds);
     useEffect(() => {
@@ -297,28 +307,86 @@ export function useTimelineClipActions(
     });
 
     // ── Clipboard ────────────────────────────────────────────
-    const clipClipboardRef = useRef<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>(null);
+    const [clipboardAvailable, setClipboardAvailable] = useState(false);
 
-    const buildClipClipboardTemplates = React.useCallback(async (ids: string[]) => {
-        const clips = sessionRef.current.clips.filter((c) => ids.includes(c.id));
-        const groupIds = clips.map((c) => c.groupId).filter((g): g is string => g != null);
-        const templates = await Promise.all(
-            clips.map(async (clip) => {
-                const linkedParamsResult = await webApi.getClipLinkedParams(clip.id);
-                return {
-                    ...clip,
-                    sourceClipId: clip.id,
-                    waveformPreview: sessionRef.current.clipWaveforms[clip.id],
-                    linkedParams: linkedParamsResult.ok
-                        ? linkedParamsResult.linkedParams
-                        : undefined,
-                };
-            }),
-        );
-        return { templates, groupIds };
+    useEffect(() => {
+        let cancelled = false;
+        const refresh = () => {
+            void webApi
+                .hasTimelineClipboard()
+                .then((result) => {
+                    if (!cancelled) setClipboardAvailable(Boolean(result?.ok && result?.available));
+                })
+                .catch(() => {
+                    if (!cancelled) setClipboardAvailable(false);
+                });
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 2000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, []);
+
+    const copyClips = React.useCallback(async (ids: string[]) => {
+        if (ids.length === 0) return false;
+        try {
+            const result = await webApi.copyTimelineClips(ids);
+            setClipboardAvailable(Boolean(result?.ok));
+            return Boolean(result?.ok);
+        } catch {
+            setClipboardAvailable(false);
+            return false;
+        }
+    }, []);
+
+    const cutClips = React.useCallback(
+        (ids: string[]) => {
+            void (async () => {
+                const copied = await copyClips(ids);
+                if (!copied) return;
+                setMultiSelectedClipIds([]);
+                void dispatch(removeClipsRemote(ids));
+            })();
+        },
+        [copyClips, dispatch, setMultiSelectedClipIds],
+    );
+
+    const copyTracks = React.useCallback(async (ids: string[]) => {
+        if (ids.length === 0) return false;
+        try {
+            const result = await webApi.copyTimelineTracks(ids);
+            setClipboardAvailable(Boolean(result?.ok));
+            return Boolean(result?.ok);
+        } catch {
+            setClipboardAvailable(false);
+            return false;
+        }
+    }, []);
+
+    const cutTracks = React.useCallback(
+        (ids: string[]) => {
+            void (async () => {
+                const copied = await copyTracks(ids);
+                if (!copied) return;
+                void dispatch(removeTrackRemote(ids[0]));
+            })();
+        },
+        [copyTracks, dispatch],
+    );
+
+    const copyClipsToReaper = React.useCallback(async (ids: string[]) => {
+        if (ids.length === 0) return false;
+        try {
+            const result = await webApi.copyClipsToReaperClipboard(ids);
+            if (result?.ok) {
+                setClipboardAvailable(false);
+            }
+            return Boolean(result?.ok);
+        } catch {
+            return false;
+        }
     }, []);
 
     // ── normalizeClips ───────────────────────────────────────
@@ -391,13 +459,34 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, t],
+        [dispatch, t, sessionRef, sameSourceConfirmResolverRef, setSameSourceConfirmOpen],
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
     const splitClipIdsAtPlayhead = React.useCallback(
         (clipIds: string[]) => {
-            const splitSec = Math.max(0, Number(sessionRef.current.playheadSec ?? 0) || 0);
+            const session = sessionRef.current;
+            let splitSec = Math.max(0, Number(session.playheadSec ?? 0) || 0);
+            if (session.timelineSnap.enabled && session.timelineSnap.snapRazorEdits) {
+                const snapped = snapTimelinePosition(
+                    {
+                        settings: session.timelineSnap,
+                        grid: session.grid,
+                        bpm: session.bpm,
+                        beatsPerBar: session.beats,
+                        tempoMap: session.tempoMap,
+                        pxPerSec: Math.max(1e-9, pxPerSec),
+                        clips: session.clips,
+                        tracks: session.tracks,
+                        selectedClipIds: clipIds,
+                        playheadSec: splitSec,
+                        object: "cursor",
+                        anchorTrackId: session.selectedTrackId,
+                    },
+                    splitSec,
+                );
+                splitSec = snapped.sec;
+            }
 
             // Expand to include all group members of any input clip
             const expandedIds = new Set(clipIds);
@@ -424,7 +513,7 @@ export function useTimelineClipActions(
             }
             return eligibleIds;
         },
-        [dispatch],
+        [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
     const splitSelectedAtPlayhead = React.useCallback(() => {
@@ -436,7 +525,7 @@ export function useTimelineClipActions(
                   : [];
         if (selectedIds.length === 0) return;
         splitClipIdsAtPlayhead(selectedIds);
-    }, [splitClipIdsAtPlayhead]);
+    }, [splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
     const recordLastClickPosition = React.useCallback(
@@ -466,7 +555,7 @@ export function useTimelineClipActions(
             if (anchorTrackIndex == null || targetTrackIndex == null) {
                 setMultiSelectedClipIds([targetClipId]);
                 dispatch(setSelectedClip(targetClipId));
-                lastClickedClipIdRef.current = targetClipId;
+                updateRangeSelectAnchor(targetClipId);
                 lastClickedClientXRef.current = targetClientX ?? null;
                 return;
             }
@@ -509,142 +598,91 @@ export function useTimelineClipActions(
             const next = selected.length > 0 ? selected : [targetClipId];
             setMultiSelectedClipIds(next);
             dispatch(setSelectedClip(targetClipId));
-            lastClickedClipIdRef.current = targetClipId;
+            updateRangeSelectAnchor(targetClipId);
             lastClickedClientXRef.current = targetClientX ?? null;
         },
-        [dispatch, setMultiSelectedClipIds, pxPerSec],
+        [
+            dispatch,
+            setMultiSelectedClipIds,
+            pxPerSec,
+            sessionRef,
+            lastClickedClipIdRef,
+            updateRangeSelectAnchor,
+            lastClickedClientXRef,
+            scrollRef,
+        ],
     );
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
-    const pasteClipsAtPlayhead = React.useCallback(() => {
-        void (async () => {
-            let tpl: ClipTemplate[] | null = null;
-            let groupIds: string[] = [];
-            const internal = clipClipboardRef.current;
-            if (internal) {
-                tpl = internal.templates;
-                groupIds = internal.groupIds;
-            }
-            try {
-                const fromSystem = await readSystemClipboardObject("clip");
-                if (fromSystem?.kind === "clip" && Array.isArray(fromSystem.templates)) {
-                    tpl = fromSystem.templates;
-                    groupIds = ((fromSystem as any).groupIds ?? []).filter(
-                        (g: any) => typeof g === "string",
-                    );
-                    clipClipboardRef.current = { templates: fromSystem.templates, groupIds };
-                }
-            } catch {
-                // ignore and fallback to internal clipboard
-            }
-            if (!tpl || tpl.length === 0) return;
+    const pasteClipsAtPlayhead = React.useCallback(
+        (mode?: "selected" | "new_tracks") => {
+            void (async () => {
+                try {
+                    const result = await dispatch(pasteTimelineClipboardRemote(mode)).unwrap();
+                    setClipboardAvailable(true);
+                    const created = result.newClipIds ?? [];
+                    if (created.length === 0) return;
 
-            const playhead = sessionRef.current.playheadSec ?? 0;
-            const minStart = tpl
-                .map((c) => c.startSec)
-                .reduce((a, b) => Math.min(a, b), Number.POSITIVE_INFINITY);
-            const delta =
-                Number.isFinite(minStart) && minStart !== Number.POSITIVE_INFINITY
-                    ? playhead - minStart
-                    : 0;
-            const templates = tpl.map((c) => ({
-                ...c,
-                startSec: Math.max(0, c.startSec + delta),
-            }));
-            dispatch(checkpointHistory());
-            await webApi.beginUndoGroup();
-            try {
-                const payload = await dispatch(
-                    createClipsRemote({
-                        templates,
-                        options: { placeOnSelectedTrack: true },
-                    }),
-                ).unwrap();
-                const created: string[] = payload?.createdClipIds ?? [];
-                if (!Array.isArray(created) || created.length === 0) return;
+                    setMultiSelectedClipIds(created);
+                    void dispatch(selectClipRemote(created[0]));
+                    dispatch(setplayheadSec(result.timeline?.playhead_sec ?? 0));
+                    void dispatch(seekPlayhead(result.timeline?.playhead_sec ?? 0));
 
-                setMultiSelectedClipIds(created);
-                void dispatch(selectClipRemote(created[0]));
-                const targetStartSec = templates.reduce(
-                    (min, t) => Math.min(min, t.startSec),
-                    Number.POSITIVE_INFINITY,
-                );
-                if (Number.isFinite(targetStartSec)) {
-                    dispatch(setplayheadSec(targetStartSec));
-                    void dispatch(seekPlayhead(targetStartSec));
-                }
-
-                if (sessionRef.current.autoCrossfadeEnabled) {
-                    const allClips = (payload?.clips ?? []) as Array<{
-                        id?: string;
-                        track_id?: string;
-                        start_sec?: number;
-                        length_sec?: number;
-                        fade_in_sec?: number;
-                        fade_out_sec?: number;
-                    }>;
-                    const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
-                    if (fadeUpdates.length > 0) {
-                        const changesById = new Map(
-                            fadeUpdates.map((u) => [
-                                u.clipId,
-                                {
-                                    fadeInSec: u.fadeInSec,
-                                    fadeOutSec: u.fadeOutSec,
-                                },
-                            ]),
-                        );
-                        await dispatch(
-                            setClipsStateBulkRemote({
-                                updates: buildBulkClipStateUpdates({
-                                    clipIds: [...changesById.keys()],
-                                    changesById,
+                    if (sessionRef.current.autoCrossfadeEnabled) {
+                        const allClips = (result.timeline?.clips ?? []) as Array<{
+                            id?: string;
+                            track_id?: string;
+                            start_sec?: number;
+                            length_sec?: number;
+                            fade_in_sec?: number;
+                            fade_out_sec?: number;
+                        }>;
+                        const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
+                        if (fadeUpdates.length > 0) {
+                            const changesById = new Map(
+                                fadeUpdates.map((u) => [
+                                    u.clipId,
+                                    {
+                                        fadeInSec: u.fadeInSec,
+                                        fadeOutSec: u.fadeOutSec,
+                                    },
+                                ]),
+                            );
+                            await dispatch(
+                                setClipsStateBulkRemote({
+                                    updates: buildBulkClipStateUpdates({
+                                        clipIds: [...changesById.keys()],
+                                        changesById,
+                                    }),
+                                    checkpoint: false,
                                 }),
-                                checkpoint: false,
-                            }),
-                        ).unwrap();
-                    }
-                }
-
-                // Re-group pasted clips: original grouped clips get new independent groups
-                if (groupIds.length === created.length) {
-                    const groupMap = new Map<string, string[]>();
-                    for (let i = 0; i < groupIds.length; i++) {
-                        const gid = groupIds[i];
-                        if (gid && created[i]) {
-                            const list = groupMap.get(gid);
-                            if (list) list.push(created[i]);
-                            else groupMap.set(gid, [created[i]]);
+                            ).unwrap();
                         }
                     }
-                    for (const newClipIds of groupMap.values()) {
-                        if (newClipIds.length >= 2) {
-                            await dispatch(groupClipsRemote(newClipIds)).unwrap();
-                        }
-                    }
+                } catch {
+                    setClipboardAvailable(false);
                 }
-            } finally {
-                void webApi.endUndoGroup();
-            }
-        })().catch(() => undefined);
-    }, [dispatch, setMultiSelectedClipIds]);
+            })();
+        },
+        [dispatch, setMultiSelectedClipIds, sessionRef],
+    );
 
     // ── TrackLane callbacks ───────────────────────────────────
     const ensureTrackLaneSelected = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const selectedIds = multiSelectedClipIdsRef.current;
             const selectedSet = multiSelectedSetRef.current;
             if (!selectedSet.has(clipId) || selectedIds.length > 1) {
                 setMultiSelectedClipIds([clipId]);
             }
         },
-        [setMultiSelectedClipIds],
+        [setMultiSelectedClipIds, updateRangeSelectAnchor],
     );
 
     const selectTrackLaneClipRemote = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
             const clipTrackId = clip?.trackId ?? null;
             if (
@@ -654,9 +692,9 @@ export function useTimelineClipActions(
             ) {
                 return;
             }
-            const preserveTrackFocus = Boolean(
-                clip && clip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(clip && clip.trackId === sessionRef.current.selectedTrackId);
             void dispatch(
                 selectClipRemote({
                     clipId,
@@ -664,12 +702,12 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch],
+        [dispatch, updateRangeSelectAnchor, sessionRef],
     );
 
     const toggleTrackLaneCtrlSelection = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
 
             const currentSelectionIds =
                 multiSelectedClipIdsRef.current.length > 0
@@ -701,9 +739,12 @@ export function useTimelineClipActions(
             const nextPrimaryClip = sessionRef.current.clips.find(
                 (entry) => entry.id === nextPrimaryClipId,
             );
-            const preserveTrackFocus = Boolean(
-                nextPrimaryClip && nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(
+                    nextPrimaryClip &&
+                        nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
+                );
 
             void dispatch(
                 selectClipRemote({
@@ -712,11 +753,10 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, setMultiSelectedClipIds, updateRangeSelectAnchor, sessionRef],
     );
 
-    const rangeSelectAnchorClipId =
-        lastClickedClipIdRef.current ?? sessionRef.current.selectedClipId ?? null;
+    const rangeSelectAnchorClipId = rangeSelectAnchorClipIdState ?? selectedClipId;
 
     const openTrackLaneContextMenu = React.useCallback(
         (clipId: string, clientX: number, clientY: number) => {
@@ -737,7 +777,7 @@ export function useTimelineClipActions(
             const bounds = scroller.getBoundingClientRect();
             setPlayheadFromClientX(clientX, bounds, scroller.scrollLeft, commit);
         },
-        [setPlayheadFromClientX],
+        [setPlayheadFromClientX, scrollRef],
     );
 
     const toggleTrackLaneClipMuted = React.useCallback(
@@ -842,8 +882,12 @@ export function useTimelineClipActions(
         selectionRect,
         onSelectionRectPointerDown,
 
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        clipboardAvailable,
+        copyClips,
+        cutClips,
+        copyTracks,
+        cutTracks,
+        copyClipsToReaper,
 
         groupClips,
         ungroupClips,

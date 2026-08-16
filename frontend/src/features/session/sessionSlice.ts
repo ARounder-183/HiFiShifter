@@ -12,6 +12,9 @@ import type {
     FadeCurveType,
     GridSize,
     PitchSnapUnit,
+    TimelineSnapSettings,
+    TimeUnit,
+    TimeUnitChoice,
     TrackMeterInfo,
     ToolMode,
     ToolModeGroup,
@@ -22,6 +25,7 @@ import {
     addClipOnTrack,
     addTrackRemote,
     createClipsRemote,
+    pasteTimelineClipboardRemote,
     duplicateClipsBulkRemote,
     duplicateTrackRemote,
     fetchSelectedTrackSummary,
@@ -52,6 +56,8 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromDialog,
     openVocalShifterFromPath,
     openReaperFromDialog,
@@ -92,8 +98,18 @@ import {
 } from "./thunks/audioThunks";
 
 import { SCALE_KEYS } from "../../utils/musicalScales";
+import type { ScaleLike } from "../../utils/musicalScales";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
+import type { TempoMap } from "../../utils/tempoMap";
+import {
+    clampDenominator,
+    fromBackendTempoMap,
+    normalizeTempoMap,
+    scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
+} from "../../utils/tempoMap";
+import { setTempoMapRemote } from "./thunks/tempoMapThunks";
 import {
     importAudioAtPosition,
     importAudioFileAtPosition,
@@ -133,6 +149,142 @@ const VALID_GRID_SIZES = new Set<GridSize>([
     "1/64t",
 ]);
 
+const VALID_TIME_UNITS = new Set<TimeUnit>([
+    "barBeats",
+    "barDivisions",
+    "seconds",
+    "clock",
+]);
+const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
+const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
+const DEFAULT_RULER_LABEL_SPACING_PX = 110;
+
+export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
+    return {
+        gridVisible: true,
+        gridMinSpacingPx: 8,
+        swingEnabled: false,
+        swingPercent: 0,
+        adjustItemsOnSwingChange: true,
+        enabled: true,
+        snapDistancePx: 4,
+        snapRelativeToGrid: false,
+        snapMediaItemsToSelectionMarkersCursor: true,
+        snapMediaItemsToGrid: true,
+        snapSelectionToSelectionMarkersCursor: true,
+        snapSelectionToGrid: true,
+        snapCursorToSelectionMarkersCursor: true,
+        snapCursorToGrid: true,
+        snapFollowsGridVisibility: true,
+        snapToGridAnyDistance: false,
+        useIndependentSnapSpacing: false,
+        snapSpacing: "1/4",
+        snapSpacingMinPx: 8,
+        snapItemStart: true,
+        snapItemSnapOffset: true,
+        snapAcrossTracks: true,
+        snapTrackDistance: 0,
+        snapRazorEdits: true,
+        snapToProjectSampleRate: false,
+        snapMediaEdgesToSource: true,
+        forceSelectionsToMultiples: false,
+        selectionMultiple: "1/4",
+        syncArrangeAndMidiGrid: true,
+    };
+}
+
+function normalizeTimelineSnapSettings(
+    base: TimelineSnapSettings,
+    patch: Partial<TimelineSnapSettings>,
+): TimelineSnapSettings {
+    const grid = (value: unknown): GridSize =>
+        VALID_GRID_SIZES.has(value as GridSize) ? (value as GridSize) : "1/4";
+    const clampedPx = (value: unknown, fallback: number, min: number, max: number) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+    };
+    const clampedNum = (value: unknown, fallback: number, min: number, max: number) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const bool = (value: unknown, fallback: boolean) =>
+        typeof value === "boolean" ? value : fallback;
+    return {
+        gridVisible: bool(patch.gridVisible, base.gridVisible),
+        gridMinSpacingPx: clampedPx(patch.gridMinSpacingPx, base.gridMinSpacingPx, 2, 200),
+        swingEnabled: bool(patch.swingEnabled, base.swingEnabled),
+        swingPercent: clampedNum(patch.swingPercent, base.swingPercent, 0, 100),
+        adjustItemsOnSwingChange: bool(
+            patch.adjustItemsOnSwingChange,
+            base.adjustItemsOnSwingChange,
+        ),
+        enabled: bool(patch.enabled, base.enabled),
+        snapDistancePx: clampedPx(patch.snapDistancePx, base.snapDistancePx, 0, 200),
+        snapRelativeToGrid: bool(patch.snapRelativeToGrid, base.snapRelativeToGrid),
+        snapMediaItemsToSelectionMarkersCursor: bool(
+            patch.snapMediaItemsToSelectionMarkersCursor,
+            base.snapMediaItemsToSelectionMarkersCursor,
+        ),
+        snapMediaItemsToGrid: bool(patch.snapMediaItemsToGrid, base.snapMediaItemsToGrid),
+        snapSelectionToSelectionMarkersCursor: bool(
+            patch.snapSelectionToSelectionMarkersCursor,
+            base.snapSelectionToSelectionMarkersCursor,
+        ),
+        snapSelectionToGrid: bool(patch.snapSelectionToGrid, base.snapSelectionToGrid),
+        snapCursorToSelectionMarkersCursor: bool(
+            patch.snapCursorToSelectionMarkersCursor,
+            base.snapCursorToSelectionMarkersCursor,
+        ),
+        snapCursorToGrid: bool(patch.snapCursorToGrid, base.snapCursorToGrid),
+        snapFollowsGridVisibility: bool(
+            patch.snapFollowsGridVisibility,
+            base.snapFollowsGridVisibility,
+        ),
+        snapToGridAnyDistance: bool(
+            patch.snapToGridAnyDistance,
+            base.snapToGridAnyDistance,
+        ),
+        useIndependentSnapSpacing: bool(
+            patch.useIndependentSnapSpacing,
+            base.useIndependentSnapSpacing,
+        ),
+        snapSpacing: grid(patch.snapSpacing ?? base.snapSpacing),
+        snapSpacingMinPx: clampedPx(
+            patch.snapSpacingMinPx,
+            base.snapSpacingMinPx,
+            2,
+            200,
+        ),
+        snapItemStart: bool(patch.snapItemStart, base.snapItemStart),
+        snapItemSnapOffset: bool(patch.snapItemSnapOffset, base.snapItemSnapOffset),
+        snapAcrossTracks: bool(patch.snapAcrossTracks, base.snapAcrossTracks),
+        snapTrackDistance: clampedNum(
+            patch.snapTrackDistance,
+            base.snapTrackDistance,
+            0,
+            32,
+        ),
+        snapRazorEdits: bool(patch.snapRazorEdits, base.snapRazorEdits),
+        snapToProjectSampleRate: bool(
+            patch.snapToProjectSampleRate,
+            base.snapToProjectSampleRate,
+        ),
+        snapMediaEdgesToSource: bool(
+            patch.snapMediaEdgesToSource,
+            base.snapMediaEdgesToSource,
+        ),
+        forceSelectionsToMultiples: bool(
+            patch.forceSelectionsToMultiples,
+            base.forceSelectionsToMultiples,
+        ),
+        selectionMultiple: grid(patch.selectionMultiple ?? base.selectionMultiple),
+        syncArrangeAndMidiGrid: bool(
+            patch.syncArrangeAndMidiGrid,
+            base.syncArrangeAndMidiGrid,
+        ),
+    };
+}
+
 export type {
     AutomationPoint,
     ClipInfo,
@@ -168,11 +320,32 @@ export interface SessionState {
     beats: number;
     projectSec: number;
     grid: GridSize;
+    primaryTimeUnit: TimeUnit;
+    secondaryTimeUnit: TimeUnitChoice;
+    rulerLabelSpacingPx: number;
+    showPlayheadTimeInTrackHeader: boolean;
+    paramEditorSyncTimeline: boolean;
 
-    /** 自动交叉淡入淡出 */
     autoCrossfadeEnabled: boolean;
-    /** 网格吸附 */
-    gridSnapEnabled: boolean;
+    /** 分割过渡 */
+    splitTransitionEnabled: boolean;
+    splitTransitionMode: "fade" | "overlap";
+    splitTransitionDurationUnit: "seconds" | "percent";
+    splitTransitionDurationSec: number;
+    splitTransitionDurationPercent: number;
+    splitTransitionCurve: FadeCurveType;
+    splitTransitionOverlapCrossfade: "auto" | "always";
+    /** 吸附总开关（兼容旧字段 gridSnapEnabled）。 */
+    snapEnabled: boolean;
+    /** 完整的时间轴吸附/网格设置（snapEnabled 仅作为旧字段镜像 enabled）。 */
+    timelineSnap: TimelineSnapSettings;
+    /**
+     * Tempo Map 数据（null = 无 Tempo Map，使用工程全局 BPM/拍号/音阶）。
+     * 变化点按秒锚定；0 位置点始终存在。
+     */
+    tempoMap: import("../../utils/tempoMap").TempoMap | null;
+    /** Tempo Map 标尺行可见性（视图菜单开关，默认开启）。 */
+    tempoMapVisible: boolean;
     /** 音高吸附 */
     pitchSnapEnabled: boolean;
     pitchSnapUnit: PitchSnapUnit;
@@ -192,6 +365,8 @@ export interface SessionState {
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */
     paramEditorSeekPlayheadEnabled: boolean;
+    /** 允许时间轴上的点击操作自动切换当前轨道 */
+    paramEditorTimelineClickSelectTrackEnabled: boolean;
     /** 剪贴板预览（在参数编辑器选区内显示剪贴板曲线预览） */
     showClipboardPreview: boolean;
     /** 参数线附近显示参数值浮窗 */
@@ -297,6 +472,8 @@ export interface SessionState {
         useCustomScale: boolean;
         customScale: CustomScalePreset | null;
         beatsPerBar: number;
+        /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+        timeSignatureDenominator: number;
         gridSize: GridSize;
         stretchAlgorithmOverride: StretchAlgorithmOption | null;
         hifiganMelStretchOverride: boolean | null;
@@ -768,7 +945,8 @@ function applyTimelineState(
 
     state.selectedTrackId = timeline.selected_track_id;
     state.selectedClipId = timeline.selected_clip_id;
-    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 300);
+    // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+    state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 960);
     state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
     state.projectSec = Math.max(4, Number(timeline.project_sec ?? state.projectSec));
     state.disabledGroupIds = Array.isArray(timeline.disabled_group_ids)
@@ -790,6 +968,7 @@ function applyTimelineState(
                   notes?: number[];
               } | null;
               beats_per_bar?: number;
+              time_signature_denominator?: number;
               grid_size?: string;
               stretch_algorithm_override?: StretchAlgorithmOption | null;
               hifigan_mel_stretch_override?: boolean | null;
@@ -805,6 +984,11 @@ function applyTimelineState(
             1,
             32,
         );
+        const nextTimeSignatureDenominator = (
+            TEMPO_DENOMINATORS as readonly number[]
+        ).includes(Number(project.time_signature_denominator))
+            ? Number(project.time_signature_denominator)
+            : clampDenominator(state.project.timeSignatureDenominator);
         const nextGridSizeRaw = String(project.grid_size ?? state.project.gridSize);
         const nextGridSize = VALID_GRID_SIZES.has(nextGridSizeRaw as GridSize)
             ? (nextGridSizeRaw as GridSize)
@@ -825,6 +1009,7 @@ function applyTimelineState(
                 ? sanitizeCustomScalePreset(project.custom_scale)
                 : null,
             beatsPerBar: nextBeatsPerBar,
+            timeSignatureDenominator: nextTimeSignatureDenominator,
             gridSize: nextGridSize,
             stretchAlgorithmOverride:
                 project.stretch_algorithm_override === undefined
@@ -837,6 +1022,33 @@ function applyTimelineState(
         };
         state.beats = nextBeatsPerBar;
         state.grid = nextGridSize;
+    }
+
+    // Tempo Map（后端载荷始终带 tempo_map 字段；旧后端无此字段时保持现值）。
+    // 在工程元数据之后解析：初始点缺失时用工程音阶物化（初始点即工程基准记录）。
+    const rawTempoMap = (timeline as unknown as { tempo_map?: unknown }).tempo_map;
+    if (rawTempoMap !== undefined) {
+        const projectScale: ScaleLike | null =
+            state.project.useCustomScale && state.project.customScale
+                ? state.project.customScale.notes
+                : state.project.baseScale;
+        state.tempoMap = fromBackendTempoMap(rawTempoMap, state.bpm, state.beats || 4, {
+            projectScale: projectScale ?? undefined,
+            projectScaleName: state.project.useCustomScale
+                ? (state.project.customScale?.name ?? undefined)
+                : undefined,
+            projectDenominator: state.project.timeSignatureDenominator,
+        });
+        if (state.tempoMap) {
+            // 0 位置点与工程基准 BPM/拍号保持一致（后端同步保证）。
+            const first = state.tempoMap.points[0];
+            state.bpm = clamp(first.bpm, 10, 960);
+            const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+            state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+            state.project.timeSignatureDenominator = clampDenominator(
+                firstSig.denominator,
+            );
+        }
     }
 
     const availableClipIds = new Set(state.clips.map((clip) => clip.id));
@@ -961,9 +1173,24 @@ const initialState: SessionState = {
     beats: 4,
     projectSec: 30, // 默认 30 秒工程边界
     grid: "1/4",
+    primaryTimeUnit: DEFAULT_PRIMARY_TIME_UNIT,
+    secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
+    rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
+    showPlayheadTimeInTrackHeader: true,
+    paramEditorSyncTimeline: false,
 
     autoCrossfadeEnabled: true,
-    gridSnapEnabled: true,
+    splitTransitionEnabled: true,
+    splitTransitionMode: "overlap",
+    splitTransitionDurationUnit: "seconds",
+    splitTransitionDurationSec: 0.01,
+    splitTransitionDurationPercent: 1,
+    splitTransitionCurve: "sine" as FadeCurveType,
+    splitTransitionOverlapCrossfade: "auto",
+    snapEnabled: true,
+    timelineSnap: createDefaultTimelineSnapSettings(),
+    tempoMap: null,
+    tempoMapVisible: true,
     pitchSnapEnabled: false,
     pitchSnapUnit: "semitone",
     pitchSnapScale: "C",
@@ -974,6 +1201,7 @@ const initialState: SessionState = {
     ignoreGrouping: false,
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
+    paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
     selectDragDirection: "y-only" as DragDirection,
@@ -1064,6 +1292,7 @@ const initialState: SessionState = {
         useCustomScale: false,
         customScale: null,
         beatsPerBar: 4,
+        timeSignatureDenominator: 4,
         gridSize: "1/4",
         stretchAlgorithmOverride: null,
         hifiganMelStretchOverride: null,
@@ -1082,6 +1311,8 @@ export {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromDialog,
     openVocalShifterFromPath,
     openReaperFromDialog,
@@ -1112,6 +1343,7 @@ export {
     fetchSelectedTrackSummary,
     addClipOnTrack,
     createClipsRemote,
+    pasteTimelineClipboardRemote,
     removeClipRemote,
     removeClipsRemote,
     moveClipRemote,
@@ -1217,7 +1449,8 @@ const sessionSlice = createSlice({
             state.selectedPointId = null;
         },
         setBpm(state, action: PayloadAction<number>) {
-            state.bpm = clamp(action.payload, 10, 300);
+            // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+            state.bpm = clamp(action.payload, 10, 960);
         },
         setBeats(state, action: PayloadAction<number>) {
             state.beats = clamp(action.payload, 1, 32);
@@ -1225,11 +1458,86 @@ const sessionSlice = createSlice({
         setGrid(state, action: PayloadAction<GridSize>) {
             state.grid = action.payload;
         },
+        setPrimaryTimeUnit(state, action: PayloadAction<TimeUnit>) {
+            if (VALID_TIME_UNITS.has(action.payload)) {
+                state.primaryTimeUnit = action.payload;
+            }
+        },
+        setSecondaryTimeUnit(state, action: PayloadAction<TimeUnitChoice>) {
+            if (action.payload === "none" || VALID_TIME_UNITS.has(action.payload)) {
+                state.secondaryTimeUnit = action.payload;
+            }
+        },
+        setRulerLabelSpacingPx(state, action: PayloadAction<number>) {
+            state.rulerLabelSpacingPx = Math.max(
+                40,
+                Math.min(320, Math.round(Number(action.payload) || 110)),
+            );
+        },
+        setShowPlayheadTimeInTrackHeader(state, action: PayloadAction<boolean>) {
+            state.showPlayheadTimeInTrackHeader = Boolean(action.payload);
+        },
+        setParamEditorSyncTimeline(state, action: PayloadAction<boolean>) {
+            state.paramEditorSyncTimeline = Boolean(action.payload);
+        },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
         },
-        toggleGridSnap(state) {
-            state.gridSnapEnabled = !state.gridSnapEnabled;
+        toggleSplitTransition(state) {
+            state.splitTransitionEnabled = !state.splitTransitionEnabled;
+        },
+        setSplitTransitionMode(
+            state,
+            action: PayloadAction<"fade" | "overlap">,
+        ) {
+            state.splitTransitionMode = action.payload;
+        },
+        setSplitTransitionDurationUnit(
+            state,
+            action: PayloadAction<"seconds" | "percent">,
+        ) {
+            state.splitTransitionDurationUnit = action.payload;
+        },
+        setSplitTransitionDurationSec(state, action: PayloadAction<number>) {
+            state.splitTransitionDurationSec = clamp(
+                Number(action.payload) || 0.01,
+                0.001,
+                10,
+            );
+        },
+        setSplitTransitionDurationPercent(state, action: PayloadAction<number>) {
+            state.splitTransitionDurationPercent = clamp(
+                Number(action.payload) || 1,
+                0.01,
+                100,
+            );
+        },
+        setSplitTransitionCurve(
+            state,
+            action: PayloadAction<FadeCurveType>,
+        ) {
+            state.splitTransitionCurve = action.payload;
+        },
+        setSplitTransitionOverlapCrossfade(
+            state,
+            action: PayloadAction<"auto" | "always">,
+        ) {
+            state.splitTransitionOverlapCrossfade = action.payload;
+        },
+        toggleSnap(state) {
+            const next = !state.timelineSnap.enabled;
+            state.timelineSnap.enabled = next;
+            state.snapEnabled = next;
+        },
+        setTimelineSnapSettings(
+            state,
+            action: PayloadAction<Partial<TimelineSnapSettings>>,
+        ) {
+            state.timelineSnap = normalizeTimelineSnapSettings(
+                state.timelineSnap,
+                action.payload,
+            );
+            state.snapEnabled = state.timelineSnap.enabled;
         },
         togglePitchSnap(state) {
             state.pitchSnapEnabled = !state.pitchSnapEnabled;
@@ -1248,6 +1556,35 @@ const sessionSlice = createSlice({
         },
         setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
+        },
+        setTempoMap(state, action: PayloadAction<TempoMap | null>) {
+            const projectScale: ScaleLike | null =
+                state.project.useCustomScale && state.project.customScale
+                    ? state.project.customScale.notes
+                    : state.project.baseScale;
+            state.tempoMap = normalizeTempoMap(action.payload, state.bpm, state.beats || 4, {
+                projectScale: projectScale ?? undefined,
+                projectScaleName: state.project.useCustomScale
+                    ? (state.project.customScale?.name ?? undefined)
+                    : undefined,
+                projectDenominator: state.project.timeSignatureDenominator,
+            });
+            // 保持工程基准值（bpm / 拍号）与 0 位置点一致，删除 Tempo Map 后回退一致。
+            if (state.tempoMap) {
+                const first = state.tempoMap.points[0];
+                state.bpm = clamp(first.bpm, 10, 960);
+                const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
+                state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
+                state.project.timeSignatureDenominator = clampDenominator(
+                    firstSig.denominator,
+                );
+            }
+        },
+        setTempoMapVisible(state, action: PayloadAction<boolean>) {
+            state.tempoMapVisible = action.payload;
+        },
+        toggleTempoMapVisible(state) {
+            state.tempoMapVisible = !state.tempoMapVisible;
         },
         upsertCustomScalePreset(state, action: PayloadAction<CustomScalePreset>) {
             const incoming = sanitizeCustomScalePreset(action.payload);
@@ -1338,6 +1675,10 @@ const sessionSlice = createSlice({
         },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
+        },
+        toggleParamEditorTimelineClickSelectTrack(state) {
+            state.paramEditorTimelineClickSelectTrackEnabled =
+                !state.paramEditorTimelineClickSelectTrackEnabled;
         },
         toggleClipboardPreview(state) {
             state.showClipboardPreview = !state.showClipboardPreview;
@@ -1830,7 +2171,75 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
-                state.gridSnapEnabled = s.gridSnap;
+                state.splitTransitionEnabled = Boolean(
+                    s.splitTransitionEnabled ?? true,
+                );
+                state.splitTransitionMode =
+                    s.splitTransitionMode === "fade" ? "fade" : "overlap";
+                state.splitTransitionDurationUnit =
+                    s.splitTransitionDurationUnit === "percent"
+                        ? "percent"
+                        : "seconds";
+                const splitDuration = Number(s.splitTransitionDurationSec);
+                if (Number.isFinite(splitDuration)) {
+                    state.splitTransitionDurationSec = clamp(splitDuration, 0.001, 10);
+                }
+                const splitPercent = Number(s.splitTransitionDurationPercent);
+                if (Number.isFinite(splitPercent)) {
+                    state.splitTransitionDurationPercent = clamp(splitPercent, 0.01, 100);
+                }
+                const splitCurve = s.splitTransitionCurve as string;
+                if (
+                    ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(
+                        splitCurve,
+                    )
+                ) {
+                    state.splitTransitionCurve = splitCurve as FadeCurveType;
+                }
+                state.splitTransitionOverlapCrossfade =
+                    s.splitTransitionOverlapCrossfade === "always"
+                        ? "always"
+                        : "auto";
+                const loadedSnapEnabled =
+                    s.snapEnabled ?? s.gridSnap ?? true;
+                state.snapEnabled = loadedSnapEnabled;
+                if (s.timelineSnap && typeof s.timelineSnap === "object") {
+                    state.timelineSnap = normalizeTimelineSnapSettings(
+                        createDefaultTimelineSnapSettings(),
+                        s.timelineSnap as Partial<TimelineSnapSettings>,
+                    );
+                    state.timelineSnap.enabled = Boolean(loadedSnapEnabled);
+                    state.snapEnabled = state.timelineSnap.enabled;
+                }
+                if (s.tempoMapVisible != null) {
+                    state.tempoMapVisible = Boolean(s.tempoMapVisible);
+                }
+                const loadedPrimaryUnit = s.primaryTimeUnit as unknown;
+                if (VALID_TIME_UNITS.has(loadedPrimaryUnit as TimeUnit)) {
+                    state.primaryTimeUnit = loadedPrimaryUnit as TimeUnit;
+                }
+                const loadedSecondaryUnit = s.secondaryTimeUnit as unknown;
+                if (
+                    loadedSecondaryUnit === "none" ||
+                    VALID_TIME_UNITS.has(loadedSecondaryUnit as TimeUnit)
+                ) {
+                    state.secondaryTimeUnit = loadedSecondaryUnit as TimeUnitChoice;
+                }
+                const loadedSpacing = Number(s.rulerLabelSpacingPx);
+                if (Number.isFinite(loadedSpacing)) {
+                    state.rulerLabelSpacingPx = Math.max(
+                        40,
+                        Math.min(320, Math.round(loadedSpacing)),
+                    );
+                }
+                if (s.showPlayheadTimeInTrackHeader != null) {
+                    state.showPlayheadTimeInTrackHeader = Boolean(
+                        s.showPlayheadTimeInTrackHeader,
+                    );
+                }
+                if (s.paramEditorSyncTimeline != null) {
+                    state.paramEditorSyncTimeline = Boolean(s.paramEditorSyncTimeline);
+                }
                 state.pitchSnapEnabled = s.pitchSnap;
                 // Validate pitchSnapUnit
                 const validUnits: PitchSnapUnit[] = ["semitone", "scale"];
@@ -1839,45 +2248,50 @@ const sessionSlice = createSlice({
                     : "semitone";
                 // Validate pitchSnapScale
                 state.pitchSnapScale = (SCALE_KEYS as readonly string[]).includes(
-                    (s as any).pitchSnapScale,
+                    s.pitchSnapScale ?? "C",
                 )
-                    ? ((s as any).pitchSnapScale as typeof state.pitchSnapScale)
+                    ? ((s.pitchSnapScale ?? "C") as typeof state.pitchSnapScale)
                     : "C";
                 // Load pitch snap tolerance (cents) if present in saved settings
-                if ((s as any).pitchSnapToleranceCents != null) {
+                if (s.pitchSnapToleranceCents != null) {
                     state.pitchSnapToleranceCents = clamp(
-                        Number((s as any).pitchSnapToleranceCents) || 0,
+                        Number(s.pitchSnapToleranceCents) || 0,
                         0,
                         1000,
                     );
                 }
                 state.playheadZoomEnabled = s.playheadZoom;
                 if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
-                if ((s as any).paramEditorSeekPlayhead != null)
+                if (s.paramEditorSeekPlayhead != null)
                     state.paramEditorSeekPlayheadEnabled = Boolean(
-                        (s as any).paramEditorSeekPlayhead,
+                        s.paramEditorSeekPlayhead,
                     );
+                if (s.paramEditorTimelineClickSelectTrack != null) {
+                    state.paramEditorTimelineClickSelectTrackEnabled = Boolean(
+                        s.paramEditorTimelineClickSelectTrack,
+                    );
+                }
                 if (s.showClipboardPreview != null)
                     state.showClipboardPreview = s.showClipboardPreview;
-                if ((s as any).showParamValuePopup != null)
-                    state.showParamValuePopup = Boolean((s as any).showParamValuePopup);
+                if (s.showParamValuePopup != null)
+                    state.showParamValuePopup = Boolean(s.showParamValuePopup);
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
-                if ((s as any).ignoreGrouping != null)
-                    state.ignoreGrouping = Boolean((s as any).ignoreGrouping);
+                if (s.ignoreGrouping != null)
+                    state.ignoreGrouping = Boolean(s.ignoreGrouping);
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
-                if ((s as any).quickSearchAutoNormalize != null)
+                if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(
-                        (s as any).quickSearchAutoNormalize,
+                        s.quickSearchAutoNormalize,
                     );
-                if (Array.isArray((s as any).visibleReferenceRootTrackIds)) {
-                    state.visibleReferenceRootTrackIds = (s as any).visibleReferenceRootTrackIds
+                if (Array.isArray(s.visibleReferenceRootTrackIds)) {
+                    state.visibleReferenceRootTrackIds = s.visibleReferenceRootTrackIds
                         .filter((id: unknown): id is string => typeof id === "string")
                         .map((id: string) => id.trim())
                         .filter((id: string) => id.length > 0);
                 }
-                const defaultStretchAlgorithm = (s as any).defaultStretchAlgorithm;
+                const defaultStretchAlgorithm = s.defaultStretchAlgorithm;
                 if (
                     defaultStretchAlgorithm != null &&
                     ["linear", "signalsmith", "soundtouch"].includes(defaultStretchAlgorithm)
@@ -1885,8 +2299,8 @@ const sessionSlice = createSlice({
                     state.defaultStretchAlgorithm =
                         defaultStretchAlgorithm as StretchAlgorithmOption;
                 }
-                if ((s as any).defaultHifiganMelStretch != null) {
-                    state.defaultHifiganMelStretch = Boolean((s as any).defaultHifiganMelStretch);
+                if (s.defaultHifiganMelStretch != null) {
+                    state.defaultHifiganMelStretch = Boolean(s.defaultHifiganMelStretch);
                 }
                 if (s.ortEp != null) {
                     const normalized = String(s.ortEp).toLowerCase();
@@ -1895,31 +2309,31 @@ const sessionSlice = createSlice({
                 if (s.gpuDeviceId != null) {
                     state.gpuDeviceId = Number(s.gpuDeviceId);
                 }
-                if ((s as any).ortDeviceId !== undefined) {
-                    const val = (s as any).ortDeviceId;
+                if (s.ortDeviceId !== undefined) {
+                    const val = s.ortDeviceId;
                     state.ortDeviceId = val == null ? null : Number(val);
                 }
-                if ((s as any).autoBackgroundRender != null) {
-                    state.autoBackgroundRender = Boolean((s as any).autoBackgroundRender);
+                if (s.autoBackgroundRender != null) {
+                    state.autoBackgroundRender = Boolean(s.autoBackgroundRender);
                 }
-                const selectDir = (s as any).selectDragDirection;
+                const selectDir = s.selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
                     state.selectDragDirection = selectDir as DragDirection;
                 }
-                const drawDir = (s as any).drawDragDirection;
+                const drawDir = s.drawDragDirection;
                 if (drawDir != null && ["free", "x-only"].includes(drawDir)) {
                     state.drawDragDirection = drawDir as DrawDragDirection;
                 }
-                const lineVibratoDir = (s as any).lineVibratoDragDirection;
+                const lineVibratoDir = s.lineVibratoDragDirection;
                 if (lineVibratoDir != null && ["free", "x-only"].includes(lineVibratoDir)) {
                     state.lineVibratoDragDirection = lineVibratoDir as DrawDragDirection;
                 }
-                const smoothness = (s as any).smoothnessPercent ?? (s as any).edgeSmoothnessPercent;
+                const smoothness = s.smoothnessPercent ?? s.edgeSmoothnessPercent;
                 if (smoothness != null) {
                     state.edgeSmoothnessPercent = clamp(Number(smoothness) || 0, 0, 100);
                 }
-                if (Array.isArray((s as any).customScalePresets)) {
-                    state.customScalePresets = (s as any).customScalePresets.map(
+                if (Array.isArray(s.customScalePresets)) {
+                    state.customScalePresets = s.customScalePresets.map(
                         (preset: unknown) =>
                             sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
                     );
@@ -2538,6 +2952,62 @@ const sessionSlice = createSlice({
                 state.status = "Open failed";
             })
 
+            .addCase(pickProjectToImport.pending, (state) =>
+                setPending(state, "Picking project to import..."),
+            )
+            .addCase(pickProjectToImport.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as
+                    | { ok: true; canceled: true }
+                    | { ok: true; canceled: false; path: string };
+                if (!payload || (payload as { canceled?: boolean }).canceled) {
+                    state.status = "Import canceled";
+                }
+            })
+            .addCase(pickProjectToImport.rejected, (state, action) => {
+                state.busy = false;
+                state.error = action.error?.message ?? "Import project failed";
+                state.status = "Import failed";
+            })
+
+            .addCase(importProjectFromPath.pending, (state) =>
+                setPending(state, "Importing project..."),
+            )
+            .addCase(importProjectFromPath.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as
+                    | { ok: true; canceled: true }
+                    | {
+                          ok: true;
+                          canceled: false;
+                          timeline: TimelineState;
+                          newClipIds?: string[];
+                          sourceProject?: string;
+                      };
+                if (!payload || payload.canceled) {
+                    state.status = "Import canceled";
+                    return;
+                }
+                applyTimelineState(state, payload.timeline, {
+                    force: true,
+                    preserveProjectNotes: false,
+                });
+                const newClipIds = payload.newClipIds;
+                if (newClipIds && newClipIds.length > 0) {
+                    state.multiSelectedClipIds = newClipIds;
+                    state.selectedClipId = newClipIds[0] ?? null;
+                }
+                state.status = "Project imported";
+            })
+            .addCase(importProjectFromPath.rejected, (state, action) => {
+                state.busy = false;
+                state.error =
+                    (action.payload as string) ??
+                    action.error?.message ??
+                    "Import project failed";
+                state.status = "Import failed";
+            })
+
             .addCase(openVocalShifterFromDialog.pending, (state) =>
                 setPending(state, "Importing VocalShifter project..."),
             )
@@ -2804,6 +3274,32 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 后端会把工程音阶同步到 Tempo Map 初始点（初始点即工程基准记录）：
+                // 前端镜像该同步，避免 effectiveScaleAtSec 等 UI 计算使用过期音阶
+                // （钢琴卷帘高亮、音高吸附会与音频渲染不一致）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
+                }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectCustomScaleRemote.fulfilled, (state, action) => {
@@ -2831,6 +3327,31 @@ const sessionSlice = createSlice({
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
+                // 与 setProjectBaseScaleRemote 一致：镜像后端对 Tempo Map 初始点
+                // 音阶的同步（初始点即工程基准记录）。
+                if (state.tempoMap && state.tempoMap.points.length > 0) {
+                    const projectScale: ScaleLike | null =
+                        state.project.useCustomScale && state.project.customScale
+                            ? state.project.customScale.notes
+                            : state.project.baseScale;
+                    state.tempoMap = {
+                        ...state.tempoMap,
+                        points: [
+                            {
+                                ...state.tempoMap.points[0],
+                                scale: scaleLikeToScaleData(
+                                    projectScale ?? undefined,
+                                    state.project.useCustomScale
+                                        ? (state.project.customScale?.name ?? undefined)
+                                        : undefined,
+                                ),
+                            },
+                            ...state.tempoMap.points.slice(1),
+                        ],
+                    };
+                }
+                // 工程音阶变化会影响子轨道“度数差”等依赖音阶的渲染，触发参数曲线/渲染缓存失效。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
             })
 
             .addCase(setProjectTimelineSettingsRemote.fulfilled, (state, action) => {
@@ -2838,6 +3359,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     project?: {
                         beats_per_bar?: number;
+                        time_signature_denominator?: number;
                         grid_size?: string;
                         dirty?: boolean;
                     };
@@ -2846,6 +3368,11 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const beats = clamp(Number(payload.project?.beats_per_bar ?? state.beats), 1, 32);
+                const denominator = (
+                    TEMPO_DENOMINATORS as readonly number[]
+                ).includes(Number(payload.project?.time_signature_denominator))
+                    ? Number(payload.project?.time_signature_denominator)
+                    : clampDenominator(state.project.timeSignatureDenominator);
                 const gridRaw = String(payload.project?.grid_size ?? state.grid);
                 const valid = VALID_GRID_SIZES.has(gridRaw as GridSize);
                 const grid = (valid ? gridRaw : "1/4") as GridSize;
@@ -2853,11 +3380,31 @@ const sessionSlice = createSlice({
                 state.beats = beats;
                 state.grid = grid;
                 state.project.beatsPerBar = beats;
+                state.project.timeSignatureDenominator = denominator;
                 state.project.gridSize = grid;
                 if (typeof payload.project?.dirty === "boolean") {
                     state.project.dirty = payload.project.dirty;
                 }
             })
+
+            .addCase(setTempoMapRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                } & TimelineState;
+                if (!payload.ok || !payload.tracks || !payload.clips) {
+                    return;
+                }
+                // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
+                applyTimelineState(state, payload, { force: true });
+                // 显式触发后台预渲染：Tempo Map 音阶变化会影响子轨道“度数差”等
+                // 依赖音阶的渲染。applyTimelineState 已使 paramsEpoch 递增，
+                // App 层据此调用 startBackgroundRender（与工程音阶变更路径
+                // setProjectBaseScaleRemote.fulfilled 保持一致）；此处再显式递增，
+                // 确保该触发不依赖 applyTimelineState 的内部实现细节。
+                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                state.status = "Tempo map updated";
+            })
+            .addCase(setTempoMapRemote.rejected, setRejected)
 
             .addCase(setProjectStretchSettingsRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
@@ -2914,6 +3461,36 @@ const sessionSlice = createSlice({
                 }
                 applyTimelineState(state, payload, { force: true });
                 state.status = "Clips created";
+            })
+
+            .addCase(pasteTimelineClipboardRemote.pending, (state) =>
+                setPending(state, "Pasting timeline clipboard..."),
+            )
+            .addCase(pasteTimelineClipboardRemote.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    timeline?: TimelineState;
+                    newClipIds?: string[];
+                };
+                if (!payload?.ok || !payload.timeline?.tracks) {
+                    state.status = "Paste timeline clipboard failed";
+                    return;
+                }
+                applyTimelineState(state, payload.timeline, { force: true });
+                if (payload.newClipIds && payload.newClipIds.length > 0) {
+                    state.multiSelectedClipIds = payload.newClipIds;
+                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                }
+                state.status = "Timeline clipboard pasted";
+            })
+            .addCase(pasteTimelineClipboardRemote.rejected, (state, action) => {
+                state.busy = false;
+                state.error =
+                    (action.payload as string) ??
+                    action.error?.message ??
+                    "Paste timeline clipboard failed";
+                state.status = "Paste timeline clipboard failed";
             })
 
             .addCase(duplicateClipsBulkRemote.fulfilled, (state, action) => {
@@ -3186,7 +3763,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 300);
+                // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
                 if (payload.tracks && payload.clips) {
                     applyTimelineState(state, payload as TimelineState, { force: true });
                 }
@@ -3313,8 +3891,24 @@ export const {
     setBpm,
     setBeats,
     setGrid,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
+    setRulerLabelSpacingPx,
+    setShowPlayheadTimeInTrackHeader,
+    setParamEditorSyncTimeline,
     toggleAutoCrossfade,
-    toggleGridSnap,
+    toggleSplitTransition,
+    setSplitTransitionMode,
+    setSplitTransitionDurationUnit,
+    setSplitTransitionDurationSec,
+    setSplitTransitionDurationPercent,
+    setSplitTransitionCurve,
+    setSplitTransitionOverlapCrossfade,
+    toggleSnap,
+    setTimelineSnapSettings,
+    setTempoMap,
+    setTempoMapVisible,
+    toggleTempoMapVisible,
     togglePitchSnap,
     setPitchSnapUnit,
     setPitchSnapScale,
@@ -3322,6 +3916,7 @@ export const {
     toggleAutoScroll,
     toggleIgnoreGrouping,
     toggleParamEditorSeekPlayhead,
+    toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
     cycleDragDirection,

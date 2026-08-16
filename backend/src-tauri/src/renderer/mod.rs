@@ -8,6 +8,7 @@
 //! 时间拉伸 + 全部声码器参数曲线。
 
 pub(crate) mod chain;
+pub(crate) mod common_params;
 pub(crate) mod hifigan;
 mod traits;
 mod utils;

@@ -55,11 +55,20 @@ export const projectApi = {
             customScale,
         ),
 
-    setProjectTimelineSettings: (beatsPerBar: number, gridSize: string) =>
+    setProjectTimelineSettings: (
+        beatsPerBar: number,
+        timeSignatureDenominator: number,
+        gridSize: string,
+    ) =>
         invoke<{
             ok: boolean;
-            project?: { beats_per_bar?: number; grid_size?: string; dirty?: boolean };
-        }>("set_project_timeline_settings", beatsPerBar, gridSize),
+            project?: {
+                beats_per_bar?: number;
+                time_signature_denominator?: number;
+                grid_size?: string;
+                dirty?: boolean;
+            };
+        }>("set_project_timeline_settings", beatsPerBar, timeSignatureDenominator, gridSize),
 
     setProjectStretchSettings: (payload: {
         stretchAlgorithmOverride?: StretchAlgorithmOption | null;
@@ -119,5 +128,30 @@ export const projectApi = {
         invoke<TimelineResult & { error?: string; skipped_files?: string[] }>(
             "import_reaper_project",
             rppPath,
+        ),
+
+    importProjectDialog: () =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("import_project_dialog"),
+
+    importProject: (payload: {
+        projectPath: string;
+        placeAtPlayhead?: boolean;
+        importTempoMap?: boolean;
+    }) =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                empty?: boolean;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+                tempoMapImported?: boolean;
+                tempoMapSkipped?: boolean;
+            }
+        >(
+            "import_project",
+            payload.projectPath,
+            payload.placeAtPlayhead,
+            payload.importTempoMap,
         ),
 };

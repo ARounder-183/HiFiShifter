@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -19,9 +19,24 @@ import {
     setDefaultStretchAlgorithm,
     setOrtEp,
     setOrtDeviceId,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
+    toggleClipboardPreview,
+    toggleParamValuePopup,
+    toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
+import type { TimeUnit } from "../../features/session/sessionTypes";
+import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
+import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
+import type { ScaleLike } from "../../utils/musicalScales";
+import {
+    getPianoRollSelection,
+    subscribePianoRollSelection,
+} from "../../utils/pianoRollSelectionBus";
 
 
 
@@ -67,8 +82,22 @@ interface MenuBarProps {
     onOpenRecentProject: (projectPath: string) => void;
     onExit: () => void;
     onImportMidiFromMenu: () => void;
+    onImportProject: () => void;
     autoBackupSettings: AutoBackupSettings;
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
+}
+
+function timeUnitLabelKey(unit: TimeUnit): string {
+    switch (unit) {
+        case "barBeats":
+            return "time_unit_bar_beats";
+        case "barDivisions":
+            return "time_unit_bar_divisions";
+        case "seconds":
+            return "time_unit_seconds";
+        case "clock":
+            return "time_unit_clock";
+    }
 }
 
 export const MenuBar: React.FC<MenuBarProps> = ({
@@ -77,6 +106,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     onOpenRecentProject,
     onExit,
     onImportMidiFromMenu,
+    onImportProject,
     autoBackupSettings,
     onAutoBackupSettingsSaved,
 }) => {
@@ -88,6 +118,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
@@ -169,6 +201,45 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         s.project.useCustomScale && s.project.customScale
             ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
             : `${tAny("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
+
+    // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
+    // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
+    // 无选区时按整个工程判断（存在音阶变化点即提示）。
+    const [selectionVersion, setSelectionVersion] = useState(0);
+    useEffect(
+        () =>
+            subscribePianoRollSelection(() => {
+                setSelectionVersion((v) => v + 1);
+            }),
+        [],
+    );
+    const tempoMapScaleHint = useMemo(() => {
+        if (!s.tempoMap) return null;
+        const sel = getPianoRollSelection();
+        const startSec = sel ? (sel.startFrame * sel.framePeriodMs) / 1000 : 0;
+        const endSec = sel
+            ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
+            : Math.max(1, s.projectSec);
+        const projectScale: ScaleLike | null =
+            s.project.useCustomScale && s.project.customScale
+                ? s.project.customScale.notes
+                : s.project.baseScale;
+        // 仅当范围内存在“与工程音阶不同”的音阶变化（或管辖范围起点的
+        // 变化与工程音阶不同）时才提示 —— 变化点音阶等于工程音阶时
+        // 选区并未真正受到影响。
+        const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
+        if (changes.length === 0) return null;
+        if (
+            changes.every((c) => scaleLikeEquals(c.scale, projectScale))
+        ) {
+            return null;
+        }
+        return tAny("project_scale_tempo_map_hint");
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.tempoMap, s.projectSec, s.project, tAny, selectionVersion]);
+    const projectScaleLabelWithHint = tempoMapScaleHint
+        ? `${projectScaleLabel} ${tempoMapScaleHint}`
+        : projectScaleLabel;
     const effectiveProjectStretchAlgorithm =
         s.project.stretchAlgorithmOverride ?? s.defaultStretchAlgorithm;
     const effectiveProjectHifiganMelStretch =
@@ -237,8 +308,37 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return formatKeybinding(kb, "");
     }
 
-    /** 派发编辑操作事件给 PianoRollPanel */
+    /** 派发编辑操作事件给 PianoRollPanel / TimelinePanel */
     const dispatchEditOp = useCallback((op: string, data?: Record<string, unknown>) => {
+        const active = document.activeElement as HTMLElement | null;
+        const inPianoRoll =
+            active?.hasAttribute("data-piano-roll-scroller") ||
+            active?.closest?.("[data-piano-roll-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
+        const inTrackHeader =
+            Boolean(active?.closest?.("[data-track-list-panel]")) ||
+            document.body.getAttribute("data-hs-focus-window") === "trackHeader";
+        const inTimeline =
+            active?.hasAttribute("data-timeline-scroller") ||
+            active?.closest?.("[data-timeline-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "timeline";
+
+        if (
+            (op === "copy" ||
+                op === "cut" ||
+                op === "paste" ||
+                op === "pasteTracks" ||
+                op === "copyReaper") &&
+            inTimeline &&
+            !inPianoRoll &&
+            !inTrackHeader
+        ) {
+            window.dispatchEvent(
+                new CustomEvent("hifi:timelineEditOp", { detail: { op, ...data } }),
+            );
+            return;
+        }
+
         window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op, ...data } }));
     }, []);
 
@@ -352,6 +452,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {t("menu_import_midi")}{" "}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={onImportProject}>
+                        {t("menu_import_hifishifter")}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => void dispatch(openReaperFromDialog())}>
                         {t("menu_import_reaper")}
                     </DropdownMenu.Item>
@@ -394,101 +497,40 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
-                        {tAny("menu_copy")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("pianoRoll.copy")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
                         {tAny("menu_cut")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("clip.cut")}
                         </div>
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
+                        {tAny("menu_copy")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("pianoRoll.copy")}
+                        </div>
+                    </DropdownMenu.Item>
+                    {/* 剪贴板：粘贴 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
                         {tAny("menu_paste")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.paste")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
-                        {tAny("menu_select_all")}{" "}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteTracks")}>
+                        {t("menu_paste_new_tracks")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.selectAll")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
-                        {tAny("menu_deselect")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.deselect")}
+                            {shortcutLabel("edit.pasteTracks")}
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("initialize")}>
-                        {tAny("menu_initialize")}
+                    {/* 外部剪贴板交换 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copyReaper")}>
+                        {t("menu_copy_reaper_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.initialize")}
+                            {shortcutLabel("edit.copyReaper")}
                         </div>
                     </DropdownMenu.Item>
-
-                    {isPitchParam && (
-                        <>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => setTransposeCentsOpen(true)}>
-                                {tAny("menu_transpose_cents")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeCents")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item onSelect={() => setTransposeDegreesOpen(true)}>
-                                {tAny("menu_transpose_degrees")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeDegrees")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
-                    <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
-                        {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.setPitch")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setAverageOpen(true)}>
-                        {tAny("menu_average")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.average")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setSmoothOpen(true)}>
-                        {tAny("menu_smooth")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.smooth")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setVibratoOpen(true)}>
-                        {tAny("menu_add_vibrato")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.addVibrato")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
-                        {tAny("menu_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.quantize")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
-                        {tAny("menu_mean_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.meanQuantize")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteReaper")}>
                         {t("menu_paste_reaper_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
@@ -499,6 +541,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("menu_paste_vocalshifter_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteVocalShifter")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 选择 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
+                        {tAny("menu_select_all")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.selectAll")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
+                        {tAny("menu_deselect")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.deselect")}
                         </div>
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
@@ -544,6 +600,93 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
                         onSelect={() => {
+                            dispatch(toggleClipboardPreview());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleParamValuePopup());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleTempoMapVisible());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.tempoMapVisible, tAny("menu_view_tempo_map"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+
+                    {/* Time Display */}
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {tAny("time_display")}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_primary")}:{" "}
+                                    {tAny(timeUnitLabelKey(s.primaryTimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNITS.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setPrimaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.primaryTimeUnit === unit,
+                                                tAny(timeUnitLabelKey(unit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_secondary")}:{" "}
+                                    {s.secondaryTimeUnit === "none"
+                                        ? tAny("time_unit_none")
+                                        : tAny(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNIT_CHOICES.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setSecondaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.secondaryTimeUnit === unit,
+                                                unit === "none"
+                                                    ? tAny("time_unit_none")
+                                                    : tAny(timeUnitLabelKey(unit as TimeUnit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item onSelect={() => setTimeDisplaySettingsOpen(true)}>
+                                {tAny("timeline_display_settings")}
+                            </DropdownMenu.Item>
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item
+                        onSelect={() => {
                             const nextMode = theme.mode === "dark" ? "light" : "dark";
                             theme.applySettings({
                                 mode: nextMode,
@@ -568,6 +711,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
+                        {tAny("snap_grid_settings_title")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tAny("stretch_project_override")}
@@ -880,6 +1027,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setAppearanceDialogOpen}
             />
 
+            <TimelineDisplaySettingsDialog
+                open={timeDisplaySettingsOpen}
+                onOpenChange={setTimeDisplaySettingsOpen}
+            />
+
+            <SnapGridSettingsDialog
+                open={snapSettingsOpen}
+                onOpenChange={setSnapSettingsOpen}
+            />
+
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
 
             <AutoBackupDialog
@@ -977,7 +1134,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setTransposeDegreesOpen}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(degrees, scaleValue, edgeSmoothnessPercent) =>
                     dispatchEditOp("transposeDegrees", {
@@ -1031,7 +1188,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("quantize", {
@@ -1051,7 +1208,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("meanQuantize", {

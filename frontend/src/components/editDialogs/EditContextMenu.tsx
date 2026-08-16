@@ -83,14 +83,16 @@ export function EditContextMenu({
     }, [x, y]);
 
     const itemClass =
-        "px-3 py-1 text-xs cursor-pointer hover:bg-[var(--accent-a4)] rounded select-none text-[var(--gray-12)]";
-    const sepClass = "h-px bg-[var(--gray-a5)] my-1";
+        "px-3 py-1.5 text-left w-full text-[12px] transition-colors cursor-pointer hover:bg-qt-button-hover select-none text-qt-text";
+    const sepClass = "my-1 border-t border-qt-border";
 
     return (
         <div
             ref={menuRef}
-            className="fixed z-[9999] min-w-[180px] rounded-md border border-[var(--gray-a6)] bg-[var(--color-panel-solid)] shadow-lg py-1"
+            data-hs-context-menu="1"
+            className="fixed z-[9999] min-w-[180px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
+            onPointerDown={(e) => e.stopPropagation()}
         >
             <div
                 className={itemClass}

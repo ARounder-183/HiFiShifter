@@ -83,6 +83,9 @@ pub struct ProjectFile {
     pub base_scale: String,
     #[serde(default = "default_beats_per_bar")]
     pub beats_per_bar: u32,
+    /// 工程基准拍号分母（v2 新增，旧工程反序列化时默认 4）。
+    #[serde(default = "default_time_signature_denominator")]
+    pub time_signature_denominator: u32,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
     #[serde(default)]
@@ -103,6 +106,7 @@ impl ProjectFile {
         timeline: TimelineState,
         base_scale: String,
         beats_per_bar: u32,
+        time_signature_denominator: u32,
         grid_size: String,
     ) -> Self {
         Self {
@@ -112,6 +116,7 @@ impl ProjectFile {
             timeline,
             base_scale,
             beats_per_bar,
+            time_signature_denominator,
             grid_size,
             use_custom_scale: false,
             custom_scale: None,
@@ -129,6 +134,10 @@ fn default_beats_per_bar() -> u32 {
     4
 }
 
+fn default_time_signature_denominator() -> u32 {
+    4
+}
+
 fn default_grid_size() -> String {
     "1/4".to_string()
 }
@@ -140,11 +149,17 @@ fn default_grid_size() -> String {
 /// 优先尝试 MessagePack 格式（v2），失败后 fallback 到 JSON（v1 兼容）。
 pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     // 先尝试 MessagePack（新格式）
-    if let Ok(pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+    if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+        pf.timeline.migrate_legacy_common_param_curves();
         return Ok(pf);
     }
     // fallback：JSON（兼容旧工程文件）
-    serde_json::from_slice(bytes).map_err(|e| format!("无法解析工程文件: {}", e))
+    serde_json::from_slice(bytes)
+        .map_err(|e| format!("无法解析工程文件: {}", e))
+        .map(|mut pf: ProjectFile| {
+            pf.timeline.migrate_legacy_common_param_curves();
+            pf
+        })
 }
 
 pub fn is_json_project_path(path: &Path) -> bool {

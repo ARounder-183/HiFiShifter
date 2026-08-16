@@ -43,7 +43,7 @@ fn sample_automation_curve(
     if !idx_f.is_finite() {
         return default_value;
     }
-    let i0 = idx_f.floor().max(0.0) as usize;
+    let i0 = (idx_f.floor().max(0.0) as usize).min(curve.len().saturating_sub(1));
     let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
     let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
     let a = curve.get(i0).copied().unwrap_or(default_value);
@@ -51,21 +51,56 @@ fn sample_automation_curve(
     a + (b - a) * frac
 }
 
-/// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade）。
+/// 线性平衡式声像：center 保持两声道均为 1.0，硬左/硬右时关闭对侧声道。
+#[inline]
+fn pan_gains(pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    if pan <= 0.0 {
+        (1.0, 1.0 + pan)
+    } else {
+        (1.0 - pan, 1.0)
+    }
+}
+
+/// 对一帧 PCM 应用共通音量/声像自动化（vslib 路径的曲线为 None，由处理器内部完成）。
+#[inline]
+fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f32, f32) {
+    let vol = sample_automation_curve(
+        clip.volume_curve.as_deref().map(|v| v.as_slice()),
+        abs_frame,
+        clip.src.sample_rate,
+        clip.volume_curve_frame_period_ms,
+        1.0,
+    );
+    let pan = sample_automation_curve(
+        clip.pan_curve.as_deref().map(|v| v.as_slice()),
+        abs_frame,
+        clip.src.sample_rate,
+        clip.pan_curve_frame_period_ms,
+        0.0,
+    );
+    let (left_gain, right_gain) = pan_gains(pan);
+    (l * vol * left_gain, r * vol * right_gain)
+}
+
+/// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
 /// 返回 None 表示该帧应静音（越界、leading silence 等）。
 #[inline]
 fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32, f32)> {
-    // 最高优先级：预渲染 PCM（有 pitch edit 时由后台线程渲染）
-    if let Some(ref rendered) = clip.rendered_pcm {
+    let abs_frame = clip.start_frame.saturating_add(local);
+    let raw = if let Some(ref rendered) = clip.rendered_pcm {
         let idx = (local as usize) * 2;
-        if idx + 1 < rendered.len() {
+        if idx + 1 >= rendered.len() {
+            // rendered_pcm 存在但越界时返回静音
+            None
+        } else {
             let mut left = rendered[idx];
             let mut right = rendered[idx + 1];
             if let Some(ref breath_noise) = clip.breath_noise_pcm {
                 if idx + 1 < breath_noise.len() {
                     let gain = sample_automation_curve(
                         clip.breath_curve.as_deref().map(|v| v.as_slice()),
-                        clip.start_frame.saturating_add(local),
+                        abs_frame,
                         clip.src.sample_rate,
                         clip.breath_curve_frame_period_ms,
                         1.0,
@@ -74,65 +109,56 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
                     right += breath_noise[idx + 1] * gain;
                 }
             }
-            // 应用 volume 曲线（不触发重渲染，实时乘到最终输出）
-            let vol = sample_automation_curve(
-                clip.volume_curve.as_deref().map(|v| v.as_slice()),
-                clip.start_frame.saturating_add(local),
-                clip.src.sample_rate,
-                clip.volume_curve_frame_period_ms,
-                1.0,
-            );
-            return Some((left * vol, right * vol));
-        }
-        // rendered_pcm 存在但越界时返回静音
-        return None;
-    }
-
-    // 若该 clip 需要合成（pitch edit）但尚未渲染完成，回退到源音频而非静音
-    // rendered_pcm=None 时才走到这里（有 rendered_pcm 已在上面 return）
-    if clip.needs_synthesis && clip.rendered_pcm.is_some() {
-        return None;
-    }
-
-    // 无需合成：直接回退到源 PCM（支持 playback_rate 采样）
-    let src_frame_f = local_adj * clip.playback_rate;
-    let src_frame = src_frame_f.round() as u64;
-    let range = clip.src_end_frame.saturating_sub(clip.src_start_frame);
-    if range == 0 {
-        return None;
-    }
-    let src_abs = if clip.reversed {
-        if src_frame >= range {
-            clip.src_end_frame
-        } else {
-            clip.src_end_frame
-                .saturating_sub(1)
-                .saturating_sub(src_frame)
+            Some((left, right))
         }
     } else {
-        src_frame.saturating_add(clip.src_start_frame)
-    };
-    if src_abs >= clip.src_end_frame {
-        if clip.repeat {
-            let src_off = src_frame % range;
-            let looped = if clip.reversed {
-                clip.src_end_frame.saturating_sub(1).saturating_sub(src_off)
+        // 若该 clip 需要合成（pitch edit）但尚未渲染完成，按调用约定渲染分支
+        // 已经返回；此处仅处理“无需合成，直接采样源 PCM”的路径。
+        let src_frame_f = local_adj * clip.playback_rate;
+        let src_frame = src_frame_f.round() as u64;
+        let range = clip.src_end_frame.saturating_sub(clip.src_start_frame);
+        if range == 0 {
+            return None;
+        }
+        let src_abs = if clip.reversed {
+            if src_frame >= range {
+                clip.src_end_frame
             } else {
-                clip.src_start_frame + src_off
-            };
-            let idx = (looped as usize) * 2;
+                clip.src_end_frame
+                    .saturating_sub(1)
+                    .saturating_sub(src_frame)
+            }
+        } else {
+            src_frame.saturating_add(clip.src_start_frame)
+        };
+        if src_abs >= clip.src_end_frame {
+            if clip.repeat {
+                let src_off = src_frame % range;
+                let looped = if clip.reversed {
+                    clip.src_end_frame.saturating_sub(1).saturating_sub(src_off)
+                } else {
+                    clip.src_start_frame + src_off
+                };
+                let idx = (looped as usize) * 2;
+                if idx + 1 < clip.src.pcm.len() {
+                    Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            let idx = (src_abs as usize) * 2;
             if idx + 1 < clip.src.pcm.len() {
-                return Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]));
+                Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+            } else {
+                None
             }
         }
-        return None;
-    }
-    let idx = (src_abs as usize) * 2;
-    if idx + 1 < clip.src.pcm.len() {
-        Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
-    } else {
-        None
-    }
+    };
+
+    raw.map(|(left, right)| apply_mix_automation(clip, abs_frame, left, right))
 }
 
 pub(crate) fn mix_snapshot_clips_into_scratch(

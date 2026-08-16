@@ -9,6 +9,7 @@
 //!
 //! 预设链构造：[`world_chain()`]、[`hifigan_chain()`]
 
+use super::common_params::{COMMON_MIX_PARAMS, PAN_PARAM, VOLUME_PARAM};
 use super::traits::{
     ClipProcessContext, ClipProcessor, ParamDescriptor, ProcessorCapabilities, RenderContext,
     Renderer,
@@ -16,7 +17,7 @@ use super::traits::{
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
 
-static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 5] = [
+static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 6] = [
     ParamDescriptor {
         id: "breath_enabled",
         display_name: "Breath",
@@ -59,17 +60,8 @@ static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 5] = [
             max_value: 500.0,
         },
     },
-    ParamDescriptor {
-        id: "hifigan_volume",
-        display_name: "Volume",
-        group: "NSF-HiFiGAN",
-        kind: super::traits::ParamKind::AutomationCurve {
-            unit: "x",
-            default_value: 1.0,
-            min_value: 0.0,
-            max_value: 2.0,
-        },
-    },
+    VOLUME_PARAM,
+    PAN_PARAM,
 ];
 
 // ─── StageContext ──────────────────────────────────────────────────────────────
@@ -159,6 +151,10 @@ impl ProcessingStage for WorldVocoderStage {
 
     fn display_name(&self) -> &str {
         "WORLD 声码器"
+    }
+
+    fn param_descriptors(&self) -> &'static [ParamDescriptor] {
+        &COMMON_MIX_PARAMS
     }
 
     fn process(&self, input_pcm: Vec<f32>, ctx: &StageContext<'_>) -> Result<Vec<f32>, String> {

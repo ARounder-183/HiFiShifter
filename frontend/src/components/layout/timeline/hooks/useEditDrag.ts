@@ -305,7 +305,13 @@ async function stretchTrackLinkedParams(
 }
 
 export type EditDragType =
-    "trim_left" | "trim_right" | "stretch_left" | "stretch_right" | "fade_in" | "fade_out" | "gain";
+    | "trim_left"
+    | "trim_right"
+    | "stretch_left"
+    | "stretch_right"
+    | "fade_in"
+    | "fade_out"
+    | "gain";
 
 export type EditDragState = {
     type: EditDragType;
@@ -351,12 +357,20 @@ export function useEditDrag(deps: {
     dispatch: AppDispatch;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** 忽略编组 */
     ignoreGrouping: boolean;
     /** modifier.paramFineAdjust 绑定 */
@@ -368,10 +382,10 @@ export function useEditDrag(deps: {
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         ignoreGrouping,
         paramFineAdjustKb,
     } = deps;
@@ -514,9 +528,15 @@ export function useEditDrag(deps: {
                     drag.type === "stretch_left" ||
                     drag.type === "stretch_right";
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
-                const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+                const effectiveSnap = snapEnabled && !noSnapActive;
                 if (shouldSnap && effectiveSnap) {
-                    beat = snapBeat(beat);
+                    const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
+                    beat = snapTimeline(beat, "mediaItem", {
+                        originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
+                        anchorTrackId: sessionRef.current.clips.find((c) => c.id === drag.clipId)
+                            ?.trackId,
+                        excludeClipIds: new Set(drag.selectedClipIds),
+                    });
                 }
 
                 const minLen = 0.0;

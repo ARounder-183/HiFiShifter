@@ -1,11 +1,18 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useMemo, useState } from "react";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
-import { PauseIcon, Pencil1Icon, PlayIcon, StopIcon } from "@radix-ui/react-icons";
+import {
+    DoubleArrowRightIcon,
+    PauseIcon,
+    Pencil1Icon,
+    PlayIcon,
+    StopIcon,
+} from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 
 import {
@@ -15,17 +22,32 @@ import {
     updateTransportBpm,
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
-    toggleGridSnap,
+    toggleSplitTransition,
+    toggleSnap,
     togglePlayheadZoom,
     toggleAutoScroll,
     toggleIgnoreGrouping,
     toggleParamEditorSeekPlayhead,
+    toggleParamEditorTimelineClickSelectTrack,
     persistUiSettings,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
+    setTempoMap,
 } from "../../features/session/sessionSlice";
-import { SCALE_KEYS, SCALE_LABELS } from "../../utils/musicalScales";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import type { TempoMapScaleData, TempoTimeSignature } from "../../utils/tempoMap";
+import {
+    clampBpm,
+    effectiveScaleAtSec,
+    pointIndexAtSec,
+    scaleLikeToScaleData,
+    TEMPO_DENOMINATORS,
+    tempoAtSec,
+    updateTempoPoint,
+} from "../../utils/tempoMap";
+import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
 
@@ -34,39 +56,191 @@ export function ActionBar() {
     const s = useAppSelector((state: RootState) => state.session);
     const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
     const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
 
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
+    const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
-    const [gridSnapMenuPos, setGridSnapMenuPos] = useState<{ x: number; y: number } | null>(null);
+
+    function formatBpmValue(value: number): string {
+        const normalized = Number(value);
+        return Number.isFinite(normalized) ? String(normalized) : "120";
+    }
+
+    const [bpmText, setBpmText] = useState(() => formatBpmValue(s.bpm || 120));
+    /** 用户正在输入时置位，阻止显示值变化覆写输入草稿。 */
+    const [bpmDirty, setBpmDirty] = useState(false);
+
+    // Tempo Map 存在时，BPM 显示为播放头位置的生效速度。
+    const displayBpm = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.bpm;
+        }
+        return s.bpm || 120;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    const displayBeats = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.numerator;
+        }
+        return Math.round(s.beats || 4);
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats]);
+
+    // Tempo Map 存在时，拍号分母显示播放头位置的实际值（如 3/8、6/8）；否则为工程基准值。
+    const displayDenominator = useMemo(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            const at = tempoAtSec(s.tempoMap, s.playheadSec, {
+                bpm: s.bpm,
+                beatsPerBar: s.beats || 4,
+            });
+            return at.denominator;
+        }
+        return s.project.timeSignatureDenominator || 4;
+    }, [s.tempoMap, s.playheadSec, s.bpm, s.beats, s.project.timeSignatureDenominator]);
+
+    // 工程音阶（无 Tempo Map 时的显示与回退值）。
+    const projectScaleLike = useMemo<ScaleLike | null>(
+        () =>
+            s.project?.useCustomScale && s.project?.customScale
+                ? s.project.customScale.notes
+                : s.project?.baseScale ?? "C",
+        [s.project],
+    );
+
+    // Tempo Map 存在时，基准音阶显示播放头位置及以前最近变化点的生效音阶。
+    const displayScale = useMemo<ScaleLike | null>(() => {
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            return (
+                effectiveScaleAtSec(s.tempoMap, s.playheadSec, projectScaleLike ?? undefined) ??
+                null
+            );
+        }
+        return projectScaleLike;
+    }, [s.tempoMap, s.playheadSec, projectScaleLike]);
+
+    /** 播放头位置最近变化点的自定义音阶名称（用于显示）。 */
+    const tempoCustomScaleName = useMemo(() => {
+        if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+        for (let i = pointIndexAtSec(s.tempoMap, s.playheadSec); i >= 0; i -= 1) {
+            const scale = s.tempoMap.points[i].scale;
+            if (scale?.notes && scale.notes.length > 0) {
+                return scale.name || scale.notes.join(", ");
+            }
+            if (scale?.key) return null;
+        }
+        return null;
+    }, [s.tempoMap, s.playheadSec]);
+
+    /** 当前显示音阶是否即工程自定义音阶（显示/选项归并用）。 */
+    const displayScaleMatchesProjectCustom = useMemo(() => {
+        if (!Array.isArray(displayScale)) return false;
+        if (!s.project?.useCustomScale || !s.project?.customScale) return false;
+        const a = displayScale;
+        const b = s.project.customScale.notes;
+        return a.length === b.length && a.every((v, i) => v === b[i]);
+    }, [displayScale, s.project]);
+
+    const showTempoCustomScaleItem =
+        s.tempoMap != null &&
+        s.tempoMap.points.length > 0 &&
+        Array.isArray(displayScale) &&
+        !displayScaleMatchesProjectCustom;
+
+    const displayScaleSelectValue = Array.isArray(displayScale)
+        ? displayScaleMatchesProjectCustom
+            ? "__custom__"
+            : "__tempo_custom__"
+        : typeof displayScale === "string" &&
+            (SCALE_KEYS as readonly string[]).includes(displayScale)
+          ? displayScale
+          : "__custom__";
 
     const baseScaleWheelOptions = [
         ...SCALE_KEYS,
         ...(s.project?.customScale ? (["__custom__"] as const) : []),
+        ...(showTempoCustomScaleItem ? (["__tempo_custom__"] as const) : []),
         "__custom_dialog__",
     ];
 
-    const [bpmText, setBpmText] = useState(() => String(Math.round(s.bpm || 120)));
-    const bpmDirtyRef = useRef(false);
+    // 显示值变化时同步输入框（渲染期调整，避免 effect 级联渲染）。
+    const displayBpmText = formatBpmValue(displayBpm);
+    if (!bpmDirty && displayBpmText !== bpmText) {
+        setBpmText(displayBpmText);
+    }
 
-    useEffect(() => {
-        if (!bpmDirtyRef.current) {
-            setBpmText(String(Math.round(s.bpm || 120)));
-        }
-    }, [s.bpm]);
+    /**
+     * Tempo Map 存在时：更新从播放头位置开始、往前寻找的最近一个变化点
+     * （初始点即工程基准记录，同样参与更新；不再自动新建变化点）。
+     */
+    const updateTempoPointAtPlayhead = useCallback(
+        (patch: {
+            bpm?: number;
+            timeSignature?: TempoTimeSignature | null;
+            scale?: TempoMapScaleData | null;
+        }) => {
+            if (!s.tempoMap || s.tempoMap.points.length === 0) return null;
+            const map = s.tempoMap;
+            const idx = pointIndexAtSec(map, s.playheadSec);
+            const nextMap = updateTempoPoint(map, map.points[idx].id, patch);
+            dispatch(setTempoMap(nextMap));
+            void dispatch(setTempoMapRemote(nextMap));
+            return nextMap;
+        },
+        [s.tempoMap, s.playheadSec, dispatch],
+    );
+
+    /** 基准音阶变更：有 Tempo Map 时写最近变化点，否则写工程音阶。 */
+    const applyBaseScale = useCallback(
+        (next: ScaleLike | null, customName?: string) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ scale: scaleLikeToScaleData(next, customName) });
+                return;
+            }
+            if (next == null) return;
+            if (Array.isArray(next)) {
+                if (s.project?.customScale) {
+                    dispatch(setProjectCustomScaleRemote(s.project.customScale));
+                }
+                return;
+            }
+            if ((SCALE_KEYS as readonly string[]).includes(next as string)) {
+                dispatch(setProjectBaseScaleRemote(next as (typeof SCALE_KEYS)[number]));
+            }
+        },
+        [s.tempoMap, s.project, dispatch, updateTempoPointAtPlayhead],
+    );
 
     function commitBpm(nextText?: string) {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
-        bpmDirtyRef.current = false;
+        setBpmDirty(false);
         if (!Number.isFinite(next)) {
-            setBpmText(String(Math.round(s.bpm || 120)));
+            setBpmText(formatBpmValue(displayBpm));
             return;
         }
-        dispatch(setBpm(next));
-        void dispatch(updateTransportBpm(next));
-        setBpmText(String(Math.round(next)));
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        if (s.tempoMap && s.tempoMap.points.length > 0) {
+            updateTempoPointAtPlayhead({ bpm: clamped });
+            setBpmText(formatBpmValue(clamped));
+            return;
+        }
+        dispatch(setBpm(clamped));
+        void dispatch(updateTransportBpm(clamped));
+        setBpmText(formatBpmValue(clamped));
     }
 
     // Custom styles for Radix components to match Qt look
@@ -87,7 +261,13 @@ export function ActionBar() {
                 <TextField.Root
                     size="1"
                     value={bpmText}
+                    title={
+                        s.tempoMap && s.tempoMap.points.length > 0
+                            ? tAny("tempo_map_actionbar_tip")
+                            : undefined
+                    }
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                        setBpmDirty(true);
                         setBpmText(e.target.value);
                     }}
                     onBlur={() => commitBpm()}
@@ -98,10 +278,30 @@ export function ActionBar() {
                             (e.currentTarget as HTMLInputElement).blur();
                         } else if (e.key === "Escape") {
                             e.preventDefault();
-                            bpmDirtyRef.current = false;
-                            setBpmText(String(Math.round(s.bpm || 120)));
+                            setBpmDirty(false);
+                            setBpmText(formatBpmValue(displayBpm));
                             (e.currentTarget as HTMLInputElement).blur();
                         }
+                    }}
+                    onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const direction = e.deltaY < 0 ? 1 : -1;
+                        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+                        const current = Number(bpmText);
+                        const base = Number.isFinite(current) ? current : Number(displayBpm);
+                        const nextRaw = base + direction * step;
+                        const next = Math.round(nextRaw * 1000) / 1000;
+                        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+                        const clamped = clampBpm(next);
+                        if (s.tempoMap && s.tempoMap.points.length > 0) {
+                            updateTempoPointAtPlayhead({ bpm: clamped });
+                        } else {
+                            dispatch(setBpm(clamped));
+                            void dispatch(updateTransportBpm(clamped));
+                        }
+                        setBpmText(formatBpmValue(clamped));
+                        setBpmDirty(false);
                     }}
                     style={{
                         width: 60,
@@ -110,23 +310,65 @@ export function ActionBar() {
                     }}
                 />
                 <Text size="1" className="text-qt-text-muted">
-                    {t("beats_per_bar")}:
+                    {t("time_signature")}:
                 </Text>
                 <Flex align="center" gap="1">
                     <TextField.Root
                         size="1"
                         type="number"
-                        value={Number.isFinite(s.beats) ? Math.round(s.beats).toString() : "4"}
+                        value={String(displayBeats)}
+                        title={
+                            s.tempoMap && s.tempoMap.points.length > 0
+                                ? tAny("tempo_map_actionbar_tip")
+                                : undefined
+                        }
                         onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                             const raw = e.target.value.trim();
                             const parsed = Number(raw);
                             if (!Number.isFinite(parsed)) return;
                             // Clamp locally to avoid sending huge values to backend
                             const clamped = Math.min(32, Math.max(1, Math.round(parsed)));
-                            if (clamped === Math.round(s.beats || 0)) return;
+                            // 与显示值比较（Tempo Map 下为播放头位置生效值）。
+                            if (clamped === Math.round(displayBeats)) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: clamped,
+                                        denominator: displayDenominator,
+                                    },
+                                });
+                                return;
+                            }
                             void dispatch(
                                 setProjectTimelineSettingsRemote({
                                     beatsPerBar: clamped,
+                                    timeSignatureDenominator: displayDenominator,
+                                    gridSize: s.grid,
+                                }),
+                            );
+                        }}
+                        onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const direction = e.deltaY < 0 ? 1 : -1;
+                            // 基础值取播放头位置的生效值（Tempo Map 下为最近变化点），
+                            // 与 BPM / 基准音阶一致。
+                            const current = Math.max(1, Math.min(32, Math.round(displayBeats)));
+                            const next = Math.max(1, Math.min(32, current + direction));
+                            if (next === current) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: next,
+                                        denominator: displayDenominator,
+                                    },
+                                });
+                                return;
+                            }
+                            void dispatch(
+                                setProjectTimelineSettingsRemote({
+                                    beatsPerBar: next,
+                                    timeSignatureDenominator: displayDenominator,
                                     gridSize: s.grid,
                                 }),
                             );
@@ -138,8 +380,74 @@ export function ActionBar() {
                         }}
                     />
                     <Text size="1" className="text-qt-text-muted">
-                        / 4
+                        /
                     </Text>
+                    <Select.Root
+                        size="1"
+                        value={String(displayDenominator)}
+                        onValueChange={(v) => {
+                            const next = Number(v) || 4;
+                            if (next === displayDenominator) return;
+                            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                updateTempoPointAtPlayhead({
+                                    timeSignature: {
+                                        numerator: displayBeats,
+                                        denominator: next,
+                                    },
+                                });
+                                return;
+                            }
+                            void dispatch(
+                                setProjectTimelineSettingsRemote({
+                                    beatsPerBar: s.beats,
+                                    timeSignatureDenominator: next,
+                                    gridSize: s.grid,
+                                }),
+                            );
+                        }}
+                    >
+                        <Select.Trigger
+                            style={{
+                                width: 48,
+                                backgroundColor: "var(--qt-base)",
+                                justifyContent: "center",
+                            }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: String(displayDenominator),
+                                    options: TEMPO_DENOMINATORS.map((d) => String(d)),
+                                    onChange: (v) => {
+                                        const next = Number(v) || 4;
+                                        if (next === displayDenominator) return;
+                                        if (s.tempoMap && s.tempoMap.points.length > 0) {
+                                            updateTempoPointAtPlayhead({
+                                                timeSignature: {
+                                                    numerator: displayBeats,
+                                                    denominator: next,
+                                                },
+                                            });
+                                            return;
+                                        }
+                                        void dispatch(
+                                            setProjectTimelineSettingsRemote({
+                                                beatsPerBar: s.beats,
+                                                timeSignatureDenominator: next,
+                                                gridSize: s.grid,
+                                            }),
+                                        );
+                                    },
+                                });
+                            }}
+                        />
+                        <Select.Content>
+                            {TEMPO_DENOMINATORS.map((d) => (
+                                <Select.Item key={d} value={String(d)}>
+                                    {d}
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
                 </Flex>
 
                 <Text size="1" className="text-qt-text-muted">
@@ -152,6 +460,7 @@ export function ActionBar() {
                         void dispatch(
                             setProjectTimelineSettingsRemote({
                                 beatsPerBar: s.beats,
+                                timeSignatureDenominator: displayDenominator,
                                 gridSize: v,
                             }),
                         );
@@ -171,14 +480,12 @@ export function ActionBar() {
                                     "1/16",
                                     "1/32",
                                     "1/64",
-                                    "1/1d",
                                     "1/2d",
                                     "1/4d",
                                     "1/8d",
                                     "1/16d",
                                     "1/32d",
                                     "1/64d",
-                                    "1/1t",
                                     "1/2t",
                                     "1/4t",
                                     "1/8t",
@@ -190,6 +497,7 @@ export function ActionBar() {
                                     void dispatch(
                                         setProjectTimelineSettingsRemote({
                                             beatsPerBar: s.beats,
+                                            timeSignatureDenominator: displayDenominator,
                                             gridSize: next,
                                         }),
                                     );
@@ -234,50 +542,62 @@ export function ActionBar() {
                     {t("base_scale")}:
                 </Text>
                 <Select.Root
-                    value={
-                        s.project?.useCustomScale && s.project?.customScale
-                            ? "__custom__"
-                            : (s.project?.baseScale ?? "C")
-                    }
+                    value={displayScaleSelectValue}
                     size="1"
                     onValueChange={(v) => {
                         if (v === "__custom_dialog__") {
                             setCustomScaleOpen(true);
                             return;
                         }
-                        if (v === "__custom__" && s.project?.customScale) {
-                            dispatch(setProjectCustomScaleRemote(s.project.customScale));
+                        if (v === "__custom__") {
+                            if (s.project?.customScale) {
+                                applyBaseScale(s.project.customScale.notes, s.project.customScale.name);
+                            }
+                            return;
+                        }
+                        if (v === "__tempo_custom__") {
+                            if (Array.isArray(displayScale)) {
+                                applyBaseScale(displayScale, tempoCustomScaleName ?? undefined);
+                            }
                             return;
                         }
                         if ((SCALE_KEYS as readonly string[]).includes(v)) {
-                            dispatch(setProjectBaseScaleRemote(v));
+                            applyBaseScale(v as (typeof SCALE_KEYS)[number]);
                         }
                     }}
                 >
                     <Select.Trigger
                         style={{ backgroundColor: "var(--qt-base)" }}
                         onWheel={(event) => {
-                            const currentValue =
-                                s.project?.useCustomScale && s.project?.customScale
-                                    ? "__custom__"
-                                    : (s.project?.baseScale ?? "C");
                             applySelectWheelChange({
                                 event,
-                                currentValue,
+                                currentValue: displayScaleSelectValue,
                                 options: baseScaleWheelOptions,
                                 onChange: (next) => {
                                     if (next === "__custom_dialog__") {
                                         setCustomScaleOpen(true);
                                         return;
                                     }
-                                    if (next === "__custom__" && s.project?.customScale) {
-                                        dispatch(
-                                            setProjectCustomScaleRemote(s.project.customScale),
-                                        );
+                                    if (next === "__custom__") {
+                                        if (s.project?.customScale) {
+                                            applyBaseScale(
+                                                s.project.customScale.notes,
+                                                s.project.customScale.name,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    if (next === "__tempo_custom__") {
+                                        if (Array.isArray(displayScale)) {
+                                            applyBaseScale(
+                                                displayScale,
+                                                tempoCustomScaleName ?? undefined,
+                                            );
+                                        }
                                         return;
                                     }
                                     if ((SCALE_KEYS as readonly string[]).includes(next)) {
-                                        dispatch(setProjectBaseScaleRemote(next));
+                                        applyBaseScale(next as (typeof SCALE_KEYS)[number]);
                                     }
                                 },
                             });
@@ -291,6 +611,16 @@ export function ActionBar() {
                                 </Select.Item>
                             ))}
                         </Select.Group>
+                        {showTempoCustomScaleItem ? (
+                            <>
+                                <Select.Separator />
+                                <Select.Group>
+                                    <Select.Item value="__tempo_custom__">
+                                        {tempoCustomScaleName ?? tAny("custom_scale_short")}
+                                    </Select.Item>
+                                </Select.Group>
+                            </>
+                        ) : null}
                         {s.project?.customScale ? (
                             <>
                                 <Select.Separator />
@@ -417,20 +747,20 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                {/* Grid Snap */}
+                {/* Split Transition */}
                 <IconButton
                     size="1"
-                    variant={s.gridSnapEnabled ? "solid" : "ghost"}
+                    variant={s.splitTransitionEnabled ? "solid" : "ghost"}
                     color="gray"
-                    data-tooltip={tAny("grid_snap")}
+                    data-tooltip={tAny("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
-                        dispatch(toggleGridSnap());
+                        dispatch(toggleSplitTransition());
                         void dispatch(persistUiSettings());
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();
-                        setGridSnapMenuPos({ x: e.clientX, y: e.clientY });
+                        setSplitTransitionOpen(true);
                     }}
                 >
                     <svg
@@ -440,17 +770,68 @@ export function ActionBar() {
                         fill="none"
                         xmlns="http://www.w3.org/2000/svg"
                     >
+                        <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
                         <path
-                            d="M2 2V13M5.5 2V13M9 2V13M12.5 2V13"
-                            stroke="currentColor"
-                            strokeWidth="0.8"
-                            opacity="0.5"
+                            d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
+                            fill="currentColor"
+                            opacity="0.85"
                         />
-                        <path d="M7.5 4L7.5 11" stroke="currentColor" strokeWidth="1.5" />
-                        <path d="M5.5 6L7.5 4L9.5 6" stroke="currentColor" strokeWidth="1" />
-                        <path d="M5.5 9L7.5 11L9.5 9" stroke="currentColor" strokeWidth="1" />
+                        <path
+                            d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
+                            fill="currentColor"
+                            opacity="0.45"
+                        />
                     </svg>
                 </IconButton>
+
+                {/* Snap */}
+                <IconButton
+                    size="1"
+                    variant={s.snapEnabled ? "solid" : "ghost"}
+                    color="gray"
+                    data-tooltip={tAny("snap")}
+                    tabIndex={-1}
+                    onClick={() => {
+                        dispatch(toggleSnap());
+                        void dispatch(persistUiSettings());
+                    }}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        setSnapSettingsOpen(true);
+                    }}
+                >
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                    >
+                        <path
+                            d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15Z"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                        <path
+                            d="m5 8 4 4"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                        <path
+                            d="m12 15 4 4"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </IconButton>
+
+                <Separator orientation="vertical" size="2" />
 
                 {/* Playhead Zoom */}
                 <IconButton
@@ -472,14 +853,30 @@ export function ActionBar() {
                         xmlns="http://www.w3.org/2000/svg"
                     >
                         <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M6 3L7.5 1.5L9 3" stroke="currentColor" strokeWidth="1" />
-                        <path d="M4 7.5H2M13 7.5H11" stroke="currentColor" strokeWidth="1" />
-                        <path d="M3.5 5L2 7.5L3.5 10" stroke="currentColor" strokeWidth="0.8" />
-                        <path d="M11.5 5L13 7.5L11.5 10" stroke="currentColor" strokeWidth="0.8" />
+                        <path d="M6 3.5L7.5 2L9 3.5" stroke="currentColor" strokeWidth="1" />
+                        <path d="M5.5 5.5L4 7.5L5.5 9.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M9.5 5.5L11 7.5L9.5 9.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M3 12H12" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
                     </svg>
                 </IconButton>
 
-                {/* Auto Scroll */}
+                {/* Auto Scroll (horizontal arrows) */}
+                <IconButton
+                    size="1"
+                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
+                    color="gray"
+                    data-tooltip={tAny("auto_scroll")}
+                    tabIndex={-1}
+                    onClick={() => {
+                        dispatch(toggleAutoScroll());
+                        void dispatch(persistUiSettings());
+                    }}
+                >
+                    <DoubleArrowRightIcon width="15" height="15" />
+                </IconButton>
+
+                <Separator orientation="vertical" size="2" />
+
                 <IconButton
                     size="1"
                     variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
@@ -514,15 +911,15 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
-                {/* Auto Scroll (horizontal arrows) */}
+                {/* Allow timeline clicks to switch the parameter editor track */}
                 <IconButton
                     size="1"
-                    variant={s.autoScrollEnabled ? "solid" : "ghost"}
+                    variant={s.paramEditorTimelineClickSelectTrackEnabled ? "solid" : "ghost"}
                     color="gray"
-                    data-tooltip={tAny("auto_scroll")}
+                    data-tooltip={tAny("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
-                        dispatch(toggleAutoScroll());
+                        dispatch(toggleParamEditorTimelineClickSelectTrack());
                         void dispatch(persistUiSettings());
                     }}
                 >
@@ -533,12 +930,51 @@ export function ActionBar() {
                         fill="none"
                         xmlns="http://www.w3.org/2000/svg"
                     >
-                        <path d="M7.5 2V13" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M3 6L1.5 7.5L3 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M12 6L13.5 7.5L12 9" stroke="currentColor" strokeWidth="1" />
-                        <path d="M2 7.5H13" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
+                        <defs>
+                            <marker
+                                id="hs-track-switch-arrow"
+                                viewBox="0 0 6 6"
+                                refX="3"
+                                refY="3"
+                                markerWidth="5"
+                                markerHeight="5"
+                                orient="auto-start-reverse"
+                            >
+                                <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" />
+                            </marker>
+                        </defs>
+                        <rect
+                            x="1.5"
+                            y="2"
+                            width="8"
+                            height="3"
+                            rx="1"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                        />
+                        <rect
+                            x="5.5"
+                            y="10"
+                            width="8"
+                            height="3"
+                            rx="1"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                        />
+                        <line
+                            x1="9.5"
+                            y1="4.5"
+                            x2="5.5"
+                            y2="10.5"
+                            stroke="currentColor"
+                            strokeWidth="1"
+                            markerStart="url(#hs-track-switch-arrow)"
+                            markerEnd="url(#hs-track-switch-arrow)"
+                        />
                     </svg>
                 </IconButton>
+
+                <Separator orientation="vertical" size="2" />
 
                 {/* Ignore Grouping (broken chain) */}
                 <IconButton
@@ -582,163 +1018,22 @@ export function ActionBar() {
                 <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
             )}
 
+            {splitTransitionOpen && (
+                <SplitTransitionSettingsDialog
+                    open={splitTransitionOpen}
+                    onOpenChange={setSplitTransitionOpen}
+                />
+            )}
+
             {customScaleOpen && (
                 <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
             )}
 
-            {/* Grid Snap Context Menu */}
-            {gridSnapMenuPos && (
-                <GridSnapContextMenu
-                    x={gridSnapMenuPos.x}
-                    y={gridSnapMenuPos.y}
-                    currentGrid={s.grid}
-                    onSelect={(grid) => {
-                        void dispatch(
-                            setProjectTimelineSettingsRemote({
-                                beatsPerBar: s.beats,
-                                gridSize: grid,
-                            }),
-                        );
-                        setGridSnapMenuPos(null);
-                    }}
-                    onClose={() => setGridSnapMenuPos(null)}
-                    t={tAny}
-                />
+            {snapSettingsOpen && (
+                <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
             )}
+
+            {/* Snap Context Menu removed: right-click opens the settings dialog above. */}
         </Flex>
-    );
-}
-
-/** Grid snap note type definitions for the context menu */
-const GRID_SNAP_ITEMS: Array<{ value: string; labelKey: string } | "separator"> = [
-    { value: "1/1", labelKey: "grid_snap_whole" },
-    { value: "1/2", labelKey: "grid_snap_half" },
-    { value: "1/4", labelKey: "grid_snap_quarter" },
-    { value: "1/8", labelKey: "grid_snap_8th" },
-    { value: "1/16", labelKey: "grid_snap_16th" },
-    { value: "1/32", labelKey: "grid_snap_32nd" },
-    { value: "1/64", labelKey: "grid_snap_64th" },
-    "separator",
-    { value: "1/2d", labelKey: "grid_snap_dotted_half" },
-    { value: "1/4d", labelKey: "grid_snap_dotted_quarter" },
-    { value: "1/8d", labelKey: "grid_snap_dotted_8th" },
-    { value: "1/16d", labelKey: "grid_snap_dotted_16th" },
-    { value: "1/32d", labelKey: "grid_snap_dotted_32nd" },
-    { value: "1/64d", labelKey: "grid_snap_dotted_64th" },
-    "separator",
-    { value: "1/2t", labelKey: "grid_snap_triplet_half" },
-    { value: "1/4t", labelKey: "grid_snap_triplet_quarter" },
-    { value: "1/8t", labelKey: "grid_snap_triplet_8th" },
-    { value: "1/16t", labelKey: "grid_snap_triplet_16th" },
-    { value: "1/32t", labelKey: "grid_snap_triplet_32nd" },
-    { value: "1/64t", labelKey: "grid_snap_triplet_64th" },
-];
-
-function GridSnapContextMenu({
-    x,
-    y,
-    currentGrid,
-    onSelect,
-    onClose,
-    t,
-}: {
-    x: number;
-    y: number;
-    currentGrid: string;
-    onSelect: (grid: string) => void;
-    onClose: () => void;
-    t: (key: string) => string;
-}) {
-    const menuRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        const handleClick = (e: globalThis.MouseEvent) => {
-            if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-                onClose();
-            }
-        };
-        const handleKey = (e: globalThis.KeyboardEvent) => {
-            if (e.key === "Escape") onClose();
-        };
-        window.addEventListener("mousedown", handleClick, true);
-        window.addEventListener("keydown", handleKey, true);
-        return () => {
-            window.removeEventListener("mousedown", handleClick, true);
-            window.removeEventListener("keydown", handleKey, true);
-        };
-    }, [onClose]);
-
-    useLayoutEffect(() => {
-        const el = menuRef.current;
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        if (rect.right > vw) el.style.left = `${vw - rect.width}px`;
-        if (rect.bottom > vh) el.style.top = `${vh - rect.height}px`;
-    }, [x, y]);
-
-    const style: React.CSSProperties = {
-        position: "fixed",
-        left: x,
-        top: y,
-        zIndex: 10000,
-        minWidth: 180,
-        background: "var(--qt-panel)",
-        border: "1px solid var(--qt-border)",
-        borderRadius: 10,
-        padding: "4px 0",
-        boxShadow: "0 20px 44px rgba(0,0,0,0.28)",
-        display: "block",
-        height: "auto",
-        overflow: "visible",
-    };
-
-    return createPortal(
-        <div ref={menuRef} style={style}>
-            {GRID_SNAP_ITEMS.map((item, i) => {
-                if (item === "separator") {
-                    return (
-                        <div
-                            key={`sep-${i}`}
-                            style={{ height: 1, background: "var(--qt-divider)", margin: "4px 0" }}
-                        />
-                    );
-                }
-                const isActive = item.value === currentGrid;
-                return (
-                    <div
-                        key={item.value}
-                        onClick={() => onSelect(item.value)}
-                        style={{
-                            padding: "5px 12px",
-                            cursor: "pointer",
-                            fontSize: 13,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            background: isActive
-                                ? "color-mix(in oklab, var(--qt-highlight) 22%, transparent)"
-                                : "transparent",
-                            color: isActive ? "var(--qt-text)" : "inherit",
-                        }}
-                        onMouseEnter={(e) => {
-                            if (!isActive)
-                                (e.currentTarget as HTMLDivElement).style.background =
-                                    "var(--qt-hover)";
-                        }}
-                        onMouseLeave={(e) => {
-                            (e.currentTarget as HTMLDivElement).style.background = isActive
-                                ? "color-mix(in oklab, var(--qt-highlight) 22%, transparent)"
-                                : "transparent";
-                        }}
-                    >
-                        <span>{t(item.labelKey)}</span>
-                        {isActive && <span style={{ marginLeft: 8 }}>✓</span>}
-                    </div>
-                );
-            })}
-        </div>,
-        document.body,
     );
 }

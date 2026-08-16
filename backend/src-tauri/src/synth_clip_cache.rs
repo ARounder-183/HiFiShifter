@@ -486,11 +486,18 @@ pub fn compute_rendered_clip_hash(
     let mut h: u64 = 14695981039346656037u64;
 
     fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
+        // vslib 把全部曲线烘焙进合成输出（含共通 volume/pan），
+        // 因此这些曲线必须参与渲染缓存 key。
+        if renderer_id == "vslib" {
+            return true;
+        }
+        // 共通 volume/pan 在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+        if crate::renderer::common_params::is_common_mix_param(param_id) {
+            return false;
+        }
+        // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
         !(renderer_id == "nsf_hifigan_onnx"
-            && matches!(
-                param_id,
-                "breath_gain" | "hifigan_tension" | "hifigan_volume"
-            ))
+            && matches!(param_id, "breath_gain" | "hifigan_tension"))
     }
 
     macro_rules! mix_bytes {
@@ -923,10 +930,22 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
     );
 }
 
-/// 专门为音高编辑提供的“柔性”缓存失效策略，仅失效片段级合成缓存和解除旧 Hash 绑定，
-/// 保留 RenderedClipCache，使得在新的预渲染完成前，系统可以无缝回退播放上一次渲染的音频！
+/// 专门为音高编辑提供的“柔性”缓存失效策略：仅失效片段级合成缓存，并解除旧的
+/// `pending_rendered_keys` 绑定。
+///
+/// 必须保留 `RenderedClipCache`：
+///
+/// 1. 该缓存的 key 已经包含完整渲染参数（pitch_edit、renderer、curves、params、
+///    source/trim/rate/formant 等），真实参数变化会自动产生新的 hash，旧条目
+///    自然不会再被精确命中，不会造成错误复用。
+/// 2. 保留最近一次渲染结果，可在新渲染完成前无缝垫音，避免播放瞬间出现静音。
+/// 3. 引擎 `last_timeline` 有时晚于 AppState 时间线更新（例如音高分析完成后
+///    异步组装 pitch_orig/pitch_edit 的场景），播放时据此产生的“假失效”不应摧毁
+///    已经按当前参数渲染好的缓存；否则首次播放会整段静音、气声缺失，第二次播放才恢复。
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
-    eprintln!("[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared)");
+    eprintln!(
+        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
+    );
     // 1. SynthClipCache 失效
     {
         let mut cache = global_synth_clip_cache()
@@ -941,13 +960,7 @@ pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
             .unwrap_or_else(|e| e.into_inner());
         map.remove(clip_id);
     }
-    // 3. RenderedClipCache 也失效，强制下次播放时重新合成
-    {
-        let mut cache = global_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.invalidate(clip_id);
-    }
+    // 注意：不要失效 RenderedClipCache，原因见上方文档注释。
 }
 
 /// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）

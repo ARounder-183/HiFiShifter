@@ -10,6 +10,7 @@ import { useRef, useState } from "react";
 import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
+import { snapTimelinePosition } from "../../../utils/timelineSnapping";
 
 export function shouldStartTimelineSelectionRect(button: number): boolean {
     // Only start selection for right-click (button === 2).
@@ -86,6 +87,34 @@ export function useTimelineSelectionRect(params: {
         y2: number;
     } | null>(null);
 
+    /** 将框选矩形的水平像素边界吸附到当前网格/选区设置。 */
+    const snapSelectionX = (x: number): number => {
+        const session = sessionRef.current;
+        const snap = session.timelineSnap;
+        if (!snap.enabled) return x;
+        const pxPerSec = Math.max(1e-9, (pxPerBeat * Math.max(1, session.bpm)) / 60);
+        const rawSec = Math.max(0, x / pxPerSec);
+        const result = snapTimelinePosition(
+            {
+                settings: snap,
+                grid: session.grid,
+                bpm: session.bpm,
+                beatsPerBar: session.beats,
+                tempoMap: session.tempoMap,
+                pxPerSec,
+                clips: session.clips,
+                tracks: session.tracks,
+                selectedClipIds: [],
+                playheadSec: session.playheadSec,
+                object: "selection",
+                originSec: 0,
+                anchorTrackId: session.selectedTrackId,
+            },
+            rawSec,
+        );
+        return result.sec * pxPerSec;
+    };
+
     function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
         if (!shouldStartTimelineSelectionRect(e.button)) return;
         const el = e.currentTarget as HTMLDivElement;
@@ -130,10 +159,12 @@ export function useTimelineSelectionRect(params: {
 
             if (!drag.hasSelectionDrag) return;
 
+            const sx1 = snapSelectionX(Math.min(drag.startX, cx));
+            const sx2 = snapSelectionX(Math.max(drag.startX, cx));
             setSelectionRect({
-                x1: Math.min(drag.startX, cx),
+                x1: sx1,
                 y1: Math.min(drag.startY, cy),
-                x2: Math.max(drag.startX, cx),
+                x2: sx2,
                 y2: Math.max(drag.startY, cy),
             });
         }
@@ -145,10 +176,12 @@ export function useTimelineSelectionRect(params: {
 
             const hasSelectionDrag = drag.hasSelectionDrag;
 
+            const sx1 = snapSelectionX(Math.min(drag.startX, drag.curX));
+            const sx2 = snapSelectionX(Math.max(drag.startX, drag.curX));
             const rect = {
-                x1: Math.min(drag.startX, drag.curX),
+                x1: sx1,
                 y1: Math.min(drag.startY, drag.curY),
-                x2: Math.max(drag.startX, drag.curX),
+                x2: sx2,
                 y2: Math.max(drag.startY, drag.curY),
             };
             setSelectionRect(null);

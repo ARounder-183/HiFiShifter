@@ -90,7 +90,15 @@ export function useClipDrag(deps: {
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
     dispatch: AppDispatch;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
@@ -99,8 +107,8 @@ export function useClipDrag(deps: {
     slipEditKb: Keybinding;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** modifier.clipCopyDrag 绑定 */
     copyDragKb: Keybinding;
     /** 自动交叉淡入淡出 */
@@ -117,20 +125,20 @@ export function useClipDrag(deps: {
         multiSelectedSet,
         dispatch,
         pxPerSec,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         copyDragKb,
         autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick,
     } = deps;
-    void gridSnapEnabled;
+    void snapEnabled;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);
@@ -314,9 +322,13 @@ export function useClipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
             const noSnapActive = isModifierActive(noSnapKb, ev);
-            const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+            const effectiveSnap = snapEnabled && !noSnapActive;
             if (effectiveSnap) {
-                nextStart = snapBeat(nextStart);
+                nextStart = snapTimeline(nextStart, "mediaItem", {
+                    originSec: drag.initialAnchorstartSec,
+                    anchorTrackId: drag.initialAnchorTrackId,
+                    excludeClipIds: new Set(drag.clipIds),
+                });
             }
 
             let deltaBeat = nextStart - drag.initialAnchorstartSec;

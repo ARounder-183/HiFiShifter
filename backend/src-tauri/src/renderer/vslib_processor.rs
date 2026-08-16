@@ -9,6 +9,7 @@
 //! - 合成模式（SYNTHMODE_M / SYNTHMODE_MF / SYNTHMODE_P）
 //! - 逐控制点音量、强弱、声像曲线
 
+use super::common_params::{PAN_PARAM, VOLUME_PARAM};
 use super::traits::{
     ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, ProcessorCapabilities,
     RenderContext, Renderer, RendererCapabilities,
@@ -309,30 +310,10 @@ static VSLIB_PARAMS: &[ParamDescriptor] = &[
             default_value: 1, // SYNTHMODE_MF
         },
     },
-    // 音量（AutomationCurve）
-    ParamDescriptor {
-        id: "volume",
-        display_name: "音量",
-        group: "动态",
-        kind: ParamKind::AutomationCurve {
-            unit: "×",
-            default_value: 1.0,
-            min_value: 0.0,
-            max_value: 4.0,
-        },
-    },
-    // 声像（AutomationCurve）
-    ParamDescriptor {
-        id: "pan",
-        display_name: "声像",
-        group: "动态",
-        kind: ParamKind::AutomationCurve {
-            unit: "",
-            default_value: 0.0,
-            min_value: -1.0,
-            max_value: 1.0,
-        },
-    },
+    // 音量（AutomationCurve）—— 与其它算法使用同一个共通描述符。
+    VOLUME_PARAM,
+    // 声像（AutomationCurve）—— 与其它算法使用同一个共通描述符。
+    PAN_PARAM,
     // 共振峰偏移（AutomationCurve）
     ParamDescriptor {
         id: "formant_shift_cents",

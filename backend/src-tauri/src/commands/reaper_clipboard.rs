@@ -12,6 +12,107 @@ use crate::state::AppState;
 use super::core::get_timeline_state_from_ref;
 
 // ---------------------------------------------------------------------------
+// 平台特定的剪贴板写入
+// ---------------------------------------------------------------------------
+
+/// Windows: 写入 "REAPERMedia" 自定义格式，并可选附带人类可读文本。
+#[cfg(target_os = "windows")]
+fn write_reaper_clipboard(data: &[u8], text_summary: Option<&str>) -> Result<(), String> {
+    use clipboard_win::{raw, register_format, Clipboard};
+
+    let _clipboard =
+        Clipboard::new_attempts(10).map_err(|e| format!("clipboard_open_failed: {}", e))?;
+    raw::empty().map_err(|e| format!("clipboard_empty_failed: {}", e))?;
+
+    let format = register_format("REAPERMedia")
+        .ok_or_else(|| "reaper_clipboard_format_not_found".to_string())?;
+    raw::set_without_clear(format.get(), data)
+        .map_err(|e| format!("reaper_clipboard_write_failed: {}", e))?;
+
+    if let Some(summary) = text_summary.filter(|value| !value.trim().is_empty()) {
+        raw::set_string_with(summary, clipboard_win::options::NoClear)
+            .map_err(|e| format!("reaper_clipboard_text_write_failed: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// macOS: 写入 "REAPERMedia" 自定义类型，并可选附带人类可读文本。
+#[cfg(target_os = "macos")]
+fn write_reaper_clipboard(data: &[u8], text_summary: Option<&str>) -> Result<(), String> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSData, NSString};
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let _ = pasteboard.clearContents();
+
+    let data_ns = NSData::with_bytes(data);
+    let format_ns = NSString::from_str("REAPERMedia");
+    if !pasteboard.setData_forType(Some(&data_ns), &format_ns) {
+        return Err("reaper_clipboard_write_failed".to_string());
+    }
+
+    if let Some(summary) = text_summary.filter(|value| !value.trim().is_empty()) {
+        let text_ns = NSString::from_str(summary);
+        let text_type = NSString::from_str("public.utf8-plain-text");
+        let _ = pasteboard.setString_forType(&text_ns, &text_type);
+    }
+
+    Ok(())
+}
+
+/// Linux: 通过 wl-copy (Wayland) 或 xclip (X11) 写入自定义目标
+/// "REAPERMedia"。不写入 text/plain，避免普通文本框粘贴出二进制乱码。
+#[cfg(target_os = "linux")]
+fn write_reaper_clipboard(data: &[u8], _text_summary: Option<&str>) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    let mut child = if is_wayland {
+        Command::new("wl-copy")
+            .args(["--type", "REAPERMedia"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    } else {
+        Command::new("xclip")
+            .args(["-selection", "clipboard", "-target", "REAPERMedia", "-i"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    }
+    .map_err(|e| {
+        let tool = if is_wayland { "wl-copy" } else { "xclip" };
+        format!("reaper_clipboard_write_failed: failed to run {}: {}", tool, e)
+    })?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "reaper_clipboard_write_failed: no stdin".to_string())?
+        .write_all(data)
+        .map_err(|e| format!("reaper_clipboard_write_failed: {}", e))?;
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("reaper_clipboard_write_failed: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("reaper_clipboard_write_failed".to_string())
+    }
+}
+
+/// 不支持的平台回退。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn write_reaper_clipboard(_data: &[u8], _text_summary: Option<&str>) -> Result<(), String> {
+    Err("clipboard_unsupported_platform".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // 平台特定的剪贴板读取
 // ---------------------------------------------------------------------------
 
@@ -204,6 +305,34 @@ pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
 ///
 /// 不再自动处理 MIDI 剪贴板；前端应先通过 `read_midi_clipboard_to_memory` 检测
 /// Standard MIDI File 并弹出统一导入弹窗。
+/// 将选中的 HiFiShifter Clip 导出为 REAPERMedia 剪贴板数据。
+/// 这是“复制到 REAPER”的逆操作：在 REAPER 中直接 Ctrl+V 即可粘贴。
+pub(super) fn copy_clips_to_reaper_clipboard(
+    state: &AppState,
+    clip_ids: Vec<String>,
+) -> serde_json::Value {
+    let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let result = match crate::reaper_export::build_reaper_clipboard(&timeline, &clip_ids) {
+        Ok(result) => result,
+        Err(error) => return serde_json::json!({ "ok": false, "error": error }),
+    };
+    drop(timeline);
+
+    let summary = format!(
+        "HiFiShifter: {} clip(s) copied as REAPER clipboard data. Paste in REAPER.",
+        result.exported_clip_count
+    );
+    match write_reaper_clipboard(&result.bytes, Some(&summary)) {
+        Ok(()) => serde_json::json!({
+            "ok": true,
+            "exportedClipCount": result.exported_clip_count,
+            "skippedClipCount": result.skipped_clip_count,
+            "trackCount": result.track_count,
+        }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
 pub(super) fn paste_reaper_clipboard(
     state: &AppState,
     _selection_start_frame: Option<usize>,

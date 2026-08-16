@@ -12,6 +12,7 @@ import { degreeInputToScaleSteps, scaleStepsToDegreeDisplay } from "../../../uti
 
 export const CHILD_PITCH_OFFSET_CENTS_PREFIX = "child_pitch_offset_cents@";
 export const CHILD_PITCH_OFFSET_DEGREES_PREFIX = "child_pitch_offset_degrees@";
+export const CHILD_FORMANT_OFFSET_CENTS_PREFIX = "child_formant_offset_cents@";
 
 export const CHILD_PITCH_OFFSET_CENTS_RANGE = {
     min: -2400,
@@ -24,12 +25,25 @@ export const CHILD_PITCH_OFFSET_DEGREES_RANGE = {
     max: 14,
 } as const;
 
+export const CHILD_FORMANT_OFFSET_CENTS_RANGE = {
+    min: -2400,
+    max: 2400,
+} as const;
+
 export function buildChildPitchOffsetCentsParam(trackId: string): string {
     return `${CHILD_PITCH_OFFSET_CENTS_PREFIX}${trackId}`;
 }
 
 export function buildChildPitchOffsetDegreesParam(trackId: string): string {
     return `${CHILD_PITCH_OFFSET_DEGREES_PREFIX}${trackId}`;
+}
+
+export function buildChildFormantOffsetCentsParam(trackId: string): string {
+    return `${CHILD_FORMANT_OFFSET_CENTS_PREFIX}${trackId}`;
+}
+
+export function isChildFormantOffsetCentsParam(param: string): boolean {
+    return param.startsWith(CHILD_FORMANT_OFFSET_CENTS_PREFIX);
 }
 
 export function isChildPitchOffsetCentsParam(param: string): boolean {
@@ -41,12 +55,16 @@ export function isChildPitchOffsetDegreesParam(param: string): boolean {
 }
 
 export function isChildPitchOffsetParam(param: string): boolean {
-    return isChildPitchOffsetCentsParam(param) || isChildPitchOffsetDegreesParam(param);
+    return (
+        isChildPitchOffsetCentsParam(param) ||
+        isChildPitchOffsetDegreesParam(param) ||
+        isChildFormantOffsetCentsParam(param)
+    );
 }
 
 export function parseChildPitchOffsetParam(
     param: string,
-): { mode: "cents" | "degrees"; trackId: string } | null {
+): { mode: "cents" | "degrees" | "formant"; trackId: string } | null {
     if (isChildPitchOffsetCentsParam(param)) {
         return {
             mode: "cents",
@@ -57,6 +75,12 @@ export function parseChildPitchOffsetParam(
         return {
             mode: "degrees",
             trackId: param.slice(CHILD_PITCH_OFFSET_DEGREES_PREFIX.length),
+        };
+    }
+    if (isChildFormantOffsetCentsParam(param)) {
+        return {
+            mode: "formant",
+            trackId: param.slice(CHILD_FORMANT_OFFSET_CENTS_PREFIX.length),
         };
     }
     return null;
@@ -70,12 +94,16 @@ export function snapChildPitchOffsetValue(param: string, value: number): number 
     if (isChildPitchOffsetDegreesParam(param)) {
         return Math.round(value);
     }
+    if (isChildFormantOffsetCentsParam(param)) {
+        return Math.round(value / 50) * 50;
+    }
     return value;
 }
 
 export function childPitchOffsetShiftStep(param: string): number | null {
     if (isChildPitchOffsetCentsParam(param)) return 100;
     if (isChildPitchOffsetDegreesParam(param)) return 1;
+    if (isChildFormantOffsetCentsParam(param)) return 50;
     return null;
 }
 
@@ -88,12 +116,15 @@ export function childPitchOffsetValueToDisplay(param: string, value: number): nu
 }
 
 export function childPitchOffsetDisplayToInternal(
-    mode: "cents" | "degrees",
+    mode: "cents" | "degrees" | "formant",
     value: number,
 ): number {
     if (!Number.isFinite(value)) return 0;
     if (mode === "degrees") {
         return degreeInputToScaleSteps(value);
+    }
+    if (mode === "formant") {
+        return Math.round(value / 50) * 50;
     }
     return value;
 }
