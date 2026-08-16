@@ -506,21 +506,22 @@ pub(crate) fn build_snapshot(
             )
             .unwrap_or((None, 5.0));
 
-        let (volume_curve, volume_curve_frame_period_ms) = processor_params
-            .and_then(|(_, _, frame_period_ms, renderer_id, _, extra_curves, _)| {
-                if renderer_id == "nsf_hifigan_onnx" {
-                    Some((
-                        extra_curves
-                            .get("hifigan_volume")
-                            .cloned()
-                            .map(std::sync::Arc::new),
-                        frame_period_ms,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((None, 5.0));
+        let (volume_curve, volume_curve_frame_period_ms, pan_curve, pan_curve_frame_period_ms) =
+            processor_params
+                .and_then(|(_, _, frame_period_ms, renderer_id, entry, _, _)| {
+                    // vslib 通过自己的控制点消费 volume/pan（与合成输出一起缓存），
+                    // mix 阶段跳过，避免二次应用；未开启 Compose 时按约定不生效。
+                    if renderer_id == "vslib" {
+                        return None;
+                    }
+                    let volume_curve =
+                        crate::pitch_editing::common_volume_curve_for_clip(entry, clip)
+                            .map(|curve| std::sync::Arc::new(curve.to_vec()));
+                    let pan_curve = crate::pitch_editing::common_pan_curve_for_clip(entry, clip)
+                        .map(|curve| std::sync::Arc::new(curve.to_vec()));
+                    Some((volume_curve, frame_period_ms, pan_curve, frame_period_ms))
+                })
+                .unwrap_or((None, 5.0, None, 5.0));
 
         // ── 查询整 Clip 渲染缓存 ───────────────────────────────────────────
         // 改法 C+D：优先从 pending_rendered_keys 查找渲染线程传递的 cache_key，
@@ -667,6 +668,21 @@ pub(crate) fn build_snapshot(
                         // 【优雅降级】：尝试获取该 Clip 最近一次成功的渲染结果作为过渡垫音
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
+                        let needs_breath = processor_params.map_or(false, |(
+                            _,
+                            _,
+                            _,
+                            renderer_id,
+                            entry,
+                            _,
+                            _,
+                        )| {
+                            renderer_id == "nsf_hifigan_onnx"
+                                && crate::pitch_editing::extra_param_enabled(
+                                    &entry.extra_params,
+                                    "breath_enabled",
+                                )
+                        });
 
                         let needs_tension = processor_params.map_or(
                             false,
@@ -690,6 +706,12 @@ pub(crate) fn build_snapshot(
                                 fallback_pcm = Some(p);
                                 fallback_breath = b;
                             }
+                        }
+
+                        // 气声开启时，绝不能回退到不含独立 breath stem 的旧渲染：
+                        // 否则首次播放会听到“没有气声”的旧音频，第二次播放缓存就绪后才恢复。
+                        if needs_breath && fallback_breath.is_none() {
+                            fallback_pcm = None;
                         }
 
                         if let Some(old_pcm) = fallback_pcm {
@@ -769,6 +791,8 @@ pub(crate) fn build_snapshot(
             breath_curve_frame_period_ms,
             volume_curve,
             volume_curve_frame_period_ms,
+            pan_curve,
+            pan_curve_frame_period_ms,
             needs_synthesis,
         });
     }
@@ -884,6 +908,8 @@ pub(crate) fn build_snapshot_for_file(
             breath_curve_frame_period_ms: 5.0,
             volume_curve: None,
             volume_curve_frame_period_ms: 5.0,
+            pan_curve: None,
+            pan_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }]),
     }

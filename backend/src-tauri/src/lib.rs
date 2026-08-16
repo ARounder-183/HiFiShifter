@@ -83,6 +83,9 @@ mod hfspeaks_v2;
 #[path = "import/midi_import.rs"]
 mod midi_import;
 mod project;
+mod project_fragment;
+#[path = "import/reaper_export.rs"]
+mod reaper_export;
 #[path = "import/reaper_import.rs"]
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
@@ -92,6 +95,7 @@ mod sstretch;
 #[path = "audio/soundtouch.rs"]
 mod soundtouch;
 mod state;
+mod system_clipboard;
 #[path = "vocoder/streaming_world.rs"]
 mod streaming_world;
 mod temp_manager;
@@ -324,6 +328,8 @@ pub fn run() {
             commands::new_project,
             commands::open_project_dialog,
             commands::open_project,
+            commands::import_project_dialog,
+            commands::import_project,
             commands::save_project,
             commands::save_project_as,
             commands::get_auto_backup_settings,
@@ -333,6 +339,7 @@ pub fn run() {
             commands::set_project_custom_scale,
             commands::set_project_stretch_settings,
             commands::set_project_timeline_settings,
+            commands::set_timeline_tempo_map,
             commands::open_audio_dialog,
             commands::open_audio_dialog_multi,
             commands::pick_output_path,
@@ -381,6 +388,12 @@ pub fn run() {
             commands::convert_clips_to_pitch_reference,
             commands::update_pitch_reference,
             commands::select_clip,
+            commands::copy_timeline_clips,
+            commands::copy_timeline_tracks,
+            commands::paste_timeline_clipboard,
+            commands::has_timeline_clipboard,
+            commands::write_system_clipboard_object,
+            commands::read_system_clipboard_object,
             commands::load_default_model,
             commands::load_model,
             commands::set_pitch_shift,
@@ -416,6 +429,7 @@ pub fn run() {
             commands::paste_vocalshifter_clipboard,
             commands::open_reaper_dialog,
             commands::import_reaper_project,
+            commands::copy_clips_to_reaper_clipboard,
             commands::paste_reaper_clipboard,
             commands::clear_cache,
             commands::get_processor_params,

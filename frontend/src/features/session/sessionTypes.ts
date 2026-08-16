@@ -6,6 +6,8 @@ export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
 export type DrawDragDirection = "free" | "x-only";
 export type FadeCurveType = "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+export type TimeUnit = "barBeats" | "barDivisions" | "seconds" | "clock";
+export type TimeUnitChoice = TimeUnit | "none";
 // EditParam 是一个字符串，可以是 "pitch" 或声码器额外参数 ID（如 "breath_gain"、"hifigan_tension"）
 // 具体可用值由后端 `get_processor_params` 动态返回
 export type EditParam = string;
@@ -31,6 +33,83 @@ export type GridSize =
     | "1/16t"
     | "1/32t"
     | "1/64t";
+
+/**
+ * 时间轴吸附/网格设置（对标 REAPER Snap/Grid Settings）。
+ *
+ * 该对象同时持久化到后端 UI 设置，并通过 Redux `session.timelineSnap` 全局共享。
+ */
+export interface TimelineSnapSettings {
+    // ── Grid ──
+    /** 显示背景网格线。 */
+    gridVisible: boolean;
+    /** 网格线最小像素间距。 */
+    gridMinSpacingPx: number;
+    /** 开启 Swing（摇摆）网格。 */
+    swingEnabled: boolean;
+    /** Swing 强度（0-100）。 */
+    swingPercent: number;
+    /** 调整 Swing 时自动按新 Swing 网格重新对齐现有媒体项。 */
+    adjustItemsOnSwingChange: boolean;
+
+    // ── Snap master ──
+    /** 吸附总开关（工具栏按钮同步该值）。 */
+    enabled: boolean;
+    /** 鼠标距吸附目标的像素距离阈值。 */
+    snapDistancePx: number;
+    /** 吸附位置相对网格保留原偏移。 */
+    snapRelativeToGrid: boolean;
+
+    // ── Snap targets / objects matrix ──
+    /** 媒体项吸附到 选择/标记/光标。 */
+    snapMediaItemsToSelectionMarkersCursor: boolean;
+    /** 媒体项吸附到网格。 */
+    snapMediaItemsToGrid: boolean;
+    /** 选区吸附到 选择/标记/光标。 */
+    snapSelectionToSelectionMarkersCursor: boolean;
+    /** 选区吸附到网格。 */
+    snapSelectionToGrid: boolean;
+    /** 光标吸附到 选择/标记/光标。 */
+    snapCursorToSelectionMarkersCursor: boolean;
+    /** 光标吸附到网格。 */
+    snapCursorToGrid: boolean;
+
+    // ── Grid snap behavior ──
+    /** 吸附设置跟随网格显示状态。 */
+    snapFollowsGridVisibility: boolean;
+    /** 任意距离吸附网格（激进模式）。 */
+    snapToGridAnyDistance: boolean;
+    /** 使用独立于显示网格的吸附间距。 */
+    useIndependentSnapSpacing: boolean;
+    /** 独立吸附间距。 */
+    snapSpacing: GridSize;
+    /** 独立吸附间距的最小像素值。 */
+    snapSpacingMinPx: number;
+
+    // ── Item & special interactions ──
+    /** 项目起点参与吸附。 */
+    snapItemStart: boolean;
+    /** 项目 snap offset（内容起始点）参与吸附。 */
+    snapItemSnapOffset: boolean;
+    /** 允许吸附到其他轨道的媒体项。 */
+    snapAcrossTracks: boolean;
+    /** 允许跨多少条轨道吸附（0 = 仅本轨）。 */
+    snapTrackDistance: number;
+    /** 剃刀/分割边缘吸附。 */
+    snapRazorEdits: boolean;
+
+    // ── Advanced ──
+    /** 吸附到工程采样率（sample accurate）。 */
+    snapToProjectSampleRate: boolean;
+    /** 媒体项边缘吸附到源媒体 start/end。 */
+    snapMediaEdgesToSource: boolean;
+    /** 强制选区为网格倍数。 */
+    forceSelectionsToMultiples: boolean;
+    /** 强制选区倍数网格。 */
+    selectionMultiple: GridSize;
+    /** Arrange 视图与 MIDI/参数编辑器共用同一网格划分。 */
+    syncArrangeAndMidiGrid: boolean;
+}
 
 export interface TrackInfo {
     id: string;

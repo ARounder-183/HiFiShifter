@@ -54,8 +54,8 @@ export function drawTimelineCanvas(
             selected: boolean;
             muted: boolean;
             gain: number;
+            playbackRate: number;
             groupId?: string;
-            playbackRate?: number;
             name: string;
             isMidiClip?: boolean;
             trackColor?: string;
@@ -87,7 +87,7 @@ export function drawTimelineCanvas(
             selected: clip.selected,
             muted: clip.muted,
             gain: clip.gain,
-            playbackRate: clip.playbackRate ?? 1,
+            playbackRate: clip.playbackRate,
             name: clip.name,
             fontFamily,
             isPitchAdjustment: clip.isMidiClip,

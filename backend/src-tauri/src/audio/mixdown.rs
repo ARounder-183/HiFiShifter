@@ -91,7 +91,7 @@ fn sample_automation_curve_at_sec(
     if !idx_f.is_finite() {
         return default_value;
     }
-    let i0 = idx_f as usize; // 直接用 usize 截断正浮点数，省去 floor
+    let i0 = (idx_f as usize).min(curve.len().saturating_sub(1));
     let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
     let frac = (idx_f - i0 as f64) as f32; // fraction 在 [0, 1) 内，无需 clamp
     let a = curve.get(i0).copied().unwrap_or(default_value);
@@ -564,25 +564,30 @@ pub fn render_mixdown_interleaved(
             }
         }
 
-        // 提取 hifigan_volume 曲线（与 snapshot.rs 中的逻辑对应）
-        let (volume_curve, volume_curve_frame_period_ms) = timeline
-            .resolve_root_track_id(&clip.track_id)
-            .and_then(|root| {
-                let entry = timeline.params_by_root_track.get(&root)?;
-                let track = timeline.tracks.iter().find(|t| t.id == root)?;
-                let kind =
-                    crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-                let renderer_id = crate::renderer::get_renderer(kind).id();
-                if renderer_id == "nsf_hifigan_onnx" {
+        // 提取共通 volume / pan 曲线（与 snapshot.rs 的逻辑对应）。
+        // vslib 在合成阶段通过自己的控制点消费 volume/pan，mixdown 跳过避免二次应用。
+        let (volume_curve, volume_curve_frame_period_ms, pan_curve, pan_curve_frame_period_ms) =
+            timeline
+                .resolve_root_track_id(&clip.track_id)
+                .and_then(|root| {
+                    let entry = timeline.params_by_root_track.get(&root)?;
+                    let track = timeline.tracks.iter().find(|t| t.id == root)?;
+                    let kind = crate::state::SynthPipelineKind::from_track_algo(
+                        &track.pitch_analysis_algo,
+                    );
+                    if crate::pitch_editing::processor_bakes_common_mix_curves(kind) {
+                        return None;
+                    }
+                    let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
+                    let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
                     Some((
-                        entry.extra_curves.get("hifigan_volume").map(|v| v.as_slice()),
+                        volume,
+                        entry.frame_period_ms.max(0.1),
+                        pan,
                         entry.frame_period_ms.max(0.1),
                     ))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or((None, 5.0));
+                })
+                .unwrap_or((None, 5.0, None, 5.0));
 
         // Apply fades (linear) and gain (timeline-referenced).
         let fade_in_frames = (clip.fade_in_sec.max(0.0) * out_rate as f64)
@@ -626,6 +631,7 @@ pub fn render_mixdown_interleaved(
         clips_mixed = clips_mixed.saturating_add(1);
 
         let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
+        let has_pan_curve = pan_curve.is_some() && !pan_curve.as_ref().unwrap().is_empty();
         for f in 0..max_frames_to_mix {
             if f % 4096 == 0 && mixdown_cancelled(&opts) {
                 return Err("export_cancelled".to_string());
@@ -653,8 +659,8 @@ pub fn render_mixdown_interleaved(
 
             // 只有真存在曲线时才计算
             let mut final_g = g;
+            let abs_sec = clip_start_sec + (local_in_clip as f64 / out_rate as f64);
             if has_volume_curve {
-                let abs_sec = clip_start_sec + (local_in_clip as f64 / out_rate as f64);
                 let vol = sample_automation_curve_at_sec(
                     volume_curve,
                     abs_sec,
@@ -664,8 +670,21 @@ pub fn render_mixdown_interleaved(
                 final_g *= vol;
             }
 
-            mix[oi] += segment[si] * final_g;
-            mix[oi + 1] += segment[si + 1] * final_g;
+            let pan = if has_pan_curve {
+                sample_automation_curve_at_sec(pan_curve, abs_sec, pan_curve_frame_period_ms, 0.0)
+            } else {
+                0.0
+            }
+            .clamp(-1.0, 1.0);
+            // 线性平衡：center 保持两声道增益为 1，避免中心衰减。
+            let (left_gain, right_gain) = if pan <= 0.0 {
+                (1.0, 1.0 + pan)
+            } else {
+                (1.0 - pan, 1.0)
+            };
+
+            mix[oi] += segment[si] * final_g * left_gain;
+            mix[oi + 1] += segment[si + 1] * final_g * right_gain;
         }
     }
 

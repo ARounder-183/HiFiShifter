@@ -35,9 +35,14 @@ import {
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
     removeClipsRemote,
+    persistUiSettings,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
+    setTempoMap,
     setTrackName,
     setTrackVolume,
 } from "../../features/session/sessionSlice";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
 import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
 import { useEditDrag } from "./timeline/hooks/useEditDrag";
@@ -65,8 +70,15 @@ import {
     TrackList,
     detectExternalPathAction,
     extractLocalFilePath,
+    formatCursorTime,
     hasFileDrag,
 } from "./timeline";
+import { timeRulerHeightPx } from "./timeline/rulerHeight";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import type { TempoMap } from "../../utils/tempoMap";
+import type { ScaleLike } from "../../utils/musicalScales";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
+import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
 
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
@@ -76,7 +88,6 @@ import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandl
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { writeSystemClipboardObject } from "../../utils/systemClipboard";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
@@ -91,6 +102,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     syncScrollLeft: (next: number) => void;
     autoScrollEnabled: boolean;
+    projectSec: number;
 }) {
     const {
         pxPerSecRef,
@@ -100,6 +112,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         scrollRef,
         syncScrollLeft,
         autoScrollEnabled,
+        projectSec,
     } = props;
     const transport = useAppSelector((state) => ({
         playheadSec: state.session.playheadSec,
@@ -131,7 +144,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                     playheadSec: visualPlayheadSec,
                     pxPerSec: pxPerSecRef.current,
                     viewportWidth: scroller.clientWidth,
-                    contentWidth: scroller.scrollWidth,
+                    contentWidth: projectSec * pxPerSecRef.current,
                 });
                 if (Math.abs(scroller.scrollLeft - next) <= 0.5) return;
                 scroller.scrollLeft = next;
@@ -146,6 +159,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 scrollRef,
                 syncScrollLeft,
                 transport.isPlaying,
+                projectSec,
             ],
         ),
     });
@@ -183,6 +197,14 @@ interface TimelinePanelProps {
     onImportTargetMenuChange?: (v: string) => void;
     importTargetDragDrop?: string;
     onImportTargetDragDropChange?: (v: string) => void;
+    importTempoMapEnabled?: boolean;
+    onImportTempoMapEnabledChange?: (v: boolean) => void;
+    importTempoMapTempo?: boolean;
+    onImportTempoMapTempoChange?: (v: boolean) => void;
+    importTempoMapTimeSignature?: boolean;
+    onImportTempoMapTimeSignatureChange?: (v: boolean) => void;
+    importTempoMapKeySignature?: boolean;
+    onImportTempoMapKeySignatureChange?: (v: boolean) => void;
 }
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
@@ -215,6 +237,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     onImportTargetMenuChange,
     importTargetDragDrop,
     onImportTargetDragDropChange,
+    importTempoMapEnabled,
+    onImportTempoMapEnabledChange,
+    importTempoMapTempo,
+    onImportTempoMapTempoChange,
+    importTempoMapTimeSignature,
+    onImportTempoMapTimeSignatureChange,
+    importTempoMapKeySignature,
+    onImportTempoMapKeySignatureChange,
 }) => {
     const importTarget = midiDialogSource === "dragDrop" ? importTargetDragDrop : importTargetMenu;
     const onImportTargetChange =
@@ -235,6 +265,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clipId: string | null;
         midiPath: string | null;
     }>({ open: false, clipId: null, midiPath: null });
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = React.useState(false);
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
@@ -269,7 +300,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        bars,
+        ticks,
+        tempoGridLineXs,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -292,7 +324,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
-        snapBeat,
+        snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,
         startPanPointer,
@@ -300,6 +332,76 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
+
+    const timeContext = React.useMemo<TimeFormatContext>(
+        () => ({
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+            tempoMap: s.tempoMap,
+        }),
+        [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    const projectScale = React.useMemo<ScaleLike | null>(
+        () =>
+            s.project.useCustomScale && s.project.customScale
+                ? s.project.customScale.notes
+                : s.project.baseScale,
+        [s.project.baseScale, s.project.customScale, s.project.useCustomScale],
+    );
+
+    const handleTempoMapChange = React.useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+        },
+        [dispatch],
+    );
+    const handleTempoMapCommit = React.useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+            void dispatch(setTempoMapRemote(next));
+        },
+        [dispatch],
+    );
+    const handlePrimaryUnitChange = React.useCallback(
+        (unit: TimeUnit) => {
+            dispatch(setPrimaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleSecondaryUnitChange = React.useCallback(
+        (unit: TimeUnitChoice) => {
+            dispatch(setSecondaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleCopyPlayheadTime = React.useCallback(async () => {
+        const text = formatCursorTime(
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            Number(sessionRef.current.playheadSec ?? 0) || 0,
+            timeContext,
+        ).combined;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            try {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                textarea.remove();
+            } catch {
+                // 忽略复制失败
+            }
+        }
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, sessionRef, timeContext]);
 
     // ── 记录最近点击的 clientX，用于 Shift 范围选择的锚点位置
     const lastClickedClientXRef = React.useRef<number | null>(null);
@@ -333,8 +435,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         renamingClipId,
         selectionRect,
         onSelectionRectPointerDown,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        clipboardAvailable,
+        copyClips,
+        cutClips,
+        copyTracks,
+        cutTracks,
+        copyClipsToReaper,
         groupClips,
         ungroupClips,
         toggleGroupDisabled,
@@ -391,6 +497,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             importBpmAsProject?: boolean;
             clipboardGuid?: string;
             closeLeadingGap?: boolean;
+            importAsTempoMap?: boolean;
+            importTempo?: boolean;
+            importTimeSignature?: boolean;
+            importKeySignature?: boolean;
         }) => {
             void dispatch(
                 importMidiAsClip({
@@ -405,6 +515,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     importBpmAsProject: result.importBpmAsProject,
                     clipboardGuid: result.clipboardGuid,
                     closeLeadingGap: result.closeLeadingGap,
+                    importAsTempoMap: result.importAsTempoMap,
+                    importTempo: result.importTempo,
+                    importTimeSignature: result.importTimeSignature,
+                    importKeySignature: result.importKeySignature,
                 }),
             );
         },
@@ -542,6 +656,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             dropPreviewRef,
             pendingDropDurationPathRef,
             beatFromClientX,
+            snapTimeline,
             trackIdFromClientY,
             rowTopForTrackId,
             setDropPreview,
@@ -573,8 +688,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
+        copyClipsToReaper,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -596,11 +712,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled: s.gridSnapEnabled,
+        snapEnabled: s.timelineSnap.enabled,
         ignoreGrouping,
+        paramFineAdjustKb,
     });
 
     const { slipDragRef: _slipDragRef, startSlipDrag } = useSlipDrag({
@@ -626,14 +743,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedClipIds,
         multiSelectedSet,
         dispatch,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled: s.gridSnapEnabled,
+        snapEnabled: s.timelineSnap.enabled,
         copyDragKb,
         autoCrossfadeEnabled: s.autoCrossfadeEnabled,
         ignoreGrouping,
@@ -947,6 +1064,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }),
         [sparseClipRenderModel.drawClips, activeGroupIds, disabledGroupIds],
     );
+    const timelineScrollRange = useMemo(
+        () => resolveTimelineScrollRange({ contentWidth, viewportWidth }),
+        [contentWidth, viewportWidth],
+    );
 
     // ═════════════════════════════════════════════════════════
     // JSX 渲染
@@ -978,8 +1099,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onAlgoChange={handleTrackAlgoChange}
                 onTrackNameChange={handleTrackNameChange}
                 onDuplicateTrack={handleDuplicateTrack}
+                onCopyTrack={(trackId) => void copyTracks([trackId])}
+                onCutTrack={(trackId) => cutTracks([trackId])}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
+                headerHeight={timeRulerHeightPx(
+                    Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
+                )}
             />
 
             {/* Timeline View (Right) */}
@@ -987,7 +1113,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimeRuler
                     contentWidth={contentWidth}
                     scrollLeft={scrollLeft}
-                    bars={bars}
+                    ticks={ticks}
                     pxPerBeat={pxPerBeat}
                     pxPerSec={pxPerSec}
                     secPerBeat={secPerBeat}
@@ -996,18 +1122,65 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     playheadLineRef={rulerPlayheadLineRef}
                     playheadHeadRef={rulerPlayheadHeadRef}
                     contentRef={rulerContentRef}
+                    timeContext={timeContext}
+                    primaryUnit={s.primaryTimeUnit}
+                    secondaryUnit={s.secondaryTimeUnit}
+                    onPrimaryUnitChange={handlePrimaryUnitChange}
+                    onSecondaryUnitChange={handleSecondaryUnitChange}
+                    onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                    onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                    t={t as (key: string) => string}
+                    tempoMap={s.tempoMap}
+                    tempoMapVisible={s.tempoMapVisible}
+                    projectSec={dynamicProjectSec}
+                    grid={s.grid}
+                    snapEnabled={s.snapEnabled}
+                    timelineSnap={s.timelineSnap}
+                    projectScale={projectScale}
+                    projectScaleName={
+                        s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
+                    }
+                    fallbackDenominator={s.project.timeSignatureDenominator}
+                    customScalePresets={s.customScalePresets}
+                    onTempoMapChange={handleTempoMapChange}
+                    onTempoMapCommit={handleTempoMapCommit}
                     onMouseDown={(e) => {
                         if (e.button !== 0) return;
                         document.body.setAttribute("data-hs-focus-window", "timeline");
                         const scroller = scrollRef.current;
                         if (!scroller) return;
-                        const bounds = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                        startDeferredPlayheadSeek({
-                            startClientX: e.clientX,
-                            startClientY: e.clientY,
-                            getBounds: () => bounds,
-                            getScrollLeft: () => scroller.scrollLeft,
-                        });
+                        const ruler = e.currentTarget as HTMLDivElement;
+                        let moved = false;
+                        let lastSec = 0;
+
+                        const updateAt = (clientX: number, commit: boolean): number =>
+                            setPlayheadFromClientX(
+                                clientX,
+                                ruler.getBoundingClientRect(),
+                                scroller.scrollLeft,
+                                commit,
+                            );
+
+                        // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+                        lastSec = updateAt(e.clientX, true);
+
+                        const onMove = (ev: MouseEvent) => {
+                            moved = true;
+                            lastSec = updateAt(ev.clientX, false);
+                        };
+
+                        const onEnd = (ev: MouseEvent) => {
+                            window.removeEventListener("mousemove", onMove, true);
+                            window.removeEventListener("mouseup", onEnd, true);
+                            window.removeEventListener("mouseleave", onEnd, true);
+                            if (!moved) return;
+                            lastSec = updateAt(ev.clientX, false);
+                            void dispatch(seekPlayhead(lastSec));
+                        };
+
+                        window.addEventListener("mousemove", onMove, true);
+                        window.addEventListener("mouseup", onEnd, true);
+                        window.addEventListener("mouseleave", onEnd, true);
                     }}
                 />
 
@@ -1015,7 +1188,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimelineScrollArea
                     scrollRef={scrollRef}
                     projectSec={dynamicProjectSec}
-                    bpm={s.bpm}
                     pxPerSec={pxPerSec}
                     setPxPerSec={setPxPerSec}
                     rowHeight={rowHeight}
@@ -1269,13 +1441,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         // Guard scrollbar interactions first — avoid clearing
                         // multi-selection when dragging the native scrollbar.
                         const scroller = scrollRef.current;
-                        if (scroller && isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)) return;
+                        if (scroller && isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY))
+                            return;
                         setContextMenu(null);
                         setTrackAreaMenu(null);
                         setMultiSelectedClipIds([]);
                         if (!scroller) return;
                         const trackId = trackIdFromClientY(e.clientY);
-                        if (trackId && trackId !== sessionRef.current.selectedTrackId) {
+                        if (
+                            s.paramEditorTimelineClickSelectTrackEnabled &&
+                            trackId &&
+                            trackId !== sessionRef.current.selectedTrackId
+                        ) {
                             void dispatch(selectTrackRemote(trackId));
                         }
                         startDeferredPlayheadSeek({
@@ -1292,301 +1469,333 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         });
                     }}
                 >
-                    {/* Track Lanes */}
+                    {/* Track Lanes（外层含右侧虚拟宽度，内容层严格等于工程宽） */}
                     <div
                         className="relative"
                         style={{
-                            width: contentWidth,
+                            width: timelineScrollRange.paddedContentWidth,
                             height: contentHeight,
                         }}
                     >
-                        {selectionRect ? (
-                            <div
-                                className="absolute z-40 pointer-events-none"
-                                style={{
-                                    left: selectionRect.x1,
-                                    top: selectionRect.y1,
-                                    width: Math.max(1, selectionRect.x2 - selectionRect.x1),
-                                    height: Math.max(1, selectionRect.y2 - selectionRect.y1),
-                                    border: "1px dashed var(--qt-highlight)",
-                                    backgroundColor:
-                                        "color-mix(in oklab, var(--qt-highlight) 12%, transparent)",
-                                }}
-                            />
-                        ) : null}
-
-                        <BackgroundGrid
-                            contentWidth={contentWidth}
-                            contentHeight={trackGridHeight}
-                            pxPerBeat={pxPerBeat}
-                            grid={s.grid}
-                            beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                        />
-
-                        {viewportWidth > 0 ? (
-                            <div
-                                className="absolute pointer-events-none"
-                                style={{
-                                    top: timelineRenderModel.startIndex * rowHeight,
-                                    left: scrollLeft,
-                                    width: viewportWidth,
-                                    height: visibleTrackCanvasHeight,
-                                    zIndex: 1,
-                                }}
-                            >
-                                <TimelineCanvasViewport
-                                    width={Math.max(1, Math.ceil(viewportWidth))}
-                                    height={visibleTrackCanvasHeight}
-                                    model={timelineCanvasModel}
-                                />
-                            </div>
-                        ) : null}
-
-                        {clipDropNewTrack ? (
-                            <div
-                                className="absolute left-0 right-0 pointer-events-none z-20"
-                                style={{
-                                    top: s.tracks.length * rowHeight,
-                                    height: rowHeight,
-                                }}
-                            >
+                        {/* 内容层宽度严格等于工程宽：右侧虚拟宽度只用于滚动，不渲染任何内容 */}
+                        <div
+                            className="absolute top-0 left-0 overflow-hidden"
+                            style={{ width: contentWidth, height: contentHeight }}
+                        >
+                            {selectionRect ? (
                                 <div
-                                    className="absolute inset-0"
+                                    className="absolute z-40 pointer-events-none"
                                     style={{
+                                        left: selectionRect.x1,
+                                        top: selectionRect.y1,
+                                        width: Math.max(1, selectionRect.x2 - selectionRect.x1),
+                                        height: Math.max(1, selectionRect.y2 - selectionRect.y1),
                                         border: "1px dashed var(--qt-highlight)",
                                         backgroundColor:
-                                            "color-mix(in oklab, var(--qt-highlight) 10%, transparent)",
+                                            "color-mix(in oklab, var(--qt-highlight) 12%, transparent)",
                                     }}
                                 />
-                                {newTrackGhostClips.map((clip) => (
-                                    <div
-                                        key={`new-track-ghost-${clip.id}`}
-                                        className="absolute opacity-60"
-                                        style={{
-                                            left: Math.max(0, clip.startSec * pxPerSec),
-                                            width: Math.max(1, clip.lengthSec * pxPerSec),
-                                            top: 0,
-                                            height: rowHeight - 8,
-                                            paddingTop: 8,
-                                        }}
-                                    >
-                                        <div
-                                            className="absolute left-0 right-0 top-0 rounded-t-sm"
-                                            style={{
-                                                height: 18,
-                                                backgroundColor:
-                                                    "color-mix(in oklab, var(--qt-highlight) 55%, transparent)",
-                                            }}
-                                        />
-                                        <div
-                                            className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/70"
-                                            style={{
-                                                top: 18,
-                                                backgroundColor:
-                                                    "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
-                                            }}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        ) : null}
+                            ) : null}
 
-                        <div
-                            className="absolute left-0 right-0"
-                            style={{
-                                top: timelineRenderModel.startIndex * rowHeight,
-                            }}
-                        >
-                            {visibleTracks.map((track) => {
-                                const trackClips =
-                                    visibleTrackClipsById[track.id] ?? ([] as typeof s.clips);
-
-                                return (
-                                    <TrackLane
-                                        key={track.id}
-                                        track={track}
-                                        allTracks={s.tracks}
-                                        trackClips={trackClips}
-                                        rowHeight={rowHeight}
-                                        pxPerSec={pxPerSec}
-                                        bpm={s.bpm}
-                                        viewportWidthPx={viewportWidth}
-                                        viewportStartSec={viewportStartSec}
-                                        viewportEndSec={viewportEndSec}
-                                        overlayClipIds={
-                                            sparseClipRenderModel.overlayClipIdsByTrackId[
-                                                track.id
-                                            ] ?? []
-                                        }
-                                        altPressed={altPressed}
-                                        selectedClipId={
-                                            selectedClipTrackId === track.id
-                                                ? s.selectedClipId
-                                                : null
-                                        }
-                                        multiSelectedClipIds={multiSelectedClipIds}
-                                        multiSelectedSet={multiSelectedSet}
-                                        trackColor={track.color || undefined}
-                                        ensureSelected={ensureTrackLaneSelected}
-                                        selectClipRemote={selectTrackLaneClipRemote}
-                                        onShiftRangeSelect={selectClipRangeByRect}
-                                        rangeSelectAnchorClipId={rangeSelectAnchorClipId}
-                                        recordLastClickPosition={recordLastClickPosition}
-                                        openContextMenu={openTrackLaneContextMenu}
-                                        seekFromClientX={seekFromTrackLaneClientX}
-                                        ghostDrag={ghostDrag}
-                                        verticalTrackLockTrackId={verticalTrackLockTrackId}
-                                        allClips={s.clips}
-                                        startClipDrag={startClipDrag}
-                                        startEditDrag={startEditDrag}
-                                        toggleClipMuted={toggleTrackLaneClipMuted}
-                                        onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
-                                        clearContextMenu={clearContextMenu}
-                                        toggleMultiSelect={toggleTrackLaneMultiSelect}
-                                        renamingClipId={renamingClipId}
-                                        onRenameCommit={commitTrackLaneRename}
-                                        onRenameDone={handleTrackLaneRenameDone}
-                                        onGainCommit={commitTrackLaneGain}
-                                        onFormantMorphCommit={commitTrackLaneFormantMorph}
-                                        activeGroupIds={activeGroupIds}
-                                        disabledGroupIds={disabledGroupIds}
-                                        onToggleGroupDisabled={(groupId) => {
-                                            toggleGroupDisabled(groupId);
-                                        }}
-                                    />
-                                );
-                            })}
-                        </div>
-
-                        <div className="absolute inset-0 pointer-events-none z-[12]">
                             <BackgroundGrid
                                 contentWidth={contentWidth}
                                 contentHeight={trackGridHeight}
                                 pxPerBeat={pxPerBeat}
                                 grid={s.grid}
                                 beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                lineOpacity={0.38}
-                                showBoundary={false}
+                                viewportWidth={viewportWidth}
+                                scrollLeft={scrollLeft}
+                                visible={s.timelineSnap.gridVisible}
+                                minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                swingPercent={
+                                    s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
+                                }
+                                weakLineXs={tempoGridLineXs?.weak ?? null}
+                                strongLineXs={tempoGridLineXs?.strong ?? null}
                             />
-                        </div>
 
-                        <div
-                            className="absolute left-0 right-0 pointer-events-none z-10"
-                            style={{
-                                top: contentHeight - TRACK_ADD_ROW_HEIGHT,
-                                height: TRACK_ADD_ROW_HEIGHT,
-                                backgroundColor: "var(--qt-graph-bg)",
-                            }}
-                        />
+                            {viewportWidth > 0 ? (
+                                <div
+                                    className="absolute pointer-events-none"
+                                    style={{
+                                        top: timelineRenderModel.startIndex * rowHeight,
+                                        left: scrollLeft,
+                                        width: viewportWidth,
+                                        height: visibleTrackCanvasHeight,
+                                        zIndex: 1,
+                                    }}
+                                >
+                                    <TimelineCanvasViewport
+                                        width={Math.max(1, Math.ceil(viewportWidth))}
+                                        height={visibleTrackCanvasHeight}
+                                        model={timelineCanvasModel}
+                                    />
+                                </div>
+                            ) : null}
 
-                        {/* Drop preview (ghost item) */}
-                        {dropPreview ? (
+                            {clipDropNewTrack ? (
+                                <div
+                                    className="absolute left-0 right-0 pointer-events-none z-20"
+                                    style={{
+                                        top: s.tracks.length * rowHeight,
+                                        height: rowHeight,
+                                    }}
+                                >
+                                    <div
+                                        className="absolute inset-0"
+                                        style={{
+                                            border: "1px dashed var(--qt-highlight)",
+                                            backgroundColor:
+                                                "color-mix(in oklab, var(--qt-highlight) 10%, transparent)",
+                                        }}
+                                    />
+                                    {newTrackGhostClips.map((clip) => (
+                                        <div
+                                            key={`new-track-ghost-${clip.id}`}
+                                            className="absolute opacity-60"
+                                            style={{
+                                                left: Math.max(0, clip.startSec * pxPerSec),
+                                                width: Math.max(1, clip.lengthSec * pxPerSec),
+                                                top: 0,
+                                                height: rowHeight - 8,
+                                                paddingTop: 8,
+                                            }}
+                                        >
+                                            <div
+                                                className="absolute left-0 right-0 top-0 rounded-t-sm"
+                                                style={{
+                                                    height: 18,
+                                                    backgroundColor:
+                                                        "color-mix(in oklab, var(--qt-highlight) 55%, transparent)",
+                                                }}
+                                            />
+                                            <div
+                                                className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/70"
+                                                style={{
+                                                    top: 18,
+                                                    backgroundColor:
+                                                        "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
+                                                }}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : null}
+
                             <div
-                                ref={dropPreviewRef}
-                                className="absolute z-30 pointer-events-none"
+                                className="absolute left-0 right-0"
                                 style={{
-                                    left: Math.max(0, dropPreview.startSec * pxPerSec),
-                                    top: rowTopForTrackId(dropPreview.trackId) + 8,
-                                    width:
-                                        dropPreview.durationSec > 0
-                                            ? Math.max(1, pxPerSec * dropPreview.durationSec)
-                                            : 80,
-                                    height: rowHeight - 16,
+                                    top: timelineRenderModel.startIndex * rowHeight,
                                 }}
                             >
-                                <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
-                                    <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
-                                        {dropPreview.fileName}
+                                {visibleTracks.map((track) => {
+                                    const trackClips =
+                                        visibleTrackClipsById[track.id] ?? ([] as typeof s.clips);
+
+                                    return (
+                                        <TrackLane
+                                            key={track.id}
+                                            track={track}
+                                            allTracks={s.tracks}
+                                            trackClips={trackClips}
+                                            rowHeight={rowHeight}
+                                            pxPerSec={pxPerSec}
+                                            bpm={s.bpm}
+                                            viewportWidthPx={viewportWidth}
+                                            viewportStartSec={viewportStartSec}
+                                            viewportEndSec={viewportEndSec}
+                                            overlayClipIds={
+                                                sparseClipRenderModel.overlayClipIdsByTrackId[
+                                                    track.id
+                                                ] ?? []
+                                            }
+                                            altPressed={altPressed}
+                                            selectedClipId={
+                                                selectedClipTrackId === track.id
+                                                    ? s.selectedClipId
+                                                    : null
+                                            }
+                                            multiSelectedClipIds={multiSelectedClipIds}
+                                            multiSelectedSet={multiSelectedSet}
+                                            trackColor={track.color || undefined}
+                                            ensureSelected={ensureTrackLaneSelected}
+                                            selectClipRemote={selectTrackLaneClipRemote}
+                                            onShiftRangeSelect={selectClipRangeByRect}
+                                            rangeSelectAnchorClipId={rangeSelectAnchorClipId}
+                                            recordLastClickPosition={recordLastClickPosition}
+                                            openContextMenu={openTrackLaneContextMenu}
+                                            seekFromClientX={seekFromTrackLaneClientX}
+                                            ghostDrag={ghostDrag}
+                                            verticalTrackLockTrackId={verticalTrackLockTrackId}
+                                            allClips={s.clips}
+                                            startClipDrag={startClipDrag}
+                                            startEditDrag={startEditDrag}
+                                            toggleClipMuted={toggleTrackLaneClipMuted}
+                                            onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
+                                            clearContextMenu={clearContextMenu}
+                                            toggleMultiSelect={toggleTrackLaneMultiSelect}
+                                            renamingClipId={renamingClipId}
+                                            onRenameCommit={commitTrackLaneRename}
+                                            onRenameDone={handleTrackLaneRenameDone}
+                                            onGainCommit={commitTrackLaneGain}
+                                            onFormantMorphCommit={commitTrackLaneFormantMorph}
+                                            activeGroupIds={activeGroupIds}
+                                            disabledGroupIds={disabledGroupIds}
+                                            onToggleGroupDisabled={(groupId) => {
+                                                toggleGroupDisabled(groupId);
+                                            }}
+                                        />
+                                    );
+                                })}
+                            </div>
+
+                            <div className="absolute inset-0 pointer-events-none z-[12]">
+                                <BackgroundGrid
+                                    contentWidth={contentWidth}
+                                    contentHeight={trackGridHeight}
+                                    pxPerBeat={pxPerBeat}
+                                    grid={s.grid}
+                                    beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                    viewportWidth={viewportWidth}
+                                    scrollLeft={scrollLeft}
+                                    visible={s.timelineSnap.gridVisible}
+                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                    swingPercent={
+                                        s.timelineSnap.swingEnabled
+                                            ? s.timelineSnap.swingPercent
+                                            : 0
+                                    }
+                                    lineOpacity={0.38}
+                                    showBoundary={false}
+                                    weakLineXs={tempoGridLineXs?.weak ?? null}
+                                    strongLineXs={tempoGridLineXs?.strong ?? null}
+                                />
+                            </div>
+
+                            <div
+                                className="absolute left-0 right-0 pointer-events-none z-10"
+                                style={{
+                                    top: contentHeight - TRACK_ADD_ROW_HEIGHT,
+                                    height: TRACK_ADD_ROW_HEIGHT,
+                                    backgroundColor: "var(--qt-graph-bg)",
+                                }}
+                            />
+
+                            {/* Drop preview (ghost item) */}
+                            {dropPreview ? (
+                                <div
+                                    ref={dropPreviewRef}
+                                    className="absolute z-30 pointer-events-none"
+                                    style={{
+                                        left: Math.max(0, dropPreview.startSec * pxPerSec),
+                                        top: rowTopForTrackId(dropPreview.trackId) + 8,
+                                        width:
+                                            dropPreview.durationSec > 0
+                                                ? Math.max(1, pxPerSec * dropPreview.durationSec)
+                                                : 80,
+                                        height: rowHeight - 16,
+                                    }}
+                                >
+                                    <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
+                                        <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
+                                            {dropPreview.fileName}
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        ) : null}
+                            ) : null}
 
-                        {s.clipFormantToolWindow.open && activeFormantToolClip ? (
-                            <ClipFormantToolWindow
-                                clip={activeFormantToolClip}
-                                status={s.clipFormantStatus[activeFormantToolClip.id] ?? "ready"}
-                                x={s.clipFormantToolWindow.x}
-                                y={s.clipFormantToolWindow.y}
-                                onCommit={commitTrackLaneFormantMorph}
-                                onMove={(x, y) =>
-                                    dispatch(setClipFormantToolWindowPosition({ x, y }))
-                                }
-                                onClose={() => dispatch(closeClipFormantToolWindow())}
-                            />
-                        ) : null}
-
-                        {/* Playhead Cursor */}
-                        <div
-                            ref={playheadRef}
-                            className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 cursor-ew-resize"
-                            style={{
-                                left: (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSec,
-                            }}
-                            onPointerDown={(e) => {
-                                if (e.button !== 0) return;
-                                e.stopPropagation();
-                                const scroller = scrollRef.current;
-                                if (!scroller) return;
-                                const startX = e.clientX;
-                                const startY = e.clientY;
-                                let moved = false;
-                                const bounds = scroller.getBoundingClientRect();
-                                const initialSec = Number(sessionRef.current.playheadSec ?? 0) || 0;
-                                playheadDragRef.current = {
-                                    pointerId: e.pointerId,
-                                    lastBeat: initialSec,
-                                };
-                                (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-
-                                function onPointerMove(ev: PointerEvent) {
-                                    const drag = playheadDragRef.current;
-                                    const currentScroller = scrollRef.current;
-                                    if (
-                                        !drag ||
-                                        drag.pointerId !== e.pointerId ||
-                                        !currentScroller
-                                    ) {
-                                        return;
+                            {s.clipFormantToolWindow.open && activeFormantToolClip ? (
+                                <ClipFormantToolWindow
+                                    clip={activeFormantToolClip}
+                                    status={
+                                        s.clipFormantStatus[activeFormantToolClip.id] ?? "ready"
                                     }
-                                    const dx = ev.clientX - startX;
-                                    const dy = ev.clientY - startY;
-                                    if (!moved && dx * dx + dy * dy >= 9) {
-                                        moved = true;
+                                    x={s.clipFormantToolWindow.x}
+                                    y={s.clipFormantToolWindow.y}
+                                    onCommit={commitTrackLaneFormantMorph}
+                                    onMove={(x, y) =>
+                                        dispatch(setClipFormantToolWindowPosition({ x, y }))
                                     }
-                                    if (!moved) return;
-                                    const currentBounds = currentScroller.getBoundingClientRect();
-                                    drag.lastBeat = setPlayheadFromClientX(
-                                        ev.clientX,
-                                        currentBounds,
-                                        currentScroller.scrollLeft,
-                                        false,
+                                    onClose={() => dispatch(closeClipFormantToolWindow())}
+                                />
+                            ) : null}
+
+                            {/* Playhead Cursor */}
+                            <div
+                                ref={playheadRef}
+                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 cursor-ew-resize"
+                                style={{
+                                    left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
+                                }}
+                                onPointerDown={(e) => {
+                                    if (e.button !== 0) return;
+                                    e.stopPropagation();
+                                    const scroller = scrollRef.current;
+                                    if (!scroller) return;
+                                    const startX = e.clientX;
+                                    const startY = e.clientY;
+                                    let moved = false;
+                                    const bounds = scroller.getBoundingClientRect();
+                                    const initialSec =
+                                        Number(sessionRef.current.playheadSec ?? 0) || 0;
+                                    playheadDragRef.current = {
+                                        pointerId: e.pointerId,
+                                        lastBeat: initialSec,
+                                    };
+                                    (e.currentTarget as HTMLDivElement).setPointerCapture(
+                                        e.pointerId,
                                     );
-                                }
 
-                                function endDrag() {
-                                    const drag = playheadDragRef.current;
-                                    if (!drag || drag.pointerId !== e.pointerId) return;
-                                    playheadDragRef.current = null;
-                                    if (!moved) {
+                                    function onPointerMove(ev: PointerEvent) {
+                                        const drag = playheadDragRef.current;
+                                        const currentScroller = scrollRef.current;
+                                        if (
+                                            !drag ||
+                                            drag.pointerId !== e.pointerId ||
+                                            !currentScroller
+                                        ) {
+                                            return;
+                                        }
+                                        const dx = ev.clientX - startX;
+                                        const dy = ev.clientY - startY;
+                                        if (!moved && dx * dx + dy * dy >= 9) {
+                                            moved = true;
+                                        }
+                                        if (!moved) return;
+                                        const currentBounds =
+                                            currentScroller.getBoundingClientRect();
                                         drag.lastBeat = setPlayheadFromClientX(
-                                            startX,
-                                            bounds,
-                                            scroller!.scrollLeft,
+                                            ev.clientX,
+                                            currentBounds,
+                                            currentScroller.scrollLeft,
                                             false,
                                         );
                                     }
-                                    void dispatch(seekPlayhead(drag.lastBeat));
-                                    window.removeEventListener("pointermove", onPointerMove);
-                                    window.removeEventListener("pointerup", endDrag);
-                                    window.removeEventListener("pointercancel", endDrag);
-                                }
 
-                                window.addEventListener("pointermove", onPointerMove);
-                                window.addEventListener("pointerup", endDrag);
-                                window.addEventListener("pointercancel", endDrag);
-                            }}
-                        />
+                                    function endDrag() {
+                                        const drag = playheadDragRef.current;
+                                        if (!drag || drag.pointerId !== e.pointerId) return;
+                                        playheadDragRef.current = null;
+                                        if (!moved) {
+                                            drag.lastBeat = setPlayheadFromClientX(
+                                                startX,
+                                                bounds,
+                                                scroller!.scrollLeft,
+                                                false,
+                                            );
+                                        }
+                                        void dispatch(seekPlayhead(drag.lastBeat));
+                                        window.removeEventListener("pointermove", onPointerMove);
+                                        window.removeEventListener("pointerup", endDrag);
+                                        window.removeEventListener("pointercancel", endDrag);
+                                    }
+
+                                    window.addEventListener("pointermove", onPointerMove);
+                                    window.addEventListener("pointerup", endDrag);
+                                    window.addEventListener("pointercancel", endDrag);
+                                }}
+                            />
+                        </div>
                     </div>
                 </TimelineScrollArea>
 
@@ -1751,58 +1960,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       clipActions.setRenamingClipId(clipId);
                                   }}
                                   onCopy={(ids) => {
-                                      void (async () => {
-                                          const s = sessionRef.current;
-                                          const expandedIds = expandClipIdsWithGroups(
-                                              ids,
-                                              s.clips,
-                                              s.ignoreGrouping,
-                                              s.disabledGroupIds,
-                                          );
-                                          const result =
-                                              await buildClipClipboardTemplates(expandedIds);
-                                          if (result.templates.length > 0) {
-                                              clipClipboardRef.current = result;
-                                              try {
-                                                  await writeSystemClipboardObject({
-                                                      version: 1,
-                                                      kind: "clip",
-                                                      templates: result.templates,
-                                                      groupIds: result.groupIds,
-                                                  });
-                                              } catch {
-                                                  // ignore clipboard write errors
-                                              }
-                                          }
-                                      })();
+                                      const s = sessionRef.current;
+                                      const expandedIds = expandClipIdsWithGroups(
+                                          ids,
+                                          s.clips,
+                                          s.ignoreGrouping,
+                                          s.disabledGroupIds,
+                                      );
+                                      void copyClips(expandedIds);
                                   }}
                                   onCut={(ids) => {
-                                      void (async () => {
-                                          const s = sessionRef.current;
-                                          const expandedIds = expandClipIdsWithGroups(
-                                              ids,
-                                              s.clips,
-                                              s.ignoreGrouping,
-                                              s.disabledGroupIds,
-                                          );
-                                          const result =
-                                              await buildClipClipboardTemplates(expandedIds);
-                                          if (result.templates.length === 0) return;
-                                          clipClipboardRef.current = result;
-                                          try {
-                                              await writeSystemClipboardObject({
-                                                  version: 1,
-                                                  kind: "clip",
-                                                  templates: result.templates,
-                                                  groupIds: result.groupIds,
-                                              });
-                                          } catch {
-                                              // ignore clipboard write errors
-                                          }
-                                          setContextMenu(null);
-                                          setMultiSelectedClipIds([]);
-                                          void dispatch(removeClipsRemote(expandedIds));
-                                      })();
+                                      const s = sessionRef.current;
+                                      const expandedIds = expandClipIdsWithGroups(
+                                          ids,
+                                          s.clips,
+                                          s.ignoreGrouping,
+                                          s.disabledGroupIds,
+                                      );
+                                      setContextMenu(null);
+                                      cutClips(expandedIds);
                                   }}
                                   onReplace={(ids) => {
                                       void replaceClipSources(ids);
@@ -1897,10 +2073,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <TrackAreaContextMenu
                         x={trackAreaMenu.x}
                         y={trackAreaMenu.y}
-                        canPaste={
-                            Boolean(clipClipboardRef.current) &&
-                            (clipClipboardRef.current?.templates.length ?? 0) > 0
-                        }
+                        canPaste={clipboardAvailable}
                         canSplit={(multiSelectedClipIds.length > 0
                             ? multiSelectedClipIds
                             : sessionRef.current.selectedClipId
@@ -1957,6 +2130,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     onSpecifiedBpmChange={onSpecifiedBpmChange}
                     closeLeadingGap={closeLeadingGap}
                     onCloseLeadingGapChange={onCloseLeadingGapChange}
+                    importTempoMapEnabled={importTempoMapEnabled}
+                    onImportTempoMapEnabledChange={onImportTempoMapEnabledChange}
+                    importTempoMapTempo={importTempoMapTempo}
+                    onImportTempoMapTempoChange={onImportTempoMapTempoChange}
+                    importTempoMapTimeSignature={importTempoMapTimeSignature}
+                    onImportTempoMapTimeSignatureChange={onImportTempoMapTimeSignatureChange}
+                    importTempoMapKeySignature={importTempoMapKeySignature}
+                    onImportTempoMapKeySignatureChange={onImportTempoMapKeySignatureChange}
                 />
 
                 <MidiTrackSelectDialog
@@ -2033,6 +2214,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     scrollRef={scrollRef}
                     syncScrollLeft={syncScrollLeft}
                     autoScrollEnabled={s.autoScrollEnabled}
+                    projectSec={dynamicProjectSec}
+                />
+
+                <TimelineDisplaySettingsDialog
+                    open={timeDisplaySettingsOpen}
+                    onOpenChange={setTimeDisplaySettingsOpen}
                 />
             </Flex>
         </Flex>

@@ -440,7 +440,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_open_folder")}
+                        data-tooltip={(t as (key: string) => string)("fb_open_folder")}
                         onClick={handleOpenFolder}
                     >
                         <FolderIcon />
@@ -449,7 +449,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_refresh")}
+                        data-tooltip={(t as (key: string) => string)("fb_refresh")}
                         onClick={handleRefresh}
                     >
                         <ReloadIcon />
@@ -458,7 +458,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={t("fb_close")}
+                        data-tooltip={t("fb_close")}
                         onClick={() => dispatch(setVisible(false))}
                     >
                         <Cross2Icon />
@@ -515,7 +515,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant={fb.regexEnabled ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_regex")}
+                        data-tooltip={tAny("fb_regex")}
                         onClick={() => {
                             const nextRegexEnabled = !fb.regexEnabled;
                             dispatch(toggleRegex());
@@ -546,7 +546,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant={fb.audioOnly ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_audio_only")}
+                        data-tooltip={tAny("fb_audio_only")}
                         onClick={() => dispatch(toggleAudioOnly())}
                         style={{
                             width: 22,
@@ -597,12 +597,17 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_parent_dir")}
+                        data-tooltip={(t as (key: string) => string)("fb_parent_dir")}
                         onClick={handleParentDir}
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <Text size="1" color="gray" className="truncate flex-1" title={fb.currentPath}>
+                    <Text
+                        size="1"
+                        color="gray"
+                        className="truncate flex-1"
+                        data-tooltip={fb.currentPath}
+                    >
                         {fb.currentPath}
                     </Text>
                 </Flex>
@@ -767,7 +772,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 文件名 + 路径提示 */}
                 <div className="flex flex-col min-w-0 flex-1">
-                    <Text size="1" className="truncate" title={entry.name}>
+                    <Text size="1" className="truncate" data-tooltip={entry.name}>
                         {entry.name}
                         {entry.isDir ? "/" : ""}
                     </Text>

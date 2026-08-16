@@ -314,6 +314,11 @@ export const TrackLane = React.memo(
                 const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
                 const allowSeek = !altKeyDown && !ctrlOrMeta && !event.shiftKey;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clip.id)
+                        : selectedClipId === clip.id;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const startX = event.clientX;
                 const startY = event.clientY;
                 let moved = false;
@@ -321,6 +326,10 @@ export const TrackLane = React.memo(
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
+
+                if (primedSelection) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== event.pointerId) return;
@@ -337,7 +346,7 @@ export const TrackLane = React.memo(
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clip.id, true, event.clientX);
                         }
                         if (allowSeek) {
@@ -355,6 +364,9 @@ export const TrackLane = React.memo(
             [
                 altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
                 onShiftRangeSelect,
                 primeSelection,
                 rangeSelectAnchorClipId,
@@ -382,6 +394,11 @@ export const TrackLane = React.memo(
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
                 const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clipId)
+                        : selectedClipId === clipId;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const mode =
                     edge === "trim_left"
                         ? stretchActive
@@ -398,6 +415,10 @@ export const TrackLane = React.memo(
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
+
+                if (primedSelection) {
+                    primeSelection(clipId, true, event.clientX);
+                }
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== pointerId || dragStarted) return;
@@ -422,7 +443,7 @@ export const TrackLane = React.memo(
                             onShiftRangeSelect(clipId, shiftRangeAnchorClipId, startX);
                             return;
                         }
-                        if (shouldPrimeSelection) {
+                        if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clipId, true, event.clientX);
                         }
                         seekFromClientX(ev.clientX, true);
@@ -436,6 +457,9 @@ export const TrackLane = React.memo(
             [
                 altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
                 onCtrlToggleSelect,
                 onShiftRangeSelect,
                 primeSelection,

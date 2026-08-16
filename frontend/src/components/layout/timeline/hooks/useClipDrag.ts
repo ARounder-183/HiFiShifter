@@ -26,7 +26,11 @@ import {
     buildBulkClipStateUpdates,
     buildDuplicateClipsBulkPayload,
 } from "./bulkClipRemotePayloads";
-import { buildDropToNewTrackMoves, computeSelectedTrackSpan } from "./clipDropMoveUtils";
+import {
+    buildDropToNewTrackMoves,
+    computeSelectedTrackSpan,
+    computeTrackMoveBounds,
+} from "./clipDropMoveUtils";
 import {
     computeTimelineTrackDragLock,
     computeTimelineTrackDragLockThresholdPx,
@@ -86,7 +90,15 @@ export function useClipDrag(deps: {
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
     dispatch: AppDispatch;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
@@ -95,8 +107,8 @@ export function useClipDrag(deps: {
     slipEditKb: Keybinding;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** modifier.clipCopyDrag 绑定 */
     copyDragKb: Keybinding;
     /** 自动交叉淡入淡出 */
@@ -113,20 +125,20 @@ export function useClipDrag(deps: {
         multiSelectedSet,
         dispatch,
         pxPerSec,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
         slipEditKb,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         copyDragKb,
         autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick,
     } = deps;
-    void gridSnapEnabled;
+    void snapEnabled;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);
@@ -224,19 +236,17 @@ export function useClipDrag(deps: {
             allowTrackMove = false;
         }
 
-        let minTrackOffset = 0;
-        let maxTrackOffset = 0;
-        for (const id of clipIds) {
-            const initial = initialById[id];
-            if (!initial) continue;
-            const idx = trackIndexById[initial.trackId];
-            if (!Number.isFinite(idx)) {
-                allowTrackMove = false;
-                continue;
-            }
-            minTrackOffset = Math.min(minTrackOffset, -idx);
-            maxTrackOffset = Math.max(maxTrackOffset, trackOrder.length - 1 - idx);
+        const trackBounds = computeTrackMoveBounds({
+            trackCount: trackOrder.length,
+            clipIds,
+            initialById,
+            trackIndexById,
+        });
+        if (!trackBounds) {
+            allowTrackMove = false;
         }
+        const minTrackOffset = trackBounds?.minTrackOffset ?? 0;
+        const maxTrackOffset = trackBounds?.maxTrackOffset ?? 0;
 
         const targetTrackId = trackIdFromClientY(e.clientY) ?? initialTrackId;
         // 允许对混合轨道选择也创建新轨（后续释放时会根据源轨跨度创建多条轨道）
@@ -312,9 +322,13 @@ export function useClipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
             const noSnapActive = isModifierActive(noSnapKb, ev);
-            const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+            const effectiveSnap = snapEnabled && !noSnapActive;
             if (effectiveSnap) {
-                nextStart = snapBeat(nextStart);
+                nextStart = snapTimeline(nextStart, "mediaItem", {
+                    originSec: drag.initialAnchorstartSec,
+                    anchorTrackId: drag.initialAnchorTrackId,
+                    excludeClipIds: new Set(drag.clipIds),
+                });
             }
 
             let deltaBeat = nextStart - drag.initialAnchorstartSec;
@@ -405,7 +419,7 @@ export function useClipDrag(deps: {
                                 nextTrackId == null
                                     ? NEW_TRACK_SENTINEL
                                     : (resolveTrackIdByOffset(drag, id, drag.lastTrackOffset) ??
-                                      nextTrackId);
+                                      initial.trackId);
                             dispatch(
                                 moveClipTrack({
                                     clipId: id,
@@ -791,16 +805,20 @@ export function useClipDrag(deps: {
                 const moves = drag.clipIds
                     .map((id) => {
                         const initial = drag.initialById[id];
-                        const now = session.clips.find((c) => c.id === id);
-                        if (!initial || !now) return null;
-                        const changedBeat =
-                            Math.abs(Number(now.startSec) - initial.startSec) > 1e-6;
-                        const changedTrack = String(now.trackId) !== initial.trackId;
+                        if (!initial) return null;
+                        const startSec = Math.max(0, initial.startSec + drag.lastDeltaBeat);
+                        const trackId =
+                            drag.allowTrackMove && drag.lastTrackOffset !== 0
+                                ? (resolveTrackIdByOffset(drag, id, drag.lastTrackOffset) ??
+                                  initial.trackId)
+                                : initial.trackId;
+                        const changedBeat = Math.abs(startSec - initial.startSec) > 1e-6;
+                        const changedTrack = trackId !== initial.trackId;
                         if (!changedBeat && !changedTrack) return null;
                         return {
                             clipId: id,
-                            startSec: Number(now.startSec),
-                            trackId: String(now.trackId),
+                            startSec,
+                            trackId,
                         };
                     })
                     .filter(

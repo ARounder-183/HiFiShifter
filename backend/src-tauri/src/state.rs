@@ -34,6 +34,67 @@ fn default_formant_strength() -> f64 {
     0.50
 }
 
+/// 内置音阶键名 → 音级集合（未知键名返回 None）。
+pub(crate) fn scale_notes_for_key(scale: &str) -> Option<Vec<u8>> {
+    let notes = match scale {
+        "C" => vec![0, 2, 4, 5, 7, 9, 11],
+        "Db" => vec![1, 3, 5, 6, 8, 10, 0],
+        "D" => vec![2, 4, 6, 7, 9, 11, 1],
+        "Eb" => vec![3, 5, 7, 8, 10, 0, 2],
+        "E" => vec![4, 6, 8, 9, 11, 1, 3],
+        "F" => vec![5, 7, 9, 10, 0, 2, 4],
+        "Gb" => vec![6, 8, 10, 11, 1, 3, 5],
+        "G" => vec![7, 9, 11, 0, 2, 4, 6],
+        "Ab" => vec![8, 10, 0, 1, 3, 5, 7],
+        "A" => vec![9, 11, 1, 2, 4, 6, 8],
+        "Bb" => vec![10, 0, 2, 3, 5, 7, 9],
+        "B" => vec![11, 1, 3, 4, 6, 8, 10],
+        _ => return None,
+    };
+    Some(notes)
+}
+
+/// 全部内置音阶键名（与 scale_notes_for_key 对应）。
+pub(crate) const SCALE_KEYS: [&str; 12] = [
+    "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B",
+];
+
+/// 由音级集合反查内置音阶键名（归一化后完全一致才匹配）。
+pub(crate) fn key_for_scale_notes(notes: &[u8]) -> Option<String> {
+    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    for key in SCALE_KEYS {
+        if let Some(n) = scale_notes_for_key(key) {
+            let mut m: Vec<u8> = n.iter().map(|v| v % 12).collect();
+            m.sort_unstable();
+            m.dedup();
+            if m == normalized {
+                return Some(key.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 工程音阶 → Tempo Map 初始点音阶数据（初始点即工程基准记录，含自定义音阶名）。
+pub(crate) fn tempo_scale_data_from_project(p: &ProjectState) -> TempoScaleData {
+    if p.use_custom_scale {
+        if let Some(custom) = p.custom_scale.as_ref() {
+            return TempoScaleData {
+                key: None,
+                name: Some(custom.name.clone()),
+                notes: Some(custom.notes.clone()),
+            };
+        }
+    }
+    TempoScaleData {
+        key: Some(p.base_scale.clone()),
+        name: None,
+        notes: None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
@@ -100,8 +161,9 @@ pub struct TrackParamsState {
     #[serde(skip)]
     pub pending_pitch_offset: Option<Vec<f32>>,
 
-    /// 声码器专属逐帧自动化曲线（key = ParamDescriptor::id）。
-    /// 例："formant_shift_cents", "volume" 等；缺失 key = 使用参数默认值。
+    /// 自动化曲线（key = ParamDescriptor::id）。
+    /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
+    /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
     #[serde(default)]
     pub extra_curves: HashMap<String, Vec<f32>>,
 
@@ -349,6 +411,31 @@ pub struct RuntimeState {
     pub synthesized_wav_path: Option<String>,
 }
 
+/// Tempo Map 变化点携带的音阶覆盖数据（None = 跟随工程音阶）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoScaleData {
+    /// 内置音阶键名（如 "C"、"Db"）。
+    pub key: Option<String>,
+    /// 自定义音阶名称。
+    pub name: Option<String>,
+    /// 自定义音阶音级集合（0-11）。
+    pub notes: Option<Vec<u8>>,
+}
+
+/// Tempo Map 变化点（时间锚定：position_sec 绝对秒）。
+/// 拍号为 None 表示“跟随之前的拍号”（0 位置初始点必须显式携带拍号）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPointData {
+    pub id: String,
+    pub position_sec: f64,
+    pub bpm: f64,
+    pub numerator: Option<u32>,
+    pub denominator: Option<u32>,
+    pub scale: Option<TempoScaleData>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineState {
     pub tracks: Vec<Track>,
@@ -364,6 +451,11 @@ pub struct TimelineState {
 
     #[serde(default = "default_project_scale_notes")]
     pub project_scale_notes: Vec<u8>,
+
+    /// Tempo Map（None = 无 Tempo Map，使用全局 BPM/拍号/音阶）。
+    /// 点按 position_sec 升序；第一个点必须位于 0。
+    #[serde(default)]
+    pub tempo_map: Option<Vec<TempoPointData>>,
 
     pub next_track_order: i32,
 
@@ -390,6 +482,8 @@ pub struct ProjectState {
     pub use_custom_scale: bool,
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
+    /// 工程基准拍号分母（1/2/4/8/16/32）。
+    pub time_signature_denominator: u32,
     pub grid_size: String,
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
     pub hifigan_mel_stretch_override: Option<bool>,
@@ -409,6 +503,7 @@ impl Default for ProjectState {
             use_custom_scale: false,
             custom_scale: None,
             beats_per_bar: 4,
+            time_signature_denominator: 4,
             grid_size: "1/4".to_string(),
             stretch_algorithm_override: None,
             hifigan_mel_stretch_override: None,
@@ -443,10 +538,36 @@ impl Default for TimelineState {
 
             params_by_root_track: BTreeMap::new(),
             project_scale_notes: default_project_scale_notes(),
+            tempo_map: None,
             next_track_order: 1,
             disabled_group_ids: HashSet::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitTransitionMode {
+    FadeOnly,
+    ExtendOverlap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitTransitionDurationUnit {
+    Seconds,
+    Percent,
+}
+
+/// 分割过渡选项，由全局 UI 设置解析而来，并在 `split_clip_with_transition` 中使用。
+#[derive(Debug, Clone)]
+pub struct SplitTransitionOptions {
+    pub enabled: bool,
+    pub mode: SplitTransitionMode,
+    pub duration_unit: SplitTransitionDurationUnit,
+    pub duration_sec: f64,
+    pub duration_percent: f64,
+    pub curve: Option<String>,
+    /// 延伸重叠模式下，是否同时为重叠区域设置淡入淡出。
+    pub overlap_fades: bool,
 }
 
 impl TimelineState {
@@ -520,7 +641,7 @@ impl TimelineState {
         }
     }
 
-    fn extract_linked_params_from_root_range(
+    pub(crate) fn extract_linked_params_from_root_range(
         &mut self,
         root_track_id: &str,
         start_sec: f64,
@@ -618,7 +739,7 @@ impl TimelineState {
         }
     }
 
-    fn apply_linked_params_to_root_range(
+    pub(crate) fn apply_linked_params_to_root_range(
         &mut self,
         root_track_id: &str,
         start_sec: f64,
@@ -631,6 +752,14 @@ impl TimelineState {
         let end_frame = start_frame.saturating_add(frame_len);
         let kind = self.root_track_kind(root_track_id);
         let has_pitch = !linked_params.pitch_edit.is_empty();
+
+        // 粘贴/导入带 pitch_edit 的曲线时，目标根轨道必须进入合成模式，
+        // 否则后续异步 pitch_orig 分析会跳过该轨道，声码器也会直接返回原声。
+        if has_pitch {
+            if let Some(track) = self.tracks.iter_mut().find(|track| track.id == root_track_id) {
+                track.compose_enabled = true;
+            }
+        }
 
         let target_existing_keys = self
             .params_by_root_track
@@ -788,6 +917,10 @@ impl TimelineState {
                 ..TrackParamsState::default()
             });
 
+        // 旧工程使用算法专有的 `hifigan_volume`；统一迁移到共通 `volume`，
+        // 保证切换算法时曲线仍然生效。
+        Self::migrate_legacy_common_curves_in_entry(entry);
+
         entry.frame_period_ms = fp;
 
         // CRITICAL FIX: Detect stale pitch curves and clear them when clip/timeline changes.
@@ -845,6 +978,37 @@ impl TimelineState {
                     }
                 }
                 i += stride;
+            }
+        }
+    }
+
+    fn migrate_legacy_common_curves_in_entry(entry: &mut TrackParamsState) {
+        // `hifigan_volume` → 共通 `volume`。
+        if !entry.extra_curves.contains_key("volume") {
+            if let Some(legacy) = entry.extra_curves.remove("hifigan_volume") {
+                entry.extra_curves.insert("volume".to_string(), legacy);
+            }
+        } else {
+            // 已存在共通曲线时，旧键不再参与渲染，直接移除避免缓存键重复计算。
+            entry.extra_curves.remove("hifigan_volume");
+        }
+    }
+
+    /// 工程加载/导入时执行参数迁移：
+    /// 旧版 NSF-HiFiGAN 的 `hifigan_volume` 曲线统一迁移到共通 `volume` 曲线。
+    pub fn migrate_legacy_common_param_curves(&mut self) {
+        for entry in self.params_by_root_track.values_mut() {
+            Self::migrate_legacy_common_curves_in_entry(entry);
+        }
+        for clip in &mut self.clips {
+            if let Some(curves) = clip.extra_curves.as_mut() {
+                if !curves.contains_key("volume") {
+                    if let Some(legacy) = curves.remove("hifigan_volume") {
+                        curves.insert("volume".to_string(), legacy);
+                    }
+                } else {
+                    curves.remove("hifigan_volume");
+                }
             }
         }
     }
@@ -1237,6 +1401,7 @@ impl AppState {
             use_custom_scale: p.use_custom_scale,
             custom_scale: p.custom_scale,
             beats_per_bar: p.beats_per_bar,
+            time_signature_denominator: p.time_signature_denominator,
             grid_size: p.grid_size,
             stretch_algorithm_override: p.stretch_algorithm_override,
             hifigan_mel_stretch_override: p.hifigan_mel_stretch_override,
@@ -1342,11 +1507,19 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
+        let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, prev);
         h.redo.push(current);
         drop(h);
         self.bump_timeline_version();
+        // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
+        // 同步工程 BPM/拍号/音阶，避免撤销后工程记录与 Tempo Map 分叉。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
+        self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
         payload
@@ -1363,20 +1536,242 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
+        let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, next);
         h.undo.push_back(current);
         drop(h);
         self.bump_timeline_version();
+        // 与 undo_timeline 一致：重做后同步工程基准记录。
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
+        }
         self.audio_engine.update_timeline(tl.clone());
+        self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
         payload
+    }
+
+    /// 实际生效音阶发生变化时失效所有渲染缓存，并在「后台预渲染」启用时
+    /// 触发后台渲染（与直接编辑 Tempo Map 的路径一致；撤销/重做恢复的快照
+    /// 同样走这里 —— 引擎的 clip 差分检测不会覆盖 Tempo Map）。
+    fn invalidate_render_caches_if_scale_changed(&self, tl: &TimelineState, scale_before: &str) {
+        let scale_after = tl.render_scale_signature();
+        if scale_before == scale_after {
+            return;
+        }
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+        if let Some(handle) = self.app_handle.get() {
+            let _ = crate::commands::playback::request_background_render(handle);
+        }
+    }
+
+    /// 从 Tempo Map 0 位置初始点同步“工程基准记录”（BPM / 拍号 / 音阶）。
+    ///
+    /// 初始点即工程基准记录（与 `set_timeline_tempo_map` 的双向同步约定一致），
+    /// 撤销/重做恢复时间线快照后也必须重新同步，否则工程记录与 Tempo Map
+    /// 会永久分叉（例如撤销音阶修改后工程仍显示旧音阶，保存/重开也无法自愈）。
+    /// 仅在实际值变化时写回并标记工程 dirty。
+    pub fn sync_project_record_from_tempo_map(&self, tl: &mut TimelineState, p: &mut ProjectState) {
+        let Some(first) = tl
+            .tempo_map
+            .as_ref()
+            .and_then(|points| points.first())
+            .cloned()
+        else {
+            return;
+        };
+        let mut changed = false;
+
+        let bpm = first.bpm.clamp(10.0, 960.0);
+        if (tl.bpm - bpm).abs() > 1e-9 {
+            tl.bpm = bpm;
+            changed = true;
+        }
+        let beats = first.numerator.unwrap_or(4).clamp(1, 32);
+        if p.beats_per_bar != beats {
+            p.beats_per_bar = beats;
+            changed = true;
+        }
+        let denominator = match first.denominator {
+            Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => d,
+            _ => p.time_signature_denominator,
+        };
+        if p.time_signature_denominator != denominator {
+            p.time_signature_denominator = denominator;
+            changed = true;
+        }
+
+        if let Some(scale) = first.scale.as_ref() {
+            if let Some(key) = scale.key.as_deref() {
+                if p.base_scale != key || p.use_custom_scale {
+                    p.base_scale = key.to_string();
+                    p.use_custom_scale = false;
+                    p.custom_scale = None;
+                    changed = true;
+                }
+                if let Some(notes) = scale_notes_for_key(key) {
+                    tl.project_scale_notes = notes;
+                }
+            } else if let Some(notes) = scale.notes.as_ref() {
+                let mut normalized: Vec<u8> = notes.iter().map(|n| n % 12).collect();
+                normalized.sort_unstable();
+                normalized.dedup();
+                if !normalized.is_empty() {
+                    let name = scale
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .unwrap_or_else(|| "Custom Scale".to_string());
+                    let same = p.use_custom_scale
+                        && p.custom_scale.as_ref().map(|c| (&c.name, &c.notes))
+                            == Some((&name, &normalized));
+                    if !same {
+                        p.custom_scale = Some(crate::project::CustomScale {
+                            id: p
+                                .custom_scale
+                                .as_ref()
+                                .map(|c| c.id.clone())
+                                .unwrap_or_else(|| new_id("cs")),
+                            name,
+                            notes: normalized.clone(),
+                        });
+                        p.use_custom_scale = true;
+                        changed = true;
+                    }
+                    tl.project_scale_notes = normalized;
+                }
+            }
+        }
+        if changed {
+            p.dirty = true;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
+        let base = TimelineState::default();
+        let no_map = base.render_scale_signature();
+
+        let initial = TempoPointData {
+            id: "initial".to_string(),
+            position_sec: 0.0,
+            bpm: 120.0,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: Some(TempoScaleData {
+                key: Some("C".to_string()),
+                name: None,
+                notes: Some(base.project_scale_notes.clone()),
+            }),
+        };
+
+        // 仅创建“初始点 = 工程基准”的 Tempo Map：实际生效音阶不变。
+        let mut initial_only = base.clone();
+        initial_only.tempo_map = Some(vec![initial.clone()]);
+        assert_eq!(no_map, initial_only.render_scale_signature());
+
+        // 只有 BPM / 拍号变化、没有音阶变化的变化点：实际生效音阶不变。
+        let mut tempo_only = base.clone();
+        tempo_only.tempo_map = Some(vec![
+            initial.clone(),
+            TempoPointData {
+                id: "tempo".to_string(),
+                position_sec: 5.0,
+                bpm: 90.0,
+                numerator: Some(3),
+                denominator: Some(4),
+                scale: None,
+            },
+        ]);
+        assert_eq!(no_map, tempo_only.render_scale_signature());
+
+        let scale_at = |sec: f64, key: &str| TempoPointData {
+            id: format!("scale_{sec}"),
+            position_sec: sec,
+            bpm: 120.0,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: Some(TempoScaleData {
+                key: Some(key.to_string()),
+                name: None,
+                notes: None,
+            }),
+        };
+
+        // 添加真正的音阶变化点：签名必须改变。
+        let mut scaled = base.clone();
+        scaled.tempo_map = Some(vec![initial.clone(), scale_at(5.0, "G")]);
+        let scaled_sig = scaled.render_scale_signature();
+        assert_ne!(no_map, scaled_sig);
+
+        // 挪动真正的音阶变化点：签名必须改变。
+        let mut moved = base.clone();
+        moved.tempo_map = Some(vec![initial.clone(), scale_at(6.0, "G")]);
+        assert_ne!(scaled_sig, moved.render_scale_signature());
+
+        // 清除 Tempo Map：回到工程基准签名。
+        let mut cleared = scaled.clone();
+        cleared.tempo_map = None;
+        assert_eq!(no_map, cleared.render_scale_signature());
+    }
+
+    #[test]
+    fn tempo_map_normalize_materializes_initial_time_signature() {
+        let mut timeline = TimelineState::default();
+        timeline.bpm = 150.0;
+        timeline.tempo_map = Some(vec![
+            TempoPointData {
+                id: "a".to_string(),
+                position_sec: 0.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "b".to_string(),
+                position_sec: 2.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            TempoPointData {
+                id: "c".to_string(),
+                position_sec: 4.0,
+                bpm: 120.0,
+                numerator: Some(6),
+                denominator: Some(8),
+                scale: None,
+            },
+        ]);
+        timeline.normalize_tempo_map();
+        let points = timeline.tempo_map.as_ref().unwrap();
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        assert_eq!(points[0].numerator, Some(4));
+        assert_eq!(points[0].denominator, Some(4));
+        // 其它点保持“跟随之前的拍号”。
+        assert_eq!(points[1].numerator, None);
+        assert_eq!(points[1].denominator, None);
+        // 生效拍号解析：跟随点解析为 4/4，显式点解析为 6/8。
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 1),
+            (4, 4)
+        );
+        assert_eq!(
+            TimelineState::effective_time_signature_at(points, 2),
+            (6, 8)
+        );
+    }
 
     #[test]
     fn patch_clips_state_updates_multiple_clips_in_one_pass() {
@@ -1844,9 +2239,294 @@ mod tests {
         // Original group_a, new right group for A, original group_b, new right group for B
         assert!(groups.len() >= 4, "expected >=4 groups, got {}", groups.len());
     }
+
+    #[test]
+    fn split_clip_with_transition_fade_only_sets_boundary_fades() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.5).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.1).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        assert!((right.start_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.1).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.0).abs() < 1e-9);
+        assert_eq!(left.fade_out_curve, "sine");
+        assert_eq!(right.fade_in_curve, "sine");
+    }
+
+    #[test]
+    fn split_clip_with_transition_extend_overlap_preserves_source_position() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.2).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((right.length_sec - 1.6).abs() < 1e-9);
+        assert!((right.source_start_sec - 1.8).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.2).abs() < 1e-9);
+
+        // At the split point, both clips must still reference the same source position.
+        let left_source_at_split = left.source_end_sec - (left.length_sec - 0.5) * 2.0;
+        let right_source_at_split =
+            right.source_start_sec + (0.5 - right.start_sec) * 2.0;
+        assert!((left_source_at_split - 2.0).abs() < 1e-9);
+        assert!((right_source_at_split - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_percent_uses_combined_clip_length() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Percent,
+            duration_sec: 999.0,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        // 前 0.5s + 后 1.5s = 2.0s，1% = 0.02s
+        assert!((left.fade_out_sec - 0.02).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.02).abs() < 1e-9);
+        assert!((left.length_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_without_fades_keeps_zero_fades() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_handles_reversed_clips() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 3.0;
+            clip.source_end_sec = 7.0;
+            clip.playback_rate = 2.0;
+            clip.reversed = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: Some("sine".to_string()),
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.6).abs() < 1e-9);
+        assert!((left.source_start_sec - 5.8).abs() < 1e-9);
+        assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((right.length_sec - 1.6).abs() < 1e-9);
+        assert!((right.source_end_sec - 6.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_clamps_near_timeline_start() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+            clip.playback_rate = 2.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.005, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 0.105).abs() < 1e-9);
+        assert!((right.start_sec - 0.0).abs() < 1e-9);
+        assert!((right.length_sec - 2.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.105).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.105).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_with_transition_overlap_clamps_to_source_material_end() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 2.0;
+            clip.source_end_sec = 3.0;
+            clip.duration_sec = Some(3.0);
+            clip.playback_rate = 1.0;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: true,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.95, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        assert!((left.length_sec - 1.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!((right.start_sec - 0.85).abs() < 1e-9);
+        assert!((right.length_sec - 1.05).abs() < 1e-9);
+        assert!((right.source_start_sec - 2.85).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
+    }
 }
 
-fn new_id(prefix: &str) -> String {
+pub(crate) fn new_id(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4().simple())
 }
 
@@ -1874,7 +2554,7 @@ fn default_fade_curve() -> String {
 }
 
 impl TimelineState {
-    fn ensure_project_end_sec(&mut self, end_sec: f64) {
+    pub(crate) fn ensure_project_end_sec(&mut self, end_sec: f64) {
         if !(end_sec.is_finite()) {
             return;
         }
@@ -1943,6 +2623,7 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
@@ -2013,12 +2694,209 @@ impl TimelineState {
             project_sec: Some(self.project_sec),
             project: None,
             missing_files: None,
+            tempo_map: self.tempo_map_payload(),
             disabled_group_ids: {
                 let mut ids: Vec<String> = self.disabled_group_ids.iter().cloned().collect();
                 ids.sort();
                 ids
             },
         }
+    }
+
+    // ─── Tempo Map ────────────────────────────────────────────────
+
+    /// 序列化 Tempo Map 供前端载荷使用（None = 无 Tempo Map）。
+    fn tempo_map_payload(&self) -> Option<Vec<crate::models::TempoPointPayload>> {
+        self.tempo_map.as_ref().map(|points| {
+            points
+                .iter()
+                .map(|p| crate::models::TempoPointPayload {
+                    id: p.id.clone(),
+                    position_sec: p.position_sec,
+                    bpm: p.bpm,
+                    numerator: p.numerator,
+                    denominator: p.denominator,
+                    scale: p.scale.as_ref().map(|s| crate::models::TempoScalePayload {
+                        key: s.key.clone(),
+                        name: s.name.clone(),
+                        notes: s.notes.clone(),
+                    }),
+                })
+                .collect()
+        })
+    }
+
+    /// 规范化 Tempo Map：排序、钳制、确保首点位于 0；无有效点返回 None。
+    /// 0 位置初始点即工程基准记录，必须显式携带拍号（缺失时按 4/4 物化）。
+    pub fn normalize_tempo_map(&mut self) {
+        let Some(points) = self.tempo_map.take() else {
+            return;
+        };
+        let mut valid: Vec<TempoPointData> = Vec::new();
+        for mut p in points {
+            if p.id.trim().is_empty() {
+                continue;
+            }
+            p.position_sec = p.position_sec.max(0.0);
+            p.bpm = p.bpm.clamp(10.0, 960.0);
+            p.numerator = p.numerator.map(|n| n.clamp(1, 32));
+            p.denominator = match p.denominator {
+                Some(d) if matches!(d, 1 | 2 | 4 | 8 | 16 | 32) => Some(d),
+                Some(_) => Some(4),
+                None => None,
+            };
+            valid.push(p);
+        }
+        // 先排序再去重：若在排序前去重，输入乱序时相邻的重复点（如 [2,5,2]）
+        // 会同时保留，破坏“位置严格递增”的不变量（下游二分查找/积分依赖它）。
+        valid.sort_by(|a, b| a.position_sec.partial_cmp(&b.position_sec).unwrap_or(std::cmp::Ordering::Equal));
+        valid.dedup_by(|a, b| (a.position_sec - b.position_sec).abs() < 1e-6);
+        if valid.is_empty() {
+            self.tempo_map = None;
+            return;
+        }
+        if valid[0].position_sec > 1e-9 {
+            valid.insert(
+                0,
+                TempoPointData {
+                    id: new_id("tp"),
+                    position_sec: 0.0,
+                    bpm: self.bpm,
+                    numerator: Some(4),
+                    denominator: Some(4),
+                    // 初始点即工程基准记录：携带工程音阶（内置键反查，否则保留音级集合）。
+                    scale: Some(TempoScaleData {
+                        key: key_for_scale_notes(&self.project_scale_notes),
+                        name: None,
+                        notes: Some(self.project_scale_notes.clone()),
+                    }),
+                },
+            );
+        }
+        valid[0].position_sec = 0.0;
+        // 初始点必须显式携带拍号（工程基准记录不存在“之前”可跟随）。
+        if valid[0].numerator.is_none() || valid[0].denominator.is_none() {
+            valid[0].numerator = Some(valid[0].numerator.unwrap_or(4));
+            valid[0].denominator = Some(valid[0].denominator.unwrap_or(4));
+        }
+        self.tempo_map = Some(valid);
+    }
+
+    /// 下标处变化点的生效拍号（跟随之前的拍号时向前解析为实际值）。
+    /// 0 位置初始点由规范化保证显式携带拍号，因此任何下标都有确定值。
+    pub fn effective_time_signature_at(points: &[TempoPointData], index: usize) -> (u32, u32) {
+        let mut carry: (u32, u32) = (4, 4);
+        for (i, point) in points.iter().enumerate() {
+            if let (Some(n), Some(d)) = (point.numerator, point.denominator) {
+                carry = (n.clamp(1, 32), d);
+            }
+            if i >= index {
+                break;
+            }
+        }
+        carry
+    }
+
+    /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。
+    /// 语义与前端 `effectiveScaleAtSec` 及 `scale_segments` 一致：
+    /// 音阶为 null 的变化点表示“跟随之前的音阶”（透明），需继续向前寻找
+    /// 最近一个显式携带音阶的变化点；找不到才回退工程音阶。
+    pub fn effective_scale_notes_at_sec(&self, sec: f64) -> Vec<u8> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return self.project_scale_notes.clone();
+        };
+        let target = sec.max(0.0);
+        for point in points.iter().rev() {
+            if point.position_sec > target + 1e-9 {
+                continue;
+            }
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        return notes;
+                    }
+                }
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes
+                        .iter()
+                        .map(|v| v % 12)
+                        .collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        return normalized;
+                    }
+                }
+            }
+            // 该点音阶为 null（跟随之前的音阶）：继续向前寻找。
+        }
+        self.project_scale_notes.clone()
+    }
+
+    /// 逐段生效音阶（(段起始秒, 音级集合)，按时间升序；首段从 0 开始）。
+    /// 供逐帧渲染路径使用（帧时间单调递增，可用游标快速查询）。
+    pub fn scale_segments(&self) -> Vec<(f64, Vec<u8>)> {
+        let Some(points) = self.tempo_map.as_ref() else {
+            return vec![(0.0, self.project_scale_notes.clone())];
+        };
+        let mut segments: Vec<(f64, Vec<u8>)> = Vec::new();
+        let mut current: Option<Vec<u8>> = None;
+        let mut last_sec = 0.0f64;
+        for point in points {
+            let sec = point.position_sec.max(last_sec);
+            if sec > last_sec + 1e-9 {
+                let notes = current
+                    .clone()
+                    .unwrap_or_else(|| self.project_scale_notes.clone());
+                segments.push((last_sec, notes));
+            }
+            last_sec = sec;
+            if let Some(scale) = point.scale.as_ref() {
+                if let Some(key) = scale.key.as_deref() {
+                    if let Some(notes) = scale_notes_for_key(key) {
+                        current = Some(notes);
+                    }
+                }
+                if let Some(notes) = scale.notes.as_ref() {
+                    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
+                    normalized.sort_unstable();
+                    normalized.dedup();
+                    if !normalized.is_empty() {
+                        current = Some(normalized);
+                    }
+                }
+            }
+        }
+        let notes = current.unwrap_or_else(|| self.project_scale_notes.clone());
+        if segments.is_empty() || (segments.last().map(|(sec, _)| *sec) < Some(last_sec)) {
+            segments.push((last_sec, notes));
+        }
+        segments
+    }
+
+    /// 渲染相关的“生效音阶”签名。
+    ///
+    /// 该签名基于 `scale_segments()` 的实际生效音阶，并压缩相邻相同音阶段。
+    /// 与只统计“显式音阶变化点”不同，因此：
+    /// - 创建 / 清除只含“初始点 = 工程基准”的 Tempo Map 不会产生签名变化；
+    /// - 移动只有 BPM / 拍号、没有音阶变化的变化点不会产生签名变化；
+    /// - 音阶键、音级集合、音阶生效位置或工程基准音阶变化时签名会变化。
+    pub fn render_scale_signature(&self) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        let mut last_notes: Option<Vec<u8>> = None;
+        for (sec, notes) in self.scale_segments() {
+            if last_notes.as_ref() == Some(&notes) {
+                continue;
+            }
+            let notes_text = notes
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            segments.push(format!("{:.6}:{}", sec, notes_text));
+            last_notes = Some(notes);
+        }
+        segments.join("|")
     }
 
     pub fn add_track(
@@ -3034,16 +3912,16 @@ impl TimelineState {
         created_clip_ids
     }
 
-    pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) {
+    pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
         let Some(idx) = self.clips.iter().position(|c| c.id == clip_id) else {
-            return;
+            return None;
         };
         let clip = self.clips[idx].clone();
         let start = clip.start_sec;
         let end = clip.start_sec + clip.length_sec;
         let split = split_sec.clamp(start, end);
         if split <= start + 1e-6 || split >= end - 1e-6 {
-            return;
+            return None;
         }
 
         self.ensure_project_end_sec(end);
@@ -3110,7 +3988,195 @@ impl TimelineState {
         }
         // Propagate group_id to the split-off right clip
         right.group_id = self.clips[idx].group_id.clone();
+        let right_id = right.id.clone();
         self.clips.push(right);
+        Some(right_id)
+    }
+
+    /// 分割 clip，并在分割完成后根据全局“分割过渡”设置应用淡入淡出或延伸重叠。
+    pub fn split_clip_with_transition(
+        &mut self,
+        clip_id: &str,
+        split_sec: f64,
+        opts: &SplitTransitionOptions,
+    ) -> Option<String> {
+        let orig_source_end = self
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .map(|c| c.source_end_sec)
+            .unwrap_or(0.0);
+        let right_id = self.split_clip(clip_id, split_sec)?;
+        let effective_duration_sec = match opts.duration_unit {
+            SplitTransitionDurationUnit::Seconds => opts.duration_sec,
+            SplitTransitionDurationUnit::Percent => {
+                let left_len = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)
+                    .map(|c| c.length_sec)
+                    .unwrap_or(0.0);
+                let right_len = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == right_id)
+                    .map(|c| c.length_sec)
+                    .unwrap_or(0.0);
+                (left_len + right_len) * opts.duration_percent / 100.0
+            }
+        };
+        if opts.enabled && effective_duration_sec.is_finite() && effective_duration_sec > 0.0 {
+            self.apply_split_transition(
+                clip_id,
+                &right_id,
+                opts,
+                effective_duration_sec,
+                orig_source_end,
+            );
+        }
+        Some(right_id)
+    }
+
+    fn apply_split_transition(
+        &mut self,
+        left_id: &str,
+        right_id: &str,
+        opts: &SplitTransitionOptions,
+        duration_sec: f64,
+        orig_source_end: f64,
+    ) {
+        let Some(left_idx) = self.clips.iter().position(|c| c.id == left_id) else {
+            return;
+        };
+        let Some(right_idx) = self.clips.iter().position(|c| c.id == right_id) else {
+            return;
+        };
+
+        let duration = duration_sec.max(0.0);
+        if duration <= 0.0 {
+            return;
+        }
+
+        let set_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+            left.fade_out_sec = fade_len.min(left.length_sec);
+            right.fade_in_sec = fade_len.min(right.length_sec);
+            if let Some(curve) = opts.curve.as_deref() {
+                left.fade_out_curve = curve.to_string();
+                right.fade_in_curve = curve.to_string();
+            }
+        };
+
+        match opts.mode {
+            SplitTransitionMode::FadeOnly => {
+                let (left, right) = self.clips.split_at_mut(right_idx);
+                set_fade(&mut left[left_idx], &mut right[0], duration);
+            }
+            SplitTransitionMode::ExtendOverlap => {
+                // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
+                // 两侧都会钳制在 Clip 原素材的实际长度范围内（source 0 .. 文件时长），
+                // 后 clip 同时不能越过时间轴起点 0。
+                let source_end_limit = self
+                    .source_file_duration_sec(&self.clips[left_idx])
+                    .unwrap_or(orig_source_end.max(0.0));
+
+                let left_rate = {
+                    let left = &self.clips[left_idx];
+                    if left.playback_rate.is_finite() && left.playback_rate > 0.0 {
+                        left.playback_rate as f64
+                    } else {
+                        1.0
+                    }
+                };
+                let left_source_avail_sec = {
+                    let left = &self.clips[left_idx];
+                    if left.reversed {
+                        left.source_start_sec.max(0.0) / left_rate
+                    } else {
+                        (source_end_limit - left.source_end_sec).max(0.0) / left_rate
+                    }
+                };
+                let left_grow = duration.min(left_source_avail_sec).max(0.0);
+
+                let right_rate = {
+                    let right = &self.clips[right_idx];
+                    if right.playback_rate.is_finite() && right.playback_rate > 0.0 {
+                        right.playback_rate as f64
+                    } else {
+                        1.0
+                    }
+                };
+                let right_source_avail_sec = {
+                    let right = &self.clips[right_idx];
+                    if right.reversed {
+                        (source_end_limit - right.source_end_sec).max(0.0) / right_rate
+                    } else {
+                        right.source_start_sec.max(0.0) / right_rate
+                    }
+                };
+                let right_grow = duration
+                    .min(self.clips[right_idx].start_sec)
+                    .min(right_source_avail_sec)
+                    .max(0.0);
+
+                let overlap_sec = left_grow + right_grow;
+                if overlap_sec <= 0.0 {
+                    return;
+                }
+
+                // 前 clip 末尾向后延长 left_grow，同时扩展 source 范围，
+                // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
+                {
+                    let left = &mut self.clips[left_idx];
+                    left.length_sec += left_grow;
+                    if left.reversed {
+                        left.source_start_sec =
+                            (left.source_start_sec - left_grow * left_rate).max(0.0);
+                    } else {
+                        left.source_end_sec =
+                            (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                    }
+                }
+
+                // 后 clip 起始位置向前延长 right_grow，同时扩展 source 范围。
+                {
+                    let right = &mut self.clips[right_idx];
+                    right.start_sec = (right.start_sec - right_grow).max(0.0);
+                    right.length_sec += right_grow;
+                    if right.reversed {
+                        right.source_end_sec =
+                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                    } else {
+                        right.source_start_sec =
+                            (right.source_start_sec - right_grow * right_rate).max(0.0);
+                    }
+                }
+
+                if opts.overlap_fades {
+                    let (left, right) = self.clips.split_at_mut(right_idx);
+                    set_fade(&mut left[left_idx], &mut right[0], overlap_sec);
+                }
+            }
+        }
+
+        if let Some(clip) = self.clips.get(left_idx) {
+            self.ensure_project_end_sec(clip.start_sec + clip.length_sec);
+        }
+    }
+
+    fn source_file_duration_sec(&self, clip: &Clip) -> Option<f64> {
+        if let (Some(frames), Some(sample_rate)) =
+            (clip.duration_frames, clip.source_sample_rate)
+        {
+            if sample_rate > 0 && frames > 0 {
+                return Some(frames as f64 / sample_rate as f64);
+            }
+        }
+        if let Some(duration) = clip.duration_sec {
+            if duration.is_finite() && duration > 0.0 {
+                return Some(duration);
+            }
+        }
+        None
     }
 
     /// Split multiple clips at the same position.
@@ -3118,7 +4184,27 @@ impl TimelineState {
     /// - Right halves get a new group_id (per original group).
     /// - Unsplit clips in affected groups are assigned to left or right side by position.
     /// - Groups with fewer than 2 members after reassignment are dissolved.
+    #[allow(dead_code)]
     pub fn split_clips_at(&mut self, clip_ids: &[String], split_sec: f64) {
+        self.split_clips_at_with_options(clip_ids, split_sec, None);
+    }
+
+    /// 同 `split_clips_at`，但在每个分割上应用“分割过渡”设置。
+    pub fn split_clips_at_with_transition(
+        &mut self,
+        clip_ids: &[String],
+        split_sec: f64,
+        opts: &SplitTransitionOptions,
+    ) {
+        self.split_clips_at_with_options(clip_ids, split_sec, Some(opts));
+    }
+
+    fn split_clips_at_with_options(
+        &mut self,
+        clip_ids: &[String],
+        split_sec: f64,
+        opts: Option<&SplitTransitionOptions>,
+    ) {
         // 1. Collect affected group IDs from input clips
         let affected_groups: HashSet<Option<String>> = clip_ids
             .iter()
@@ -3135,7 +4221,11 @@ impl TimelineState {
 
         // 3. Split each input clip
         for cid in clip_ids {
-            self.split_clip(cid, split_sec);
+            if let Some(opts) = opts {
+                let _ = self.split_clip_with_transition(cid, split_sec, opts);
+            } else {
+                let _ = self.split_clip(cid, split_sec);
+            }
         }
 
         // 4. Identify newly created clip IDs (right halves)
@@ -4196,7 +5286,8 @@ impl AppState {
 
         let gpu_backend = {
             #[cfg(target_os = "windows")] { "DirectML" }
-            #[cfg(target_os = "linux")] { "WebGPU" }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))] { "WebGPU" }
+            #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))] { "" }
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))] { "CoreML" }
             #[cfg(all(target_os = "macos", target_arch = "x86_64"))] { "" }
         };

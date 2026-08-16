@@ -73,6 +73,13 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                 const progress = await coreApi.getPitchAnalysisProgress();
                 if (!disposed && progress && progress.totalClips && progress.totalClips > 0) {
                     const p = Number(progress.progress);
+                    const completed = Number(progress.completedClips ?? 0);
+                    const finished =
+                        p >= 1 || (progress.totalClips > 0 && completed >= progress.totalClips);
+                    if (finished) {
+                        setStateRaw(DEFAULT_STATE);
+                        return;
+                    }
                     setStateRaw({
                         pending: true,
                         progress: Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0,
@@ -123,6 +130,15 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                         const p = Number(payload?.progress);
                         if (!Number.isFinite(p)) return;
                         const pp = Math.max(0, Math.min(1, p));
+                        const completed = Number(payload?.completedClips ?? 0);
+                        const total = Number(payload?.totalClips ?? 0);
+                        const finished = pp >= 1 || (total > 0 && completed >= total);
+                        // The final progress event races with pitch_orig_updated
+                        // (different backend threads), so treat completion as terminal.
+                        if (finished) {
+                            setStateRaw(DEFAULT_STATE);
+                            return;
+                        }
                         setStateRaw({
                             pending: true,
                             progress: pp,

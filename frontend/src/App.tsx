@@ -20,6 +20,8 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    pickProjectToImport,
+    importProjectFromPath,
     openVocalShifterFromPath,
     openReaperFromPath,
     importAudioFromPath,
@@ -37,6 +39,7 @@ import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysi
 import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { NotebookPanel } from "./components/layout/NotebookPanel";
+import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import type { ActionId } from "./features/keybindings/types";
@@ -142,6 +145,7 @@ function AppInner() {
         projectDirtyRef.current = projectDirty;
     }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
+    const hasExistingTempoMap = useAppSelector((state) => Boolean(state.session.tempoMap));
     // 当工程路径变更时（新建/打开/关闭工程），重置已忽略的源文件路径集合
     useEffect(() => {
         ignoredSourcePathsRef.current = new Set();
@@ -169,6 +173,10 @@ function AppInner() {
         open: boolean;
         mode: "switch" | "exit";
     }>({ open: false, mode: "switch" });
+    const [projectImportPick, setProjectImportPick] = useState<{
+        open: boolean;
+        path: string | null;
+    }>({ open: false, path: null });
     const [missingFileDialog, setMissingFileDialog] = useState<{
         open: boolean;
         missingPath: string;
@@ -198,6 +206,10 @@ function AppInner() {
     const [specifiedBpm, setSpecifiedBpm] = useState<number>(120);
     const [importPosition, setImportPosition] = useState<string>("selection");
     const [closeLeadingGap, setCloseLeadingGap] = useState(true);
+    const [importTempoMapEnabled, setImportTempoMapEnabled] = useState(false);
+    const [importTempoMapTempo, setImportTempoMapTempo] = useState(true);
+    const [importTempoMapTimeSignature, setImportTempoMapTimeSignature] = useState(true);
+    const [importTempoMapKeySignature, setImportTempoMapKeySignature] = useState(false);
     const [midiImportTargetMenu, setMidiImportTargetMenu] = useState<string>("pitchRef");
     const [midiImportTargetDragDrop, setMidiImportTargetDragDrop] = useState<string>("pitchRef");
     const [midiDialogSource, setMidiDialogSource] = useState<"menu" | "dragDrop">("menu");
@@ -227,15 +239,31 @@ function AppInner() {
                 if (s?.midiCloseLeadingGap != null) {
                     setCloseLeadingGap(s.midiCloseLeadingGap);
                 }
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+                }
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+                }
+                if (s?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(
+                        Boolean(s.midiImportTempoMapTimeSignature),
+                    );
+                }
+                if (s?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(
+                        Boolean(s.midiImportTempoMapKeySignature),
+                    );
+                }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetMenu((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetMenu(s.midiImportTarget);
                 }
                 if (s?.midiImportTargetDragDrop != null) {
                     setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetDragDrop((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetDragDrop(s.midiImportTarget);
                 }
             });
         });
@@ -253,63 +281,88 @@ function AppInner() {
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiFillGaps: v } as any),
+            settingsApi.saveUiSettings({ midiFillGaps: v }),
         );
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any),
+            settingsApi.saveUiSettings({ midiMultiTrackMerge: v }),
         );
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any),
+            settingsApi.saveUiSettings({ midiImportBpmAsProject: v }),
         );
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any),
+            settingsApi.saveUiSettings({ midiNoteBpmMode: v }),
         );
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any),
+            settingsApi.saveUiSettings({ midiSpecifiedBpm: v }),
         );
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportPosition: position } as any),
+            settingsApi.saveUiSettings({ midiImportPosition: position }),
         );
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any),
+            settingsApi.saveUiSettings({ midiCloseLeadingGap: v }),
+        );
+    }, []);
+
+    const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
+        setImportTempoMapEnabled(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportAsTempoMap: v }),
+        );
+    }, []);
+    const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
+        setImportTempoMapTempo(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }),
+        );
+    }, []);
+    const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapTimeSignature(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }),
+        );
+    }, []);
+    const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapKeySignature(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }),
         );
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetMenu: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetMenu: v }),
         );
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }),
         );
     }, []);
 
@@ -429,10 +482,17 @@ function AppInner() {
             }
         }
         function preventContextMenu(e: MouseEvent) {
-            const target = e.target as HTMLElement | null;
-            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-            if (target?.closest?.("[data-hs-context-menu]")) return;
+            // 完全禁用 WebView 默认右键菜单。只调用 preventDefault，
+            // 不阻止传播，因此应用内基于 contextmenu 事件实现的
+            // 自定义菜单/右键拖拽仍可正常工作。
             e.preventDefault();
+        }
+
+        function preventContextMenuKey(e: KeyboardEvent) {
+            // 同时屏蔽键盘触发的 WebView 默认菜单（Menu/ContextMenu 键与 Shift+F10）。
+            if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                e.preventDefault();
+            }
         }
 
         function altKeyDown(e: KeyboardEvent) {
@@ -449,9 +509,11 @@ function AppInner() {
         window.addEventListener("keydown", altKeyDown, true);
         window.addEventListener("keyup", altKeyUp, true);
         window.addEventListener("keydown", preventBrowserFind, true);
+        window.addEventListener("keydown", preventContextMenuKey, true);
         document.addEventListener("contextmenu", preventContextMenu, true);
         return () => {
             window.removeEventListener("keydown", preventBrowserFind, true);
+            window.removeEventListener("keydown", preventContextMenuKey, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
             document.removeEventListener("contextmenu", preventContextMenu, true);
@@ -841,6 +903,34 @@ function AppInner() {
             });
         },
         [dispatch, runOrPromptUnsavedAction],
+    );
+
+    const handleImportProject = useCallback(async () => {
+        try {
+            const picked = await dispatch(pickProjectToImport()).unwrap();
+            if (!picked?.ok || picked.canceled || !picked.path) {
+                return;
+            }
+            setProjectImportPick({ open: true, path: picked.path });
+        } catch {
+            // Reducer already surfaces the error.
+        }
+    }, [dispatch]);
+
+    const handleImportProjectConfirmed = useCallback(
+        (options: { placeAtPlayhead: boolean; importTempoMap: boolean }) => {
+            const { path } = projectImportPick;
+            setProjectImportPick({ open: false, path: null });
+            if (!path) return;
+            void dispatch(
+                importProjectFromPath({
+                    projectPath: path,
+                    placeAtPlayhead: options.placeAtPlayhead,
+                    importTempoMap: options.importTempoMap,
+                }),
+            );
+        },
+        [dispatch, projectImportPick],
     );
 
     const handleExternalFileAction = useCallback(
@@ -1439,6 +1529,20 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "edit.pasteTracks":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "pasteTracks" },
+                        }),
+                    );
+                    break;
+                case "edit.copyReaper":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "copyReaper" },
+                        }),
+                    );
+                    break;
                 // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
                 default:
                     break;
@@ -1504,7 +1608,7 @@ function AppInner() {
                     <Dialog.Description>{t("vs_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" title={file}>
+                            <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
@@ -1530,7 +1634,7 @@ function AppInner() {
                     <Dialog.Description>{t("reaper_import_skipped_header")}</Dialog.Description>
                     <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
                         {(reaperSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" title={file}>
+                            <div key={file} className="truncate" data-tooltip={file}>
                                 • {file}
                             </div>
                         ))}
@@ -1649,7 +1753,7 @@ function AppInner() {
                             <div
                                 key={item.clip_id}
                                 className="truncate py-0.5"
-                                title={item.source_path}
+                                data-tooltip={item.source_path}
                             >
                                 <span
                                     className={
@@ -1760,10 +1864,20 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
+            <ImportProjectDialog
+                key={projectImportPick.open ? (projectImportPick.path ?? "open") : "closed"}
+                open={projectImportPick.open}
+                projectPath={projectImportPick.path}
+                hasExistingTempoMap={hasExistingTempoMap}
+                onOpenChange={(open) => setProjectImportPick((prev) => ({ ...prev, open }))}
+                onConfirm={handleImportProjectConfirmed}
+            />
+
             <MenuBar
                 onNewProject={handleNewProject}
                 onOpenProject={handleOpenProject}
                 onOpenRecentProject={handleOpenRecentProject}
+                onImportProject={handleImportProject}
                 onExit={handleExitApp}
                 onImportMidiFromMenu={handleImportMidiFromMenu}
                 autoBackupSettings={autoBackupSettings}
@@ -1804,6 +1918,18 @@ function AppInner() {
                             onSpecifiedBpmChange={handleSpecifiedBpmChange}
                             onImportPositionChange={handleImportPositionChange}
                             onCloseLeadingGapChange={handleCloseLeadingGapChange}
+                            importTempoMapEnabled={importTempoMapEnabled}
+                            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+                            importTempoMapTempo={importTempoMapTempo}
+                            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+                            importTempoMapTimeSignature={importTempoMapTimeSignature}
+                            onImportTempoMapTimeSignatureChange={
+                                handleImportTempoMapTimeSignatureChange
+                            }
+                            importTempoMapKeySignature={importTempoMapKeySignature}
+                            onImportTempoMapKeySignatureChange={
+                                handleImportTempoMapKeySignatureChange
+                            }
                             midiDialogSource={midiDialogSource}
                             onMidiDialogSourceChange={setMidiDialogSource}
                             importTargetMenu={midiImportTargetMenu}

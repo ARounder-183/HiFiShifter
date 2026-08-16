@@ -1,14 +1,13 @@
 import React, { useRef, useState } from "react";
 import type { ClipFormantMorph, ClipInfo } from "../../../../features/session/sessionTypes";
 import { CLIP_HEADER_HEIGHT } from "../constants";
-import { gainToDb } from "../math";
+import { formatGainDbValue, gainToDb } from "../math";
+import { AppTooltipBubble } from "../../../../components/AppTooltip";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { resolveTimelineClipHeaderVisibility } from "../runtime/timelineClipHeaderVisibility";
 import { buildTimelineClipVisualStyle } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
-
-const CLIP_GAIN_WHEEL_STEP_DB = 0.5;
 
 export const ClipHeader: React.FC<{
     clip: ClipInfo;
@@ -22,7 +21,7 @@ export const ClipHeader: React.FC<{
     triggerRename?: boolean;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
-    /** 增益双击输入框提交（dB 值，已 clamp 到 -24~+12） */
+    /** 增益提交（dB 值；输入框提交会 clamp 到 -12~+12，双击旋钮/数值标签重置为 0 dB） */
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     onToggleGroupDisabled?: (groupId: string) => void;
@@ -49,25 +48,21 @@ export const ClipHeader: React.FC<{
     const isDark = mode === "dark";
     const gainDb = gainToDb(clip.gain);
     const clampedGainDb = Math.min(12, Math.max(-12, gainDb));
-    const [wheelGainDb, setWheelGainDb] = useState<number | null>(null);
-    const wheelTimerRef = useRef<number | null>(null);
-    const pendingGainDbRef = useRef<number | null>(null);
-    const pendingClipIdRef = useRef<string | null>(null);
-    const activeGainDb = wheelGainDb !== null ? wheelGainDb : clampedGainDb;
-    const gainKnobDeg = (activeGainDb / 12) * 135;
-
-    // 监听 clip.gain 的变化，当 Redux 状态更新为期望值时清除 wheelGainDb
-    // 这样可以避免在 onGainCommit 异步完成和 Redux 更新之间出现闪烁
-    React.useEffect(() => {
-        if (pendingGainDbRef.current !== null && pendingClipIdRef.current === clip.id) {
-            const expectedGain = Math.pow(10, pendingGainDbRef.current / 20);
-            if (Math.abs(clip.gain - expectedGain) < 1e-6) {
-                setWheelGainDb(null);
-                pendingGainDbRef.current = null;
-                pendingClipIdRef.current = null;
-            }
-        }
-    }, [clip.gain, clip.id]);
+    const gainKnobDeg = (clampedGainDb / 12) * 135;
+    const [gainDragBaseDb, setGainDragBaseDb] = useState<number | null>(null);
+    const [gainHovered, setGainHovered] = useState(false);
+    const [gainTooltipPos, setGainTooltipPos] = useState<{ x: number; y: number } | null>(null);
+    const gainTooltip =
+        gainDragBaseDb == null
+            ? t("gain_value_tooltip").replace("{gain}", formatGainDbValue(clampedGainDb))
+            : t("gain_value_tooltip_drag")
+                  .replace("{gain}", formatGainDbValue(clampedGainDb))
+                  .replace("{delta}", formatGainDbValue(clampedGainDb - gainDragBaseDb));
+    const showGainTooltip = gainHovered || gainDragBaseDb != null;
+    const clipTooltipText =
+        clip.midiNoteCount != null
+            ? `${t("clip_type_midi_prefix")} ${clip.name}`
+            : (clip.sourcePath ?? clip.name);
 
     // 根据 clip 像素宽度决定显示哪些元素（从右往左依次隐藏）
     // >= 152px: 全显示 | 116-152: 隐藏名称 | 96-116: 隐藏播放速率 | 68-96: 隐藏增益值+F | 52-68: 隐藏F | 32-52: 只留增益旋钮 | < 32px: 全隐藏
@@ -93,7 +88,7 @@ export const ClipHeader: React.FC<{
         isPitchAdjustment,
     });
 
-    // ── 增益双击输入框 ──────────────────────────────────────────────────────
+    // ── 增益数值输入框 ──────────────────────────────────────────────────────
     const [gainEditing, setGainEditing] = useState(false);
     const [gainInputVal, setGainInputVal] = useState("");
     const gainInputRef = useRef<HTMLInputElement>(null);
@@ -155,12 +150,23 @@ export const ClipHeader: React.FC<{
             {/* 增益拖拽把手 */}
             {showGainKnob && (
                 <div
-                    title={t("clip_gain_drag_hint")}
+                    aria-label={gainTooltip}
                     style={{ cursor: "ns-resize", opacity: hideVisuals ? 0 : 1 }}
-                    data-clip-gain-knob
+                    onPointerEnter={(e) => {
+                        setGainHovered(true);
+                        setGainTooltipPos({ x: e.clientX, y: e.clientY });
+                    }}
+                    onPointerMove={(e) => {
+                        setGainTooltipPos({ x: e.clientX, y: e.clientY });
+                    }}
+                    onPointerLeave={() => {
+                        setGainHovered(false);
+                    }}
                     onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        setGainHovered(true);
+                        setGainTooltipPos({ x: e.clientX, y: e.clientY });
 
                         const pointerId = e.pointerId;
                         const targetEl = e.currentTarget as HTMLElement;
@@ -169,11 +175,14 @@ export const ClipHeader: React.FC<{
                         let dragStarted = false;
 
                         const onMove = (ev: PointerEvent) => {
-                            if (ev.pointerId !== pointerId || dragStarted) return;
+                            if (ev.pointerId !== pointerId) return;
+                            setGainTooltipPos({ x: ev.clientX, y: ev.clientY });
+                            if (dragStarted) return;
                             const dx = ev.clientX - startX;
                             const dy = ev.clientY - startY;
                             if (dx * dx + dy * dy < 9) return;
                             dragStarted = true;
+                            setGainDragBaseDb(clampedGainDb);
                             startEditDrag(
                                 {
                                     button: 0,
@@ -187,6 +196,14 @@ export const ClipHeader: React.FC<{
 
                         const onEnd = (ev: PointerEvent) => {
                             if (ev.pointerId !== pointerId) return;
+                            const knobRect = targetEl.getBoundingClientRect();
+                            const stillOverKnob =
+                                ev.clientX >= knobRect.left &&
+                                ev.clientX <= knobRect.right &&
+                                ev.clientY >= knobRect.top &&
+                                ev.clientY <= knobRect.bottom;
+                            setGainHovered(stillOverKnob);
+                            setGainDragBaseDb(null);
                             window.removeEventListener("pointermove", onMove, true);
                             window.removeEventListener("pointerup", onEnd, true);
                             window.removeEventListener("pointercancel", onEnd, true);
@@ -197,43 +214,10 @@ export const ClipHeader: React.FC<{
                         window.addEventListener("pointercancel", onEnd, true);
                     }}
                     onDoubleClick={(e) => {
+                        // 双击旋钮重置为 0 dB
                         e.preventDefault();
                         e.stopPropagation();
                         onGainCommit?.(clip.id, 0);
-                    }}
-                    onWheel={(e) => {
-                        if (!onGainCommit) return;
-                        const rawDelta =
-                            Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-                        if (!Number.isFinite(rawDelta) || Math.abs(rawDelta) < 0.01) {
-                            return;
-                        }
-
-                        const direction = rawDelta < 0 ? 1 : -1;
-                        const notches = Math.max(1, Math.round(Math.abs(rawDelta) / 100));
-                        const nextDb = Math.min(
-                            12,
-                            Math.max(
-                                -12,
-                                activeGainDb + direction * CLIP_GAIN_WHEEL_STEP_DB * notches,
-                            ),
-                        );
-
-                        e.preventDefault();
-                        e.stopPropagation();
-
-                        // 立即更新本地 UI，但延迟 200ms 才提交给后端
-                        setWheelGainDb(nextDb);
-                        pendingGainDbRef.current = nextDb;
-                        pendingClipIdRef.current = clip.id;
-                        if (wheelTimerRef.current !== null) {
-                            window.clearTimeout(wheelTimerRef.current);
-                        }
-                        wheelTimerRef.current = window.setTimeout(() => {
-                            onGainCommit(clip.id, nextDb);
-                            // 不再立即清除 wheelGainDb，而是通过 useEffect 监听 clip.gain 变化来清除
-                            wheelTimerRef.current = null;
-                        }, 200);
                     }}
                 >
                     <div
@@ -355,7 +339,7 @@ export const ClipHeader: React.FC<{
                                 e.stopPropagation();
                                 onToggleGroupDisabled?.(clip.groupId!);
                             }}
-                            title={title}
+                            data-tooltip={title}
                             style={{
                                 opacity: hideVisuals ? 0 : 1,
                                 width: visualStyle.muteBadgeWidth,
@@ -382,9 +366,9 @@ export const ClipHeader: React.FC<{
                     onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        toggleClipMuted(clip.id, !Boolean(clip.muted));
+                        toggleClipMuted(clip.id, !clip.muted);
                     }}
-                    title={clip.muted ? t("clip_unmute") : t("clip_mute")}
+                    data-tooltip={clip.muted ? t("clip_unmute") : t("clip_mute")}
                     style={{
                         opacity: hideVisuals ? 0 : 1,
                         width: visualStyle.muteBadgeWidth,
@@ -436,7 +420,8 @@ export const ClipHeader: React.FC<{
                         />
                     ) : (
                         <div
-                            className="text-xs font-medium drop-shadow-md truncate cursor-text"
+                            className="text-xs font-medium drop-shadow-md truncate cursor-default"
+                            data-tooltip={clipTooltipText}
                             style={{
                                 color: visualStyle.textFill,
                                 opacity: hideVisuals ? 0 : 1,
@@ -497,19 +482,23 @@ export const ClipHeader: React.FC<{
                                 color: "rgba(233, 239, 244, 0.82)",
                                 opacity: hideVisuals ? 0 : 1,
                             }}
-                            title={t("clip_gain_drag_hint")}
                             onDoubleClick={(e) => {
+                                // 双击数值重置为 0 dB
                                 e.preventDefault();
                                 e.stopPropagation();
                                 onGainCommit?.(clip.id, 0);
                             }}
                         >
-                            {activeGainDb >= 0 ? "+" : ""}
-                            {activeGainDb.toFixed(1)}dB
+                            {clampedGainDb >= 0 ? "+" : ""}
+                            {clampedGainDb.toFixed(1)}dB
                         </div>
                     )}
                 </div>
             )}
+            <AppTooltipBubble
+                text={gainTooltip}
+                position={showGainTooltip ? gainTooltipPos : null}
+            />
         </div>
     );
 };

@@ -214,7 +214,9 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                     <td style={{ padding: "6px 12px" }}>
                                                         <Flex align="center" gap="1">
                                                             {isFastest && (
-                                                                <span title="Fastest">⚡</span>
+                                                                <span data-tooltip="Fastest">
+                                                                    ⚡
+                                                                </span>
                                                             )}
                                                             <span
                                                                 style={{

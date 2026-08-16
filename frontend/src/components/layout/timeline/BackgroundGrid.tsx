@@ -1,12 +1,20 @@
-import React from "react";
-import { gridStepBeats } from "./grid";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { explicitGridLinesKey } from "./gridLineKey";
+import { resolveGridLineSamplingPlan } from "./gridLineSampling";
+import {
+    clearGridRedrawHandler,
+    setGridRedrawHandler,
+} from "./gridRedrawBridge";
 
-function positiveMod(value: number, mod: number): number {
-    if (!Number.isFinite(value) || !Number.isFinite(mod) || mod <= 0) return 0;
-    const r = value % mod;
-    return (r + mod) % mod;
-}
-
+/**
+ * Grid lines are drawn as SVG paths computed directly from beat positions.
+ * Repeating CSS gradients with fractional background sizes can accumulate
+ * subpixel rounding drift, which makes the minor grid shift relative to the
+ * real beat/snap positions.
+ *
+ * 提供 `weakLineXs` / `strongLineXs`（内容坐标系 x 像素数组）时，
+ * 网格线直接使用这些显式位置（Tempo Map 的不等距网格）。
+ */
 export const BackgroundGrid: React.FC<{
     contentWidth: number;
     contentHeight: number;
@@ -19,6 +27,16 @@ export const BackgroundGrid: React.FC<{
     boundaryRef?: React.Ref<HTMLDivElement>;
     lineOpacity?: number;
     showBoundary?: boolean;
+    sticky?: boolean;
+    /** 网格显示总开关（Snap/Grid 设置）。 */
+    visible?: boolean;
+    /** 用户配置的最小弱网格线像素间距。 */
+    minSpacingPx?: number;
+    /** Swing 强度（0-100），仅作用于弱网格线的奇数格。 */
+    swingPercent?: number;
+    /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
+    weakLineXs?: number[] | null;
+    strongLineXs?: number[] | null;
 }> = ({
     contentWidth,
     contentHeight,
@@ -31,53 +49,240 @@ export const BackgroundGrid: React.FC<{
     boundaryRef,
     lineOpacity = 0.9,
     showBoundary = true,
+    sticky = false,
+    visible = true,
+    minSpacingPx,
+    swingPercent = 0,
+    weakLineXs = null,
+    strongLineXs = null,
 }) => {
+    const svgRef = useRef<SVGSVGElement | null>(null);
+
     const useViewport =
         viewportWidth != null &&
         Number.isFinite(viewportWidth) &&
+        viewportWidth > 0 &&
         scrollLeft != null &&
         Number.isFinite(scrollLeft);
+    const isSticky = sticky && useViewport;
 
-    const weakStepPx = Math.max(1e-6, pxPerBeat * gridStepBeats(grid));
-    const barStepPx = Math.max(1e-6, pxPerBeat * beatsPerBar);
+    const useExplicitLines = weakLineXs != null && Array.isArray(weakLineXs);
 
-    const width = useViewport ? Math.max(1, Math.floor(viewportWidth)) : contentWidth;
+    const samplingViewportWidth =
+        viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+            ? viewportWidth
+            : contentWidth;
+    const samplingPlan = useExplicitLines
+        ? { weakStepPx: 0, strongStepPx: 0 }
+        : resolveGridLineSamplingPlan({
+              pxPerBeat,
+              grid,
+              beatsPerBar: Math.max(1, Math.round(beatsPerBar)),
+              viewportWidth: samplingViewportWidth,
+              minWeakSpacingPx: minSpacingPx,
+          });
+
+    const width = isSticky ? Math.max(1, Math.floor(viewportWidth as number)) : contentWidth;
     const height = contentHeight;
 
-    const weakOffsetPx = useViewport ? -positiveMod(scrollLeft as number, weakStepPx) : 0;
-    const barOffsetPx = useViewport ? -positiveMod(scrollLeft as number, barStepPx) : 0;
+    const latestRef = useRef({
+        weakStepPx: samplingPlan.weakStepPx,
+        strongStepPx: samplingPlan.strongStepPx,
+        swingPercent: Math.max(0, Math.min(100, swingPercent)),
+        weakLineXs: weakLineXs,
+        strongLineXs: strongLineXs,
+        width,
+        height,
+        contentWidth,
+        viewportWidth:
+            viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+                ? viewportWidth
+                : contentWidth,
+        scrollLeft: scrollLeft ?? 0,
+        isSticky,
+    });
 
-    // If the parent provides refs in viewport mode, it may be doing imperative
-    // syncing (e.g. in a scroll handler). Avoid overriding those styles with
-    // potentially throttled/stale React props.
-    const manualViewportSync = useViewport && (layerRef != null || boundaryRef != null);
+    useLayoutEffect(() => {
+        latestRef.current = {
+            weakStepPx: samplingPlan.weakStepPx,
+            strongStepPx: samplingPlan.strongStepPx,
+            swingPercent: Math.max(0, Math.min(100, swingPercent)),
+            weakLineXs,
+            strongLineXs,
+            width,
+            height,
+            contentWidth,
+            viewportWidth:
+                viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+                    ? viewportWidth
+                    : contentWidth,
+            scrollLeft: scrollLeft ?? 0,
+            isSticky,
+        };
+    });
 
-    const boundaryLeft = useViewport ? contentWidth - 1 - (scrollLeft as number) : contentWidth - 1;
+    const lastDrawKeyRef = useRef<string | null>(null);
 
+    const draw = useCallback((nextScrollLeft?: number) => {
+        const svg = svgRef.current;
+        if (!svg) return;
+        const paths = svg.querySelectorAll<SVGPathElement>("path");
+        if (paths.length < 2) return;
+
+        const latest = latestRef.current;
+        const sl = Number.isFinite(nextScrollLeft)
+            ? (nextScrollLeft as number)
+            : latest.scrollLeft;
+        const offset = latest.isSticky ? sl : 0;
+        const bufferPx = Math.max(240, latest.viewportWidth * 0.5);
+        const visibleStart = latest.isSticky ? 0 : Math.max(0, sl - bufferPx);
+        const visibleEnd = latest.isSticky
+            ? latest.width
+            : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
+
+        // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
+        // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
+        // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
+        const drawKey = [
+            sl,
+            latest.weakStepPx,
+            latest.strongStepPx,
+            latest.swingPercent,
+            explicitGridLinesKey(latest.weakLineXs),
+            explicitGridLinesKey(latest.strongLineXs),
+            latest.width,
+            latest.height,
+            latest.contentWidth,
+            latest.viewportWidth,
+            latest.isSticky,
+        ].join("|");
+        if (lastDrawKeyRef.current === drawKey) return;
+        lastDrawKeyRef.current = drawKey;
+
+        const buildUniformPath = (stepPx: number): string => {
+            if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
+            const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
+            const lastIndex = Math.max(
+                firstIndex,
+                Math.ceil((visibleEnd + offset) / stepPx),
+            );
+            const swingPx =
+                (Math.max(0, Math.min(100, latest.swingPercent)) / 100) * 0.5 * stepPx;
+            const parts: string[] = [];
+            for (let index = firstIndex; index <= lastIndex; index += 1) {
+                // Swing：奇数网格位置向右偏移（最大半步）。
+                const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
+                if (x < -1 || x > latest.width + 1) continue;
+                parts.push(`M${x} 0V${latest.height}`);
+            }
+            return parts.join("");
+        };
+
+        const buildExplicitPath = (lineXs: number[] | null): string => {
+            if (!lineXs || lineXs.length === 0) return "";
+            const parts: string[] = [];
+            // 二分定位可见范围
+            const lo = 0;
+            const hi = lineXs.length;
+            const lowerBound = (target: number) => {
+                let l = lo;
+                let h = hi;
+                while (l < h) {
+                    const mid = (l + h) >> 1;
+                    if (lineXs[mid] < target) l = mid + 1;
+                    else h = mid;
+                }
+                return l;
+            };
+            const start = lowerBound(visibleStart + offset);
+            for (let i = start; i < lineXs.length; i += 1) {
+                const x = lineXs[i] - offset;
+                if (x > latest.width + 1) break;
+                if (x < -1) continue;
+                parts.push(`M${x} 0V${latest.height}`);
+            }
+            return parts.join("");
+        };
+
+        paths[0].setAttribute(
+            "d",
+            useExplicitLines
+                ? buildExplicitPath(latest.weakLineXs)
+                : buildUniformPath(latest.weakStepPx),
+        );
+        paths[1].setAttribute(
+            "d",
+            useExplicitLines
+                ? buildExplicitPath(latest.strongLineXs)
+                : buildUniformPath(latest.strongStepPx),
+        );
+    }, [useExplicitLines]);
+
+    useEffect(() => {
+        draw(scrollLeft);
+    }, [
+        draw,
+        scrollLeft,
+        samplingPlan.weakStepPx,
+        samplingPlan.strongStepPx,
+        swingPercent,
+        weakLineXs,
+        strongLineXs,
+        width,
+        height,
+        contentWidth,
+        viewportWidth,
+        isSticky,
+    ]);
+
+    useEffect(() => {
+        const el = layerRef && typeof layerRef === "object" ? layerRef.current : null;
+        if (!el) return;
+        setGridRedrawHandler(el, draw);
+        return () => {
+            if (el) {
+                clearGridRedrawHandler(el);
+            }
+        };
+    }, [draw, layerRef]);
+
+    const boundaryLeft = isSticky
+        ? contentWidth - 1 - (scrollLeft as number)
+        : contentWidth - 1;
     const boundaryVisible =
         Number.isFinite(boundaryLeft) && boundaryLeft >= -2 && boundaryLeft <= width + 2;
+    const manualViewportSync = isSticky && (layerRef != null || boundaryRef != null);
+
+    if (!visible) return null;
 
     return (
         <>
             <div
                 ref={layerRef}
                 className="absolute left-0 top-0 pointer-events-none"
-                style={{
-                    width,
-                    height,
-                    backgroundImage: [
-                        "linear-gradient(to right, var(--qt-graph-grid-weak) 1px, transparent 1px)",
-                        "linear-gradient(to right, var(--qt-graph-grid-strong) 3px, transparent 3px)",
-                    ].join(", "),
-                    backgroundSize: [`${weakStepPx}px 100%`, `${barStepPx}px 100%`].join(", "),
-                    backgroundPosition: useViewport
-                        ? manualViewportSync
-                            ? undefined
-                            : [`${weakOffsetPx}px 0px`, `${barOffsetPx}px 0px`].join(", ")
-                        : undefined,
-                    opacity: lineOpacity,
-                }}
-            />
+                style={{ width, height }}
+            >
+                <svg
+                    ref={svgRef}
+                    width={width}
+                    height={height}
+                    className="absolute inset-0"
+                    style={{ display: "block" }}
+                >
+                    <path
+                        fill="none"
+                        strokeWidth={1}
+                        opacity={lineOpacity}
+                        style={{ stroke: "var(--qt-graph-grid-weak)" }}
+                    />
+                    <path
+                        fill="none"
+                        strokeWidth={2}
+                        opacity={lineOpacity}
+                        style={{ stroke: "var(--qt-graph-grid-strong)" }}
+                    />
+                </svg>
+            </div>
 
             <div
                 ref={boundaryRef}

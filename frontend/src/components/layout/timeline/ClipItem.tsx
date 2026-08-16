@@ -124,11 +124,15 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
 
-    const left = Math.max(0, Math.round(clip.startSec * pxPerSec));
-    const width = Math.max(1, Math.round(clip.lengthSec * pxPerSec));
+    // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
+    // 若这里 Math.round，Clip 会相对网格最多向右偏 0.5px；在常用缩放
+    // (100-200 px/s) 下就是约 2.5-5ms 的“网格偏右”观感，且随 pxPerSec
+    // 与 BPM 改变而变化。保留浮点像素可让 Clip 与网格完全对齐。
+    const left = Math.max(0, clip.startSec * pxPerSec);
+    const width = Math.max(1, clip.lengthSec * pxPerSec);
     const leadingOverlapPx = Math.max(
         0,
-        Math.min(width, Math.round(Math.max(0, leadingOverlapSec) * pxPerSec)),
+        Math.min(width, Math.max(0, leadingOverlapSec) * pxPerSec),
     );
     const leadingOverlapMaskImage =
         leadingOverlapPx > 0
@@ -165,6 +169,13 @@ export const ClipItem = React.memo(function ClipItem({
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
             const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
             const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+            const primedSelection = shouldPrimeSelection && !selected;
+
+            if (primedSelection) {
+                ensureSelected(clip.id);
+                selectClipRemote(clip.id);
+                recordLastClickPosition?.(e.clientX);
+            }
 
             const startX = e.clientX;
             const startY = e.clientY;
@@ -203,7 +214,7 @@ export const ClipItem = React.memo(function ClipItem({
                         onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
                         return;
                     }
-                    if (shouldPrimeSelection) {
+                    if (shouldPrimeSelection && !primedSelection) {
                         if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                             ensureSelected(clip.id);
                         }
@@ -230,6 +241,7 @@ export const ClipItem = React.memo(function ClipItem({
             recordLastClickPosition,
             seekFromClientX,
             selectClipRemote,
+            selected,
             startEditDrag,
             altPressed,
         ],
@@ -287,6 +299,13 @@ export const ClipItem = React.memo(function ClipItem({
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
                 const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const primedSelection = shouldPrimeSelection && !selected;
+
+                if (primedSelection) {
+                    ensureSelected(clip.id);
+                    selectClipRemote(clip.id);
+                    recordLastClickPosition?.(e.clientX);
+                }
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
@@ -310,7 +329,7 @@ export const ClipItem = React.memo(function ClipItem({
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                                 ensureSelected(clip.id);
                             }
@@ -333,11 +352,6 @@ export const ClipItem = React.memo(function ClipItem({
 
                 startClipDrag(e, clip.id, clip.startSec, false);
             }}
-            title={
-                clip.midiNoteCount != null
-                    ? `${t("clip_type_midi_prefix")} ${clip.name}`
-                    : (clip.sourcePath ?? clip.name)
-            }
         >
             <div
                 className="absolute inset-0 overflow-visible"
@@ -402,7 +416,7 @@ export const ClipItem = React.memo(function ClipItem({
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_in");
                             }}
-                            title={t("fade_in")}
+                            data-tooltip={t("fade_in")}
                         />
                         {/* right-[10px]：避开右侧 edge handle 的 10px 宽度，确保两者不重叠 */}
                         <div
@@ -411,7 +425,7 @@ export const ClipItem = React.memo(function ClipItem({
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_out");
                             }}
-                            title={t("fade_out")}
+                            data-tooltip={t("fade_out")}
                         />
 
                         {/* Fade handles: 操作区覆盖整�?fade 区域（fadeBeats > 0 时显示） */}
@@ -424,7 +438,7 @@ export const ClipItem = React.memo(function ClipItem({
                                 onPointerDown={(e) => {
                                     startDeferredFadeEditDrag(e, "fade_in");
                                 }}
-                                title={t("fade_in")}
+                                data-tooltip={t("fade_in")}
                             ></div>
                         )}
                         {(clip.fadeOutSec ?? 0) > 0 && (
@@ -436,7 +450,7 @@ export const ClipItem = React.memo(function ClipItem({
                                 onPointerDown={(e) => {
                                     startDeferredFadeEditDrag(e, "fade_out");
                                 }}
-                                title={t("fade_out")}
+                                data-tooltip={t("fade_out")}
                             ></div>
                         )}
 

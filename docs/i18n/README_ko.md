@@ -52,7 +52,7 @@ HiFiShifter는 세 가지 방법으로 오디오를 가져올 수 있습니다:
 
 #### 오디오 편집
 
-- **그리드 스냅**: 클립 이동/자르기는 기본적으로 그리드에 스냅됩니다. `Shift`를 누르면 일시적으로 스냅을 끌 수 있습니다.
+- **스냅**: 클립 이동/자르기는 기본적으로 그리드 등 설정된 대상에 스냅됩니다. `Shift`를 누르면 일시적으로 스냅을 끌 수 있습니다.
 - **자르기/스트레치 범위**: 클립의 왼쪽/오른쪽 가장자리를 드래그하여 자르거나 연장합니다.
 - **타임 스트레치**: `Alt` + 왼쪽 마우스 버튼을 누른 상태에서 클립의 왼쪽/오른쪽 가장자리를 드래그하면 오디오를 스트레치할 수 있습니다.
 - **슬립 편집**: `Alt` + 왼쪽 마우스 버튼을 누른 상태에서 클립 본체를 드래그하면 내부 콘텐츠를 좌우로 슬라이드할 수 있습니다.
@@ -181,7 +181,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-sudo bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
 
 이 스크립트는 시스템 종속성, Node.js(없는 경우), appimagetool 및 프론트엔드 npm 종속성을 설치합니다.

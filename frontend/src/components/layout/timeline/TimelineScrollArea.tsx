@@ -1,20 +1,18 @@
-import React, { useEffect, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "./constants";
 import { clamp } from "./math";
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { getTimelineWheelAction } from "../wheelGesture";
-import { resolveWheelZoom } from "./runtime/timelineInteractionController";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
-import { screenXToWorldSec } from "./runtime/timelineWorld";
+import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
         scrollRef: React.MutableRefObject<HTMLDivElement | null>;
         projectSec: number;
-        bpm: number;
         pxPerSec: number;
         setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
         rowHeight: number;
@@ -30,14 +28,12 @@ export const TimelineScrollArea: React.FC<
 > = ({
     scrollRef,
     projectSec,
-    bpm,
     pxPerSec,
     setPxPerSec,
     rowHeight,
     setRowHeight,
     setScrollLeft,
     onScroll,
-    onWheel,
     scrollHorizontalKb,
     scrollVerticalKb,
     horizontalZoomKb,
@@ -81,7 +77,7 @@ export const TimelineScrollArea: React.FC<
         rowHeightRef.current = rowHeight;
     }, [rowHeight]);
 
-    function syncScrollLeft(scroller: HTMLDivElement) {
+    const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
         const next = scroller.scrollLeft;
         const nextSnapshot = {
             scrollLeft: next,
@@ -99,13 +95,13 @@ export const TimelineScrollArea: React.FC<
         lastViewportDispatchRef.current = nextSnapshot;
         lastScrollLeftRef.current = next;
         setScrollLeft(next);
-    }
+    }, [setScrollLeft]);
 
     useEffect(() => {
         const scroller = scrollRef.current;
         if (!scroller) return;
         syncScrollLeft(scroller);
-    }, [scrollRef, setScrollLeft]);
+    }, [scrollRef, syncScrollLeft]);
 
     useEffect(() => {
         return () => {};
@@ -130,7 +126,7 @@ export const TimelineScrollArea: React.FC<
         pendingZoomRef.current = null;
         scroller.scrollLeft = pending.nextScrollLeft;
         syncScrollLeft(scroller);
-    }, [projectSec, bpm, pxPerSec, scrollRef]);
+    }, [projectSec, pxPerSec, scrollRef, syncScrollLeft]);
 
     useLayoutEffect(() => {
         const scroller = scrollRef.current;
@@ -158,12 +154,6 @@ export const TimelineScrollArea: React.FC<
 
         const handler: EventListener = (evt) => {
             const e = evt as globalThis.WheelEvent;
-            const clipGainKnobEl = (e.target as HTMLElement | null)?.closest(
-                "[data-clip-gain-knob]",
-            );
-            if (clipGainKnobEl) {
-                return;
-            }
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
                 if (!kb) return false;
@@ -251,41 +241,28 @@ export const TimelineScrollArea: React.FC<
             const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
 
             const totalSec = Math.max(0, projectSec);
-            let anchorSec: number;
-
-            // Playhead-based zoom: use playhead as anchor instead of pointer
-            if (playheadZoomEnabled && getPlayheadSec) {
-                anchorSec = clamp(getPlayheadSec(), 0, totalSec);
-            } else {
-                const anchorX = clamp(e.clientX - bounds.left, 0, Math.max(1, bounds.width));
-                anchorSec = screenXToWorldSec(anchorX, {
-                    pxPerSec: basePxPerSec,
-                    rowHeight: rowHeightRef.current,
-                    scrollLeftPx: baseScrollLeft,
-                    scrollTopPx: scroller.scrollTop,
-                });
-            }
-
             const minPxPerSec = resolveTimelineMinPxPerSec({
                 baseMinPxPerSec: MIN_PX_PER_SEC,
                 projectSec: totalSec,
-                viewportWidthPx: bounds.width,
+                viewportWidthPx: scroller.clientWidth,
             });
-            const nextPxPerSec = clamp(basePxPerSec * factor, minPxPerSec, MAX_PX_PER_SEC);
-            if (Math.abs(nextPxPerSec - basePxPerSec) < 1e-9) return;
-
-            const anchorScreenX = clamp(e.clientX - bounds.left, 0, Math.max(1, bounds.width));
-            const zoom = resolveWheelZoom({
-                anchorScreenX,
-                anchorSec,
-                nextPxPerSec,
+            const zoom = resolveHorizontalWheelZoom({
+                factor,
+                basePxPerSec,
+                baseScrollLeft,
+                totalSec,
+                viewportWidth: scroller.clientWidth,
+                playheadZoomEnabled: Boolean(playheadZoomEnabled),
+                playheadSec: getPlayheadSec?.() ?? null,
+                anchorScreenX: e.clientX - bounds.left,
+                minPxPerSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
-            const maxScrollLeft = Math.max(0, totalSec * nextPxPerSec - Math.max(1, bounds.width));
-            const nextScrollLeft = clamp(zoom.nextScrollLeftPx, 0, maxScrollLeft);
+            if (!zoom) return;
 
             zoomPendingRef.current = {
-                nextPxPerSec,
-                nextScrollLeft,
+                nextPxPerSec: zoom.nextPxPerSec,
+                nextScrollLeft: zoom.nextScrollLeft,
             };
 
             if (zoomRafRef.current == null) {
@@ -307,7 +284,6 @@ export const TimelineScrollArea: React.FC<
             scroller.removeEventListener("wheel", handler);
         };
     }, [
-        pxPerSec,
         scrollRef,
         setPxPerSec,
         setRowHeight,

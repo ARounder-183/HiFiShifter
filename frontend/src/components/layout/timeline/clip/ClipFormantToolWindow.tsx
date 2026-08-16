@@ -127,6 +127,9 @@ export const ClipFormantToolWindow: React.FC<{
                 document.body.setAttribute("data-hs-focus-window", CLIP_FORMANT_FOCUS_WINDOW);
                 event.stopPropagation();
             }}
+            onMouseDown={(event) => {
+                event.stopPropagation();
+            }}
             onClick={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.stopPropagation()}

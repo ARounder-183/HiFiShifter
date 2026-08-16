@@ -1,4 +1,4 @@
-import type { TimelineResult, TrackSummaryResult } from "../../types/api";
+import type { TimelineResult, TrackSummaryResult, TempoMapPayload } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
@@ -37,6 +37,10 @@ export const timelineApi = {
 
     setProjectLength: (projectSec: number) =>
         invoke<TimelineResult>("set_project_length", projectSec),
+
+    // Tempo Map
+    setTimelineTempoMap: (tempoMap: TempoMapPayload | null) =>
+        invoke<TimelineResult>("set_timeline_tempo_map", tempoMap),
 
     // Import
     importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>
@@ -253,6 +257,48 @@ export const timelineApi = {
         invoke<TimelineResult>("update_pitch_reference", clipIds),
 
     selectClip: (clipId: string | null) => invoke<TimelineResult>("select_clip", clipId),
+
+    // Native cross-process timeline clipboard (backend system clipboard)
+    copyTimelineClips: (clipIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_clips",
+            clipIds,
+        ),
+
+    copyTimelineTracks: (trackIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_tracks",
+            trackIds,
+        ),
+
+    copyClipsToReaperClipboard: (clipIds: string[]) =>
+        invoke<{
+            ok: boolean;
+            error?: string;
+            exportedClipCount?: number;
+            skippedClipCount?: number;
+            trackCount?: number;
+        }>("copy_clips_to_reaper_clipboard", clipIds),
+
+    pasteTimelineClipboard: (mode?: "selected" | "new_tracks") =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+            }
+        >("paste_timeline_clipboard", mode),
+
+    hasTimelineClipboard: () =>
+        invoke<{
+            ok: boolean;
+            available?: boolean;
+            kind?: "clips" | "tracks" | "project";
+            clipCount?: number;
+            trackCount?: number;
+            sourceProject?: string;
+        }>("has_timeline_clipboard"),
 
     /// 检查所有已导入的音频源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。

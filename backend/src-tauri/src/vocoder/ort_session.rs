@@ -1019,10 +1019,11 @@ pub struct GpuDiagnostic {
 ///
 /// Checks each provider by attempting to query its availability through ORT.
 ///
-/// NOTE: WebGPU probing is ONLY performed on Linux, where Dawn uses the
-/// Vulkan backend which is safe to probe. On Windows, Dawn uses D3D12
-/// and probing can trigger native crashes on some GPU/driver combos.
-/// WebGPU on Windows is only used when the user explicitly selects it.
+/// NOTE: WebGPU probing is performed on Linux x86_64 and macOS ARM64,
+/// where Dawn uses the Vulkan/Metal backend which is safe to probe.
+/// On Windows, Dawn uses D3D12 and probing can trigger native crashes on
+/// some GPU/driver combos; WebGPU on Windows is only used when the user
+/// explicitly selects it.
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 

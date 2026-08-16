@@ -181,7 +181,7 @@ Run the one-click install script:
 
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-sudo bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
 
 This script installs system dependencies, Node.js (if missing), appimagetool, and frontend npm dependencies.

@@ -92,6 +92,11 @@ export const paramsApi = {
             }>;
             initial_bpm?: number;
             has_bpm?: boolean;
+            has_time_signature?: boolean;
+            has_key_signature?: boolean;
+            tempo_point_count?: number;
+            time_signature_count?: number;
+            key_signature_count?: number;
         }>("get_midi_tracks", midiPath, clipboardGuid ?? null),
 
     readMidiClipboardToMemory: () =>
@@ -108,6 +113,11 @@ export const paramsApi = {
             }>;
             initial_bpm?: number;
             has_bpm?: boolean;
+            has_time_signature?: boolean;
+            has_key_signature?: boolean;
+            tempo_point_count?: number;
+            time_signature_count?: number;
+            key_signature_count?: number;
         }>("read_midi_clipboard_to_memory"),
 
     importMidiToPitch: (
@@ -153,6 +163,10 @@ export const paramsApi = {
         importMidiBpmAsProject?: boolean,
         clipboardGuid?: string,
         closeLeadingGap?: boolean,
+        importMidiAsTempoMap?: boolean,
+        importMidiTempo?: boolean,
+        importMidiTimeSignature?: boolean,
+        importMidiKeySignature?: boolean,
     ) =>
         invoke<TimelineResult & { ok: boolean; error?: string }>(
             "import_midi_as_clip",
@@ -167,6 +181,10 @@ export const paramsApi = {
             importMidiBpmAsProject,
             clipboardGuid ?? null,
             closeLeadingGap,
+            importMidiAsTempoMap,
+            importMidiTempo,
+            importMidiTimeSignature,
+            importMidiKeySignature,
         ),
 
     replaceMidiClipData: (

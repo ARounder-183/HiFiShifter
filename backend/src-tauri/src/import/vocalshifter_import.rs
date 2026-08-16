@@ -1214,6 +1214,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: track_order,
     };
@@ -1937,6 +1938,7 @@ pub fn import_vsp_clipboard(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: next_order,
     };
@@ -2482,6 +2484,7 @@ fn import_vsp_clipboard_selected_tracks(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: track_order,
     };

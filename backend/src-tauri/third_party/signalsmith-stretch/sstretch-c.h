@@ -99,6 +99,21 @@ int sstretch_process_offline(
 );
 
 /**
+ * Exact whole-buffer time stretch using Signalsmith's .exact() path.
+ *
+ * This aligns the output so that output sample 0 corresponds to input sample 0
+ * (no leading latency/pre-roll is discarded by the caller). If the input is
+ * shorter than the library's seek length, the output is zeroed and 0 is returned.
+ */
+int sstretch_exact(
+    SStretchState state,
+    const float* input_interleaved,
+    unsigned int in_frames,
+    float* output_interleaved,
+    unsigned int out_frames
+);
+
+/**
  * 刷新残余输出（用于流式处理结束时）。
  *
  * @param state              句柄

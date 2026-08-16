@@ -293,8 +293,73 @@ impl Default for ReaperEnvelope {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReaperTempoEnvelopePoint {
+    /// 位置（秒，时间锚定）。
+    pub position_sec: f64,
+    /// BPM。
+    pub bpm: f64,
+    /// 变化形状：1 = 阶梯（square），0 = 线性渐变到下一个点。
+    pub shape: i32,
+    /// 拍号分子（有拍号信息时为 Some）。
+    pub numerator: Option<u32>,
+    /// 拍号分母（有拍号信息时为 Some）。
+    pub denominator: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaperTempoEnvelope {
-    pub points: Vec<Vec<f64>>,
+    pub points: Vec<ReaperTempoEnvelopePoint>,
+}
+
+/// 解析 TEMPOENVEX `PT` 行第 4 个值（slowcurv）中打包的拍号。
+///
+/// REAPER 将拍号编码为 `denom_base * 1000 + (num_base + num - 1)`：
+/// - 分母基值：65 = 全音符(1)，131 = 2 分音符(2)，262 = 4 分音符(4)，
+///   524 = 8 分音符(8)，1048 = 16 分音符(16)，2097 = 32 分音符(32)，
+///   4194 = 64 分音符(64)，8388 = 128 分音符(128)；
+/// - 分子基值按分母依次为 537 / 73 / 145 / 289 / 577 / 153 / 305 / 609。
+/// 参见 https://wiki.cockos.com/wiki/index.php/RPR_GetSetEnvelopeState
+fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
+    let value = slow_curv.round() as i64;
+    if value <= 0 {
+        return None;
+    }
+    const DENOM_BASES: &[(i64, u32)] = &[
+        (8388, 128),
+        (4194, 64),
+        (2097, 32),
+        (1048, 16),
+        (524, 8),
+        (262, 4),
+        (131, 2),
+        (65, 1),
+    ];
+    const NUM_BASES: &[(i64, i64)] = &[
+        (8388, 609),
+        (4194, 305),
+        (2097, 153),
+        (1048, 577),
+        (524, 289),
+        (262, 145),
+        (131, 73),
+        (65, 537),
+    ];
+    for &(denom_base, denominator) in DENOM_BASES {
+        if value >= denom_base * 1000 && value < (denom_base + 1) * 1000 {
+            let num_part = value - denom_base * 1000;
+            let num_base = NUM_BASES
+                .iter()
+                .find(|(base, _)| *base == denom_base)
+                .map(|(_, nb)| *nb)
+                .unwrap_or(0);
+            let numerator = (num_part - num_base + 1).clamp(1, 32) as u32;
+            // 仅接受 HiFiShifter 支持的分母集合。
+            if matches!(denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                return Some((numerator, denominator));
+            }
+        }
+    }
+    None
 }
 
 // ─── 块解析器 ───
@@ -602,6 +667,7 @@ fn update_source_paths(data: &mut ReaperData, folder: &Path) {
 fn parse_data_block(block: &Block) -> ReaperData {
     let mut data = ReaperData::default();
     let mut current_track: Option<ReaperTrack> = None;
+    let mut current_track_has_content = false;
     let mut cumulative_track_offset: usize = 0;
     let mut pending_offset: usize = 0;
 
@@ -625,8 +691,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
 
         if block_type.as_deref() == Some("TRACK") {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             let track = parse_track_block(child);
             data.is_track_data = true;
@@ -634,6 +702,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
             data.tracks.push(track);
             cumulative_track_offset += 1;
             current_track = None;
+            current_track_has_content = false;
             continue;
         }
 
@@ -644,6 +713,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                 current_track = Some(ReaperTrack::default());
             }
             current_track.as_mut().unwrap().items.push(item);
+            current_track_has_content = true;
             continue;
         }
 
@@ -660,6 +730,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                     current_track = Some(ReaperTrack::default());
                 }
                 current_track.as_mut().unwrap().envelopes.push(env);
+                current_track_has_content = true;
                 continue;
             }
         }
@@ -672,8 +743,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
             .unwrap_or(false)
         {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             // 解析跳过的轨道数（TRACKSKIP N ...）
             let skip_n = child
@@ -685,12 +758,15 @@ fn parse_data_block(block: &Block) -> ReaperData {
             cumulative_track_offset += skip_n;
             pending_offset = cumulative_track_offset;
             current_track = Some(ReaperTrack::default());
+            current_track_has_content = false;
         }
     }
 
     if let Some(t) = current_track {
-        data.track_offsets.push(pending_offset);
-        data.tracks.push(t);
+        if current_track_has_content {
+            data.track_offsets.push(pending_offset);
+            data.tracks.push(t);
+        }
     }
 
     // 如果顶层没有 track/item，尝试递归查找
@@ -1052,9 +1128,28 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
         if tokens.is_empty() {
             continue;
         }
-        if tokens[0].to_uppercase() == "PT" {
-            env.points.push(parse_double_array(&tokens));
+        if tokens[0].to_uppercase() != "PT" || tokens.len() < 4 {
+            continue;
         }
+        let position_sec = parse_double(&tokens[1]).max(0.0);
+        let bpm = parse_double(&tokens[2]);
+        let shape = parse_int(&tokens[3]);
+        // 拍号打包在第 4 个值（slowcurv）中；无第 4 个值时继承前一点的拍号。
+        let (numerator, denominator) = if tokens.len() >= 5 {
+            match parse_tempo_env_time_signature(parse_double(&tokens[4])) {
+                Some(ts) => (Some(ts.0), Some(ts.1)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        env.points.push(ReaperTempoEnvelopePoint {
+            position_sec,
+            bpm,
+            shape,
+            numerator,
+            denominator,
+        });
     }
 
     env
@@ -1062,4 +1157,300 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
 
 fn is_envelope_type(s: &str) -> bool {
     ENVELOPE_TYPES.iter().any(|&e| e.eq_ignore_ascii_case(s))
+}
+
+// ---------------------------------------------------------------------------
+// REAPER clipboard serialization
+// ---------------------------------------------------------------------------
+
+fn format_reaper_f64(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let mut text = format!("{:.12}", value);
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn quote_reaper_string(value: &str) -> String {
+    // Double quotes inside a path are sanitized because REAPERMedia has no
+    // reliable escape sequence for them. Backslashes are preserved.
+    let escaped = value.replace('"', "'");
+    format!("\"{}\"", escaped)
+}
+
+fn push_reaper_token(out: &mut Vec<u8>, token: String) {
+    out.extend_from_slice(token.as_bytes());
+    out.push(0);
+}
+
+fn push_reaper_array(out: &mut Vec<u8>, key: &str, values: &[f64]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(|value| format_reaper_f64(*value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_int_array(out: &mut Vec<u8>, key: &str, values: &[i32]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_source(out: &mut Vec<u8>, source: &ReaperSource) {
+    let source_type = source.source_type.to_uppercase();
+
+    if source_type == "SECTION" {
+        push_reaper_token(out, "<SOURCE SECTION".to_string());
+        if let Some(length) = source.section_length_sec {
+            push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(length)));
+        }
+        push_reaper_token(out, format!("MODE {}", source.section_mode));
+        if let Some(start) = source.section_start_sec {
+            push_reaper_token(out, format!("STARTPOS {}", format_reaper_f64(start)));
+        }
+        push_reaper_token(out, "OVERLAP 0.01".to_string());
+
+        let mut inner = source.clone();
+        inner.source_type = "WAVE".to_string();
+        inner.section_mode = 0;
+        inner.section_start_sec = None;
+        inner.section_length_sec = None;
+        inner.midi_source = None;
+        push_reaper_source(out, &inner);
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    if source_type == "MIDI" {
+        push_reaper_token(out, "<SOURCE MIDI".to_string());
+        let ppq = source
+            .midi_source
+            .as_ref()
+            .map(|midi| midi.ticks_per_qn.max(1))
+            .unwrap_or(960);
+        push_reaper_token(out, format!("HASDATA 1 {ppq} QN"));
+        push_reaper_token(out, "CCINTERP 32".to_string());
+        if let Some(igntempo) = source
+            .midi_source
+            .as_ref()
+            .and_then(|midi| midi.igntempo.as_ref())
+        {
+            push_reaper_token(
+                out,
+                format!(
+                    "IGNTEMPO {} {} {} {}",
+                    if igntempo.ignore_project { 1 } else { 0 },
+                    format_reaper_f64(igntempo.tempo),
+                    igntempo.beats,
+                    igntempo.beat_note,
+                ),
+            );
+        } else {
+            push_reaper_token(out, "IGNTEMPO 0 120 4 4".to_string());
+        }
+        if let Some(midi) = source.midi_source.as_ref() {
+            for event in &midi.events {
+                push_reaper_token(
+                    out,
+                    format!(
+                        "E {} {:02X} {:02X} {:02X}",
+                        event.tick_offset, event.status, event.data1, event.data2
+                    ),
+                );
+            }
+        }
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    push_reaper_token(
+        out,
+        format!(
+            "<SOURCE {}",
+            if source_type.is_empty() { "WAVE" } else { &source_type }
+        ),
+    );
+    push_reaper_token(out, format!("FILE {}", quote_reaper_string(&source.file_path)));
+    push_reaper_token(out, ">".to_string());
+}
+
+fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool) {
+    if !is_item_default {
+        push_reaper_token(
+            out,
+            if take.selected {
+                "TAKE SEL".to_string()
+            } else {
+                "TAKE".to_string()
+            },
+        );
+    }
+    push_reaper_token(out, format!("NAME {}", quote_reaper_string(&take.name)));
+    push_reaper_array(
+        out,
+        if is_item_default { "VOLPAN" } else { "TAKEVOLPAN" },
+        &take.vol_pan,
+    );
+    if !is_item_default {
+        push_reaper_array(out, "FADEIN", &take.fade_in);
+        push_reaper_array(out, "FADEOUT", &take.fade_out);
+    }
+    push_reaper_token(out, format!("SOFFS {}", format_reaper_f64(take.s_offs)));
+    push_reaper_array(out, "PLAYRATE", &take.play_rate);
+    push_reaper_token(out, format!("CHANMODE {}", take.chan_mode));
+    if let Some(source) = take.source.as_ref() {
+        push_reaper_source(out, source);
+    }
+}
+
+fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
+    push_reaper_token(out, "<ITEM".to_string());
+    push_reaper_token(out, format!("POSITION {}", format_reaper_f64(item.position)));
+    push_reaper_token(out, format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)));
+    push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length)));
+    push_reaper_token(out, format!("LOOP {}", if item.is_loop { 1 } else { 0 }));
+    push_reaper_token(out, format!("ALLTAKES {}", if item.all_takes { 1 } else { 0 }));
+    push_reaper_array(out, "FADEIN", &item.fade_in);
+    push_reaper_array(out, "FADEOUT", &item.fade_out);
+    push_reaper_int_array(out, "MUTE", &item.mute);
+    push_reaper_token(out, format!("SEL {}", if item.selected { 1 } else { 0 }));
+    push_reaper_take(out, &item.default_take, true);
+    for take in &item.takes {
+        push_reaper_take(out, take, false);
+    }
+    for envelope in &item.envelopes {
+        push_reaper_token(out, format!("<{}", envelope.env_type));
+        if let Some(range) = envelope.seg_range.as_ref() {
+            push_reaper_array(out, "SEG_RANGE", range);
+        }
+        for point in &envelope.points {
+            push_reaper_array(out, "PT", point);
+        }
+        push_reaper_token(out, ">".to_string());
+    }
+    push_reaper_token(out, ">".to_string());
+}
+
+/// Serialize parsed REAPER data into the REAPERMedia clipboard byte format.
+/// `as_track_data = false` writes ITEM + TRACKSKIP blocks; `true` writes
+/// `<TRACK ...>` wrapped track data.
+pub fn serialize_reaper_clipboard(data: &ReaperData, as_track_data: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+
+    let offsets = if data.track_offsets.len() == data.tracks.len() {
+        data.track_offsets.clone()
+    } else {
+        (0..data.tracks.len()).collect::<Vec<_>>()
+    };
+
+    for (index, track) in data.tracks.iter().enumerate() {
+        if as_track_data {
+            push_reaper_token(&mut out, "<TRACK".to_string());
+            push_reaper_token(&mut out, format!("NAME {}", quote_reaper_string(&track.name)));
+            push_reaper_array(&mut out, "VOLPAN", &track.vol_pan);
+            push_reaper_int_array(&mut out, "MUTESOLO", &track.mute_solo);
+            push_reaper_token(&mut out, format!("IPHASE {}", if track.iphase { 1 } else { 0 }));
+        }
+
+        for item in &track.items {
+            push_reaper_item(&mut out, item);
+        }
+        for envelope in &track.envelopes {
+            push_reaper_token(&mut out, format!("<{}", envelope.env_type));
+            for point in &envelope.points {
+                push_reaper_array(&mut out, "PT", point);
+            }
+            push_reaper_token(&mut out, ">".to_string());
+        }
+
+        if as_track_data {
+            push_reaper_token(&mut out, ">".to_string());
+        } else {
+            let current = offsets.get(index).copied().unwrap_or(0);
+            let next = offsets
+                .get(index + 1)
+                .copied()
+                .unwrap_or(current.saturating_add(1));
+            let skip = next.saturating_sub(current).max(1);
+            push_reaper_token(&mut out, format!("TRACKSKIP {skip} 1"));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_tempo_env_time_signature() {
+        // 4/4 → 262 * 1000 + (145 + 4 - 1) = 262148
+        assert_eq!(parse_tempo_env_time_signature(262148.0), Some((4, 4)));
+        // 3/4 → 262 * 1000 + (145 + 3 - 1) = 262147
+        assert_eq!(parse_tempo_env_time_signature(262147.0), Some((3, 4)));
+        // 6/8 → 524 * 1000 + (289 + 6 - 1) = 524294
+        assert_eq!(parse_tempo_env_time_signature(524294.0), Some((6, 8)));
+        // 非法值
+        assert_eq!(parse_tempo_env_time_signature(1.0), None);
+    }
+
+    #[test]
+    fn parses_tempo_envelope_from_example_rpp() {
+        // 来自 C:\Users\z\Desktop\Reaper_Example.rpp 的 TEMPOENVEX 块（节选）。
+        let block_text = "<TEMPOENVEX\n\
+EGUID {2A001931-7D16-4259-A7F4-7ED6A60C53C6}\n\
+ACT 1 -1\n\
+VIS 1 0 1\n\
+LANEHEIGHT 0 0\n\
+ARM 1\n\
+DEFSHAPE 1 -1 -1\n\
+PT 0.000000000000 169.6000000000 1 262148 0 1 0 \"\" 0 169 0 ABBB\n\
+PT 0.353773584906 184.0000000000 1\n\
+PT 0.679860541427 198.4000000000 1\n\
+PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
+>";
+        let lines: Vec<String> = block_text.lines().map(|s| s.to_string()).collect();
+        let block = parse_blocks(&lines);
+        let envelope = parse_tempo_envelope_block(&block);
+
+        assert_eq!(envelope.points.len(), 4);
+        // 首点：169.6 BPM、4/4。
+        let first = &envelope.points[0];
+        assert!((first.position_sec - 0.0).abs() < 1e-12);
+        assert!((first.bpm - 169.6).abs() < 1e-9);
+        assert_eq!(first.shape, 1);
+        assert_eq!(first.numerator, Some(4));
+        assert_eq!(first.denominator, Some(4));
+        // 普通点：无拍号信息（继承前一点）。
+        let second = &envelope.points[1];
+        assert!((second.bpm - 184.0).abs() < 1e-9);
+        assert_eq!(second.numerator, None);
+        // 末点：145.6 BPM、3/4（ABB 拍型）。
+        let last = &envelope.points[3];
+        assert!((last.position_sec - 4.904195314949).abs() < 1e-12);
+        assert!((last.bpm - 145.6).abs() < 1e-9);
+        assert_eq!(last.numerator, Some(3));
+        assert_eq!(last.denominator, Some(4));
+    }
 }

@@ -2,7 +2,9 @@ import { useRef } from "react";
 import { batch } from "react-redux";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
+import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
+    bumpParamsEpoch,
     checkpointHistory,
     moveClipStart,
     setClipFades,
@@ -17,6 +19,7 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { applyAutoCrossfade } from "./autoCrossfade";
 import { clamp } from "../math";
+import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { paramsApi } from "../../../../services/api";
@@ -30,6 +33,8 @@ import {
 import { applyBulkFadeValue, applyBulkGainDeltaDb, getBulkEditableClipIds } from "./bulkClipEdit";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
+
+const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
 
 export function resolveStretchParamTypes(
     pitchEditUserModified: boolean | null | undefined,
@@ -137,8 +142,176 @@ async function stretchLinkedParams(
     }
 }
 
+type StretchRangeMapping = {
+    oldStartSec: number;
+    oldLengthSec: number;
+    newStartSec: number;
+    newLengthSec: number;
+};
+
+function buildMappedParamValues(
+    oldValues: number[],
+    paramType: "pitch" | "tension",
+    newFrameCount: number,
+): number[] {
+    const newValues = new Array<number>(newFrameCount);
+    const oldMaxIdx = oldValues.length - 1;
+    const newMaxIdx = newFrameCount > 1 ? newFrameCount - 1 : 1;
+    const ratio = oldMaxIdx / newMaxIdx;
+
+    for (let i = 0; i < newFrameCount; i++) {
+        const oldIdxF = i * ratio;
+        const lo = oldIdxF | 0;
+        const hi = lo < oldMaxIdx ? lo + 1 : oldMaxIdx;
+        const frac = oldIdxF - lo;
+        const loVal = oldValues[lo] ?? 0;
+        const hiVal = oldValues[hi] ?? 0;
+        if (paramType === "pitch") {
+            if (loVal === 0 && hiVal === 0) {
+                newValues[i] = 0;
+            } else if (loVal === 0) {
+                newValues[i] = 0;
+            } else if (hiVal === 0) {
+                newValues[i] = frac < 0.5 ? loVal : 0;
+            } else {
+                newValues[i] = loVal + (hiVal - loVal) * frac;
+            }
+        } else {
+            newValues[i] = loVal + (hiVal - loVal) * frac;
+        }
+    }
+
+    return newValues;
+}
+
+function subtractIntervals(
+    range: { start: number; end: number },
+    excluded: Array<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+    const sorted = excluded
+        .filter((item) => item.end >= range.start && item.start <= range.end)
+        .sort((a, b) => a.start - b.start);
+    const result: Array<{ start: number; end: number }> = [];
+    let cursor = range.start;
+
+    for (const item of sorted) {
+        if (cursor < item.start) {
+            result.push({
+                start: cursor,
+                end: Math.min(item.start - 1, range.end),
+            });
+        }
+        cursor = Math.max(cursor, item.end + 1);
+        if (cursor > range.end) break;
+    }
+
+    if (cursor <= range.end) {
+        result.push({ start: cursor, end: range.end });
+    }
+
+    return result;
+}
+
+/**
+ * Stretch parameter lines for several clips on the same track as one batch.
+ *
+ * Per-clip independent writes were racing with per-clip restores: the old
+ * range of one clip can overlap the new range of a neighbouring clip, so a
+ * restore could erase freshly written mapped values. This version writes all
+ * new ranges first, then only restores old-range parts that are not covered
+ * by any new range on that track.
+ */
+async function stretchTrackLinkedParams(
+    trackId: string,
+    mappings: StretchRangeMapping[],
+): Promise<void> {
+    if (mappings.length === 0) return;
+
+    const probe = await paramsApi.getParamFrames(trackId, "pitch", 0, 1, 1);
+    if (!probe?.ok) return;
+    const fp = Math.max(1, Number(probe.frame_period_ms) || 5);
+    const stretchParams = resolveStretchParamTypes(probe.pitch_edit_user_modified);
+
+    const frameMappings = mappings.map((mapping) => {
+        const oldStartFrame = Math.round((mapping.oldStartSec * 1000) / fp);
+        const oldEndFrame = Math.round(((mapping.oldStartSec + mapping.oldLengthSec) * 1000) / fp);
+        const oldFrameCount = Math.max(1, oldEndFrame - oldStartFrame);
+
+        const newStartFrame = Math.round((mapping.newStartSec * 1000) / fp);
+        const newEndFrame = Math.round(((mapping.newStartSec + mapping.newLengthSec) * 1000) / fp);
+        const newFrameCount = Math.max(1, newEndFrame - newStartFrame);
+
+        return { oldStartFrame, oldFrameCount, newStartFrame, newFrameCount };
+    });
+
+    const newRanges = frameMappings.map((mapping) => ({
+        start: mapping.newStartFrame,
+        end: mapping.newStartFrame + mapping.newFrameCount - 1,
+    }));
+
+    for (const paramType of stretchParams) {
+        const fetched = await Promise.all(
+            frameMappings.map(async (mapping) => {
+                const res = await paramsApi.getParamFrames(
+                    trackId,
+                    paramType,
+                    mapping.oldStartFrame,
+                    mapping.oldFrameCount,
+                    1,
+                );
+                if (!res?.ok) return null;
+                return {
+                    mapping,
+                    values: (res.edit ?? []).map((value) => Number(value) || 0),
+                };
+            }),
+        );
+
+        // Write every new range first so no restore can clobber a fresh write.
+        for (const item of fetched) {
+            if (!item || item.values.length === 0) continue;
+            const newValues = buildMappedParamValues(
+                item.values,
+                paramType,
+                item.mapping.newFrameCount,
+            );
+            await paramsApi.setParamFrames(
+                trackId,
+                paramType,
+                item.mapping.newStartFrame,
+                newValues,
+                false,
+            );
+        }
+
+        // Restore only old-range parts not covered by any new range.
+        for (const mapping of frameMappings) {
+            const oldEndFrame = mapping.oldStartFrame + mapping.oldFrameCount - 1;
+            const restoreSegments = subtractIntervals(
+                { start: mapping.oldStartFrame, end: oldEndFrame },
+                newRanges,
+            );
+            for (const segment of restoreSegments) {
+                await paramsApi.restoreParamFrames(
+                    trackId,
+                    paramType,
+                    segment.start,
+                    segment.end - segment.start + 1,
+                    false,
+                );
+            }
+        }
+    }
+}
+
 export type EditDragType =
-    "trim_left" | "trim_right" | "stretch_left" | "stretch_right" | "fade_in" | "fade_out" | "gain";
+    | "trim_left"
+    | "trim_right"
+    | "stretch_left"
+    | "stretch_right"
+    | "fade_in"
+    | "fade_out"
+    | "gain";
 
 export type EditDragState = {
     type: EditDragType;
@@ -184,14 +357,24 @@ export function useEditDrag(deps: {
     dispatch: AppDispatch;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
-    snapBeat: (beat: number) => number;
+    snapTimeline: (
+        sec: number,
+        object: "mediaItem",
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
-    /** 网格吸附全局开关 */
-    gridSnapEnabled: boolean;
+    /** 吸附全局开关 */
+    snapEnabled: boolean;
     /** 忽略编组 */
     ignoreGrouping: boolean;
+    /** modifier.paramFineAdjust 绑定 */
+    paramFineAdjustKb: Keybinding;
 }) {
     const {
         scrollRef,
@@ -199,11 +382,12 @@ export function useEditDrag(deps: {
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapBeat,
+        snapTimeline,
         beatFromClientX,
         noSnapKb,
-        gridSnapEnabled,
+        snapEnabled,
         ignoreGrouping,
+        paramFineAdjustKb,
     } = deps;
 
     const editDragRef = useRef<EditDragState | null>(null);
@@ -255,6 +439,12 @@ export function useEditDrag(deps: {
         dispatch(checkpointHistory());
         dispatch(beginInteraction());
 
+        // Gain drag sends throttled backend preview updates while dragging. Open the
+        // backend undo group up front so the single checkpoint is the pre-drag value;
+        // otherwise the final bulk write would checkpoint after the previews already
+        // changed the backend, and undo would bounce back to the post-drag value.
+        const gainUndoGroupPromise = type === "gain" ? webApi.beginUndoGroup() : null;
+
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -303,6 +493,19 @@ export function useEditDrag(deps: {
         let ticking = false;
         let latestEvent: PointerEvent | null = null;
         let accumulatedGainDeltaDb = 0;
+        let gainFineAxisState: FineAxisDragState | null = null;
+        let gainDragStartClientY: number | null = null;
+        let remotePreviewChain: Promise<unknown> = Promise.resolve();
+
+        const finishGainUndoGroup = async () => {
+            if (!gainUndoGroupPromise) return;
+            try {
+                await remotePreviewChain;
+                await gainUndoGroupPromise;
+            } finally {
+                await webApi.endUndoGroup();
+            }
+        };
 
         function onMove(ev: PointerEvent) {
             latestEvent = ev;
@@ -325,9 +528,15 @@ export function useEditDrag(deps: {
                     drag.type === "stretch_left" ||
                     drag.type === "stretch_right";
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
-                const effectiveSnap = gridSnapEnabled ? !noSnapActive : noSnapActive;
+                const effectiveSnap = snapEnabled && !noSnapActive;
                 if (shouldSnap && effectiveSnap) {
-                    beat = snapBeat(beat);
+                    const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
+                    beat = snapTimeline(beat, "mediaItem", {
+                        originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
+                        anchorTrackId: sessionRef.current.clips.find((c) => c.id === drag.clipId)
+                            ?.trackId,
+                        excludeClipIds: new Set(drag.selectedClipIds),
+                    });
                 }
 
                 const minLen = 0.0;
@@ -358,7 +567,9 @@ export function useEditDrag(deps: {
                                 );
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
                 if (drag.type === "fade_out") {
@@ -388,13 +599,27 @@ export function useEditDrag(deps: {
                                 );
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
                 if (drag.type === "gain") {
-                    const movementY = (currentEv.movementY ?? 0) as number;
-                    const deltaDb = -movementY * 0.25;
-                    accumulatedGainDeltaDb += deltaDb;
+                    if (gainDragStartClientY == null || !gainFineAxisState) {
+                        gainDragStartClientY = currentEv.clientY;
+                        gainFineAxisState = {
+                            raw: currentEv.clientY,
+                            adjusted: currentEv.clientY,
+                            fineActive: isModifierActive(paramFineAdjustKb, currentEv),
+                        };
+                    }
+                    const adjustedY = advanceFineAxisDrag(
+                        gainFineAxisState,
+                        currentEv.clientY,
+                        isModifierActive(paramFineAdjustKb, currentEv),
+                    );
+                    const deltaY = gainDragStartClientY - adjustedY;
+                    accumulatedGainDeltaDb = deltaY * CLIP_GAIN_DRAG_DB_PER_PX;
                     const gainUpdates = applyBulkGainDeltaDb({
                         clipIds: drag.selectedClipIds,
                         clipsById: new Map(
@@ -419,14 +644,23 @@ export function useEditDrag(deps: {
                             const nextGain = gainUpdates[0]?.gain;
                             if (nextGain != null && now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
-                                void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    gain: nextGain,
-                                    checkpoint: false,
-                                });
+                                const remoteUpdate = () =>
+                                    webApi.setClipState({
+                                        clipId: drag.clipId,
+                                        gain: nextGain,
+                                        checkpoint: false,
+                                    });
+                                const nextRemotePreview = gainUndoGroupPromise
+                                    ? gainUndoGroupPromise.then(remoteUpdate)
+                                    : Promise.resolve().then(remoteUpdate);
+                                remotePreviewChain = remotePreviewChain
+                                    .then(() => nextRemotePreview)
+                                    .catch(() => undefined);
                             }
                         }
-                    } catch {}
+                    } catch {
+                        // Best-effort remote preview update; ignore transient failures.
+                    }
                     return;
                 }
 
@@ -721,6 +955,9 @@ export function useEditDrag(deps: {
 
             const clipNow = sessionRef.current.clips.find((c) => c.id === drag.clipId);
             if (!isGroupStretch && !clipNow) {
+                if (gainUndoGroupPromise) {
+                    void finishGainUndoGroup().catch(() => undefined);
+                }
                 dispatch(endInteraction());
                 return;
             }
@@ -1054,14 +1291,20 @@ export function useEditDrag(deps: {
                         return [clipId, { gain: nextClip?.gain ?? 1 }] as const;
                     }),
                 );
-                persistPromise = dispatch(
-                    setClipsStateBulkRemote({
-                        updates: buildBulkClipStateUpdates({
-                            clipIds: drag.selectedClipIds,
-                            changesById,
-                        }),
-                    }),
-                ).unwrap();
+                const persistBulkGain = () =>
+                    remotePreviewChain.then(() =>
+                        dispatch(
+                            setClipsStateBulkRemote({
+                                updates: buildBulkClipStateUpdates({
+                                    clipIds: drag.selectedClipIds,
+                                    changesById,
+                                }),
+                            }),
+                        ).unwrap(),
+                    );
+                persistPromise = gainUndoGroupPromise
+                    ? gainUndoGroupPromise.then(persistBulkGain)
+                    : persistBulkGain();
             }
 
             // 两阶段播放速率更新：后端响应后重新应用前端计算的值
@@ -1075,22 +1318,32 @@ export function useEditDrag(deps: {
 
             // 拉伸后同步参数线：当"锁定参数线"启用时，将旧范围内的参数值时域映射到新范围
             const isStretch = drag.type === "stretch_left" || drag.type === "stretch_right";
+            // The clip persistence already bumps paramsEpoch, but at that point
+            // stretchLinkedParams has not written the new curves yet. Bump again
+            // after the mapping finishes so the parameter editor fetches fresh data.
             if (isStretch && sessionRef.current.lockParamLinesEnabled && drag.stretchGroup) {
-                const stretchTasks = drag.stretchGroup.clipIds.map((id) => {
+                const mappingsByRootTrack = new Map<string, StretchRangeMapping[]>();
+                for (const id of drag.stretchGroup.clipIds) {
                     const initial = drag.stretchGroup?.initialById[id];
                     const now = sessionRef.current.clips.find((c) => c.id === id);
-                    if (!initial || !now?.trackId) {
-                        return Promise.resolve();
-                    }
-                    return stretchLinkedParams(
-                        now.trackId,
-                        initial.startSec,
-                        initial.lengthSec,
-                        now.startSec,
-                        now.lengthSec,
-                    );
-                });
-                void Promise.resolve(persistPromise).then(() => Promise.allSettled(stretchTasks));
+                    if (!initial || !now?.trackId) continue;
+                    const rootTrackId = resolveRootTrackId(sessionRef.current.tracks, now.trackId);
+                    if (!rootTrackId) continue;
+                    const trackMappings = mappingsByRootTrack.get(rootTrackId) ?? [];
+                    trackMappings.push({
+                        oldStartSec: initial.startSec,
+                        oldLengthSec: initial.lengthSec,
+                        newStartSec: now.startSec,
+                        newLengthSec: now.lengthSec,
+                    });
+                    mappingsByRootTrack.set(rootTrackId, trackMappings);
+                }
+                const stretchTasks = Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
+                    stretchTrackLinkedParams(trackId, mappings),
+                );
+                void Promise.resolve(persistPromise)
+                    .then(() => Promise.allSettled(stretchTasks))
+                    .finally(() => dispatch(bumpParamsEpoch()));
             } else if (
                 isStretch &&
                 sessionRef.current.lockParamLinesEnabled &&
@@ -1101,19 +1354,28 @@ export function useEditDrag(deps: {
                 const oldLengthSec = drag.baselengthSec;
                 const newStartSec = singleClipNow.startSec;
                 const newLengthSec = singleClipNow.lengthSec;
-                void Promise.resolve(persistPromise).then(() =>
-                    stretchLinkedParams(
-                        stretchTrackId,
-                        oldStartSec,
-                        oldLengthSec,
-                        newStartSec,
-                        newLengthSec,
-                    ),
-                );
+                void Promise.resolve(persistPromise)
+                    .then(() =>
+                        stretchLinkedParams(
+                            stretchTrackId,
+                            oldStartSec,
+                            oldLengthSec,
+                            newStartSec,
+                            newLengthSec,
+                        ),
+                    )
+                    .finally(() => dispatch(bumpParamsEpoch()));
             }
 
             // 在所有持久化请求完成后释放交互锁
-            void Promise.resolve(persistPromise).finally(() => {
+            void Promise.resolve(persistPromise).finally(async () => {
+                if (gainUndoGroupPromise) {
+                    try {
+                        await finishGainUndoGroup();
+                    } catch {
+                        // Best-effort undo-group cleanup.
+                    }
+                }
                 dispatch(endInteraction());
             });
 
