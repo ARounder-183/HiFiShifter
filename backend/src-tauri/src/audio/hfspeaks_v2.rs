@@ -775,8 +775,31 @@ pub fn compute_mipmap_peaks_with_progress<F: FnMut(f32)>(
         }
     }
 
-    // 回退到 symphonia
-    compute_mipmap_peaks_symphonia(path, source_file_size, source_modified_ns, &mut progress_cb)
+    // 视频容器交给 FFmpeg 优先处理，避免 Symphonia 对 MP4/MKV 音轨的
+    // 时长/帧数偏差影响峰值缓存。
+    if crate::media::is_video_extension(path) {
+        if let Ok(peaks) = compute_mipmap_peaks_ffmpeg(
+            path,
+            source_file_size,
+            source_modified_ns,
+            &mut progress_cb,
+        ) {
+            return Ok(peaks);
+        }
+    }
+
+    // 回退到 symphonia；symphonia 不支持的编码再回退到 FFmpeg。
+    match compute_mipmap_peaks_symphonia(path, source_file_size, source_modified_ns, &mut progress_cb)
+    {
+        Ok(peaks) => Ok(peaks),
+        Err(symphonia_err) => compute_mipmap_peaks_ffmpeg(
+            path,
+            source_file_size,
+            source_modified_ns,
+            &mut progress_cb,
+        )
+        .map_err(|ffmpeg_err| format!("{symphonia_err}; {ffmpeg_err}")),
+    }
 }
 
 /// 使用 hound 计算 WAV 文件的多级峰值
@@ -958,8 +981,13 @@ fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
 
     let mut format = probed.format;
     let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
+        .tracks()
+        .iter()
+        .find(|track| {
+            track.codec_params.sample_rate.is_some() || track.codec_params.channels.is_some()
+        })
+        .or_else(|| format.default_track())
+        .ok_or_else(|| "no audio track".to_string())?;
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| e.to_string())?;
@@ -1058,6 +1086,88 @@ fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
     calculator.flush(&mut output_callback);
 
     // 构建 HfsPeakFile
+    let mut file = HfsPeakFile::new(
+        channels,
+        sample_rate,
+        total_frames,
+        source_file_size,
+        source_modified_ns,
+    );
+
+    for (level_idx, buffer) in output_buffers.into_iter().enumerate() {
+        let data = MipmapData {
+            min: buffer.iter().map(|(min, _)| *min).collect(),
+            max: buffer.iter().map(|(_, max)| *max).collect(),
+        };
+        file.add_mipmap(division_factors[level_idx], data);
+    }
+
+    Ok(file)
+}
+
+/// 使用动态链接的 FFmpeg 计算视频/额外媒体格式的多级峰值。
+fn compute_mipmap_peaks_ffmpeg<F: FnMut(f32)>(
+    path: &Path,
+    source_file_size: u64,
+    source_modified_ns: u64,
+    progress_cb: &mut Option<F>,
+) -> Result<HfsPeakFile, String> {
+    let probe = crate::media::probe_media(path, 0, None)
+        .ok_or_else(|| "ffmpeg media probe failed".to_string())?;
+    let sample_rate = probe.sample_rate.max(1);
+    let channels = probe.channels.max(1);
+    let total_frames = probe.total_frames;
+
+    let division_factors = calculate_division_factors(sample_rate);
+    let mut output_buffers: Vec<Vec<(f32, f32)>> =
+        division_factors.iter().map(|_| Vec::new()).collect();
+    let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
+
+    let mut output_callback = |level: usize, min: f32, max: f32| {
+        if level < output_buffers.len() {
+            output_buffers[level].push((min, max));
+        }
+    };
+
+    let mut frames_processed: u64 = 0;
+    let progress_interval = if total_frames > 0 {
+        (total_frames / 20).max(1)
+    } else {
+        44100
+    };
+
+    crate::media::visit_media_audio_frames(path, None, |frame, _rate, ch| {
+        let ch = ch.max(1) as usize;
+        let frames = frame.len() / ch;
+        for f in 0..frames {
+            let base = f * ch;
+            let mut ch_min = f32::INFINITY;
+            let mut ch_max = f32::NEG_INFINITY;
+            for c in 0..ch {
+                let v = frame.get(base + c).copied().unwrap_or(0.0);
+                ch_min = ch_min.min(v);
+                ch_max = ch_max.max(v);
+            }
+            calculator.process_frame(ch_min, ch_max, &mut output_callback);
+            frames_processed += 1;
+            if frames_processed % progress_interval == 0 {
+                if let Some(cb) = progress_cb.as_mut() {
+                    if total_frames > 0 {
+                        cb(frames_processed as f32 / total_frames as f32);
+                    } else {
+                        let estimated_total =
+                            source_file_size / ((channels as u64) * 4).max(1);
+                        cb((frames_processed as f32 / estimated_total as f32).min(0.99));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| e)?;
+
+    calculator.flush(&mut output_callback);
+
     let mut file = HfsPeakFile::new(
         channels,
         sample_rate,

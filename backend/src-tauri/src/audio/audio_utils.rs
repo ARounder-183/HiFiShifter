@@ -1,5 +1,23 @@
 use std::path::Path;
 
+/// Select the audio track from a Symphonia format reader.
+///
+/// `default_track()` may return a video track for video containers (MP4/MKV),
+/// which yields meaningless sample_rate/frame values. Prefer a track that
+/// actually carries audio parameters, and fall back to `default_track()` for
+/// single-track audio-only formats.
+fn pick_symphonia_audio_track(
+    format: &dyn symphonia::core::formats::FormatReader,
+) -> Option<&symphonia::core::formats::Track> {
+    format
+        .tracks()
+        .iter()
+        .find(|track| {
+            track.codec_params.sample_rate.is_some() || track.codec_params.channels.is_some()
+        })
+        .or_else(|| format.default_track())
+}
+
 pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
     if path.as_os_str().is_empty() {
         return Err("empty path".to_string());
@@ -17,7 +35,24 @@ pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>),
         }
     }
 
-    decode_audio_f32_interleaved_symphonia(path)
+    if crate::media::is_video_extension(path) {
+        if let Ok(v) = crate::media::decode_media_audio_f32_interleaved(path, None) {
+            return Ok(v);
+        }
+    }
+
+    match decode_audio_f32_interleaved_symphonia(path) {
+        Ok(v) => Ok(v),
+        Err(symphonia_err) => {
+            // Video containers and exotic audio codecs are handled by the
+            // dynamically-linked FFmpeg decoder.
+            crate::media::decode_media_audio_f32_interleaved(path, None)
+                .map(|(sr, ch, pcm)| (sr, ch, pcm))
+                .map_err(|ffmpeg_err| {
+                    format!("symphonia: {symphonia_err}; ffmpeg: {ffmpeg_err}")
+                })
+        }
+    }
 }
 
 fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
@@ -91,9 +126,8 @@ fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<
         )
         .map_err(|e| e.to_string())?;
     let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
+    let track = pick_symphonia_audio_track(format.as_ref())
+        .ok_or_else(|| "no audio track".to_string())?;
 
     let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
     let channels = track
@@ -168,8 +202,33 @@ pub fn try_read_wav_info(path: &Path, preview_points: usize) -> Option<WavInfo> 
         }
     }
 
-    // Fall back to Symphonia for non-WAV (or WAV variants hound can't decode).
-    try_read_audio_info_symphonia(path, preview_points)
+    // Video containers are authoritative FFmpeg territory: use FFmpeg first
+    // so AAC edit lists / encoder padding never produce wrong frame counts.
+    if crate::media::is_video_extension(path) {
+        if let Some(probe) = crate::media::probe_media(path, preview_points, None) {
+            return Some(WavInfo {
+                sample_rate: probe.sample_rate,
+                total_frames: probe.total_frames,
+                duration_sec: probe.duration_sec,
+                waveform_preview: probe.waveform_preview,
+            });
+        }
+    }
+
+    // Fall back to Symphonia for non-WAV (or WAV variants hound can't decode),
+    // then to FFmpeg for unsupported audio codecs.
+    if let Some(info) = try_read_audio_info_symphonia(path, preview_points) {
+        return Some(info);
+    }
+    if let Some(probe) = crate::media::probe_media(path, preview_points, None) {
+        return Some(WavInfo {
+            sample_rate: probe.sample_rate,
+            total_frames: probe.total_frames,
+            duration_sec: probe.duration_sec,
+            waveform_preview: probe.waveform_preview,
+        });
+    }
+    None
 }
 
 /// 快速只读 sample_rate / total_frames / duration_sec，不生成 waveform_preview。
@@ -188,7 +247,29 @@ pub fn try_read_audio_header_only(path: &Path) -> Option<WavInfo> {
             return Some(info);
         }
     }
-    try_read_duration_symphonia(path)
+    if crate::media::is_video_extension(path) {
+        if let Some(probe) = crate::media::probe_media(path, 0, None) {
+            return Some(WavInfo {
+                sample_rate: probe.sample_rate,
+                total_frames: probe.total_frames,
+                duration_sec: probe.duration_sec,
+                waveform_preview: vec![],
+            });
+        }
+    }
+
+    if let Some(info) = try_read_duration_symphonia(path) {
+        return Some(info);
+    }
+    if let Some(probe) = crate::media::probe_media(path, 0, None) {
+        return Some(WavInfo {
+            sample_rate: probe.sample_rate,
+            total_frames: probe.total_frames,
+            duration_sec: probe.duration_sec,
+            waveform_preview: vec![],
+        });
+    }
+    None
 }
 
 fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
@@ -212,7 +293,7 @@ fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
         )
         .ok()?;
     let format = probed.format;
-    let track = format.default_track()?;
+    let track = pick_symphonia_audio_track(format.as_ref())?;
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
 
     if let Some(n_frames) = track.codec_params.n_frames {
@@ -359,7 +440,7 @@ fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<W
             )
             .ok()?;
         let format = probed.format;
-        let track = format.default_track()?;
+        let track = pick_symphonia_audio_track(format.as_ref())?;
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .ok()?;

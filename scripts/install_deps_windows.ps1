@@ -32,4 +32,13 @@ if (-not $SkipFrontend) {
     npm --prefix frontend ci
 }
 
+if ($env:SKIP_FFMPEG -ne "1") {
+    Write-Host "[install_deps_windows] Provisioning LGPL shared FFmpeg"
+    $FfmpegArch = if ($env:PROCESSOR_ARCHITECTURE -match "ARM64") { "arm64" } else { "x64" }
+    & "$PSScriptRoot\install_ffmpeg_windows.ps1" -Arch $FfmpegArch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FFmpeg provisioning failed (exit $LASTEXITCODE)"
+    }
+}
+
 Write-Host "[install_deps_windows] Done"

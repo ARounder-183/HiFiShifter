@@ -45,14 +45,7 @@ pub(crate) fn linear_resample_interleaved(
 }
 
 pub(crate) fn is_audio_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            ["wav", "mp3", "flac", "ogg", "m4a", "aac"]
-                .iter()
-                .any(|&ext| e.eq_ignore_ascii_case(ext))
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(path)
 }
 
 fn read_wav_f32_interleaved(path: &Path) -> Option<(u32, u16, Vec<f32>)> {
@@ -113,6 +106,21 @@ pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, V
         }
     }
 
+    if crate::media::is_video_extension(path) {
+        if let Ok((sr, ch, pcm)) = crate::media::decode_media_audio_f32_interleaved(path, None) {
+            return Ok((sr, ch as usize, pcm));
+        }
+    }
+
+    match decode_symphonia_inner(path) {
+        Ok(v) => Ok(v),
+        Err(symphonia_err) => crate::media::decode_media_audio_f32_interleaved(path, None)
+            .map(|(sr, ch, pcm)| (sr, ch as usize, pcm))
+            .map_err(|ffmpeg_err| format!("symphonia: {symphonia_err}; ffmpeg: {ffmpeg_err}")),
+    }
+}
+
+fn decode_symphonia_inner(path: &Path) -> Result<(u32, usize, Vec<f32>), String> {
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::FormatOptions;
@@ -139,8 +147,13 @@ pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, V
 
     let mut format = probed.format;
     let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
+        .tracks()
+        .iter()
+        .find(|track| {
+            track.codec_params.sample_rate.is_some() || track.codec_params.channels.is_some()
+        })
+        .or_else(|| format.default_track())
+        .ok_or_else(|| "no audio track".to_string())?;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())

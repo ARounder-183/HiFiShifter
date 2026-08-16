@@ -73,7 +73,10 @@ export const enUS = {
     menu_exit: "Exit",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "Import Audio...",
+    media_stream_select_title: "Select Audio Stream",
+    media_stream_select_hint: "This video contains multiple audio streams. Select one to extract and import.",
+    media_stream_track: "Track",
+    menu_import_media: "Import Media File...",
     menu_import_reaper: "Import Reaper Project...",
     menu_import_vocalshifter: "Import VocalShifter Project...",
     menu_import_hifishifter: "Import HiFiShifter Project...",
@@ -277,8 +280,8 @@ export const enUS = {
     status_target_original: "Original",
     status_target_synthesized: "Synthesized",
     status_target_none: "Idle",
-    dropped_audio_imported: "Dropped audio imported",
-    import_audio_failed: "Import audio failed",
+    dropped_audio_imported: "Dropped media imported",
+    import_audio_failed: "Import media failed",
 
     menu_about: "About HiFiShifter",
     glue: "Glue",
@@ -750,7 +753,7 @@ export const enUS = {
     fb_sort_size: "Size",
     fb_sort_label: "Sort",
     fb_regex_error: "Invalid regex",
-    fb_audio_only: "Show audio files only",
+    fb_audio_only: "Show media files only",
 
     // Edit menu new items
     menu_deselect: "Deselect",

@@ -67,7 +67,10 @@ export const koKR = {
     menu_exit: "종료",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "오디오 가져오기...",
+    media_stream_select_title: "오디오 트랙 선택",
+    media_stream_select_hint: "이 동영상에는 여러 오디오 트랙이 포함되어 있습니다. 추출하여 가져올 트랙을 선택하세요.",
+    media_stream_track: "트랙",
+    menu_import_media: "미디어 파일 가져오기...",
     menu_import_reaper: "Reaper 프로젝트 가져오기...",
     menu_import_vocalshifter: "VocalShifter 프로젝트 가져오기...",
     menu_import_hifishifter: "HiFiShifter 프로젝트 가져오기...",
@@ -351,8 +354,8 @@ export const koKR = {
     status_target_original: "원본",
     status_target_synthesized: "합성",
     status_target_none: "대기 중",
-    dropped_audio_imported: "드롭된 오디오를 가져왔습니다",
-    import_audio_failed: "오디오 가져오기에 실패했습니다",
+    dropped_audio_imported: "드롭된 미디어를 가져왔습니다",
+    import_audio_failed: "미디어 가져오기에 실패했습니다",
 
     menu_about: "HiFiShifter 정보",
     glue: "붙이기",
@@ -830,7 +833,7 @@ export const koKR = {
     fb_sort_size: "크기",
     fb_sort_label: "정렬",
     fb_regex_error: "잘못된 정규 표현식",
-    fb_audio_only: "오디오 파일만 표시",
+    fb_audio_only: "미디어 파일만 표시",
 
     // 편집 메뉴 새 항목
     menu_deselect: "선택 해제",

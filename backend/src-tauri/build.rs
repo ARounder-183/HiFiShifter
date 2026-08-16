@@ -36,6 +36,11 @@ fn main() {
     // tauri.windows.conf.json handles the bundling.
     copy_directml_dll();
 
+    // FFmpeg must stay dynamically linked (project license is MIT). Copy the
+    // LGPL shared libraries next to the development binary and into resources
+    // so Tauri can bundle them.
+    copy_ffmpeg_shared_libs();
+
     // tauri_build validates resources listed in tauri.conf.json and its
     // platform-specific merges (tauri.windows.conf.json, tauri.macos.conf.json).
     // All resource files must exist before this call.
@@ -668,6 +673,145 @@ fn create_vslib_placeholder() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(p, b"");
+    }
+}
+
+const FFMPEG_WINDOWS_DLLS: &[&str] = &[
+    "avcodec-62.dll",
+    "avformat-62.dll",
+    "avutil-60.dll",
+    "swresample-6.dll",
+];
+
+/// Copy dynamically-linked FFmpeg libraries for local runs and Tauri bundling.
+///
+/// `FFMPEG_DIR` must point to an LGPL shared FFmpeg installation containing
+/// `include`, `lib` and (`bin` on Windows / `lib` on Unix).
+fn copy_ffmpeg_shared_libs() {
+    let Ok(ffmpeg_dir) = std::env::var("FFMPEG_DIR") else {
+        // Resource validation still needs the files listed in tauri config.
+        // CI always provisions FFmpeg before building; local developers should
+        // set FFMPEG_DIR too. A placeholder keeps `cargo check` usable without
+        // FFmpeg, but the resulting binary cannot decode video media.
+        println!("cargo:warning=[ffmpeg] FFMPEG_DIR not set; creating placeholder FFmpeg DLLs (video decode disabled)");
+        ensure_ffmpeg_placeholder_resources();
+        return;
+    };
+    let ffmpeg_dir = std::path::Path::new(&ffmpeg_dir);
+    if !ffmpeg_dir.join("include").exists() || !ffmpeg_dir.join("lib").exists() {
+        println!(
+            "cargo:warning=[ffmpeg] FFMPEG_DIR {} is missing include/lib; skipping library copy",
+            ffmpeg_dir.display()
+        );
+        ensure_ffmpeg_placeholder_resources();
+        return;
+    }
+
+    let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
+    let target_dir = std::path::Path::new(&out_dir).ancestors().nth(3).unwrap();
+    let _ = std::fs::create_dir_all(target_dir);
+
+    if cfg!(target_os = "windows") {
+        let src_bin = ffmpeg_dir.join("bin");
+        let dst_resource = std::path::Path::new("resources/ffmpeg");
+        let _ = std::fs::create_dir_all(dst_resource);
+        for dll in FFMPEG_WINDOWS_DLLS {
+            copy_if_different(&src_bin.join(dll), &target_dir.join(dll));
+            copy_if_different(&src_bin.join(dll), &dst_resource.join(dll));
+        }
+        // Remove older FFmpeg major versions left by previous local builds so
+        // portable packaging never ships two generations of the libraries.
+        for stale in &[
+            "avcodec-61.dll",
+            "avformat-61.dll",
+            "avutil-59.dll",
+            "swresample-5.dll",
+        ] {
+            for dir in [target_dir, dst_resource] {
+                let _ = std::fs::remove_file(dir.join(stale));
+            }
+        }
+        let license_src = if ffmpeg_dir.join("LICENSE.txt").exists() {
+            ffmpeg_dir.join("LICENSE.txt")
+        } else {
+            ffmpeg_dir.join("LICENSE")
+        };
+        if license_src.exists() {
+            copy_if_different(&license_src, &dst_resource.join("LICENSE.txt"));
+        }
+    } else {
+        // Unix: copy versioned shared objects next to the binary and add a
+        // relative rpath so local dev runs work without LD_LIBRARY_PATH.
+        let src_lib = ffmpeg_dir.join("lib");
+        if let Ok(entries) = std::fs::read_dir(&src_lib) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("libavcodec")
+                    || name.starts_with("libavformat")
+                    || name.starts_with("libavutil")
+                    || name.starts_with("libswresample")
+                {
+                    copy_if_different(&entry.path(), &target_dir.join(name.as_ref()));
+                }
+            }
+        }
+
+        if cfg!(target_os = "macos") {
+            // Tauri copies FFmpeg dylibs into Contents/Resources/ffmpeg.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources/ffmpeg");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+        } else if cfg!(target_os = "linux") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        }
+    }
+}
+
+fn ensure_ffmpeg_placeholder_resources() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    let dst_resource = std::path::Path::new("resources/ffmpeg");
+    let _ = std::fs::create_dir_all(dst_resource);
+    for dll in FFMPEG_WINDOWS_DLLS {
+        let dst = dst_resource.join(dll);
+        if !dst.exists() {
+            let _ = std::fs::write(dst, b"");
+        }
+    }
+    let license = dst_resource.join("LICENSE.txt");
+    if !license.exists() {
+        let _ = std::fs::write(license, b"FFmpeg shared libraries are provisioned via FFMPEG_DIR.
+");
+    }
+}
+
+fn copy_if_different(src: &std::path::Path, dst: &std::path::Path) {
+    if !src.exists() {
+        return;
+    }
+    let src_bytes = match std::fs::read(src) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let dst_bytes = std::fs::read(dst).unwrap_or_default();
+    if src_bytes != dst_bytes {
+        if let Err(e) = std::fs::write(dst, &src_bytes) {
+            println!(
+                "cargo:warning=[ffmpeg] could not copy {} to {}: {}",
+                src.display(),
+                dst.display(),
+                e
+            );
+        } else {
+            println!(
+                "cargo:warning=[ffmpeg] copied {} to {}",
+                src.display(),
+                dst.display()
+            );
+        }
     }
 }
 

@@ -124,6 +124,14 @@ jobs:
             %USERPROFILE%\.cargo\git
           key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Cache provisioned FFmpeg libraries
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/third_party/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install_ffmpeg_linux.sh', 'scripts/install_ffmpeg_macos.sh', 'scripts/install_ffmpeg_windows.ps1') }}
+          restore-keys: |
+            ffmpeg-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -144,8 +152,33 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
+          sudo apt-get install -y jq cmake libclang-dev clang libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
+
+      # ── FFmpeg (LGPL, dynamic linking) ────────────────────────────────
+
+      - name: Provision FFmpeg shared libraries (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ARCH=x64
+          if [[ "${{ matrix.cargo_target }}" == *aarch64* ]]; then ARCH=arm64; fi
+          chmod +x ./scripts/install_ffmpeg_linux.sh
+          bash ./scripts/install_ffmpeg_linux.sh "$ARCH"
+
+      - name: Provision FFmpeg shared libraries (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chmod +x ./scripts/install_ffmpeg_macos.sh
+          bash ./scripts/install_ffmpeg_macos.sh
+
+      - name: Provision FFmpeg shared libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Arch = if ("${{ matrix.cargo_target }}" -like "*aarch64*") { "arm64" } else { "x64" }
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_ffmpeg_windows.ps1 -Arch $Arch
 
       - name: Ensure AppImage bundling prerequisites (Linux)
         if: runner.os == 'Linux'
@@ -239,6 +272,29 @@ jobs:
           ST_SO_PATH="$GITHUB_WORKSPACE/backend/src-tauri/third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so"
           FILES_JSON="$(jq -c --arg k "usr/bin/libSoundTouchDLL.so" --arg v "$ST_SO_PATH" '. + {($k): $v}' <<<"$FILES_JSON")"
 
+          echo "=== Bundling dynamically-linked FFmpeg LGPL libraries ==="
+          FFMPEG_DIR="$(realpath "$GITHUB_WORKSPACE/backend/src-tauri/third_party/ffmpeg/current")"
+          if [ -z "${FFMPEG_DIR:-}" ] || [ ! -d "$FFMPEG_DIR/lib" ]; then
+            echo "  WARNING: FFMPEG_DIR is not set; AppImage will lack FFmpeg libraries"
+          else
+            for lib in libavcodec libavformat libavutil libswresample; do
+              for src in "$FFMPEG_DIR"/lib/${lib}.so*; do
+                if [ -e "$src" ]; then
+                  fname="$(basename "$src")"
+                  FILES_JSON="$(jq -c --arg k "usr/lib/$fname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+                  echo "  added $fname <- $src"
+                fi
+              done
+            done
+            for license_file in "$FFMPEG_DIR"/LICENSE.txt "$FFMPEG_DIR"/LICENSE; do
+              if [ -f "$license_file" ]; then
+                FILES_JSON="$(jq -c --arg k "usr/share/licenses/ffmpeg/LICENSE.txt" --arg v "$license_file" '. + {($k): $v}' <<<"$FILES_JSON")"
+                echo "  added FFmpeg LICENSE.txt <- $license_file"
+                break
+              fi
+            done
+          fi
+
           echo "=== Writing tauri.linux.conf.json ==="
           jq -n --argjson files "$FILES_JSON" '{ bundle: { linux: { appimage: { files: $files } } } }' > tauri.linux.conf.json
         shell: bash
@@ -247,12 +303,13 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           chmod +x ./scripts/install_deps_macos.sh || true
-          SKIP_FRONTEND=1 bash ./scripts/install_deps_macos.sh
+          SKIP_FRONTEND=1 SKIP_FFMPEG=1 bash ./scripts/install_deps_macos.sh
         shell: bash
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
+          $env:SKIP_FFMPEG = "1"
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 

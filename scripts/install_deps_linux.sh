@@ -12,7 +12,7 @@ sudo apt-get update -y || true
 
 # Core packages used by native crates
 # Also install libfuse2 and fuse so AppImages can run in CI (provides libfuse.so.2)
-sudo apt-get install -y pkg-config cmake libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse || true
+sudo apt-get install -y pkg-config cmake libclang-dev clang libglib2.0-dev libgirepository1.0-dev gobject-introspection libssl-dev build-essential libgtk-3-dev libgdk-pixbuf2.0-dev libasound2-dev libfuse2 fuse || true
 
 # Additional dev packages commonly required by linuxdeploy and the GTK/GStreamer plugins
 # (helps Tauri's bundler find webkit/gstreamer and related girs at build time)
@@ -114,3 +114,10 @@ echo "[install_deps_linux] Done installing extra runtime deps"
 # Ensure modern FUSE implementation available (install fuse3 and libfuse2)
 echo "[install_deps_linux] Ensuring fuse3 and libfuse2 are installed"
 sudo apt-get install -y fuse3 libfuse2 || true
+
+# Provision LGPL shared FFmpeg for media/video import (dynamic linking).
+if [ "${SKIP_FFMPEG:-0}" != "1" ]; then
+  ARCH="x64"
+  if [ "$(uname -m)" = "aarch64" ]; then ARCH="arm64"; fi
+  bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install_ffmpeg_linux.sh" "$ARCH"
+fi

@@ -43,8 +43,19 @@ export const timelineApi = {
         invoke<TimelineResult>("set_timeline_tempo_map", tempoMap),
 
     // Import
-    importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>
-        invoke<TimelineResult>("import_audio_item", audioPath, trackId, startSec),
+    importAudioItem: (
+        audioPath: string,
+        trackId?: string | null,
+        startSec?: number,
+        mediaAudioStreamIndex?: number,
+    ) =>
+        invoke<TimelineResult>(
+            "import_audio_item",
+            audioPath,
+            trackId,
+            startSec,
+            mediaAudioStreamIndex,
+        ),
 
     importAudioBytes: (
         fileName: string,

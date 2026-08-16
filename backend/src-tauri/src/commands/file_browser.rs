@@ -31,16 +31,6 @@ pub struct AudioPreviewData {
     pub pcm_base64: String,
 }
 
-/// 支持的音频扩展名（用于前端标记）
-#[allow(dead_code)]
-const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"];
-
-fn _is_audio_extension(ext: &str) -> bool {
-    AUDIO_EXTENSIONS
-        .iter()
-        .any(|&e| e.eq_ignore_ascii_case(ext))
-}
-
 /// 列出指定目录下的文件和子目录
 pub(crate) fn list_directory(dir_path: String) -> Result<Vec<FileEntry>, String> {
     let path = Path::new(&dir_path);
@@ -207,6 +197,13 @@ fn read_channel_count(path: &Path) -> Option<u16> {
         }
     }
 
+    // 视频容器优先用 FFmpeg，避免 Symphonia 返回视频轨或不准确的音轨参数。
+    if crate::media::is_video_extension(path) {
+        if let Some(channels) = crate::media::probe_media(path, 0, None).map(|p| p.channels) {
+            return Some(channels);
+        }
+    }
+
     // 非 WAV: 用 symphonia probe 读取 codec params
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
@@ -220,21 +217,29 @@ fn read_channel_count(path: &Path) -> Option<u16> {
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let track = probed.format.default_track()?;
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(2);
-    Some(channels)
+    if let Ok(probed) = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        let format = probed.format;
+        let track = format
+            .tracks()
+            .iter()
+            .find(|track| {
+                track.codec_params.sample_rate.is_some()
+                    || track.codec_params.channels.is_some()
+            })
+            .or_else(|| format.default_track())?;
+        return track
+            .codec_params
+            .channels
+            .map(|c| c.count() as u16)
+            .or(Some(2));
+    }
+
+    crate::media::probe_media(path, 0, None).map(|info| info.channels).or(Some(2))
 }
 
 /// 读取音频预览 PCM 数据（f32 LE interleaved → base64）
@@ -250,7 +255,12 @@ pub(crate) fn read_audio_preview(
 
     let max = max_frames.unwrap_or(480_000) as usize;
 
-    let (sample_rate, channels, samples) = crate::audio_utils::decode_audio_f32_interleaved(path)?;
+    let (sample_rate, channels, samples) =
+        if crate::media::is_video_extension(path) {
+            crate::media::decode_media_audio_prefix_f32(path, None, max)?
+        } else {
+            crate::audio_utils::decode_audio_f32_interleaved(path)?
+        };
 
     let total_frames = samples.len() / channels.max(1) as usize;
     let frames_to_use = total_frames.min(max);
@@ -270,4 +280,15 @@ pub(crate) fn read_audio_preview(
         channels,
         pcm_base64,
     })
+}
+
+/// 列出媒体文件（尤其是视频）中的全部音轨。
+pub(crate) fn list_media_audio_streams(
+    file_path: String,
+) -> Result<Vec<crate::media::MediaAudioStream>, String> {
+    let path = Path::new(&file_path);
+    if !path.is_file() {
+        return Err(format!("Not a file: {}", file_path));
+    }
+    crate::media::list_audio_streams(path)
 }

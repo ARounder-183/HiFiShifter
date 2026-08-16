@@ -38,6 +38,10 @@ hound = "3"
 cpal = "0.15"
 arc-swap = "1.7"
 symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "vorbis", "wav"] }
+# FFmpeg is dynamically linked (LGPL shared libraries) and is used only for
+# media containers that Symphonia cannot handle (e.g. video files and exotic
+# audio codecs). Never enable ffmpeg-sys-next "static"/"build" features here.
+ffmpeg-next = { version = "8.1.0", default-features = false, features = ["codec", "format"] }
 blake3 = "1"
 rayon = "1.7"
 lru = "0.12"

@@ -42,13 +42,13 @@ HiFiShifter can be roughly divided into two functional areas: the upper track pa
 
 HiFiShifter provides a fairly complete track panel and audio clip editing functionality, similar to most modern DAWs.
 
-#### Importing Audio
+#### Importing Media (Audio / Video)
 
-HiFiShifter supports three ways to import audio:
+HiFiShifter supports three ways to import media files. Video files automatically use their audio track:
 
-1. Drag and drop audio from the system file manager directly onto a track.
-2. Click the folder icon on the toolbar to open the built-in file browser and drag audio onto a track.
-3. Press `Ctrl + F` to open quick search, select audio, and import it onto a track (the quick search file path matches the built-in file browser's current path).
+1. Drag and drop audio or video files from the system file manager directly onto a track.
+2. Click the folder icon on the toolbar to open the built-in file browser and drag media files onto a track.
+3. Press `Ctrl + F` to open quick search, select media files, and import them onto a track (the quick search file path matches the built-in file browser's current path).
 
 #### Audio Editing
 

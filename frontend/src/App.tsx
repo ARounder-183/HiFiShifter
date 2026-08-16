@@ -114,7 +114,11 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
     if (/\.(hshp|hsp|json)$/i.test(normalized)) return "openProject";
     if (/\.rpp$/i.test(normalized)) return "importReaper";
     if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
-    if (/\.(wav|flac|mp3|ogg|m4a|aac|aif|aiff|wma|opus)$/i.test(normalized)) {
+    if (
+        /\.(wav|flac|mp3|ogg|oga|opus|aac|m4a|aif|aiff|wma|ac3|eac3|ape|wv|mp2|mpa|dts|amr|mp4|m4v|mov|mkv|webm|avi|flv|wmv|ts|mts|m2ts|vob|mpg|mpeg|3gp|3g2|ogv|rm|rmvb)$/i.test(
+            normalized,
+        )
+    ) {
         return "importAudio";
     }
     return null;
