@@ -482,10 +482,17 @@ function AppInner() {
             }
         }
         function preventContextMenu(e: MouseEvent) {
-            const target = e.target as HTMLElement | null;
-            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-            if (target?.closest?.("[data-hs-context-menu]")) return;
+            // 完全禁用 WebView 默认右键菜单。只调用 preventDefault，
+            // 不阻止传播，因此应用内基于 contextmenu 事件实现的
+            // 自定义菜单/右键拖拽仍可正常工作。
             e.preventDefault();
+        }
+
+        function preventContextMenuKey(e: KeyboardEvent) {
+            // 同时屏蔽键盘触发的 WebView 默认菜单（Menu/ContextMenu 键与 Shift+F10）。
+            if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                e.preventDefault();
+            }
         }
 
         function altKeyDown(e: KeyboardEvent) {
@@ -502,9 +509,11 @@ function AppInner() {
         window.addEventListener("keydown", altKeyDown, true);
         window.addEventListener("keyup", altKeyUp, true);
         window.addEventListener("keydown", preventBrowserFind, true);
+        window.addEventListener("keydown", preventContextMenuKey, true);
         document.addEventListener("contextmenu", preventContextMenu, true);
         return () => {
             window.removeEventListener("keydown", preventBrowserFind, true);
+            window.removeEventListener("keydown", preventContextMenuKey, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
             document.removeEventListener("contextmenu", preventContextMenu, true);
