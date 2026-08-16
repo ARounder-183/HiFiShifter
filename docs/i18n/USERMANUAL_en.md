@@ -262,7 +262,7 @@ The current version of HiFiShifter supports three vocal tuning algorithms and th
 
 A track can only use one algorithm; if you want to use multiple algorithms, separate them into different tracks.
 
-A track group shares a single set of parameters, with child tracks inheriting parameters from the root track. Additionally, child tracks have two extra parameters: `Cents Offset` and `Degree Offset`, which conveniently adjust pitch relative to the root track. The `Degree Offset` uses the project's scale setting as its reference.
+A track group shares a single set of parameters, with child tracks inheriting parameters from the root track. Additionally, child tracks have three extra parameters: `Cents Offset`, `Degree Offset` and `Formant Offset`, which conveniently adjust pitch and timbre relative to the root track. The `Degree Offset` uses the project's scale setting as its reference. `Formant Offset` is drawn in cents per frame and accumulates along the root → parent → current-child hierarchy; it is only shown when the track-group algorithm supports `Formant Shift` (NSF-HiFiGAN and VocalShifter / vslib), and editing snaps to 50-cent steps.
 
 After copying a `Pitch` segment using the Select tool, you can paste it onto `Cents Offset` or `Degree Offset`, and HiFiShifter will automatically calculate and apply the appropriate offset.
 
@@ -333,7 +333,7 @@ Alternatively, use the `Cents Offset` and `Degree Offset` parameters on child tr
 2. Drag the harmony track's header onto the lead vocal track to form a track group (lead = root, harmony = child).
 3. Switch the parameter editor to the `Degree Offset` parameter of the harmony track and draw the desired degree line. Both `Cents Offset` and `Degree Offset` support Pitch Snap, snapping to integer semitones and integer degrees respectively.
 
-This quickly creates harmonies by degree transposition.
+This quickly creates harmonies by degree transposition. Similarly, switch to a child track's `Formant Offset` parameter to draw a per-frame formant-shift curve and create timbrally varied harmonies on algorithms that support `Formant Shift` (NSF-HiFiGAN / vslib).
 
 ### 6. Pitch Reference Clip
 

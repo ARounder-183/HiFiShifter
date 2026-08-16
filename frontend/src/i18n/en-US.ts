@@ -387,10 +387,13 @@ export const enUS = {
     algo_label: "Algo",
     child_pitch_mode_cents: "Cents",
     child_pitch_mode_degrees: "Degrees",
+    child_formant_mode: "Formant",
     child_pitch_offset_cents_label: "Child Track Cents Offset",
     child_pitch_offset_degrees_label: "Child Track Degree Offset",
+    child_formant_offset_cents_label: "Child Track Formant Offset",
     child_pitch_offset_cents_short: "cents",
     child_pitch_offset_degrees_short: "degrees",
+    child_formant_offset_cents_short: "cents",
     aria_loading: "Loading",
 
     // 快捷键管理

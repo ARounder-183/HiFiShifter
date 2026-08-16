@@ -38,6 +38,7 @@ import {
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
 import { buildChildOffsetPasteValues as buildChildOffsetPasteValuesHelper } from "./childPitchOffsetPaste";
@@ -2870,7 +2871,8 @@ export function usePianoRollInteractions(args: {
                                 if (
                                     editParam === "pitch" ||
                                     isChildPitchOffsetCentsParam(editParam) ||
-                                    isChildPitchOffsetDegreesParam(editParam)
+                                    isChildPitchOffsetDegreesParam(editParam) ||
+                                    isChildFormantOffsetCentsParam(editParam)
                                 ) {
                                     onPitchSnapGestureActiveChange?.(true);
                                 }
@@ -2925,6 +2927,13 @@ export function usePianoRollInteractions(args: {
                                     ) {
                                         useScaleDegreeTranspose = false;
                                         rawValueDelta = Math.round(rawValueDelta);
+                                    } else if (
+                                        effectiveSnap &&
+                                        isChildFormantOffsetCentsParam(editParam) &&
+                                        yDragEnabled
+                                    ) {
+                                        useScaleDegreeTranspose = false;
+                                        rawValueDelta = Math.round(rawValueDelta / 50) * 50;
                                     } else {
                                         useScaleDegreeTranspose = false;
                                         if (!yDragEnabled) {

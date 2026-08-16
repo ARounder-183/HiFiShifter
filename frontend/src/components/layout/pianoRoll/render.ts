@@ -29,6 +29,7 @@ import {
     childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
 
 /**
@@ -566,6 +567,30 @@ export function drawPianoRoll(args: {
                         ctx.lineTo(w, y + 0.5);
                         ctx.stroke();
                     }
+                } else if (isChildFormantOffsetCentsParam(editParam)) {
+                    // 共振峰差使用 cents 单位，强线每 600 cents。
+                    const range = vMax - vMin;
+                    const candidates = [1200, 600, 300, 200, 100, 50, 25, 10, 5, 1];
+                    let chosen = candidates[candidates.length - 1];
+                    for (const c of candidates) {
+                        const count = Math.ceil(range / c) + 1;
+                        if (count >= 5 && count <= 12) {
+                            chosen = c;
+                            break;
+                        }
+                    }
+                    const firstMark = Math.ceil(vMin / chosen) * chosen;
+                    for (let m = firstMark; m <= vMax + chosen * 0.01; m += chosen) {
+                        const y = valueToY(editParam, m, h);
+                        const isStrong = Math.round(m) % 600 === 0;
+                        ctx.fillText(formatAxisMark(m, editParam), 6, y);
+                        ctx.strokeStyle = colors.tensionLine;
+                        ctx.lineWidth = isStrong ? 1.25 : 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y + 0.5);
+                        ctx.lineTo(w, y + 0.5);
+                        ctx.stroke();
+                    }
                 } else if (isChildPitchOffsetDegreesParam(editParam)) {
                     // 度数使用内部 degree-step 单位，强线每 7 个单位
                     const candidates = [14, 7, 3, 1];
@@ -735,6 +760,31 @@ export function drawPianoRoll(args: {
             const y = valueToY(editParam, v, h);
             const rounded = Math.round(v);
             const isStrong = rounded % 7 === 0;
+            ctx.strokeStyle = isStrong
+                ? isDark
+                    ? "rgba(255,255,255,0.14)"
+                    : "rgba(0,0,0,0.16)"
+                : isDark
+                  ? "rgba(255,255,255,0.07)"
+                  : "rgba(0,0,0,0.08)";
+            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.beginPath();
+            ctx.moveTo(0, y + 0.5);
+            ctx.lineTo(w, y + 0.5);
+            ctx.stroke();
+        }
+    } else if (isChildFormantOffsetCentsParam(editParam)) {
+        const view = paramViews[editParam] ?? { center: 0, span: 1 };
+        const span = Math.max(1e-6, view.span);
+        const vMin = view.center - span / 2;
+        const vMax = view.center + span / 2;
+        const step = 50;
+        const start = Math.ceil(vMin / step) * step;
+
+        for (let v = start; v <= vMax + step * 0.01; v += step) {
+            const y = valueToY(editParam, v, h);
+            const rounded = Math.round(v);
+            const isStrong = rounded % 600 === 0;
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"

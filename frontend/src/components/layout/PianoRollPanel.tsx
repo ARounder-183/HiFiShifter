@@ -116,11 +116,14 @@ import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
 import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
+    buildChildFormantOffsetCentsParam,
     childPitchOffsetValueToDisplay,
     CHILD_PITCH_OFFSET_CENTS_RANGE,
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
+    CHILD_FORMANT_OFFSET_CENTS_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
     isChildPitchOffsetParam,
     parseChildPitchOffsetParam,
 } from "./pianoRoll/childPitchOffsetParams";
@@ -829,6 +832,13 @@ export const PianoRollPanel: React.FC = () => {
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
 
+    const childFormantOffsetParam = useMemo(() => {
+        if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
+        const algo = rootTrack?.pitchAnalysisAlgo;
+        if (algo !== "nsf_hifigan_onnx" && algo !== "vslib") return null;
+        return buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+    }, [effectiveSelectedTrackId, selectedIsChildTrack, rootTrack?.pitchAnalysisAlgo]);
+
     // 声码器参数描述符（由 algo 动态定制面板）
     const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
     const processorParamsRef = useRef<ProcessorParamDescriptor[]>([]);
@@ -852,6 +862,12 @@ export const PianoRollPanel: React.FC = () => {
                 max: CHILD_PITCH_OFFSET_DEGREES_RANGE.max,
             };
         }
+        if (isChildFormantOffsetCentsParam(editParam)) {
+            return {
+                min: CHILD_FORMANT_OFFSET_CENTS_RANGE.min,
+                max: CHILD_FORMANT_OFFSET_CENTS_RANGE.max,
+            };
+        }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
         if (desc?.kind.type === "automation_curve") {
             return {
@@ -864,7 +880,11 @@ export const PianoRollPanel: React.FC = () => {
 
     const currentParamDefaultValue = useMemo(() => {
         if (editParam === "pitch") return 60;
-        if (isChildPitchOffsetCentsParam(editParam) || isChildPitchOffsetDegreesParam(editParam)) {
+        if (
+            isChildPitchOffsetCentsParam(editParam) ||
+            isChildPitchOffsetDegreesParam(editParam) ||
+            isChildFormantOffsetCentsParam(editParam)
+        ) {
             return 0;
         }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
@@ -880,6 +900,7 @@ export const PianoRollPanel: React.FC = () => {
     const currentParamQuantizeUnit = useMemo(() => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
         if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
+        if (isChildFormantOffsetCentsParam(editParam)) return 50;
         if (editParam === "volume" || editParam === "dyn_edit") return 0.05;
         if (editParam === "formant_shift_cents") return 50;
         if (editParam === "breath_gain" || editParam === "hifigan_tension") {
@@ -897,7 +918,9 @@ export const PianoRollPanel: React.FC = () => {
         if (paramViewsRef.current[editParam]) return;
         const range = isChildPitchOffsetCentsParam(editParam)
             ? CHILD_PITCH_OFFSET_CENTS_RANGE
-            : CHILD_PITCH_OFFSET_DEGREES_RANGE;
+            : isChildPitchOffsetDegreesParam(editParam)
+              ? CHILD_PITCH_OFFSET_DEGREES_RANGE
+              : CHILD_FORMANT_OFFSET_CENTS_RANGE;
         paramViewsRef.current = {
             ...paramViewsRef.current,
             [editParam]: {
@@ -1043,6 +1066,7 @@ export const PianoRollPanel: React.FC = () => {
             ...processorParams.map((p) => p.id),
             ...(childPitchOffsetCentsParam ? [childPitchOffsetCentsParam] : []),
             ...(childPitchOffsetDegreesParam ? [childPitchOffsetDegreesParam] : []),
+            ...(childFormantOffsetParam ? [childFormantOffsetParam] : []),
         ]);
         if (isChildPitchOffsetParam(editParam)) {
             if (!selectedIsChildTrack || !effectiveSelectedTrackId) {
@@ -1063,6 +1087,13 @@ export const PianoRollPanel: React.FC = () => {
                     return;
                 }
             }
+            if (isChildFormantOffsetCentsParam(editParam)) {
+                const expected = buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+                if (editParam !== expected) {
+                    dispatch(setEditParam(expected));
+                    return;
+                }
+            }
         }
 
         if (!available.has(editParam)) {
@@ -1074,6 +1105,7 @@ export const PianoRollPanel: React.FC = () => {
         dispatch,
         childPitchOffsetCentsParam,
         childPitchOffsetDegreesParam,
+        childFormantOffsetParam,
         effectiveSelectedTrackId,
         selectedIsChildTrack,
     ]);
@@ -2847,7 +2879,7 @@ export const PianoRollPanel: React.FC = () => {
                             startFrame,
                             frameCount,
                             clipboardPitch: clip.values,
-                            mode: targetParam.mode,
+                            mode: targetParam.mode as "cents" | "degrees",
                             paramsApi,
                             pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
                             projectScale: effectiveProjectScale,
@@ -4255,6 +4287,17 @@ export const PianoRollPanel: React.FC = () => {
                                 style={{ cursor: "pointer" }}
                             >
                                 {t("child_pitch_mode_degrees")}
+                            </Button>
+                        ) : null}
+                        {selectedIsChildTrack && childFormantOffsetParam ? (
+                            <Button
+                                size="1"
+                                variant={editParam === childFormantOffsetParam ? "solid" : "soft"}
+                                color={editParam === childFormantOffsetParam ? "cyan" : "gray"}
+                                onClick={() => dispatch(setEditParam(childFormantOffsetParam))}
+                                style={{ cursor: "pointer" }}
+                            >
+                                {t("child_formant_mode")}
                             </Button>
                         ) : null}
                         <Button

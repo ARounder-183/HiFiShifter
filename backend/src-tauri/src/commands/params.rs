@@ -5,13 +5,17 @@ use tauri::State;
 
 const CHILD_PITCH_OFFSET_CENTS_PREFIX: &str = "child_pitch_offset_cents@";
 const CHILD_PITCH_OFFSET_DEGREES_PREFIX: &str = "child_pitch_offset_degrees@";
+const CHILD_FORMANT_OFFSET_CENTS_PREFIX: &str = "child_formant_offset_cents@";
 const CHILD_PITCH_OFFSET_CENTS_DEFAULT: f32 = 0.0;
 const CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT: f32 = 0.0;
+const CHILD_FORMANT_OFFSET_CENTS_DEFAULT: f32 = 0.0;
+const CHILD_FORMANT_OFFSET_CENTS_RANGE: (f32, f32) = (-2400.0, 2400.0);
 
 #[derive(Clone, Copy)]
 enum ChildPitchOffsetParamMode {
     Cents,
     Degrees,
+    Formant,
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +41,14 @@ fn parse_child_pitch_offset_param(param: &str) -> Option<ChildPitchOffsetParamSp
             });
         }
     }
+    if let Some(track_id) = param.strip_prefix(CHILD_FORMANT_OFFSET_CENTS_PREFIX) {
+        if !track_id.is_empty() {
+            return Some(ChildPitchOffsetParamSpec {
+                mode: ChildPitchOffsetParamMode::Formant,
+                track_id,
+            });
+        }
+    }
     None
 }
 
@@ -56,6 +68,7 @@ fn resolve_child_pitch_offset_curve_default_value(
     match spec.mode {
         ChildPitchOffsetParamMode::Cents => Some(CHILD_PITCH_OFFSET_CENTS_DEFAULT),
         ChildPitchOffsetParamMode::Degrees => Some(CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT),
+        ChildPitchOffsetParamMode::Formant => Some(CHILD_FORMANT_OFFSET_CENTS_DEFAULT),
     }
 }
 
@@ -408,6 +421,19 @@ pub(super) fn set_param_frames(
                 0.0
             }
         };
+
+        if let Some(spec) = parse_child_pitch_offset_param(&param) {
+            if matches!(spec.mode, ChildPitchOffsetParamMode::Formant) {
+                let vv = v.clamp(
+                    CHILD_FORMANT_OFFSET_CENTS_RANGE.0,
+                    CHILD_FORMANT_OFFSET_CENTS_RANGE.1,
+                );
+                if vv != v {
+                    clamped += 1;
+                }
+                v = vv;
+            }
+        }
 
         match param.as_str() {
             "pitch" => {
