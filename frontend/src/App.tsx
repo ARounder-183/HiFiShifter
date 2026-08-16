@@ -1520,6 +1520,20 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "edit.pasteTracks":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "pasteTracks" },
+                        }),
+                    );
+                    break;
+                case "edit.copyReaper":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "copyReaper" },
+                        }),
+                    );
+                    break;
                 // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
                 default:
                     break;

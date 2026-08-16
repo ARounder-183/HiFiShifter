@@ -297,7 +297,7 @@ export const setClipsStateBulkRemote = createAsyncThunk(
 
 export const pasteTimelineClipboardRemote = createAsyncThunk(
     "session/pasteTimelineClipboardRemote",
-    async (mode: "auto" | "selected" | "new_tracks" | undefined, { rejectWithValue }) => {
+    async (mode: "selected" | "new_tracks" | undefined, { rejectWithValue }) => {
         const result = await webApi.pasteTimelineClipboard(mode);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");

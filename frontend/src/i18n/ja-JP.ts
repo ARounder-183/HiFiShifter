@@ -85,7 +85,7 @@ export const jaJP = {
         "現在のプロジェクトには既にテンポマップがあるため、インポート側のテンポマップはスキップされます。",
     import_project_import: "インポート",
     menu_import_midi: "MIDI をインポート...",
-    menu_copy_reaper_clipboard: "選択クリップを Reaper クリップボードにコピー",
+    menu_copy_reaper_clipboard: "Reaper クリップボードにコピー",
     menu_paste_selected_track: "選択トラックにペースト",
     menu_paste_new_tracks: "新しいトラックとしてペースト",
     menu_paste_reaper_clipboard: "Reaper クリップボードデータをペースト",
@@ -824,6 +824,8 @@ export const jaJP = {
     kb_edit_quantize: "クオンタイズ",
     kb_edit_mean_quantize: "平均クオンタイズ",
     kb_edit_paste_reaper: "Reaper クリップボードをペースト",
+    kb_edit_paste_tracks: "新しいトラックとしてペースト",
+    kb_edit_copy_reaper: "Reaper クリップボードにコピー",
     kb_edit_paste_vocalshifter: "VocalShifter クリップボードをペースト",
 
     // スクロール修飾キーバインド

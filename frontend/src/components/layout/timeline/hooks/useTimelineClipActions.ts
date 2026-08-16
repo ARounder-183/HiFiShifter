@@ -145,7 +145,7 @@ export interface UseTimelineClipActionsResult {
     ) => void;
     rangeSelectAnchorClipId: string | null;
     recordLastClickPosition: (clientX: number) => void;
-    pasteClipsAtPlayhead: (mode?: "auto" | "selected" | "new_tracks") => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     clearContextMenu: () => void;
 
     // TrackLane callbacks
@@ -615,7 +615,7 @@ export function useTimelineClipActions(
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
     const pasteClipsAtPlayhead = React.useCallback(
-        (mode?: "auto" | "selected" | "new_tracks") => {
+        (mode?: "selected" | "new_tracks") => {
             void (async () => {
                 try {
                     const result = await dispatch(pasteTimelineClipboardRemote(mode)).unwrap();

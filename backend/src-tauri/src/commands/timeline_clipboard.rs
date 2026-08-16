@@ -52,30 +52,10 @@ fn read_fragment() -> Result<ProjectFragment, String> {
     ProjectFragment::decode(&bytes)
 }
 
-fn paste_placement(
-    fragment: &ProjectFragment,
-    mode: Option<&str>,
-) -> FragmentTrackPlacement {
-    match mode.unwrap_or("auto") {
-        "selected" => FragmentTrackPlacement::SelectedTrackOnly,
+fn paste_placement(mode: Option<&str>) -> FragmentTrackPlacement {
+    match mode.unwrap_or("selected") {
         "new_tracks" | "tracks" => FragmentTrackPlacement::AppendAtEnd,
-        _ => {
-            if fragment.kind != ProjectFragmentKind::Clips {
-                return FragmentTrackPlacement::AppendAtEnd;
-            }
-            let clip_track_count = fragment
-                .timeline
-                .clips
-                .iter()
-                .map(|clip| clip.track_id.as_str())
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            if clip_track_count <= 1 {
-                FragmentTrackPlacement::SelectedTrackOnly
-            } else {
-                FragmentTrackPlacement::SelectedTracksRelative
-            }
-        }
+        _ => FragmentTrackPlacement::SelectedTrackOnly,
     }
 }
 
@@ -88,7 +68,7 @@ fn paste_fragment(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl);
         let playhead_sec = tl.playhead_sec.max(0.0);
-        let track_placement = paste_placement(&fragment, mode.as_deref());
+        let track_placement = paste_placement(mode.as_deref());
         let merge = match merge_project_fragment(
             &mut tl,
             &fragment,
