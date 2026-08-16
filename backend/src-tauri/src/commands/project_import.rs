@@ -98,8 +98,7 @@ pub(super) fn import_project(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl);
 
-        let scale_signature_before =
-            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_signature_before = tl.render_scale_signature();
         let anchor_sec = if place_at_playhead.unwrap_or(false) {
             Some(tl.playhead_sec.max(0.0))
         } else {
@@ -168,8 +167,7 @@ pub(super) fn import_project(
         }
 
         state.audio_engine.update_timeline(tl.clone());
-        let scale_signature_after =
-            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_signature_after = tl.render_scale_signature();
 
         let mut payload = tl.to_payload();
         payload.created_clip_ids = Some(merge.created_clip_ids.clone());

@@ -90,6 +90,8 @@ export const TempoMapCornerButton: React.FC = () => {
     const [dialogOpen, setDialogOpen] = useState(false);
 
     const hasMap = s.tempoMap != null && s.tempoMap.points.length > 0;
+    /** 是否存在 0 位置初始点以外的实际速度映射变化点。 */
+    const hasChangePoints = s.tempoMap != null && s.tempoMap.points.length > 1;
     /** 存在 Tempo Map 且正在显示（红色提醒模式）。 */
     const active = hasMap && s.tempoMapVisible;
     /** 图标按钮的无障碍名称（与悬浮提示共用同一份文案）。 */
@@ -176,7 +178,13 @@ export const TempoMapCornerButton: React.FC = () => {
                 onClick={(e) => {
                     e.stopPropagation();
                     if (active) {
-                        setDialogOpen(true);
+                        // 只有工程基准初始点、没有任何实际变化点时，无需确认，
+                        // 直接清空 Tempo Map 即可（开启/关闭都不影响渲染）。
+                        if (hasChangePoints) {
+                            setDialogOpen(true);
+                        } else {
+                            clearMap();
+                        }
                         return;
                     }
                     ensureShown();
