@@ -498,18 +498,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
-                        {tAny("menu_copy")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("pianoRoll.copy")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
                         {tAny("menu_cut")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("clip.cut")}
                         </div>
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
+                        {tAny("menu_copy")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("pianoRoll.copy")}
+                        </div>
+                    </DropdownMenu.Item>
+                    {/* 剪贴板：粘贴 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
                         {tAny("menu_paste")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
@@ -523,19 +525,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("menu_paste_new_tracks")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
-                        {tAny("menu_select_all")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.selectAll")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
-                        {tAny("menu_deselect")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.deselect")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
+                    {/* 外部剪贴板交换 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("copyReaper")}>
                         {t("menu_copy_reaper_clipboard")}
                     </DropdownMenu.Item>
@@ -549,6 +539,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {t("menu_paste_vocalshifter_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.pasteVocalShifter")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 选择 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
+                        {tAny("menu_select_all")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.selectAll")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("deselect")}>
+                        {tAny("menu_deselect")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.deselect")}
                         </div>
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>

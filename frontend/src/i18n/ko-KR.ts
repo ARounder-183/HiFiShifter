@@ -77,10 +77,11 @@ export const koKR = {
     import_project_original_position: "원래 타임라인 위치 유지",
     import_project_playhead_position: "재생 헤드 위치에 배치",
     import_project_tempo_map: "템포 맵 가져오기 (현재 프로젝트에 없을 때만)",
-    import_project_tempo_map_unavailable: "현재 프로젝트에 이미 템포 맵이 있어 가져온 템포 맵은 건너뜁니다.",
+    import_project_tempo_map_unavailable:
+        "현재 프로젝트에 이미 템포 맵이 있어 가져온 템포 맵은 건너뜁니다.",
     import_project_import: "가져오기",
     menu_import_midi: "MIDI 가져오기...",
-    menu_copy_reaper_clipboard: "선택한 클립을 REAPER 클립보드로 복사",
+    menu_copy_reaper_clipboard: "선택한 클립을 Reaper 클립보드로 복사",
     menu_paste_selected_track: "선택한 트랙에 붙여넣기",
     menu_paste_new_tracks: "새 트랙으로 붙여넣기",
     menu_paste_reaper_clipboard: "Reaper 클립보드 데이터 붙여넣기",
@@ -736,8 +737,7 @@ export const koKR = {
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",
     sync_timeline_view: "타임라인 뷰 동기화",
-    sync_timeline_view_tooltip:
-        "파라미터 에디터의 가로 위치와 확대/축소를 타임라인에 동기화합니다",
+    sync_timeline_view_tooltip: "파라미터 에디터의 가로 위치와 확대/축소를 타임라인에 동기화합니다",
     grid_snap_dotted_half: "점2분음표",
     grid_snap_dotted_quarter: "점4분음표",
     grid_snap_dotted_8th: "점8분음표",

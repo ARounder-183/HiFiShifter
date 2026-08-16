@@ -88,7 +88,7 @@ export const enUS = {
         "The current project already has a tempo map, so the imported tempo map will be skipped.",
     import_project_import: "Import",
     menu_import_midi: "Import MIDI...",
-    menu_copy_reaper_clipboard: "Copy Selected Clips to REAPER Clipboard",
+    menu_copy_reaper_clipboard: "Copy Selected Clips to Reaper Clipboard",
     menu_paste_selected_track: "Paste into Selected Track",
     menu_paste_new_tracks: "Paste as New Tracks",
     menu_paste_reaper_clipboard: "Paste Reaper Clipboard Data",
