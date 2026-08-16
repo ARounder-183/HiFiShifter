@@ -7,9 +7,7 @@ import { selectMergedKeybindings } from "../../../../features/keybindings/keybin
 import type { ActionId, Keybinding, KeybindingMap } from "../../../../features/keybindings/types";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
-
-const IS_MAC =
-    typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+import { IS_MAC } from "../../../../utils/platform";
 
 const CLIP_ACTIONS: ActionId[] = [
     "clip.delete",

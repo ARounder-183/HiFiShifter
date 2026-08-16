@@ -108,6 +108,8 @@ The track view is one of HiFiShifter's core features, allowing you to crop, spli
 For view navigation, drag the middle mouse button (hold the scroll wheel) to pan. Horizontal/vertical zoom or scrolling can be done by holding modifiers like `Ctrl`, `Alt`, `Shift` while scrolling the mouse wheel. These modifiers can be adjusted in the shortcut settings.
 
 Common shortcuts:
+> **macOS**: `Ctrl` below maps to `Command (⌘)` and `Alt` maps to `Option (⌥)`. Use `⌘ + click` to toggle individual selection, `⇧ + click` for range selection, `⌘ + drag` for copy-drag, and `⌘ + ⇧ + Z` for redo.
+
 
 - `Space`: Play / Pause (does not return to start)
 - `Enter`: Play / Stop (returns to start)
@@ -119,14 +121,14 @@ Common shortcuts:
 - `Ctrl + Alt + V`: Paste as New Tracks
 - `Ctrl + Shift + C`: Copy to Reaper Clipboard
 - `Ctrl + Z`: Undo
-- `Ctrl + Y`: Redo
+- `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
 - `Ctrl + R`: Deselect
 - `Delete`: Delete audio clip
 - `-` / `=`: Shift parameter curve down/up for selected clips
 - Modifier `Alt`: Hold while dragging clip start/end to stretch the clip; drag the middle of the clip to slip-edit (internal content offset)
 - Modifier `Shift`: Hold to temporarily toggle snap
-- Modifier `Ctrl`: Hold while dragging a clip to copy it
+- Modifier `Ctrl` (`⌘` on macOS): Hold while dragging a clip to copy it
 
 The small circle at the top-left of a clip is a volume adjustment knob, the `M` button can mute that clip individually, and the `F` button can open that clip's formant editing menu. The left and right edges of a clip allow adjusting fade-in/fade-out envelope lengths.
 
@@ -277,7 +279,7 @@ Common shortcuts:
 - `Ctrl + C`: Copy
 - `Ctrl + V`: Paste
 - `Ctrl + Z`: Undo
-- `Ctrl + Y`: Redo
+- `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
 - `Ctrl + R`: Deselect
 - `BackSpace`: Initialize

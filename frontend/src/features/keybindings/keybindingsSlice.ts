@@ -2,8 +2,7 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import type { ActionId, Keybinding, KeybindingMap, KeybindingOverrides } from "./types";
 import { DEFAULT_KEYBINDINGS, ACTION_META } from "./defaultKeybindings";
 import { loadKeybindingOverrides, saveKeybindingOverrides } from "./keybindingStorage";
-const IS_MAC =
-    typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+import { IS_MAC, isPrimaryModifierDown } from "../../utils/platform";
 // ─── State ───────────────────────────────────────────────────────
 
 interface KeybindingsState {
@@ -135,9 +134,9 @@ export function formatKeybinding(kb: Keybinding, noneLabel?: string): string {
     if (isNoneBinding(kb)) return noneLabel ?? "—";
     const parts: string[] = [];
     const modifierFlags = getModifierFlags(kb);
-    if (modifierFlags.ctrl) parts.push("Ctrl");
-    if (modifierFlags.alt) parts.push("Alt");
-    if (modifierFlags.shift) parts.push("Shift");
+    if (modifierFlags.ctrl) parts.push(IS_MAC ? "⌘" : "Ctrl");
+    if (modifierFlags.alt) parts.push(IS_MAC ? "⌥" : "Alt");
+    if (modifierFlags.shift) parts.push(IS_MAC ? "⇧" : "Shift");
 
     // modifierOnly 类型无主键，直接返回修饰键名称
     if (kb.modifierOnly) {
@@ -290,7 +289,7 @@ export function isModifierActive(
     const required = getModifierFlags(kb);
     if (!hasAnyModifierFlags(required)) return false;
 
-    const pressedCtrl = IS_MAC ? Boolean(event.metaKey) : Boolean(event.ctrlKey);
+    const pressedCtrl = isPrimaryModifierDown(event);
     const pressedShift = Boolean(event.shiftKey);
     const pressedAlt = Boolean(event.altKey);
 

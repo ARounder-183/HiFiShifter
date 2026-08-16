@@ -12,6 +12,7 @@
 import React from "react";
 
 import { useI18n } from "../../../i18n/I18nProvider";
+import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
@@ -162,12 +163,12 @@ export const ClipItem = React.memo(function ClipItem({
 
             // Only check physical Alt key for click-selection bypass.
             // altPressed tracks the stretch modifier and must not interfere
-            // with Ctrl/Shift selection behavior.
+            // with primary-modifier/Shift selection behavior.
             const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-            const ctrlOrMeta = e.ctrlKey || e.metaKey;
-            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+            const primaryModifierDown = isPrimaryModifierDown(e);
+            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-            const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+            const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
             const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
             const primedSelection = shouldPrimeSelection && !selected;
 
@@ -289,15 +290,15 @@ export const ClipItem = React.memo(function ClipItem({
 
                 // altPressed tracks the stretch modifier (configurable), used only
                 // for edge-handle behavior. For click-selection bypass (slip-edit),
-                // we only check the physical Alt key to avoid breaking Ctrl/Shift
+                // we only check the physical Alt key to avoid breaking primary-modifier/Shift
                 // selection when those keys are configured as stretch modifiers.
                 const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                const ctrlOrMeta = e.ctrlKey || e.metaKey;
+                const primaryModifierDown = isPrimaryModifierDown(e);
 
                 // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
-                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+                const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const primedSelection = shouldPrimeSelection && !selected;
 
@@ -309,7 +310,7 @@ export const ClipItem = React.memo(function ClipItem({
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
-                const allowSeek = !altKeyDown && !ctrlOrMeta && !e.shiftKey;
+                const allowSeek = !altKeyDown && !primaryModifierDown && !e.shiftKey;
                 const startX = e.clientX;
                 const startY = e.clientY;
                 let moved = false;

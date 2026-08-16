@@ -1,4 +1,5 @@
 import type { ActionId, ActionMeta, KeybindingMap } from "./types";
+import { IS_MAC } from "../../utils/platform";
 
 /**
  * 默认快捷键映射表
@@ -23,7 +24,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 
     // 编辑
     "edit.undo": { key: "z", ctrl: true },
-    "edit.redo": { key: "y", ctrl: true },
+    "edit.redo": IS_MAC ? { key: "z", ctrl: true, shift: true } : { key: "y", ctrl: true },
     "edit.selectAll": { key: "a", ctrl: true },
     "edit.deselect": { key: "r", ctrl: true },
     "edit.initialize": { key: "backspace" },
@@ -78,6 +79,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.clipSlipEdit": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
+    // macOS 上 ctrl 字段会自动映射为 Command（⌘），因此默认复制拖动为 ⌘+拖动；
+    // 避免占用 Option，Option 保留给拉伸/滑动编辑等交替操作。
     "modifier.clipCopyDrag": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
     "modifier.pianoRollVerticalZoom": {

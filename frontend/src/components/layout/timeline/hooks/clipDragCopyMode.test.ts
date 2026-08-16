@@ -10,7 +10,6 @@ assertEqual(
     resolveClipDragCopyMode({
         existingCopyMode: false,
         ctrlKey: true,
-        metaKey: false,
         modifierActive: false,
     }),
     true,
@@ -21,7 +20,6 @@ assertEqual(
     resolveClipDragCopyMode({
         existingCopyMode: false,
         ctrlKey: false,
-        metaKey: false,
         modifierActive: true,
     }),
     true,
@@ -32,7 +30,6 @@ assertEqual(
     resolveClipDragCopyMode({
         existingCopyMode: false,
         ctrlKey: false,
-        metaKey: false,
         modifierActive: false,
     }),
     false,

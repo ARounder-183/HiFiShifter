@@ -28,6 +28,7 @@ import {
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import type { FileEntry } from "../../services/api/fileBrowser";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { isPrimaryModifierDown } from "../../utils/platform";
 
 /** 支持的音频扩展名 */
 const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"]);
@@ -227,8 +228,8 @@ export const FileBrowserPanel: React.FC = () => {
         (entry: FileEntry, ev?: React.MouseEvent) => {
             const idx = audioEntries.findIndex((e) => e.path === entry.path);
 
-            if (ev?.ctrlKey || ev?.metaKey) {
-                // Ctrl+click: toggle selection
+            if (ev && isPrimaryModifierDown(ev)) {
+                // macOS: Command+click / Windows: Ctrl+click — toggle selection
                 setSelectedPaths((prev) => {
                     const next = new Set(prev);
                     if (next.has(entry.path)) next.delete(entry.path);

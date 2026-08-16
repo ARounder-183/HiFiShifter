@@ -410,7 +410,7 @@ export interface SessionState {
     clips: ClipInfo[];
     selectedTrackId: string | null;
     selectedClipId: string | null;
-    /** 多选 clip 的 id 列表（框选 / Ctrl+点击） */
+    /** 多选 clip 的 id 列表（框选 / 主修饰键 + 点击） */
     multiSelectedClipIds: string[];
     clipAutomation: Record<string, Record<string, AutomationPoint[]>>;
     selectedPointId: string | null;
