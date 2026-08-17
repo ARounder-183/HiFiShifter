@@ -330,11 +330,6 @@ export const zhCN = {
     ctx_unreverse_selected: "取消倒放选中项",
     clip_replace_same_source_confirm:
         "工程中还有其他音频块使用与当前音频块相同的源文件路径。是否同时替换这些同源音频块？",
-    missing_file_replace_title: "缺失文件",
-    missing_file_replace_desc: "找不到以下音频文件。是否手动指定替代文件？",
-    missing_file_replace_pick: "选择替代文件",
-
-    // 源文件变更检测（窗口重新获得焦点时触发）
     source_file_changed_title: "源文件已变更",
     source_file_changed_modified_desc: "以下音频文件已在外部被修改。是否重新加载到工程中？",
     source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",

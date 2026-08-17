@@ -344,12 +344,6 @@ export const enUS = {
     ctx_unreverse_selected: "Unreverse Selected",
     clip_replace_same_source_confirm:
         "Other clips in this project use the same source file path as the selected clip(s). Replace those same-source clips as well?",
-    missing_file_replace_title: "Missing File",
-    missing_file_replace_desc:
-        "The following audio file cannot be found. Do you want to pick a replacement file?",
-    missing_file_replace_pick: "Pick Replacement",
-
-    // Source file change detection (triggered on window focus regain)
     source_file_changed_title: "Source File Changed",
     source_file_changed_modified_desc:
         "The following audio file(s) have been modified externally. Do you want to reload them into the project?",

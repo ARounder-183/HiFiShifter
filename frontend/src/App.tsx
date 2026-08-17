@@ -49,9 +49,9 @@ import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep"
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
+import type { SourceFileChange } from "./services/api/timeline";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
-import { MISSING_FILE_CONFIRM_EVENT } from "./features/session/thunks/missingFilePrompt";
 import {
     OPEN_PROJECT_PATH_EVENT,
     type ExternalFileActionDetail,
@@ -99,6 +99,17 @@ const errorCodeKey: Record<string, string> = {
     import_read_failed: "vs_import_read_failed",
     import_parse_failed: "vs_import_parse_failed",
 };
+
+// 这些状态表示工程内容刚被替换/导入，需立即执行一次源文件变更检测，
+// 不依赖窗口 focus（例如启动时通过命令行打开工程时窗口可能一直保持聚焦）。
+const SOURCE_FILE_CHECK_TRIGGER_STATUSES = new Set([
+    "Project opened",
+    "Project imported",
+    "VocalShifter project imported",
+    "Reaper project imported",
+    "Pasted VocalShifter clipboard data",
+    "Pasted Reaper clipboard data",
+]);
 
 const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
     saveOnSaveEnabled: true,
@@ -150,6 +161,7 @@ function AppInner() {
     useEffect(() => {
         ignoredSourcePathsRef.current = new Set();
     }, [projectPath]);
+
     const vocalShifterSkippedFilesDialog = useAppSelector(
         (state) => state.session.vocalShifterSkippedFilesDialog,
     );
@@ -177,18 +189,20 @@ function AppInner() {
         open: boolean;
         path: string | null;
     }>({ open: false, path: null });
-    const [missingFileDialog, setMissingFileDialog] = useState<{
-        open: boolean;
-        missingPath: string;
-    }>({ open: false, missingPath: "" });
-    // 源文件变更检测对话框（窗口重新获得焦点时触发）
+    // 检测/处理互斥：避免窗口 focus、工程打开、文件选择对话框等事件叠加触发重复检测。
+    const sourceFileCheckBusyRef = useRef(false);
+    const sourceFileChangeHandlingRef = useRef(false);
+    const sourceFileDialogOpenRef = useRef(false);
+    // 源文件变更检测对话框（窗口重新获得焦点或工程内容变更后触发）
     const [sourceFileChangedDialog, setSourceFileChangedDialog] = useState<{
         open: boolean;
-        changes: Array<{ clip_id: string; clip_name: string; source_path: string; change: string }>;
+        changes: SourceFileChange[];
     }>({ open: false, changes: [] });
+    useEffect(() => {
+        sourceFileDialogOpenRef.current = sourceFileChangedDialog.open;
+    }, [sourceFileChangedDialog.open]);
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
-    const missingFileResolverRef = useRef<((shouldPick: boolean) => void) | null>(null);
     const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
     // 当前会话中已忽略的源文件变更路径集合（用户点击"忽略"后不再重复弹窗）
     const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
@@ -1177,31 +1191,6 @@ function AppInner() {
     }, [runtimeIsPlaying, runtimeHasSynthesized, toolMode, drawToolMode]);
 
     useEffect(() => {
-        const handler = (event: Event) => {
-            const detail = (
-                event as CustomEvent<{
-                    missingPath?: string;
-                    resolve?: (shouldPick: boolean) => void;
-                }>
-            ).detail;
-            if (!detail || typeof detail.resolve !== "function") return;
-            missingFileResolverRef.current = detail.resolve;
-            setMissingFileDialog({
-                open: true,
-                missingPath: typeof detail.missingPath === "string" ? detail.missingPath : "",
-            });
-        };
-        window.addEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
-        return () => {
-            window.removeEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
-            if (missingFileResolverRef.current) {
-                missingFileResolverRef.current(false);
-                missingFileResolverRef.current = null;
-            }
-        };
-    }, []);
-
-    useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
 
@@ -1233,44 +1222,63 @@ function AppInner() {
         };
     }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
 
-    // 窗口重新获得焦点时，检测已导入的音频源文件是否被外部修改或删除
-    useEffect(() => {
-        let checking = false;
-
-        async function onFocus() {
-            if (checking) return;
-            checking = true;
-            try {
-                const result = await webApi.checkSourceFilesChanged();
-                const allChanges =
-                    (
-                        result as {
-                            changed?: Array<{
-                                clip_id: string;
-                                clip_name: string;
-                                source_path: string;
-                                change: string;
-                            }>;
-                        }
-                    )?.changed ?? [];
-                // 过滤掉用户已在本会话中"忽略"的路径
-                const ignored = ignoredSourcePathsRef.current;
-                const changes = allChanges.filter((c) => !ignored.has(c.source_path));
-                if (changes.length > 0) {
-                    setSourceFileChangedDialog({ open: true, changes });
-                }
-            } catch {
-                // 静默失败；此检测为可选增强功能
-            } finally {
-                checking = false;
-            }
+    // 检测已导入的音频源文件是否被外部修改或删除。
+    // 触发时机：窗口重新获得焦点，以及工程/导入内容刚替换完成时。
+    const checkSourceFileChanges = useCallback(async () => {
+        if (
+            sourceFileCheckBusyRef.current ||
+            sourceFileChangeHandlingRef.current ||
+            sourceFileDialogOpenRef.current
+        ) {
+            return;
         }
+        sourceFileCheckBusyRef.current = true;
+        try {
+            const result = (await webApi.checkSourceFilesChanged()) as
+                | { changed?: SourceFileChange[] }
+                | undefined;
+            const rawChanges = result?.changed ?? [];
+            const ignored = ignoredSourcePathsRef.current;
+            const seen = new Set<string>();
+            const changes = rawChanges
+                .filter((c) => {
+                    if (!c || typeof c.source_path !== "string" || !c.source_path.trim()) {
+                        return false;
+                    }
+                    if (c.change !== "deleted" && c.change !== "modified") return false;
+                    // 后端按 source_path 去重，这里再做一次防御性去重。
+                    const key = `${c.source_path}::${c.change}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                })
+                .filter((c) => !ignored.has(c.source_path));
+            if (changes.length > 0) {
+                sourceFileDialogOpenRef.current = true;
+                setSourceFileChangedDialog({ open: true, changes });
+            }
+        } catch {
+            // 静默失败；此检测为可选增强功能
+        } finally {
+            sourceFileCheckBusyRef.current = false;
+        }
+    }, []);
 
+    useEffect(() => {
+        function onFocus() {
+            void checkSourceFileChanges();
+        }
         window.addEventListener("focus", onFocus);
         return () => {
             window.removeEventListener("focus", onFocus);
         };
-    }, []);
+    }, [checkSourceFileChanges]);
+
+    useEffect(() => {
+        if (SOURCE_FILE_CHECK_TRIGGER_STATUSES.has(status)) {
+            void checkSourceFileChanges();
+        }
+    }, [status, checkSourceFileChanges]);
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
@@ -1771,63 +1779,7 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
-            <Dialog.Root
-                open={missingFileDialog.open}
-                onOpenChange={(open) => {
-                    if (!open) {
-                        setMissingFileDialog((prev) => ({
-                            ...prev,
-                            open: false,
-                        }));
-                        if (missingFileResolverRef.current) {
-                            missingFileResolverRef.current(false);
-                            missingFileResolverRef.current = null;
-                        }
-                    }
-                }}
-            >
-                <Dialog.Content maxWidth="560px">
-                    <Dialog.Title>{t("missing_file_replace_title")}</Dialog.Title>
-                    <Dialog.Description>{t("missing_file_replace_desc")}</Dialog.Description>
-                    <div className="mt-2 rounded border border-qt-border bg-qt-base p-2 text-xs break-all">
-                        {missingFileDialog.missingPath}
-                    </div>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={() => {
-                                setMissingFileDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-                                if (missingFileResolverRef.current) {
-                                    missingFileResolverRef.current(false);
-                                    missingFileResolverRef.current = null;
-                                }
-                            }}
-                        >
-                            {t("cancel")}
-                        </Button>
-                        <Button
-                            onClick={() => {
-                                setMissingFileDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-                                if (missingFileResolverRef.current) {
-                                    missingFileResolverRef.current(true);
-                                    missingFileResolverRef.current = null;
-                                }
-                            }}
-                        >
-                            {t("missing_file_replace_pick")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-
-            {/* Source file changed dialog — triggered on window focus regain */}
+            {/* Source file changed dialog — triggered on focus or project content change */}
             <Dialog.Root
                 open={sourceFileChangedDialog.open}
                 onOpenChange={(open) => {
@@ -1889,42 +1841,49 @@ function AppInner() {
                                     open: false,
                                 }));
 
-                                // 重新加载被修改的文件：
-                                // 按 source_path 去重，使用 replaceSameSource: true
-                                // 确保工程中所有引用同一源文件的 clip 全部统一更新，
-                                // 避免其他同源 clip 因 mtime 未更新而在下次切屏时错误弹窗。
-                                const modifiedPaths = new Set<string>();
-                                for (const c of changes) {
-                                    if (c.change === "modified") {
-                                        modifiedPaths.add(c.source_path);
+                                // 处理期间阻止窗口 focus 检测重复弹窗。
+                                sourceFileChangeHandlingRef.current = true;
+                                try {
+                                    // 重新加载被修改的文件：按 source_path 去重，
+                                    // replaceSameSource: true 会让后端扩展至所有同源 clip。
+                                    const modifiedItems = new Map<string, SourceFileChange>();
+                                    for (const c of changes) {
+                                        if (
+                                            c.change === "modified" &&
+                                            c.source_path &&
+                                            !modifiedItems.has(c.source_path)
+                                        ) {
+                                            modifiedItems.set(c.source_path, c);
+                                        }
                                     }
-                                }
-                                for (const path of modifiedPaths) {
-                                    try {
-                                        // 找出该路径对应的任意一个 clip_id 即可；
-                                        // replaceSameSource: true 会让后端自动扩展至所有同源 clip
-                                        const anyClipId =
-                                            changes.find(
-                                                (c) =>
-                                                    c.change === "modified" &&
-                                                    c.source_path === path,
-                                            )?.clip_id ?? "";
-                                        await dispatch(
-                                            replaceClipSourceRemote({
-                                                clipIds: anyClipId ? [anyClipId] : [],
-                                                newSourcePath: path,
-                                                replaceSameSource: true,
-                                            }),
-                                        ).unwrap();
-                                    } catch {
-                                        // continue with remaining files
+                                    for (const item of modifiedItems.values()) {
+                                        try {
+                                            await dispatch(
+                                                replaceClipSourceRemote({
+                                                    clipIds: item.clip_id ? [item.clip_id] : [],
+                                                    newSourcePath: item.source_path,
+                                                    replaceSameSource: true,
+                                                }),
+                                            ).unwrap();
+                                        } catch {
+                                            // continue with remaining files
+                                        }
                                     }
-                                }
 
-                                // 提示用户为已删除的文件选择替代文件
-                                const deletedItems = changes.filter((c) => c.change === "deleted");
-                                if (deletedItems.length > 0) {
-                                    for (const item of deletedItems) {
+                                    // 已删除文件同样按 source_path 去重；后端每个路径只返回
+                                    // 一条 clip 记录，因此也必须使用 replaceSameSource: true，
+                                    // 否则引用同一源文件的其他 clip 不会被一起替换。
+                                    const deletedItems = new Map<string, SourceFileChange>();
+                                    for (const c of changes) {
+                                        if (
+                                            c.change === "deleted" &&
+                                            c.source_path &&
+                                            !deletedItems.has(c.source_path)
+                                        ) {
+                                            deletedItems.set(c.source_path, c);
+                                        }
+                                    }
+                                    for (const item of deletedItems.values()) {
                                         try {
                                             const picked = await coreApi.openAudioDialog();
                                             if (
@@ -1941,15 +1900,19 @@ function AppInner() {
                                             const newPath = (picked as { path: string }).path;
                                             await dispatch(
                                                 replaceClipSourceRemote({
-                                                    clipIds: [item.clip_id],
+                                                    clipIds: item.clip_id
+                                                        ? [item.clip_id]
+                                                        : [],
                                                     newSourcePath: newPath,
-                                                    replaceSameSource: false,
+                                                    replaceSameSource: true,
                                                 }),
                                             ).unwrap();
                                         } catch {
                                             // continue with remaining files
                                         }
                                     }
+                                } finally {
+                                    sourceFileChangeHandlingRef.current = false;
                                 }
                             }}
                         >

@@ -345,12 +345,6 @@ export const jaJP = {
     ctx_unreverse_selected: "選択項目の逆再生を解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
-    missing_file_replace_title: "ファイルが見つかりません",
-    missing_file_replace_desc:
-        "以下の音声ファイルが見つかりません。代替ファイルを手動で指定しますか？",
-    missing_file_replace_pick: "代替ファイルを選択",
-
-    // ソースファイル変更検出（ウィンドウがフォーカスを取得した時にトリガー）
     source_file_changed_title: "ソースファイルが変更されました",
     source_file_changed_modified_desc:
         "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",

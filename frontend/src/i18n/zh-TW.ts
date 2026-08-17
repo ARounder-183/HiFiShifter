@@ -331,11 +331,6 @@ export const zhTW = {
     ctx_unreverse_selected: "取消倒放選取項目",
     clip_replace_same_source_confirm:
         "專案中還有其他音訊片段使用與目前音訊片段相同的來源檔案路徑。是否同時取代這些同來源音訊片段？",
-    missing_file_replace_title: "檔案遺失",
-    missing_file_replace_desc: "找不到以下音訊檔案。是否手動指定替代檔案？",
-    missing_file_replace_pick: "選擇替代檔案",
-
-    // 源文件變更檢測（窗口重新獲得焦點時觸發）
     source_file_changed_title: "源文件已變更",
     source_file_changed_modified_desc: "以下音訊檔案已在外部被修改。是否重新載入到工程中？",
     source_file_changed_deleted_desc: "以下音訊檔案已被移動或刪除。是否選擇替代檔案？",
