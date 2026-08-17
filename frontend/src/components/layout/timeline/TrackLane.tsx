@@ -5,6 +5,7 @@ import React from "react";
 
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
+import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
@@ -124,10 +125,12 @@ type TrackLaneProps = {
 
     clearContextMenu: () => void;
 
-    /** 当前正在重命名的 clipId（来自右键菜单触发） */
+    /** 当前正在重命名的 clipId（来自右键菜单或双击名称） */
     renamingClipId?: string | null;
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
@@ -173,8 +176,10 @@ export const TrackLane = React.memo(
             recordLastClickPosition,
             clearContextMenu,
             renamingClipId,
+            onRenameStart,
             onRenameCommit,
             onRenameDone,
+            onRenameClickCandidate,
             onGainCommit,
             onFormantMorphCommit,
             activeGroupIds,
@@ -601,8 +606,10 @@ export const TrackLane = React.memo(
                             recordLastClickPosition={recordLastClickPosition}
                             clearContextMenu={clearContextMenu}
                             triggerRename={renamingClipId === clip.id}
+                            onRenameStart={onRenameStart}
                             onRenameCommit={onRenameCommit}
                             onRenameDone={onRenameDone}
+                            onRenameClickCandidate={onRenameClickCandidate}
                             onGainCommit={onGainCommit}
                             onFormantMorphCommit={onFormantMorphCommit}
                             activeGroupIds={activeGroupIds}
@@ -681,8 +688,10 @@ export const TrackLane = React.memo(
             prev.recordLastClickPosition === next.recordLastClickPosition &&
             prev.clearContextMenu === next.clearContextMenu &&
             prev.renamingClipId === next.renamingClipId &&
+            prev.onRenameStart === next.onRenameStart &&
             prev.onRenameCommit === next.onRenameCommit &&
             prev.onRenameDone === next.onRenameDone &&
+            prev.onRenameClickCandidate === next.onRenameClickCandidate &&
             prev.onGainCommit === next.onGainCommit &&
             prev.onFormantMorphCommit === next.onFormantMorphCommit &&
             prev.ghostDrag === next.ghostDrag &&

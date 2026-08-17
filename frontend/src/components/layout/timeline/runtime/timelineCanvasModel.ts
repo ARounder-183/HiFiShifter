@@ -37,6 +37,7 @@ export type TimelineCanvasClipModel = {
     groupId?: string;
     isMidiClip: boolean;
     trackColor?: string;
+    isRenaming: boolean;
 };
 
 export function buildSparseClipRenderModel(args: {
@@ -122,6 +123,7 @@ export function buildSparseClipRenderModel(args: {
             groupId: clip.groupId,
             isMidiClip: clip.midiNoteCount != null,
             trackColor: track.color,
+            isRenaming: clip.id === args.renamingClipId,
         })),
     );
 

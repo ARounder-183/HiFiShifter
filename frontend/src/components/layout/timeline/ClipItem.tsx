@@ -15,7 +15,11 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
-import { ClipHeader } from "./clip/ClipHeader";
+import {
+    ClipHeader,
+    type ClipRenameClickCandidate,
+    type ClipRenameController,
+} from "./clip/ClipHeader";
 
 const LEADING_OVERLAP_ALPHA = 0.5;
 
@@ -45,8 +49,10 @@ export const ClipItem = React.memo(function ClipItem({
     recordLastClickPosition,
     clearContextMenu,
     triggerRename,
+    onRenameStart,
     onRenameCommit,
     onRenameDone,
+    onRenameClickCandidate,
     onGainCommit,
     onFormantMorphCommit,
     activeGroupIds,
@@ -111,10 +117,12 @@ export const ClipItem = React.memo(function ClipItem({
 
     clearContextMenu: () => void;
 
-    /** 外部触发重命名（来自右键菜单�?*/
+    /** 外部触发重命名（来自右键菜单） */
     triggerRename?: boolean;
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
@@ -123,6 +131,7 @@ export const ClipItem = React.memo(function ClipItem({
     hovered?: boolean;
 }) {
     const { t } = useI18n();
+    const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
     // 若这里 Math.round，Clip 会相对网格最多向右偏 0.5px；在常用缩放
@@ -273,6 +282,20 @@ export const ClipItem = React.memo(function ClipItem({
                 top: 0,
                 height: rowHeight - CLIP_BODY_PADDING_Y,
                 boxShadow: interactionHintBoxShadow,
+                // 名称编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
+                // 否则 Canvas 中的原始名称会把输入框盖住。
+                zIndex: triggerRename ? 60 : undefined,
+            }}
+            onPointerDownCapture={(e) => {
+                // 正在编辑名称时，点击 Clip 内输入框以外的任意位置都先提交编辑。
+                // 输入框自身的 pointerdown 会在命中 input 时跳过。
+                const target = e.target as HTMLElement | null;
+                const isInputTarget =
+                    target?.closest?.("input,textarea,select,[contenteditable='true']") != null;
+                const controller = renameControllerRef.current;
+                if (!isInputTarget && controller?.isEditing()) {
+                    controller.commit();
+                }
             }}
             onContextMenu={(e) => {
                 e.preventDefault();
@@ -390,8 +413,11 @@ export const ClipItem = React.memo(function ClipItem({
                     startEditDrag={startEditDrag}
                     toggleClipMuted={toggleClipMuted}
                     triggerRename={triggerRename}
+                    onRenameStart={onRenameStart}
                     onRenameCommit={onRenameCommit}
                     onRenameDone={onRenameDone}
+                    onRenameClickCandidate={onRenameClickCandidate}
+                    renameControllerRef={renameControllerRef}
                     onGainCommit={onGainCommit}
                     onFormantMorphCommit={onFormantMorphCommit}
                     onToggleGroupDisabled={onToggleGroupDisabled}
