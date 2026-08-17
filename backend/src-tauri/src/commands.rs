@@ -362,8 +362,15 @@ pub fn import_audio_item(
     audio_path: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
+    media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_item(state, audio_path, track_id, start_sec)
+    timeline::import_audio_item(
+        state,
+        audio_path,
+        track_id,
+        start_sec,
+        media_audio_stream_index,
+    )
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_audio_bytes(
@@ -1011,6 +1018,13 @@ pub fn list_directory(dir_path: String) -> Result<Vec<file_browser::FileEntry>, 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileInfo, String> {
     file_browser::get_audio_file_info(file_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_media_audio_streams(
+    file_path: String,
+) -> Result<Vec<crate::media::MediaAudioStream>, String> {
+    file_browser::list_media_audio_streams(file_path)
 }
 
 #[tauri::command(rename_all = "camelCase")]

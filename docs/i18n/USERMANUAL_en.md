@@ -39,9 +39,11 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 ## 2. Menu
 
-The `File` menu allows you to open and save HiFiShifter project files, as well as import audio files, import Reaper projects (`.rpp`), import VocalShifter projects (`.vshp` or `.vsp`), import MIDI files, and export audio.
+The `File` menu allows you to open and save HiFiShifter project files, as well as import media files (audio or video), import Reaper projects (`.rpp`), import VocalShifter projects (`.vshp` or `.vsp`), import MIDI files, and export audio.
 
-HiFiShifter project files have the extensions `.hshp` or `.hsp`. Additionally, `Save As` supports saving the project as a plain text `json` file, or packaging the current project together with all used media files into an archive zip `.zip`. Currently, HiFiShifter only supports importing regular audio files, not video files.
+HiFiShifter project files have the extensions `.hshp` or `.hsp`. Additionally, `Save As` supports saving the project as a plain text `json` file, or packaging the current project together with all used media files into an archive zip `.zip`.
+
+`File → Import Media File` accepts common audio formats (`wav`, `mp3`, `flac`, `ogg`, `m4a`, `aac`, etc.) and common video containers (`mp4`, `mov`, `mkv`, `webm`, `avi`, `wmv`, `ts`, `mpg`, etc.). Video files contribute their audio stream only; the picture track is never processed. Video containers and additional audio codecs are decoded through pure-Rust Symphonia with all features plus the FDK AAC / libopus adapters. The container's default audio stream is selected by default; if a video contains multiple audio streams, the File-menu import flow opens an audio-stream picker and extracts the selected stream to `<name>.hifi_audio_<n>.wav` next to the source video before importing it as a regular audio clip. The extracted WAV cache is reused by waveform, playback, pitch-analysis and rendering paths. Source paths referenced by REAPER project files / REAPER clipboard data and VocalShifter project files / VocalShifter clipboard data accept the same video containers and use their audio tracks; unsupported video encodings are skipped and counted in `skipped_files`.
 
 The automatic backup feature allows you to configure backups for your project files, with two modes: `Backup on save` and `Timed backups`.
 
@@ -227,9 +229,9 @@ HiFiShifter supports a project-level Tempo Map that lets you define different BP
 
 ## 4. File Browser
 
-The file browser allows you to open a specific folder, search and sort audio files within it, and drag them into the HiFiShifter track view. Search supports regular expressions. Clicking an audio file automatically plays a preview. You can hold `Ctrl` and `Shift` for multi-selection. Left-dragging files adds one or more audio files across time into the timeline. Right-dragging files brings up a menu with `Add Across Time` / `Add Across Tracks`. `Add Across Tracks` allows you to add multiple audio clips vertically across multiple tracks.
+The file browser allows you to open a specific folder, search and sort audio and video media files within it, and drag them into the HiFiShifter track view. Video files use a purple icon; audio files use a blue icon. Search supports regular expressions. Clicking a media file automatically plays a preview (videos preview their audio track). You can hold `Ctrl` and `Shift` for multi-selection. Left-dragging files adds one or more media files across time into the timeline. Right-dragging files brings up a menu with `Add Across Time` / `Add Across Tracks`. `Add Across Tracks` allows you to add multiple media audio clips vertically across multiple tracks.
 
-When the track view has focus, press `Ctrl + F` to open the Quick Search window. This is a simplified version of the file browser, allowing you to quickly search and preview audio files within a folder and add them to the timeline.
+When the track view has focus, press `Ctrl + F` to open the Quick Search window. This is a simplified version of the file browser, allowing you to quickly search and preview audio/video media files within a folder (videos preview their audio track) and add them to the timeline.
 
 ## 5. Parameter Editor
 

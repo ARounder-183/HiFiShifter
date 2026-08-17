@@ -66,7 +66,10 @@ export const zhCN = {
     menu_exit: "退出",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "导入音频...",
+    media_stream_select_title: "选择音轨",
+    media_stream_select_hint: "该视频包含多个音轨，请选择要抽取并导入的音轨。",
+    media_stream_track: "音轨",
+    menu_import_media: "导入媒体文件...",
     menu_import_reaper: "导入 Reaper 工程...",
     menu_import_vocalshifter: "导入 VocalShifter 工程...",
     menu_import_hifishifter: "导入 HiFiShifter 工程...",
@@ -263,8 +266,8 @@ export const zhCN = {
     status_target_original: "原音",
     status_target_synthesized: "合成",
     status_target_none: "空闲",
-    dropped_audio_imported: "已导入拖拽音频",
-    import_audio_failed: "导入音频失败",
+    dropped_audio_imported: "已导入拖拽媒体文件",
+    import_audio_failed: "导入媒体文件失败",
 
     menu_about: "关于 HiFiShifter",
     glue: "胶合",
@@ -727,7 +730,7 @@ export const zhCN = {
     fb_sort_size: "大小",
     fb_sort_label: "排序",
     fb_regex_error: "无效的正则表达式",
-    fb_audio_only: "仅显示音频文件",
+    fb_audio_only: "仅显示媒体文件",
 
     // Edit menu new items
     menu_deselect: "取消选择",

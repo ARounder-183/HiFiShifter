@@ -4949,7 +4949,16 @@ impl TimelineState {
         let mut source_sample_rate: Option<u32> = None;
         let mut waveform_preview: Option<Vec<f32>> = None;
 
-        match try_read_wav_info(Path::new(audio_path), 4096) {
+        // 视频文件导入只做 O(1) header 探测，不在导入线程里全量解码；
+        // 波形由前端按需异步请求峰值缓存生成。
+        let is_video_source = crate::media::is_video_extension(Path::new(audio_path));
+        let import_info = if is_video_source {
+            crate::audio_utils::try_read_audio_header_only(Path::new(audio_path))
+        } else {
+            crate::audio_utils::try_read_wav_info(Path::new(audio_path), 4096)
+        };
+
+        match import_info {
             Some(info) => {
                 if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                     let mut max_amp = 0.0f32;

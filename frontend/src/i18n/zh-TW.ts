@@ -67,7 +67,10 @@ export const zhTW = {
     menu_exit: "結束",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "匯入音訊...",
+    media_stream_select_title: "選擇音軌",
+    media_stream_select_hint: "該影片包含多個音軌，請選擇要抽取並匯入的音軌。",
+    media_stream_track: "音軌",
+    menu_import_media: "匯入媒體檔案...",
     menu_import_reaper: "匯入 Reaper 專案...",
     menu_import_vocalshifter: "匯入 VocalShifter 專案...",
     menu_import_hifishifter: "匯入 HiFiShifter 專案...",
@@ -264,8 +267,8 @@ export const zhTW = {
     status_target_original: "原音",
     status_target_synthesized: "合成",
     status_target_none: "閒置",
-    dropped_audio_imported: "已匯入拖放音訊",
-    import_audio_failed: "匯入音訊失敗",
+    dropped_audio_imported: "已匯入拖放媒體檔案",
+    import_audio_failed: "匯入媒體檔案失敗",
 
     menu_about: "關於 HiFiShifter",
     glue: "膠合",
@@ -728,7 +731,7 @@ export const zhTW = {
     fb_sort_size: "大小",
     fb_sort_label: "排序",
     fb_regex_error: "無效的正規表示式",
-    fb_audio_only: "僅顯示音訊檔案",
+    fb_audio_only: "僅顯示媒體檔案",
 
     // 編輯選單新項目
     menu_deselect: "取消選取",

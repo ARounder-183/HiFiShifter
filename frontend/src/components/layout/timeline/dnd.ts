@@ -77,10 +77,26 @@ export function isVocalShifterProjectFilePath(path: string | null | undefined): 
     return /\.(vshp|vsp)$/i.test(normalized);
 }
 
+const AUDIO_FILE_RE =
+    /\.(wav|flac|mp3|ogg|oga|opus|aac|m4a|aif|aiff|wma|ac3|eac3|ape|wv|mp2|mpa|dts|amr)$/i;
+const VIDEO_FILE_RE =
+    /\.(mp4|m4v|mov|mkv|webm|avi|flv|wmv|ts|mts|m2ts|vob|mpg|mpeg|3gp|3g2|ogv|rm|rmvb)$/i;
+
+export function isVideoFilePath(path: string | null | undefined): boolean {
+    const normalized = String(path ?? "").trim();
+    if (!normalized) return false;
+    return VIDEO_FILE_RE.test(normalized);
+}
+
+/** @deprecated 使用 isMediaFilePath（音频 + 视频容器） */
 export function isAudioFilePath(path: string | null | undefined): boolean {
     const normalized = String(path ?? "").trim();
     if (!normalized) return false;
-    return /\.(wav|flac|mp3|ogg|m4a|aac|aif|aiff|wma|opus)$/i.test(normalized);
+    return AUDIO_FILE_RE.test(normalized) || VIDEO_FILE_RE.test(normalized);
+}
+
+export function isMediaFilePath(path: string | null | undefined): boolean {
+    return isAudioFilePath(path);
 }
 
 export function isMidiFilePath(path: string | null | undefined): boolean {

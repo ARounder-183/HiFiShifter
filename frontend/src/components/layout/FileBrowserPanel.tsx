@@ -29,12 +29,21 @@ import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import type { FileEntry } from "../../services/api/fileBrowser";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 
-/** 支持的音频扩展名 */
-const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"]);
+/** 支持的音频与视频媒体扩展名（视频按音轨导入） */
+const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr", "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb"]);
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
+}
+
+const VIDEO_EXTENSIONS = new Set([
+    "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob",
+    "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",
+]);
+
+function isVideoFile(entry: FileEntry): boolean {
+    return isAudioFile(entry) && !!entry.extension && VIDEO_EXTENSIONS.has(entry.extension);
 }
 
 /** 格式化文件大小 */
@@ -53,6 +62,16 @@ function FolderIcon({ className }: { className?: string }) {
                 d="M1 3.5C1 3.22386 1.22386 3 1.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H13.5C13.7761 4.5 14 4.72386 14 5V12.5C14 12.7761 13.7761 13 13.5 13H1.5C1.22386 13 1 12.7761 1 12.5V3.5Z"
                 fill="currentColor"
             />
+        </svg>
+    );
+}
+
+/** 视频媒体图标 SVG */
+function VideoIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <rect x="1.5" y="2.5" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+            <path d="M6 5.5V9.5L9.5 7.5L6 5.5Z" fill="currentColor" />
         </svg>
     );
 }
@@ -762,6 +781,8 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                     ) : isAudio ? (
                         isPlaying ? (
                             <StopIcon width="12" height="12" className="text-qt-highlight" />
+                        ) : isVideoFile(entry) ? (
+                            <VideoIcon className="text-purple-400" />
                         ) : (
                             <AudioIcon className="text-blue-400" />
                         )

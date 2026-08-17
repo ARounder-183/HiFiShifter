@@ -1,6 +1,12 @@
+const MEDIA_DIALOG_EXTENSIONS: &[&str] = &[
+    "wav", "flac", "mp3", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3",
+    "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr", "mp4", "m4v", "mov", "mkv", "webm", "avi",
+    "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",
+];
+
 pub(super) fn open_audio_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
-        .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "m4a"])
+        .add_filter("Media Files", MEDIA_DIALOG_EXTENSIONS)
         .pick_file();
 
     match picked {
@@ -13,7 +19,7 @@ pub(super) fn open_audio_dialog() -> serde_json::Value {
 
 pub(super) fn open_audio_dialog_multi() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
-        .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "m4a"])
+        .add_filter("Media Files", MEDIA_DIALOG_EXTENSIONS)
         .pick_files();
 
     match picked {

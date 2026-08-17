@@ -41,13 +41,6 @@ pub const VERSION: u16 = 2;
 /// 最大 mipmap 级别数
 pub const MAX_MIPMAP_LEVELS: usize = 3;
 
-/// 波形峰值计算允许跳过的最大连续坏帧数。
-///
-/// 某些 MP3 编码器会在音频起始处写入若干非标准帧（例如 ID3 后的填充/静音帧），
-/// Symphonia 对这类帧会返回 `invalid main_data offset`，但后续帧可正常解码。
-/// 为波形显示这种非精确场景，跳过少量连续坏帧远好于整段波形完全不可用。
-const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 64;
-
 /// 默认 mipmap 除数因子 (针对 44.1kHz 优化)
 /// 三级 mipmap 缓存方案：
 /// - L0 (div=16):   精细级，近距离对轨，spp ≤ 512
@@ -782,8 +775,8 @@ pub fn compute_mipmap_peaks_with_progress<F: FnMut(f32)>(
         }
     }
 
-    // 回退到 symphonia
-    compute_mipmap_peaks_symphonia(path, source_file_size, source_modified_ns, &mut progress_cb)
+    // 其他格式（含视频容器中的音轨）统一走 Symphonia 解码峰值计算。
+    compute_mipmap_peaks_media(path, source_file_size, source_modified_ns, &mut progress_cb)
 }
 
 /// 使用 hound 计算 WAV 文件的多级峰值
@@ -933,147 +926,72 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     Ok(file)
 }
 
-/// 使用 symphonia 计算其他格式文件的多级峰值
-fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
+/// 使用 Symphonia 计算非 WAV 媒体（音频与视频容器）的多级峰值。
+fn compute_mipmap_peaks_media<F: FnMut(f32)>(
     path: &Path,
     source_file_size: u64,
     source_modified_ns: u64,
     progress_cb: &mut Option<F>,
 ) -> Result<HfsPeakFile, String> {
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
+    let probe = crate::media::probe_media(path, 0, None)
+        .ok_or_else(|| "symphonia media probe failed".to_string())?;
+    let sample_rate = probe.sample_rate.max(1);
+    let channels = probe.channels.max(1);
+    let total_frames = probe.total_frames;
 
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
-
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(1);
-
-    // 估算总帧数（可能不精确）
-    let total_frames = track.codec_params.n_frames.unwrap_or(0);
-
-    // 初始化输出缓冲区
     let division_factors = calculate_division_factors(sample_rate);
     let mut output_buffers: Vec<Vec<(f32, f32)>> =
         division_factors.iter().map(|_| Vec::new()).collect();
-
-    // 创建计算器
     let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
 
-    // 输出回调
     let mut output_callback = |level: usize, min: f32, max: f32| {
         if level < output_buffers.len() {
             output_buffers[level].push((min, max));
         }
     };
 
-    // 进度跟踪
     let mut frames_processed: u64 = 0;
     let progress_interval = if total_frames > 0 {
         (total_frames / 20).max(1)
     } else {
         44100
-    }; // symphonia 可能没有精确 total_frames
+    };
 
-    // 解码循环
-    let track_id = track.id;
-    let mut consecutive_decode_errors: u32 = 0;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(e) => {
-                consecutive_decode_errors += 1;
-                if consecutive_decode_errors > MAX_CONSECUTIVE_DECODE_ERRORS {
-                    return Err(e.to_string());
+    crate::media::visit_media_audio_frames(
+        path,
+        Some(probe.audio_stream_index),
+        |frame, _rate, ch| {
+            let ch = ch.max(1) as usize;
+            let frames = frame.len() / ch;
+            for f in 0..frames {
+                let base = f * ch;
+                let mut ch_min = f32::INFINITY;
+                let mut ch_max = f32::NEG_INFINITY;
+                for c in 0..ch {
+                    let v = frame.get(base + c).copied().unwrap_or(0.0);
+                    ch_min = ch_min.min(v);
+                    ch_max = ch_max.max(v);
                 }
-                // 跳过起始处的坏帧；一旦后续帧成功解码，计数器会清零。
-                continue;
-            }
-        };
-        consecutive_decode_errors = 0;
-
-        // 使用 SampleBuffer 转换为 f32 interleaved
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
-        sbuf.copy_interleaved_ref(decoded);
-        let samples = sbuf.samples();
-
-        // 处理帧
-        let frames = samples.len() / channels as usize;
-        for f in 0..frames {
-            let base = f * channels as usize;
-            let mut ch_min = f32::INFINITY;
-            let mut ch_max = f32::NEG_INFINITY;
-            for ch in 0..channels as usize {
-                let v = samples.get(base + ch).copied().unwrap_or(0.0);
-                if v < ch_min {
-                    ch_min = v;
-                }
-                if v > ch_max {
-                    ch_max = v;
-                }
-            }
-            calculator.process_frame(ch_min, ch_max, &mut output_callback);
-            frames_processed += 1;
-            if frames_processed % progress_interval == 0 {
-                if let Some(cb) = progress_cb.as_mut() {
-                    if total_frames > 0 {
-                        cb(frames_processed as f32 / total_frames as f32);
-                    } else {
-                        // total_frames 未知时，基于文件大小估算
-                        let estimated_total = source_file_size / ((channels as u64) * 4).max(1);
-                        cb((frames_processed as f32 / estimated_total as f32).min(0.99));
+                calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                frames_processed += 1;
+                if frames_processed % progress_interval == 0 {
+                    if let Some(cb) = progress_cb.as_mut() {
+                        if total_frames > 0 {
+                            cb(frames_processed as f32 / total_frames as f32);
+                        } else {
+                            let estimated_total = source_file_size / ((channels as u64) * 4).max(1);
+                            cb((frames_processed as f32 / estimated_total as f32).min(0.99));
+                        }
                     }
                 }
             }
-        }
-    }
+            Ok(())
+        },
+    )
+    .map_err(|e| e)?;
 
-    // 刷新剩余数据
     calculator.flush(&mut output_callback);
 
-    // 构建 HfsPeakFile
     let mut file = HfsPeakFile::new(
         channels,
         sample_rate,

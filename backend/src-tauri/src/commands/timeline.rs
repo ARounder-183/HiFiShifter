@@ -187,13 +187,58 @@ pub(super) fn import_audio_item(
     audio_path: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
+    media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         eprintln!(
-            "import_audio_item(audio_path={}, track_id={:?}, start_sec={:?})",
-            audio_path, track_id, start_sec
+            "import_audio_item(audio_path={}, track_id={:?}, start_sec={:?}, stream={:?})",
+            audio_path, track_id, start_sec, media_audio_stream_index
         );
     }
+
+    // 多音轨视频：用户显式选择某条音轨时，先把该音轨抽取为源文件旁边的
+    // WAV 缓存，再走普通导入流程。未指定时保留原始媒体路径，由 Symphonia
+    // 在需要时直接解码默认音轨。
+    let source_path = if let Some(stream_index) = media_audio_stream_index {
+        if crate::media::is_video_extension(std::path::Path::new(&audio_path)) {
+            match crate::media::extract_audio_stream_to_wav(
+                std::path::Path::new(&audio_path),
+                stream_index,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut payload = tl.to_payload();
+                    payload.project = Some(state.project_meta_payload());
+                    payload.ok = false;
+                    payload.created_clip_ids = Some(vec![]);
+                    payload.missing_files = Some(vec![error]);
+                    return payload;
+                }
+            }
+        } else {
+            audio_path.clone()
+        }
+    } else {
+        audio_path.clone()
+    };
+
+    let source_meta = std::path::Path::new(&source_path);
+    if source_meta.exists()
+        && crate::audio_utils::try_read_audio_header_only(source_meta).is_none()
+    {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        payload.ok = false;
+        payload.created_clip_ids = Some(vec![]);
+        payload.missing_files = Some(vec![format!(
+            "media_has_no_audio_or_unsupported_codec: {}",
+            source_meta.display()
+        )]);
+        return payload;
+    }
+
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.audio_loaded = true;
@@ -207,7 +252,7 @@ pub(super) fn import_audio_item(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&audio_path, resolved_track_id, start_sec);
+    tl.import_audio_item(&source_path, resolved_track_id, start_sec);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());

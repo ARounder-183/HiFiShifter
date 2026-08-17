@@ -129,6 +129,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 audioPath: args[0],
                 ...(args[1] !== undefined ? { trackId: args[1] } : {}),
                 ...(args[2] !== undefined ? { startSec: args[2] } : {}),
+                ...(args[3] !== undefined ? { mediaAudioStreamIndex: args[3] } : {}),
             };
 
         case "import_audio_bytes":
@@ -463,6 +464,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { dirPath: args[0] };
 
         case "get_audio_file_info":
+            return { filePath: args[0] };
+
+        case "get_media_audio_streams":
             return { filePath: args[0] };
 
         case "read_audio_preview":

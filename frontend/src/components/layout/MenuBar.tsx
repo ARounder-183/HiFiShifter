@@ -41,9 +41,11 @@ import {
 
 
 import {
+    importAudioAtPosition,
     importAudioFromDialog,
     importMultipleAudioAtPosition,
 } from "../../features/session/thunks/importThunks";
+import type { MediaAudioStream } from "../../services/api/fileBrowser";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
@@ -161,6 +163,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [meanQuantizeOpen, setMeanQuantizeOpen] = useState(false);
     const [menuImportMode, setMenuImportMode] = useState<{
         audioPaths: string[];
+        trackId: string | null;
+        startSec: number;
+    } | null>(null);
+    const [mediaStreamImport, setMediaStreamImport] = useState<{
+        path: string;
+        streams: MediaAudioStream[];
         trackId: string | null;
         startSec: number;
     } | null>(null);
@@ -347,11 +355,27 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             const res = (await dispatch(importAudioFromDialog()).unwrap()) as {
                 canceled?: boolean;
                 requiresModeChoice?: boolean;
+                requiresStreamChoice?: boolean;
                 audioPaths?: string[];
+                mediaAudioStreams?: MediaAudioStream[];
+                path?: string;
                 trackId?: string | null;
                 startSec?: number;
             };
-            if (res?.canceled || !res?.requiresModeChoice) {
+            if (res?.canceled) {
+                return;
+            }
+            if (res?.requiresStreamChoice && res.path) {
+                setMediaStreamImport({
+                    path: res.path,
+                    streams: res.mediaAudioStreams ?? [],
+                    trackId: res.trackId ?? s.selectedTrackId ?? null,
+                    startSec:
+                        typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                });
+                return;
+            }
+            if (!res?.requiresModeChoice) {
                 return;
             }
             if (!Array.isArray(res.audioPaths) || res.audioPaths.length <= 1) {
@@ -443,7 +467,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void handleImportAudioFromMenu();
                         }}
                     >
-                        {t("menu_import_audio")}{" "}
+                        {t("menu_import_media")}{" "}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -1061,7 +1085,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-sm font-medium text-qt-text">
-                                {tAny("import_dialog_title") || t("menu_import_audio")}
+                                {tAny("import_dialog_title") || t("menu_import_media")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
                                 {menuImportMode.audioPaths.length} file(s) selected
@@ -1109,6 +1133,81 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             <button
                                 className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMenuImportMode(null)}
+                            >
+                                {tAny("cancel") || "Cancel"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 多音轨媒体：选择要导入的音轨 */}
+            {mediaStreamImport && (
+                <div
+                    className="fixed inset-0 z-[9999] bg-qt-overlay flex items-center justify-center"
+                    onClick={() => setMediaStreamImport(null)}
+                >
+                    <div
+                        className="w-[420px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-xl shadow-[0_20px_44px_rgba(0,0,0,0.28)]"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="px-4 py-3 border-b border-qt-border">
+                            <div className="text-sm font-medium text-qt-text">
+                                {tAny("media_stream_select_title") || "Select audio stream"}
+                            </div>
+                            <div className="mt-1 text-xs text-qt-text-muted truncate">
+                                {mediaStreamImport.path}
+                            </div>
+                            <div className="mt-1 text-xs text-qt-text-muted">
+                                {tAny("media_stream_select_hint") ||
+                                    "This file contains multiple audio streams. Select one to extract and import."}
+                            </div>
+                        </div>
+
+                        <div className="px-3 py-3 flex flex-col gap-2 max-h-[50vh] overflow-y-auto custom-scrollbar">
+                            {mediaStreamImport.streams.map((stream) => {
+                                const meta = [
+                                    stream.codec,
+                                    stream.channels > 0 ? `${stream.channels} ch` : null,
+                                    stream.sampleRate > 0 ? `${stream.sampleRate} Hz` : null,
+                                    stream.title || stream.language,
+                                    stream.durationSec > 0
+                                        ? `${stream.durationSec.toFixed(2)} s`
+                                        : null,
+                                ].filter(Boolean);
+                                return (
+                                    <button
+                                        key={stream.index}
+                                        className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                        onClick={() => {
+                                            const m = mediaStreamImport;
+                                            setMediaStreamImport(null);
+                                            void dispatch(
+                                                importAudioAtPosition({
+                                                    audioPath: m.path,
+                                                    trackId: m.trackId,
+                                                    startSec: m.startSec,
+                                                    mediaAudioStreamIndex: stream.index,
+                                                }),
+                                            );
+                                        }}
+                                    >
+                                        <span className="font-medium">
+                                            {tAny("media_stream_track") || "Track"}{" "}
+                                            {stream.index + 1}
+                                        </span>
+                                        <span className="ml-2 text-xs text-qt-text-muted">
+                                            {meta.join(" · ")}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <div className="px-3 py-2 border-t border-qt-border flex justify-end">
+                            <button
+                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
+                                onClick={() => setMediaStreamImport(null)}
                             >
                                 {tAny("cancel") || "Cancel"}
                             </button>

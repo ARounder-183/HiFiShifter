@@ -70,7 +70,10 @@ export const jaJP = {
     menu_exit: "終了",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "オーディオをインポート...",
+    media_stream_select_title: "音声トラックを選択",
+    media_stream_select_hint: "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
+    media_stream_track: "トラック",
+    menu_import_media: "メディアファイルをインポート...",
     menu_import_reaper: "Reaper プロジェクトをインポート...",
     menu_import_vocalshifter: "VocalShifter プロジェクトをインポート...",
     menu_import_hifishifter: "HiFiShifter プロジェクトをインポート...",
@@ -278,8 +281,8 @@ export const jaJP = {
     status_target_original: "原音",
     status_target_synthesized: "合成音",
     status_target_none: "待機中",
-    dropped_audio_imported: "ドロップされたオーディオをインポートしました",
-    import_audio_failed: "オーディオのインポートに失敗しました",
+    dropped_audio_imported: "ドロップされたメディアをインポートしました",
+    import_audio_failed: "メディアのインポートに失敗しました",
 
     menu_about: "HiFiShifter について",
     glue: "グルー",
@@ -752,7 +755,7 @@ export const jaJP = {
     fb_sort_size: "サイズ",
     fb_sort_label: "並び替え",
     fb_regex_error: "無効な正規表現",
-    fb_audio_only: "オーディオファイルのみ表示",
+    fb_audio_only: "メディアファイルのみ表示",
 
     // 編集メニュー新規項目
     menu_deselect: "選択解除",

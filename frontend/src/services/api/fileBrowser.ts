@@ -22,6 +22,16 @@ export interface AudioPreviewData {
     pcmBase64: string;
 }
 
+export interface MediaAudioStream {
+    index: number;
+    title: string | null;
+    language: string | null;
+    codec: string;
+    sampleRate: number;
+    channels: number;
+    durationSec: number;
+}
+
 export const fileBrowserApi = {
     listDirectory: (dirPath: string) => invoke<FileEntry[]>("list_directory", dirPath),
 
@@ -29,6 +39,9 @@ export const fileBrowserApi = {
         invoke<FileEntry[]>("search_files_recursive", dirPath, query),
 
     getAudioFileInfo: (filePath: string) => invoke<AudioFileInfo>("get_audio_file_info", filePath),
+
+    getMediaAudioStreams: (filePath: string) =>
+        invoke<MediaAudioStream[]>("get_media_audio_streams", filePath),
 
     readAudioPreview: (filePath: string, maxFrames?: number) =>
         invoke<AudioPreviewData>("read_audio_preview", filePath, maxFrames),
