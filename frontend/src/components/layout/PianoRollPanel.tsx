@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import { Flex, Text, Button, Select, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
 import {
+    ChevronDownIcon,
     CursorArrowIcon,
     EyeOpenIcon,
     EyeClosedIcon,
@@ -85,6 +86,7 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
+import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
 import {
@@ -116,11 +118,14 @@ import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
 import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
+    buildChildFormantOffsetCentsParam,
     childPitchOffsetValueToDisplay,
     CHILD_PITCH_OFFSET_CENTS_RANGE,
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
+    CHILD_FORMANT_OFFSET_CENTS_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
     isChildPitchOffsetParam,
     parseChildPitchOffsetParam,
 } from "./pianoRoll/childPitchOffsetParams";
@@ -169,6 +174,129 @@ function sameStringArray(a: string[], b: string[]) {
     if (a.length !== b.length) return false;
     return a.every((value, index) => value === b[index]);
 }
+
+type FormantParamButtonProps = {
+    rootParamId: string;
+    rootLabel: string;
+    childParamId: string | null;
+    childLabel: string;
+    rootActive: boolean;
+    childActive: boolean;
+    secondaryVisible: boolean;
+    showSecondary: boolean;
+    hideSecondaryLabel: string;
+    showSecondaryLabel: string;
+    onSelectRoot: () => void;
+    onSelectChild: () => void;
+    onToggleSecondary: () => void;
+};
+
+const FormantParamButton: React.FC<FormantParamButtonProps> = ({
+    rootParamId,
+    rootLabel,
+    childParamId,
+    childLabel,
+    rootActive,
+    childActive,
+    secondaryVisible,
+    showSecondary,
+    hideSecondaryLabel,
+    showSecondaryLabel,
+    onSelectRoot,
+    onSelectChild,
+    onToggleSecondary,
+}) => {
+    if (!childParamId) {
+        return (
+            <React.Fragment>
+                <Button
+                    size="1"
+                    variant={rootActive ? "solid" : "soft"}
+                    color={rootActive ? "amber" : "gray"}
+                    onClick={onSelectRoot}
+                    style={{ cursor: "pointer" }}
+                >
+                    {rootLabel}
+                </Button>
+                {showSecondary ? (
+                    <IconButton
+                        size="1"
+                        variant={secondaryVisible ? "soft" : "ghost"}
+                        color={secondaryVisible ? "orange" : "gray"}
+                        onClick={onToggleSecondary}
+                        style={{ cursor: "pointer" }}
+                        data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
+                    >
+                        {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
+                    </IconButton>
+                ) : null}
+            </React.Fragment>
+        );
+    }
+
+    return (
+        <React.Fragment>
+            <Button
+                size="1"
+                variant={rootActive || childActive ? "solid" : "soft"}
+                color={rootActive || childActive ? "amber" : "gray"}
+                onClick={onSelectRoot}
+                style={{ cursor: "pointer" }}
+            >
+                {childActive ? childLabel : rootLabel}
+            </Button>
+            {showSecondary ? (
+                <IconButton
+                    size="1"
+                    variant={secondaryVisible ? "soft" : "ghost"}
+                    color={secondaryVisible ? "orange" : "gray"}
+                    onClick={onToggleSecondary}
+                    style={{ cursor: "pointer" }}
+                    data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
+                >
+                    {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
+                </IconButton>
+            ) : null}
+            <DropdownMenu.Root>
+                <DropdownMenu.Trigger data-tooltip={childActive ? childLabel : rootLabel}>
+                    <IconButton
+                        size="1"
+                        variant="ghost"
+                        color="gray"
+                        style={{ cursor: "pointer" }}
+                    >
+                        <ChevronDownIcon width="12" height="12" />
+                    </IconButton>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content variant="soft" color="gray">
+                    <DropdownMenu.RadioGroup
+                        value={
+                            rootActive
+                                ? rootParamId
+                                : childActive && childParamId
+                                  ? childParamId
+                                  : undefined
+                        }
+                        onValueChange={(value) => {
+                            if (value === rootParamId) {
+                                onSelectRoot();
+                            } else if (value === childParamId) {
+                                onSelectChild();
+                            }
+                        }}
+                    >
+                        <DropdownMenu.RadioItem value={rootParamId}>
+                            {rootLabel}
+                        </DropdownMenu.RadioItem>
+                        <DropdownMenu.RadioItem value={childParamId}>
+                            {childLabel}
+                        </DropdownMenu.RadioItem>
+                    </DropdownMenu.RadioGroup>
+                </DropdownMenu.Content>
+            </DropdownMenu.Root>
+        </React.Fragment>
+    );
+};
 
 export const PianoRollPanel: React.FC = () => {
     const dispatch = useAppDispatch();
@@ -284,7 +412,7 @@ export const PianoRollPanel: React.FC = () => {
         const kb = mergedKeybindings["modifier.clipNoSnap"];
         if (!kb) return;
         const onKey = (e: KeyboardEvent) => {
-            const active = isModifierActive(kb, e as any);
+            const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
         };
         window.addEventListener("keydown", onKey as EventListener);
@@ -354,27 +482,27 @@ export const PianoRollPanel: React.FC = () => {
             if (s?.midiCloseLeadingGap != null) {
                 setCloseLeadingGap(s.midiCloseLeadingGap);
             }
-            if ((s as any)?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+            if (s?.midiImportAsTempoMap != null) {
+                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
             }
-            if ((s as any)?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+            if (s?.midiImportTempoMapTempo != null) {
+                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
             }
-            if ((s as any)?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean((s as any).midiImportTempoMapTimeSignature));
+            if (s?.midiImportTempoMapTimeSignature != null) {
+                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
             }
-            if ((s as any)?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean((s as any).midiImportTempoMapKeySignature));
+            if (s?.midiImportTempoMapKeySignature != null) {
+                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
             }
             if (s?.midiImportTargetReaperClipboard != null) {
                 setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetReaperClipboard((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetReaperClipboard(s.midiImportTarget);
             }
             if (s?.midiImportTargetParamEditor != null) {
                 setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetParamEditor((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetParamEditor(s.midiImportTarget);
             }
         });
     }, []);
@@ -829,6 +957,24 @@ export const PianoRollPanel: React.FC = () => {
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
 
+    const childFormantOffsetParam = useMemo(() => {
+        if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
+        const algo = rootTrack?.pitchAnalysisAlgo;
+        if (algo !== "nsf_hifigan_onnx" && algo !== "vslib") return null;
+        return buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+    }, [effectiveSelectedTrackId, selectedIsChildTrack, rootTrack?.pitchAnalysisAlgo]);
+
+    const pitchGroupActive =
+        editParam === "pitch" ||
+        editParam === childPitchOffsetCentsParam ||
+        editParam === childPitchOffsetDegreesParam;
+    const pitchGroupLabel =
+        editParam === childPitchOffsetCentsParam
+            ? t("child_pitch_mode_cents")
+            : editParam === childPitchOffsetDegreesParam
+              ? t("child_pitch_mode_degrees")
+              : t("pitch");
+
     // 声码器参数描述符（由 algo 动态定制面板）
     const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
     const processorParamsRef = useRef<ProcessorParamDescriptor[]>([]);
@@ -852,6 +998,12 @@ export const PianoRollPanel: React.FC = () => {
                 max: CHILD_PITCH_OFFSET_DEGREES_RANGE.max,
             };
         }
+        if (isChildFormantOffsetCentsParam(editParam)) {
+            return {
+                min: CHILD_FORMANT_OFFSET_CENTS_RANGE.min,
+                max: CHILD_FORMANT_OFFSET_CENTS_RANGE.max,
+            };
+        }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
         if (desc?.kind.type === "automation_curve") {
             return {
@@ -864,7 +1016,11 @@ export const PianoRollPanel: React.FC = () => {
 
     const currentParamDefaultValue = useMemo(() => {
         if (editParam === "pitch") return 60;
-        if (isChildPitchOffsetCentsParam(editParam) || isChildPitchOffsetDegreesParam(editParam)) {
+        if (
+            isChildPitchOffsetCentsParam(editParam) ||
+            isChildPitchOffsetDegreesParam(editParam) ||
+            isChildFormantOffsetCentsParam(editParam)
+        ) {
             return 0;
         }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
@@ -880,6 +1036,7 @@ export const PianoRollPanel: React.FC = () => {
     const currentParamQuantizeUnit = useMemo(() => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
         if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
+        if (isChildFormantOffsetCentsParam(editParam)) return 50;
         if (editParam === "volume" || editParam === "dyn_edit") return 0.05;
         if (editParam === "formant_shift_cents") return 50;
         if (editParam === "breath_gain" || editParam === "hifigan_tension") {
@@ -897,7 +1054,9 @@ export const PianoRollPanel: React.FC = () => {
         if (paramViewsRef.current[editParam]) return;
         const range = isChildPitchOffsetCentsParam(editParam)
             ? CHILD_PITCH_OFFSET_CENTS_RANGE
-            : CHILD_PITCH_OFFSET_DEGREES_RANGE;
+            : isChildPitchOffsetDegreesParam(editParam)
+              ? CHILD_PITCH_OFFSET_DEGREES_RANGE
+              : CHILD_FORMANT_OFFSET_CENTS_RANGE;
         paramViewsRef.current = {
             ...paramViewsRef.current,
             [editParam]: {
@@ -1043,6 +1202,7 @@ export const PianoRollPanel: React.FC = () => {
             ...processorParams.map((p) => p.id),
             ...(childPitchOffsetCentsParam ? [childPitchOffsetCentsParam] : []),
             ...(childPitchOffsetDegreesParam ? [childPitchOffsetDegreesParam] : []),
+            ...(childFormantOffsetParam ? [childFormantOffsetParam] : []),
         ]);
         if (isChildPitchOffsetParam(editParam)) {
             if (!selectedIsChildTrack || !effectiveSelectedTrackId) {
@@ -1063,6 +1223,13 @@ export const PianoRollPanel: React.FC = () => {
                     return;
                 }
             }
+            if (isChildFormantOffsetCentsParam(editParam)) {
+                const expected = buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+                if (editParam !== expected) {
+                    dispatch(setEditParam(expected));
+                    return;
+                }
+            }
         }
 
         if (!available.has(editParam)) {
@@ -1074,6 +1241,7 @@ export const PianoRollPanel: React.FC = () => {
         dispatch,
         childPitchOffsetCentsParam,
         childPitchOffsetDegreesParam,
+        childFormantOffsetParam,
         effectiveSelectedTrackId,
         selectedIsChildTrack,
     ]);
@@ -1291,6 +1459,9 @@ export const PianoRollPanel: React.FC = () => {
                 }
                 invalidate();
             },
+            // syncScrollLeft reads the latest scroll state through refs and is called
+            // imperatively; including the plain render-scope function would defeat memoization.
+            // eslint-disable-next-line react-hooks/exhaustive-deps
             [
                 contentWidth,
                 invalidate,
@@ -1316,11 +1487,7 @@ export const PianoRollPanel: React.FC = () => {
         }
 
         if (gridLayerRef.current) {
-            (
-                gridLayerRef.current as unknown as {
-                    __hifiGridRedraw?: (scrollLeft: number) => void;
-                }
-            ).__hifiGridRedraw?.(next);
+            invokeGridRedrawHandler(gridLayerRef.current, next);
         }
 
         if (gridBoundaryRef.current) {
@@ -1727,65 +1894,65 @@ export const PianoRollPanel: React.FC = () => {
     // 导入位置变更时持久化保存
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        void settingsApi.saveUiSettings({ midiImportPosition: position } as any);
+        void settingsApi.saveUiSettings({ midiImportPosition: position });
     }, []);
 
     // 填补空隙选项变更时持久化保存
     const handleFillGapsChange = useCallback((value: boolean) => {
         setFillGaps(value);
-        void settingsApi.saveUiSettings({ midiFillGaps: value } as any);
+        void settingsApi.saveUiSettings({ midiFillGaps: value });
     }, []);
 
     // BPM 选项变更时持久化保存
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any);
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        void settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any);
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v });
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any);
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any);
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any);
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any);
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any);
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
     }, []);
 
     const handleImportTargetChange = useCallback((v: string) => {
         if (midiDialogSourceRef.current === "reaperClipboard") {
             setImportTargetReaperClipboard(v);
-            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v });
         } else {
             setImportTargetParamEditor(v);
-            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v });
         }
     }, []);
 
@@ -2212,6 +2379,8 @@ export const PianoRollPanel: React.FC = () => {
             scroller.scrollLeft = next;
             syncScrollLeft(scroller);
         }
+        // syncScrollLeft reads the latest scroll state through refs; see onFrame above.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         s.paramEditorSyncTimeline,
         s.autoScrollEnabled,
@@ -2237,7 +2406,7 @@ export const PianoRollPanel: React.FC = () => {
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
                 if (isNoneBinding(kb)) return noModifierPressed;
-                return isModifierActive(kb, e as any);
+                return isModifierActive(kb, e);
             };
             const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
             const pianoVerticalScrollRequested = isWheelBindingRequested(pianoKeysVerticalScrollKb);
@@ -2847,7 +3016,7 @@ export const PianoRollPanel: React.FC = () => {
                             startFrame,
                             frameCount,
                             clipboardPitch: clip.values,
-                            mode: targetParam.mode,
+                            mode: targetParam.mode as "cents" | "degrees",
                             paramsApi,
                             pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
                             projectScale: effectiveProjectScale,
@@ -4231,88 +4400,106 @@ export const PianoRollPanel: React.FC = () => {
 
                 <Flex gap="2" align="center">
                     <Flex gap="1" align="center">
-                        {selectedIsChildTrack && childPitchOffsetCentsParam ? (
-                            <Button
-                                size="1"
-                                variant={
-                                    editParam === childPitchOffsetCentsParam ? "solid" : "soft"
-                                }
-                                color={editParam === childPitchOffsetCentsParam ? "cyan" : "gray"}
-                                onClick={() => dispatch(setEditParam(childPitchOffsetCentsParam))}
-                                style={{ cursor: "pointer" }}
-                            >
-                                {t("child_pitch_mode_cents")}
-                            </Button>
-                        ) : null}
-                        {selectedIsChildTrack && childPitchOffsetDegreesParam ? (
-                            <Button
-                                size="1"
-                                variant={
-                                    editParam === childPitchOffsetDegreesParam ? "solid" : "soft"
-                                }
-                                color={editParam === childPitchOffsetDegreesParam ? "cyan" : "gray"}
-                                onClick={() => dispatch(setEditParam(childPitchOffsetDegreesParam))}
-                                style={{ cursor: "pointer" }}
-                            >
-                                {t("child_pitch_mode_degrees")}
-                            </Button>
-                        ) : null}
-                        <Button
-                            size="1"
-                            variant={editParam === "pitch" ? "solid" : "soft"}
-                            color={editParam === "pitch" ? "grass" : "gray"}
-                            onClick={() => dispatch(setEditParam("pitch"))}
-                            style={{ cursor: "pointer" }}
-                        >
-                            {t("pitch")}
-                        </Button>
-                        {/*  ?editParam 不是 pitch 时，显示 pitch 副参数开 ?*/}
-                        {editParam !== "pitch" && pitchEnabled ? (
-                            <IconButton
-                                size="1"
-                                variant={secondaryParamVisible["pitch"] ? "soft" : "ghost"}
-                                color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                onClick={() => toggleSecondaryParam("pitch")}
-                                style={{ cursor: "pointer" }}
-                                data-tooltip={
-                                    secondaryParamVisible["pitch"]
-                                        ? t("hide_secondary_param")
-                                        : t("show_secondary_param")
-                                }
-                            >
-                                {secondaryParamVisible["pitch"] ? (
-                                    <EyeOpenIcon />
-                                ) : (
-                                    <EyeClosedIcon />
-                                )}
-                            </IconButton>
-                        ) : null}
-                        {/* 由后端 processorParams 驱动的动态参数按钮 */}
-                        {processorParams.map((p) => (
-                            <React.Fragment key={p.id}>
+                        {selectedIsChildTrack &&
+                        (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
+                            <React.Fragment>
                                 <Button
                                     size="1"
-                                    variant={editParam === p.id ? "solid" : "soft"}
-                                    color={editParam === p.id ? "amber" : "gray"}
-                                    onClick={() => dispatch(setEditParam(p.id))}
+                                    variant={pitchGroupActive ? "solid" : "soft"}
+                                    color={pitchGroupActive ? "grass" : "gray"}
+                                    onClick={() => dispatch(setEditParam("pitch"))}
                                     style={{ cursor: "pointer" }}
                                 >
-                                    {getProcessorParamLabel(p)}
+                                    {pitchGroupLabel}
                                 </Button>
-                                {editParam !== p.id ? (
+                                {editParam !== "pitch" && pitchEnabled ? (
                                     <IconButton
                                         size="1"
-                                        variant={secondaryParamVisible[p.id] ? "soft" : "ghost"}
-                                        color={secondaryParamVisible[p.id] ? "orange" : "gray"}
-                                        onClick={() => toggleSecondaryParam(p.id)}
+                                        variant={
+                                            secondaryParamVisible["pitch"] ? "soft" : "ghost"
+                                        }
+                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
+                                        onClick={() => toggleSecondaryParam("pitch")}
                                         style={{ cursor: "pointer" }}
                                         data-tooltip={
-                                            secondaryParamVisible[p.id]
+                                            secondaryParamVisible["pitch"]
                                                 ? t("hide_secondary_param")
                                                 : t("show_secondary_param")
                                         }
                                     >
-                                        {secondaryParamVisible[p.id] ? (
+                                        {secondaryParamVisible["pitch"] ? (
+                                            <EyeOpenIcon />
+                                        ) : (
+                                            <EyeClosedIcon />
+                                        )}
+                                    </IconButton>
+                                ) : null}
+                                <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger data-tooltip={pitchGroupLabel}>
+                                        <IconButton
+                                            size="1"
+                                            variant="ghost"
+                                            color="gray"
+                                            style={{ cursor: "pointer" }}
+                                        >
+                                            <ChevronDownIcon width="12" height="12" />
+                                        </IconButton>
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content variant="soft" color="gray">
+                                        <DropdownMenu.RadioGroup
+                                            value={editParam}
+                                            onValueChange={(value) =>
+                                                dispatch(setEditParam(value))
+                                            }
+                                        >
+                                            <DropdownMenu.RadioItem value="pitch">
+                                                {t("pitch")}
+                                            </DropdownMenu.RadioItem>
+                                            {childPitchOffsetCentsParam ? (
+                                                <DropdownMenu.RadioItem
+                                                    value={childPitchOffsetCentsParam}
+                                                >
+                                                    {t("child_pitch_mode_cents")}
+                                                </DropdownMenu.RadioItem>
+                                            ) : null}
+                                            {childPitchOffsetDegreesParam ? (
+                                                <DropdownMenu.RadioItem
+                                                    value={childPitchOffsetDegreesParam}
+                                                >
+                                                    {t("child_pitch_mode_degrees")}
+                                                </DropdownMenu.RadioItem>
+                                            ) : null}
+                                        </DropdownMenu.RadioGroup>
+                                    </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                            </React.Fragment>
+                        ) : (
+                            <React.Fragment>
+                                <Button
+                                    size="1"
+                                    variant={editParam === "pitch" ? "solid" : "soft"}
+                                    color={editParam === "pitch" ? "grass" : "gray"}
+                                    onClick={() => dispatch(setEditParam("pitch"))}
+                                    style={{ cursor: "pointer" }}
+                                >
+                                    {t("pitch")}
+                                </Button>
+                                {editParam !== "pitch" && pitchEnabled ? (
+                                    <IconButton
+                                        size="1"
+                                        variant={
+                                            secondaryParamVisible["pitch"] ? "soft" : "ghost"
+                                        }
+                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
+                                        onClick={() => toggleSecondaryParam("pitch")}
+                                        style={{ cursor: "pointer" }}
+                                        data-tooltip={
+                                            secondaryParamVisible["pitch"]
+                                                ? t("hide_secondary_param")
+                                                : t("show_secondary_param")
+                                        }
+                                    >
+                                        {secondaryParamVisible["pitch"] ? (
                                             <EyeOpenIcon />
                                         ) : (
                                             <EyeClosedIcon />
@@ -4320,7 +4507,74 @@ export const PianoRollPanel: React.FC = () => {
                                     </IconButton>
                                 ) : null}
                             </React.Fragment>
-                        ))}
+                        )}
+                        {/* 由后端 processorParams 驱动的动态参数按钮 */}
+                        {processorParams.map((p) => {
+                            if (p.id === "formant_shift_cents") {
+                                return (
+                                    <FormantParamButton
+                                        key={p.id}
+                                        rootParamId={p.id}
+                                        rootLabel={getProcessorParamLabel(p)}
+                                        childParamId={
+                                            selectedIsChildTrack ? childFormantOffsetParam : null
+                                        }
+                                        childLabel={t("child_formant_mode")}
+                                        rootActive={editParam === p.id}
+                                        childActive={editParam === childFormantOffsetParam}
+                                        secondaryVisible={secondaryParamVisible[p.id] ?? false}
+                                        showSecondary={editParam !== p.id}
+                                        hideSecondaryLabel={t("hide_secondary_param")}
+                                        showSecondaryLabel={t("show_secondary_param")}
+                                        onSelectRoot={() => dispatch(setEditParam(p.id))}
+                                        onSelectChild={() => {
+                                            if (childFormantOffsetParam) {
+                                                dispatch(setEditParam(childFormantOffsetParam));
+                                            }
+                                        }}
+                                        onToggleSecondary={() => toggleSecondaryParam(p.id)}
+                                    />
+                                );
+                            }
+
+                            return (
+                                <React.Fragment key={p.id}>
+                                    <Button
+                                        size="1"
+                                        variant={editParam === p.id ? "solid" : "soft"}
+                                        color={editParam === p.id ? "amber" : "gray"}
+                                        onClick={() => dispatch(setEditParam(p.id))}
+                                        style={{ cursor: "pointer" }}
+                                    >
+                                        {getProcessorParamLabel(p)}
+                                    </Button>
+                                    {editParam !== p.id ? (
+                                        <IconButton
+                                            size="1"
+                                            variant={
+                                                secondaryParamVisible[p.id] ? "soft" : "ghost"
+                                            }
+                                            color={
+                                                secondaryParamVisible[p.id] ? "orange" : "gray"
+                                            }
+                                            onClick={() => toggleSecondaryParam(p.id)}
+                                            style={{ cursor: "pointer" }}
+                                            data-tooltip={
+                                                secondaryParamVisible[p.id]
+                                                    ? t("hide_secondary_param")
+                                                    : t("show_secondary_param")
+                                            }
+                                        >
+                                            {secondaryParamVisible[p.id] ? (
+                                                <EyeOpenIcon />
+                                            ) : (
+                                                <EyeClosedIcon />
+                                            )}
+                                        </IconButton>
+                                    ) : null}
+                                </React.Fragment>
+                            );
+                        })}
                     </Flex>
 
                     {rootTrack ? (
@@ -4514,7 +4768,7 @@ export const PianoRollPanel: React.FC = () => {
                 <Flex className="px-3 py-2 bg-qt-base border-b border-qt-border">
                     <ProgressBar
                         percentage={asyncRefresh.progress}
-                        label={(t as any)("refreshing_pitch_data") || "Refreshing pitch data"}
+                        label={tAny("refreshing_pitch_data") || "Refreshing pitch data"}
                         showCancel={true}
                         onCancel={async () => {
                             // Task 6.6: 取消按钮点击时调 ?cancelRefresh()
@@ -4551,7 +4805,7 @@ export const PianoRollPanel: React.FC = () => {
                         color="red"
                         onClick={() => rootTrackId && void asyncRefresh.startRefresh(rootTrackId)}
                     >
-                        {(t as any)("retry") || "Retry"}
+                        {tAny("retry") || "Retry"}
                     </Button>
                 </Flex>
             )}

@@ -78,15 +78,17 @@ export const jaJP = {
     menu_import_vocalshifter: "VocalShifter プロジェクトをインポート...",
     menu_import_hifishifter: "HiFiShifter プロジェクトをインポート...",
     import_project_dialog_title: "HiFiShifter プロジェクトのインポート",
-    import_project_dialog_desc: "選択したプロジェクトを現在のプロジェクトに統合する方法を選んでください。",
+    import_project_dialog_desc:
+        "選択したプロジェクトを現在のプロジェクトに統合する方法を選んでください。",
     import_project_file: "プロジェクト ファイル",
     import_project_original_position: "元のタイムライン位置を維持",
     import_project_playhead_position: "再生ヘッド位置に配置",
     import_project_tempo_map: "テンポマップをインポート（現在のプロジェクトにない場合のみ）",
-    import_project_tempo_map_unavailable: "現在のプロジェクトには既にテンポマップがあるため、インポート側のテンポマップはスキップされます。",
+    import_project_tempo_map_unavailable:
+        "現在のプロジェクトには既にテンポマップがあるため、インポート側のテンポマップはスキップされます。",
     import_project_import: "インポート",
     menu_import_midi: "MIDI をインポート...",
-    menu_copy_reaper_clipboard: "選択クリップを REAPER クリップボードにコピー",
+    menu_copy_reaper_clipboard: "Reaper クリップボードにコピー",
     menu_paste_selected_track: "選択トラックにペースト",
     menu_paste_new_tracks: "新しいトラックとしてペースト",
     menu_paste_reaper_clipboard: "Reaper クリップボードデータをペースト",
@@ -346,12 +348,6 @@ export const jaJP = {
     ctx_unreverse_selected: "選択項目の逆再生を解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
-    missing_file_replace_title: "ファイルが見つかりません",
-    missing_file_replace_desc:
-        "以下の音声ファイルが見つかりません。代替ファイルを手動で指定しますか？",
-    missing_file_replace_pick: "代替ファイルを選択",
-
-    // ソースファイル変更検出（ウィンドウがフォーカスを取得した時にトリガー）
     source_file_changed_title: "ソースファイルが変更されました",
     source_file_changed_modified_desc:
         "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",
@@ -389,10 +385,13 @@ export const jaJP = {
     algo_label: "アルゴリズム",
     child_pitch_mode_cents: "セント差",
     child_pitch_mode_degrees: "度数差",
+    child_formant_mode: "フォルマント差",
     child_pitch_offset_cents_label: "子トラックのセント差",
     child_pitch_offset_degrees_label: "子トラックの度数差",
+    child_formant_offset_cents_label: "子トラックのフォルマント差",
     child_pitch_offset_cents_short: "セント",
     child_pitch_offset_degrees_short: "度数",
+    child_formant_offset_cents_short: "セント",
     aria_loading: "読み込み中",
     export_dialog_sample_rate: "サンプリングレート",
     export_dialog_bit_depth: "ビット深度",
@@ -662,8 +661,7 @@ export const jaJP = {
     show_playhead_time_in_track_header: "トラックヘッダーに再生ヘッド時間を表示",
     copy_playhead_time: "再生ヘッド時間をコピー",
     sync_timeline_view: "タイムライン表示に同期",
-    sync_timeline_view_tooltip:
-        "パラメータエディタの水平位置とズームをタイムラインに同期します",
+    sync_timeline_view_tooltip: "パラメータエディタの水平位置とズームをタイムラインに同期します",
     grid_snap_dotted_half: "付点2分音符",
     grid_snap_dotted_quarter: "付点4分音符",
     grid_snap_dotted_8th: "付点8分音符",
@@ -716,8 +714,7 @@ export const jaJP = {
     tempo_map_scale: "スケール",
     tempo_map_scale_inherit: "前のスケールに従う",
     tempo_map_bpm_range: "（10-960）",
-    tempo_map_actionbar_tip:
-        "テンポマップ有効：変更は再生ヘッドより前の直近の変更点に適用されます",
+    tempo_map_actionbar_tip: "テンポマップ有効：変更は再生ヘッドより前の直近の変更点に適用されます",
     tempo_map_ts_inherit: "前の拍子に従う",
     tempo_map_tooltip_position: "位置：",
     tempo_map_tooltip_bpm: "BPM：",
@@ -824,6 +821,8 @@ export const jaJP = {
     kb_edit_quantize: "クオンタイズ",
     kb_edit_mean_quantize: "平均クオンタイズ",
     kb_edit_paste_reaper: "Reaper クリップボードをペースト",
+    kb_edit_paste_tracks: "新しいトラックとしてペースト",
+    kb_edit_copy_reaper: "Reaper クリップボードにコピー",
     kb_edit_paste_vocalshifter: "VocalShifter クリップボードをペースト",
 
     // スクロール修飾キーバインド

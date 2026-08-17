@@ -291,7 +291,7 @@ export const timelineApi = {
             trackCount?: number;
         }>("copy_clips_to_reaper_clipboard", clipIds),
 
-    pasteTimelineClipboard: (mode?: "auto" | "selected" | "new_tracks") =>
+    pasteTimelineClipboard: (mode?: "selected" | "new_tracks") =>
         invoke<
             TimelineResult & {
                 error?: string;

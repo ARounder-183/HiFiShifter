@@ -95,33 +95,6 @@ pub(crate) fn tempo_scale_data_from_project(p: &ProjectState) -> TempoScaleData 
     }
 }
 
-/// Tempo Map 音阶签名（用于判断音阶部分是否变化、是否需要失效渲染缓存）。
-/// None 与“无显式音阶变化点”返回相同签名（空串）。
-/// 签名包含每个显式音阶变化点的位置与音阶内容 —— 挪动变化点同样会使签名改变。
-pub(crate) fn tempo_map_scale_signature(points: Option<&[TempoPointData]>) -> String {
-    let Some(points) = points else {
-        return String::new();
-    };
-    points
-        .iter()
-        .filter(|p| p.scale.is_some())
-        .map(|p| {
-            let s = p.scale.as_ref().expect("filtered");
-            format!(
-                "{:.6}:{}:{}:{}",
-                p.position_sec,
-                s.key.as_deref().unwrap_or(""),
-                s.name.as_deref().unwrap_or(""),
-                s.notes
-                    .as_ref()
-                    .map(|n| n.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))
-                    .unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PitchAnalysisAlgo {
@@ -1534,7 +1507,7 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
-        let scale_before = tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, prev);
         h.redo.push(current);
         drop(h);
@@ -1563,7 +1536,7 @@ impl AppState {
             payload.project = Some(self.project_meta_payload());
             return payload;
         };
-        let scale_before = tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, next);
         h.undo.push_back(current);
         drop(h);
@@ -1580,12 +1553,12 @@ impl AppState {
         payload
     }
 
-    /// Tempo Map 音阶签名发生变化时失效所有渲染缓存，并在
-    /// 「后台预渲染」启用时触发后台渲染（与直接编辑 Tempo Map 的路径一致；
-    /// 撤销/重做恢复的快照同样走这里 —— 引擎的 clip 差分检测不会覆盖 Tempo Map）。
+    /// 实际生效音阶发生变化时失效所有渲染缓存，并在「后台预渲染」启用时
+    /// 触发后台渲染（与直接编辑 Tempo Map 的路径一致；撤销/重做恢复的快照
+    /// 同样走这里 —— 引擎的 clip 差分检测不会覆盖 Tempo Map）。
     fn invalidate_render_caches_if_scale_changed(&self, tl: &TimelineState, scale_before: &str) {
-        let scale_after = tempo_map_scale_signature(tl.tempo_map.as_deref());
-        if scale_before == scale_after.as_str() {
+        let scale_after = tl.render_scale_signature();
+        if scale_before == scale_after {
             return;
         }
         for clip in &tl.clips {
@@ -1684,9 +1657,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tempo_map_scale_signature_detects_scale_relevant_changes() {
-        let point = |sec: f64, key: &str| TempoPointData {
-            id: "p1".to_string(),
+    fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
+        let base = TimelineState::default();
+        let no_map = base.render_scale_signature();
+
+        let initial = TempoPointData {
+            id: "initial".to_string(),
+            position_sec: 0.0,
+            bpm: 120.0,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: Some(TempoScaleData {
+                key: Some("C".to_string()),
+                name: None,
+                notes: Some(base.project_scale_notes.clone()),
+            }),
+        };
+
+        // 仅创建“初始点 = 工程基准”的 Tempo Map：实际生效音阶不变。
+        let mut initial_only = base.clone();
+        initial_only.tempo_map = Some(vec![initial.clone()]);
+        assert_eq!(no_map, initial_only.render_scale_signature());
+
+        // 只有 BPM / 拍号变化、没有音阶变化的变化点：实际生效音阶不变。
+        let mut tempo_only = base.clone();
+        tempo_only.tempo_map = Some(vec![
+            initial.clone(),
+            TempoPointData {
+                id: "tempo".to_string(),
+                position_sec: 5.0,
+                bpm: 90.0,
+                numerator: Some(3),
+                denominator: Some(4),
+                scale: None,
+            },
+        ]);
+        assert_eq!(no_map, tempo_only.render_scale_signature());
+
+        let scale_at = |sec: f64, key: &str| TempoPointData {
+            id: format!("scale_{sec}"),
             position_sec: sec,
             bpm: 120.0,
             numerator: Some(4),
@@ -1697,31 +1706,22 @@ mod tests {
                 notes: None,
             }),
         };
-        let no_scale = TempoPointData {
-            id: "p0".to_string(),
-            position_sec: 0.0,
-            bpm: 120.0,
-            numerator: Some(4),
-            denominator: Some(4),
-            scale: None,
-        };
 
-        // 无数据与无显式音阶点 → 相同签名（空串）。
-        assert_eq!(tempo_map_scale_signature(None), "");
-        assert_eq!(tempo_map_scale_signature(Some(&[])), "");
-        assert_eq!(tempo_map_scale_signature(Some(&[no_scale])), "");
+        // 添加真正的音阶变化点：签名必须改变。
+        let mut scaled = base.clone();
+        scaled.tempo_map = Some(vec![initial.clone(), scale_at(5.0, "G")]);
+        let scaled_sig = scaled.render_scale_signature();
+        assert_ne!(no_map, scaled_sig);
 
-        // 挪动音阶变化点 → 签名改变（渲染缓存需失效）。
-        let a = tempo_map_scale_signature(Some(&[point(5.0, "G")]));
-        let moved = tempo_map_scale_signature(Some(&[point(6.0, "G")]));
-        assert_ne!(a, moved, "moving a scale point must change the signature");
+        // 挪动真正的音阶变化点：签名必须改变。
+        let mut moved = base.clone();
+        moved.tempo_map = Some(vec![initial.clone(), scale_at(6.0, "G")]);
+        assert_ne!(scaled_sig, moved.render_scale_signature());
 
-        // 修改音阶内容 → 签名改变。
-        let edited = tempo_map_scale_signature(Some(&[point(5.0, "D")]));
-        assert_ne!(a, edited, "editing a scale point must change the signature");
-
-        // 删除音阶 → 签名改变（回到空串）。
-        assert_ne!(a, "", "removing scale data must change the signature");
+        // 清除 Tempo Map：回到工程基准签名。
+        let mut cleared = scaled.clone();
+        cleared.tempo_map = None;
+        assert_eq!(no_map, cleared.render_scale_signature());
     }
 
     #[test]
@@ -2872,6 +2872,31 @@ impl TimelineState {
             segments.push((last_sec, notes));
         }
         segments
+    }
+
+    /// 渲染相关的“生效音阶”签名。
+    ///
+    /// 该签名基于 `scale_segments()` 的实际生效音阶，并压缩相邻相同音阶段。
+    /// 与只统计“显式音阶变化点”不同，因此：
+    /// - 创建 / 清除只含“初始点 = 工程基准”的 Tempo Map 不会产生签名变化；
+    /// - 移动只有 BPM / 拍号、没有音阶变化的变化点不会产生签名变化；
+    /// - 音阶键、音级集合、音阶生效位置或工程基准音阶变化时签名会变化。
+    pub fn render_scale_signature(&self) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        let mut last_notes: Option<Vec<u8>> = None;
+        for (sec, notes) in self.scale_segments() {
+            if last_notes.as_ref() == Some(&notes) {
+                continue;
+            }
+            let notes_text = notes
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            segments.push(format!("{:.6}:{}", sec, notes_text));
+            last_notes = Some(notes);
+        }
+        segments.join("|")
     }
 
     pub fn add_track(

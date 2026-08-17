@@ -49,9 +49,9 @@ import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep"
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
+import type { SourceFileChange } from "./services/api/timeline";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
-import { MISSING_FILE_CONFIRM_EVENT } from "./features/session/thunks/missingFilePrompt";
 import {
     OPEN_PROJECT_PATH_EVENT,
     type ExternalFileActionDetail,
@@ -99,6 +99,17 @@ const errorCodeKey: Record<string, string> = {
     import_read_failed: "vs_import_read_failed",
     import_parse_failed: "vs_import_parse_failed",
 };
+
+// 这些状态表示工程内容刚被替换/导入，需立即执行一次源文件变更检测，
+// 不依赖窗口 focus（例如启动时通过命令行打开工程时窗口可能一直保持聚焦）。
+const SOURCE_FILE_CHECK_TRIGGER_STATUSES = new Set([
+    "Project opened",
+    "Project imported",
+    "VocalShifter project imported",
+    "Reaper project imported",
+    "Pasted VocalShifter clipboard data",
+    "Pasted Reaper clipboard data",
+]);
 
 const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
     saveOnSaveEnabled: true,
@@ -154,6 +165,7 @@ function AppInner() {
     useEffect(() => {
         ignoredSourcePathsRef.current = new Set();
     }, [projectPath]);
+
     const vocalShifterSkippedFilesDialog = useAppSelector(
         (state) => state.session.vocalShifterSkippedFilesDialog,
     );
@@ -181,18 +193,20 @@ function AppInner() {
         open: boolean;
         path: string | null;
     }>({ open: false, path: null });
-    const [missingFileDialog, setMissingFileDialog] = useState<{
-        open: boolean;
-        missingPath: string;
-    }>({ open: false, missingPath: "" });
-    // 源文件变更检测对话框（窗口重新获得焦点时触发）
+    // 检测/处理互斥：避免窗口 focus、工程打开、文件选择对话框等事件叠加触发重复检测。
+    const sourceFileCheckBusyRef = useRef(false);
+    const sourceFileChangeHandlingRef = useRef(false);
+    const sourceFileDialogOpenRef = useRef(false);
+    // 源文件变更检测对话框（窗口重新获得焦点或工程内容变更后触发）
     const [sourceFileChangedDialog, setSourceFileChangedDialog] = useState<{
         open: boolean;
-        changes: Array<{ clip_id: string; clip_name: string; source_path: string; change: string }>;
+        changes: SourceFileChange[];
     }>({ open: false, changes: [] });
+    useEffect(() => {
+        sourceFileDialogOpenRef.current = sourceFileChangedDialog.open;
+    }, [sourceFileChangedDialog.open]);
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
-    const missingFileResolverRef = useRef<((shouldPick: boolean) => void) | null>(null);
     const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
     // 当前会话中已忽略的源文件变更路径集合（用户点击"忽略"后不再重复弹窗）
     const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
@@ -243,31 +257,31 @@ function AppInner() {
                 if (s?.midiCloseLeadingGap != null) {
                     setCloseLeadingGap(s.midiCloseLeadingGap);
                 }
-                if ((s as any)?.midiImportAsTempoMap != null) {
-                    setImportTempoMapEnabled(Boolean((s as any).midiImportAsTempoMap));
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
                 }
-                if ((s as any)?.midiImportTempoMapTempo != null) {
-                    setImportTempoMapTempo(Boolean((s as any).midiImportTempoMapTempo));
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
                 }
-                if ((s as any)?.midiImportTempoMapTimeSignature != null) {
+                if (s?.midiImportTempoMapTimeSignature != null) {
                     setImportTempoMapTimeSignature(
-                        Boolean((s as any).midiImportTempoMapTimeSignature),
+                        Boolean(s.midiImportTempoMapTimeSignature),
                     );
                 }
-                if ((s as any)?.midiImportTempoMapKeySignature != null) {
+                if (s?.midiImportTempoMapKeySignature != null) {
                     setImportTempoMapKeySignature(
-                        Boolean((s as any).midiImportTempoMapKeySignature),
+                        Boolean(s.midiImportTempoMapKeySignature),
                     );
                 }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetMenu((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetMenu(s.midiImportTarget);
                 }
                 if (s?.midiImportTargetDragDrop != null) {
                     setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-                } else if ((s as any)?.midiImportTarget != null) {
-                    setMidiImportTargetDragDrop((s as any).midiImportTarget);
+                } else if (s?.midiImportTarget != null) {
+                    setMidiImportTargetDragDrop(s.midiImportTarget);
                 }
             });
         });
@@ -285,88 +299,88 @@ function AppInner() {
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiFillGaps: v } as any),
+            settingsApi.saveUiSettings({ midiFillGaps: v }),
         );
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any),
+            settingsApi.saveUiSettings({ midiMultiTrackMerge: v }),
         );
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any),
+            settingsApi.saveUiSettings({ midiImportBpmAsProject: v }),
         );
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any),
+            settingsApi.saveUiSettings({ midiNoteBpmMode: v }),
         );
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any),
+            settingsApi.saveUiSettings({ midiSpecifiedBpm: v }),
         );
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportPosition: position } as any),
+            settingsApi.saveUiSettings({ midiImportPosition: position }),
         );
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any),
+            settingsApi.saveUiSettings({ midiCloseLeadingGap: v }),
         );
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportAsTempoMap: v } as any),
+            settingsApi.saveUiSettings({ midiImportAsTempoMap: v }),
         );
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }),
         );
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }),
         );
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v } as any),
+            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }),
         );
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetMenu: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetMenu: v }),
         );
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v } as any),
+            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }),
         );
     }, []);
 
@@ -475,21 +489,108 @@ function AppInner() {
     const isModifierRef = useRef(false);
 
     useEffect(() => {
+        function isEditableTarget(target: EventTarget | null): boolean {
+            const el = target as HTMLElement | null;
+            if (!el) return false;
+            const tag = (el.tagName ?? "").toLowerCase();
+            if (tag === "input" || tag === "textarea" || tag === "select") return true;
+            if (el.isContentEditable) return true;
+            return el.closest?.('input,textarea,select,[contenteditable="true"]') != null;
+        }
+
+        // 只允许可编辑控件和显式声明可选择/拖拽的区域使用 WebView 原生选择逻辑。
+        function allowsNativeTextSelection(target: EventTarget | null): boolean {
+            if (isEditableTarget(target)) return true;
+            let node = target instanceof Element ? target : null;
+            while (node) {
+                if (node.getAttribute?.("data-hs-selectable") === "true") return true;
+                try {
+                    const style = window.getComputedStyle(node) as CSSStyleDeclaration & {
+                        webkitUserSelect?: string;
+                    };
+                    const userSelect = style.userSelect || style.webkitUserSelect || "";
+                    if (userSelect === "text" || userSelect === "all") return true;
+                    if (userSelect === "none") return false;
+                } catch {
+                    // ignore
+                }
+                node = node.parentElement;
+            }
+            return false;
+        }
+
+        function preventNativeTextSelection(e: Event) {
+            if (allowsNativeTextSelection(e.target)) return;
+            // 阻止 WebView 双击/拖选文本；不阻止传播，因此自定义双击逻辑仍会执行。
+            e.preventDefault();
+        }
+
+        function clearNativeTextSelection(e: Event) {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed) return;
+            if (allowsNativeTextSelection(e.target)) return;
+            selection.removeAllRanges();
+        }
+
+        function preventNativeDragStart(e: Event) {
+            const target = e.target as HTMLElement | null;
+            if (!target) return;
+            if (isEditableTarget(target)) return;
+            if (target.closest?.('[data-hs-native-drag="true"]') || target.draggable === true) {
+                return;
+            }
+            // 阻止 WebView 原生拖拽（选中文本/图片/链接），自定义 onDragStart 仍会收到事件。
+            e.preventDefault();
+        }
+
+        function preventMiddleClickNative(e: MouseEvent) {
+            if (e.button !== 1) return;
+            if (isEditableTarget(e.target)) return;
+            // 关闭 WebView 中键自动滚动；应用自身的中键平移通过 pointerdown 实现，不受影响。
+            e.preventDefault();
+        }
+
+        function preventBrowserZoomWheel(e: WheelEvent) {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            if (isEditableTarget(e.target)) return;
+            // 禁用 Ctrl/Cmd+滚轮的 WebView 页面缩放；应用内的缩放滚轮绑定仍可正常执行。
+            e.preventDefault();
+        }
+
         function preventBrowserFind(e: KeyboardEvent) {
             const isMac = navigator.platform?.toLowerCase().includes("mac");
             const mod = isMac ? e.metaKey : e.ctrlKey;
-            if (mod && e.key.toLowerCase() === "f") {
+            const key = e.key.toLowerCase();
+            if (mod && (key === "f" || key === "p" || key === "g")) {
                 e.preventDefault();
             }
-            if (mod && e.key.toLowerCase() === "p") {
+            // Ctrl/Cmd+R 是应用内的"取消选择"快捷键；阻止 WebView 刷新但不阻断应用绑定。
+            if (mod && key === "r") {
+                e.preventDefault();
+            }
+            // 阻止浏览器页面缩放快捷键；若用户绑定 Ctrl/Cmd+数字键，应用逻辑仍会收到事件。
+            if (mod && (key === "=" || key === "+" || key === "-" || key === "0")) {
+                e.preventDefault();
+            }
+            if (e.key === "F5") {
+                e.preventDefault();
+            }
+            if (e.key === "F3") {
                 e.preventDefault();
             }
         }
         function preventContextMenu(e: MouseEvent) {
-            const target = e.target as HTMLElement | null;
-            if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-            if (target?.closest?.("[data-hs-context-menu]")) return;
+            // 完全禁用 WebView 默认右键菜单。只调用 preventDefault，
+            // 不阻止传播，因此应用内基于 contextmenu 事件实现的
+            // 自定义菜单/右键拖拽仍可正常工作。
             e.preventDefault();
+        }
+
+        function preventContextMenuKey(e: KeyboardEvent) {
+            // 同时屏蔽键盘触发的 WebView 默认菜单（Menu/ContextMenu 键与 Shift+F10）。
+            if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+                e.preventDefault();
+            }
         }
 
         function altKeyDown(e: KeyboardEvent) {
@@ -506,12 +607,29 @@ function AppInner() {
         window.addEventListener("keydown", altKeyDown, true);
         window.addEventListener("keyup", altKeyUp, true);
         window.addEventListener("keydown", preventBrowserFind, true);
+        window.addEventListener("keydown", preventContextMenuKey, true);
         document.addEventListener("contextmenu", preventContextMenu, true);
+        document.addEventListener("selectstart", preventNativeTextSelection, true);
+        document.addEventListener("pointerdown", clearNativeTextSelection, true);
+        document.addEventListener("dragstart", preventNativeDragStart, true);
+        document.addEventListener("mousedown", preventMiddleClickNative, true);
+        window.addEventListener("wheel", preventBrowserZoomWheel, {
+            capture: true,
+            passive: false,
+        });
         return () => {
             window.removeEventListener("keydown", preventBrowserFind, true);
+            window.removeEventListener("keydown", preventContextMenuKey, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
             document.removeEventListener("contextmenu", preventContextMenu, true);
+            document.removeEventListener("selectstart", preventNativeTextSelection, true);
+            document.removeEventListener("pointerdown", clearNativeTextSelection, true);
+            document.removeEventListener("dragstart", preventNativeDragStart, true);
+            document.removeEventListener("mousedown", preventMiddleClickNative, true);
+            window.removeEventListener("wheel", preventBrowserZoomWheel, {
+                capture: true,
+            } as EventListenerOptions);
         };
     }, []);
 
@@ -1077,31 +1195,6 @@ function AppInner() {
     }, [runtimeIsPlaying, runtimeHasSynthesized, toolMode, drawToolMode]);
 
     useEffect(() => {
-        const handler = (event: Event) => {
-            const detail = (
-                event as CustomEvent<{
-                    missingPath?: string;
-                    resolve?: (shouldPick: boolean) => void;
-                }>
-            ).detail;
-            if (!detail || typeof detail.resolve !== "function") return;
-            missingFileResolverRef.current = detail.resolve;
-            setMissingFileDialog({
-                open: true,
-                missingPath: typeof detail.missingPath === "string" ? detail.missingPath : "",
-            });
-        };
-        window.addEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
-        return () => {
-            window.removeEventListener(MISSING_FILE_CONFIRM_EVENT, handler as EventListener);
-            if (missingFileResolverRef.current) {
-                missingFileResolverRef.current(false);
-                missingFileResolverRef.current = null;
-            }
-        };
-    }, []);
-
-    useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
 
@@ -1133,44 +1226,63 @@ function AppInner() {
         };
     }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
 
-    // 窗口重新获得焦点时，检测已导入的音频源文件是否被外部修改或删除
-    useEffect(() => {
-        let checking = false;
-
-        async function onFocus() {
-            if (checking) return;
-            checking = true;
-            try {
-                const result = await webApi.checkSourceFilesChanged();
-                const allChanges =
-                    (
-                        result as {
-                            changed?: Array<{
-                                clip_id: string;
-                                clip_name: string;
-                                source_path: string;
-                                change: string;
-                            }>;
-                        }
-                    )?.changed ?? [];
-                // 过滤掉用户已在本会话中"忽略"的路径
-                const ignored = ignoredSourcePathsRef.current;
-                const changes = allChanges.filter((c) => !ignored.has(c.source_path));
-                if (changes.length > 0) {
-                    setSourceFileChangedDialog({ open: true, changes });
-                }
-            } catch {
-                // 静默失败；此检测为可选增强功能
-            } finally {
-                checking = false;
-            }
+    // 检测已导入的音频源文件是否被外部修改或删除。
+    // 触发时机：窗口重新获得焦点，以及工程/导入内容刚替换完成时。
+    const checkSourceFileChanges = useCallback(async () => {
+        if (
+            sourceFileCheckBusyRef.current ||
+            sourceFileChangeHandlingRef.current ||
+            sourceFileDialogOpenRef.current
+        ) {
+            return;
         }
+        sourceFileCheckBusyRef.current = true;
+        try {
+            const result = (await webApi.checkSourceFilesChanged()) as
+                | { changed?: SourceFileChange[] }
+                | undefined;
+            const rawChanges = result?.changed ?? [];
+            const ignored = ignoredSourcePathsRef.current;
+            const seen = new Set<string>();
+            const changes = rawChanges
+                .filter((c) => {
+                    if (!c || typeof c.source_path !== "string" || !c.source_path.trim()) {
+                        return false;
+                    }
+                    if (c.change !== "deleted" && c.change !== "modified") return false;
+                    // 后端按 source_path 去重，这里再做一次防御性去重。
+                    const key = `${c.source_path}::${c.change}`;
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                })
+                .filter((c) => !ignored.has(c.source_path));
+            if (changes.length > 0) {
+                sourceFileDialogOpenRef.current = true;
+                setSourceFileChangedDialog({ open: true, changes });
+            }
+        } catch {
+            // 静默失败；此检测为可选增强功能
+        } finally {
+            sourceFileCheckBusyRef.current = false;
+        }
+    }, []);
 
+    useEffect(() => {
+        function onFocus() {
+            void checkSourceFileChanges();
+        }
         window.addEventListener("focus", onFocus);
         return () => {
             window.removeEventListener("focus", onFocus);
         };
-    }, []);
+    }, [checkSourceFileChanges]);
+
+    useEffect(() => {
+        if (SOURCE_FILE_CHECK_TRIGGER_STATUSES.has(status)) {
+            void checkSourceFileChanges();
+        }
+    }, [status, checkSourceFileChanges]);
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
@@ -1524,6 +1636,20 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "edit.pasteTracks":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "pasteTracks" },
+                        }),
+                    );
+                    break;
+                case "edit.copyReaper":
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "copyReaper" },
+                        }),
+                    );
+                    break;
                 // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
                 default:
                     break;
@@ -1657,63 +1783,7 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
-            <Dialog.Root
-                open={missingFileDialog.open}
-                onOpenChange={(open) => {
-                    if (!open) {
-                        setMissingFileDialog((prev) => ({
-                            ...prev,
-                            open: false,
-                        }));
-                        if (missingFileResolverRef.current) {
-                            missingFileResolverRef.current(false);
-                            missingFileResolverRef.current = null;
-                        }
-                    }
-                }}
-            >
-                <Dialog.Content maxWidth="560px">
-                    <Dialog.Title>{t("missing_file_replace_title")}</Dialog.Title>
-                    <Dialog.Description>{t("missing_file_replace_desc")}</Dialog.Description>
-                    <div className="mt-2 rounded border border-qt-border bg-qt-base p-2 text-xs break-all">
-                        {missingFileDialog.missingPath}
-                    </div>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={() => {
-                                setMissingFileDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-                                if (missingFileResolverRef.current) {
-                                    missingFileResolverRef.current(false);
-                                    missingFileResolverRef.current = null;
-                                }
-                            }}
-                        >
-                            {t("cancel")}
-                        </Button>
-                        <Button
-                            onClick={() => {
-                                setMissingFileDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-                                if (missingFileResolverRef.current) {
-                                    missingFileResolverRef.current(true);
-                                    missingFileResolverRef.current = null;
-                                }
-                            }}
-                        >
-                            {t("missing_file_replace_pick")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-
-            {/* Source file changed dialog — triggered on window focus regain */}
+            {/* Source file changed dialog — triggered on focus or project content change */}
             <Dialog.Root
                 open={sourceFileChangedDialog.open}
                 onOpenChange={(open) => {
@@ -1775,42 +1845,49 @@ function AppInner() {
                                     open: false,
                                 }));
 
-                                // 重新加载被修改的文件：
-                                // 按 source_path 去重，使用 replaceSameSource: true
-                                // 确保工程中所有引用同一源文件的 clip 全部统一更新，
-                                // 避免其他同源 clip 因 mtime 未更新而在下次切屏时错误弹窗。
-                                const modifiedPaths = new Set<string>();
-                                for (const c of changes) {
-                                    if (c.change === "modified") {
-                                        modifiedPaths.add(c.source_path);
+                                // 处理期间阻止窗口 focus 检测重复弹窗。
+                                sourceFileChangeHandlingRef.current = true;
+                                try {
+                                    // 重新加载被修改的文件：按 source_path 去重，
+                                    // replaceSameSource: true 会让后端扩展至所有同源 clip。
+                                    const modifiedItems = new Map<string, SourceFileChange>();
+                                    for (const c of changes) {
+                                        if (
+                                            c.change === "modified" &&
+                                            c.source_path &&
+                                            !modifiedItems.has(c.source_path)
+                                        ) {
+                                            modifiedItems.set(c.source_path, c);
+                                        }
                                     }
-                                }
-                                for (const path of modifiedPaths) {
-                                    try {
-                                        // 找出该路径对应的任意一个 clip_id 即可；
-                                        // replaceSameSource: true 会让后端自动扩展至所有同源 clip
-                                        const anyClipId =
-                                            changes.find(
-                                                (c) =>
-                                                    c.change === "modified" &&
-                                                    c.source_path === path,
-                                            )?.clip_id ?? "";
-                                        await dispatch(
-                                            replaceClipSourceRemote({
-                                                clipIds: anyClipId ? [anyClipId] : [],
-                                                newSourcePath: path,
-                                                replaceSameSource: true,
-                                            }),
-                                        ).unwrap();
-                                    } catch {
-                                        // continue with remaining files
+                                    for (const item of modifiedItems.values()) {
+                                        try {
+                                            await dispatch(
+                                                replaceClipSourceRemote({
+                                                    clipIds: item.clip_id ? [item.clip_id] : [],
+                                                    newSourcePath: item.source_path,
+                                                    replaceSameSource: true,
+                                                }),
+                                            ).unwrap();
+                                        } catch {
+                                            // continue with remaining files
+                                        }
                                     }
-                                }
 
-                                // 提示用户为已删除的文件选择替代文件
-                                const deletedItems = changes.filter((c) => c.change === "deleted");
-                                if (deletedItems.length > 0) {
-                                    for (const item of deletedItems) {
+                                    // 已删除文件同样按 source_path 去重；后端每个路径只返回
+                                    // 一条 clip 记录，因此也必须使用 replaceSameSource: true，
+                                    // 否则引用同一源文件的其他 clip 不会被一起替换。
+                                    const deletedItems = new Map<string, SourceFileChange>();
+                                    for (const c of changes) {
+                                        if (
+                                            c.change === "deleted" &&
+                                            c.source_path &&
+                                            !deletedItems.has(c.source_path)
+                                        ) {
+                                            deletedItems.set(c.source_path, c);
+                                        }
+                                    }
+                                    for (const item of deletedItems.values()) {
                                         try {
                                             const picked = await coreApi.openAudioDialog();
                                             if (
@@ -1827,15 +1904,19 @@ function AppInner() {
                                             const newPath = (picked as { path: string }).path;
                                             await dispatch(
                                                 replaceClipSourceRemote({
-                                                    clipIds: [item.clip_id],
+                                                    clipIds: item.clip_id
+                                                        ? [item.clip_id]
+                                                        : [],
                                                     newSourcePath: newPath,
-                                                    replaceSameSource: false,
+                                                    replaceSameSource: true,
                                                 }),
                                             ).unwrap();
                                         } catch {
                                             // continue with remaining files
                                         }
                                     }
+                                } finally {
+                                    sourceFileChangeHandlingRef.current = false;
                                 }
                             }}
                         >

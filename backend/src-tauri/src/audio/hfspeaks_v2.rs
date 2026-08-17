@@ -41,6 +41,13 @@ pub const VERSION: u16 = 2;
 /// 最大 mipmap 级别数
 pub const MAX_MIPMAP_LEVELS: usize = 3;
 
+/// 波形峰值计算允许跳过的最大连续坏帧数。
+///
+/// 某些 MP3 编码器会在音频起始处写入若干非标准帧（例如 ID3 后的填充/静音帧），
+/// Symphonia 对这类帧会返回 `invalid main_data offset`，但后续帧可正常解码。
+/// 为波形显示这种非精确场景，跳过少量连续坏帧远好于整段波形完全不可用。
+const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 64;
+
 /// 默认 mipmap 除数因子 (针对 44.1kHz 优化)
 /// 三级 mipmap 缓存方案：
 /// - L0 (div=16):   精细级，近距离对轨，spp ≤ 512
@@ -1027,6 +1034,7 @@ fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
 
     // 解码循环
     let track_id = track.id;
+    let mut consecutive_decode_errors: u32 = 0;
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -1041,8 +1049,16 @@ fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                consecutive_decode_errors += 1;
+                if consecutive_decode_errors > MAX_CONSECUTIVE_DECODE_ERRORS {
+                    return Err(e.to_string());
+                }
+                // 跳过起始处的坏帧；一旦后续帧成功解码，计数器会清零。
+                continue;
+            }
         };
+        consecutive_decode_errors = 0;
 
         // 使用 SampleBuffer 转换为 f32 interleaved
         let spec = *decoded.spec();

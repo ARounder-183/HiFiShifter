@@ -91,7 +91,7 @@ export const enUS = {
         "The current project already has a tempo map, so the imported tempo map will be skipped.",
     import_project_import: "Import",
     menu_import_midi: "Import MIDI...",
-    menu_copy_reaper_clipboard: "Copy Selected Clips to REAPER Clipboard",
+    menu_copy_reaper_clipboard: "Copy to Reaper Clipboard",
     menu_paste_selected_track: "Paste into Selected Track",
     menu_paste_new_tracks: "Paste as New Tracks",
     menu_paste_reaper_clipboard: "Paste Reaper Clipboard Data",
@@ -347,12 +347,6 @@ export const enUS = {
     ctx_unreverse_selected: "Unreverse Selected",
     clip_replace_same_source_confirm:
         "Other clips in this project use the same source file path as the selected clip(s). Replace those same-source clips as well?",
-    missing_file_replace_title: "Missing File",
-    missing_file_replace_desc:
-        "The following audio file cannot be found. Do you want to pick a replacement file?",
-    missing_file_replace_pick: "Pick Replacement",
-
-    // Source file change detection (triggered on window focus regain)
     source_file_changed_title: "Source File Changed",
     source_file_changed_modified_desc:
         "The following audio file(s) have been modified externally. Do you want to reload them into the project?",
@@ -390,10 +384,13 @@ export const enUS = {
     algo_label: "Algo",
     child_pitch_mode_cents: "Cents",
     child_pitch_mode_degrees: "Degrees",
+    child_formant_mode: "Formant",
     child_pitch_offset_cents_label: "Child Track Cents Offset",
     child_pitch_offset_degrees_label: "Child Track Degree Offset",
+    child_formant_offset_cents_label: "Child Track Formant Offset",
     child_pitch_offset_cents_short: "cents",
     child_pitch_offset_degrees_short: "degrees",
+    child_formant_offset_cents_short: "cents",
     aria_loading: "Loading",
 
     // 快捷键管理
@@ -819,6 +816,8 @@ export const enUS = {
     kb_edit_quantize: "Quantize",
     kb_edit_mean_quantize: "Mean Quantize",
     kb_edit_paste_reaper: "Paste Reaper Clipboard",
+    kb_edit_paste_tracks: "Paste as New Tracks",
+    kb_edit_copy_reaper: "Copy to Reaper Clipboard",
     kb_edit_paste_vocalshifter: "Paste VocalShifter Clipboard",
 
     // Scroll modifier keybindings

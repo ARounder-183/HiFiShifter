@@ -590,8 +590,7 @@ pub(super) fn import_midi_as_clip(
             // （否则 6/8 等工程会被静默重置为 6/4）。
             project_time_signature_denominator,
         );
-        let scale_signature_before =
-            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
+        let render_scale_signature_before = tl.render_scale_signature();
 
         // 先判断是否真的会产生变化，再决定是否打撤销快照（与
         // set_timeline_tempo_map 的幂等约定一致：无变化不产生撤销步）。
@@ -620,9 +619,8 @@ pub(super) fn import_midi_as_clip(
             state.checkpoint_timeline(&tl);
         }
 
-        // 无变化分支把 0 位置点的音阶（调号）应用到工程时可能改变工程音阶，
-        // 需要失效渲染缓存（该分支不会产生 Tempo Map，scale_signature 不覆盖工程音阶）。
-        let mut project_scale_changed = false;
+        // 无变化分支把 0 位置点的音阶（调号）应用到工程时可能改变工程音阶；
+        // render_scale_signature 会覆盖该情况，无需单独跟踪 project_scale_changed。
         match points {
             Some(points) => {
                 let has_change =
@@ -663,7 +661,7 @@ pub(super) fn import_midi_as_clip(
                                 if let Some(key) = scale.key.as_deref() {
                                     let key = key.to_string();
                                     if p.base_scale != key || p.use_custom_scale {
-                                        project_scale_changed = true;
+                                        // 工程基准音阶变化已由 render_scale_signature 捕获。
                                     }
                                     tl.project_scale_notes =
                                         crate::state::scale_notes_for_key(&key)
@@ -688,9 +686,8 @@ pub(super) fn import_midi_as_clip(
                 midi_log("import_midi_as_clip: no tempo map events found; cleared");
             }
         }
-        let scale_signature_after =
-            crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
-        if scale_signature_before != scale_signature_after || project_scale_changed {
+        let render_scale_signature_after = tl.render_scale_signature();
+        if render_scale_signature_before != render_scale_signature_after {
             for clip in &tl.clips {
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
             }

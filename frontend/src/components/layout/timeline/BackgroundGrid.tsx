@@ -1,6 +1,10 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
+import {
+    clearGridRedrawHandler,
+    setGridRedrawHandler,
+} from "./gridRedrawBridge";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -97,22 +101,25 @@ export const BackgroundGrid: React.FC<{
         scrollLeft: scrollLeft ?? 0,
         isSticky,
     });
-    latestRef.current = {
-        weakStepPx: samplingPlan.weakStepPx,
-        strongStepPx: samplingPlan.strongStepPx,
-        swingPercent: Math.max(0, Math.min(100, swingPercent)),
-        weakLineXs,
-        strongLineXs,
-        width,
-        height,
-        contentWidth,
-        viewportWidth:
-            viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
-                ? viewportWidth
-                : contentWidth,
-        scrollLeft: scrollLeft ?? 0,
-        isSticky,
-    };
+
+    useLayoutEffect(() => {
+        latestRef.current = {
+            weakStepPx: samplingPlan.weakStepPx,
+            strongStepPx: samplingPlan.strongStepPx,
+            swingPercent: Math.max(0, Math.min(100, swingPercent)),
+            weakLineXs,
+            strongLineXs,
+            width,
+            height,
+            contentWidth,
+            viewportWidth:
+                viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+                    ? viewportWidth
+                    : contentWidth,
+            scrollLeft: scrollLeft ?? 0,
+            isSticky,
+        };
+    });
 
     const lastDrawKeyRef = useRef<string | null>(null);
 
@@ -231,16 +238,10 @@ export const BackgroundGrid: React.FC<{
     useEffect(() => {
         const el = layerRef && typeof layerRef === "object" ? layerRef.current : null;
         if (!el) return;
-        (el as unknown as { __hifiGridRedraw?: (scrollLeft: number) => void }).__hifiGridRedraw =
-            draw;
+        setGridRedrawHandler(el, draw);
         return () => {
-            const current = layerRef && typeof layerRef === "object" ? layerRef.current : null;
-            if (current) {
-                delete (
-                    current as unknown as {
-                        __hifiGridRedraw?: (scrollLeft: number) => void;
-                    }
-                ).__hifiGridRedraw;
+            if (el) {
+                clearGridRedrawHandler(el);
             }
         };
     }, [draw, layerRef]);

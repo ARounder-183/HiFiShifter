@@ -82,7 +82,7 @@ export const zhCN = {
     import_project_tempo_map_unavailable: "当前工程已有速度轨，导入工程的速度轨将被跳过。",
     import_project_import: "导入",
     menu_import_midi: "导入 MIDI...",
-    menu_copy_reaper_clipboard: "将选中 Clip 复制到 REAPER 剪贴板",
+    menu_copy_reaper_clipboard: "复制到 Reaper 剪贴板",
     menu_paste_selected_track: "粘贴到选中轨道",
     menu_paste_new_tracks: "作为新轨道组粘贴",
     menu_paste_reaper_clipboard: "粘贴 Reaper 剪贴板数据",
@@ -333,11 +333,6 @@ export const zhCN = {
     ctx_unreverse_selected: "取消倒放选中项",
     clip_replace_same_source_confirm:
         "工程中还有其他音频块使用与当前音频块相同的源文件路径。是否同时替换这些同源音频块？",
-    missing_file_replace_title: "缺失文件",
-    missing_file_replace_desc: "找不到以下音频文件。是否手动指定替代文件？",
-    missing_file_replace_pick: "选择替代文件",
-
-    // 源文件变更检测（窗口重新获得焦点时触发）
     source_file_changed_title: "源文件已变更",
     source_file_changed_modified_desc: "以下音频文件已在外部被修改。是否重新加载到工程中？",
     source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",
@@ -373,10 +368,13 @@ export const zhCN = {
     algo_label: "算法",
     child_pitch_mode_cents: "音分差",
     child_pitch_mode_degrees: "度数差",
+    child_formant_mode: "共振峰差",
     child_pitch_offset_cents_label: "子轨音分差",
     child_pitch_offset_degrees_label: "子轨度数差",
+    child_formant_offset_cents_label: "子轨共振峰差",
     child_pitch_offset_cents_short: "音分",
     child_pitch_offset_degrees_short: "度数",
+    child_formant_offset_cents_short: "音分",
     aria_loading: "加载中",
     export_dialog_sample_rate: "采样率",
     export_dialog_bit_depth: "位深",
@@ -798,6 +796,8 @@ export const zhCN = {
     kb_edit_quantize: "量化",
     kb_edit_mean_quantize: "均值量化",
     kb_edit_paste_reaper: "粘贴 Reaper 剪贴板数据",
+    kb_edit_paste_tracks: "作为新轨道组粘贴",
+    kb_edit_copy_reaper: "复制到 Reaper 剪贴板",
     kb_edit_paste_vocalshifter: "粘贴 VocalShifter 剪贴板数据",
 
     // Scroll modifier keybindings

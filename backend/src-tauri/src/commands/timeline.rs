@@ -988,8 +988,9 @@ pub(super) fn get_track_summary(
 /// - 幂等：载荷规范化后与当前 Tempo Map 完全一致时不产生撤销快照、
 ///   不更新引擎、不失效缓存、不触发后台预渲染；
 /// - 同步工程基准 BPM / 每小节拍数（与 0 位置点一致）；
-/// - 音阶部分发生变化时失效渲染缓存并触发后台预渲染
-///   （子轨道“度数差”等依赖音阶的渲染需要重建）。
+/// - 实际生效音阶发生变化时失效渲染缓存并触发后台预渲染
+///   （子轨道“度数差”等依赖音阶的渲染需要重建）；Tempo / 拍号变化
+///   或创建/清除仅含工程基准初始点的 Tempo Map 不会触发重渲染。
 pub(super) fn set_timeline_tempo_map(
     state: State<'_, AppState>,
     tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
@@ -997,9 +998,9 @@ pub(super) fn set_timeline_tempo_map(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let had_map = tl.tempo_map.is_some();
 
-    // 比较音阶签名（仅音阶变化才需要失效渲染缓存）。
-    let scale_signature_before =
-        crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
+    // 比较“实际生效音阶”签名（仅音阶变化才需要失效渲染缓存；
+    // 创建/清除仅含工程基准初始点的 Tempo Map 不会触发重新渲染）。
+    let scale_signature_before = tl.render_scale_signature();
 
     // 先在候选副本上应用载荷与规范化，便于与当前状态做幂等比较
     // （此时不产生撤销快照、不修改真实状态）。
@@ -1054,8 +1055,7 @@ pub(super) fn set_timeline_tempo_map(
         state.sync_project_record_from_tempo_map(&mut tl, &mut p);
     }
 
-    let scale_signature_after =
-        crate::state::tempo_map_scale_signature(tl.tempo_map.as_deref());
+    let scale_signature_after = tl.render_scale_signature();
 
     state.audio_engine.update_timeline(tl.clone());
 

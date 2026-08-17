@@ -1,5 +1,5 @@
 import { Dialog, Flex, Select, Text, Button, TextField } from "@radix-ui/themes";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -53,21 +53,6 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
             : String(splitTransitionDurationSec),
     );
 
-    useEffect(() => {
-        if (open) {
-            setDurationInput(
-                splitTransitionDurationUnit === "percent"
-                    ? String(splitTransitionDurationPercent)
-                    : String(splitTransitionDurationSec),
-            );
-        }
-    }, [
-        open,
-        splitTransitionDurationUnit,
-        splitTransitionDurationSec,
-        splitTransitionDurationPercent,
-    ]);
-
     function commitDuration() {
         const parsed = Number(durationInput);
         if (splitTransitionDurationUnit === "percent") {
@@ -81,7 +66,19 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
+        <Dialog.Root
+            open={open}
+            onOpenChange={(nextOpen) => {
+                if (nextOpen) {
+                    setDurationInput(
+                        splitTransitionDurationUnit === "percent"
+                            ? String(splitTransitionDurationPercent)
+                            : String(splitTransitionDurationSec),
+                    );
+                }
+                onOpenChange(nextOpen);
+            }}
+        >
             <Dialog.Content
                 style={{ maxWidth: 420 }}
                 onKeyDown={(e) => e.stopPropagation()}

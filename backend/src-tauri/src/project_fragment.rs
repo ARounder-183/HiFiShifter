@@ -298,6 +298,7 @@ pub enum FragmentTrackPlacement {
     SelectedTrackOnly,
     /// Preserve the relative order of the source clip tracks starting at the
     /// currently selected track. Missing target tracks are created as roots.
+    #[allow(dead_code)]
     SelectedTracksRelative,
 }
 

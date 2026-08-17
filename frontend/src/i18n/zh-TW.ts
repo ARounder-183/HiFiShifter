@@ -83,7 +83,7 @@ export const zhTW = {
     import_project_tempo_map_unavailable: "目前專案已有速度圖，將跳過匯入專案的速度圖。",
     import_project_import: "匯入",
     menu_import_midi: "匯入 MIDI...",
-    menu_copy_reaper_clipboard: "將選取片段複製到 REAPER 剪貼簿",
+    menu_copy_reaper_clipboard: "複製到 Reaper 剪貼簿",
     menu_paste_selected_track: "貼到選取軌道",
     menu_paste_new_tracks: "作為新軌道群組貼上",
     menu_paste_reaper_clipboard: "貼上 Reaper 剪貼簿資料",
@@ -334,11 +334,6 @@ export const zhTW = {
     ctx_unreverse_selected: "取消倒放選取項目",
     clip_replace_same_source_confirm:
         "專案中還有其他音訊片段使用與目前音訊片段相同的來源檔案路徑。是否同時取代這些同來源音訊片段？",
-    missing_file_replace_title: "檔案遺失",
-    missing_file_replace_desc: "找不到以下音訊檔案。是否手動指定替代檔案？",
-    missing_file_replace_pick: "選擇替代檔案",
-
-    // 源文件變更檢測（窗口重新獲得焦點時觸發）
     source_file_changed_title: "源文件已變更",
     source_file_changed_modified_desc: "以下音訊檔案已在外部被修改。是否重新載入到工程中？",
     source_file_changed_deleted_desc: "以下音訊檔案已被移動或刪除。是否選擇替代檔案？",
@@ -374,10 +369,13 @@ export const zhTW = {
     algo_label: "演算法",
     child_pitch_mode_cents: "音分差",
     child_pitch_mode_degrees: "度數差",
+    child_formant_mode: "共振峰差",
     child_pitch_offset_cents_label: "子軌音分差",
     child_pitch_offset_degrees_label: "子軌度數差",
+    child_formant_offset_cents_label: "子軌共振峰差",
     child_pitch_offset_cents_short: "音分",
     child_pitch_offset_degrees_short: "度數",
+    child_formant_offset_cents_short: "音分",
     aria_loading: "載入中",
     export_dialog_sample_rate: "取樣率",
     export_dialog_bit_depth: "位元深度",
@@ -799,6 +797,8 @@ export const zhTW = {
     kb_edit_quantize: "量化",
     kb_edit_mean_quantize: "均值量化",
     kb_edit_paste_reaper: "貼上 Reaper 剪貼簿資料",
+    kb_edit_paste_tracks: "作為新軌道群組貼上",
+    kb_edit_copy_reaper: "複製到 Reaper 剪貼簿",
     kb_edit_paste_vocalshifter: "貼上 VocalShifter 剪貼簿資料",
 
     // 捲動修飾鍵繫結

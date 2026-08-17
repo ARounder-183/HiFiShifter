@@ -59,6 +59,7 @@ export function drawTimelineCanvas(
             name: string;
             isMidiClip?: boolean;
             trackColor?: string;
+            isRenaming?: boolean;
         }>;
         fontFamily?: string;
         activeGroupIds?: Set<string>;
@@ -274,7 +275,7 @@ export function drawTimelineCanvas(
             ctx.fillText(visualStyle.gainLabel, gainX, clipTop + 9);
         }
 
-        if (visualStyle.showName && visualStyle.displayName.length > 0) {
+        if (!clip.isRenaming && visualStyle.showName && visualStyle.displayName.length > 0) {
             const textStartX = clipLeft + visualStyle.leadingControlsWidth;
             const textEndX = visualStyle.showGainLabel
                 ? clipLeft + clipWidth - visualStyle.trailingReservePx + 4

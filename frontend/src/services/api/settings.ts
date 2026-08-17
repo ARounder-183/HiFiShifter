@@ -13,6 +13,8 @@ export interface UiSettings {
     splitTransitionCurve?: string;
     splitTransitionOverlapCrossfade?: "auto" | "always";
     snapEnabled: boolean;
+    /** 旧版吸附开关字段名（读取兼容）。 */
+    gridSnap?: boolean;
     gridSize?: string;
     timelineSnap?: TimelineSnapSettings;
     /** Tempo Map 标尺行可见性（默认开启）。 */
@@ -43,6 +45,10 @@ export interface UiSettings {
     drawDragDirection?: string;
     lineVibratoDragDirection?: string;
     smoothnessPercent?: number;
+    /** 旧版边缘平滑字段名（读取兼容）。 */
+    edgeSmoothnessPercent?: number;
+    /** 旧版 MIDI 导入目标字段名（读取兼容）。 */
+    midiImportTarget?: string;
     midiImportPosition?: string;
     midiFillGaps?: boolean;
     midiMultiTrackMerge?: boolean;
@@ -71,6 +77,6 @@ export interface UiSettings {
 
 export const settingsApi = {
     getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
-    saveUiSettings: (settings: UiSettings) =>
+    saveUiSettings: (settings: Partial<UiSettings>) =>
         invoke<{ ok: boolean }>("save_ui_settings", { settings }),
 };

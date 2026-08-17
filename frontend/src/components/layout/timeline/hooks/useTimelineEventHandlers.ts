@@ -55,7 +55,7 @@ export interface UseTimelineEventHandlersArgs {
     copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // clip actions
-    pasteClipsAtPlayhead: (mode?: "auto" | "selected" | "new_tracks") => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     splitSelectedAtPlayhead: () => void;
     normalizeClips: (ids: string[]) => void;
     groupClips: (ids: string[]) => void;
@@ -190,6 +190,29 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
 
             if (op === "paste") {
                 pasteClipsAtPlayhead();
+                return;
+            }
+            if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
+                return;
+            }
+            if (op === "copyReaper") {
+                const selectedIds =
+                    multiSelectedClipIds.length > 0
+                        ? [...multiSelectedClipIds]
+                        : sessionRef.current.selectedClipId
+                          ? [sessionRef.current.selectedClipId]
+                          : [];
+                if (selectedIds.length === 0) return;
+                const s = sessionRef.current;
+                const expandedIds = expandClipIdsWithGroups(
+                    selectedIds,
+                    s.clips,
+                    s.ignoreGrouping,
+                    s.disabledGroupIds,
+                );
+                void copyClipsToReaper(expandedIds);
+                return;
             }
             if (op === "split") {
                 splitSelectedAtPlayhead();
@@ -197,7 +220,13 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [pasteClipsAtPlayhead, splitSelectedAtPlayhead]);
+    }, [
+        copyClipsToReaper,
+        multiSelectedClipIds,
+        pasteClipsAtPlayhead,
+        sessionRef,
+        splitSelectedAtPlayhead,
+    ]);
 
     // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
     useEffect(() => {
@@ -225,8 +254,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             }
             if (op === "paste") {
                 pasteClipsAtPlayhead();
-            } else if (op === "pasteSelected") {
-                pasteClipsAtPlayhead("selected");
             } else if (op === "pasteTracks") {
                 pasteClipsAtPlayhead("new_tracks");
             }
