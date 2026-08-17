@@ -81,6 +81,7 @@ assertEqual(
         playbackRate: clip.playbackRate,
         selected: clip.selected,
         muted: clip.muted,
+        isRenaming: clip.isRenaming,
     })),
     [
         {
@@ -94,6 +95,7 @@ assertEqual(
             playbackRate: 1.25,
             selected: false,
             muted: false,
+            isRenaming: true,
         },
         {
             id: "clip-b",
@@ -106,6 +108,7 @@ assertEqual(
             playbackRate: 0.8,
             selected: true,
             muted: true,
+            isRenaming: false,
         },
         {
             id: "clip-c",
@@ -118,6 +121,7 @@ assertEqual(
             playbackRate: 2,
             selected: true,
             muted: false,
+            isRenaming: false,
         },
     ],
     "canvas keeps drawing overlay clips so visuals stay unified",

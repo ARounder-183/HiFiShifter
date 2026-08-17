@@ -93,6 +93,7 @@ import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
+import type { ClipRenameClickCandidate } from "./timeline/clip/ClipHeader";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
@@ -254,6 +255,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
     const rulerPlayheadLineRef = React.useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = React.useRef<HTMLDivElement | null>(null);
+    // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
+    // 记录名称区域的第一次点击，让播放头在短时间内收到同位置点击时转而进入重命名。
+    const renameClickCandidateRef = React.useRef<ClipRenameClickCandidate | null>(null);
+    const suppressPlayheadMouseDownRef = React.useRef(false);
+    const registerRenameClickCandidate = React.useCallback(
+        (candidate: ClipRenameClickCandidate | null) => {
+            renameClickCandidateRef.current = candidate;
+        },
+        [],
+    );
     const [timelineScrollTop, setTimelineScrollTop] = React.useState(0);
     const [quickExportDialog, setQuickExportDialog] = React.useState<{
         open: boolean;
@@ -1201,6 +1212,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     playheadZoomEnabled={s.playheadZoomEnabled}
                     className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
                     data-timeline-scroller
+                    onDoubleClickCapture={(e) => {
+                        // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择；
+                        // 显式声明可选择（data-hs-selectable）的区域保留原生双击行为。
+                        if (isEditableTarget(e.target)) return;
+                        const target = e.target as HTMLElement | null;
+                        if (target?.closest?.("[data-hs-selectable='true']")) return;
+                        e.preventDefault();
+                    }}
                     onScroll={(e) => {
                         const el = e.currentTarget as HTMLDivElement;
                         setTimelineScrollTop(el.scrollTop);
@@ -1438,6 +1457,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }}
                     onMouseDown={(e) => {
                         if (e.button !== 0) return;
+                        // 输入框/可编辑区域内的点击只负责文本光标，不应触发时间轴点击逻辑
+                        //（尤其不能在名称编辑框中点击时跳转播放头）。
+                        if (isEditableTarget(e.target)) return;
                         // Guard scrollbar interactions first — avoid clearing
                         // multi-selection when dragging the native scrollbar.
                         const scroller = scrollRef.current;
@@ -1635,6 +1657,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             clearContextMenu={clearContextMenu}
                                             toggleMultiSelect={toggleTrackLaneMultiSelect}
                                             renamingClipId={renamingClipId}
+                                            onRenameStart={clipActions.setRenamingClipId}
+                                            onRenameClickCandidate={registerRenameClickCandidate}
                                             onRenameCommit={commitTrackLaneRename}
                                             onRenameDone={handleTrackLaneRenameDone}
                                             onGainCommit={commitTrackLaneGain}
@@ -1727,8 +1751,39 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 style={{
                                     left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
                                 }}
+                                onMouseDown={(e) => {
+                                    if (!suppressPlayheadMouseDownRef.current) return;
+                                    suppressPlayheadMouseDownRef.current = false;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                }}
                                 onPointerDown={(e) => {
                                     if (e.button !== 0) return;
+
+                                    // 双击名称的第二次点击：第一次点击已把播放头移到这里，
+                                    // 因此本次 pointerdown 会命中播放头而不是名称 div。
+                                    const candidate = renameClickCandidateRef.current;
+                                    const now = performance.now();
+                                    if (
+                                        candidate &&
+                                        candidate.pointerId === e.pointerId &&
+                                        Math.abs(candidate.clientX - e.clientX) <= 6 &&
+                                        Math.abs(candidate.clientY - e.clientY) <= 6 &&
+                                        now - candidate.time <= 500
+                                    ) {
+                                        renameClickCandidateRef.current = null;
+                                        suppressPlayheadMouseDownRef.current = true;
+                                        // mousedown 紧随 pointerdown；若本次事件未产生 mousedown，
+                                        // 下一个任务里清除标记，避免影响后续播放头拖拽。
+                                        setTimeout(() => {
+                                            suppressPlayheadMouseDownRef.current = false;
+                                        }, 0);
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        clipActions.setRenamingClipId(candidate.clipId);
+                                        return;
+                                    }
+
                                     e.stopPropagation();
                                     const scroller = scrollRef.current;
                                     if (!scroller) return;

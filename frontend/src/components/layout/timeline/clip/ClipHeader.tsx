@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 import type { ClipFormantMorph, ClipInfo } from "../../../../features/session/sessionTypes";
 import { CLIP_HEADER_HEIGHT } from "../constants";
 import { formatGainDbValue, gainToDb } from "../math";
@@ -9,6 +9,21 @@ import { resolveTimelineClipHeaderVisibility } from "../runtime/timelineClipHead
 import { buildTimelineClipVisualStyle } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
 
+export interface ClipRenameController {
+    isEditing: () => boolean;
+    commit: () => void;
+    cancel: () => void;
+}
+
+/** 名称上的第一次点击候选，用于第二次点击落在播放头上时仍能进入重命名 */
+export interface ClipRenameClickCandidate {
+    clipId: string;
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    time: number;
+}
+
 export const ClipHeader: React.FC<{
     clip: ClipInfo;
     clipWidthPx: number;
@@ -17,10 +32,16 @@ export const ClipHeader: React.FC<{
     isPitchAdjustment?: boolean;
     startEditDrag: (e: React.PointerEvent, clipId: string, type: "gain") => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
-    /** 触发内联重命名（由 ClipContextMenu 的"重命名"菜单项调用） */
+    /** 触发内联重命名（由 ClipContextMenu 的"重命名"菜单项或双击名称触发） */
     triggerRename?: boolean;
+    /** 名称内联编辑开始时通知父级（用于提升图层并隐藏 Canvas 中的原始名称） */
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    /** 名称区域第一次按下时上报双击候选；第二次点击已处理或编辑结束时传 null 清除 */
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
+    /** 供父级在 Clip 其他区域按下时主动提交当前编辑 */
+    renameControllerRef?: React.MutableRefObject<ClipRenameController | null>;
     /** 增益提交（dB 值；输入框提交会 clamp 到 -12~+12，双击旋钮/数值标签重置为 0 dB） */
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
@@ -36,8 +57,11 @@ export const ClipHeader: React.FC<{
     startEditDrag,
     toggleClipMuted,
     triggerRename = false,
+    onRenameStart,
     onRenameCommit,
     onRenameDone,
+    onRenameClickCandidate,
+    renameControllerRef,
     onGainCommit,
     onToggleGroupDisabled,
     activeGroupIds,
@@ -111,6 +135,15 @@ export const ClipHeader: React.FC<{
     const [nameEditing, setNameEditing] = useState(false);
     const [nameInputVal, setNameInputVal] = useState("");
     const nameInputRef = useRef<HTMLInputElement>(null);
+    // 双击名称不依赖浏览器 dblclick：Clip 的 pointerdown 会 preventDefault，
+    // 某些 WebView 中会因此收不到 dblclick。这里用 pointerdown 时间/位置自行判定双击。
+    const nameDoubleClickStateRef = useRef<{
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        time: number;
+    } | null>(null);
+    const suppressNextNameMouseDownRef = useRef(false);
 
     // 外部触发重命名（来自右键菜单）
     React.useEffect(() => {
@@ -118,7 +151,11 @@ export const ClipHeader: React.FC<{
             setNameInputVal(clip.name);
             setNameEditing(true);
             setTimeout(() => {
-                nameInputRef.current?.select();
+                const input = nameInputRef.current;
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
             }, 0);
         }
     }, [triggerRename]);
@@ -131,13 +168,49 @@ export const ClipHeader: React.FC<{
         onRenameDone?.();
     }
 
+    function beginNameEditing() {
+        onRenameClickCandidate?.(null);
+        onRenameStart?.(clip.id);
+        setNameInputVal(clip.name);
+        setNameEditing(true);
+        setTimeout(() => {
+            // 第二次点击的 mousedown 要么被名称 div 拦截，要么命中刚挂载的 input；
+            // 这里兜底清除拦截标记，避免影响下一次单击。
+            suppressNextNameMouseDownRef.current = false;
+            const input = nameInputRef.current;
+            if (input) {
+                input.focus();
+                input.select();
+            }
+        }, 0);
+    }
+
     function cancelNameEdit() {
         setNameEditing(false);
         onRenameDone?.();
     }
 
-    if (!showAny) return null;
-    const hideVisuals = transparentVisuals && !nameEditing && !gainEditing;
+    // 把当前输入框的提交/取消能力暴露给父级。
+    // Clip 内部点击输入框以外的区域时，父级会在 pointerdown 捕获阶段调用 commit()。
+    useLayoutEffect(() => {
+        if (!renameControllerRef) return;
+        renameControllerRef.current = {
+            isEditing: () => nameEditing,
+            commit: () => commitNameEdit(),
+            cancel: () => cancelNameEdit(),
+        };
+        return () => {
+            renameControllerRef.current = null;
+        };
+    });
+
+    // 名称编辑状态必须始终可渲染：窄 clip 平时不显示名称区域，
+    // 但从右键菜单触发重命名时仍需显示输入框，否则点击"重命名"无任何反馈。
+    if (!showAny && !nameEditing) return null;
+    // 轨道使用 Canvas 绘制 clip 的静态视觉（增益旋钮/M/F 等），DOM 层只负责交互。
+    // 编辑名称/增益时只应显示对应的输入框，其余 DOM 控件继续保持透明，
+    // 否则它们会叠在 Canvas 控件上方，造成进入重命名后控件轻微“样式变化”。
+    const hideVisuals = transparentVisuals;
 
     return (
         <div
@@ -394,8 +467,24 @@ export const ClipHeader: React.FC<{
             />
 
             {/* Clip 名称区域 */}
-            {showName && (
-                <div className="flex-1 min-w-0">
+            {(showName || nameEditing) && (
+                <div
+                    className={showName ? "flex-1 min-w-0" : "absolute"}
+                    style={
+                        showName
+                            ? undefined
+                            : {
+                                  // 窄 clip 平时没有名称占位，编辑时把输入框做成覆盖层，
+                                  // 避免 minWidth 参与 flex 排版而挤压/移动增益旋钮、M、F。
+                                  top: 1,
+                                  left: Math.min(
+                                      visualStyle.leadingControlsWidth,
+                                      Math.max(0, clipWidthPx - 2),
+                                  ),
+                                  right: 0,
+                              }
+                    }
+                >
                     {nameEditing ? (
                         <input
                             ref={nameInputRef}
@@ -403,9 +492,12 @@ export const ClipHeader: React.FC<{
                             style={{
                                 color: isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.88)",
                                 backgroundColor: isDark
-                                    ? "rgba(0,0,0,0.45)"
-                                    : "rgba(255,255,255,0.70)",
+                                    ? "rgba(0,0,0,0.95)"
+                                    : "rgba(255,255,255,0.96)",
                                 border: `1px solid ${isDark ? "rgba(255,255,255,0.40)" : "rgba(0,0,0,0.35)"}`,
+                                // 窄 clip 平时不显示名称，触发重命名时给输入框一个最小可用宽度
+                                minWidth: showName ? undefined : 120,
+                                height: showName ? undefined : 16,
                             }}
                             value={nameInputVal}
                             onChange={(e) => setNameInputVal(e.target.value)}
@@ -426,12 +518,47 @@ export const ClipHeader: React.FC<{
                                 color: visualStyle.textFill,
                                 opacity: hideVisuals ? 0 : 1,
                             }}
-                            onDoubleClick={(e) => {
+                            onPointerDown={(e) => {
+                                const previous = nameDoubleClickStateRef.current;
+                                const now = performance.now();
+                                const isDoubleClick =
+                                    previous != null &&
+                                    previous.pointerId === e.pointerId &&
+                                    Math.abs(previous.clientX - e.clientX) <= 6 &&
+                                    Math.abs(previous.clientY - e.clientY) <= 6 &&
+                                    now - previous.time <= 500;
+
+                                if (!isDoubleClick) {
+                                    nameDoubleClickStateRef.current = {
+                                        pointerId: e.pointerId,
+                                        clientX: e.clientX,
+                                        clientY: e.clientY,
+                                        time: now,
+                                    };
+                                    // 第一次点击仍会走普通 Clip 点击逻辑并可能移动播放头；
+                                    // 把候选信息上报给时间轴，让第二次点击即使落在播放头上也能重命名。
+                                    onRenameClickCandidate?.({
+                                        clipId: clip.id,
+                                        pointerId: e.pointerId,
+                                        clientX: e.clientX,
+                                        clientY: e.clientY,
+                                        time: now,
+                                    });
+                                    return;
+                                }
+
+                                // 第二次按下：阻止 Clip 的点击/拖拽逻辑并进入重命名。
                                 e.preventDefault();
                                 e.stopPropagation();
-                                setNameInputVal(clip.name);
-                                setNameEditing(true);
-                                setTimeout(() => nameInputRef.current?.select(), 0);
+                                nameDoubleClickStateRef.current = null;
+                                suppressNextNameMouseDownRef.current = true;
+                                beginNameEditing();
+                            }}
+                            onMouseDown={(e) => {
+                                if (!suppressNextNameMouseDownRef.current) return;
+                                suppressNextNameMouseDownRef.current = false;
+                                e.preventDefault();
+                                e.stopPropagation();
                             }}
                         >
                             {clip.name}

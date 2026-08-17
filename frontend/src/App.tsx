@@ -471,13 +471,93 @@ function AppInner() {
     const isModifierRef = useRef(false);
 
     useEffect(() => {
+        function isEditableTarget(target: EventTarget | null): boolean {
+            const el = target as HTMLElement | null;
+            if (!el) return false;
+            const tag = (el.tagName ?? "").toLowerCase();
+            if (tag === "input" || tag === "textarea" || tag === "select") return true;
+            if (el.isContentEditable) return true;
+            return el.closest?.('input,textarea,select,[contenteditable="true"]') != null;
+        }
+
+        // 只允许可编辑控件和显式声明可选择/拖拽的区域使用 WebView 原生选择逻辑。
+        function allowsNativeTextSelection(target: EventTarget | null): boolean {
+            if (isEditableTarget(target)) return true;
+            let node = target instanceof Element ? target : null;
+            while (node) {
+                if (node.getAttribute?.("data-hs-selectable") === "true") return true;
+                try {
+                    const style = window.getComputedStyle(node) as CSSStyleDeclaration & {
+                        webkitUserSelect?: string;
+                    };
+                    const userSelect = style.userSelect || style.webkitUserSelect || "";
+                    if (userSelect === "text" || userSelect === "all") return true;
+                    if (userSelect === "none") return false;
+                } catch {
+                    // ignore
+                }
+                node = node.parentElement;
+            }
+            return false;
+        }
+
+        function preventNativeTextSelection(e: Event) {
+            if (allowsNativeTextSelection(e.target)) return;
+            // 阻止 WebView 双击/拖选文本；不阻止传播，因此自定义双击逻辑仍会执行。
+            e.preventDefault();
+        }
+
+        function clearNativeTextSelection(e: Event) {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed) return;
+            if (allowsNativeTextSelection(e.target)) return;
+            selection.removeAllRanges();
+        }
+
+        function preventNativeDragStart(e: Event) {
+            const target = e.target as HTMLElement | null;
+            if (!target) return;
+            if (isEditableTarget(target)) return;
+            if (target.closest?.('[data-hs-native-drag="true"]') || target.draggable === true) {
+                return;
+            }
+            // 阻止 WebView 原生拖拽（选中文本/图片/链接），自定义 onDragStart 仍会收到事件。
+            e.preventDefault();
+        }
+
+        function preventMiddleClickNative(e: MouseEvent) {
+            if (e.button !== 1) return;
+            if (isEditableTarget(e.target)) return;
+            // 关闭 WebView 中键自动滚动；应用自身的中键平移通过 pointerdown 实现，不受影响。
+            e.preventDefault();
+        }
+
+        function preventBrowserZoomWheel(e: WheelEvent) {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            if (isEditableTarget(e.target)) return;
+            // 禁用 Ctrl/Cmd+滚轮的 WebView 页面缩放；应用内的缩放滚轮绑定仍可正常执行。
+            e.preventDefault();
+        }
+
         function preventBrowserFind(e: KeyboardEvent) {
             const isMac = navigator.platform?.toLowerCase().includes("mac");
             const mod = isMac ? e.metaKey : e.ctrlKey;
-            if (mod && e.key.toLowerCase() === "f") {
+            const key = e.key.toLowerCase();
+            if (mod && (key === "f" || key === "p" || key === "g")) {
                 e.preventDefault();
             }
-            if (mod && e.key.toLowerCase() === "p") {
+            // Ctrl/Cmd+R 是应用内的"取消选择"快捷键；阻止 WebView 刷新但不阻断应用绑定。
+            if (mod && key === "r") {
+                e.preventDefault();
+            }
+            // 阻止浏览器页面缩放快捷键；若用户绑定 Ctrl/Cmd+数字键，应用逻辑仍会收到事件。
+            if (mod && (key === "=" || key === "+" || key === "-" || key === "0")) {
+                e.preventDefault();
+            }
+            if (e.key === "F5") {
+                e.preventDefault();
+            }
+            if (e.key === "F3") {
                 e.preventDefault();
             }
         }
@@ -511,12 +591,27 @@ function AppInner() {
         window.addEventListener("keydown", preventBrowserFind, true);
         window.addEventListener("keydown", preventContextMenuKey, true);
         document.addEventListener("contextmenu", preventContextMenu, true);
+        document.addEventListener("selectstart", preventNativeTextSelection, true);
+        document.addEventListener("pointerdown", clearNativeTextSelection, true);
+        document.addEventListener("dragstart", preventNativeDragStart, true);
+        document.addEventListener("mousedown", preventMiddleClickNative, true);
+        window.addEventListener("wheel", preventBrowserZoomWheel, {
+            capture: true,
+            passive: false,
+        });
         return () => {
             window.removeEventListener("keydown", preventBrowserFind, true);
             window.removeEventListener("keydown", preventContextMenuKey, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
             document.removeEventListener("contextmenu", preventContextMenu, true);
+            document.removeEventListener("selectstart", preventNativeTextSelection, true);
+            document.removeEventListener("pointerdown", clearNativeTextSelection, true);
+            document.removeEventListener("dragstart", preventNativeDragStart, true);
+            document.removeEventListener("mousedown", preventMiddleClickNative, true);
+            window.removeEventListener("wheel", preventBrowserZoomWheel, {
+                capture: true,
+            } as EventListenerOptions);
         };
     }, []);
 

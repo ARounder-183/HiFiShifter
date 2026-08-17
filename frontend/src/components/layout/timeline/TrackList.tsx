@@ -62,21 +62,49 @@ const SlotTimeText = React.memo(function SlotTimeText({
     className,
     style,
     tooltip,
+    selectable = false,
 }: {
     text: string;
     digitWidthPx: number | null;
     className?: string;
     style?: React.CSSProperties;
     tooltip?: string;
+    /** 允许用户选择这段文本（显式覆盖全局 DAW 禁用文本选择的策略） */
+    selectable?: boolean;
 }) {
     const parts = React.useMemo(() => splitDigitRuns(text), [text]);
     return (
         <Text
             size="2"
             weight="medium"
-            className={className}
-            style={style}
+            className={selectable ? `${className ?? ""} cursor-text` : className}
+            style={
+                selectable
+                    ? {
+                          ...style,
+                          userSelect: "text",
+                          WebkitUserSelect: "text",
+                      }
+                    : style
+            }
             data-tooltip={tooltip}
+            data-hs-selectable={selectable ? "true" : undefined}
+            onDoubleClick={
+                selectable
+                    ? (event) => {
+                          // 文本被拆成了多个数字槽位 span，原生双击只会选中一个词；
+                          // 这里显式选中整个时间字符串，保证"双击全选"在 WebView 中稳定工作。
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const selection = window.getSelection();
+                          if (!selection) return;
+                          const range = document.createRange();
+                          range.selectNodeContents(event.currentTarget);
+                          selection.removeAllRanges();
+                          selection.addRange(range);
+                      }
+                    : undefined
+            }
         >
             {parts.map((part, index) =>
                 part.digits && digitWidthPx != null && digitWidthPx > 0 ? (
@@ -248,6 +276,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             <SlotTimeText
                 text={formatted.combined}
                 digitWidthPx={digitWidth}
+                selectable
                 className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
                 style={
                     boxWidth != null
