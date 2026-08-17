@@ -1213,8 +1213,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
                     data-timeline-scroller
                     onDoubleClickCapture={(e) => {
-                        // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择。
+                        // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择；
+                        // 显式声明可选择（data-hs-selectable）的区域保留原生双击行为。
                         if (isEditableTarget(e.target)) return;
+                        const target = e.target as HTMLElement | null;
+                        if (target?.closest?.("[data-hs-selectable='true']")) return;
                         e.preventDefault();
                     }}
                     onScroll={(e) => {
