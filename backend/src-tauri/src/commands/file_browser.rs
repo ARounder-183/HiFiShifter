@@ -197,49 +197,10 @@ fn read_channel_count(path: &Path) -> Option<u16> {
         }
     }
 
-    // 视频容器优先用 FFmpeg，避免 Symphonia 返回视频轨或不准确的音轨参数。
-    if crate::media::is_video_extension(path) {
-        if let Some(channels) = crate::media::probe_media(path, 0, None).map(|p| p.channels) {
-            return Some(channels);
-        }
-    }
-
-    // 非 WAV: 用 symphonia probe 读取 codec params
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    if let Ok(probed) = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        let format = probed.format;
-        let track = format
-            .tracks()
-            .iter()
-            .find(|track| {
-                track.codec_params.sample_rate.is_some()
-                    || track.codec_params.channels.is_some()
-            })
-            .or_else(|| format.default_track())?;
-        return track
-            .codec_params
-            .channels
-            .map(|c| c.count() as u16)
-            .or(Some(2));
-    }
-
-    crate::media::probe_media(path, 0, None).map(|info| info.channels).or(Some(2))
+    // 非 WAV（音频与视频容器）统一通过 Symphonia 读取音轨参数。
+    crate::media::probe_media(path, 0, None)
+        .map(|info| info.channels)
+        .or(Some(2))
 }
 
 /// 读取音频预览 PCM 数据（f32 LE interleaved → base64）

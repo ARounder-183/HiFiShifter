@@ -1,7 +1,0 @@
-# FFmpeg must be dynamically linked. The provisioning scripts always expose
-# the selected FFmpeg SDK through third_party/ffmpeg/current (junction on
-# Windows, symlink on Unix). Forcing this path prevents stale FFMPEG_DIR
-# values or different FFmpeg majors from leaking into ffmpeg-sys-next and
-# producing binaries that link against the wrong runtime DLL names.
-[env]
-FFMPEG_DIR = { value = "third_party/ffmpeg/current", relative = true, force = true }

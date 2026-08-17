@@ -1,12 +1,7 @@
 {
     "bundle": {
         "resources": {
-            "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib": "libSoundTouchDLL.dylib",
-            "resources/ffmpeg/LICENSE.txt": "ffmpeg/LICENSE.txt",
-            "resources/ffmpeg/libavcodec.62.dylib": "ffmpeg/libavcodec.62.dylib",
-            "resources/ffmpeg/libavformat.62.dylib": "ffmpeg/libavformat.62.dylib",
-            "resources/ffmpeg/libavutil.60.dylib": "ffmpeg/libavutil.60.dylib",
-            "resources/ffmpeg/libswresample.6.dylib": "ffmpeg/libswresample.6.dylib"
+            "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib": "libSoundTouchDLL.dylib"
         }
     }
 }

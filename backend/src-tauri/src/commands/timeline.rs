@@ -197,7 +197,7 @@ pub(super) fn import_audio_item(
     }
 
     // 多音轨视频：用户显式选择某条音轨时，先把该音轨抽取为源文件旁边的
-    // WAV 缓存，再走普通导入流程。未指定时保留原始媒体路径，由 FFmpeg
+    // WAV 缓存，再走普通导入流程。未指定时保留原始媒体路径，由 Symphonia
     // 在需要时直接解码默认音轨。
     let source_path = if let Some(stream_index) = media_audio_stream_index {
         if crate::media::is_video_extension(std::path::Path::new(&audio_path)) {

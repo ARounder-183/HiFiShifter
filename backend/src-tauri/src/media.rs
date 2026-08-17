@@ -1,19 +1,25 @@
-//! Media-file (audio + video container) support via dynamically-linked FFmpeg.
+//! Media-file (audio + video container) support via Symphonia.
 //!
-//! The project is MIT licensed and therefore links FFmpeg **dynamically**
-//! (LGPL shared libraries). No GPL/non-free components are enabled, and the
-//! `ffmpeg-sys-next` `static` / `build` features must never be enabled.
+//! Both audio-only files and audio tracks embedded in video containers are
+//! decoded with Symphonia. The registry additionally registers the FDK AAC and
+//! libopus adapters so AAC-HE / Opus media decode through those codecs.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Once;
+use std::sync::OnceLock;
 
-use ffmpeg_next as ffmpeg;
-use ffmpeg::format::sample::Sample;
-use ffmpeg::media;
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia::core::codecs::registry::CodecRegistry;
+use symphonia::core::errors::Error;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, Track, TrackType};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, Tag};
+use symphonia::core::units::{Duration, TimeBase};
 
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3",
-    "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr",
+    "wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3",
+    "ape", "wv", "mp2", "mpa", "dts", "amr",
 ];
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
@@ -66,104 +72,331 @@ pub struct MediaProbe {
     pub audio_stream_count: usize,
 }
 
-fn ensure_ffmpeg_init() -> Result<(), String> {
-    static INIT: Once = Once::new();
-    let mut result = Ok(());
-    INIT.call_once(|| {
-        if let Err(e) = ffmpeg::init() {
-            result = Err(format!("ffmpeg init failed: {e}"));
-        }
-    });
-    result
+/// Shared codec registry: every Symphonia codec enabled in `Cargo.toml`, with
+/// FDK AAC replacing the built-in AAC decoder and libopus registered for Opus.
+pub(crate) fn codec_registry() -> &'static CodecRegistry {
+    static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+
+        // Registered after the native codecs on purpose: registration for the
+        // same codec id at the same tier replaces the previous decoder, so FDK
+        // AAC wins over Symphonia's partial native AAC implementation.
+        registry.register_audio_decoder::<symphonia_adapter_fdk_aac::AacDecoder>();
+        registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    })
 }
 
-fn ffmpeg_err(context: &str, e: ffmpeg::Error) -> String {
-    format!("{context}: {e}")
-}
+fn open_format(path: &Path) -> Result<Box<dyn FormatReader>, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input, String> {
-    ensure_ffmpeg_init()?;
-    ffmpeg::format::input(path).map_err(|e| ffmpeg_err("ffmpeg open failed", e))
-}
-
-fn audio_stream_index(
-    ictx: &ffmpeg::format::context::Input,
-    preferred: Option<usize>,
-) -> Result<usize, String> {
-    if let Some(index) = preferred {
-        if ictx
-            .streams()
-            .any(|s| s.index() == index && s.parameters().medium() == media::Type::Audio)
-        {
-            return Ok(index);
-        }
-        return Err(format!("ffmpeg: audio stream {index} not found"));
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
 
-    ictx.streams()
-        .best(media::Type::Audio)
-        .map(|s| s.index())
-        .ok_or_else(|| "ffmpeg: no audio stream".to_string())
+    symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| format!("symphonia probe failed: {e}"))
 }
 
-fn duration_for_stream(ictx: &ffmpeg::format::context::Input, index: usize) -> f64 {
-    let Some(stream) = ictx.streams().nth(index) else {
-        return 0.0;
+fn select_audio_track(
+    format: &dyn FormatReader,
+    preferred: Option<usize>,
+) -> Result<(&Track, usize), String> {
+    let audio_tracks = || {
+        format
+            .tracks()
+            .iter()
+            .filter(|track| track.track_type() == Some(TrackType::Audio))
     };
 
-    let tb = f64::from(stream.time_base());
-    if stream.duration() > 0 && tb > 0.0 {
-        stream.duration() as f64 * tb
-    } else if ictx.duration() > 0 {
-        // AV_TIME_BASE (1/1_000_000 s)
-        ictx.duration() as f64 / 1_000_000.0
-    } else {
-        0.0
+    if let Some(index) = preferred {
+        let track = audio_tracks()
+            .nth(index)
+            .ok_or_else(|| format!("symphonia: audio stream {index} not found"))?;
+        return Ok((track, index));
     }
+
+    let track = format
+        .default_track(TrackType::Audio)
+        .or_else(|| audio_tracks().next())
+        .ok_or_else(|| "symphonia: no audio stream".to_string())?;
+    let index = audio_tracks()
+        .position(|candidate| candidate.id == track.id)
+        .unwrap_or(0);
+    Ok((track, index))
+}
+
+fn audio_params(track: &Track) -> Result<&AudioCodecParameters, String> {
+    track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or_else(|| format!("symphonia: track {} is not an audio track", track.id))
+}
+
+fn codec_name(params: &AudioCodecParameters) -> String {
+    codec_registry()
+        .get_audio_decoder(params.codec)
+        .map(|decoder| decoder.codec.info.short_name.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn duration_ticks_to_sec(time_base: Option<TimeBase>, ticks: u64, sample_rate: u32) -> f64 {
+    if ticks == 0 {
+        return 0.0;
+    }
+
+    if let Some(time_base) = time_base {
+        return time_base
+            .calc_duration(Duration::new(ticks))
+            .map(|time| time.as_secs_f64())
+            .unwrap_or_else(|| ticks as f64);
+    }
+
+    if sample_rate > 0 {
+        ticks as f64 / sample_rate as f64
+    } else {
+        ticks as f64
+    }
+}
+
+fn track_duration_sec(track: &Track) -> Option<f64> {
+    if let (Some(time_base), Some(duration)) = (track.time_base, track.duration) {
+        if let Some(time) = time_base.calc_duration(duration) {
+            return Some(time.as_secs_f64());
+        }
+    }
+
+    let sample_rate = audio_params(track).ok()?.sample_rate.unwrap_or(0);
+    if sample_rate > 0 {
+        if let Some(num_frames) = track.num_frames {
+            return Some(num_frames as f64 / sample_rate as f64);
+        }
+    }
+
+    None
+}
+
+/// Measure the selected track's playable duration by walking its packets.
+///
+/// `Packet::dur` is already gapless/trim-aware (valid frames only), so summing
+/// it is preferred. If a demuxer emits packets without durations, fall back to
+/// the span between the first PTS and the last PTS + decoded block duration.
+fn scan_track_duration_sec(
+    format: &mut dyn FormatReader,
+    track_id: u32,
+    time_base: Option<TimeBase>,
+    sample_rate: u32,
+) -> Result<f64, String> {
+    let mut sum_valid_ticks: u128 = 0;
+    let mut first_pts: Option<i64> = None;
+    let mut last_end: i128 = 0;
+
+    loop {
+        match format.next_packet() {
+            Ok(Some(packet)) => {
+                if packet.track_id != track_id {
+                    continue;
+                }
+
+                sum_valid_ticks = sum_valid_ticks.saturating_add(u128::from(packet.dur.get()));
+                let pts = packet.pts.get();
+                if first_pts.is_none() {
+                    first_pts = Some(pts);
+                }
+                let end = i128::from(pts) + i128::from(packet.block_dur().get());
+                last_end = last_end.max(end);
+            }
+            Ok(None) => break,
+            Err(Error::ResetRequired) => {
+                return Err("symphonia: decoder reset required while measuring duration".to_string())
+            }
+            Err(Error::IoError(_)) => break,
+            Err(e) => return Err(format!("symphonia packet read failed: {e}")),
+        }
+    }
+
+    let ticks = if sum_valid_ticks > 0 {
+        sum_valid_ticks.min(u128::from(u64::MAX)) as u64
+    } else if let Some(first) = first_pts {
+        ((last_end - i128::from(first)).max(0) as u128).min(u128::from(u64::MAX)) as u64
+    } else {
+        0
+    };
+
+    Ok(duration_ticks_to_sec(time_base, ticks, sample_rate))
+}
+
+struct MediaHeader {
+    track: Track,
+    audio_stream_index: usize,
+    sample_rate: u32,
+    channels: u16,
+    total_frames: u64,
+    duration_sec: f64,
+    has_video_stream: bool,
+    container_format: String,
+    audio_stream_count: usize,
+}
+
+fn read_media_header(path: &Path, preferred_stream: Option<usize>) -> Result<MediaHeader, String> {
+    let mut format = open_format(path)?;
+
+    let container_format = format.format_info().short_name.to_string();
+    let has_video_stream = format
+        .tracks()
+        .iter()
+        .any(|track| track.track_type() == Some(TrackType::Video));
+    let audio_stream_count = format
+        .tracks()
+        .iter()
+        .filter(|track| track.track_type() == Some(TrackType::Audio))
+        .count();
+
+    let (selected_track, audio_stream_index) =
+        select_audio_track(format.as_ref(), preferred_stream)?;
+    let track = selected_track.clone();
+    let params = audio_params(&track)?;
+    let sample_rate = params.sample_rate.unwrap_or(0);
+    let channels = params
+        .channels
+        .as_ref()
+        .map(|channels| channels.count())
+        .unwrap_or(1)
+        .max(1) as u16;
+
+    let duration_sec = match track_duration_sec(&track) {
+        Some(duration) => duration,
+        None => scan_track_duration_sec(format.as_mut(), track.id, track.time_base, sample_rate)?,
+    };
+
+    let resolved_sample_rate = if sample_rate > 0 { sample_rate } else { 44100 };
+    let total_frames = track.num_frames.unwrap_or_else(|| {
+        if duration_sec.is_finite() && duration_sec > 0.0 {
+            (duration_sec * resolved_sample_rate as f64)
+                .round()
+                .max(0.0) as u64
+        } else {
+            0
+        }
+    });
+
+    Ok(MediaHeader {
+        track,
+        audio_stream_index,
+        sample_rate: resolved_sample_rate,
+        channels,
+        total_frames,
+        duration_sec,
+        has_video_stream,
+        container_format,
+        audio_stream_count,
+    })
+}
+
+fn find_tag_value(tags: &[Tag], key: &str) -> Option<String> {
+    tags.iter()
+        .find(|tag| tag.raw.key.eq_ignore_ascii_case(key))
+        .map(|tag| tag.raw.value.to_string())
+}
+
+fn track_titles(format: &mut dyn FormatReader) -> HashMap<u32, String> {
+    let mut metadata = format.metadata();
+    let Some(revision) = metadata.skip_to_latest() else {
+        return HashMap::new();
+    };
+
+    revision
+        .per_track
+        .iter()
+        .filter_map(|per_track| {
+            find_tag_value(&per_track.metadata.tags, "title")
+                .map(|title| (per_track.track_id as u32, title))
+        })
+        .collect()
 }
 
 pub fn list_audio_streams(path: &Path) -> Result<Vec<MediaAudioStream>, String> {
-    let ictx = open_input(path)?;
-    let mut out = Vec::new();
+    let mut format = open_format(path)?;
+    let tracks: Vec<Track> = format
+        .tracks()
+        .iter()
+        .filter(|track| track.track_type() == Some(TrackType::Audio))
+        .cloned()
+        .collect();
 
-    for stream in ictx.streams() {
-        if stream.parameters().medium() != media::Type::Audio {
-            continue;
-        }
+    if tracks.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        let index = stream.index();
-        let params = stream.parameters();
-        let decoder = ffmpeg::codec::context::Context::from_parameters(params.clone())
-            .and_then(|ctx| ctx.decoder().audio())
-            .ok();
+    let titles = track_titles(format.as_mut());
 
-        let codec = decoder
-            .as_ref()
-            .and_then(|d| d.codec())
-            .map(|c| c.name().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let mut title = None;
-        let mut language = None;
-        for (key, value) in stream.metadata().iter() {
-            if key.eq_ignore_ascii_case("title") {
-                title = Some(value.to_string());
-            } else if key.eq_ignore_ascii_case("language") {
-                language = Some(value.to_string());
+    // Most demuxers expose a duration on the track itself. Only walk the packet
+    // stream when at least one audio track is missing one.
+    let mut measured_durations: HashMap<u32, f64> = HashMap::new();
+    if tracks
+        .iter()
+        .any(|track| track_duration_sec(track).is_none())
+    {
+        let mut valid_ticks: HashMap<u32, u128> = HashMap::new();
+        loop {
+            match format.next_packet() {
+                Ok(Some(packet)) => {
+                    if tracks.iter().any(|track| track.id == packet.track_id) {
+                        let entry = valid_ticks.entry(packet.track_id).or_insert(0);
+                        *entry = entry.saturating_add(u128::from(packet.dur.get()));
+                    }
+                }
+                Ok(None) => break,
+                Err(Error::IoError(_)) | Err(Error::ResetRequired) => break,
+                Err(_) => break,
             }
         }
 
+        for track in &tracks {
+            if track_duration_sec(track).is_none() {
+                let ticks = valid_ticks.get(&track.id).copied().unwrap_or(0) as u64;
+                let sample_rate = audio_params(track)
+                    .ok()
+                    .and_then(|params| params.sample_rate)
+                    .unwrap_or(0);
+                measured_durations.insert(
+                    track.id,
+                    duration_ticks_to_sec(track.time_base, ticks, sample_rate),
+                );
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(tracks.len());
+    for (index, track) in tracks.into_iter().enumerate() {
+        let params = match audio_params(&track) {
+            Ok(params) => params,
+            Err(_) => continue,
+        };
+
+        let duration_sec = track_duration_sec(&track)
+            .or_else(|| measured_durations.get(&track.id).copied())
+            .unwrap_or(0.0);
+
         out.push(MediaAudioStream {
             index,
-            title,
-            language,
-            codec,
-            sample_rate: decoder.as_ref().map(|d| d.rate()).unwrap_or(0),
-            channels: decoder
-                .as_ref()
-                .map(|d| d.channel_layout().channels() as u16)
-                .unwrap_or(0),
-            duration_sec: duration_for_stream(&ictx, index),
+            title: titles.get(&track.id).cloned(),
+            language: track.language.clone(),
+            codec: codec_name(params),
+            sample_rate: params.sample_rate.unwrap_or(0),
+            channels: params.channels.as_ref().map(|c| c.count()).unwrap_or(0) as u16,
+            duration_sec,
         });
     }
 
@@ -173,99 +406,53 @@ pub fn list_audio_streams(path: &Path) -> Result<Vec<MediaAudioStream>, String> 
 /// Probe the first (or requested) audio stream of a media file.
 ///
 /// When `preview_points > 0`, the complete audio stream is decoded once and a
-/// downsampled min/max preview is produced (same behaviour as the WAV and
-/// Symphonia paths). For header-only calls pass `preview_points = 0`.
+/// downsampled min/max preview is produced (same behaviour as the WAV path).
+/// For header-only calls pass `preview_points = 0`.
 pub fn probe_media(
     path: &Path,
     preview_points: usize,
     preferred_stream: Option<usize>,
 ) -> Option<MediaProbe> {
-    let mut ictx = open_input(path).ok()?;
-    let audio_index = audio_stream_index(&ictx, preferred_stream).ok()?;
-
-    let container_format = ictx.format().name().to_string();
-    let has_video_stream = ictx
-        .streams()
-        .any(|s| s.parameters().medium() == media::Type::Video);
-    let audio_stream_count = ictx
-        .streams()
-        .filter(|s| s.parameters().medium() == media::Type::Audio)
-        .count();
-
-    let stream = ictx.streams().nth(audio_index)?;
-    let params = stream.parameters();
-    let context = ffmpeg::codec::context::Context::from_parameters(params).ok()?;
-    let mut decoder = context.decoder().audio().ok()?;
-    let sample_rate = decoder.rate().max(1);
-    let channels = decoder.channel_layout().channels().max(1) as u16;
-    let duration_sec = duration_for_stream(&ictx, audio_index);
-
-    // AVStream.nb_frames is container-defined and for audio is often the
-    // number of *packets* (e.g. ~19 AAC packets for a 0.4 s MP4), not the
-    // number of PCM sample frames. Trusting it would create clips with a
-    // near-zero length. Derive PCM frames from the stream duration instead.
-    let total_frames = if sample_rate > 0 && duration_sec.is_finite() && duration_sec > 0.0 {
-        (duration_sec * sample_rate as f64).round().max(0.0) as u64
-    } else {
-        0
-    };
+    let header = read_media_header(path, preferred_stream).ok()?;
 
     let waveform_preview = if preview_points > 0 {
-        compute_preview(
-            &mut ictx,
-            &mut decoder,
-            audio_index,
-            sample_rate,
-            channels,
-            total_frames,
-            duration_sec,
-            preview_points,
-        )
+        compute_preview(path, &header, preview_points)
     } else {
         Vec::new()
     };
 
     Some(MediaProbe {
-        sample_rate,
-        channels,
-        duration_sec,
-        total_frames,
+        sample_rate: header.sample_rate,
+        channels: header.channels,
+        duration_sec: header.duration_sec,
+        total_frames: header.total_frames,
         waveform_preview,
-        has_video_stream,
-        container_format,
-        audio_stream_index: audio_index,
-        audio_stream_count,
+        has_video_stream: header.has_video_stream,
+        container_format: header.container_format,
+        audio_stream_index: header.audio_stream_index,
+        audio_stream_count: header.audio_stream_count,
     })
 }
 
-fn compute_preview(
-    ictx: &mut ffmpeg::format::context::Input,
-    decoder: &mut ffmpeg::decoder::Audio,
-    audio_index: usize,
-    sample_rate: u32,
-    channels: u16,
-    total_frames: u64,
-    duration_sec: f64,
-    preview_points: usize,
-) -> Vec<f32> {
+fn compute_preview(path: &Path, header: &MediaHeader, preview_points: usize) -> Vec<f32> {
     let points = preview_points.max(2);
-    let estimated_frames = if total_frames > 0 {
-        total_frames as usize
-    } else if duration_sec > 0.0 {
-        (duration_sec * sample_rate as f64).max(1.0) as usize
+    let estimated_frames = if header.total_frames > 0 {
+        header.total_frames as usize
+    } else if header.duration_sec > 0.0 {
+        (header.duration_sec * header.sample_rate as f64).max(1.0) as usize
     } else {
         0
     };
-    let estimated_samples = estimated_frames.saturating_mul(channels.max(1) as usize);
+    let estimated_samples = estimated_frames.saturating_mul(header.channels.max(1) as usize);
 
     let mut min_bucket = vec![f32::INFINITY; points];
     let mut max_bucket = vec![f32::NEG_INFINITY; points];
     let mut seen_samples = 0usize;
 
-    let _ = visit_audio_frames(
-        ictx,
-        decoder,
-        audio_index,
+    let _ = decode_track_frames_until(
+        path,
+        Some(header.audio_stream_index),
+        usize::MAX,
         &mut |frame: &[f32], _rate: u32, ch: u16| {
             let ch = ch.max(1) as usize;
             for &sample in frame.iter().take(frame.len() / ch * ch) {
@@ -289,7 +476,11 @@ fn compute_preview(
         let min = min_bucket[i];
         let max = max_bucket[i];
         let value = if min.is_finite() && max.is_finite() {
-            if max.abs() >= min.abs() { max } else { min }
+            if max.abs() >= min.abs() {
+                max
+            } else {
+                min
+            }
         } else if min.is_finite() {
             min
         } else if max.is_finite() {
@@ -307,29 +498,12 @@ pub fn decode_media_audio_f32_interleaved(
     path: &Path,
     preferred_stream: Option<usize>,
 ) -> Result<(u32, u16, Vec<f32>), String> {
-    let mut ictx = open_input(path)?;
-    let audio_index = audio_stream_index(&ictx, preferred_stream)?;
-    let stream = ictx
-        .streams()
-        .nth(audio_index)
-        .ok_or_else(|| "ffmpeg: audio stream disappeared".to_string())?;
-    let params = stream.parameters();
-    let context = ffmpeg::codec::context::Context::from_parameters(params)
-        .map_err(|e| ffmpeg_err("ffmpeg codec context failed", e))?;
-    let mut decoder = context
-        .decoder()
-        .audio()
-        .map_err(|e| ffmpeg_err("ffmpeg audio decoder failed", e))?;
-
-    let sample_rate = decoder.rate().max(1);
-    let channels = decoder.channel_layout().channels().max(1) as u16;
     let mut out = Vec::new();
-
-    visit_audio_frames(&mut ictx, &mut decoder, audio_index, &mut |frame, _, _| {
-        out.extend_from_slice(frame);
-        Ok(())
-    })?;
-
+    let (sample_rate, channels, _) =
+        decode_track_frames_until(path, preferred_stream, usize::MAX, &mut |frame, _, _| {
+            out.extend_from_slice(frame);
+            Ok(())
+        })?;
     Ok((sample_rate, channels, out))
 }
 
@@ -342,112 +516,9 @@ pub fn visit_media_audio_frames<F>(
 where
     F: FnMut(&[f32], u32, u16) -> Result<(), String>,
 {
-    let mut ictx = open_input(path)?;
-    let audio_index = audio_stream_index(&ictx, preferred_stream)?;
-    let stream = ictx
-        .streams()
-        .nth(audio_index)
-        .ok_or_else(|| "ffmpeg: audio stream disappeared".to_string())?;
-    let params = stream.parameters();
-    let context = ffmpeg::codec::context::Context::from_parameters(params)
-        .map_err(|e| ffmpeg_err("ffmpeg codec context failed", e))?;
-    let mut decoder = context
-        .decoder()
-        .audio()
-        .map_err(|e| ffmpeg_err("ffmpeg audio decoder failed", e))?;
-    let sample_rate = decoder.rate().max(1);
-    let channels = decoder.channel_layout().channels().max(1) as u16;
-
-    visit_audio_frames(&mut ictx, &mut decoder, audio_index, &mut on_frame)?;
+    let (sample_rate, channels, _) =
+        decode_track_frames_until(path, preferred_stream, usize::MAX, &mut on_frame)?;
     Ok((sample_rate, channels))
-}
-
-fn visit_audio_frames<F>(
-    ictx: &mut ffmpeg::format::context::Input,
-    decoder: &mut ffmpeg::decoder::Audio,
-    audio_index: usize,
-    on_frame: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(&[f32], u32, u16) -> Result<(), String>,
-{
-    let _ = visit_audio_frames_until(ictx, decoder, audio_index, usize::MAX, on_frame)?;
-    Ok(())
-}
-
-fn visit_audio_frames_until<F>(
-    ictx: &mut ffmpeg::format::context::Input,
-    decoder: &mut ffmpeg::decoder::Audio,
-    audio_index: usize,
-    max_frames: usize,
-    on_frame: &mut F,
-) -> Result<bool, String>
-where
-    F: FnMut(&[f32], u32, u16) -> Result<(), String>,
-{
-    let sample_rate = decoder.rate().max(1);
-    let channels = decoder.channel_layout().channels().max(1) as u16;
-    let mut emitted_frames = 0usize;
-
-    for (stream, packet) in ictx.packets() {
-        if stream.index() != audio_index {
-            continue;
-        }
-
-        match decoder.send_packet(&packet) {
-            Ok(()) => {}
-            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => continue,
-            Err(ffmpeg::Error::Eof) => break,
-            Err(e) => return Err(ffmpeg_err("ffmpeg send_packet failed", e)),
-        }
-
-        loop {
-            let mut decoded = ffmpeg::frame::Audio::empty();
-            match decoder.receive_frame(&mut decoded) {
-                Ok(()) => {
-                    let mut interleaved = Vec::new();
-                    append_audio_frame(&decoded, &mut interleaved)?;
-                    if !interleaved.is_empty() {
-                        on_frame(&interleaved, sample_rate, channels)?;
-                        emitted_frames = emitted_frames.saturating_add(
-                            interleaved.len() / (channels as usize).max(1),
-                        );
-                        if emitted_frames >= max_frames {
-                            return Ok(true);
-                        }
-                    }
-                }
-                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => break,
-                Err(ffmpeg::Error::Eof) => break,
-                Err(e) => return Err(ffmpeg_err("ffmpeg receive_frame failed", e)),
-            }
-        }
-    }
-
-    let _ = decoder.send_eof();
-    loop {
-        let mut decoded = ffmpeg::frame::Audio::empty();
-        match decoder.receive_frame(&mut decoded) {
-            Ok(()) => {
-                let mut interleaved = Vec::new();
-                append_audio_frame(&decoded, &mut interleaved)?;
-                if !interleaved.is_empty() {
-                    on_frame(&interleaved, sample_rate, channels)?;
-                    emitted_frames = emitted_frames.saturating_add(
-                        interleaved.len() / (channels as usize).max(1),
-                    );
-                    if emitted_frames >= max_frames {
-                        return Ok(true);
-                    }
-                }
-            }
-            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => continue,
-            Err(ffmpeg::Error::Eof) => break,
-            Err(_) => break,
-        }
-    }
-
-    Ok(false)
 }
 
 /// Decode at most `max_frames` sample frames from a media file. Used by the
@@ -458,48 +529,115 @@ pub fn decode_media_audio_prefix_f32(
     preferred_stream: Option<usize>,
     max_frames: usize,
 ) -> Result<(u32, u16, Vec<f32>), String> {
-    let mut ictx = open_input(path)?;
-    let audio_index = audio_stream_index(&ictx, preferred_stream)?;
-    let stream = ictx
-        .streams()
-        .nth(audio_index)
-        .ok_or_else(|| "ffmpeg: audio stream disappeared".to_string())?;
-    let params = stream.parameters();
-    let context = ffmpeg::codec::context::Context::from_parameters(params)
-        .map_err(|e| ffmpeg_err("ffmpeg codec context failed", e))?;
-    let mut decoder = context
-        .decoder()
-        .audio()
-        .map_err(|e| ffmpeg_err("ffmpeg audio decoder failed", e))?;
-    let sample_rate = decoder.rate().max(1);
-    let channels = decoder.channel_layout().channels().max(1) as u16;
     let mut out = Vec::new();
-
-    visit_audio_frames_until(
-        &mut ictx,
-        &mut decoder,
-        audio_index,
+    let (sample_rate, channels, _) = decode_track_frames_until(
+        path,
+        preferred_stream,
         max_frames.max(1),
         &mut |frame, _, _| {
             out.extend_from_slice(frame);
             Ok(())
         },
     )?;
-
     Ok((sample_rate, channels, out))
 }
 
+fn decode_track_frames_until<F>(
+    path: &Path,
+    preferred_stream: Option<usize>,
+    max_frames: usize,
+    on_frame: &mut F,
+) -> Result<(u32, u16, bool), String>
+where
+    F: FnMut(&[f32], u32, u16) -> Result<(), String>,
+{
+    let mut format = open_format(path)?;
+    let (selected_track, _) = select_audio_track(format.as_ref(), preferred_stream)?;
+    let track = selected_track.clone();
+    let params = audio_params(&track)?.clone();
+
+    let mut decoder = codec_registry()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .map_err(|e| format!("symphonia audio decoder failed: {e}"))?;
+
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
+    let declared_channels = params
+        .channels
+        .as_ref()
+        .map(|c| c.count())
+        .unwrap_or(1)
+        .max(1) as u16;
+    let track_id = track.id;
+    let mut emitted_frames = 0usize;
+    let mut frame_buf: Vec<f32> = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(Error::ResetRequired) => {
+                return Err("symphonia: decoder reset required".to_string())
+            }
+            Err(Error::IoError(_)) => break,
+            Err(e) => return Err(format!("symphonia packet read failed: {e}")),
+        };
+
+        if packet.track_id != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(Error::DecodeError(_)) => continue,
+            Err(Error::IoError(_)) => break,
+            Err(Error::ResetRequired) => {
+                return Err("symphonia: decoder reset required".to_string())
+            }
+            Err(e) => return Err(format!("symphonia decode failed: {e}")),
+        };
+
+        if decoded.is_empty() {
+            continue;
+        }
+
+        let spec = decoded.spec();
+        if sample_rate == 0 {
+            sample_rate = spec.rate().max(1);
+        }
+        let channels = spec.channels().count().max(1) as u16;
+
+        frame_buf.clear();
+        decoded.copy_to_vec_interleaved::<f32>(&mut frame_buf);
+
+        if !frame_buf.is_empty() {
+            on_frame(&frame_buf, sample_rate, channels)?;
+            emitted_frames = emitted_frames.saturating_add(frame_buf.len() / channels as usize);
+            if emitted_frames >= max_frames {
+                return Ok((
+                    if sample_rate > 0 { sample_rate } else { 44100 },
+                    channels,
+                    true,
+                ));
+            }
+        }
+    }
+
+    let _ = decoder.finalize();
+
+    Ok((
+        if sample_rate > 0 { sample_rate } else { 44100 },
+        declared_channels,
+        false,
+    ))
+}
 
 /// Extract one audio stream of a media file to a WAV file next to the source.
 ///
 /// The cache file is named `<stem>.hifi_audio_<stream>.wav` and is overwritten
 /// on every call so stale extracts can never desynchronize from the source.
-pub fn extract_audio_stream_to_wav(
-    path: &Path,
-    stream_index: usize,
-) -> Result<String, String> {
+pub fn extract_audio_stream_to_wav(path: &Path, stream_index: usize) -> Result<String, String> {
     let probe = probe_media(path, 0, Some(stream_index))
-        .ok_or_else(|| format!("ffmpeg failed to probe stream {stream_index}"))?;
+        .ok_or_else(|| format!("symphonia failed to probe stream {stream_index}"))?;
     let sample_rate = probe.sample_rate.max(1);
     let channels = probe.channels.max(1);
 
@@ -536,7 +674,11 @@ pub fn extract_audio_stream_to_wav(
             })?
         }
     };
-    let out_path = if out_path.exists() { out_path } else { temp_fallback };
+    let out_path = if out_path.exists() {
+        out_path
+    } else {
+        temp_fallback
+    };
 
     visit_media_audio_frames(path, Some(stream_index), |frame, _sr, _ch| {
         for &sample in frame {
@@ -544,121 +686,10 @@ pub fn extract_audio_stream_to_wav(
         }
         Ok(())
     })
-    .map_err(|e| format!("ffmpeg stream extraction failed: {e}"))?;
+    .map_err(|e| format!("symphonia stream extraction failed: {e}"))?;
 
     writer.finalize().map_err(|e| e.to_string())?;
     Ok(out_path.to_string_lossy().into_owned())
-}
-
-fn read_plane<T: Copy>(frame: &ffmpeg::frame::Audio, index: usize, samples: usize) -> &[T] {
-    let bytes = frame.data(index);
-    let count = (bytes.len() / std::mem::size_of::<T>()).min(samples);
-    // FFmpeg allocates audio buffers with sufficient alignment for the sample type.
-    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const T, count) }
-}
-
-fn read_packed<T: Copy>(frame: &ffmpeg::frame::Audio, samples: usize, channels: usize) -> &[T] {
-    let bytes = frame.data(0);
-    let count = (bytes.len() / std::mem::size_of::<T>()).min(samples.saturating_mul(channels));
-    // FFmpeg allocates audio buffers with sufficient alignment for the sample type.
-    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const T, count) }
-}
-
-fn append_audio_frame(frame: &ffmpeg::frame::Audio, out: &mut Vec<f32>) -> Result<(), String> {
-    let samples = frame.samples();
-    let channels = frame.channels().max(1) as usize;
-    if samples == 0 || channels == 0 {
-        return Ok(());
-    }
-
-    let planar = frame.is_planar();
-
-    match frame.format() {
-        Sample::U8(_) => {
-            if planar {
-                for frame_idx in 0..samples {
-                    for ch in 0..channels {
-                        let v = frame.plane::<u8>(ch).get(frame_idx).copied().unwrap_or(128);
-                        out.push(v as f32 / 128.0 - 1.0);
-                    }
-                }
-            } else {
-                for &v in read_packed::<u8>(frame, samples, channels) {
-                    out.push(v as f32 / 128.0 - 1.0);
-                }
-            }
-        }
-        Sample::I16(_) => {
-            if planar {
-                for frame_idx in 0..samples {
-                    for ch in 0..channels {
-                        let v = frame.plane::<i16>(ch).get(frame_idx).copied().unwrap_or(0);
-                        out.push(v as f32 / 32768.0);
-                    }
-                }
-            } else {
-                for &v in read_packed::<i16>(frame, samples, channels) {
-                    out.push(v as f32 / 32768.0);
-                }
-            }
-        }
-        Sample::I32(_) => {
-            if planar {
-                for frame_idx in 0..samples {
-                    for ch in 0..channels {
-                        let v = frame.plane::<i32>(ch).get(frame_idx).copied().unwrap_or(0);
-                        out.push(v as f32 / 2_147_483_648.0);
-                    }
-                }
-            } else {
-                for &v in read_packed::<i32>(frame, samples, channels) {
-                    out.push(v as f32 / 2_147_483_648.0);
-                }
-            }
-        }
-        Sample::I64(_) => {
-            if planar {
-                for ch in 0..channels {
-                    for &v in read_plane::<i64>(frame, ch, samples) {
-                        out.push((v as f64 / 9_223_372_036_854_775_808.0) as f32);
-                    }
-                }
-            } else {
-                for &v in read_packed::<i64>(frame, samples, channels) {
-                    out.push((v as f64 / 9_223_372_036_854_775_808.0) as f32);
-                }
-            }
-        }
-        Sample::F32(_) => {
-            if planar {
-                for frame_idx in 0..samples {
-                    for ch in 0..channels {
-                        let v = frame.plane::<f32>(ch).get(frame_idx).copied().unwrap_or(0.0);
-                        out.push(v);
-                    }
-                }
-            } else {
-                out.extend_from_slice(read_packed::<f32>(frame, samples, channels));
-            }
-        }
-        Sample::F64(_) => {
-            if planar {
-                for frame_idx in 0..samples {
-                    for ch in 0..channels {
-                        let v = frame.plane::<f64>(ch).get(frame_idx).copied().unwrap_or(0.0);
-                        out.push(v as f32);
-                    }
-                }
-            } else {
-                for &v in read_packed::<f64>(frame, samples, channels) {
-                    out.push(v as f32);
-                }
-            }
-        }
-        Sample::None => {}
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -676,10 +707,31 @@ mod tests {
         assert!(probe.duration_sec > 0.0);
         assert_eq!(probe.waveform_preview.len(), 32);
 
-        let (sr, ch, pcm) = decode_media_audio_f32_interleaved(Path::new(&path), None)
-            .expect("decode");
+        let (sr, ch, pcm) =
+            decode_media_audio_f32_interleaved(Path::new(&path), None).expect("decode");
         assert!(sr > 0);
         assert!(ch > 0);
         assert!(pcm.len() >= probe.total_frames as usize * ch as usize / 2);
+    }
+
+    #[test]
+    fn decodes_audio_when_demo_mp3_present() {
+        let path =
+            Path::new("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+        if !path.is_file() {
+            return;
+        }
+
+        let probe = probe_media(path, 16, None).expect("probe demo mp3");
+        assert!(probe.sample_rate > 0);
+        assert!(probe.channels > 0);
+        assert!(probe.duration_sec > 0.0);
+        assert_eq!(probe.waveform_preview.len(), 16);
+
+        let (sr, ch, pcm) =
+            decode_media_audio_f32_interleaved(path, None).expect("decode demo mp3");
+        assert!(sr > 0);
+        assert!(ch > 0);
+        assert!(!pcm.is_empty());
     }
 }

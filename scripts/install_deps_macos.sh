@@ -39,8 +39,3 @@ fi
 echo "[install_deps_macos] Done"
 
 echo "[install_deps_macos] Note: create-dmg global install is handled by CI after Node setup"
-
-# Provision an LGPL shared FFmpeg build (dynamic linking only).
-if [ "${SKIP_FFMPEG:-0}" != "1" ]; then
-  bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install_ffmpeg_macos.sh"
-fi
