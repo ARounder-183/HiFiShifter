@@ -1212,6 +1212,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     playheadZoomEnabled={s.playheadZoomEnabled}
                     className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
                     data-timeline-scroller
+                    onDoubleClickCapture={(e) => {
+                        // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择。
+                        if (isEditableTarget(e.target)) return;
+                        e.preventDefault();
+                    }}
                     onScroll={(e) => {
                         const el = e.currentTarget as HTMLDivElement;
                         setTimelineScrollTop(el.scrollTop);
