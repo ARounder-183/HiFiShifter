@@ -10,6 +10,9 @@ export const IS_MAC =
     typeof navigator !== "undefined" &&
     /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
 
+export const IS_LINUX =
+    typeof navigator !== "undefined" && /Linux/i.test(navigator.platform || navigator.userAgent);
+
 export type ModifierEventLike = {
     ctrlKey: boolean;
     metaKey?: boolean;
