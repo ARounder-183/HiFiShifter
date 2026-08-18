@@ -792,6 +792,45 @@ fn read_pitch_for_clip(
     Ok((curve, fp))
 }
 
+// ── 选择音高来源 ─────────────────────────────────────────────────────────────
+
+/// 选择导出用的音高数据来源。
+///
+/// - Compose 轨道：优先使用 track 级曲线（包含 pitch_edit、子轨偏移等）。
+/// - 非 Compose 轨道：track 级曲线通常只是全零占位，因此当请求带有
+///   `clip_id` 时，自动退回 clip 级读取：MIDI clip 直接展开音符，音频 clip
+///   按需运行 FCPE。这样用户无需手动开启 Compose 也能完成导出。
+fn read_pitch_for_export(
+    timeline: &TimelineState,
+    entry: &MidiExportTrackEntry,
+) -> Result<(Vec<f32>, f64), String> {
+    let compose_enabled = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == entry.root_track_id)
+        .map(|track| track.compose_enabled)
+        .unwrap_or(false);
+
+    let track_has_pitch = timeline
+        .params_by_root_track
+        .get(&entry.root_track_id)
+        .map(|params| {
+            params.pitch_orig.iter().any(|value| *value > 0.0)
+                || params.pitch_edit.iter().any(|value| *value > 0.0)
+        })
+        .unwrap_or(false);
+
+    if entry.clip_id.is_some() && (!compose_enabled || !track_has_pitch) {
+        match read_pitch_for_clip(timeline, entry) {
+            Ok(values) => return Ok(values),
+            // clip 级读取失败时继续尝试 track 级数据，避免丢失已有的音高编辑。
+            Err(_) => {}
+        }
+    }
+
+    read_pitch_for_track(timeline, entry)
+}
+
 // ── 主入口 ────────────────────────────────────────────────────────────────────
 
 pub(super) fn export_pitch_to_midi(
@@ -825,42 +864,20 @@ pub(super) fn export_pitch_to_midi(
 
         let name_bytes: &'static [u8] = Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
 
-        let (pitch_values, fp) = match read_pitch_for_track(&timeline, entry) {
+        let (pitch_values, fp) = match read_pitch_for_export(&timeline, entry) {
             Ok(v) => v,
             Err(_) => {
-                // Fallback: 尝试从 clip 级读取（非 Compose 轨道）
-                if entry.clip_id.is_some() {
-                    match read_pitch_for_clip(&timeline, entry) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            midi_tracks.push(vec![
-                                TrackEvent {
-                                    delta: delta_u28(0),
-                                    kind: TrackEventKind::Meta(MetaMessage::TrackName(
-                                        name_bytes,
-                                    )),
-                                },
-                                TrackEvent {
-                                    delta: delta_u28(0),
-                                    kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-                                },
-                            ]);
-                            continue;
-                        }
-                    }
-                } else {
-                    midi_tracks.push(vec![
-                        TrackEvent {
-                            delta: delta_u28(0),
-                            kind: TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)),
-                        },
-                        TrackEvent {
-                            delta: delta_u28(0),
-                            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-                        },
-                    ]);
-                    continue;
-                }
+                midi_tracks.push(vec![
+                    TrackEvent {
+                        delta: delta_u28(0),
+                        kind: TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)),
+                    },
+                    TrackEvent {
+                        delta: delta_u28(0),
+                        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+                    },
+                ]);
+                continue;
             }
         };
 
@@ -1015,5 +1032,47 @@ mod tests {
         assert_eq!(converter.sec_to_ticks(4.0), 2_880);
         assert_eq!(converter.sec_to_ticks(5.0), 3_600);
         assert_eq!(converter.sec_to_ticks(6.0), 4_560);
+    }
+
+    #[test]
+    fn non_compose_export_reads_midi_clip_fallback() {
+        use super::{read_pitch_for_export, EXPORT_FRAME_PERIOD_MS, MidiExportTrackEntry};
+        use crate::midi_import::MidiNoteEvent;
+
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        timeline.ensure_params_for_root(&root_id);
+        assert!(timeline.params_by_root_track.contains_key(&root_id));
+
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("MIDI Clip".to_string()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.midi_note_data = Some(vec![MidiNoteEvent {
+                start_sec: 0.5,
+                end_sec: 1.0,
+                note: 60.0,
+                velocity: 100,
+                channel: 0,
+            }]);
+        }
+
+        let entry = MidiExportTrackEntry {
+            track_id: root_id.clone(),
+            root_track_id: root_id,
+            name: "MIDI Clip".to_string(),
+            start_sec: 0.0,
+            end_sec: 2.0,
+            clip_id: Some(clip_id),
+        };
+
+        // 即使 Compose 关闭且 track 级曲线为空，也应自动走 clip 级读取。
+        let (pitch, fp) = read_pitch_for_export(&timeline, &entry).expect("clip fallback export");
+        assert_eq!(fp, EXPORT_FRAME_PERIOD_MS);
+        assert!(pitch.iter().any(|value| *value > 0.0));
     }
 }
