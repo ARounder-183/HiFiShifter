@@ -3,3 +3,18 @@
 #
 # Platform-specific Cargo configs can be placed in:
 #   .cargo/config-windows.toml   .cargo/config-macos.toml   .cargo/config-linux.toml
+
+# fdk-aac-sys 0.5.0 does not map MSVC's _M_ARM64 to the architecture macros
+# used by FDK_archdef.h. Without a define the header falls into its "#warning"
+# fallback, and MSVC rejects the #warning directive itself (fatal error C1021).
+#
+# Do NOT define __arm__ here: FDK_archdef.h would then take its ARM branch and
+# expose GNU __attribute__ syntax in hbe.cpp to MSVC (compile error). Instead
+# select FDK's generic __x86__ profile, whose fixed-point preference macros are
+# identical to the ARMv8 profile and which is the same code path FDK already
+# uses for successful MSVC x64 builds (_M_X64 -> __x86__).
+#
+# CXXFLAGS only: fdk-aac-sys compiles .cpp sources; other cc consumers on this
+# target are C or must not receive the define.
+[env]
+CXXFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
