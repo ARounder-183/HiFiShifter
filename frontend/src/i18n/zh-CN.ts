@@ -66,7 +66,10 @@ export const zhCN = {
     menu_exit: "退出",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "导入音频...",
+    media_stream_select_title: "选择音轨",
+    media_stream_select_hint: "该视频包含多个音轨，请选择要抽取并导入的音轨。",
+    media_stream_track: "音轨",
+    menu_import_media: "导入媒体文件...",
     menu_import_reaper: "导入 Reaper 工程...",
     menu_import_vocalshifter: "导入 VocalShifter 工程...",
     menu_import_hifishifter: "导入 HiFiShifter 工程...",
@@ -263,8 +266,8 @@ export const zhCN = {
     status_target_original: "原音",
     status_target_synthesized: "合成",
     status_target_none: "空闲",
-    dropped_audio_imported: "已导入拖拽音频",
-    import_audio_failed: "导入音频失败",
+    dropped_audio_imported: "已导入拖拽媒体文件",
+    import_audio_failed: "导入媒体文件失败",
 
     menu_about: "关于 HiFiShifter",
     glue: "胶合",
@@ -330,11 +333,6 @@ export const zhCN = {
     ctx_unreverse_selected: "取消倒放选中项",
     clip_replace_same_source_confirm:
         "工程中还有其他音频块使用与当前音频块相同的源文件路径。是否同时替换这些同源音频块？",
-    missing_file_replace_title: "缺失文件",
-    missing_file_replace_desc: "找不到以下音频文件。是否手动指定替代文件？",
-    missing_file_replace_pick: "选择替代文件",
-
-    // 源文件变更检测（窗口重新获得焦点时触发）
     source_file_changed_title: "源文件已变更",
     source_file_changed_modified_desc: "以下音频文件已在外部被修改。是否重新加载到工程中？",
     source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",
@@ -360,7 +358,7 @@ export const zhCN = {
     color_green: "绿",
     color_orange: "橙",
     color_pink: "粉",
-    color_sky_blue: "天蓝",
+    color_magenta: "洋红",
     color_yellow: "黄",
     color_red: "红",
 
@@ -732,7 +730,7 @@ export const zhCN = {
     fb_sort_size: "大小",
     fb_sort_label: "排序",
     fb_regex_error: "无效的正则表达式",
-    fb_audio_only: "仅显示音频文件",
+    fb_audio_only: "仅显示媒体文件",
 
     // Edit menu new items
     menu_deselect: "取消选择",

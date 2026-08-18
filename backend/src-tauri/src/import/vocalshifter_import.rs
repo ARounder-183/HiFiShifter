@@ -45,9 +45,6 @@ fn segment_overlap_sec(left_timeline_sec: f64, right_timeline_sec: f64) -> f64 {
         .min(SEGMENT_OVERLAP_MAX_SEC * 0.5)
 }
 
-/// HiFiShifter 支持的音频格式扩展名
-const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "m4a"];
-
 /// 标准 MIDI 文件扩展名
 const SUPPORTED_MIDI_EXTS: &[&str] = &["mid", "midi", "smf"];
 
@@ -502,15 +499,20 @@ fn new_clip_id() -> String {
 
 /// 判断音频文件扩展名是否被 HiFiShifter 支持。
 fn is_audio_supported(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            SUPPORTED_AUDIO_EXTS
-                .iter()
-                .any(|&ext| ext.eq_ignore_ascii_case(e))
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(Path::new(path))
+}
+
+/// 导入时读取音频信息。视频源只做 header 探测，避免在导入阶段全量
+/// 解码整条音轨；波形峰值由前端后续异步生成。
+fn read_audio_info_for_import(
+    path: &str,
+    preview_points: usize,
+) -> Option<crate::audio_utils::WavInfo> {
+    if crate::media::is_video_extension(Path::new(path)) {
+        crate::audio_utils::try_read_audio_header_only(Path::new(path))
+    } else {
+        crate::audio_utils::try_read_wav_info(Path::new(path), preview_points)
+    }
 }
 
 fn is_midi_file(path: &str) -> bool {
@@ -623,7 +625,7 @@ fn convert_volume(vs_volume: f64) -> f32 {
 
 /// 轨道颜色调色板（与 state.rs 中一致）
 const TRACK_COLORS: &[&str] = &[
-    "#6f8fa9", "#8c7fa3", "#6f9581", "#aa7f67", "#9a6f82", "#6e95a0", "#a39061", "#996d68",
+    "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e", "#d94f4a",
 ];
 
 fn clip_color() -> String {
@@ -890,18 +892,18 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         let item_start_sec = base.start_sample / sample_rate;
 
         // 读取音频文件信息
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
 
         // 处理时间拉伸标记
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
@@ -1622,18 +1624,18 @@ pub fn import_vsp_clipboard(
         let item_start_sec = base.start_sample / sample_rate + time_offset;
 
         // 读取音频文件信息
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
         let pitch_points = ext.map(|e| &e.pitch_points[..]).unwrap_or(&[]);
 
@@ -2174,18 +2176,18 @@ fn import_vsp_clipboard_selected_tracks(
 
         let item_start_sec = base.start_sample / sample_rate;
 
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
         let pitch_points = ext.map(|e| &e.pitch_points[..]).unwrap_or(&[]);
 

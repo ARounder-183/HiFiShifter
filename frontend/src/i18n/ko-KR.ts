@@ -67,7 +67,10 @@ export const koKR = {
     menu_exit: "종료",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "오디오 가져오기...",
+    media_stream_select_title: "오디오 트랙 선택",
+    media_stream_select_hint: "이 동영상에는 여러 오디오 트랙이 포함되어 있습니다. 추출하여 가져올 트랙을 선택하세요.",
+    media_stream_track: "트랙",
+    menu_import_media: "미디어 파일 가져오기...",
     menu_import_reaper: "Reaper 프로젝트 가져오기...",
     menu_import_vocalshifter: "VocalShifter 프로젝트 가져오기...",
     menu_import_hifishifter: "HiFiShifter 프로젝트 가져오기...",
@@ -352,8 +355,8 @@ export const koKR = {
     status_target_original: "원본",
     status_target_synthesized: "합성",
     status_target_none: "대기 중",
-    dropped_audio_imported: "드롭된 오디오를 가져왔습니다",
-    import_audio_failed: "오디오 가져오기에 실패했습니다",
+    dropped_audio_imported: "드롭된 미디어를 가져왔습니다",
+    import_audio_failed: "미디어 가져오기에 실패했습니다",
 
     menu_about: "HiFiShifter 정보",
     glue: "붙이기",
@@ -420,12 +423,6 @@ export const koKR = {
     ctx_unreverse_selected: "선택 항목 역재생 해제",
     clip_replace_same_source_confirm:
         "프로젝트 안에 선택한 클립과 같은 원본 파일 경로를 사용하는 다른 클립이 있습니다. 같은 원본 경로를 사용하는 클립도 함께 교체할까요?",
-    missing_file_replace_title: "파일을 찾을 수 없음",
-    missing_file_replace_desc:
-        "다음 오디오 파일을 찾을 수 없습니다. 대체 파일을 수동으로 지정하시겠습니까?",
-    missing_file_replace_pick: "대체 파일 선택",
-
-    // 소스 파일 변경 감지 (창이 포커스를 다시 얻을 때 트리거)
     source_file_changed_title: "소스 파일 변경됨",
     source_file_changed_modified_desc:
         "다음 오디오 파일이 외부에서 수정되었습니다. 프로젝트에 다시 로드하시겠습니까?",
@@ -453,7 +450,7 @@ export const koKR = {
     color_green: "초록",
     color_orange: "주황",
     color_pink: "분홍",
-    color_sky_blue: "하늘",
+    color_magenta: "마젠타",
     color_yellow: "노랑",
     color_red: "빨강",
 
@@ -833,7 +830,7 @@ export const koKR = {
     fb_sort_size: "크기",
     fb_sort_label: "정렬",
     fb_regex_error: "잘못된 정규 표현식",
-    fb_audio_only: "오디오 파일만 표시",
+    fb_audio_only: "미디어 파일만 표시",
 
     // 편집 메뉴 새 항목
     menu_deselect: "선택 해제",

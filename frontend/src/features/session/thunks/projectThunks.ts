@@ -1,46 +1,6 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import type { SessionState } from "../sessionSlice";
-import type { TimelineResult } from "../../../types/api";
-import { requestMissingFileReplacement } from "./missingFilePrompt";
-import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
-
-async function resolveMissingFilesInteractively<T extends TimelineResult>(
-    timeline: T,
-    missingFiles: string[] | undefined,
-): Promise<T> {
-    let latestTimeline = timeline;
-    const uniquePaths = Array.from(
-        new Set((missingFiles ?? []).filter((p) => typeof p === "string" && p.trim().length > 0)),
-    );
-
-    for (const missingPath of uniquePaths) {
-        const shouldPick = await requestMissingFileReplacement(missingPath);
-        if (!shouldPick) continue;
-
-        const picked = await webApi.openAudioDialog();
-        if (!picked.ok || picked.canceled || !picked.path) continue;
-
-        const targetClipIds = (latestTimeline?.clips ?? [])
-            .filter((clip) => clip?.source_path === missingPath)
-            .map((clip) => clip.id)
-            .filter((id: unknown): id is string => typeof id === "string");
-
-        if (targetClipIds.length === 0) continue;
-
-        const replaced = await webApi.replaceClipSource({
-            clipIds: targetClipIds,
-            newSourcePath: picked.path,
-            replaceSameSource: true,
-        });
-        if (replaced?.ok) {
-            waveformMipmapStore.invalidate(picked.path);
-            latestTimeline = replaced as T;
-        }
-    }
-
-    return latestTimeline;
-}
 
 export const undoRemote = createAsyncThunk("session/undoRemote", async () => {
     return webApi.undoTimeline();
@@ -62,8 +22,7 @@ export const openProjectFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
-        let timeline = await webApi.openProject(picked.path);
-        timeline = await resolveMissingFilesInteractively(timeline, timeline?.missing_files);
+        const timeline = await webApi.openProject(picked.path);
         return { ok: true, canceled: false, timeline } as const;
     },
 );
@@ -71,8 +30,7 @@ export const openProjectFromDialog = createAsyncThunk(
 export const openProjectFromPath = createAsyncThunk(
     "session/openProjectFromPath",
     async (projectPath: string) => {
-        let timeline = await webApi.openProject(projectPath);
-        timeline = await resolveMissingFilesInteractively(timeline, timeline?.missing_files);
+        const timeline = await webApi.openProject(projectPath);
         return timeline;
     },
 );
@@ -172,14 +130,10 @@ export const openVocalShifterFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
-        let result = await webApi.importVocalShifterProject(picked.path);
+        const result = await webApi.importVocalShifterProject(picked.path);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(
-            result,
-            result.missing_files,
-        );
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -200,11 +154,10 @@ export const openVocalShifterFromDialog = createAsyncThunk(
 export const openVocalShifterFromPath = createAsyncThunk(
     "session/openVocalShifterFromPath",
     async (vspPath: string, { rejectWithValue, getState }) => {
-        let result = await webApi.importVocalShifterProject(vspPath);
+        const result = await webApi.importVocalShifterProject(vspPath);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -244,11 +197,10 @@ export const importProjectFromPath = createAsyncThunk(
         },
         { rejectWithValue, getState },
     ) => {
-        let result = await webApi.importProject(payload);
+        const result = await webApi.importProject(payload);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_project_failed");
         }
-        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -277,11 +229,10 @@ export const openReaperFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
-        let result = await webApi.importReaperProject(picked.path);
+        const result = await webApi.importReaperProject(picked.path);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -302,11 +253,10 @@ export const openReaperFromDialog = createAsyncThunk(
 export const openReaperFromPath = createAsyncThunk(
     "session/openReaperFromPath",
     async (rppPath: string, { rejectWithValue, getState }) => {
-        let result = await webApi.importReaperProject(rppPath);
+        const result = await webApi.importReaperProject(rppPath);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        result = await resolveMissingFilesInteractively(result, result.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );

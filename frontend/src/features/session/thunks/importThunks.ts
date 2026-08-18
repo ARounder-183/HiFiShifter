@@ -1,5 +1,7 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
+import { fileBrowserApi } from "../../../services/api";
+import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
 import type { SessionState } from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
@@ -88,6 +90,26 @@ export const importAudioFromDialog = createAsyncThunk(
             };
         }
 
+        // 多音轨视频：让用户在“文件”菜单导入流程中选择要抽取的音轨。
+        if (isVideoFilePath(firstPath)) {
+            try {
+                const streams = await fileBrowserApi.getMediaAudioStreams(firstPath);
+                if (Array.isArray(streams) && streams.length > 1) {
+                    return {
+                        ok: true,
+                        canceled: false,
+                        path: firstPath,
+                        requiresStreamChoice: true,
+                        mediaAudioStreams: streams,
+                        trackId,
+                        startSec,
+                    };
+                }
+            } catch {
+                // 流枚举失败时退回默认音轨导入。
+            }
+        }
+
         // Delegate to importAudioAtPosition so imported clips start at playhead
         // and selection/undo handling is consistent with other import flows.
         try {
@@ -117,8 +139,13 @@ export const importAudioFromPath = createAsyncThunk(
         dispatch(setAudioPathAction(audioPath));
         const imported = await webApi.importAudioItem(audioPath);
         if (!(imported as { ok?: boolean }).ok) {
+            const failure = imported as {
+                error?: { message?: string };
+                missing_files?: string[];
+            };
             return rejectWithValue(
-                (imported as { error?: { message?: string } }).error?.message ??
+                failure.error?.message ??
+                    failure.missing_files?.[0] ??
                     "import_audio_item_failed",
             );
         }
@@ -146,6 +173,7 @@ export const importAudioAtPosition = createAsyncThunk(
             trackId?: string | null;
             startSec?: number;
             normalizeAfterImport?: boolean;
+            mediaAudioStreamIndex?: number;
         },
         { dispatch, rejectWithValue, getState },
     ) => {
@@ -185,10 +213,16 @@ export const importAudioAtPosition = createAsyncThunk(
                 payload.audioPath,
                 targetTrackId,
                 payload.startSec,
+                payload.mediaAudioStreamIndex,
             );
             if (!(imported as { ok?: boolean }).ok) {
+                const failure = imported as {
+                    error?: { message?: string };
+                    missing_files?: string[];
+                };
                 return rejectWithValue(
-                    (imported as { error?: { message?: string } }).error?.message ??
+                    failure.error?.message ??
+                        failure.missing_files?.[0] ??
                         "import_audio_item_failed",
                 );
             }

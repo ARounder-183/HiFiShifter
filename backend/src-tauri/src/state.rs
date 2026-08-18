@@ -2531,14 +2531,14 @@ pub(crate) fn new_id(prefix: &str) -> String {
 }
 
 const TRACK_COLOR_PALETTE: &[&str] = &[
-    "#6f8fa9", // 烟蓝
-    "#8c7fa3", // 石紫
-    "#6f9581", // 苔绿
-    "#aa7f67", // 铜橙
-    "#9a6f82", // 酒粉
-    "#6e95a0", // 雾青
-    "#a39061", // 暗金
-    "#996d68", // 铁锈红
+    "#4a8fd1", // 蓝
+    "#7b6bc4", // 紫
+    "#43a875", // 绿
+    "#cf6f2e", // 橙
+    "#f087b5", // 粉
+    "#b845a5", // 洋红
+    "#f0d25e", // 黄
+    "#d94f4a", // 红
 ];
 
 fn track_palette_color(index: usize) -> String {
@@ -4949,7 +4949,16 @@ impl TimelineState {
         let mut source_sample_rate: Option<u32> = None;
         let mut waveform_preview: Option<Vec<f32>> = None;
 
-        match try_read_wav_info(Path::new(audio_path), 4096) {
+        // 视频文件导入只做 O(1) header 探测，不在导入线程里全量解码；
+        // 波形由前端按需异步请求峰值缓存生成。
+        let is_video_source = crate::media::is_video_extension(Path::new(audio_path));
+        let import_info = if is_video_source {
+            crate::audio_utils::try_read_audio_header_only(Path::new(audio_path))
+        } else {
+            crate::audio_utils::try_read_wav_info(Path::new(audio_path), 4096)
+        };
+
+        match import_info {
             Some(info) => {
                 if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                     let mut max_amp = 0.0f32;

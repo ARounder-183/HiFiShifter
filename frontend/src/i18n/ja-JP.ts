@@ -70,7 +70,10 @@ export const jaJP = {
     menu_exit: "終了",
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
-    menu_import_audio: "オーディオをインポート...",
+    media_stream_select_title: "音声トラックを選択",
+    media_stream_select_hint: "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
+    media_stream_track: "トラック",
+    menu_import_media: "メディアファイルをインポート...",
     menu_import_reaper: "Reaper プロジェクトをインポート...",
     menu_import_vocalshifter: "VocalShifter プロジェクトをインポート...",
     menu_import_hifishifter: "HiFiShifter プロジェクトをインポート...",
@@ -278,8 +281,8 @@ export const jaJP = {
     status_target_original: "原音",
     status_target_synthesized: "合成音",
     status_target_none: "待機中",
-    dropped_audio_imported: "ドロップされたオーディオをインポートしました",
-    import_audio_failed: "オーディオのインポートに失敗しました",
+    dropped_audio_imported: "ドロップされたメディアをインポートしました",
+    import_audio_failed: "メディアのインポートに失敗しました",
 
     menu_about: "HiFiShifter について",
     glue: "グルー",
@@ -345,12 +348,6 @@ export const jaJP = {
     ctx_unreverse_selected: "選択項目の逆再生を解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
-    missing_file_replace_title: "ファイルが見つかりません",
-    missing_file_replace_desc:
-        "以下の音声ファイルが見つかりません。代替ファイルを手動で指定しますか？",
-    missing_file_replace_pick: "代替ファイルを選択",
-
-    // ソースファイル変更検出（ウィンドウがフォーカスを取得した時にトリガー）
     source_file_changed_title: "ソースファイルが変更されました",
     source_file_changed_modified_desc:
         "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",
@@ -378,7 +375,7 @@ export const jaJP = {
     color_green: "グリーン",
     color_orange: "オレンジ",
     color_pink: "ピンク",
-    color_sky_blue: "スカイブルー",
+    color_magenta: "マゼンタ",
     color_yellow: "イエロー",
     color_red: "レッド",
 
@@ -758,7 +755,7 @@ export const jaJP = {
     fb_sort_size: "サイズ",
     fb_sort_label: "並び替え",
     fb_regex_error: "無効な正規表現",
-    fb_audio_only: "オーディオファイルのみ表示",
+    fb_audio_only: "メディアファイルのみ表示",
 
     // 編集メニュー新規項目
     menu_deselect: "選択解除",

@@ -19,14 +19,14 @@ import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 
 /** Color palette options shown when creating a new track. */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
-    { value: "#6f8fa9", key: "color_blue" },
-    { value: "#8c7fa3", key: "color_purple" },
-    { value: "#6f9581", key: "color_green" },
-    { value: "#aa7f67", key: "color_orange" },
-    { value: "#9a6f82", key: "color_pink" },
-    { value: "#6e95a0", key: "color_sky_blue" },
-    { value: "#a39061", key: "color_yellow" },
-    { value: "#996d68", key: "color_red" },
+    { value: "#4a8fd1", key: "color_blue" },
+    { value: "#7b6bc4", key: "color_purple" },
+    { value: "#43a875", key: "color_green" },
+    { value: "#cf6f2e", key: "color_orange" },
+    { value: "#f087b5", key: "color_pink" },
+    { value: "#b845a5", key: "color_magenta" },
+    { value: "#f0d25e", key: "color_yellow" },
+    { value: "#d94f4a", key: "color_red" },
 ];
 const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
 

@@ -50,6 +50,26 @@ fn source_bounds(clip: &Clip) -> (f64, f64) {
     (start, end.max(start))
 }
 
+/// Map a media source path to the SOURCE type REAPER accepts.
+///
+/// REAPER only recognises WAVE, MP3 and FLAC as named audio source types.
+/// Video containers and every other format (WMA, OGG, M4A, etc.) must be
+/// written as VIDEO, otherwise REAPER fails to parse the clipboard data.
+fn reaper_source_type(path: &str) -> &'static str {
+    let path = std::path::Path::new(path);
+
+    if crate::media::is_video_extension(path) {
+        return "VIDEO";
+    }
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("wav") => "WAVE",
+        Some(ext) if ext.eq_ignore_ascii_case("mp3") => "MP3",
+        Some(ext) if ext.eq_ignore_ascii_case("flac") => "FLAC",
+        _ => "VIDEO",
+    }
+}
+
 fn audio_source(clip: &Clip, _rate: f64, source_span_sec: f64) -> ReaperSource {
     let path = clip.source_path.clone().unwrap_or_default();
     let (start, _) = source_bounds(clip);
@@ -64,8 +84,7 @@ fn audio_source(clip: &Clip, _rate: f64, source_span_sec: f64) -> ReaperSource {
         source
     } else {
         let mut source = ReaperSource::new();
-        // REAPERMedia 音频源统一使用 WAVE 容器描述，具体格式由 FILE 内容决定。
-        source.source_type = "WAVE".to_string();
+        source.source_type = reaper_source_type(&path).to_string();
         source.file_path = path;
         source.section_mode = 0;
         source.section_start_sec = None;
@@ -286,6 +305,40 @@ mod tests {
         assert!((item.length - 2.0).abs() < 1e-9);
         assert!((item.default_take.s_offs - 0.25).abs() < 1e-9);
         assert_eq!(item.default_take.source.as_ref().unwrap().file_path, "C:/audio/test.wav");
+    }
+
+    fn source_type_for_path(path: &str) -> String {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Source Type Test".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(path.to_string()),
+        );
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        parsed.tracks[0].items[0]
+            .default_take
+            .source
+            .as_ref()
+            .unwrap()
+            .source_type
+            .clone()
+    }
+
+    #[test]
+    fn audio_source_type_follows_reaper_clipboard_conventions() {
+        assert_eq!(source_type_for_path("C:/audio/song.wav"), "WAVE");
+        assert_eq!(source_type_for_path("C:/audio/song.MP3"), "MP3");
+        assert_eq!(source_type_for_path("C:/audio/song.flac"), "FLAC");
+        assert_eq!(source_type_for_path("C:/video/movie.mp4"), "VIDEO");
+        assert_eq!(source_type_for_path("C:/video/movie.mkv"), "VIDEO");
+        assert_eq!(source_type_for_path("C:/audio/song.wma"), "VIDEO");
+        assert_eq!(source_type_for_path("C:/audio/song.ogg"), "VIDEO");
+        assert_eq!(source_type_for_path("C:/audio/song"), "VIDEO");
     }
 
     #[test]

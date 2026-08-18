@@ -15,9 +15,6 @@ use crate::midi_import::MidiNoteEvent;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-/// HiFiShifter 支持的音频格式扩展名
-const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "m4a"];
-
 /// 帧周期（秒）
 const FRAME_PERIOD: f64 = 0.005;
 
@@ -35,7 +32,7 @@ fn segment_overlap_sec(left_timeline_sec: f64, right_timeline_sec: f64) -> f64 {
 
 /// 轨道颜色调色板（与 state.rs / vocalshifter_import.rs 一致）
 const TRACK_COLORS: &[&str] = &[
-    "#6f8fa9", "#8c7fa3", "#6f9581", "#aa7f67", "#9a6f82", "#6e95a0", "#a39061", "#996d68",
+    "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e", "#d94f4a",
 ];
 
 fn clip_color() -> String {
@@ -51,15 +48,7 @@ fn new_clip_id() -> String {
 }
 
 fn is_audio_supported(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            SUPPORTED_AUDIO_EXTS
-                .iter()
-                .any(|&ext| ext.eq_ignore_ascii_case(e))
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(Path::new(path))
 }
 
 /// 将 Reaper 音量倍率转换为 HiFiShifter 的 0.0–1.0 范围。
@@ -927,14 +916,14 @@ fn process_item(
     // 只读 header/codec params 获取时长与采样率，不生成 waveform_preview（避免全量解码）。
     // 波形数据由前端按需通过当前 waveform API 懒加载。
     let audio_info = try_read_audio_header_only(Path::new(&audio_path));
-    let (duration_sec, duration_frames, source_sr) = match &audio_info {
-        Some(info) => (
-            Some(info.duration_sec),
-            Some(info.total_frames),
-            Some(info.sample_rate),
-        ),
-        None => (None, None, None),
+    let Some(info) = &audio_info else {
+        // 文件无法被任何解码器识别（例如没有音轨的视频）。
+        skipped_files.push(raw_path);
+        return;
     };
+    let duration_sec = Some(info.duration_sec);
+    let duration_frames = Some(info.total_frames);
+    let source_sr = Some(info.sample_rate);
 
     // 获取 take 参数
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);

@@ -12,6 +12,7 @@ mod hifigan_tension;
 mod formant_morph;
 mod formant_cache;
 mod launch_args;
+mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
 mod models;
@@ -342,6 +343,7 @@ pub fn run() {
             commands::set_timeline_tempo_map,
             commands::open_audio_dialog,
             commands::open_audio_dialog_multi,
+            commands::get_media_audio_streams,
             commands::pick_output_path,
             commands::pick_directory,
             commands::open_midi_dialog,

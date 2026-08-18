@@ -41,15 +41,7 @@ pub fn is_vocalshifter_project_file_path(path: &Path) -> bool {
 }
 
 pub fn is_audio_file_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "wav" | "flac" | "mp3" | "ogg" | "m4a" | "aac" | "aif" | "aiff" | "wma" | "opus"
-            )
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(path)
 }
 
 pub fn is_supported_launch_file_path(path: &Path) -> bool {
