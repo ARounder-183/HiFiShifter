@@ -1622,13 +1622,6 @@ function AppInner() {
                     );
                     break;
                 }
-                case "edit.pasteReaper":
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: { op: "pasteReaper" },
-                        }),
-                    );
-                    break;
                 case "edit.pasteVocalShifter":
                     window.dispatchEvent(
                         new CustomEvent("hifi:editOp", {
@@ -1640,13 +1633,6 @@ function AppInner() {
                     window.dispatchEvent(
                         new CustomEvent("hifi:editOp", {
                             detail: { op: "pasteTracks" },
-                        }),
-                    );
-                    break;
-                case "edit.copyReaper":
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: { op: "copyReaper" },
                         }),
                     );
                     break;

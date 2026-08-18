@@ -35,10 +35,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.addVibrato": { key: "b", ctrl: true },
     "edit.quantize": { key: "p", ctrl: true },
     "edit.meanQuantize": { key: "q", ctrl: true },
-    "edit.pasteReaper": { key: "v", ctrl: true, shift: true },
     "edit.pasteVocalShifter": { key: "v", shift: true },
     "edit.pasteTracks": { key: "v", ctrl: true, alt: true },
-    "edit.copyReaper": { key: "c", ctrl: true, shift: true },
 
     // 工程
     "project.new": { key: "n", ctrl: true },
@@ -190,17 +188,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "edit",
         scopedContext: "paramEditorSelect",
     },
-    "edit.pasteReaper": { labelKey: "kb_edit_paste_reaper", group: "edit" },
     "edit.pasteVocalShifter": {
         labelKey: "kb_edit_paste_vocalshifter",
         group: "edit",
     },
     "edit.pasteTracks": {
         labelKey: "kb_edit_paste_tracks",
-        group: "edit",
-    },
-    "edit.copyReaper": {
-        labelKey: "kb_edit_copy_reaper",
         group: "edit",
     },
 

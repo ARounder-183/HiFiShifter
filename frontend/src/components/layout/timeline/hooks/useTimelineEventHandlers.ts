@@ -52,7 +52,6 @@ export interface UseTimelineEventHandlersArgs {
     // clipboard
     copyClips: (ids: string[]) => Promise<boolean>;
     cutClips: (ids: string[]) => void;
-    copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // clip actions
     pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
@@ -113,7 +112,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         setMultiSelectedClipIds,
         copyClips,
         cutClips,
-        copyClipsToReaper,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -196,24 +194,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 pasteClipsAtPlayhead("new_tracks");
                 return;
             }
-            if (op === "copyReaper") {
-                const selectedIds =
-                    multiSelectedClipIds.length > 0
-                        ? [...multiSelectedClipIds]
-                        : sessionRef.current.selectedClipId
-                          ? [sessionRef.current.selectedClipId]
-                          : [];
-                if (selectedIds.length === 0) return;
-                const s = sessionRef.current;
-                const expandedIds = expandClipIdsWithGroups(
-                    selectedIds,
-                    s.clips,
-                    s.ignoreGrouping,
-                    s.disabledGroupIds,
-                );
-                void copyClipsToReaper(expandedIds);
-                return;
-            }
             if (op === "split") {
                 splitSelectedAtPlayhead();
             }
@@ -221,7 +201,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
     }, [
-        copyClipsToReaper,
         multiSelectedClipIds,
         pasteClipsAtPlayhead,
         sessionRef,
@@ -238,7 +217,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     : sessionRef.current.selectedClipId
                       ? [sessionRef.current.selectedClipId]
                       : [];
-            if (op === "copy" || op === "cut" || op === "copyReaper") {
+            if (op === "copy" || op === "cut") {
                 if (selectedIds.length === 0) return;
                 const s = sessionRef.current;
                 const expandedIds = expandClipIdsWithGroups(
@@ -248,8 +227,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     s.disabledGroupIds,
                 );
                 if (op === "copy") void copyClips(expandedIds);
-                else if (op === "cut") cutClips(expandedIds);
-                else void copyClipsToReaper(expandedIds);
+                else cutClips(expandedIds);
                 return;
             }
             if (op === "paste") {
@@ -264,7 +242,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
     }, [
         copyClips,
         cutClips,
-        copyClipsToReaper,
         multiSelectedClipIds,
         pasteClipsAtPlayhead,
         sessionRef,

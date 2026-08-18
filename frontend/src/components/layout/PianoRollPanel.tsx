@@ -51,6 +51,7 @@ import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
 import { paramsApi } from "../../services/api/params";
 import { coreApi } from "../../services/api/core";
+import { webApi } from "../../services/webviewApi";
 import type { ParamFramesPayload } from "../../types/api";
 import {
     degreeInputToScaleSteps,
@@ -2695,11 +2696,10 @@ export const PianoRollPanel: React.FC = () => {
                 return;
             }
 
-            // External clipboard paste ops – work with or without selection
-            if (op === "pasteReaper" || op === "pasteVocalShifter") {
+            // VocalShifter clipboard paste stays a dedicated menu action
+            // (file-based clipboard), and works with or without selection.
+            if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const capturedEditParam = s.editParam;
-                const capturedToolMode = s.toolMode;
                 let selArgs:
                     | {
                           selectionStartFrame?: number;
@@ -2716,37 +2716,76 @@ export const PianoRollPanel: React.FC = () => {
                         selectionMaxFrames: fc,
                     };
                 }
-                if (op === "pasteReaper") {
-                    // 检查剪贴板是否包含 Standard MIDI File，若有则弹出统一导入弹窗
-                    void (async () => {
-                        try {
-                            const midiCheck = await paramsApi.readMidiClipboardToMemory();
-                            if (midiCheck.ok && midiCheck.guid) {
-                                midiDialogSourceRef.current = "reaperClipboard";
-                                setClipboardGuid(midiCheck.guid);
-                                setMidiPath(null);
-                                setMidiDialogSelection(sel2 ? { ...sel2 } : null);
-                                midiDialogOpenParamsRef.current = {
-                                    editParam: capturedEditParam,
-                                    toolMode: capturedToolMode,
-                                };
-                                setMidiDialogOpen(true);
-                                return;
-                            }
-                        } catch {
-                            // 检查失败，回退到普通 Reaper 粘贴
-                        }
-                        void dispatch(pasteReaperClipboard(selArgs));
-                    })();
-                } else {
-                    void dispatch(
-                        pasteVocalShifterClipboard({
-                            ...selArgs,
-                            activeParam: editParam,
-                        }),
-                    );
-                }
+                void dispatch(
+                    pasteVocalShifterClipboard({
+                        ...selArgs,
+                        activeParam: editParam,
+                    }),
+                );
                 bumpRefreshToken();
+                return;
+            }
+
+            // REAPERMedia fallback used by the normal paste operation when no
+            // HiFiShifter param clipboard data is available.
+            const pasteReaperClipboardFallback = () => {
+                const sel2 = selectionRef.current;
+                let selArgs:
+                    | {
+                          selectionStartFrame?: number;
+                          selectionMaxFrames?: number;
+                      }
+                    | undefined;
+                if (sel2) {
+                    const a = Math.min(sel2.aBeat, sel2.bBeat);
+                    const b = Math.max(sel2.aBeat, sel2.bBeat);
+                    const sf = Math.max(0, Math.floor((a * secPerBeat * 1000) / fp));
+                    const fc = Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp));
+                    selArgs = {
+                        selectionStartFrame: sf,
+                        selectionMaxFrames: fc,
+                    };
+                }
+                void (async () => {
+                    try {
+                        // Standard MIDI File on the clipboard opens the unified
+                        // MIDI import dialog.
+                        const midiCheck = await paramsApi.readMidiClipboardToMemory();
+                        if (midiCheck.ok && midiCheck.guid) {
+                            midiDialogSourceRef.current = "reaperClipboard";
+                            setClipboardGuid(midiCheck.guid);
+                            setMidiPath(null);
+                            setMidiDialogSelection(sel2 ? { ...sel2 } : null);
+                            midiDialogOpenParamsRef.current = {
+                                editParam: s.editParam,
+                                toolMode: s.toolMode,
+                            };
+                            setMidiDialogOpen(true);
+                            return;
+                        }
+                    } catch {
+                        // Check failed; fall back to ordinary REAPERMedia paste.
+                    }
+                    try {
+                        // Avoid surfacing a paste error when the system
+                        // clipboard does not contain REAPERMedia data at all.
+                        const reaperCheck = await webApi.hasReaperClipboard();
+                        if (!reaperCheck?.ok || !reaperCheck?.available) return;
+                    } catch {
+                        return;
+                    }
+                    void dispatch(pasteReaperClipboard(selArgs));
+                })();
+                bumpRefreshToken();
+            };
+
+            const selAtEntry = selectionRef.current;
+            // Normal paste prefers HiFiShifter param data. When there is no
+            // pitch selection (or pitch editing is unavailable), the normal
+            // paste still tries REAPERMedia data, matching the removed
+            // dedicated "Paste Reaper Clipboard Data" action.
+            if (op === "paste" && (!selAtEntry || !pitchEnabled)) {
+                pasteReaperClipboardFallback();
                 return;
             }
 
@@ -2986,7 +3025,11 @@ export const PianoRollPanel: React.FC = () => {
                     } catch {
                         // ignore and fallback to internal clipboard
                     }
-                    if (!clip) return;
+                    if (!clip) {
+                        // No HiFiShifter param clipboard data: try REAPERMedia.
+                        pasteReaperClipboardFallback();
+                        return;
+                    }
 
                     let pasteValues: number[];
                     if (clip.param === editParam) {

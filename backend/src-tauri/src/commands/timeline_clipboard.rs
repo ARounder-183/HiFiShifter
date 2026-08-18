@@ -41,9 +41,36 @@ fn fragment_summary(fragment: &ProjectFragment) -> String {
     }
 }
 
-fn write_fragment(fragment: &ProjectFragment) -> Result<(), String> {
-    let summary = fragment_summary(fragment);
-    system_clipboard::write_bytes(&fragment.encode()?, &summary)
+fn fragment_summary_with_reaper(
+    fragment: &ProjectFragment,
+    reaper: Option<&crate::reaper_export::ReaperExportResult>,
+) -> String {
+    let mut summary = fragment_summary(fragment);
+    if let Some(reaper) = reaper {
+        if reaper.exported_clip_count > 0 {
+            summary.push_str(&format!(
+                " REAPERMedia: {} clip(s) exported. Paste in REAPER.",
+                reaper.exported_clip_count
+            ));
+        }
+    }
+    summary
+}
+
+fn build_reaper_clipboard(
+    timeline: &crate::state::TimelineState,
+    clip_ids: &[String],
+) -> Option<crate::reaper_export::ReaperExportResult> {
+    crate::reaper_export::build_reaper_clipboard(timeline, clip_ids).ok()
+}
+
+fn write_fragment(
+    fragment: &ProjectFragment,
+    reaper: Option<&crate::reaper_export::ReaperExportResult>,
+) -> Result<(), String> {
+    let summary = fragment_summary_with_reaper(fragment, reaper);
+    let bytes = fragment.encode()?;
+    system_clipboard::write_bytes_with_reaper(&bytes, &summary, reaper.map(|r| r.bytes.as_slice()))
 }
 
 fn read_fragment() -> Result<ProjectFragment, String> {
@@ -158,14 +185,31 @@ pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> se
         Ok(fragment) => fragment,
         Err(error) => return json!({ "ok": false, "error": error }),
     };
+
+    // The native HiFiShifter copy now also publishes REAPERMedia data so the
+    // same selection can be pasted directly in REAPER.
+    let reaper_clip_ids: Vec<String> = fragment
+        .timeline
+        .clips
+        .iter()
+        .map(|clip| clip.id.clone())
+        .collect();
+    let reaper = if reaper_clip_ids.is_empty() {
+        None
+    } else {
+        build_reaper_clipboard(&fragment.timeline, &reaper_clip_ids)
+    };
     drop(timeline);
 
-    match write_fragment(&fragment) {
+    match write_fragment(&fragment, reaper.as_ref()) {
         Ok(()) => json!({
             "ok": true,
             "kind": fragment.kind,
             "clipCount": fragment.timeline.clips.len(),
             "trackCount": fragment.timeline.tracks.len(),
+            "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
+            "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
+            "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
         }),
         Err(error) => json!({ "ok": false, "error": error }),
     }
@@ -177,14 +221,30 @@ pub(super) fn copy_timeline_tracks(state: &AppState, track_ids: Vec<String>) -> 
         Ok(fragment) => fragment,
         Err(error) => return json!({ "ok": false, "error": error }),
     };
+
+    // Track copy includes every clip on the copied track (sub-)tree.
+    let reaper_clip_ids: Vec<String> = fragment
+        .timeline
+        .clips
+        .iter()
+        .map(|clip| clip.id.clone())
+        .collect();
+    let reaper = if reaper_clip_ids.is_empty() {
+        None
+    } else {
+        build_reaper_clipboard(&fragment.timeline, &reaper_clip_ids)
+    };
     drop(timeline);
 
-    match write_fragment(&fragment) {
+    match write_fragment(&fragment, reaper.as_ref()) {
         Ok(()) => json!({
             "ok": true,
             "kind": "tracks",
             "clipCount": fragment.timeline.clips.len(),
             "trackCount": fragment.timeline.tracks.len(),
+            "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
+            "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
+            "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
         }),
         Err(error) => json!({ "ok": false, "error": error }),
     }
@@ -196,7 +256,20 @@ pub(super) fn paste_timeline_clipboard(
 ) -> serde_json::Value {
     match read_fragment() {
         Ok(fragment) => paste_fragment(state, fragment, mode),
-        Err(error) => json!({ "ok": false, "error": error }),
+        Err(hifi_error) => {
+            // No (or invalid) HiFiShifter clipboard data: fall back to the
+            // REAPERMedia format so items copied in REAPER paste natively.
+            let fallback =
+                super::reaper_clipboard::paste_reaper_clipboard(state, None, None);
+            if fallback.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+                return fallback;
+            }
+            let reaper_error = fallback
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("reaper_clipboard_empty");
+            json!({ "ok": false, "error": format!("{}; Reaper clipboard: {}", hifi_error, reaper_error) })
+        }
     }
 }
 
@@ -210,6 +283,12 @@ pub(super) fn has_timeline_clipboard() -> serde_json::Value {
             "trackCount": fragment.timeline.tracks.len(),
             "sourceProject": fragment.source_project_name,
         }),
-        Err(_) => json!({ "ok": true, "available": false }),
+        Err(_) => {
+            if super::reaper_clipboard::has_reaper_clipboard() {
+                json!({ "ok": true, "available": true, "kind": "reaper" })
+            } else {
+                json!({ "ok": true, "available": false })
+            }
+        }
     }
 }

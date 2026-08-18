@@ -26,10 +26,8 @@ export type ActionId =
     | "edit.addVibrato" // 添加颤音
     | "edit.quantize" // 量化
     | "edit.meanQuantize" // 均值量化
-    | "edit.pasteReaper" // 粘贴 Reaper 剪贴板数据
-    | "edit.pasteVocalShifter" // 粘贴 VocalShifter 剪贴板数据
+    | "edit.pasteVocalShifter" // 粘贴 VocalShifter 剪贴板
     | "edit.pasteTracks" // 作为新轨道组粘贴
-    | "edit.copyReaper" // 复制到 Reaper 剪贴板
     // 工程
     | "project.new" // 新建工程
     | "project.open" // 打开工程

@@ -128,7 +128,6 @@ export interface UseTimelineClipActionsResult {
     cutClips: (ids: string[]) => void;
     copyTracks: (ids: string[]) => Promise<boolean>;
     cutTracks: (ids: string[]) => void;
-    copyClipsToReaper: (ids: string[]) => Promise<boolean>;
 
     // Clip operations
     groupClips: (ids: string[]) => void;
@@ -375,19 +374,6 @@ export function useTimelineClipActions(
         },
         [copyTracks, dispatch],
     );
-
-    const copyClipsToReaper = React.useCallback(async (ids: string[]) => {
-        if (ids.length === 0) return false;
-        try {
-            const result = await webApi.copyClipsToReaperClipboard(ids);
-            if (result?.ok) {
-                setClipboardAvailable(false);
-            }
-            return Boolean(result?.ok);
-        } catch {
-            return false;
-        }
-    }, []);
 
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
@@ -887,7 +873,6 @@ export function useTimelineClipActions(
         cutClips,
         copyTracks,
         cutTracks,
-        copyClipsToReaper,
 
         groupClips,
         ungroupClips,

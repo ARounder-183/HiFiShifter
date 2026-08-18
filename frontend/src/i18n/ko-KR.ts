@@ -84,11 +84,9 @@ export const koKR = {
         "현재 프로젝트에 이미 템포 맵이 있어 가져온 템포 맵은 건너뜁니다.",
     import_project_import: "가져오기",
     menu_import_midi: "MIDI 가져오기...",
-    menu_copy_reaper_clipboard: "Reaper 클립보드로 복사",
     menu_paste_selected_track: "선택한 트랙에 붙여넣기",
     menu_paste_new_tracks: "새 트랙으로 붙여넣기",
-    menu_paste_reaper_clipboard: "Reaper 클립보드 데이터 붙여넣기",
-    menu_paste_vocalshifter_clipboard: "VocalShifter 클립보드 데이터 붙여넣기",
+    menu_paste_vocalshifter_clipboard: "VocalShifter 클립보드 붙여넣기",
     ctx_quick_export: "빠른 내보내기",
     quick_export_title: "선택한 클립 빠른 내보내기",
     quick_export_description: "현재 선택한 {n}개 클립만 내보냅니다.",
@@ -895,9 +893,7 @@ export const koKR = {
     kb_edit_add_vibrato: "비브라토 추가",
     kb_edit_quantize: "퀀타이즈",
     kb_edit_mean_quantize: "평균 퀀타이즈",
-    kb_edit_paste_reaper: "Reaper 클립보드 붙여넣기",
     kb_edit_paste_tracks: "새 트랙으로 붙여넣기",
-    kb_edit_copy_reaper: "Reaper 클립보드로 복사",
     kb_edit_paste_vocalshifter: "VocalShifter 클립보드 붙여넣기",
 
     // 스크롤 수정 키바인딩

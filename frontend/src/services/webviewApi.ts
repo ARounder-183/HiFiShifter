@@ -126,9 +126,9 @@ export const webApi = {
     selectClip: timelineApi.selectClip,
     copyTimelineClips: timelineApi.copyTimelineClips,
     copyTimelineTracks: timelineApi.copyTimelineTracks,
-    copyClipsToReaperClipboard: timelineApi.copyClipsToReaperClipboard,
     pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
     hasTimelineClipboard: timelineApi.hasTimelineClipboard,
+    hasReaperClipboard: timelineApi.hasReaperClipboard,
 
     // 检查已导入音频源文件是否被外部修改或删除
     checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,
