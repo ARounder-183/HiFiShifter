@@ -374,7 +374,7 @@ export const enUS = {
     color_green: "Green",
     color_orange: "Orange",
     color_pink: "Pink",
-    color_sky_blue: "Sky Blue",
+    color_magenta: "Magenta",
     color_yellow: "Yellow",
     color_red: "Red",
 

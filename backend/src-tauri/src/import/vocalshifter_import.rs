@@ -625,7 +625,7 @@ fn convert_volume(vs_volume: f64) -> f32 {
 
 /// 轨道颜色调色板（与 state.rs 中一致）
 const TRACK_COLORS: &[&str] = &[
-    "#6f8fa9", "#8c7fa3", "#6f9581", "#aa7f67", "#9a6f82", "#6e95a0", "#a39061", "#996d68",
+    "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e", "#d94f4a",
 ];
 
 fn clip_color() -> String {

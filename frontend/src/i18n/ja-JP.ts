@@ -375,7 +375,7 @@ export const jaJP = {
     color_green: "グリーン",
     color_orange: "オレンジ",
     color_pink: "ピンク",
-    color_sky_blue: "スカイブルー",
+    color_magenta: "マゼンタ",
     color_yellow: "イエロー",
     color_red: "レッド",
 

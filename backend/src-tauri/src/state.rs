@@ -2531,14 +2531,14 @@ pub(crate) fn new_id(prefix: &str) -> String {
 }
 
 const TRACK_COLOR_PALETTE: &[&str] = &[
-    "#6f8fa9", // 烟蓝
-    "#8c7fa3", // 石紫
-    "#6f9581", // 苔绿
-    "#aa7f67", // 铜橙
-    "#9a6f82", // 酒粉
-    "#6e95a0", // 雾青
-    "#a39061", // 暗金
-    "#996d68", // 铁锈红
+    "#4a8fd1", // 蓝
+    "#7b6bc4", // 紫
+    "#43a875", // 绿
+    "#cf6f2e", // 橙
+    "#f087b5", // 粉
+    "#b845a5", // 洋红
+    "#f0d25e", // 黄
+    "#d94f4a", // 红
 ];
 
 fn track_palette_color(index: usize) -> String {

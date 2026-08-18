@@ -358,7 +358,7 @@ export const zhCN = {
     color_green: "绿",
     color_orange: "橙",
     color_pink: "粉",
-    color_sky_blue: "天蓝",
+    color_magenta: "洋红",
     color_yellow: "黄",
     color_red: "红",
 

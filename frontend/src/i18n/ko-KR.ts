@@ -450,7 +450,7 @@ export const koKR = {
     color_green: "초록",
     color_orange: "주황",
     color_pink: "분홍",
-    color_sky_blue: "하늘",
+    color_magenta: "마젠타",
     color_yellow: "노랑",
     color_red: "빨강",
 

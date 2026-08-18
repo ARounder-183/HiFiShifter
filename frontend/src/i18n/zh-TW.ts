@@ -359,7 +359,7 @@ export const zhTW = {
     color_green: "綠",
     color_orange: "橙",
     color_pink: "粉",
-    color_sky_blue: "天藍",
+    color_magenta: "洋紅",
     color_yellow: "黃",
     color_red: "紅",
 
