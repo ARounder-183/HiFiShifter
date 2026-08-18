@@ -282,15 +282,6 @@ export const timelineApi = {
             trackIds,
         ),
 
-    copyClipsToReaperClipboard: (clipIds: string[]) =>
-        invoke<{
-            ok: boolean;
-            error?: string;
-            exportedClipCount?: number;
-            skippedClipCount?: number;
-            trackCount?: number;
-        }>("copy_clips_to_reaper_clipboard", clipIds),
-
     pasteTimelineClipboard: (mode?: "selected" | "new_tracks") =>
         invoke<
             TimelineResult & {
@@ -305,11 +296,14 @@ export const timelineApi = {
         invoke<{
             ok: boolean;
             available?: boolean;
-            kind?: "clips" | "tracks" | "project";
+            kind?: "clips" | "tracks" | "project" | "reaper";
             clipCount?: number;
             trackCount?: number;
             sourceProject?: string;
         }>("has_timeline_clipboard"),
+
+    hasReaperClipboard: () =>
+        invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
 
     /// 检查所有已导入的音频源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。

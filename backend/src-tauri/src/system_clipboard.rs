@@ -16,6 +16,7 @@
 use base64::Engine;
 
 pub const OBJECT_FORMAT: &str = "application/x-hifishifter-object";
+pub const REAPER_MEDIA_FORMAT: &str = "REAPERMedia";
 const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
 
 fn decode_text_envelope(text: &str) -> Option<Vec<u8>> {
@@ -28,12 +29,18 @@ fn decode_text_envelope(text: &str) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
+fn write_contents(
+    bytes: &[u8],
+    text_summary: &str,
+    reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
     use clipboard_win::{raw, register_format, Clipboard};
 
     let _clipboard =
         Clipboard::new_attempts(10).map_err(|e| format!("clipboard_open_failed: {}", e))?;
 
+    // Both HiFiShifter and REAPER formats must share one clipboard ownership
+    // session: `empty()` once, then set each format with `NoClear` semantics.
     raw::empty().map_err(|e| format!("clipboard_empty_failed: {}", e))?;
 
     if let Some(format) = register_format(OBJECT_FORMAT) {
@@ -41,10 +48,31 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
             .map_err(|e| format!("clipboard_write_custom_failed: {}", e))?;
     }
 
+    if let Some(reaper_bytes) = reaper_bytes {
+        let format = register_format(REAPER_MEDIA_FORMAT)
+            .ok_or_else(|| "reaper_clipboard_format_not_found".to_string())?;
+        raw::set_without_clear(format.get(), reaper_bytes)
+            .map_err(|e| format!("reaper_clipboard_write_failed: {}", e))?;
+    }
+
     raw::set_string_with(text_summary, clipboard_win::options::NoClear)
         .map_err(|e| format!("clipboard_write_text_failed: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
+    write_contents(bytes, text_summary, None)
+}
+
+#[cfg(target_os = "windows")]
+pub fn write_bytes_with_reaper(
+    bytes: &[u8],
+    text_summary: &str,
+    reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
+    write_contents(bytes, text_summary, reaper_bytes)
 }
 
 #[cfg(target_os = "windows")]
@@ -80,7 +108,11 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
+fn write_contents(
+    bytes: &[u8],
+    text_summary: &str,
+    reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::{NSData, NSString};
 
@@ -96,7 +128,30 @@ pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
     let data = NSData::with_bytes(bytes);
     let format_ns = NSString::from_str(OBJECT_FORMAT);
     let _ = pasteboard.setData_forType(Some(&data), &format_ns);
+
+    if let Some(reaper_bytes) = reaper_bytes {
+        let reaper_data = NSData::with_bytes(reaper_bytes);
+        let reaper_format_ns = NSString::from_str(REAPER_MEDIA_FORMAT);
+        if !pasteboard.setData_forType(Some(&reaper_data), &reaper_format_ns) {
+            return Err("reaper_clipboard_write_failed".to_string());
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
+    write_contents(bytes, text_summary, None)
+}
+
+#[cfg(target_os = "macos")]
+pub fn write_bytes_with_reaper(
+    bytes: &[u8],
+    text_summary: &str,
+    reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
+    write_contents(bytes, text_summary, reaper_bytes)
 }
 
 #[cfg(target_os = "macos")]
@@ -173,6 +228,19 @@ pub fn write_bytes(bytes: &[u8], _text_summary: &str) -> Result<(), String> {
     }
 }
 
+/// Linux CLI clipboard tools accept only one payload per invocation
+/// (`wl-copy` / `xclip` cannot store different bytes under two targets in one
+/// ownership session). Keep the HiFiShifter object format as the single owner
+/// here; REAPERMedia co-writing is supported on Windows and macOS.
+#[cfg(target_os = "linux")]
+pub fn write_bytes_with_reaper(
+    bytes: &[u8],
+    text_summary: &str,
+    _reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
+    write_bytes(bytes, text_summary)
+}
+
 #[cfg(target_os = "linux")]
 pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
     use std::process::Command;
@@ -215,6 +283,15 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn write_bytes(_bytes: &[u8], _text_summary: &str) -> Result<(), String> {
+    Err("clipboard_unsupported_platform".to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn write_bytes_with_reaper(
+    _bytes: &[u8],
+    _text_summary: &str,
+    _reaper_bytes: Option<&[u8]>,
+) -> Result<(), String> {
     Err("clipboard_unsupported_platform".to_string())
 }
 

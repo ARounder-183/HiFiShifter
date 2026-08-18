@@ -335,8 +335,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             (op === "copy" ||
                 op === "cut" ||
                 op === "paste" ||
-                op === "pasteTracks" ||
-                op === "copyReaper") &&
+                op === "pasteTracks") &&
             inTimeline &&
             !inPianoRoll &&
             !inTrackHeader
@@ -549,18 +548,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     {/* 外部剪贴板交换 */}
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copyReaper")}>
-                        {t("menu_copy_reaper_clipboard")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.copyReaper")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteReaper")}>
-                        {t("menu_paste_reaper_clipboard")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteReaper")}
-                        </div>
-                    </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
                         {t("menu_paste_vocalshifter_clipboard")}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">

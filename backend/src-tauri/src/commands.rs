@@ -1091,14 +1091,6 @@ pub fn import_reaper_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn copy_clips_to_reaper_clipboard(
-    state: State<'_, AppState>,
-    clip_ids: Vec<String>,
-) -> serde_json::Value {
-    reaper_clipboard::copy_clips_to_reaper_clipboard(&state, clip_ids)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn paste_reaper_clipboard(
     state: State<'_, AppState>,
     selection_start_frame: Option<usize>,
@@ -1109,6 +1101,14 @@ pub fn paste_reaper_clipboard(
         selection_start_frame,
         selection_max_frames,
     )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_reaper_clipboard() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "available": reaper_clipboard::has_reaper_clipboard(),
+    })
 }
 
 // ===================== cache =====================
