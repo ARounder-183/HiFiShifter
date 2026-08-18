@@ -1,5 +1,5 @@
 use crate::project::{
-    load_project_file, prepare_source_paths_for_save, project_name_from_path,
+    load_project_file, prepare_timeline_for_project_save, project_name_from_path,
     resolve_source_paths_on_open, serialize_project_file_for_path, CustomScale, ProjectFile,
 };
 use crate::state::AppState;
@@ -429,7 +429,7 @@ fn build_project_file_snapshot(
         )
     };
 
-    let tl_saved = prepare_source_paths_for_save(tl, project_path);
+    let tl_saved = prepare_timeline_for_project_save(tl, project_path);
     let mut pf = ProjectFile::new(
         project_name.to_string(),
         tl_saved,

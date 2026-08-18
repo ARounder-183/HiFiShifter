@@ -34,6 +34,50 @@ fn default_formant_strength() -> f64 {
     0.50
 }
 
+fn default_gain() -> f32 {
+    1.0
+}
+
+fn default_playback_rate() -> f32 {
+    1.0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn is_one_f32(value: &f32) -> bool {
+    *value == 1.0
+}
+
+fn is_sine(value: &String) -> bool {
+    value == "sine"
+}
+
+fn is_emerald(value: &String) -> bool {
+    *value == default_clip_color()
+}
+
+fn is_default_frame_period(value: &f64) -> bool {
+    *value == default_frame_period_ms()
+}
+
+fn pitch_analysis_algo_is_default(value: &PitchAnalysisAlgo) -> bool {
+    matches!(value, PitchAnalysisAlgo::NsfHifiganOnnx)
+}
+
+fn btree_map_string_track_params_is_empty(value: &BTreeMap<String, TrackParamsState>) -> bool {
+    value.is_empty()
+}
+
+fn hash_set_string_is_empty(value: &HashSet<String>) -> bool {
+    value.is_empty()
+}
+
 /// 内置音阶键名 → 音级集合（未知键名返回 None）。
 pub(crate) fn scale_notes_for_key(scale: &str) -> Option<Vec<u8>> {
     let notes = match scale {
@@ -133,24 +177,27 @@ impl SynthPipelineKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrackParamsState {
-    #[serde(default = "default_frame_period_ms")]
+    #[serde(
+        default = "default_frame_period_ms",
+        skip_serializing_if = "is_default_frame_period"
+    )]
     pub frame_period_ms: f64,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_orig: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_edit: Vec<f32>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub pitch_edit_user_modified: bool,
 
     /// 是否有活跃的音高参考块（非静音 MIDI clip）在此轨道组中
     #[serde(skip)]
     pub has_pitch_adjustment_active: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_orig: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_edit: Vec<f32>,
 
     #[serde(skip)]
@@ -164,25 +211,44 @@ pub struct TrackParamsState {
     /// 自动化曲线（key = ParamDescriptor::id）。
     /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
     /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, f64>,
+}
+
+impl TrackParamsState {
+    /// 保存工程文件时，没有任何用户数据需要持久化的状态。
+    ///
+    /// 全零/空的 pitch、tension 和自动化曲线在反序列化后与默认状态语义一致，
+    /// 因此整条 root-track 参数记录都可以省略。
+    pub fn is_empty_project_data(&self) -> bool {
+        self.pitch_orig.is_empty()
+            && self.pitch_edit.is_empty()
+            && !self.pitch_edit_user_modified
+            && self.tension_orig.is_empty()
+            && self.tension_edit.is_empty()
+            && self.extra_curves.is_empty()
+            && self.extra_params.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkedParamCurvesPayload {
-    #[serde(default = "default_frame_period_ms")]
+    #[serde(
+        default = "default_frame_period_ms",
+        skip_serializing_if = "is_default_frame_period"
+    )]
     pub frame_period_ms: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_edit: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_edit: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
 }
 
@@ -292,16 +358,20 @@ pub struct CreateClipsBulkPayload {
 pub struct Track {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     pub order: i32,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub muted: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub solo: bool,
+    #[serde(default = "default_gain", skip_serializing_if = "is_one_f32")]
     pub volume: f32,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub compose_enabled: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "pitch_analysis_algo_is_default")]
     pub pitch_analysis_algo: PitchAnalysisAlgo,
 
     /// 轨道主题色，hex 字符串，如 "#4f8ef7"
@@ -318,13 +388,18 @@ pub struct Clip {
     pub name: String,
     pub start_sec: f64,
     pub length_sec: f64,
+    #[serde(default = "default_clip_color", skip_serializing_if = "is_emerald")]
     pub color: String,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path_relative: Option<String>,
-    pub duration_sec: Option<f64>,       // 兼容性保留
-    pub duration_frames: Option<u64>,    // 精确的frame总数
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>, // 兼容性保留
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_frames: Option<u64>, // 精确的frame总数
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sample_rate: Option<u32>, // 源文件采样率
     /// 文件导入时的 mtime（Unix 时间戳，秒），用于检测外部文件替换/删除。
     /// None 表示运行时从字节流导入（无磁盘文件）或尚未初始化。
@@ -339,35 +414,42 @@ pub struct Clip {
     /// 用于元数据变化后的第二层内容确认。仅在程序运行期间有效，不持久化。
     #[serde(skip)]
     pub source_file_fingerprint: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waveform_preview: Option<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pitch_range: Option<PitchRange>,
 
+    #[serde(default = "default_gain", skip_serializing_if = "is_one_f32")]
     pub gain: f32,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub muted: bool,
-    #[serde(alias = "trim_start_sec")]
+    #[serde(alias = "trim_start_sec", default, skip_serializing_if = "is_zero_f64")]
     pub source_start_sec: f64,
     #[serde(alias = "trim_end_sec")]
     pub source_end_sec: f64,
+    #[serde(default = "default_playback_rate", skip_serializing_if = "is_one_f32")]
     pub playback_rate: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub reversed: bool,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub fade_in_sec: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub fade_out_sec: f64,
     /// 淡入曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve")]
+    #[serde(default = "default_fade_curve", skip_serializing_if = "is_sine")]
     pub fade_in_curve: String,
     /// 淡出曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve")]
+    #[serde(default = "default_fade_curve", skip_serializing_if = "is_sine")]
     pub fade_out_curve: String,
 
     /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_curves: Option<HashMap<String, Vec<f32>>>,
 
     /// Clip 级别的声码器静态参数覆盖（None = 使用 Track 级别的 extra_params）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_params: Option<HashMap<String, f64>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formant_morph: Option<ClipFormantMorph>,
 
     /// MIDI 音符数据（仅用于 MIDI clip，无音频源）。
@@ -377,7 +459,7 @@ pub struct Clip {
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
 
     /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub midi_fill_gaps: bool,
 }
 
@@ -416,10 +498,13 @@ pub struct RuntimeState {
 #[serde(rename_all = "camelCase")]
 pub struct TempoScaleData {
     /// 内置音阶键名（如 "C"、"Db"）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// 自定义音阶名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// 自定义音阶音级集合（0-11）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<u8>>,
 }
 
@@ -431,8 +516,11 @@ pub struct TempoPointData {
     pub id: String,
     pub position_sec: f64,
     pub bpm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub numerator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denominator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<TempoScaleData>,
 }
 
@@ -440,26 +528,35 @@ pub struct TempoPointData {
 pub struct TimelineState {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_track_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_clip_id: Option<String>,
     pub bpm: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub playhead_sec: f64,
     pub project_sec: f64,
 
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "btree_map_string_track_params_is_empty"
+    )]
     pub params_by_root_track: BTreeMap<String, TrackParamsState>,
 
-    #[serde(default = "default_project_scale_notes")]
+    #[serde(
+        default = "default_project_scale_notes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub project_scale_notes: Vec<u8>,
 
     /// Tempo Map（None = 无 Tempo Map，使用全局 BPM/拍号/音阶）。
     /// 点按 position_sec 升序；第一个点必须位于 0。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tempo_map: Option<Vec<TempoPointData>>,
 
     pub next_track_order: i32,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "hash_set_string_is_empty")]
     pub disabled_group_ids: HashSet<String>,
 }
 
@@ -3197,6 +3294,25 @@ impl TimelineState {
     pub fn set_project_length(&mut self, project_sec: f64) {
         if project_sec.is_finite() {
             self.project_sec = project_sec.max(4.0);
+        }
+    }
+
+    /// 从 `duration_frames` / `source_sample_rate` 重建被省略的 `duration_sec`。
+    ///
+    /// 工程文件保存时会省略可精确推导的 `duration_sec`，这里在加载/导入时
+    /// 恢复它，保证所有读取路径看到的仍是完整 Clip。
+    pub fn restore_derived_clip_fields(&mut self) {
+        for clip in &mut self.clips {
+            if clip.duration_sec.is_some() {
+                continue;
+            }
+            if let (Some(frames), Some(sample_rate)) =
+                (clip.duration_frames, clip.source_sample_rate)
+            {
+                if sample_rate > 0 {
+                    clip.duration_sec = Some(frames as f64 / sample_rate as f64);
+                }
+            }
         }
     }
 

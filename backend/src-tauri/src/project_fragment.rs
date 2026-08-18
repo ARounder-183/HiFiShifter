@@ -27,7 +27,7 @@ pub struct ProjectFragment {
     /// Per-source-clip automation slices for clip selections.  For whole-track
     /// and whole-project fragments the complete `timeline.params_by_root_track`
     /// is used instead.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub linked_params_by_clip: BTreeMap<String, LinkedParamCurvesPayload>,
 }
 
