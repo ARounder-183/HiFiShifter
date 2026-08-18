@@ -66,37 +66,44 @@ pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-/// Linux: 通过 wl-paste (Wayland) 或 xclip (X11) 读取自定义目标 "REAPERMedia"。
+/// Linux: 通过 wl-paste (Wayland) 或 xclip (X11) 读取 REAPERMedia。
+/// 优先读取 REAPER Linux 使用的 `application/swell-REAPERMedia`，
+/// 同时保留旧版短目标 `REAPERMedia` 作为回退。
 #[cfg(target_os = "linux")]
 pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
     use std::process::Command;
 
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    let is_wayland = crate::linux_clipboard::is_wayland_session();
+    let targets = [
+        crate::linux_clipboard::REAPER_MEDIA_LINUX_FORMAT,
+        crate::linux_clipboard::REAPER_MEDIA_LEGACY_FORMAT,
+    ];
 
-    let output = if is_wayland {
-        Command::new("wl-paste")
-            .args(["--type", "REAPERMedia"])
-            .output()
-    } else {
-        Command::new("xclip")
-            .args(["-selection", "clipboard", "-target", "REAPERMedia", "-o"])
-            .output()
-    };
+    for target in targets {
+        let output = if is_wayland {
+            Command::new("wl-paste").args(["--type", target]).output()
+        } else {
+            Command::new("xclip")
+                .args(["-selection", "clipboard", "-target", target, "-o"])
+                .output()
+        };
 
-    let output = output.map_err(|e| {
-        let tool = if is_wayland { "wl-paste" } else { "xclip" };
-        format!("clipboard_read_failed: failed to run {}: {}", tool, e)
-    })?;
-
-    if !output.status.success() {
-        return Err("clipboard_empty".to_string());
+        match output {
+            Err(error) => {
+                let tool = if is_wayland { "wl-paste" } else { "xclip" };
+                return Err(format!(
+                    "clipboard_read_failed: failed to run {}: {}",
+                    tool, error
+                ));
+            }
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+                return Ok(output.stdout);
+            }
+            Ok(_) => continue,
+        }
     }
 
-    if output.stdout.is_empty() {
-        return Err("clipboard_empty".to_string());
-    }
-
-    Ok(output.stdout)
+    Err("clipboard_empty".to_string())
 }
 
 /// 不支持的平台回退。
@@ -155,43 +162,44 @@ pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-/// Linux: 通过 wl-paste (Wayland) 或 xclip (X11) 读取自定义目标 "Standard MIDI File"。
+/// Linux: 通过 wl-paste (Wayland) 或 xclip (X11) 读取 Standard MIDI File。
+/// 优先读取 REAPER Linux 使用的 `application/swell-Standard MIDI File`，
+/// 同时保留旧版短目标 `Standard MIDI File` 作为回退。
 #[cfg(target_os = "linux")]
 pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
     use std::process::Command;
 
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    let is_wayland = crate::linux_clipboard::is_wayland_session();
+    let targets = [
+        crate::linux_clipboard::STANDARD_MIDI_FILE_LINUX_FORMAT,
+        crate::linux_clipboard::STANDARD_MIDI_FILE_LEGACY_FORMAT,
+    ];
 
-    let output = if is_wayland {
-        Command::new("wl-paste")
-            .args(["--type", "Standard MIDI File"])
-            .output()
-    } else {
-        Command::new("xclip")
-            .args([
-                "-selection",
-                "clipboard",
-                "-target",
-                "Standard MIDI File",
-                "-o",
-            ])
-            .output()
-    };
+    for target in targets {
+        let output = if is_wayland {
+            Command::new("wl-paste").args(["--type", target]).output()
+        } else {
+            Command::new("xclip")
+                .args(["-selection", "clipboard", "-target", target, "-o"])
+                .output()
+        };
 
-    let output = output.map_err(|e| {
-        let tool = if is_wayland { "wl-paste" } else { "xclip" };
-        format!("midi_clipboard_read_failed: failed to run {}: {}", tool, e)
-    })?;
-
-    if !output.status.success() {
-        return Err("midi_clipboard_empty".to_string());
+        match output {
+            Err(error) => {
+                let tool = if is_wayland { "wl-paste" } else { "xclip" };
+                return Err(format!(
+                    "midi_clipboard_read_failed: failed to run {}: {}",
+                    tool, error
+                ));
+            }
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+                return Ok(output.stdout);
+            }
+            Ok(_) => continue,
+        }
     }
 
-    if output.stdout.is_empty() {
-        return Err("midi_clipboard_empty".to_string());
-    }
-
-    Ok(output.stdout)
+    Err("midi_clipboard_empty".to_string())
 }
 
 /// 不支持的平台回退。
