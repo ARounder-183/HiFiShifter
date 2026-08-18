@@ -14,7 +14,11 @@
 # identical to the ARMv8 profile and which is the same code path FDK already
 # uses for successful MSVC x64 builds (_M_X64 -> __x86__).
 #
-# CXXFLAGS only: fdk-aac-sys compiles .cpp sources; other cc consumers on this
-# target are C or must not receive the define.
+# Set both CFLAGS and CXXFLAGS. fdk-aac-sys 0.5.0's build.rs never calls
+# cc::Build::cpp(true), so even though its sources are .cpp files the cc crate
+# reads CFLAGS (not CXXFLAGS) for those compilation commands. CXXFLAGS is kept
+# as a safety net in case a future fdk-aac-sys build script sets cpp(true).
+# No other cc consumer on this target checks __x86__, so the define is safe.
 [env]
+CFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
 CXXFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
