@@ -42,7 +42,7 @@ dependencies = [
  "uuid",
  "windows 0.58.0",
  "wl-clipboard-rs",
- "x11-clipboard",
+ "xcb",
  "zip",
 ]
 
@@ -7231,15 +7231,6 @@ checksum = "502da5464ccd04011667b11c435cb992822c2c0dbde1770c988480d312a0db2e"
 dependencies = [
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "x11-clipboard"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89bd49c06c9eb5d98e6ba6536cf64ac9f7ee3a009b2f53996d405b3944f6bcea"
-dependencies = [
- "xcb",
 ]
 
 [[package]]
