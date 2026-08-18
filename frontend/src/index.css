@@ -107,6 +107,30 @@ body,
     overflow: hidden; /* Prevent scrolling on body */
 }
 
+/*
+ * DAW-style interaction baseline: the app itself is not selectable text.
+ * This is especially important on Linux/WebKitGTK, where `selectstart`
+ * suppression alone does not always stop mouse-drag text selection.
+ * Editable controls and explicit `data-hs-selectable` surfaces opt back in.
+ */
+html,
+body,
+#root,
+body * {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+body input,
+body textarea,
+body select,
+body [contenteditable="true"],
+body [data-hs-selectable="true"],
+body [data-hs-selectable="true"] * {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
 body {
     background: var(--qt-window, #353535);
     color: var(--qt-text, #cccccc);

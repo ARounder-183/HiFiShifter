@@ -6,6 +6,7 @@ import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
 import { useAppDispatch, useAppSelector } from "./app/hooks";
 import { webApi } from "./services/webviewApi";
+import { IS_LINUX } from "./utils/platform";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -498,6 +499,55 @@ function AppInner() {
             return el.closest?.('input,textarea,select,[contenteditable="true"]') != null;
         }
 
+        // WebKitGTK fires `contextmenu` on right-button press instead of
+        // release. Track the right-button state on Linux and re-dispatch the
+        // deferred event on pointerup so right-click menus (and right-drag
+        // decisions made by local handlers) follow Windows-like timing.
+        let linuxRightButtonDown = false;
+        let linuxDeferredContextMenu: {
+            clientX: number;
+            clientY: number;
+            target: EventTarget | null;
+        } | null = null;
+        const trackLinuxRightButton = (event: PointerEvent) => {
+            if (IS_LINUX && event.button === 2) {
+                linuxRightButtonDown = true;
+            }
+        };
+        const flushLinuxDeferredContextMenu = () => {
+            const pending = linuxDeferredContextMenu;
+            linuxDeferredContextMenu = null;
+            linuxRightButtonDown = false;
+            if (!pending) return;
+            window.setTimeout(() => {
+                const clientX = pending.clientX;
+                const clientY = pending.clientY;
+                let target = pending.target;
+                if (!(target instanceof Element) || !document.contains(target)) {
+                    target = document.elementFromPoint(clientX, clientY);
+                }
+                target?.dispatchEvent(
+                    new MouseEvent("contextmenu", {
+                        bubbles: true,
+                        cancelable: true,
+                        clientX,
+                        clientY,
+                        button: 2,
+                        buttons: 0,
+                        view: window,
+                    }),
+                );
+            }, 0);
+        };
+        const cancelLinuxDeferredContextMenu = () => {
+            linuxDeferredContextMenu = null;
+            linuxRightButtonDown = false;
+        };
+        const handleLinuxPointerUp = (event: PointerEvent) => {
+            if (!IS_LINUX || event.button !== 2) return;
+            flushLinuxDeferredContextMenu();
+        };
+
         // 只允许可编辑控件和显式声明可选择/拖拽的区域使用 WebView 原生选择逻辑。
         function allowsNativeTextSelection(target: EventTarget | null): boolean {
             if (isEditableTarget(target)) return true;
@@ -580,6 +630,20 @@ function AppInner() {
             }
         }
         function preventContextMenu(e: MouseEvent) {
+            if (IS_LINUX && linuxRightButtonDown && !e.defaultPrevented) {
+                // Linux/WebKitGTK emits this event while the button is still
+                // down. Hold it back and replay on pointerup; local right-drag
+                // handlers that already called preventDefault/stopPropagation
+                // keep full control of their own drag/context-menu flow.
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                linuxDeferredContextMenu = {
+                    clientX: e.clientX,
+                    clientY: e.clientY,
+                    target: e.target,
+                };
+                return;
+            }
             // 完全禁用 WebView 默认右键菜单。只调用 preventDefault，
             // 不阻止传播，因此应用内基于 contextmenu 事件实现的
             // 自定义菜单/右键拖拽仍可正常工作。
@@ -608,9 +672,18 @@ function AppInner() {
         window.addEventListener("keyup", altKeyUp, true);
         window.addEventListener("keydown", preventBrowserFind, true);
         window.addEventListener("keydown", preventContextMenuKey, true);
+        if (IS_LINUX) {
+            window.addEventListener("pointerdown", trackLinuxRightButton, true);
+            window.addEventListener("pointerup", handleLinuxPointerUp, true);
+            window.addEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
+        }
         document.addEventListener("contextmenu", preventContextMenu, true);
         document.addEventListener("selectstart", preventNativeTextSelection, true);
         document.addEventListener("pointerdown", clearNativeTextSelection, true);
+        // WebKitGTK may create the selection during the drag rather than on
+        // `selectstart`; clear it again on release (editable/selectable
+        // targets are left untouched).
+        document.addEventListener("mouseup", clearNativeTextSelection, true);
         document.addEventListener("dragstart", preventNativeDragStart, true);
         document.addEventListener("mousedown", preventMiddleClickNative, true);
         window.addEventListener("wheel", preventBrowserZoomWheel, {
@@ -622,9 +695,15 @@ function AppInner() {
             window.removeEventListener("keydown", preventContextMenuKey, true);
             window.removeEventListener("keydown", altKeyDown, true);
             window.removeEventListener("keyup", altKeyUp, true);
+            if (IS_LINUX) {
+                window.removeEventListener("pointerdown", trackLinuxRightButton, true);
+                window.removeEventListener("pointerup", handleLinuxPointerUp, true);
+                window.removeEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
+            }
             document.removeEventListener("contextmenu", preventContextMenu, true);
             document.removeEventListener("selectstart", preventNativeTextSelection, true);
             document.removeEventListener("pointerdown", clearNativeTextSelection, true);
+            document.removeEventListener("mouseup", clearNativeTextSelection, true);
             document.removeEventListener("dragstart", preventNativeDragStart, true);
             document.removeEventListener("mousedown", preventMiddleClickNative, true);
             window.removeEventListener("wheel", preventBrowserZoomWheel, {
