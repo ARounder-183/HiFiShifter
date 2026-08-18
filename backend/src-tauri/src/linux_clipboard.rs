@@ -14,8 +14,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 
-use x11_clipboard::xcb;
-use x11_clipboard::Context as X11Context;
+use xcb;
 
 /// REAPER's Linux builds (SWELL) expose clipboard formats under this MIME
 /// prefix. Keep the short name as a fallback for older HiFiShifter versions.
@@ -59,6 +58,72 @@ struct IncrTransfer {
     pos: usize,
 }
 
+struct X11Atoms {
+    clipboard: xcb::Atom,
+    targets: xcb::Atom,
+    incr: xcb::Atom,
+}
+
+struct X11Context {
+    connection: xcb::Connection,
+    window: xcb::Window,
+    atoms: X11Atoms,
+}
+
+fn intern_atom(connection: &xcb::Connection, name: &str) -> Result<xcb::Atom, String> {
+    xcb::intern_atom(connection, false, name)
+        .get_reply()
+        .map(|reply| reply.atom())
+        .map_err(|error| format!("clipboard_x11_atom_failed ({name}): {error:?}"))
+}
+
+impl X11Context {
+    fn new() -> Result<Self, String> {
+        let (connection, screen) = xcb::Connection::connect(None)
+            .map_err(|error| format!("clipboard_x11_open_failed: {error:?}"))?;
+        let window = connection.generate_id();
+
+        {
+            let root = connection
+                .get_setup()
+                .roots()
+                .nth(screen as usize)
+                .ok_or_else(|| "clipboard_x11_no_screen".to_string())?;
+            xcb::create_window(
+                &connection,
+                xcb::COPY_FROM_PARENT as u8,
+                window,
+                root.root(),
+                0,
+                0,
+                1,
+                1,
+                0,
+                xcb::WINDOW_CLASS_INPUT_OUTPUT as u16,
+                root.root_visual(),
+                &[(xcb::CW_EVENT_MASK, xcb::EVENT_MASK_PROPERTY_CHANGE)],
+            );
+            connection.flush();
+        }
+
+        let atoms = X11Atoms {
+            clipboard: intern_atom(&connection, "CLIPBOARD")?,
+            targets: intern_atom(&connection, "TARGETS")?,
+            incr: intern_atom(&connection, "INCR")?,
+        };
+
+        Ok(Self {
+            connection,
+            window,
+            atoms,
+        })
+    }
+
+    fn get_atom(&self, name: &str) -> Result<xcb::Atom, String> {
+        intern_atom(&self.connection, name)
+    }
+}
+
 struct X11Owner {
     context: Arc<X11Context>,
     entries: Arc<RwLock<Vec<ClipboardEntry>>>,
@@ -72,9 +137,7 @@ fn x11_owner() -> Result<&'static Mutex<X11Owner>, String> {
         return Ok(owner);
     }
 
-    let context = Arc::new(
-        X11Context::new(None).map_err(|error| format!("clipboard_x11_open_failed: {error:?}"))?,
-    );
+    let context = Arc::new(X11Context::new()?);
     let entries = Arc::new(RwLock::new(Vec::<ClipboardEntry>::new()));
     let (refresh, refresh_receiver) = mpsc::channel::<()>();
 
