@@ -81,6 +81,8 @@ use fcpe_onnx_stub as fcpe_onnx;
 mod config;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
 #[path = "import/midi_import.rs"]
 mod midi_import;
 mod project;

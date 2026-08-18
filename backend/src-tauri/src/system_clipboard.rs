@@ -16,6 +16,7 @@
 use base64::Engine;
 
 pub const OBJECT_FORMAT: &str = "application/x-hifishifter-object";
+#[cfg(not(target_os = "linux"))]
 pub const REAPER_MEDIA_FORMAT: &str = "REAPERMedia";
 const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
 
@@ -185,60 +186,38 @@ fn is_wayland_session() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub fn write_bytes(bytes: &[u8], _text_summary: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let is_wayland = is_wayland_session();
-
-    let mut child = if is_wayland {
-        Command::new("wl-copy")
-            .args(["--type", OBJECT_FORMAT])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    } else {
-        Command::new("xclip")
-            .args(["-selection", "clipboard", "-target", OBJECT_FORMAT, "-i"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    }
-    .map_err(|e| {
-        let tool = if is_wayland { "wl-copy" } else { "xclip" };
-        format!("clipboard_write_failed: failed to run {}: {}", tool, e)
-    })?;
-
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "clipboard_write_failed: no stdin".to_string())?
-        .write_all(bytes)
-        .map_err(|e| format!("clipboard_write_failed: {}", e))?;
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("clipboard_write_failed: {}", e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("clipboard_write_failed".to_string())
-    }
+pub fn write_bytes(bytes: &[u8], text_summary: &str) -> Result<(), String> {
+    let formats: Vec<(&str, &[u8])> = vec![
+        (OBJECT_FORMAT, bytes),
+        ("UTF8_STRING", text_summary.as_bytes()),
+        ("text/plain", text_summary.as_bytes()),
+    ];
+    crate::linux_clipboard::write_multi(&formats)
 }
 
-/// Linux CLI clipboard tools accept only one payload per invocation
-/// (`wl-copy` / `xclip` cannot store different bytes under two targets in one
-/// ownership session). Keep the HiFiShifter object format as the single owner
-/// here; REAPERMedia co-writing is supported on Windows and macOS.
+/// Linux now co-writes REAPERMedia in the same clipboard ownership session.
+/// Both the SWELL MIME name used by REAPER on Linux and the legacy short
+/// target are advertised so old and new readers can paste the data.
 #[cfg(target_os = "linux")]
 pub fn write_bytes_with_reaper(
     bytes: &[u8],
     text_summary: &str,
-    _reaper_bytes: Option<&[u8]>,
+    reaper_bytes: Option<&[u8]>,
 ) -> Result<(), String> {
-    write_bytes(bytes, text_summary)
+    let mut formats: Vec<(&str, &[u8])> = vec![(OBJECT_FORMAT, bytes)];
+    if let Some(reaper_bytes) = reaper_bytes {
+        formats.push((
+            crate::linux_clipboard::REAPER_MEDIA_LINUX_FORMAT,
+            reaper_bytes,
+        ));
+        formats.push((
+            crate::linux_clipboard::REAPER_MEDIA_LEGACY_FORMAT,
+            reaper_bytes,
+        ));
+    }
+    formats.push(("UTF8_STRING", text_summary.as_bytes()));
+    formats.push(("text/plain", text_summary.as_bytes()));
+    crate::linux_clipboard::write_multi(&formats)
 }
 
 #[cfg(target_os = "linux")]
