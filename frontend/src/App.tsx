@@ -51,7 +51,7 @@ import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep"
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
-import type { SourceFileChange } from "./services/api/timeline";
+import type { SourceFileChange, SourceFileMatchCandidate } from "./services/api/timeline";
 import { waveformMipmapStore } from "./utils/waveformMipmapStore";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
@@ -129,6 +129,10 @@ type SourceFileChangedItem = SourceFileChange & {
     action: SourceFileChangeAction;
     /** 重新加载成功后实际使用的新文件路径。 */
     reloadedPath?: string;
+    /** 按名称搜索得到的候选文件（哈希完全匹配项排在前面）。 */
+    candidates?: SourceFileMatchCandidate[];
+    /** 用户在候选列表中当前选中的路径。 */
+    selectedCandidatePath?: string;
 };
 
 function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
@@ -221,6 +225,7 @@ function AppInner() {
         open: boolean;
         changes: SourceFileChangedItem[];
     }>({ open: false, changes: [] });
+    const [sourceFileSearchBusy, setSourceFileSearchBusy] = useState(false);
     useEffect(() => {
         sourceFileDialogOpenRef.current = sourceFileChangedDialog.open;
     }, [sourceFileChangedDialog.open]);
@@ -1475,7 +1480,12 @@ function AppInner() {
     const updateSourceFileChangeItem = useCallback(
         (
             clipId: string,
-            patch: Partial<Pick<SourceFileChangedItem, "action" | "reloadedPath">>,
+            patch: Partial<
+                Pick<
+                    SourceFileChangedItem,
+                    "action" | "reloadedPath" | "candidates" | "selectedCandidatePath"
+                >
+            >,
         ) => {
             setSourceFileChangedDialog((prev) => ({
                 ...prev,
@@ -1522,67 +1532,176 @@ function AppInner() {
         }));
     }, [sourceFileChangedDialog.changes]);
 
+    const applySourceFileReplacement = useCallback(
+        async (item: SourceFileChangedItem, replacementPath: string) => {
+            if (
+                item.action === "processing" ||
+                item.action === "ignored" ||
+                sourceFileChangeHandlingRef.current
+            ) {
+                return false;
+            }
+
+            updateSourceFileChangeItem(item.clip_id, { action: "processing" });
+            sourceFileChangeHandlingRef.current = true;
+            try {
+                await dispatch(
+                    replaceClipSourceRemote({
+                        clipIds: item.clip_id ? [item.clip_id] : [],
+                        newSourcePath: replacementPath,
+                        replaceSameSource: true,
+                    }),
+                ).unwrap();
+                updateSourceFileChangeItem(item.clip_id, {
+                    action: "reloaded",
+                    reloadedPath: replacementPath,
+                    selectedCandidatePath: undefined,
+                });
+                return true;
+            } catch {
+                // 重新加载过的条目再次重选失败时，保留原先“已重新加载”的
+                // 状态和路径，方便用户直接重试；未加载过的条目才显示失败。
+                updateSourceFileChangeItem(
+                    item.clip_id,
+                    item.action === "reloaded" ? { action: "reloaded" } : { action: "failed" },
+                );
+                return false;
+            } finally {
+                sourceFileChangeHandlingRef.current = false;
+            }
+        },
+        [dispatch, updateSourceFileChangeItem],
+    );
+
     const reloadSourceFileChangeItem = useCallback(
         async (item: SourceFileChangedItem) => {
             if (
                 item.action === "processing" ||
-                item.action === "reloaded" ||
                 item.action === "ignored" ||
                 sourceFileChangeHandlingRef.current
             ) {
                 return;
             }
 
-            updateSourceFileChangeItem(item.clip_id, { action: "processing" });
-            // 处理期间阻止窗口 focus 检测重复弹窗。
-            sourceFileChangeHandlingRef.current = true;
-            let reloadedPath: string | undefined;
-            try {
-                if (item.change === "deleted") {
-                    // 为当前这一项选择替代文件；对话框标题/预设文件名都明确指向该文件。
-                    const dialogTitle = t("source_file_changed_reload_dialog_title").replace(
-                        "{name}",
-                        item.clip_name || item.source_path,
-                    );
-                    const picked = await coreApi.openAudioDialogForSource(
-                        item.source_path,
-                        dialogTitle,
-                    );
-                    if (!picked?.ok || picked.canceled || !picked.path) {
+            if (item.change === "deleted") {
+                // 为当前这一项选择替代文件；对话框标题/预设文件名都明确指向该文件。
+                const dialogTitle = t("source_file_changed_reload_dialog_title").replace(
+                    "{name}",
+                    item.clip_name || item.source_path,
+                );
+                const picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+                if (!picked?.ok || picked.canceled || !picked.path) {
+                    // 重新选择时取消：保留原有的“已重新加载”状态，而不是退回未处理。
+                    if (item.action !== "reloaded") {
                         updateSourceFileChangeItem(item.clip_id, { action: "pending" });
-                        return;
                     }
-                    reloadedPath = picked.path;
-                    await dispatch(
-                        replaceClipSourceRemote({
-                            clipIds: item.clip_id ? [item.clip_id] : [],
-                            newSourcePath: reloadedPath,
-                            replaceSameSource: true,
-                        }),
-                    ).unwrap();
-                } else {
-                    // 被修改的文件重新加载原路径；replaceSameSource 会同步所有同源 clip。
-                    reloadedPath = item.source_path;
-                    await dispatch(
-                        replaceClipSourceRemote({
-                            clipIds: item.clip_id ? [item.clip_id] : [],
-                            newSourcePath: reloadedPath,
-                            replaceSameSource: true,
-                        }),
-                    ).unwrap();
+                    return;
                 }
-                updateSourceFileChangeItem(item.clip_id, {
-                    action: "reloaded",
-                    reloadedPath,
-                });
-            } catch {
-                updateSourceFileChangeItem(item.clip_id, { action: "failed" });
-            } finally {
-                sourceFileChangeHandlingRef.current = false;
+                await applySourceFileReplacement(item, picked.path);
+                return;
             }
+
+            // 被修改的文件重新加载原路径；replaceSameSource 会同步所有同源 clip。
+            await applySourceFileReplacement(item, item.source_path);
         },
-        [dispatch, t, updateSourceFileChangeItem],
+        [applySourceFileReplacement, t, updateSourceFileChangeItem],
     );
+
+    const searchSourceFileReplacements = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.filter(
+            (item) =>
+                item.action !== "ignored" &&
+                item.action !== "reloaded" &&
+                item.action !== "processing",
+        );
+        if (targets.length === 0 || sourceFileSearchBusy || sourceFileChangeHandlingRef.current) {
+            return;
+        }
+
+        const { fileBrowserApi } = await import("./services/api/fileBrowser");
+        let picked: { ok: boolean; canceled?: boolean; path?: string } | undefined;
+        try {
+            picked = await fileBrowserApi.pickDirectory();
+        } catch {
+            return;
+        }
+        if (!picked?.ok || picked.canceled || !picked.path) return;
+
+        setSourceFileSearchBusy(true);
+        try {
+            const result = await webApi.searchSourceFileReplacements(
+                picked.path,
+                targets.map((item) => item.clip_id),
+            );
+            const targetIds = new Set(targets.map((item) => item.clip_id));
+            setSourceFileChangedDialog((prev) => ({
+                ...prev,
+                changes: prev.changes.map((item) => {
+                    if (!targetIds.has(item.clip_id)) return item;
+                    const candidates = result.matches?.[item.clip_id] ?? [];
+                    return {
+                        ...item,
+                        candidates,
+                        selectedCandidatePath: candidates[0]?.path,
+                    };
+                }),
+            }));
+        } catch {
+            // 搜索失败保持现有状态；用户可以重新选择文件夹再试。
+        } finally {
+            setSourceFileSearchBusy(false);
+        }
+    }, [sourceFileChangedDialog.changes, sourceFileSearchBusy]);
+
+    const selectSourceFileMatchCandidate = useCallback(
+        (clipId: string, candidatePath: string) => {
+            updateSourceFileChangeItem(clipId, { selectedCandidatePath: candidatePath });
+        },
+        [updateSourceFileChangeItem],
+    );
+
+    const applySelectedSourceFileMatch = useCallback(
+        async (item: SourceFileChangedItem) => {
+            const candidatePath = item.selectedCandidatePath;
+            if (!candidatePath) return;
+            await applySourceFileReplacement(item, candidatePath);
+        },
+        [applySourceFileReplacement],
+    );
+
+    const applyAllExactSourceFileMatches = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.flatMap((item) => {
+            if (
+                item.action === "ignored" ||
+                item.action === "reloaded" ||
+                item.action === "processing"
+            ) {
+                return [];
+            }
+            const exact = item.candidates?.find((candidate) => candidate.exact_hash);
+            return exact ? [{ item, path: exact.path }] : [];
+        });
+        for (const target of targets) {
+            await applySourceFileReplacement(target.item, target.path);
+        }
+    }, [applySourceFileReplacement, sourceFileChangedDialog.changes]);
+
+    const applyAllSelectedSourceFileMatches = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.flatMap((item) => {
+            if (
+                item.action === "ignored" ||
+                item.action === "reloaded" ||
+                item.action === "processing"
+            ) {
+                return [];
+            }
+            const path = item.selectedCandidatePath;
+            return path ? [{ item, path }] : [];
+        });
+        for (const target of targets) {
+            await applySourceFileReplacement(target.item, target.path);
+        }
+    }, [applySourceFileReplacement, sourceFileChangedDialog.changes]);
 
     const closeSourceFileChangedDialog = useCallback(() => {
         setSourceFileChangedDialog((prev) => ({ ...prev, open: false }));
@@ -1987,6 +2106,40 @@ function AppInner() {
         };
     }, [isDragging]);
 
+    const sourceFileSearchMatchTotal = sourceFileChangedDialog.changes.reduce(
+        (total, item) =>
+            item.action === "pending" || item.action === "failed"
+                ? total + (item.candidates?.length ?? 0)
+                : total,
+        0,
+    );
+    const sourceFileSearchExactTotal = sourceFileChangedDialog.changes.reduce(
+        (total, item) =>
+            item.action === "pending" || item.action === "failed"
+                ? total +
+                  (item.candidates?.filter((candidate) => candidate.exact_hash).length ?? 0)
+                : total,
+        0,
+    );
+    const sourceFileExactApplyTotal = sourceFileChangedDialog.changes.reduce((total, item) => {
+        if (item.action !== "pending" && item.action !== "failed") {
+            return total;
+        }
+        return total + (item.candidates?.some((candidate) => candidate.exact_hash) ? 1 : 0);
+    }, 0);
+    const sourceFileSelectedApplyTotal = sourceFileChangedDialog.changes.reduce((total, item) => {
+        if (
+            (item.action !== "pending" && item.action !== "failed") ||
+            !item.selectedCandidatePath
+        ) {
+            return total;
+        }
+        return total + 1;
+    }, 0);
+    const sourceFileAnyProcessing = sourceFileChangedDialog.changes.some(
+        (item) => item.action === "processing",
+    );
+
     return (
         <Flex
             direction="column"
@@ -2126,6 +2279,43 @@ function AppInner() {
                             ? t("source_file_changed_deleted_desc")
                             : t("source_file_changed_modified_desc")}
                     </Dialog.Description>
+                    <Flex justify="between" align="center" gap="2" mt="2">
+                        <Text size="1" color="gray" className="min-w-0 truncate">
+                            {sourceFileSearchMatchTotal > 0
+                                ? t("source_file_changed_search_result_summary")
+                                      .replace("{total}", String(sourceFileSearchMatchTotal))
+                                      .replace("{exact}", String(sourceFileSearchExactTotal))
+                                      .replace("{selected}", String(sourceFileSelectedApplyTotal))
+                                : t("source_file_changed_search_hint")}
+                        </Text>
+                        {sourceFileSearchMatchTotal > 0 &&
+                            (sourceFileExactApplyTotal > 0 || sourceFileSelectedApplyTotal > 0) && (
+                                <Flex gap="2" align="center" className="shrink-0">
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="green"
+                                        disabled={
+                                            sourceFileAnyProcessing || sourceFileExactApplyTotal === 0
+                                        }
+                                        onClick={() => void applyAllExactSourceFileMatches()}
+                                    >
+                                        {t("source_file_changed_apply_all_exact")}
+                                    </Button>
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        disabled={
+                                            sourceFileAnyProcessing ||
+                                            sourceFileSelectedApplyTotal === 0
+                                        }
+                                        onClick={() => void applyAllSelectedSourceFileMatches()}
+                                    >
+                                        {t("source_file_changed_apply_all_selected")}
+                                    </Button>
+                                </Flex>
+                            )}
+                    </Flex>
                     <div className="mt-2 max-h-[280px] overflow-auto rounded border border-qt-border bg-qt-base p-2">
                         {sourceFileChangedDialog.changes.map((item) => {
                             const itemKey = `${item.clip_id}::${item.change}`;
@@ -2189,6 +2379,48 @@ function AppInner() {
                                                 <span className="truncate">{item.reloadedPath}</span>
                                             </div>
                                         )}
+                                        {!isDone && item.candidates && item.candidates.length > 0 && (
+                                            <div className="mt-1 flex items-center gap-1">
+                                                <select
+                                                    className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                    value={item.selectedCandidatePath ?? ""}
+                                                    disabled={isBusy}
+                                                    onChange={(event) =>
+                                                        selectSourceFileMatchCandidate(
+                                                            item.clip_id,
+                                                            event.target.value,
+                                                        )
+                                                    }
+                                                >
+                                                    {item.candidates.map((candidate) => (
+                                                        <option
+                                                            key={candidate.path}
+                                                            value={candidate.path}
+                                                        >
+                                                            {candidate.exact_hash
+                                                                ? `✓ ${t("source_file_changed_match_exact")} · `
+                                                                : ""}
+                                                            {candidate.path}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <Button
+                                                    size="1"
+                                                    variant="soft"
+                                                    disabled={isBusy || !item.selectedCandidatePath}
+                                                    onClick={() =>
+                                                        void applySelectedSourceFileMatch(item)
+                                                    }
+                                                >
+                                                    {t("source_file_changed_use_selected")}
+                                                </Button>
+                                            </div>
+                                        )}
+                                        {!isDone && item.candidates && item.candidates.length === 0 && (
+                                            <div className="mt-1 truncate text-[10px] text-qt-text-muted">
+                                                {t("source_file_changed_search_no_matches")}
+                                            </div>
+                                        )}
                                     </div>
                                     <div
                                         className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none ${statusBadgeClass}`}
@@ -2200,7 +2432,11 @@ function AppInner() {
                                             size="1"
                                             variant="soft"
                                             color="gray"
-                                            disabled={isBusy || isDone}
+                                            disabled={
+                                                isBusy ||
+                                                item.action === "ignored" ||
+                                                item.action === "reloaded"
+                                            }
                                             onClick={() => void ignoreSourceFileChangeItem(item)}
                                         >
                                             {t("source_file_changed_ignore")}
@@ -2208,7 +2444,7 @@ function AppInner() {
                                         <Button
                                             size="1"
                                             variant="soft"
-                                            disabled={isBusy || isDone}
+                                            disabled={isBusy || item.action === "ignored"}
                                             onClick={() => void reloadSourceFileChangeItem(item)}
                                         >
                                             {t("source_file_changed_reload")}
@@ -2240,6 +2476,25 @@ function AppInner() {
                                 .replace("{total}", String(sourceFileChangedDialog.changes.length))}
                         </Text>
                         <Flex gap="2" align="center" className="shrink-0">
+                            <Button
+                                size="1"
+                                variant="soft"
+                                disabled={
+                                    sourceFileSearchBusy ||
+                                    sourceFileAnyProcessing ||
+                                    !sourceFileChangedDialog.changes.some(
+                                        (item) =>
+                                            item.action !== "ignored" &&
+                                            item.action !== "reloaded" &&
+                                            item.action !== "processing",
+                                    )
+                                }
+                                onClick={() => void searchSourceFileReplacements()}
+                            >
+                                {sourceFileSearchBusy
+                                    ? t("source_file_changed_searching")
+                                    : t("source_file_changed_search_folder")}
+                            </Button>
                             <Button
                                 size="1"
                                 variant="soft"

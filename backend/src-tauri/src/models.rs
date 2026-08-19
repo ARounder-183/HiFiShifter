@@ -112,7 +112,7 @@ impl From<&ClipFormantMorph> for ClipFormantMorphPayload {
     }
 }
 
-/// 源文件变更检测结果：当用户切换回窗口时，检测导入的音频文件是否被外部替换或删除。
+/// 源文件变更检测结果：当用户切换回窗口时，检测导入的媒体文件是否被外部替换或删除。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceFileChangePayload {
@@ -127,6 +127,23 @@ pub struct SourceFileChangePayload {
 #[serde(rename_all = "snake_case")]
 pub struct CheckSourceFilesChangedPayload {
     pub changed: Vec<SourceFileChangePayload>,
+}
+
+/// 按文件名称搜索到的候选源文件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceFileMatchCandidatePayload {
+    /// 候选文件的绝对路径。
+    pub path: String,
+    /// 内容指纹是否与工程记录的源文件完全一致。
+    pub exact_hash: bool,
+}
+
+/// 批量搜索候选源文件的返回载荷，key 为 clip_id。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SearchSourceFileMatchesPayload {
+    pub matches: std::collections::HashMap<String, Vec<SourceFileMatchCandidatePayload>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

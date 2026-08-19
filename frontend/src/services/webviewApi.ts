@@ -116,6 +116,7 @@ export const webApi = {
     setClipsStateBulk: timelineApi.setClipsStateBulk,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,
     replaceClipSource: timelineApi.replaceClipSource,
+    searchSourceFileReplacements: timelineApi.searchSourceFileReplacements,
     splitClip: timelineApi.splitClip,
     splitClipsAt: timelineApi.splitClipsAt,
     glueClips: timelineApi.glueClips,
@@ -131,7 +132,7 @@ export const webApi = {
     hasTimelineClipboard: timelineApi.hasTimelineClipboard,
     hasReaperClipboard: timelineApi.hasReaperClipboard,
 
-    // 检查已导入音频源文件是否被外部修改或删除
+    // 检查已导入媒体源文件是否被外部修改或删除
     checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,
 
     setTransport: timelineApi.setTransport,

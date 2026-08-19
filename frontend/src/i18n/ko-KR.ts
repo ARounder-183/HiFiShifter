@@ -56,7 +56,7 @@ export const koKR = {
     export_conflict_exists_desc: "다음 내보내기 대상 파일이 이미 존재합니다:",
     export_conflict_source_title: "치명적 경고: 내보내기 대상이 프로젝트 미디어 파일과 동일합니다",
     export_conflict_source_desc:
-        "내보내기 대상 경로가 현재 프로젝트에서 사용 중인 오디오 클립의 원본 파일 경로와 일치합니다.\n이 파일을 덮어쓰면 프로젝트 미디어가 손상되어 복구 불가능한 데이터 손실이 발생할 수 있습니다. 신중하게 진행하세요.",
+        "내보내기 대상 경로가 현재 프로젝트에서 사용 중인 미디어 클립의 원본 파일 경로와 일치합니다.\n이 파일을 덮어쓰면 프로젝트 미디어가 손상되어 복구 불가능한 데이터 손실이 발생할 수 있습니다. 신중하게 진행하세요.",
     export_conflict_apply_all: "이후 동일한 유형의 충돌에도 같은 작업 적용",
     export_conflict_skip: "건너뛰기",
     export_conflict_cancel: "내보내기 취소",
@@ -182,7 +182,7 @@ export const koKR = {
     appearance_color_meter_rail: "미터 레일",
     appearance_color_meter_well: "미터 웰",
     reaper_import_skipped_header:
-        "Reaper 가져오기 중 다음 오디오 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
+        "Reaper 가져오기 중 다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
     menu_pick_output: "출력 경로 선택",
     language: "언어",
     stretch_project_override: "프로젝트 스트레치 재정의",
@@ -263,7 +263,7 @@ export const koKR = {
         "타임라인의 클립을 드래그하여 시작 위치 이동 (기본은 스냅, Shift를 누르면 자유 이동)",
     hint_add_point: "파라미터 패널을 더블 클릭하여 포인트 추가",
     hint_drag_point: "포인트를 드래그하여 커브 편집",
-    hint_drop_audio: "오디오 파일을 드롭하여 가져오기 및 분석",
+    hint_drop_audio: "미디어 파일을 드롭하여 가져오기 및 분석",
     hint_alt_drag: "클립 드래그 중 Alt 키를 누르면 Slip-Edit (내부 콘텐츠 이동; 스냅 없음)",
 
     timeline_title: "타임라인",
@@ -422,11 +422,11 @@ export const koKR = {
     ctx_unreverse_selected: "선택 항목 역재생 해제",
     clip_replace_same_source_confirm:
         "프로젝트 안에 선택한 클립과 같은 원본 파일 경로를 사용하는 다른 클립이 있습니다. 같은 원본 경로를 사용하는 클립도 함께 교체할까요?",
-    source_file_changed_title: "소스 파일 변경됨",
+    source_file_changed_title: "소스 미디어 변경됨",
     source_file_changed_modified_desc:
-        "다음 오디오 파일이 외부에서 수정되었습니다. 파일마다 무시하거나 다시 로드할 수 있습니다.",
+        "다음 미디어 파일이 외부에서 수정되었습니다. 파일마다 무시하거나 다시 로드할 수 있습니다.",
     source_file_changed_deleted_desc:
-        "다음 오디오 파일이 이동 또는 삭제되었습니다. 파일마다 무시하거나 대체 파일을 선택할 수 있습니다.",
+        "다음 미디어 파일이 이동 또는 삭제되었습니다. 파일마다 무시하거나 대체 파일을 선택할 수 있습니다.",
     source_file_changed_reload: "다시 로드",
     source_file_changed_ignore: "무시",
     source_file_changed_ignore_all: "모두 무시",
@@ -440,6 +440,17 @@ export const koKR = {
     source_file_changed_summary: "무시 {ignored} · 다시 로드됨 {reloaded} · 전체 {total}",
     source_file_changed_reload_dialog_title: '"{name}"의 대체 파일 선택',
     source_file_changed_reloaded_path: "다시 로드 경로:",
+    source_file_changed_search_folder: "폴더 검색…",
+    source_file_changed_searching: "검색 중…",
+    source_file_changed_search_hint:
+        "폴더를 선택하면 파일 이름이 일치하는 파일을 하위 폴더까지 검색합니다.",
+    source_file_changed_search_result_summary:
+        "이름 일치 {total}개 · 해시 완전 일치 {exact}개 · 선택됨 {selected}개",
+    source_file_changed_match_exact: "해시 완전 일치",
+    source_file_changed_use_selected: "선택 사용",
+    source_file_changed_apply_all_exact: "모든 해시 일치 적용",
+    source_file_changed_apply_all_selected: "모든 선택 적용",
+    source_file_changed_search_no_matches: "이름이 일치하는 파일을 찾지 못했습니다",
     project_version_too_new_title: "최신 버전의 프로젝트 파일을 감지했습니다",
     project_version_too_new_desc:
         "이 프로젝트 파일은 현재 프로그램(v{currentVersion})보다 최신 버전(v{fileVersion})으로 만들어졌습니다. 호환되지 않을 수 있습니다. 그래도 계속해서 로드를 시도하시겠습니까?",
@@ -581,7 +592,7 @@ export const koKR = {
     vs_import_read_failed: "VocalShifter 프로젝트 파일을 읽지 못했습니다.",
     vs_import_parse_failed: "VocalShifter 프로젝트 파싱에 실패했습니다.",
     vs_import_skipped_header:
-        "다음 오디오 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
+        "다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
 
     // MIDI 가져오기
     midi_import: "MIDI 가져오기",

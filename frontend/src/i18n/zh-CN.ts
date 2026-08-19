@@ -55,7 +55,7 @@ export const zhCN = {
     export_conflict_exists_desc: "以下导出目标文件已存在：",
     export_conflict_source_title: "高风险警告：导出目标指向工程媒体文件",
     export_conflict_source_desc:
-        "检测到导出目标路径与当前工程中某个音频块的源文件路径相同。\n覆盖该文件可能直接破坏工程媒体并导致工程内容不可恢复。请谨慎选择。",
+        "检测到导出目标路径与当前工程中某个媒体块的源文件路径相同。\n覆盖该文件可能直接破坏工程媒体并导致工程内容不可恢复。请谨慎选择。",
     export_conflict_apply_all: "对后续同类冲突执行相同操作",
     export_conflict_skip: "跳过",
     export_conflict_cancel: "取消导出",
@@ -97,7 +97,7 @@ export const zhCN = {
     quick_export_error_missing_output_dir: "请选择导出目录。",
     quick_export_error_missing_file_name: "请输入文件名。",
     quick_export_error_pick_directory_failed: "选择导出目录失败。",
-    reaper_import_skipped_header: "Reaper 导入时跳过了以下音频文件（格式不支持或文件不存在）：",
+    reaper_import_skipped_header: "Reaper 导入时跳过了以下媒体文件（格式不支持或文件不存在）：",
     menu_pick_output: "选择导出路径",
     stretch_project_override: "工程拉伸覆盖",
     stretch_global_default: "全局拉伸默认",
@@ -177,7 +177,7 @@ export const zhCN = {
     hint_drag_clip: "拖拽时间轴中的块可移动起始位置（默认吸附到网格；按住 Shift 可自由移动）",
     hint_add_point: "参数区双击可新增控制点",
     hint_drag_point: "拖动控制点可编辑曲线",
-    hint_drop_audio: "把音频文件拖到界面中可直接导入并分析",
+    hint_drop_audio: "把媒体文件拖到界面中可直接导入并分析",
     hint_alt_drag: "拖动音频块时按住 Alt 进行内部偏移（Slip-Edit：移动内部内容，不吸附）",
 
     timeline_title: "时间轴",
@@ -331,12 +331,12 @@ export const zhCN = {
     ctx_reverse_selected: "倒放选中项",
     ctx_unreverse_selected: "取消倒放选中项",
     clip_replace_same_source_confirm:
-        "工程中还有其他音频块使用与当前音频块相同的源文件路径。是否同时替换这些同源音频块？",
-    source_file_changed_title: "源文件已变更",
+        "工程中还有其他媒体块使用与当前媒体块相同的源文件路径。是否同时替换这些同源媒体块？",
+    source_file_changed_title: "源媒体已变更",
     source_file_changed_modified_desc:
-        "以下音频文件已在外部被修改。您可以对每个文件分别选择忽略或重新加载。",
+        "以下媒体文件已在外部被修改。您可以对每个文件分别选择忽略或重新加载。",
     source_file_changed_deleted_desc:
-        "以下音频文件已被移动或删除。您可以对每个文件分别选择忽略，或为其重新指定替代文件。",
+        "以下媒体文件已被移动或删除。您可以对每个文件分别选择忽略，或为其重新指定替代文件。",
     source_file_changed_reload: "重新加载",
     source_file_changed_ignore: "忽略",
     source_file_changed_ignore_all: "全部忽略",
@@ -350,6 +350,16 @@ export const zhCN = {
     source_file_changed_summary: "已忽略 {ignored} · 已重新加载 {reloaded} · 全部 {total}",
     source_file_changed_reload_dialog_title: "为“{name}”选择替代文件",
     source_file_changed_reloaded_path: "重新加载路径：",
+    source_file_changed_search_folder: "搜索文件夹…",
+    source_file_changed_searching: "正在搜索…",
+    source_file_changed_search_hint: "选择一个文件夹，按文件名称搜索匹配文件（包含子文件夹）。",
+    source_file_changed_search_result_summary:
+        "找到 {total} 个名称匹配 · {exact} 个哈希完全匹配 · 已选 {selected} 个",
+    source_file_changed_match_exact: "哈希完全匹配",
+    source_file_changed_use_selected: "使用所选",
+    source_file_changed_apply_all_exact: "应用全部哈希匹配",
+    source_file_changed_apply_all_selected: "应用全部所选",
+    source_file_changed_search_no_matches: "未找到名称匹配的文件",
     project_version_too_new_title: "检测到更高版本的工程文件",
     project_version_too_new_desc:
         "该工程文件由更高版本（v{fileVersion}）创建，当前程序工程文件版本为 v{currentVersion}。工程文件可能不兼容，是否仍要继续尝试加载？",
@@ -490,7 +500,7 @@ export const zhCN = {
     vs_paste_no_pitch_line: "当前没有选中的音高线，请先选择一条音高线。",
     vs_import_read_failed: "读取 VocalShifter 工程文件失败。",
     vs_import_parse_failed: "解析 VocalShifter 工程失败。",
-    vs_import_skipped_header: "以下音频文件因格式不支持或文件不存在而被跳过：",
+    vs_import_skipped_header: "以下媒体文件因格式不支持或文件不存在而被跳过：",
 
     // MIDI 导入
     midi_import: "导入 MIDI",

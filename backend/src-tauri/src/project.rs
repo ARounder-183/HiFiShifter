@@ -352,6 +352,17 @@ pub fn prepare_timeline_for_project_save(
 ) -> TimelineState {
     for clip in &mut tl.clips {
         clip.waveform_preview = None;
+        // 保证保存的工程中携带用于后续哈希匹配的内容指纹。
+        // 已持久化或运行时刚更新的值保持不变；旧工程没有指纹时按当前
+        // 磁盘文件补算一次，文件缺失则继续保持 None。
+        if clip.source_file_fingerprint.is_none() {
+            if let Some(source_path) = clip.source_path.as_deref().map(str::trim) {
+                if !source_path.is_empty() {
+                    clip.source_file_fingerprint =
+                        crate::audio_utils::compute_file_fingerprint(Path::new(source_path));
+                }
+            }
+        }
         // duration_sec 可由 duration_frames / source_sample_rate 精确重建；
         // 仅当二者齐全且数值一致时省略，避免旧工程兼容路径依赖该字段。
         if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
@@ -660,6 +671,7 @@ mod tests {
             clip.fade_in_curve = "logarithmic".to_string();
             clip.fade_out_curve = "exponential".to_string();
             clip.color = "blue".to_string();
+            clip.source_file_fingerprint = Some(0x1122334455667788);
         }
         {
             let params = tl.params_by_root_track.get_mut(&root).unwrap();
@@ -712,6 +724,11 @@ mod tests {
         assert!((clip.fade_out_sec - 0.2).abs() < 1e-12);
         assert_eq!(clip.fade_in_curve, "logarithmic");
         assert_eq!(clip.fade_out_curve, "exponential");
+        assert_eq!(
+            clip.source_file_fingerprint,
+            Some(0x1122334455667788),
+            "source fingerprint must be persisted for later hash matching"
+        );
         assert!(
             clip.waveform_preview.is_none(),
             "waveform preview is stripped"

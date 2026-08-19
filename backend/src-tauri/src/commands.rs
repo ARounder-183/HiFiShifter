@@ -624,6 +624,15 @@ pub fn check_source_files_changed(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn search_source_file_replacements(
+    state: State<'_, AppState>,
+    folder_path: String,
+    clip_ids: Vec<String>,
+) -> crate::models::SearchSourceFileMatchesPayload {
+    timeline::search_source_file_replacements(state, folder_path, clip_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn split_clip(
     state: State<'_, AppState>,
     clip_id: String,

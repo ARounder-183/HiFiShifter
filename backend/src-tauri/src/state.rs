@@ -411,8 +411,14 @@ pub struct Clip {
     #[serde(skip)]
     pub source_file_size: Option<u64>,
     /// 源文件内容指纹（头 64KB + 尾 64KB FNV-1a 64-bit）。
-    /// 用于元数据变化后的第二层内容确认。仅在程序运行期间有效，不持久化。
-    #[serde(skip)]
+    ///
+    /// 用于：
+    /// 1. 元数据变化后的第二层内容确认；
+    /// 2. 源文件缺失时按文件名搜索候选文件并进行哈希匹配。
+    ///
+    /// 该字段随工程文件持久化；打开工程时优先使用工程中保存的值，
+    /// 即使源文件当前缺失，也能用于后续重新匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_file_fingerprint: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waveform_preview: Option<Vec<f32>>,
@@ -2635,6 +2641,66 @@ mod tests {
         assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
         assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
     }
+
+    #[test]
+    fn check_source_files_changed_uses_persisted_fingerprint_after_open_baseline_refresh() {
+        let test_path = std::env::temp_dir().join(format!(
+            "hifishifter_fingerprint_check_{}.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&test_path);
+
+        // 保存工程时磁盘上是内容 A。
+        std::fs::write(&test_path, b"content-A").unwrap();
+        let saved_fingerprint =
+            crate::audio_utils::compute_file_fingerprint(&test_path).expect("fingerprint A");
+
+        // 关闭工程后，用户在资源管理器中用内容 B 替换了同名文件。
+        std::fs::write(&test_path, b"content-B-different").unwrap();
+
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            Some(test_path.display().to_string()),
+        );
+
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 模拟打开工程后的状态：持久化指纹仍是 A，但 mtime/size 已按 B 刷新。
+            clip.source_file_fingerprint = Some(saved_fingerprint);
+            let meta = std::fs::metadata(&test_path).unwrap();
+            clip.source_file_size = Some(meta.len());
+            clip.source_file_mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+        }
+
+        let changed = tl.check_source_files_changed().changed;
+        assert!(
+            changed.iter().any(|item| {
+                item.clip_id == clip_id
+                    && item.source_path == test_path.display().to_string()
+                    && item.change == "modified"
+            }),
+            "fingerprint change must be detected even when mtime/size match the just-opened file"
+        );
+
+        // 用户重新加载 B 后，运行时指纹更新为 B，不应再报告变更。
+        if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+            clip.source_file_fingerprint =
+                crate::audio_utils::compute_file_fingerprint(&test_path);
+        }
+        let changed = tl.check_source_files_changed().changed;
+        assert!(changed.is_empty(), "same fingerprint must not report a change");
+
+        let _ = std::fs::remove_file(&test_path);
+    }
 }
 
 pub(crate) fn new_id(prefix: &str) -> String {
@@ -3332,7 +3398,9 @@ impl TimelineState {
 
     /// 根据 clip 的 source_path 从磁盘读取文件元数据 + 内容指纹，
     /// 填充 `source_file_size`、`source_file_mtime`、`source_file_fingerprint`。
-    /// 仅在 source_path 存在且文件可访问时生效。
+    ///
+    /// 内容指纹优先保留工程文件中已持久化的值：它代表“用于匹配的原始文件
+    /// 哈希”。仅当工程中没有保存指纹时，才用当前磁盘文件计算一次。
     pub fn populate_clip_file_metadata(clip: &mut Clip) {
         let Some(ref source_path) = clip.source_path else {
             return;
@@ -3349,8 +3417,10 @@ impl TimelineState {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs());
         }
-        if let Some(fp) = crate::audio_utils::compute_file_fingerprint(p) {
-            clip.source_file_fingerprint = Some(fp);
+        if clip.source_file_fingerprint.is_none() {
+            if let Some(fp) = crate::audio_utils::compute_file_fingerprint(p) {
+                clip.source_file_fingerprint = Some(fp);
+            }
         }
     }
 
@@ -5291,13 +5361,17 @@ impl TimelineState {
             let old_size = clip.source_file_size;
             let old_fp = clip.source_file_fingerprint;
 
-            // 若大小和 mtime 均与记录一致 → 未修改，跳过
-            if current_size == old_size && current_mtime == old_mtime {
+            // 若大小和 mtime 均与记录一致，通常可跳过。
+            // 但工程文件可能保存了旧的源文件指纹：例如用户在关闭工程后手动替换了
+            // 同名文件，重新打开工程时 mtime/size 会以“新文件”为基线刷新，因此
+            // 元数据一致并不代表内容与工程保存时一致。只要存在指纹，就必须进入
+            // 指纹验证层，用工程中保存的哈希重新判断内容是否发生变化。
+            if current_size == old_size && current_mtime == old_mtime && old_fp.is_none() {
                 continue;
             }
 
-            // 旧工程无元数据 → 跳过检测（无法判断是否变更）
-            if old_mtime.is_none() && old_size.is_none() {
+            // 旧工程既无元数据也无指纹 → 跳过检测（无法判断是否变更）
+            if old_mtime.is_none() && old_size.is_none() && old_fp.is_none() {
                 continue;
             }
 

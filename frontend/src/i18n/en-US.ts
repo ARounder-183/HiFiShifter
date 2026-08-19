@@ -62,7 +62,7 @@ export const enUS = {
     export_conflict_exists_desc: "The following export target already exists:",
     export_conflict_source_title: "Critical Warning: Export Target Matches Project Media",
     export_conflict_source_desc:
-        "The export target path matches an audio clip source file used by the current project.\nOverwriting this file may permanently damage project media and cause irreversible data loss. Proceed carefully.",
+        "The export target path matches a media clip source file used by the current project.\nOverwriting this file may permanently damage project media and cause irreversible data loss. Proceed carefully.",
     export_conflict_apply_all: "Apply the same action to subsequent similar conflicts",
     export_conflict_skip: "Skip",
     export_conflict_cancel: "Cancel Export",
@@ -107,7 +107,7 @@ export const enUS = {
     quick_export_error_missing_file_name: "Please enter a file name.",
     quick_export_error_pick_directory_failed: "Failed to choose output folder.",
     reaper_import_skipped_header:
-        "Some audio files were skipped during Reaper import (unsupported format or file not found):",
+        "Some media files were skipped during Reaper import (unsupported format or file not found):",
     menu_pick_output: "Pick Output",
     stretch_project_override: "Project Stretch Override",
     stretch_global_default: "Global Stretch Default",
@@ -188,7 +188,7 @@ export const enUS = {
         "Drag clips on timeline to move start (snaps to grid; hold Shift for free movement)",
     hint_add_point: "Double click in parameter panel to add points",
     hint_drag_point: "Drag points to edit the curve",
-    hint_drop_audio: "Drop audio file onto app to import and analyze",
+    hint_drop_audio: "Drop media file onto app to import and analyze",
     hint_alt_drag: "Hold Alt while dragging a clip to Slip-Edit (move content internally; no snap)",
 
     timeline_title: "Timeline",
@@ -346,11 +346,11 @@ export const enUS = {
     ctx_unreverse_selected: "Unreverse Selected",
     clip_replace_same_source_confirm:
         "Other clips in this project use the same source file path as the selected clip(s). Replace those same-source clips as well?",
-    source_file_changed_title: "Source File Changed",
+    source_file_changed_title: "Source Media Changed",
     source_file_changed_modified_desc:
-        "The following audio file(s) have been modified externally. You can ignore or reload each file individually.",
+        "The following media file(s) have been modified externally. You can ignore or reload each file individually.",
     source_file_changed_deleted_desc:
-        "The following audio file(s) have been moved or deleted. You can ignore each file or choose a replacement for it.",
+        "The following media file(s) have been moved or deleted. You can ignore each file or choose a replacement for it.",
     source_file_changed_reload: "Reload",
     source_file_changed_ignore: "Ignore",
     source_file_changed_ignore_all: "Ignore All",
@@ -364,6 +364,17 @@ export const enUS = {
     source_file_changed_summary: "Ignored {ignored} · Reloaded {reloaded} · Total {total}",
     source_file_changed_reload_dialog_title: 'Choose a replacement for "{name}"',
     source_file_changed_reloaded_path: "Reloaded path:",
+    source_file_changed_search_folder: "Search Folder...",
+    source_file_changed_searching: "Searching...",
+    source_file_changed_search_hint:
+        "Choose a folder to search for files with matching names, including subfolders.",
+    source_file_changed_search_result_summary:
+        "{total} name match(es) · {exact} exact hash · {selected} selected",
+    source_file_changed_match_exact: "exact hash",
+    source_file_changed_use_selected: "Use Selected",
+    source_file_changed_apply_all_exact: "Apply All Exact Matches",
+    source_file_changed_apply_all_selected: "Apply All Selected",
+    source_file_changed_search_no_matches: "No matching file name found",
     project_version_too_new_title: "Newer Project File Detected",
     project_version_too_new_desc:
         "This project file was created with a newer version (v{fileVersion}) than this app (v{currentVersion}). It may be incompatible. Do you want to continue and try to load it anyway?",
@@ -500,7 +511,7 @@ export const enUS = {
     vs_import_read_failed: "Failed to read VocalShifter project file.",
     vs_import_parse_failed: "Failed to parse VocalShifter project.",
     vs_import_skipped_header:
-        "The following audio files were skipped (unsupported format or not found):",
+        "The following media files were skipped (unsupported format or not found):",
 
     // MIDI 导入
     midi_import: "Import MIDI",

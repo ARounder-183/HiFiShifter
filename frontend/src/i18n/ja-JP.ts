@@ -59,7 +59,7 @@ export const jaJP = {
     export_conflict_source_title:
         "重大な警告：エクスポート先がプロジェクトのメディアファイルと一致しています",
     export_conflict_source_desc:
-        "エクスポート先のパスが、現在のプロジェクトで使用中のオーディオクリップのソースファイルと一致しています。\nこのファイルを上書きすると、プロジェクトのメディアが破損し、復旧不能なデータ損失を招く可能性があります。十分に注意してください。",
+        "エクスポート先のパスが、現在のプロジェクトで使用中のメディアクリップのソースファイルと一致しています。\nこのファイルを上書きすると、プロジェクトのメディアが破損し、復旧不能なデータ損失を招く可能性があります。十分に注意してください。",
     export_conflict_apply_all: "以降の同種の競合にも同じ操作を適用する",
     export_conflict_skip: "スキップ",
     export_conflict_cancel: "エクスポートを中止",
@@ -104,7 +104,7 @@ export const jaJP = {
     quick_export_error_missing_file_name: "ファイル名を入力してください。",
     quick_export_error_pick_directory_failed: "出力フォルダの選択に失敗しました。",
     reaper_import_skipped_header:
-        "Reaper インポート時に以下のオーディオファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
+        "Reaper インポート時に以下のメディアファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
     menu_pick_output: "出力先を選択",
     language: "言語",
     stretch_project_override: "プロジェクトストレッチ上書き",
@@ -185,7 +185,7 @@ export const jaJP = {
         "タイムライン上のクリップをドラッグして開始位置を移動（通常はグリッドにスナップ；Shift を押しながらでフリー移動）",
     hint_add_point: "パラメータパネルをダブルクリックしてポイントを追加",
     hint_drag_point: "ポイントをドラッグしてカーブを編集",
-    hint_drop_audio: "オーディオファイルをドロップしてインポート・分析",
+    hint_drop_audio: "メディアファイルをドロップしてインポート・分析",
     hint_alt_drag:
         "クリップをドラッグ中に Alt を押すと Slip-Edit（内部コンテンツを移動；スナップなし）",
 
@@ -347,11 +347,11 @@ export const jaJP = {
     ctx_unreverse_selected: "選択項目の逆再生を解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
-    source_file_changed_title: "ソースファイルが変更されました",
+    source_file_changed_title: "ソースメディアが変更されました",
     source_file_changed_modified_desc:
-        "以下の音声ファイルは外部で変更されています。ファイルごとに「無視」または「再読み込み」を選択できます。",
+        "以下のメディアファイルは外部で変更されています。ファイルごとに「無視」または「再読み込み」を選択できます。",
     source_file_changed_deleted_desc:
-        "以下の音声ファイルは移動または削除されています。ファイルごとに「無視」するか、代替ファイルを選択できます。",
+        "以下のメディアファイルは移動または削除されています。ファイルごとに「無視」するか、代替ファイルを選択できます。",
     source_file_changed_reload: "再読み込み",
     source_file_changed_ignore: "無視",
     source_file_changed_ignore_all: "すべて無視",
@@ -366,6 +366,17 @@ export const jaJP = {
         "無視 {ignored} · 再読み込み済み {reloaded} · 合計 {total}",
     source_file_changed_reload_dialog_title: "「{name}」の代替ファイルを選択",
     source_file_changed_reloaded_path: "再読み込みパス：",
+    source_file_changed_search_folder: "フォルダーを検索…",
+    source_file_changed_searching: "検索中…",
+    source_file_changed_search_hint:
+        "フォルダーを選択して、ファイル名が一致するファイルをサブフォルダーも含めて検索します。",
+    source_file_changed_search_result_summary:
+        "{total} 件の名前一致 · {exact} 件のハッシュ完全一致 · {selected} 件選択中",
+    source_file_changed_match_exact: "ハッシュ完全一致",
+    source_file_changed_use_selected: "選択を使用",
+    source_file_changed_apply_all_exact: "全ハッシュ一致を適用",
+    source_file_changed_apply_all_selected: "選択中の全候補を適用",
+    source_file_changed_search_no_matches: "名前が一致するファイルが見つかりません",
     project_version_too_new_title: "新しいバージョンのプロジェクトファイルを検出しました",
     project_version_too_new_desc:
         "このプロジェクトファイルは、このアプリ（v{currentVersion}）より新しいバージョン（v{fileVersion}）で作成されています。互換性がない可能性があります。それでも読み込みを続行しますか？",
@@ -509,7 +520,7 @@ export const jaJP = {
     vs_import_read_failed: "VocalShifter プロジェクトファイルの読み取りに失敗しました。",
     vs_import_parse_failed: "VocalShifter プロジェクトの解析に失敗しました。",
     vs_import_skipped_header:
-        "以下のオーディオファイルはスキップされました（非対応形式またはファイルが見つかりません）：",
+        "以下のメディアファイルはスキップされました（非対応形式またはファイルが見つかりません）：",
 
     // MIDI インポート
     midi_import: "MIDI をインポート",

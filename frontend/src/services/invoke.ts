@@ -259,6 +259,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 replaceSameSource: args[2],
             };
 
+        case "search_source_file_replacements":
+            return {
+                folderPath: args[0],
+                clipIds: args[1],
+            };
+
         case "split_clip":
             return { clipId: args[0], splitSec: args[1] };
 
