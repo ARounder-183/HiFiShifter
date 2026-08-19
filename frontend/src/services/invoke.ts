@@ -263,6 +263,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return {
                 folderPath: args[0],
                 clipIds: args[1],
+                searchMode: args[2],
             };
 
         case "split_clip":

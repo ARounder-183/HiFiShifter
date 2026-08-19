@@ -314,13 +314,18 @@ export const timelineApi = {
     hasReaperClipboard: () =>
         invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
 
-    /// 在指定文件夹及其子文件夹中按文件名称搜索候选源文件，
-    /// 并使用与源媒体变更检测相同的指纹逻辑标记哈希完全匹配的候选。
-    searchSourceFileReplacements: (folderPath: string, clipIds: string[]) =>
+    /// 在指定文件夹及其子文件夹中搜索候选源文件。
+    /// searchMode 为 "file_name"（精准文件名）或 "extension_hash"（文件扩展名 + 哈希）。
+    searchSourceFileReplacements: (
+        folderPath: string,
+        clipIds: string[],
+        searchMode: "file_name" | "extension_hash",
+    ) =>
         invoke<SearchSourceFileMatchesResult>(
             "search_source_file_replacements",
             folderPath,
             clipIds,
+            searchMode,
         ),
 
     /// 检查所有已导入的媒体源文件是否被外部修改或删除。

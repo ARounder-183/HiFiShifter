@@ -129,6 +129,17 @@ pub struct CheckSourceFilesChangedPayload {
     pub changed: Vec<SourceFileChangePayload>,
 }
 
+/// “搜索文件夹”的匹配模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SearchSourceFileMode {
+    /// 精准文件名匹配：按源文件的完整文件名（含扩展名）搜索。
+    #[serde(rename = "file_name")]
+    ByFileName,
+    /// 文件扩展名 + 哈希匹配：扫描所有相同扩展名的文件，按内容指纹匹配。
+    #[serde(rename = "extension_hash")]
+    ByExtensionHash,
+}
+
 /// 按文件名称搜索到的候选源文件。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]

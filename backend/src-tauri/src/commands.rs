@@ -624,12 +624,13 @@ pub fn check_source_files_changed(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn search_source_file_replacements(
+pub async fn search_source_file_replacements(
     state: State<'_, AppState>,
     folder_path: String,
     clip_ids: Vec<String>,
-) -> crate::models::SearchSourceFileMatchesPayload {
-    timeline::search_source_file_replacements(state, folder_path, clip_ids)
+    search_mode: crate::models::SearchSourceFileMode,
+) -> Result<crate::models::SearchSourceFileMatchesPayload, String> {
+    timeline::search_source_file_replacements(state, folder_path, clip_ids, search_mode).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

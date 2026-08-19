@@ -777,9 +777,18 @@ pub(super) fn check_source_files_changed(
 
 const MAX_SOURCE_MATCH_CANDIDATES_PER_CLIP: usize = 200;
 
+/// 取路径的小写扩展名（不含点）。
+fn path_extension_key(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
 fn collect_source_file_match_candidates(
     dir: &Path,
     targets_by_name: &HashMap<std::ffi::OsString, Vec<(String, Option<u64>)>>,
+    targets_by_extension: &HashMap<String, Vec<(String, Option<u64>)>>,
+    mode: crate::models::SearchSourceFileMode,
     out: &mut HashMap<String, Vec<crate::models::SourceFileMatchCandidatePayload>>,
 ) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -792,94 +801,164 @@ fn collect_source_file_match_candidates(
         };
         let path = entry.path();
         if file_type.is_dir() {
-            collect_source_file_match_candidates(&path, targets_by_name, out);
+            collect_source_file_match_candidates(
+                &path,
+                targets_by_name,
+                targets_by_extension,
+                mode,
+                out,
+            );
             continue;
         }
         if !file_type.is_file() {
             continue;
         }
-        let Some(file_name) = path.file_name() else {
-            continue;
-        };
-        let Some(targets) = targets_by_name.get(file_name) else {
-            continue;
+
+        let expected_targets = match mode {
+            crate::models::SearchSourceFileMode::ByFileName => {
+                let Some(file_name) = path.file_name() else {
+                    continue;
+                };
+                let Some(targets) = targets_by_name.get(file_name) else {
+                    continue;
+                };
+                targets
+            }
+            crate::models::SearchSourceFileMode::ByExtensionHash => {
+                let Some(ext) = path_extension_key(&path) else {
+                    continue;
+                };
+                let Some(targets) = targets_by_extension.get(&ext) else {
+                    continue;
+                };
+                targets
+            }
         };
 
-        // 同一文件只计算一次指纹；哈希逻辑与“源媒体已变更”完全一致。
+        // 同一文件只计算一次指纹；哈希逻辑与“重新捕获缺失媒体”检测完全一致。
         let actual_fingerprint = crate::audio_utils::compute_file_fingerprint(&path);
         let candidate_path = path.display().to_string();
 
-        for (clip_id, expected_fingerprint) in targets {
+        for (clip_id, expected_fingerprint) in expected_targets {
             let candidates = out.entry(clip_id.clone()).or_default();
-            if candidates.len() >= MAX_SOURCE_MATCH_CANDIDATES_PER_CLIP {
-                continue;
+
+            match mode {
+                crate::models::SearchSourceFileMode::ByFileName => {
+                    if candidates.len() >= MAX_SOURCE_MATCH_CANDIDATES_PER_CLIP {
+                        continue;
+                    }
+                    let exact_hash = match (expected_fingerprint, actual_fingerprint) {
+                        (Some(expected), Some(actual)) => *expected == actual,
+                        _ => false,
+                    };
+                    candidates.push(crate::models::SourceFileMatchCandidatePayload {
+                        path: candidate_path.clone(),
+                        exact_hash,
+                    });
+                }
+                crate::models::SearchSourceFileMode::ByExtensionHash => {
+                    // 扩展名 + 哈希模式只展示内容指纹完全一致的候选。
+                    let exact_hash = match (expected_fingerprint, actual_fingerprint) {
+                        (Some(expected), Some(actual)) => *expected == actual,
+                        _ => false,
+                    };
+                    if !exact_hash {
+                        continue;
+                    }
+                    if candidates.len() >= MAX_SOURCE_MATCH_CANDIDATES_PER_CLIP {
+                        continue;
+                    }
+                    candidates.push(crate::models::SourceFileMatchCandidatePayload {
+                        path: candidate_path.clone(),
+                        exact_hash: true,
+                    });
+                }
             }
-            let exact_hash = match (expected_fingerprint, actual_fingerprint) {
-                (Some(expected), Some(actual)) => *expected == actual,
-                _ => false,
-            };
-            candidates.push(crate::models::SourceFileMatchCandidatePayload {
-                path: candidate_path.clone(),
-                exact_hash,
-            });
         }
     }
 }
 
-/// 在指定文件夹及其子文件夹中，按源文件名称搜索候选文件。
+/// 在指定文件夹及其子文件夹中搜索候选源文件。
 ///
-/// 每个候选文件使用与“源媒体已变更”检测完全相同的 `compute_file_fingerprint`
-/// 逻辑计算指纹，并与 clip 当前记录的源文件指纹比对；哈希完全一致的候选
-/// 会标为 `exact_hash = true` 且排在前面。
-pub(super) fn search_source_file_replacements(
+/// - `ByFileName`：按源文件的完整文件名精确匹配每个候选文件，并使用与
+///   “重新捕获缺失媒体”检测完全相同的 `compute_file_fingerprint` 逻辑计算
+///   指纹；哈希完全一致的候选会标为 `exact_hash = true` 且排在前面。
+/// - `ByExtensionHash`：遍历文件夹中所有扩展名与源文件一致的候选文件，逐个
+///   计算内容指纹，只把指纹与 clip 记录的源文件指纹完全一致的候选展示出来
+///   （可能较慢，适合文件被改名但内容未变的情形）。
+///
+/// 文件夹遍历和指纹计算放在 blocking task 中执行，避免阻塞前端 IPC 线程。
+pub(super) async fn search_source_file_replacements(
     state: State<'_, AppState>,
     folder_path: String,
     clip_ids: Vec<String>,
-) -> crate::models::SearchSourceFileMatchesPayload {
-    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    let root = Path::new(folder_path.trim());
-    let mut matches: HashMap<String, Vec<crate::models::SourceFileMatchCandidatePayload>> =
-        HashMap::new();
-    let mut targets_by_name: HashMap<std::ffi::OsString, Vec<(String, Option<u64>)>> =
-        HashMap::new();
-
-    for clip_id in clip_ids {
-        let Some(clip) = tl.clips.iter().find(|clip| clip.id == clip_id) else {
-            continue;
-        };
-        let Some(source_path) = clip
-            .source_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-        else {
-            continue;
-        };
-        let Some(file_name) = Path::new(source_path).file_name() else {
-            continue;
-        };
-
-        matches.insert(clip_id.clone(), Vec::new());
-        targets_by_name
-            .entry(file_name.to_os_string())
-            .or_default()
-            .push((clip_id, clip.source_file_fingerprint));
+    search_mode: crate::models::SearchSourceFileMode,
+) -> Result<crate::models::SearchSourceFileMatchesPayload, String> {
+    let mut targets_by_name: HashMap<std::ffi::OsString, Vec<(String, Option<u64>)>>;
+    let mut targets_by_extension: HashMap<String, Vec<(String, Option<u64>)>>;
+    {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        targets_by_name = HashMap::new();
+        targets_by_extension = HashMap::new();
+        for clip_id in clip_ids {
+            let Some(clip) = tl.clips.iter().find(|clip| clip.id == clip_id) else {
+                continue;
+            };
+            let Some(source_path) = clip
+                .source_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            else {
+                continue;
+            };
+            let source_path = Path::new(source_path);
+            if let Some(file_name) = source_path.file_name() {
+                targets_by_name
+                    .entry(file_name.to_os_string())
+                    .or_default()
+                    .push((clip_id.clone(), clip.source_file_fingerprint));
+            }
+            if let Some(ext) = path_extension_key(source_path) {
+                targets_by_extension
+                    .entry(ext)
+                    .or_default()
+                    .push((clip_id.clone(), clip.source_file_fingerprint));
+            }
+        }
     }
 
-    if root.is_dir() {
-        collect_source_file_match_candidates(root, &targets_by_name, &mut matches);
-    }
-
-    for candidates in matches.values_mut() {
-        candidates.sort_by(|left, right| {
-            right
-                .exact_hash
-                .cmp(&left.exact_hash)
-                .then_with(|| left.path.cmp(&right.path))
-        });
-    }
-
-    crate::models::SearchSourceFileMatchesPayload { matches }
+    let folder_path = folder_path.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut matches: HashMap<String, Vec<crate::models::SourceFileMatchCandidatePayload>> =
+            targets_by_name
+                .values()
+                .flatten()
+                .chain(targets_by_extension.values().flatten())
+                .map(|(clip_id, _)| (clip_id.clone(), Vec::new()))
+                .collect();
+        let root = Path::new(&folder_path);
+        if root.is_dir() {
+            collect_source_file_match_candidates(
+                root,
+                &targets_by_name,
+                &targets_by_extension,
+                search_mode,
+                &mut matches,
+            );
+        }
+        for candidates in matches.values_mut() {
+            candidates.sort_by(|left, right| {
+                right
+                    .exact_hash
+                    .cmp(&left.exact_hash)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+        }
+        crate::models::SearchSourceFileMatchesPayload { matches }
+    })
+    .await
+    .map_err(|error| format!("Failed to join source match search task: {error}"))
 }
 
 pub(super) fn split_clip(

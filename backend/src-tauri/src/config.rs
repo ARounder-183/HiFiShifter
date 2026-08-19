@@ -296,6 +296,11 @@ pub struct UiSettings {
     /// at any time during rendering.
     #[serde(default)]
     pub auto_background_render: bool,
+    /// 自动重新加载已修改的媒体文件（默认关闭）。
+    /// 启用后，窗口重新获得焦点并检测到媒体内容变化时，
+    /// 后端会在后台直接重新加载原路径，无需弹出确认窗口。
+    #[serde(default)]
+    pub auto_reload_modified_media: bool,
 }
 
 fn default_ort_ep() -> String {
@@ -528,6 +533,7 @@ impl Default for UiSettings {
             ort_ep: default_ort_ep(),
             ort_device_id: None,
             auto_background_render: true,
+            auto_reload_modified_media: false,
         }
     }
 }
