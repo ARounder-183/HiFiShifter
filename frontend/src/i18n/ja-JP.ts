@@ -349,13 +349,23 @@ export const jaJP = {
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
     source_file_changed_title: "ソースファイルが変更されました",
     source_file_changed_modified_desc:
-        "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",
+        "以下の音声ファイルは外部で変更されています。ファイルごとに「無視」または「再読み込み」を選択できます。",
     source_file_changed_deleted_desc:
-        "以下の音声ファイルが移動または削除されました。代替ファイルを選択しますか？",
+        "以下の音声ファイルは移動または削除されています。ファイルごとに「無視」するか、代替ファイルを選択できます。",
     source_file_changed_reload: "再読み込み",
     source_file_changed_ignore: "無視",
+    source_file_changed_ignore_all: "すべて無視",
     source_file_changed_status_deleted: "削除済み",
     source_file_changed_status_modified: "変更済み",
+    source_file_changed_item_processing: "処理中…",
+    source_file_changed_item_pending: "未処理",
+    source_file_changed_item_ignored: "無視しました",
+    source_file_changed_item_reloaded: "再読み込みしました",
+    source_file_changed_item_failed: "再読み込みに失敗",
+    source_file_changed_summary:
+        "無視 {ignored} · 再読み込み済み {reloaded} · 合計 {total}",
+    source_file_changed_reload_dialog_title: "「{name}」の代替ファイルを選択",
+    source_file_changed_reloaded_path: "再読み込みパス：",
     project_version_too_new_title: "新しいバージョンのプロジェクトファイルを検出しました",
     project_version_too_new_desc:
         "このプロジェクトファイルは、このアプリ（v{currentVersion}）より新しいバージョン（v{fileVersion}）で作成されています。互換性がない可能性があります。それでも読み込みを続行しますか？",

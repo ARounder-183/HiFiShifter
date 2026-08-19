@@ -28,6 +28,7 @@ export const webApi = {
     getPlaybackState: coreApi.getPlaybackState,
     openAudioDialog: coreApi.openAudioDialog,
     openAudioDialogMultiple: coreApi.openAudioDialogMultiple,
+    openAudioDialogForSource: coreApi.openAudioDialogForSource,
     openMidiDialog: coreApi.openMidiDialog,
     pickOutputPath: coreApi.pickOutputPath,
     closeWindow: coreApi.closeWindow,

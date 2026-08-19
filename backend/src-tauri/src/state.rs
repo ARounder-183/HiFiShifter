@@ -1436,6 +1436,20 @@ impl AppState {
         let peaks = match result {
             Ok(p) => p,
             Err(e) => {
+                // 必须发送终态事件：前端依赖 done/failed 隐藏“正在分析波形”状态，
+                // 缺失/无法读取的文件如果没有终态事件会导致进度提示永久停留。
+                if let Some(handle) = self.app_handle.get() {
+                    use tauri::Emitter;
+                    let _ = handle.emit(
+                        "waveform_analysis_progress",
+                        serde_json::json!({
+                            "sourcePath": &source_path_owned,
+                            "progress": 1.0,
+                            "status": "failed",
+                            "error": e,
+                        }),
+                    );
+                }
                 self.remove_waveform_inflight(source_path);
                 return Err(e);
             }

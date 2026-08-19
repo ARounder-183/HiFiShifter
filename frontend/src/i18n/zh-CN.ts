@@ -333,12 +333,23 @@ export const zhCN = {
     clip_replace_same_source_confirm:
         "工程中还有其他音频块使用与当前音频块相同的源文件路径。是否同时替换这些同源音频块？",
     source_file_changed_title: "源文件已变更",
-    source_file_changed_modified_desc: "以下音频文件已在外部被修改。是否重新加载到工程中？",
-    source_file_changed_deleted_desc: "以下音频文件已被移动或删除。是否选择替代文件？",
+    source_file_changed_modified_desc:
+        "以下音频文件已在外部被修改。您可以对每个文件分别选择忽略或重新加载。",
+    source_file_changed_deleted_desc:
+        "以下音频文件已被移动或删除。您可以对每个文件分别选择忽略，或为其重新指定替代文件。",
     source_file_changed_reload: "重新加载",
     source_file_changed_ignore: "忽略",
+    source_file_changed_ignore_all: "全部忽略",
     source_file_changed_status_deleted: "已删除",
     source_file_changed_status_modified: "已修改",
+    source_file_changed_item_processing: "处理中…",
+    source_file_changed_item_pending: "未处理",
+    source_file_changed_item_ignored: "已忽略",
+    source_file_changed_item_reloaded: "已重新加载",
+    source_file_changed_item_failed: "重新加载失败",
+    source_file_changed_summary: "已忽略 {ignored} · 已重新加载 {reloaded} · 全部 {total}",
+    source_file_changed_reload_dialog_title: "为“{name}”选择替代文件",
+    source_file_changed_reloaded_path: "重新加载路径：",
     project_version_too_new_title: "检测到更高版本的工程文件",
     project_version_too_new_desc:
         "该工程文件由更高版本（v{fileVersion}）创建，当前程序工程文件版本为 v{currentVersion}。工程文件可能不兼容，是否仍要继续尝试加载？",

@@ -393,6 +393,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
             };
 
+        case "open_audio_dialog_for_source":
+            return { sourcePath: args[0], dialogTitle: args[1] };
+
         case "open_midi_dialog":
             return {};
 

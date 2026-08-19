@@ -83,6 +83,13 @@ export const coreApi = {
     openAudioDialogMultiple: () =>
         invoke<{ ok: boolean; canceled?: boolean; paths?: string[] }>("open_audio_dialog_multi"),
 
+    openAudioDialogForSource: (sourcePath: string, dialogTitle: string) =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>(
+            "open_audio_dialog_for_source",
+            sourcePath,
+            dialogTitle,
+        ),
+
     pickOutputPath: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("pick_output_path"),
 

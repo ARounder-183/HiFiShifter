@@ -328,6 +328,7 @@ pub fn run() {
             commands::set_timeline_tempo_map,
             commands::open_audio_dialog,
             commands::open_audio_dialog_multi,
+            commands::open_audio_dialog_for_source,
             commands::get_media_audio_streams,
             commands::pick_output_path,
             commands::pick_directory,

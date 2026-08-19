@@ -72,6 +72,8 @@ interface FileMipmapCache {
     levels: [LevelPeaks | null, LevelPeaks | null, LevelPeaks | null];
     /** 正在加载中的级别 */
     loadingLevels: Set<number>;
+    /** 已确认加载失败、在 invalidate() 前不再自动重试的级别 */
+    failedLevels: Set<number>;
 }
 
 /** 加载状态回调 */
@@ -464,6 +466,10 @@ class WaveformMipmapStoreImpl {
      * 音频导入/项目打开时调用。
      */
     async preload(sourcePath: string): Promise<void> {
+        // 所有级别都已知失败时不再触发后端计算（例如源文件已缺失）。
+        const existing = this.cache.get(sourcePath);
+        if (existing && existing.failedLevels.size >= LEVEL_COUNT) return;
+
         // 先通知后端预计算（触发磁盘缓存）
         try {
             await waveformApi.preloadWaveformMipmap(sourcePath);
@@ -494,6 +500,8 @@ class WaveformMipmapStoreImpl {
         const needed = sourcePaths.filter((sp) => {
             const entry = this.cache.get(sp);
             if (!entry) return true;
+            // L2 已知加载失败时不再自动重试（例如缺失文件）。
+            if (entry.failedLevels.has(2)) return false;
             // 至少 L2 未加载则需要
             return entry.levels[2] == null;
         });
@@ -508,6 +516,7 @@ class WaveformMipmapStoreImpl {
                     sampleRate: 0,
                     levels: [null, null, null],
                     loadingLevels: new Set(),
+                    failedLevels: new Set(),
                 };
                 this.cacheSet(sp, entry);
             } else {
@@ -533,6 +542,10 @@ class WaveformMipmapStoreImpl {
                     }
                 } else {
                     hasError = true;
+                }
+                if (hasError) {
+                    const entry = this.cache.get(sourcePath);
+                    if (entry) entry.failedLevels.add(2);
                 }
                 this.notify(
                     sourcePath,
@@ -575,6 +588,40 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
+     * 将文件标记为当前不可用（缺失/无法读取）。
+     *
+     * 与加载失败的自然负缓存一致：所有级别在 invalidate() 前都不会再发起
+     * 自动加载，避免缺失文件在渲染循环中被反复请求并持续触发后端进度事件。
+     * 若后续通过重新指定文件等方式恢复，replaceClipSourceRemote 会调用
+     * invalidate() 清除该标记。
+     */
+    markUnavailable(sourcePath: string): void {
+        const normalized = sourcePath;
+        if (!normalized) return;
+
+        let entry = this.cache.get(normalized);
+        if (!entry) {
+            entry = {
+                sampleRate: 0,
+                levels: [null, null, null],
+                loadingLevels: new Set(),
+                failedLevels: new Set(),
+            };
+            this.cacheSet(normalized, entry);
+        } else {
+            this.touchLru(normalized);
+        }
+
+        const wasAlreadyMarked = entry.failedLevels.size >= LEVEL_COUNT;
+        for (let level = 0; level < LEVEL_COUNT; level++) {
+            entry.failedLevels.add(level);
+        }
+        if (!wasAlreadyMarked) {
+            this.notify(normalized, "error", "source unavailable");
+        }
+    }
+
+    /**
      * 清除所有缓存
      */
     clear(): void {
@@ -611,6 +658,7 @@ class WaveformMipmapStoreImpl {
                 sampleRate: 0,
                 levels: [null, null, null],
                 loadingLevels: new Set(),
+                failedLevels: new Set(),
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -619,6 +667,9 @@ class WaveformMipmapStoreImpl {
 
         // 已加载 → 立即返回
         if (entry.levels[level]) return Promise.resolve();
+
+        // 已确认失败 → 不再自动重试，避免缺失文件在每次渲染时反复触发后端计算。
+        if (entry.failedLevels.has(level)) return Promise.resolve();
 
         // 正在加载 → 返回已有 Promise（等待完成）
         const promiseKey = `${sourcePath}|${level}`;
@@ -637,10 +688,14 @@ class WaveformMipmapStoreImpl {
                     this.applyDecoded(sourcePath, level, decoded);
                     this.notify(sourcePath, "done");
                 } else {
+                    const current = this.cache.get(sourcePath);
+                    if (current) current.failedLevels.add(level);
                     this.notify(sourcePath, "error", "decode failed");
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                const current = this.cache.get(sourcePath);
+                if (current) current.failedLevels.add(level);
                 this.notify(sourcePath, "error", msg);
             } finally {
                 entry!.loadingLevels.delete(level);
@@ -662,6 +717,7 @@ class WaveformMipmapStoreImpl {
                 sampleRate: decoded.sampleRate,
                 levels: [null, null, null],
                 loadingLevels: new Set(),
+                failedLevels: new Set(),
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -670,6 +726,7 @@ class WaveformMipmapStoreImpl {
 
         entry.sampleRate = decoded.sampleRate;
         const clampedLevel = Math.min(level, 2) as 0 | 1 | 2;
+        entry.failedLevels.delete(clampedLevel);
         entry.levels[clampedLevel] = {
             min: decoded.min,
             max: decoded.max,

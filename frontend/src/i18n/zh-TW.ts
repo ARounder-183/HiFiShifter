@@ -334,12 +334,23 @@ export const zhTW = {
     clip_replace_same_source_confirm:
         "專案中還有其他音訊片段使用與目前音訊片段相同的來源檔案路徑。是否同時取代這些同來源音訊片段？",
     source_file_changed_title: "源文件已變更",
-    source_file_changed_modified_desc: "以下音訊檔案已在外部被修改。是否重新載入到工程中？",
-    source_file_changed_deleted_desc: "以下音訊檔案已被移動或刪除。是否選擇替代檔案？",
+    source_file_changed_modified_desc:
+        "以下音訊檔案已在外部被修改。您可以對每個檔案分別選擇忽略或重新載入。",
+    source_file_changed_deleted_desc:
+        "以下音訊檔案已被移動或刪除。您可以對每個檔案分別選擇忽略，或為其重新指定替代檔案。",
     source_file_changed_reload: "重新載入",
     source_file_changed_ignore: "忽略",
+    source_file_changed_ignore_all: "全部忽略",
     source_file_changed_status_deleted: "已刪除",
     source_file_changed_status_modified: "已修改",
+    source_file_changed_item_processing: "處理中…",
+    source_file_changed_item_pending: "未處理",
+    source_file_changed_item_ignored: "已忽略",
+    source_file_changed_item_reloaded: "已重新載入",
+    source_file_changed_item_failed: "重新載入失敗",
+    source_file_changed_summary: "已忽略 {ignored} · 已重新載入 {reloaded} · 全部 {total}",
+    source_file_changed_reload_dialog_title: "為「{name}」選擇替代檔案",
+    source_file_changed_reloaded_path: "重新載入路徑：",
     project_version_too_new_title: "偵測到較新版本的工程檔案",
     project_version_too_new_desc:
         "此工程檔案由較新版本（v{fileVersion}）建立，目前程式的工程檔案版本為 v{currentVersion}。工程檔案可能不相容，是否仍要繼續嘗試載入？",
