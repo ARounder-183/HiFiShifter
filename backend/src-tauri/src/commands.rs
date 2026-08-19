@@ -154,8 +154,9 @@ pub fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
-    project::open_project(state, window, project_path)
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
+    project::open_project(state, window, project_path, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]

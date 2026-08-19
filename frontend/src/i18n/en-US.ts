@@ -280,6 +280,7 @@ export const enUS = {
     status_target_none: "Idle",
     dropped_audio_imported: "Dropped media imported",
     import_audio_failed: "Import media failed",
+    status_project_version_confirmation: "Project version confirmation required",
 
     menu_about: "About HiFiShifter",
     glue: "Glue",
@@ -354,6 +355,10 @@ export const enUS = {
     source_file_changed_ignore: "Ignore",
     source_file_changed_status_deleted: "DELETED",
     source_file_changed_status_modified: "MODIFIED",
+    project_version_too_new_title: "Newer Project File Detected",
+    project_version_too_new_desc:
+        "This project file was created with a newer version (v{fileVersion}) than this app (v{currentVersion}). It may be incompatible. Do you want to continue and try to load it anyway?",
+    project_version_too_new_continue: "Continue Loading",
 
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",

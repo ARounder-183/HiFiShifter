@@ -92,7 +92,8 @@ export const projectApi = {
     openProjectDialog: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_project_dialog"),
 
-    openProject: (projectPath: string) => invoke<TimelineResult>("open_project", projectPath),
+    openProject: (projectPath: string, force?: boolean) =>
+        invoke<TimelineResult>("open_project", projectPath, force),
 
     saveProject: (notesMarkdown?: string) => invoke<any>("save_project", notesMarkdown),
 

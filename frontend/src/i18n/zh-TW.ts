@@ -267,6 +267,7 @@ export const zhTW = {
     status_target_none: "閒置",
     dropped_audio_imported: "已匯入拖放媒體檔案",
     import_audio_failed: "匯入媒體檔案失敗",
+    status_project_version_confirmation: "工程檔案版本確認",
 
     menu_about: "關於 HiFiShifter",
     glue: "膠合",
@@ -339,6 +340,10 @@ export const zhTW = {
     source_file_changed_ignore: "忽略",
     source_file_changed_status_deleted: "已刪除",
     source_file_changed_status_modified: "已修改",
+    project_version_too_new_title: "偵測到較新版本的工程檔案",
+    project_version_too_new_desc:
+        "此工程檔案由較新版本（v{fileVersion}）建立，目前程式的工程檔案版本為 v{currentVersion}。工程檔案可能不相容，是否仍要繼續嘗試載入？",
+    project_version_too_new_continue: "繼續載入",
 
     fade_curve_linear: "線性",
     fade_curve_sine: "正弦",

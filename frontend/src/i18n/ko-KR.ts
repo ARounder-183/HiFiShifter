@@ -355,6 +355,7 @@ export const koKR = {
     status_target_none: "대기 중",
     dropped_audio_imported: "드롭된 미디어를 가져왔습니다",
     import_audio_failed: "미디어 가져오기에 실패했습니다",
+    status_project_version_confirmation: "프로젝트 파일 버전 확인",
 
     menu_about: "HiFiShifter 정보",
     glue: "붙이기",
@@ -430,6 +431,10 @@ export const koKR = {
     source_file_changed_ignore: "무시",
     source_file_changed_status_deleted: "삭제됨",
     source_file_changed_status_modified: "수정됨",
+    project_version_too_new_title: "최신 버전의 프로젝트 파일을 감지했습니다",
+    project_version_too_new_desc:
+        "이 프로젝트 파일은 현재 프로그램(v{currentVersion})보다 최신 버전(v{fileVersion})으로 만들어졌습니다. 호환되지 않을 수 있습니다. 그래도 계속해서 로드를 시도하시겠습니까?",
+    project_version_too_new_continue: "계속 로드",
 
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",

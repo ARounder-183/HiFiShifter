@@ -56,6 +56,7 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromDialog,
@@ -1311,6 +1312,7 @@ export {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromDialog,
@@ -2914,9 +2916,18 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as
                     | { ok: true; canceled: true }
-                    | { ok: true; canceled: false; timeline: TimelineState };
+                    | {
+                          ok: true;
+                          canceled: false;
+                          timeline: TimelineState;
+                          projectVersionTooNew?: boolean;
+                      };
                 if (!payload || (payload as any).canceled) {
                     state.status = "Open canceled";
+                    return;
+                }
+                if ((payload as { projectVersionTooNew?: boolean }).projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
                     return;
                 }
                 applyTimelineState(state, (payload as any).timeline, {
@@ -2938,8 +2949,13 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    projectVersionTooNew?: boolean;
                 } & TimelineState;
                 if (!payload.ok) return;
+                if (payload.projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
+                    return;
+                }
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
@@ -2947,6 +2963,32 @@ const sessionSlice = createSlice({
                 state.status = "Project opened";
             })
             .addCase(openProjectFromPath.rejected, (state, action) => {
+                state.busy = false;
+                state.error = action.error?.message ?? "Open project failed";
+                state.status = "Open failed";
+            })
+
+            .addCase(openProjectFromPathForced.pending, (state) =>
+                setPending(state, "Opening project..."),
+            )
+            .addCase(openProjectFromPathForced.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    projectVersionTooNew?: boolean;
+                } & TimelineState;
+                if (!payload.ok) return;
+                if (payload.projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
+                    return;
+                }
+                applyTimelineState(state, payload, {
+                    force: true,
+                    preserveProjectNotes: false,
+                });
+                state.status = "Project opened";
+            })
+            .addCase(openProjectFromPathForced.rejected, (state, action) => {
                 state.busy = false;
                 state.error = action.error?.message ?? "Open project failed";
                 state.status = "Open failed";

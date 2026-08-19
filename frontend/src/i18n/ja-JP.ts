@@ -281,6 +281,7 @@ export const jaJP = {
     status_target_none: "待機中",
     dropped_audio_imported: "ドロップされたメディアをインポートしました",
     import_audio_failed: "メディアのインポートに失敗しました",
+    status_project_version_confirmation: "プロジェクトファイルのバージョン確認",
 
     menu_about: "HiFiShifter について",
     glue: "グルー",
@@ -355,6 +356,10 @@ export const jaJP = {
     source_file_changed_ignore: "無視",
     source_file_changed_status_deleted: "削除済み",
     source_file_changed_status_modified: "変更済み",
+    project_version_too_new_title: "新しいバージョンのプロジェクトファイルを検出しました",
+    project_version_too_new_desc:
+        "このプロジェクトファイルは、このアプリ（v{currentVersion}）より新しいバージョン（v{fileVersion}）で作成されています。互換性がない可能性があります。それでも読み込みを続行しますか？",
+    project_version_too_new_continue: "続行して読み込む",
 
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",

@@ -180,6 +180,24 @@ pub struct TimelineStatePayload {
     pub tempo_map: Option<Vec<TempoPointPayload>>,
 }
 
+/// `open_project` 的返回载荷。
+///
+/// 除正常时间轴状态外，还可能携带“工程文件版本高于当前程序”的确认信息。
+/// 该确认信息出现时后端尚未加载工程，前端应展示警告并在用户确认后以
+/// `force = true` 再次调用 `open_project`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenProjectPayload {
+    #[serde(flatten)]
+    pub timeline: TimelineStatePayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_version_too_new: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_file_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_project_file_version: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeInfoPayload {

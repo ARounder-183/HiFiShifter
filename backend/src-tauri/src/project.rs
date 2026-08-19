@@ -79,6 +79,11 @@ impl SynthConfig {
 
 // ─── 工程文件 ──────────────────────────────────────────────────────────────────
 
+/// 当前程序读写的最新工程文件版本号。
+///
+/// 打开工程时若文件版本高于该值，必须先经用户确认后才能尝试加载。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProjectFile {
@@ -130,7 +135,7 @@ impl ProjectFile {
         grid_size: String,
     ) -> Self {
         Self {
-            version: 2,
+            version: CURRENT_PROJECT_FILE_VERSION,
             name,
             notes_markdown: String::new(),
             timeline,
@@ -184,9 +189,30 @@ fn is_default_grid_size(value: &String) -> bool {
 
 // ─── 序列化 / 反序列化 ─────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+struct ProjectFileVersionProbe {
+    #[serde(default)]
+    version: Option<u32>,
+}
+
+/// 只读取工程文件头部的版本号，不解析完整时间轴。
+///
+/// 即使未来版本的工程文件因结构变化而无法完整反序列化，打开工程时也能
+/// 先依据版本号向用户发出“可能不兼容”的警告。
+pub fn read_project_file_version(bytes: &[u8]) -> Option<u32> {
+    if let Ok(probe) = rmp_serde::from_slice::<ProjectFileVersionProbe>(bytes) {
+        if probe.version.is_some() {
+            return probe.version;
+        }
+    }
+    serde_json::from_slice::<ProjectFileVersionProbe>(bytes)
+        .ok()
+        .and_then(|probe| probe.version)
+}
+
 /// 从字节流加载工程文件，自动检测格式。
 ///
-/// 优先尝试 MessagePack 格式（v2），失败后 fallback 到 JSON（v1 兼容）。
+/// 优先尝试 MessagePack 格式（v3），失败后 fallback 到 JSON（v1/v2 兼容）。
 pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     // 先尝试 MessagePack（新格式）
     if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
@@ -513,7 +539,17 @@ mod tests {
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(!text.contains('\n'), "JSON project should be compact");
-        assert!(text.contains("\"version\":2"));
+        assert!(text.contains("\"version\":3"));
+    }
+
+    #[test]
+    fn project_file_version_can_be_read_without_full_timeline_parse() {
+        let pf = project_file_with_clip(TimelineState::default());
+        let json_bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        assert_eq!(read_project_file_version(&json_bytes), Some(3));
+
+        let msgpack_bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
+        assert_eq!(read_project_file_version(&msgpack_bytes), Some(3));
     }
 
     #[test]

@@ -266,6 +266,7 @@ export const zhCN = {
     status_target_none: "空闲",
     dropped_audio_imported: "已导入拖拽媒体文件",
     import_audio_failed: "导入媒体文件失败",
+    status_project_version_confirmation: "工程文件版本确认",
 
     menu_about: "关于 HiFiShifter",
     glue: "胶合",
@@ -338,6 +339,10 @@ export const zhCN = {
     source_file_changed_ignore: "忽略",
     source_file_changed_status_deleted: "已删除",
     source_file_changed_status_modified: "已修改",
+    project_version_too_new_title: "检测到更高版本的工程文件",
+    project_version_too_new_desc:
+        "该工程文件由更高版本（v{fileVersion}）创建，当前程序工程文件版本为 v{currentVersion}。工程文件可能不兼容，是否仍要继续尝试加载？",
+    project_version_too_new_continue: "继续加载",
 
     fade_curve_linear: "线性",
     fade_curve_sine: "正弦",

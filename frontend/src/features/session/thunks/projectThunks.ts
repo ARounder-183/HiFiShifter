@@ -2,6 +2,15 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import type { SessionState } from "../sessionSlice";
 
+export interface ProjectVersionConfirmation {
+    ok: true;
+    canceled: false;
+    projectVersionTooNew: true;
+    path: string;
+    projectFileVersion: number;
+    currentProjectFileVersion: number;
+}
+
 export const undoRemote = createAsyncThunk("session/undoRemote", async () => {
     return webApi.undoTimeline();
 });
@@ -23,6 +32,16 @@ export const openProjectFromDialog = createAsyncThunk(
             return { ok: true, canceled: true } as const;
         }
         const timeline = await webApi.openProject(picked.path);
+        if (timeline.project_version_too_new) {
+            return {
+                ok: true,
+                canceled: false,
+                projectVersionTooNew: true,
+                path: picked.path,
+                projectFileVersion: timeline.project_file_version ?? 0,
+                currentProjectFileVersion: timeline.current_project_file_version ?? 0,
+            } satisfies ProjectVersionConfirmation;
+        }
         return { ok: true, canceled: false, timeline } as const;
     },
 );
@@ -31,7 +50,25 @@ export const openProjectFromPath = createAsyncThunk(
     "session/openProjectFromPath",
     async (projectPath: string) => {
         const timeline = await webApi.openProject(projectPath);
+        if (timeline.project_version_too_new) {
+            return {
+                ok: true,
+                canceled: false,
+                projectVersionTooNew: true,
+                path: projectPath,
+                projectFileVersion: timeline.project_file_version ?? 0,
+                currentProjectFileVersion: timeline.current_project_file_version ?? 0,
+            } satisfies ProjectVersionConfirmation;
+        }
         return timeline;
+    },
+);
+
+/** 用户在版本警告对话框中确认“继续尝试加载”后的强制打开。 */
+export const openProjectFromPathForced = createAsyncThunk(
+    "session/openProjectFromPathForced",
+    async (projectPath: string) => {
+        return webApi.openProject(projectPath, true);
     },
 );
 

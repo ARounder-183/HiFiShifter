@@ -314,7 +314,10 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { startSec: args[0] };
 
         case "open_project":
-            return { projectPath: args[0] };
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { force: args[1] } : {}),
+            };
 
         case "run_timed_auto_backup":
             return { pathTemplate: args[0] };

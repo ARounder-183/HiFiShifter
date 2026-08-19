@@ -1,6 +1,7 @@
 use crate::project::{
     load_project_file, prepare_timeline_for_project_save, project_name_from_path,
-    resolve_source_paths_on_open, serialize_project_file_for_path, CustomScale, ProjectFile,
+    read_project_file_version, resolve_source_paths_on_open, serialize_project_file_for_path,
+    CustomScale, ProjectFile, CURRENT_PROJECT_FILE_VERSION,
 };
 use crate::state::AppState;
 use crate::synth_clip_cache;
@@ -851,15 +852,35 @@ pub(super) fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
     let path = PathBuf::from(&project_path);
-    // 读取字节流，自动检测 MessagePack（v2）或 JSON（v1 兼容）格式。
+    // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
     let bytes = fs::read(&path).unwrap_or_default();
+    // 先只读取版本号：即使未来版本工程因结构变化而无法完整解析，
+    // 也能在尝试加载前给出明确的“可能不兼容”警告。
+    let project_file_version = read_project_file_version(&bytes).unwrap_or(0);
+    if project_file_version > CURRENT_PROJECT_FILE_VERSION && !force.unwrap_or(false) {
+        let mut payload = get_timeline_state(state);
+        payload.ok = true;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            project_version_too_new: Some(true),
+            project_file_version: Some(project_file_version),
+            current_project_file_version: Some(CURRENT_PROJECT_FILE_VERSION),
+        };
+    }
+
     let parsed = load_project_file(&bytes);
     let Ok(mut pf) = parsed else {
         let mut payload = get_timeline_state(state);
         payload.ok = false;
-        return payload;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            project_version_too_new: None,
+            project_file_version: None,
+            current_project_file_version: None,
+        };
     };
 
     let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
@@ -965,7 +986,12 @@ pub(super) fn open_project(
     if !missing_files.is_empty() {
         payload.missing_files = Some(missing_files);
     }
-    payload
+    crate::models::OpenProjectPayload {
+        timeline: payload,
+        project_version_too_new: None,
+        project_file_version: None,
+        current_project_file_version: None,
+    }
 }
 
 pub(super) fn save_project(

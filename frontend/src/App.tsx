@@ -21,6 +21,7 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromPath,
@@ -76,6 +77,7 @@ const statusKey: Record<string, string> = {
     "Open canceled": "status_open_canceled",
     "Opening project...": "status_opening_project",
     "Open failed": "status_open_failed",
+    "Project version confirmation required": "status_project_version_confirmation",
     "Project opened": "status_project_opened",
     "Save canceled": "status_save_canceled",
     "Save failed": "status_save_failed",
@@ -190,6 +192,13 @@ function AppInner() {
         open: boolean;
         mode: "switch" | "exit";
     }>({ open: false, mode: "switch" });
+    // 打开工程时发现文件版本高于当前程序：等待用户确认是否继续尝试加载。
+    const [projectVersionDialog, setProjectVersionDialog] = useState<{
+        open: boolean;
+        path: string;
+        fileVersion: number;
+        currentVersion: number;
+    }>({ open: false, path: "", fileVersion: 0, currentVersion: 0 });
     const [projectImportPick, setProjectImportPick] = useState<{
         open: boolean;
         path: string | null;
@@ -1076,6 +1085,36 @@ function AppInner() {
         })();
     }, [dispatch, executePendingUnsavedAction, projectPath]);
 
+    const showProjectVersionConfirmationIfNeeded = useCallback((result: unknown) => {
+        const payload = result as
+            | {
+                  projectVersionTooNew?: boolean;
+                  path?: string;
+                  projectFileVersion?: number;
+                  currentProjectFileVersion?: number;
+              }
+            | undefined;
+        if (payload?.projectVersionTooNew && payload.path) {
+            setProjectVersionDialog({
+                open: true,
+                path: payload.path,
+                fileVersion: Number(payload.projectFileVersion ?? 0),
+                currentVersion: Number(payload.currentProjectFileVersion ?? 0),
+            });
+        }
+    }, []);
+
+    const confirmContinueLoadingNewerProject = useCallback(() => {
+        const path = projectVersionDialog.path;
+        setProjectVersionDialog((current) => ({ ...current, open: false }));
+        if (!path) return;
+        void dispatch(openProjectFromPathForced(path));
+    }, [dispatch, projectVersionDialog.path]);
+
+    const cancelContinueLoadingNewerProject = useCallback(() => {
+        setProjectVersionDialog((current) => ({ ...current, open: false }));
+    }, []);
+
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
             await dispatch(newProjectRemote()).unwrap();
@@ -1084,17 +1123,19 @@ function AppInner() {
 
     const handleOpenProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
-            await dispatch(openProjectFromDialog()).unwrap();
+            const result = await dispatch(openProjectFromDialog()).unwrap();
+            showProjectVersionConfirmationIfNeeded(result);
         });
-    }, [dispatch, runOrPromptUnsavedAction]);
+    }, [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded]);
 
     const handleOpenRecentProject = useCallback(
         (path: string) => {
             runOrPromptUnsavedAction("switch", async () => {
-                await dispatch(openProjectFromPath(path)).unwrap();
+                const result = await dispatch(openProjectFromPath(path)).unwrap();
+                showProjectVersionConfirmationIfNeeded(result);
             });
         },
-        [dispatch, runOrPromptUnsavedAction],
+        [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded],
     );
 
     const handleImportProject = useCallback(async () => {
@@ -1131,7 +1172,8 @@ function AppInner() {
             if (!normalized) return;
             if (kind === "openProject") {
                 runOrPromptUnsavedAction("switch", async () => {
-                    await dispatch(openProjectFromPath(normalized)).unwrap();
+                    const result = await dispatch(openProjectFromPath(normalized)).unwrap();
+                    showProjectVersionConfirmationIfNeeded(result);
                 });
                 return;
             }
@@ -1147,7 +1189,7 @@ function AppInner() {
                 void dispatch(importAudioFromPath(normalized));
             }
         },
-        [dispatch, runOrPromptUnsavedAction],
+        [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded],
     );
 
     const handleExitApp = useCallback(() => {
@@ -1844,6 +1886,43 @@ function AppInner() {
                             {t("unsaved_changes_discard")}
                         </Button>
                         <Button onClick={saveUnsavedAndContinue}>{t("menu_save_project")}</Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* Project file version newer than this build — ask before attempting load */}
+            <Dialog.Root
+                open={projectVersionDialog.open}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setProjectVersionDialog((current) => ({ ...current, open: false }));
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="480px">
+                    <Dialog.Title>{t("project_version_too_new_title")}</Dialog.Title>
+                    <Dialog.Description>
+                        {t("project_version_too_new_desc")
+                            .replace(
+                                "{fileVersion}",
+                                String(projectVersionDialog.fileVersion || "?"),
+                            )
+                            .replace(
+                                "{currentVersion}",
+                                String(projectVersionDialog.currentVersion || "?"),
+                            )}
+                    </Dialog.Description>
+                    <Flex justify="end" gap="2" mt="4">
+                        <Button
+                            variant="soft"
+                            color="gray"
+                            onClick={cancelContinueLoadingNewerProject}
+                        >
+                            {t("progress_cancel")}
+                        </Button>
+                        <Button color="amber" onClick={confirmContinueLoadingNewerProject}>
+                            {t("project_version_too_new_continue")}
+                        </Button>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>
