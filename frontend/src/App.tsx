@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react";
 import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
@@ -174,9 +181,73 @@ function resetSourceFileItemToPending(item: SourceFileChangedItem): SourceFileCh
         action: "pending",
         reloadedPath: undefined,
         reloadAttempted: false,
-        candidates: undefined,
-        selectedCandidatePath: undefined,
     };
+}
+
+interface WheelSelectProps {
+    value: string;
+    onValueChange: (value: string) => void;
+    disabled?: boolean;
+    className?: string;
+    children: ReactNode;
+}
+
+/**
+ * 支持滚轮调整选项的下拉框。
+ * 监听原生 wheel 事件（非 passive），滚动时切换选项并阻止默认滚动传播，
+ * 避免其所在的可滚动网格列表被一并滚动。
+ */
+function WheelSelect({
+    value,
+    onValueChange,
+    disabled,
+    className,
+    children,
+}: WheelSelectProps) {
+    const selectRef = useRef<HTMLSelectElement | null>(null);
+
+    useEffect(() => {
+        const select = selectRef.current;
+        if (!select || disabled) return;
+
+        const handleWheel = (event: WheelEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const total = select.options.length;
+            if (total === 0) return;
+            const current = select.selectedIndex;
+            const step = event.deltaY > 0 ? 1 : -1;
+            const next = Math.max(0, Math.min(total - 1, current + step));
+            if (next !== current) {
+                const nextValue = select.options[next]?.value;
+                if (nextValue !== undefined) {
+                    onValueChange(nextValue);
+                }
+            }
+        };
+
+        select.addEventListener("wheel", handleWheel, { passive: false });
+        return () => select.removeEventListener("wheel", handleWheel);
+    }, [value, disabled, onValueChange]);
+
+    return (
+        <select
+            ref={selectRef}
+            value={value}
+            disabled={disabled}
+            className={className}
+            onChange={(event) => onValueChange(event.target.value)}
+        >
+            {children}
+        </select>
+    );
+}
+
+/** 若条目保留着候选列表但没有当前选择，则默认选回第一个候选。 */
+function defaultSelectedCandidatePath(item: SourceFileChangedItem): SourceFileChangedItem {
+    if (item.selectedCandidatePath) return item;
+    const first = item.candidates?.[0]?.path;
+    return first ? { ...item, selectedCandidatePath: first } : item;
 }
 
 function mergeLatestSourceFileChanges(
@@ -212,8 +283,6 @@ function mergeLatestSourceFileChanges(
                 ...item,
                 change: "deleted",
                 action: "pending",
-                candidates: undefined,
-                selectedCandidatePath: undefined,
             };
         }
 
@@ -232,8 +301,6 @@ function mergeLatestSourceFileChanges(
         return {
             ...item,
             change: "modified",
-            candidates: undefined,
-            selectedCandidatePath: undefined,
         };
     });
 
@@ -378,7 +445,7 @@ function AppInner() {
     const [midiImportTargetMenu, setMidiImportTargetMenu] = useState<string>("pitchRef");
     const [midiImportTargetDragDrop, setMidiImportTargetDragDrop] = useState<string>("pitchRef");
     const [midiDialogSource, setMidiDialogSource] = useState<"menu" | "dragDrop">("menu");
-    const [autoReloadModifiedMedia, setAutoReloadModifiedMedia] = useState(false);
+    const [autoReloadModifiedMedia, setAutoReloadModifiedMedia] = useState(true);
 
     // 加载 MIDI 相关设置
     useEffect(() => {
@@ -2004,8 +2071,16 @@ function AppInner() {
             ) {
                 return [];
             }
-            const exact = item.candidates?.find((candidate) => candidate.exact_hash);
-            return exact ? [{ item, path: exact.path }] : [];
+            const candidates = item.candidates ?? [];
+            const exactCandidates = candidates.filter((candidate) => candidate.exact_hash);
+            if (exactCandidates.length === 0) return [];
+            // 若用户当前选中的恰是哈希完全匹配项，优先尊重用户的选择；
+            // 否则按候选顺序取第一个哈希完全匹配项。
+            const selected = item.selectedCandidatePath
+                ? candidates.find((candidate) => candidate.path === item.selectedCandidatePath)
+                : undefined;
+            const chosen = selected?.exact_hash ? selected : exactCandidates[0];
+            return [{ item, path: chosen.path }];
         });
         for (const target of targets) {
             await applySourceFileReplacement(target.item, target.path, "replace");
@@ -2031,8 +2106,24 @@ function AppInner() {
     }, [applySourceFileReplacement, sourceFileChangedDialog.changes]);
 
     // 全部重置：先刷新最新状态，再恢复为窗口初始的“未处理”快照。
+    // 重置时保留“搜索文件夹”已搜索到的候选列表与当前选择，方便用户继续操作。
     const resetAllSourceFileChanges = useCallback(async () => {
         if (sourceFileCheckBusyRef.current || sourceFileChangeHandlingRef.current) return;
+        const searchResultsByClipId = new Map(
+            sourceFileChangedDialog.changes.map((item) => [
+                item.clip_id,
+                {
+                    candidates: item.candidates,
+                    selectedCandidatePath: item.selectedCandidatePath,
+                },
+            ]),
+        );
+        const attachSearchResults = (item: SourceFileChangedItem): SourceFileChangedItem => {
+            const saved = searchResultsByClipId.get(item.clip_id);
+            if (!saved) return item;
+            return { ...item, ...saved };
+        };
+
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
@@ -2040,9 +2131,10 @@ function AppInner() {
                 | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
             const baseItems = sourceFileInitialChangesRef.current.map((item) => ({ ...item }));
-            const changes = mergeLatestSourceFileChanges(baseItems, rawChanges).map((item) =>
-                resetSourceFileItemToPending(item),
-            );
+            const changes = mergeLatestSourceFileChanges(baseItems, rawChanges)
+                .map((item) => resetSourceFileItemToPending(item))
+                .map(attachSearchResults)
+                .map(defaultSelectedCandidatePath);
             for (const item of changes) {
                 ignoredSourcePathsRef.current.delete(item.source_path);
             }
@@ -2050,9 +2142,12 @@ function AppInner() {
             setSourceFileChangedDialog((prev) => ({ ...prev, open: true, changes }));
         } catch {
             // 读取失败时仍恢复到初始快照，避免列表停留在错误状态。
-            const changes = sourceFileInitialChangesRef.current.map((item) => ({
-                ...resetSourceFileItemToPending(item),
-            }));
+            const changes = sourceFileInitialChangesRef.current
+                .map((item) => ({
+                    ...resetSourceFileItemToPending(item),
+                }))
+                .map(attachSearchResults)
+                .map(defaultSelectedCandidatePath);
             for (const item of changes) {
                 ignoredSourcePathsRef.current.delete(item.source_path);
             }
@@ -2060,9 +2155,10 @@ function AppInner() {
         } finally {
             sourceFileCheckBusyRef.current = false;
         }
-    }, []);
+    }, [sourceFileChangedDialog.changes]);
 
     // 单条重置：仅将该条目恢复为窗口打开时的初始状态。
+    // 重置时保留该条目“搜索文件夹”搜索到的候选列表与当前选择。
     const resetSourceFileChangeItem = useCallback((clipId: string) => {
         setSourceFileChangedDialog((prev) => ({
             ...prev,
@@ -2074,10 +2170,15 @@ function AppInner() {
                 const restored = initial
                     ? resetSourceFileItemToPending({ ...initial })
                     : resetSourceFileItemToPending(item);
+                const merged = defaultSelectedCandidatePath({
+                    ...restored,
+                    candidates: item.candidates,
+                    selectedCandidatePath: item.selectedCandidatePath,
+                } as SourceFileChangedItem);
                 if (restored.source_path) {
                     ignoredSourcePathsRef.current.delete(restored.source_path);
                 }
-                return restored;
+                return merged;
             }),
         }));
     }, []);
@@ -2720,7 +2821,7 @@ function AppInner() {
                             <span className="shrink-0 text-[10px] text-qt-text-muted">
                                 {t("recapture_missing_media_search_mode_label")}
                             </span>
-                            <select
+                            <WheelSelect
                                 className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                                 value={sourceFileSearchMode}
                                 disabled={
@@ -2732,9 +2833,9 @@ function AppInner() {
                                             item.action === "failed",
                                     )
                                 }
-                                onChange={(event) =>
+                                onValueChange={(value) =>
                                     setSourceFileSearchMode(
-                                        event.target.value as "file_name" | "extension_hash",
+                                        value as "file_name" | "extension_hash",
                                     )
                                 }
                             >
@@ -2744,7 +2845,7 @@ function AppInner() {
                                 <option value="extension_hash">
                                     {t("recapture_missing_media_search_mode_extension_hash")}
                                 </option>
-                            </select>
+                            </WheelSelect>
                             <Button
                                 size="1"
                                 variant="soft"
@@ -2947,14 +3048,14 @@ function AppInner() {
                                             item.candidates &&
                                             item.candidates.length > 0 && (
                                                 <div className="mt-1 flex items-center gap-1">
-                                                    <select
+                                                    <WheelSelect
                                                         className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
                                                         value={item.selectedCandidatePath ?? ""}
                                                         disabled={isBusy}
-                                                        onChange={(event) =>
+                                                        onValueChange={(value) =>
                                                             selectSourceFileMatchCandidate(
                                                                 item.clip_id,
-                                                                event.target.value,
+                                                                value,
                                                             )
                                                         }
                                                     >
@@ -2969,7 +3070,7 @@ function AppInner() {
                                                                 {candidate.path}
                                                             </option>
                                                         ))}
-                                                    </select>
+                                                    </WheelSelect>
                                                     <Button
                                                         size="1"
                                                         variant="soft"

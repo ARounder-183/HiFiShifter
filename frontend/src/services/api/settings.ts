@@ -68,7 +68,7 @@ export interface UiSettings {
     gpuDeviceId?: number;
     ortDeviceId?: number | null;
     autoBackgroundRender?: boolean;
-    /** 自动重新加载已修改的媒体文件（默认关闭）。 */
+    /** 自动重新加载已修改的媒体文件（默认开启）。 */
     autoReloadModifiedMedia?: boolean;
     customScalePresets?: Array<{
         id: string;
