@@ -71,7 +71,8 @@ export const jaJP = {
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
     media_stream_select_title: "音声トラックを選択",
-    media_stream_select_hint: "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
+    media_stream_select_hint:
+        "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
     media_stream_track: "トラック",
     menu_import_media: "メディアファイルをインポート...",
     menu_import_reaper: "Reaper プロジェクトをインポート...",
@@ -161,6 +162,7 @@ export const jaJP = {
     reference_root_tracks_all: "すべて選択",
     reference_root_tracks_clear: "クリア",
     reference_root_tracks_empty: "他のトラックグループはありません",
+    reference_root_tracks_short: "参照",
     tool_mode: "ツールモード",
     edit_param: "パラメータ編集",
     draw: "描画",
@@ -197,6 +199,7 @@ export const jaJP = {
     track_remove_selected: "選択トラックを削除",
 
     param_editor: "パラメータエディタ",
+    param_editor_short: "パラメータ",
     pitch_requires_compose:
         "ルートトラックで Compose（C）を有効にしてピッチカーブを生成してください",
     pitch_requires_algo:
@@ -231,6 +234,17 @@ export const jaJP = {
     vslib_synth_mode_chorus: "コーラス",
     switch_on: "オン",
     switch_off: "オフ",
+
+    // パラメータエディタのツールバー向け短縮ラベル (省略形)
+    param_btn_pitch: "PIT",
+    param_btn_breath: "BRE",
+    param_btn_volume: "VOL",
+    param_btn_pan: "PAN",
+    param_btn_formant: "FRM",
+    param_btn_tension: "TEN",
+    param_btn_breathiness: "BRE",
+    breath_state_on: "ブレスオン",
+    breath_state_off: "ブレスオフ",
     points_help: "ダブルクリックで追加 · ドラッグで移動 · 右クリックで削除",
     points_count: "ポイント数",
     selected: "選択中",
@@ -432,12 +446,18 @@ export const jaJP = {
     progress_cancel: "キャンセル",
     pitch_analyzing_clips: "分析中{clipName}{clipCount} {percentage}%",
     algo_label: "アルゴリズム",
+    algo_label_short: "アルゴ",
     child_pitch_mode_cents: "セント差",
     child_pitch_mode_degrees: "度数差",
     child_formant_mode: "フォルマント差",
     child_pitch_offset_cents_label: "子トラックのセント差",
     child_pitch_offset_degrees_label: "子トラックの度数差",
     child_formant_offset_cents_label: "子トラックのフォルマント差",
+    child_pitch_root_option: "ピッチ（トラックグループ）",
+    child_pitch_cents_option: "セント差（現在の子トラック）",
+    child_pitch_degrees_option: "度数差（現在の子トラック）",
+    child_formant_root_option: "フォルマントシフト（トラックグループ）",
+    child_formant_offset_option: "フォルマント差（現在の子トラック）",
     child_pitch_offset_cents_short: "セント",
     child_pitch_offset_degrees_short: "度数",
     child_formant_offset_cents_short: "セント",
@@ -679,6 +699,7 @@ export const jaJP = {
     param_value_popup: "パラメータ値ポップアップ",
     lock_param_lines: "パラメータ線をロック",
     edge_smoothness: "平滑度",
+    edge_smoothness_short: "平滑",
 
     // グリッド音符タイプラベル
     grid_note_normal: "通常",

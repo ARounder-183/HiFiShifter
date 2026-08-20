@@ -74,7 +74,8 @@ export const enUS = {
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
     media_stream_select_title: "Select Audio Stream",
-    media_stream_select_hint: "This video contains multiple audio streams. Select one to extract and import.",
+    media_stream_select_hint:
+        "This video contains multiple audio streams. Select one to extract and import.",
     media_stream_track: "Track",
     menu_import_media: "Import Media File...",
     menu_import_reaper: "Import Reaper Project...",
@@ -164,6 +165,7 @@ export const enUS = {
     reference_root_tracks_all: "Select All",
     reference_root_tracks_clear: "Clear",
     reference_root_tracks_empty: "No other track groups",
+    reference_root_tracks_short: "Ref Tracks",
     tool_mode: "Tool Mode",
     edit_param: "Edit Param",
     draw: "Draw",
@@ -199,6 +201,7 @@ export const enUS = {
     track_remove_selected: "Remove Selected Track",
 
     param_editor: "Parameter Editor",
+    param_editor_short: "Param Editor",
     pitch_requires_compose: "Enable Compose (C) on the root track to generate pitch curve",
     pitch_requires_algo: "Select a non-None pitch algorithm to enable pitch editing",
     midi_compose_required_title: "Compose Not Enabled",
@@ -230,6 +233,17 @@ export const enUS = {
     vslib_synth_mode_chorus: "Chorus",
     switch_on: "On",
     switch_off: "Off",
+
+    // Short toolbar labels for the parameter editor (acronyms keep non-CJK toolbars compact)
+    param_btn_pitch: "PIT",
+    param_btn_breath: "BRE",
+    param_btn_volume: "VOL",
+    param_btn_pan: "PAN",
+    param_btn_formant: "FRM",
+    param_btn_tension: "TEN",
+    param_btn_breathiness: "BRE",
+    breath_state_on: "Breath On",
+    breath_state_off: "Breath Off",
     points_help: "Double click add · Drag move · Right click delete",
     points_count: "Points",
     selected: "Selected",
@@ -351,8 +365,7 @@ export const enUS = {
         "The following media files are missing or their contents have changed. You can ignore each item, reload modified files from their original paths, or replace missing files with other files.",
     recapture_missing_media_modified_desc:
         "The following media file(s) have been modified externally.",
-    recapture_missing_media_deleted_desc:
-        "The following media file(s) have been moved or deleted.",
+    recapture_missing_media_deleted_desc: "The following media file(s) have been moved or deleted.",
     recapture_missing_media_reload: "Reload",
     recapture_missing_media_replace: "Replace",
     recapture_missing_media_reload_all: "Reload All",
@@ -384,8 +397,7 @@ export const enUS = {
     recapture_missing_media_searching: "Searching...",
     recapture_missing_media_search_mode_label: "Search mode:",
     recapture_missing_media_search_mode_file_name: "Exact file name",
-    recapture_missing_media_search_mode_extension_hash:
-        "File extension + hash (may be slow!)",
+    recapture_missing_media_search_mode_extension_hash: "File extension + hash (may be slow!)",
     recapture_missing_media_search_result_summary:
         "{total} match(es) · {exact} exact hash · {selected} selected",
     recapture_missing_media_match_exact: "exact hash",
@@ -433,12 +445,18 @@ export const enUS = {
     progress_cancel: "Cancel",
     pitch_analyzing_clips: "Analyzing{clipName}{clipCount} {percentage}%",
     algo_label: "Algo",
+    algo_label_short: "Algo",
     child_pitch_mode_cents: "Cents",
     child_pitch_mode_degrees: "Degrees",
     child_formant_mode: "Formant",
     child_pitch_offset_cents_label: "Child Track Cents Offset",
     child_pitch_offset_degrees_label: "Child Track Degree Offset",
     child_formant_offset_cents_label: "Child Track Formant Offset",
+    child_pitch_root_option: "Pitch (Track Group)",
+    child_pitch_cents_option: "Cents (Current Sub-track)",
+    child_pitch_degrees_option: "Degrees (Current Sub-track)",
+    child_formant_root_option: "Formant Shift (Track Group)",
+    child_formant_offset_option: "Formant Offset (Current Sub-track)",
     child_pitch_offset_cents_short: "cents",
     child_pitch_offset_degrees_short: "degrees",
     child_formant_offset_cents_short: "cents",
@@ -673,6 +691,7 @@ export const enUS = {
     param_value_popup: "Popup Param Values",
     lock_param_lines: "Lock Param Lines",
     edge_smoothness: "Smoothness",
+    edge_smoothness_short: "Smooth",
 
     // Grid note type labels
     grid_note_normal: "Normal",

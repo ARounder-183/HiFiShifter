@@ -257,6 +257,25 @@ textarea {
     font-family: var(--qt-font-family) !important;
 }
 
+/*
+ * 工具栏/开关图标按钮尺寸稳定：
+ * Radix 的「ghost」变体会改用 content-box 尺寸并用 padding + 负 margin 做补偿，
+ * 导致其占用的盒子与固定尺寸的 solid/soft 变体不一致。这样在启用/禁用（solid ↔ ghost）
+ * 切换时，按钮会产生约 1px 的尺寸/位置抖动。这里把 ghost 图标按钮统一为与其他变体
+ * 相同的固定尺寸（border-box + 无内边距 + 无负 margin），保证开关切换时布局零位移。
+ * 用户通过 margin 属性（如 ml="2"）设置的外边距仍然生效。
+ */
+.rt-IconButton.rt-variant-ghost {
+    box-sizing: border-box;
+    width: var(--base-button-height);
+    height: var(--base-button-height);
+    padding: 0;
+    --margin-top-override: var(--margin-top);
+    --margin-right-override: var(--margin-right);
+    --margin-bottom-override: var(--margin-bottom);
+    --margin-left-override: var(--margin-left);
+}
+
 .rt-DropdownMenuItem,
 .rt-SelectItem,
 .rt-ContextMenuItem {
