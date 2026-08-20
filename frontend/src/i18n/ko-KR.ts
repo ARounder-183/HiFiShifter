@@ -391,6 +391,10 @@ export const koKR = {
     fade_out: "페이드 아웃",
     show_secondary_param: "보조 파라미터 오버레이 표시",
     hide_secondary_param: "보조 파라미터 오버레이 숨기기",
+    secondary_overlay_tooltip_visible: "보조 파라미터 오버레이: 표시\n클릭하여 숨기기",
+    secondary_overlay_tooltip_hidden: "보조 파라미터 오버레이: 숨김\n클릭하여 표시",
+    breath_tooltip_on: "브레스: 켜짐\n클릭하여 끄기",
+    breath_tooltip_off: "브레스: 꺼짐\n클릭하여 켜기",
     onnx_compile_required:
         "ONNX 모델이 컴파일되지 않았습니다. 실행: cargo tauri dev --features onnx",
     onnx_unavailable_label: " (사용 불가)",

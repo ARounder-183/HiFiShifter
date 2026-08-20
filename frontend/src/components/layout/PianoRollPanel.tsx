@@ -227,6 +227,130 @@ function sameStringArray(a: string[], b: string[]) {
     return a.every((value, index) => value === b[index]);
 }
 
+/**
+ * “气声/气流”图标：三道向右上方倾斜流动的曲线，表示风/气流（类似 Material “Air” 图标），
+ * 避免被误认为汉堡菜单；关闭（off）时气流变淡并叠加一条斜杠。
+ * 用于代替冗长的“气声开启/气声关闭”文本。
+ */
+const BreathAirIcon: React.FC<{ off?: boolean }> = ({ off = false }) => (
+    <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ display: "block" }}
+    >
+        {/* 三道右倾的流动曲线 = 风/气流 */}
+        <path
+            d="M2.2 3.6C4.8 1.9 8.2 2.5 11 5.2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.4 6.8C4.6 5.1 8.1 5.9 11.4 8.9"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.9 10.1C4.7 9.3 7.5 9.5 9.9 11.7"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        {off ? (
+            <path d="M3 11L11 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        ) : null}
+    </svg>
+);
+
+type ParamToolbarPillProps = {
+    /** 参数按钮上的简短标签（如 PIT / 共振峰） */
+    label: string;
+    /** 完整参数名（ToolTip） */
+    labelTooltip?: string;
+    /** 是否为主参数（激活）：整个药丸整体高亮 */
+    active: boolean;
+    /** 激活时的强调色（音高=grass，共振峰/其它=amber） */
+    accent: "grass" | "amber";
+    /** 点击标签：选中该参数 */
+    onSelect: () => void;
+    /** 眼睛状态：main=主参数（仅展示“睁开”，不响应点击）；on/off=副曲线叠加可见/隐藏 */
+    eyeMode: "main" | "on" | "off";
+    /** 点击眼睛（非 main 时调用；main 时不响应，以保持排版稳定） */
+    onToggleEye?: () => void;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    eyeTooltip?: string;
+    /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
+    eyeLabel?: string;
+    /** 可选尾部片段（如气声开关）：渲染在参数名之后、子参数下拉之前 */
+    trailing?: React.ReactNode;
+    /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
+    dropdown?: React.ReactNode;
+};
+
+/**
+ * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
+ * 各片段共享一块连续背景（由 data-accent-color 决定激活色），
+ * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
+ */
+const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
+    label,
+    labelTooltip,
+    active,
+    accent,
+    onSelect,
+    eyeMode,
+    onToggleEye,
+    eyeTooltip,
+    eyeLabel,
+    trailing,
+    dropdown,
+}) => {
+    const eyeInert = eyeMode === "main";
+    const eyeIcon = eyeMode === "off" ? <EyeClosedIcon /> : <EyeOpenIcon />;
+    return (
+        <div
+            className="param-pill"
+            data-accent-color={accent}
+            data-active={active ? "true" : undefined}
+        >
+            <button
+                type="button"
+                tabIndex={-1}
+                className={
+                    eyeInert
+                        ? "param-pill__seg param-pill__seg--eye param-pill__seg--inert"
+                        : "param-pill__seg param-pill__seg--eye"
+                }
+                data-tooltip={eyeInert ? undefined : eyeTooltip}
+                aria-label={eyeInert ? label : (eyeLabel ?? eyeTooltip)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    if (!eyeInert) onToggleEye?.();
+                }}
+            >
+                {eyeIcon}
+            </button>
+            <button
+                type="button"
+                className="param-pill__seg param-pill__seg--label"
+                data-tooltip={labelTooltip}
+                onClick={onSelect}
+            >
+                {label}
+            </button>
+            {trailing}
+            {dropdown}
+        </div>
+    );
+};
+
 type FormantParamButtonProps = {
     rootParamId: string;
     /** 按钮上的简短标签（如 FRM / 共振峰） */
@@ -242,9 +366,12 @@ type FormantParamButtonProps = {
     rootActive: boolean;
     childActive: boolean;
     secondaryVisible: boolean;
-    showSecondary: boolean;
+    /** 眼睛的无障碍标签（简短动作说明） */
     hideSecondaryLabel: string;
     showSecondaryLabel: string;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    hideSecondaryTooltip: string;
+    showSecondaryTooltip: string;
     onSelectRoot: () => void;
     onSelectChild: () => void;
     onToggleSecondary: () => void;
@@ -261,99 +388,81 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
     rootActive,
     childActive,
     secondaryVisible,
-    showSecondary,
     hideSecondaryLabel,
     showSecondaryLabel,
+    hideSecondaryTooltip,
+    showSecondaryTooltip,
     onSelectRoot,
     onSelectChild,
     onToggleSecondary,
 }) => {
+    const eyeMode: "main" | "on" | "off" =
+        rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
+
     if (!childParamId) {
         return (
-            <React.Fragment>
-                <Button
-                    size="1"
-                    variant={rootActive ? "solid" : "soft"}
-                    color={rootActive ? "amber" : "gray"}
-                    onClick={onSelectRoot}
-                    style={{ cursor: "pointer" }}
-                    data-tooltip={rootTooltip}
-                >
-                    {rootLabel}
-                </Button>
-                {showSecondary ? (
-                    <IconButton
-                        size="1"
-                        variant={secondaryVisible ? "soft" : "ghost"}
-                        color={secondaryVisible ? "orange" : "gray"}
-                        onClick={onToggleSecondary}
-                        style={{ cursor: "pointer" }}
-                        data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
-                    >
-                        {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
-                    </IconButton>
-                ) : null}
-            </React.Fragment>
+            <ParamToolbarPill
+                label={rootLabel}
+                labelTooltip={rootTooltip}
+                active={rootActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+            />
         );
     }
 
     return (
-        <React.Fragment>
-            <Button
-                size="1"
-                variant={rootActive || childActive ? "solid" : "soft"}
-                color={rootActive || childActive ? "amber" : "gray"}
-                onClick={onSelectRoot}
-                style={{ cursor: "pointer" }}
-                data-tooltip={childActive ? childLabel : rootTooltip}
-            >
-                {childActive ? childLabel : rootLabel}
-            </Button>
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger data-tooltip={childActive ? childLabel : rootLabel}>
-                    <IconButton size="1" variant="ghost" color="gray" style={{ cursor: "pointer" }}>
-                        <ChevronDownIcon width="12" height="12" />
-                    </IconButton>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.RadioGroup
-                        value={
-                            rootActive
-                                ? rootParamId
-                                : childActive && childParamId
-                                  ? childParamId
-                                  : undefined
-                        }
-                        onValueChange={(value) => {
-                            if (value === rootParamId) {
-                                onSelectRoot();
-                            } else if (value === childParamId) {
-                                onSelectChild();
-                            }
-                        }}
+        <DropdownMenu.Root>
+            <ParamToolbarPill
+                label={childActive ? childLabel : rootLabel}
+                labelTooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                active={rootActive || childActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+                dropdown={
+                    <DropdownMenu.Trigger
+                        className="param-pill__seg param-pill__seg--chev"
+                        data-tooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                        tabIndex={-1}
                     >
-                        <DropdownMenu.RadioItem value={rootParamId}>
-                            {rootMenuLabel ?? rootLabel}
-                        </DropdownMenu.RadioItem>
-                        <DropdownMenu.RadioItem value={childParamId}>
-                            {childMenuLabel ?? childLabel}
-                        </DropdownMenu.RadioItem>
-                    </DropdownMenu.RadioGroup>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-            {showSecondary ? (
-                <IconButton
-                    size="1"
-                    variant={secondaryVisible ? "soft" : "ghost"}
-                    color={secondaryVisible ? "orange" : "gray"}
-                    onClick={onToggleSecondary}
-                    style={{ cursor: "pointer" }}
-                    data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
+                        <ChevronDownIcon width="12" height="12" />
+                    </DropdownMenu.Trigger>
+                }
+            />
+            <DropdownMenu.Content variant="soft" color="gray">
+                <DropdownMenu.RadioGroup
+                    value={
+                        rootActive
+                            ? rootParamId
+                            : childActive && childParamId
+                              ? childParamId
+                              : undefined
+                    }
+                    onValueChange={(value) => {
+                        if (value === rootParamId) {
+                            onSelectRoot();
+                        } else if (value === childParamId) {
+                            onSelectChild();
+                        }
+                    }}
                 >
-                    {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
-                </IconButton>
-            ) : null}
-        </React.Fragment>
+                    <DropdownMenu.RadioItem value={rootParamId}>
+                        {rootMenuLabel ?? rootLabel}
+                    </DropdownMenu.RadioItem>
+                    <DropdownMenu.RadioItem value={childParamId}>
+                        {childMenuLabel ?? childLabel}
+                    </DropdownMenu.RadioItem>
+                </DropdownMenu.RadioGroup>
+            </DropdownMenu.Content>
+        </DropdownMenu.Root>
     );
 };
 
@@ -4617,107 +4726,92 @@ export const PianoRollPanel: React.FC = () => {
                         ) : null}
                         {selectedIsChildTrack &&
                         (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
-                            <React.Fragment>
-                                <Button
-                                    size="1"
-                                    variant={pitchGroupActive ? "solid" : "soft"}
-                                    color={pitchGroupActive ? "grass" : "gray"}
-                                    onClick={() => dispatch(setEditParam("pitch"))}
-                                    style={{ cursor: "pointer" }}
-                                    data-tooltip={pitchGroupTooltip}
-                                >
-                                    {pitchGroupLabel}
-                                </Button>
-                                <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger data-tooltip={pitchGroupTooltip}>
-                                        <IconButton
-                                            size="1"
-                                            variant="ghost"
-                                            color="gray"
-                                            style={{ cursor: "pointer" }}
+                            <DropdownMenu.Root>
+                                <ParamToolbarPill
+                                    label={pitchGroupLabel}
+                                    labelTooltip={pitchGroupTooltip}
+                                    active={pitchGroupActive}
+                                    accent="grass"
+                                    onSelect={() => dispatch(setEditParam("pitch"))}
+                                    eyeMode={
+                                        pitchGroupActive
+                                            ? "main"
+                                            : secondaryParamVisible["pitch"]
+                                              ? "on"
+                                              : "off"
+                                    }
+                                    onToggleEye={() => toggleSecondaryParam("pitch")}
+                                    eyeTooltip={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    dropdown={
+                                        <DropdownMenu.Trigger
+                                            className="param-pill__seg param-pill__seg--chev"
+                                            data-tooltip={pitchGroupTooltip}
+                                            tabIndex={-1}
                                         >
                                             <ChevronDownIcon width="12" height="12" />
-                                        </IconButton>
-                                    </DropdownMenu.Trigger>
-                                    <DropdownMenu.Content variant="soft" color="gray">
-                                        <DropdownMenu.RadioGroup
-                                            value={editParam}
-                                            onValueChange={(value) => dispatch(setEditParam(value))}
-                                        >
-                                            <DropdownMenu.RadioItem value="pitch">
-                                                {t("child_pitch_root_option")}
+                                        </DropdownMenu.Trigger>
+                                    }
+                                />
+                                <DropdownMenu.Content variant="soft" color="gray">
+                                    <DropdownMenu.RadioGroup
+                                        value={editParam}
+                                        onValueChange={(value) => dispatch(setEditParam(value))}
+                                    >
+                                        <DropdownMenu.RadioItem value="pitch">
+                                            {t("child_pitch_root_option")}
+                                        </DropdownMenu.RadioItem>
+                                        {childPitchOffsetCentsParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetCentsParam}
+                                            >
+                                                {t("child_pitch_cents_option")}
                                             </DropdownMenu.RadioItem>
-                                            {childPitchOffsetCentsParam ? (
-                                                <DropdownMenu.RadioItem
-                                                    value={childPitchOffsetCentsParam}
-                                                >
-                                                    {t("child_pitch_cents_option")}
-                                                </DropdownMenu.RadioItem>
-                                            ) : null}
-                                            {childPitchOffsetDegreesParam ? (
-                                                <DropdownMenu.RadioItem
-                                                    value={childPitchOffsetDegreesParam}
-                                                >
-                                                    {t("child_pitch_degrees_option")}
-                                                </DropdownMenu.RadioItem>
-                                            ) : null}
-                                        </DropdownMenu.RadioGroup>
-                                    </DropdownMenu.Content>
-                                </DropdownMenu.Root>
-                                {editParam !== "pitch" && pitchEnabled ? (
-                                    <IconButton
-                                        size="1"
-                                        variant={secondaryParamVisible["pitch"] ? "soft" : "ghost"}
-                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                        onClick={() => toggleSecondaryParam("pitch")}
-                                        style={{ cursor: "pointer" }}
-                                        data-tooltip={
-                                            secondaryParamVisible["pitch"]
-                                                ? t("hide_secondary_param")
-                                                : t("show_secondary_param")
-                                        }
-                                    >
-                                        {secondaryParamVisible["pitch"] ? (
-                                            <EyeOpenIcon />
-                                        ) : (
-                                            <EyeClosedIcon />
-                                        )}
-                                    </IconButton>
-                                ) : null}
-                            </React.Fragment>
+                                        ) : null}
+                                        {childPitchOffsetDegreesParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetDegreesParam}
+                                            >
+                                                {t("child_pitch_degrees_option")}
+                                            </DropdownMenu.RadioItem>
+                                        ) : null}
+                                    </DropdownMenu.RadioGroup>
+                                </DropdownMenu.Content>
+                            </DropdownMenu.Root>
                         ) : (
-                            <React.Fragment>
-                                <Button
-                                    size="1"
-                                    variant={editParam === "pitch" ? "solid" : "soft"}
-                                    color={editParam === "pitch" ? "grass" : "gray"}
-                                    onClick={() => dispatch(setEditParam("pitch"))}
-                                    style={{ cursor: "pointer" }}
-                                    data-tooltip={t("pitch")}
-                                >
-                                    {t("param_btn_pitch")}
-                                </Button>
-                                {editParam !== "pitch" && pitchEnabled ? (
-                                    <IconButton
-                                        size="1"
-                                        variant={secondaryParamVisible["pitch"] ? "soft" : "ghost"}
-                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                        onClick={() => toggleSecondaryParam("pitch")}
-                                        style={{ cursor: "pointer" }}
-                                        data-tooltip={
-                                            secondaryParamVisible["pitch"]
-                                                ? t("hide_secondary_param")
-                                                : t("show_secondary_param")
-                                        }
-                                    >
-                                        {secondaryParamVisible["pitch"] ? (
-                                            <EyeOpenIcon />
-                                        ) : (
-                                            <EyeClosedIcon />
-                                        )}
-                                    </IconButton>
-                                ) : null}
-                            </React.Fragment>
+                            <ParamToolbarPill
+                                label={t("param_btn_pitch")}
+                                labelTooltip={t("pitch")}
+                                active={editParam === "pitch"}
+                                accent="grass"
+                                onSelect={() => dispatch(setEditParam("pitch"))}
+                                eyeMode={
+                                    editParam === "pitch"
+                                        ? "main"
+                                        : secondaryParamVisible["pitch"]
+                                          ? "on"
+                                          : "off"
+                                }
+                                onToggleEye={() => toggleSecondaryParam("pitch")}
+                                eyeTooltip={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("secondary_overlay_tooltip_visible")
+                                        : t("secondary_overlay_tooltip_hidden")
+                                }
+                                eyeLabel={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("hide_secondary_param")
+                                        : t("show_secondary_param")
+                                }
+                            />
                         )}
                         {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
                         {orderedProcessorParams.map((p) => {
@@ -4737,9 +4831,12 @@ export const PianoRollPanel: React.FC = () => {
                                         rootActive={editParam === p.id}
                                         childActive={editParam === childFormantOffsetParam}
                                         secondaryVisible={secondaryParamVisible[p.id] ?? false}
-                                        showSecondary={editParam !== p.id}
                                         hideSecondaryLabel={t("hide_secondary_param")}
                                         showSecondaryLabel={t("show_secondary_param")}
+                                        hideSecondaryTooltip={t("secondary_overlay_tooltip_hidden")}
+                                        showSecondaryTooltip={t(
+                                            "secondary_overlay_tooltip_visible",
+                                        )}
                                         onSelectRoot={() => dispatch(setEditParam(p.id))}
                                         onSelectChild={() => {
                                             if (childFormantOffsetParam) {
@@ -4751,39 +4848,70 @@ export const PianoRollPanel: React.FC = () => {
                                 );
                             }
 
-                            return (
-                                <React.Fragment key={p.id}>
-                                    <Button
-                                        size="1"
-                                        variant={editParam === p.id ? "solid" : "soft"}
-                                        color={editParam === p.id ? "amber" : "gray"}
-                                        onClick={() => dispatch(setEditParam(p.id))}
-                                        style={{ cursor: "pointer" }}
-                                        data-tooltip={getProcessorParamLabel(p)}
+                            const paramActive = editParam === p.id;
+                            const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
+
+                            // nsf-hifigan：把“气声开关”以图标片段融合进“气声音量”药丸。
+                            let breathTrailing: React.ReactNode = null;
+                            if (p.id === "breath_gain") {
+                                const breathDesc = processorStaticParams.find(
+                                    (sp) => sp.id === "breath_enabled",
+                                );
+                                const breathDefault =
+                                    breathDesc && breathDesc.kind.type === "static_enum"
+                                        ? breathDesc.kind.default_value
+                                        : 0;
+                                const breathOn =
+                                    (processorStaticValues["breath_enabled"] ?? breathDefault) ===
+                                    1;
+                                breathTrailing = (
+                                    <button
+                                        type="button"
+                                        tabIndex={-1}
+                                        className="param-pill__seg param-pill__seg--breath"
+                                        data-tooltip={
+                                            breathOn
+                                                ? t("breath_tooltip_on")
+                                                : t("breath_tooltip_off")
+                                        }
+                                        aria-label={`${t("breath_mode_label")}: ${
+                                            breathOn ? t("switch_on") : t("switch_off")
+                                        }`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleStaticParamChange(
+                                                "breath_enabled",
+                                                breathOn ? 0 : 1,
+                                            );
+                                        }}
                                     >
-                                        {getProcessorParamShortLabel(p)}
-                                    </Button>
-                                    {editParam !== p.id ? (
-                                        <IconButton
-                                            size="1"
-                                            variant={secondaryParamVisible[p.id] ? "soft" : "ghost"}
-                                            color={secondaryParamVisible[p.id] ? "orange" : "gray"}
-                                            onClick={() => toggleSecondaryParam(p.id)}
-                                            style={{ cursor: "pointer" }}
-                                            data-tooltip={
-                                                secondaryParamVisible[p.id]
-                                                    ? t("hide_secondary_param")
-                                                    : t("show_secondary_param")
-                                            }
-                                        >
-                                            {secondaryParamVisible[p.id] ? (
-                                                <EyeOpenIcon />
-                                            ) : (
-                                                <EyeClosedIcon />
-                                            )}
-                                        </IconButton>
-                                    ) : null}
-                                </React.Fragment>
+                                        <BreathAirIcon off={!breathOn} />
+                                    </button>
+                                );
+                            }
+
+                            return (
+                                <ParamToolbarPill
+                                    key={p.id}
+                                    label={getProcessorParamShortLabel(p)}
+                                    labelTooltip={getProcessorParamLabel(p)}
+                                    active={paramActive}
+                                    accent="amber"
+                                    onSelect={() => dispatch(setEditParam(p.id))}
+                                    eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
+                                    onToggleEye={() => toggleSecondaryParam(p.id)}
+                                    eyeTooltip={
+                                        paramEyeVisible
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        paramEyeVisible
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    trailing={breathTrailing}
+                                />
                             );
                         })}
                     </Flex>
@@ -4795,62 +4923,10 @@ export const PianoRollPanel: React.FC = () => {
                                 const currentValue =
                                     processorStaticValues[param.id] ?? param.kind.default_value;
 
-                                // nsf-hifigan 的气声开关：合并成单个“气声开启/气声关闭”切换按钮。
+                                // 气声开关已融合进“气声音量”参数的药丸中（见下方
+                                // breath_gain 的 trailing 片段），此处不再单独渲染。
                                 if (param.id === "breath_enabled") {
-                                    const breathOn = currentValue === 1;
-                                    return (
-                                        <Button
-                                            key={param.id}
-                                            size="1"
-                                            variant={breathOn ? "solid" : "soft"}
-                                            color={breathOn ? "blue" : "gray"}
-                                            onClick={() =>
-                                                void handleStaticParamChange(
-                                                    param.id,
-                                                    breathOn ? 0 : 1,
-                                                )
-                                            }
-                                            style={{
-                                                cursor: "pointer",
-                                                position: "relative",
-                                                whiteSpace: "nowrap",
-                                            }}
-                                            data-tooltip={`${t("breath_mode_label")}: ${
-                                                breathOn ? t("switch_on") : t("switch_off")
-                                            }`}
-                                        >
-                                            {/*
-                                                按钮文案显示的是“当前气声状态”（气声开启/气声关闭），
-                                                而非“动作”。这里同时把两种状态文案以不可见方式占位，
-                                                由更宽者决定按钮宽度：宽度随语言自动适配，
-                                                且切换状态时按钮宽度不变、布局不抖动。
-                                            */}
-                                            <span
-                                                aria-hidden="true"
-                                                style={{ display: "grid", visibility: "hidden" }}
-                                            >
-                                                <span style={{ gridArea: "1 / 1" }}>
-                                                    {t("breath_state_on")}
-                                                </span>
-                                                <span style={{ gridArea: "1 / 1" }}>
-                                                    {t("breath_state_off")}
-                                                </span>
-                                            </span>
-                                            <span
-                                                style={{
-                                                    position: "absolute",
-                                                    inset: 0,
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                }}
-                                            >
-                                                {breathOn
-                                                    ? t("breath_state_on")
-                                                    : t("breath_state_off")}
-                                            </span>
-                                        </Button>
-                                    );
+                                    return null;
                                 }
 
                                 // vslib 的合成模式：改为支持滚轮切换的下拉栏。
