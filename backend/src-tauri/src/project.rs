@@ -89,31 +89,23 @@ pub const CURRENT_PROJECT_FILE_VERSION: u32 = 3;
 pub struct ProjectFile {
     pub version: u32,
     pub name: String,
+    /// 用户笔记；为空时省略（旧版本已容忍缺省，且空内容无可丢失信息）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes_markdown: String,
     pub timeline: TimelineState,
-    #[serde(
-        default = "default_base_scale",
-        skip_serializing_if = "is_default_base_scale"
-    )]
+    /// 工程的基础音乐参数（基准音阶/拍号/网格）始终序列化。
+    /// 这些参数定义工程的语义身份，不能依赖"缺省 = 默认值"的隐式规则：
+    /// 一旦未来版本调整默认值，历史文件将静默改变含义，且不利于跨版本兼容与维护。
+    #[serde(default = "default_base_scale")]
     pub base_scale: String,
-    #[serde(
-        default = "default_beats_per_bar",
-        skip_serializing_if = "is_default_beats_per_bar"
-    )]
+    #[serde(default = "default_beats_per_bar")]
     pub beats_per_bar: u32,
     /// 工程基准拍号分母（v2 新增，旧工程反序列化时默认 4）。
-    #[serde(
-        default = "default_time_signature_denominator",
-        skip_serializing_if = "is_default_time_signature_denominator"
-    )]
+    #[serde(default = "default_time_signature_denominator")]
     pub time_signature_denominator: u32,
-    #[serde(
-        default = "default_grid_size",
-        skip_serializing_if = "is_default_grid_size"
-    )]
+    #[serde(default = "default_grid_size")]
     pub grid_size: String,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub use_custom_scale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_scale: Option<CustomScale>,
@@ -165,26 +157,6 @@ fn default_time_signature_denominator() -> u32 {
 
 fn default_grid_size() -> String {
     "1/4".to_string()
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn is_default_base_scale(value: &String) -> bool {
-    *value == default_base_scale()
-}
-
-fn is_default_beats_per_bar(value: &u32) -> bool {
-    *value == default_beats_per_bar()
-}
-
-fn is_default_time_signature_denominator(value: &u32) -> bool {
-    *value == default_time_signature_denominator()
-}
-
-fn is_default_grid_size(value: &String) -> bool {
-    *value == default_grid_size()
 }
 
 // ─── 序列化 / 反序列化 ─────────────────────────────────────────────────────────
@@ -335,17 +307,17 @@ fn curve_is_all_zero(curve: &[f32]) -> bool {
 
 /// 保存工程文件前的专门精简处理。
 ///
-/// 与内存中的运行时 `TimelineState` 不同，落盘数据只保留：
-/// - 用户可编辑、无法从源文件重新推导出的内容；
-/// - 打开工程后能立刻正确渲染所必需的内容。
-///
-/// 被剥离的均为缓存/派生数据，之后可由现有分析/波形管线重新生成：
-/// - `waveform_preview`：波形预览缓存（前端另有 mipmap 二进制缓存）。
-/// - `pitch_edit` / `pitch_orig` 的冗余副本：未编辑时二者相同，只保留 orig；
-///   已编辑时 orig 仍可能作为未编辑帧的基线，因此按需保留。
-/// - `tension_orig`：从未参与渲染，属于历史遗留字段。
-/// - 全零曲线与空 `extra_curves`：与反序列化后的默认值语义完全一致。
-/// - `project_scale_notes`：可由 `base_scale` / `custom_scale` / tempo map 重建。
+/// 与内存中的运行时 `TimelineState` 不同，落盘数据采用如下策略：
+/// - 基础/语义参数（音准曲线之外的用户配置）一律原样序列化，确保自描述性
+///   与跨版本兼容（见 `Track` / `Clip` / `ProjectFile` 上的 serde 注解）。
+/// - 纯缓存/派生数据置空后仍以 `null`/空值落盘（字段保持存在，兼容旧版本
+///   反序列化要求字段必须存在），内容由现有分析/波形管线重新生成：
+///   - `waveform_preview`：波形预览缓存（前端另有 mipmap 二进制缓存）。
+///   - `pitch_edit` / `pitch_orig` 的冗余副本：未编辑时二者相同，只保留 orig；
+///     已编辑时 orig 仍可能作为未编辑帧的基线，因此按需保留。
+///   - `tension_orig`：从未参与渲染，属于历史遗留字段。
+///   - 全零曲线与空 `extra_curves`：与反序列化后的默认值语义完全一致。
+///   - `project_scale_notes`：可由 `base_scale` / `custom_scale` / tempo map 重建。
 pub fn prepare_timeline_for_project_save(
     mut tl: TimelineState,
     project_path: &Path,
@@ -363,18 +335,8 @@ pub fn prepare_timeline_for_project_save(
                 }
             }
         }
-        // duration_sec 可由 duration_frames / source_sample_rate 精确重建；
-        // 仅当二者齐全且数值一致时省略，避免旧工程兼容路径依赖该字段。
-        if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
-            if sample_rate > 0 {
-                let derived = frames as f64 / sample_rate as f64;
-                if let Some(duration_sec) = clip.duration_sec {
-                    if (duration_sec - derived).abs() <= 1e-6 {
-                        clip.duration_sec = None;
-                    }
-                }
-            }
-        }
+        // 注意：duration_sec / duration_frames / source_sample_rate 是基础媒体信息，
+        // 始终原样序列化（不省略），以免旧版本读取时缺少必需字段。
         if let Some(curves) = clip.extra_curves.as_mut() {
             curves.retain(|_, curve| !curve.is_empty());
             if curves.is_empty() {
@@ -580,6 +542,66 @@ mod tests {
             "all-default root params should be omitted entirely"
         );
         assert!(prepared.project_scale_notes.is_empty());
+    }
+
+    #[test]
+    fn compact_json_keeps_required_and_core_fields() {
+        // 即使全部处于默认值，工程核心参数与旧版本必需的基础字段也必须始终出现。
+        let tl = prepare_timeline_for_project_save(
+            timeline_with_clip_and_zero_curves(),
+            Path::new("test.hshp"),
+        );
+        let pf = project_file_with_clip(tl);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+
+        for key in [
+            "\"base_scale\"",
+            "\"beats_per_bar\"",
+            "\"time_signature_denominator\"",
+            "\"grid_size\"",
+            "\"use_custom_scale\"",
+            "\"version\"",
+        ] {
+            assert!(
+                text.contains(key),
+                "core project parameter {key} must always be serialized"
+            );
+        }
+
+        // Track / Clip / TimelineState 中属于旧版本必需或基础语义的字段
+        // 即使取默认值也必须存在（旧版本反序列化要求字段必须携带）。
+        for key in [
+            "\"parent_id\"",
+            "\"muted\"",
+            "\"solo\"",
+            "\"volume\"",
+            "\"compose_enabled\"",
+            "\"pitch_analysis_algo\"",
+            "\"source_path\"",
+            "\"duration_sec\"",
+            "\"duration_frames\"",
+            "\"source_sample_rate\"",
+            "\"waveform_preview\"",
+            "\"pitch_range\"",
+            "\"gain\"",
+            "\"source_start_sec\"",
+            "\"source_end_sec\"",
+            "\"playback_rate\"",
+            "\"reversed\"",
+            "\"fade_in_sec\"",
+            "\"fade_out_sec\"",
+            "\"fade_in_curve\"",
+            "\"fade_out_curve\"",
+            "\"selected_track_id\"",
+            "\"selected_clip_id\"",
+            "\"playhead_sec\"",
+        ] {
+            assert!(
+                text.contains(key),
+                "field {key} must always be present to stay readable by older app versions"
+            );
+        }
     }
 
     #[test]

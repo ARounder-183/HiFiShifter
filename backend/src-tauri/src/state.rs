@@ -46,28 +46,8 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn is_zero_f64(value: &f64) -> bool {
-    *value == 0.0
-}
-
-fn is_one_f32(value: &f32) -> bool {
-    *value == 1.0
-}
-
-fn is_sine(value: &String) -> bool {
-    value == "sine"
-}
-
-fn is_emerald(value: &String) -> bool {
-    *value == default_clip_color()
-}
-
 fn is_default_frame_period(value: &f64) -> bool {
     *value == default_frame_period_ms()
-}
-
-fn pitch_analysis_algo_is_default(value: &PitchAnalysisAlgo) -> bool {
-    matches!(value, PitchAnalysisAlgo::NsfHifiganOnnx)
 }
 
 fn btree_map_string_track_params_is_empty(value: &BTreeMap<String, TrackParamsState>) -> bool {
@@ -358,20 +338,23 @@ pub struct CreateClipsBulkPayload {
 pub struct Track {
     pub id: String,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 轨道分组父级；`None` 表示根轨道。始终序列化以兼容旧版本读取。
+    #[serde(default)]
     pub parent_id: Option<String>,
     pub order: i32,
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// 轨道音量/静音/独奏/合成开关/分析算法等基础参数属于工程语义内容，
+    /// 始终序列化，避免依赖"缺省 = 默认值"的隐式规则（默认值可能在跨版本间变化）。
+    #[serde(default)]
     pub muted: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub solo: bool,
-    #[serde(default = "default_gain", skip_serializing_if = "is_one_f32")]
+    #[serde(default = "default_gain")]
     pub volume: f32,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub compose_enabled: bool,
 
-    #[serde(default, skip_serializing_if = "pitch_analysis_algo_is_default")]
+    #[serde(default)]
     pub pitch_analysis_algo: PitchAnalysisAlgo,
 
     /// 轨道主题色，hex 字符串，如 "#4f8ef7"
@@ -388,18 +371,20 @@ pub struct Clip {
     pub name: String,
     pub start_sec: f64,
     pub length_sec: f64,
-    #[serde(default = "default_clip_color", skip_serializing_if = "is_emerald")]
+    /// Clip 颜色、来源路径、时长/采样率等基础参数始终序列化，兼容旧版本读取；
+    /// `source_path_relative` 为可推导的派生路径，仍按需省略。
+    #[serde(default = "default_clip_color")]
     pub color: String,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path_relative: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub duration_sec: Option<f64>, // 兼容性保留
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub duration_frames: Option<u64>, // 精确的frame总数
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_sample_rate: Option<u32>, // 源文件采样率
     /// 文件导入时的 mtime（Unix 时间戳，秒），用于检测外部文件替换/删除。
     /// None 表示运行时从字节流导入（无磁盘文件）或尚未初始化。
@@ -420,32 +405,36 @@ pub struct Clip {
     /// 即使源文件当前缺失，也能用于后续重新匹配。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_file_fingerprint: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 波形预览与音高范围属于可重新生成的缓存，仅在保存时以 None/null 形式
+    /// 落盘（保持字段存在以兼容旧版本读取，但不携带任何波形数据）。
+    #[serde(default)]
     pub waveform_preview: Option<Vec<f32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub pitch_range: Option<PitchRange>,
 
-    #[serde(default = "default_gain", skip_serializing_if = "is_one_f32")]
+    /// 增益/静音/裁剪/播放速率/反向/淡入淡出/曲线类型等 clip 基础参数
+    /// 始终序列化，避免依赖"缺省 = 默认值"的隐式规则。
+    #[serde(default = "default_gain")]
     pub gain: f32,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub muted: bool,
-    #[serde(alias = "trim_start_sec", default, skip_serializing_if = "is_zero_f64")]
+    #[serde(alias = "trim_start_sec", default)]
     pub source_start_sec: f64,
     #[serde(alias = "trim_end_sec")]
     pub source_end_sec: f64,
-    #[serde(default = "default_playback_rate", skip_serializing_if = "is_one_f32")]
+    #[serde(default = "default_playback_rate")]
     pub playback_rate: f32,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub reversed: bool,
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
     pub fade_in_sec: f64,
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
     pub fade_out_sec: f64,
     /// 淡入曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve", skip_serializing_if = "is_sine")]
+    #[serde(default = "default_fade_curve")]
     pub fade_in_curve: String,
     /// 淡出曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve", skip_serializing_if = "is_sine")]
+    #[serde(default = "default_fade_curve")]
     pub fade_out_curve: String,
 
     /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
@@ -534,12 +523,12 @@ pub struct TempoPointData {
 pub struct TimelineState {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub selected_track_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub selected_clip_id: Option<String>,
     pub bpm: f64,
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
     pub playhead_sec: f64,
     pub project_sec: f64,
 
