@@ -318,6 +318,7 @@ pub fn run() {
             commands::import_project,
             commands::save_project,
             commands::save_project_as,
+            commands::save_project_to_path,
             commands::get_auto_backup_settings,
             commands::save_auto_backup_settings,
             commands::run_timed_auto_backup,

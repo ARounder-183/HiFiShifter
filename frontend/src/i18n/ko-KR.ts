@@ -473,6 +473,15 @@ export const koKR = {
         "이 프로젝트 파일은 현재 프로그램(v{currentVersion})보다 최신 버전(v{fileVersion})으로 만들어졌습니다. 호환되지 않을 수 있습니다. 그래도 계속해서 로드를 시도하시겠습니까?",
     project_version_too_new_continue: "계속 로드",
 
+    status_save_version_confirmation: "저장 버전 확인",
+    save_version_conflict_title: "기존 프로젝트 파일을 덮어쓰시겠습니까?",
+    save_version_conflict_desc_lower:
+        "대상 위치에 현재 버전(v{currentVersion})보다 오래된 버전(v{existingVersion})의 HiFiShifter 프로젝트 파일이 이미 있습니다. 덮어쓰면 파일이 새 버전으로 업그레이드되어 이전 앱에서 열 수 없거나 인식하지 못하는 매개변수가 손실될 수 있습니다. 어떤 작업을 수행하시겠습니까?",
+    save_version_conflict_desc_higher:
+        "대상 위치에 현재 버전(v{currentVersion})보다 최신 버전(v{existingVersion})의 HiFiShifter 프로젝트 파일이 이미 있습니다. 덮어쓰면 저장 후 일부 매개변수가 누락되거나 파일이 호환되지 않을 수 있습니다. 어떤 작업을 수행하시겠습니까?",
+    save_version_conflict_save_as: "다른 이름으로 저장...",
+    save_version_conflict_continue: "계속 저장",
+
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",
     fade_curve_exponential: "지수",

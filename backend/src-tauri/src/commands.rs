@@ -177,6 +177,19 @@ pub fn save_project_as(
     project::save_project_as(state, window, notes_markdown)
 }
 
+/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
+/// 确认"继续保存"。
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_project_to_path(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
+) -> serde_json::Value {
+    project::save_project_to_path(state, window, project_path, notes_markdown, force)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_auto_backup_settings(state: State<'_, AppState>) -> crate::config::AutoBackupSettings {
     project::get_auto_backup_settings(state)

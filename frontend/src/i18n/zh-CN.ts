@@ -382,6 +382,15 @@ export const zhCN = {
         "该工程文件由更高版本（v{fileVersion}）创建，当前程序工程文件版本为 v{currentVersion}。工程文件可能不兼容，是否仍要继续尝试加载？",
     project_version_too_new_continue: "继续加载",
 
+    status_save_version_confirmation: "保存版本确认",
+    save_version_conflict_title: "覆盖已存在的工程文件？",
+    save_version_conflict_desc_lower:
+        "目标位置已存在由更低版本（v{existingVersion}）创建、与当前版本（v{currentVersion}）不一致的 HiFiShifter 工程文件。覆盖保存会将该文件升级为新版本，可能导致旧版本无法读取或丢失其可理解的参数，请在操作前确认。您希望执行哪项操作？",
+    save_version_conflict_desc_higher:
+        "目标位置已存在由更高版本（v{existingVersion}）创建、与当前版本（v{currentVersion}）不一致的 HiFiShifter 工程文件。覆盖保存可能会导致保存后参数缺失或工程文件不兼容。您希望执行哪项操作？",
+    save_version_conflict_save_as: "另存为...",
+    save_version_conflict_continue: "继续保存",
+
     fade_curve_linear: "线性",
     fade_curve_sine: "正弦",
     fade_curve_exponential: "指数",

@@ -66,6 +66,7 @@ import {
     redoRemote,
     saveProjectAsRemote,
     saveProjectRemote,
+    saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -486,6 +487,17 @@ export interface SessionState {
     lastResult?: unknown;
     vocalShifterSkippedFilesDialog: string[] | null;
     reaperSkippedFilesDialog: string[] | null;
+
+    /**
+     * 保存/另存为目标位置已存在版本不一致的工程文件时，弹出的覆盖确认对话框。
+     * 为 null 表示没有待确认的覆盖。
+     */
+    saveVersionConflictDialog: {
+        path: string;
+        existingVersion: number;
+        currentVersion: number;
+        existingIsNewer: boolean;
+    } | null;
 
     /**
      * 交互锁计数器：当用户正在进行连续操作（拖动、滑动等）时 > 0。
@@ -1303,6 +1315,7 @@ const initialState: SessionState = {
     status: "Ready",
     vocalShifterSkippedFilesDialog: null,
     reaperSkippedFilesDialog: null,
+    saveVersionConflictDialog: null,
     _interactionLockCount: 0,
 };
 
@@ -1321,6 +1334,7 @@ export {
     openReaperFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
+    saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -1759,6 +1773,9 @@ const sessionSlice = createSlice({
         },
         closeReaperSkippedFilesDialog(state) {
             state.reaperSkippedFilesDialog = null;
+        },
+        closeSaveVersionConflictDialog(state) {
+            state.saveVersionConflictDialog = null;
         },
         setSelectedClip(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
@@ -3208,6 +3225,16 @@ const sessionSlice = createSlice({
 
             .addCase(saveProjectRemote.fulfilled, (state, action) => {
                 const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
                 if (payload?.ok && payload?.canceled) {
                     state.status = "Save canceled";
                     return;
@@ -3247,6 +3274,16 @@ const sessionSlice = createSlice({
 
             .addCase(saveProjectAsRemote.fulfilled, (state, action) => {
                 const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
                 if (payload?.ok && payload?.canceled) {
                     state.status = "Save As canceled";
                     return;
@@ -3282,6 +3319,59 @@ const sessionSlice = createSlice({
                 }
 
                 state.status = "Save As failed";
+            })
+
+            .addCase(saveProjectToPathRemote.fulfilled, (state, action) => {
+                const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    // 理论上 force 保存不会再冲突；兜底再次弹出确认框。
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
+                if (payload?.ok && payload?.canceled) {
+                    state.status = "Save canceled";
+                    return;
+                }
+
+                // 保留播放头位置和音高曲线，避免 UI 跳变
+                const currentPlayheadSec = state.playheadSec;
+                const currentParamsEpoch = state.paramsEpoch;
+                const currentClipPitchCurves = state.clipPitchCurves;
+
+                if (payload?.ok && payload?.timeline?.ok) {
+                    applyTimelineState(state, payload.timeline as TimelineState, { force: true });
+                    state.playheadSec = currentPlayheadSec;
+                    state.paramsEpoch = currentParamsEpoch;
+                    state.clipPitchCurves = currentClipPitchCurves;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                if (payload?.ok && payload?.tracks && payload?.clips) {
+                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    state.playheadSec = currentPlayheadSec;
+                    state.paramsEpoch = currentParamsEpoch;
+                    state.clipPitchCurves = currentClipPitchCurves;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                if (payload?.ok) {
+                    state.project.dirty = false;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                state.status = "Save failed";
+            })
+            .addCase(saveProjectToPathRemote.rejected, (state) => {
+                state.status = "Save failed";
             })
 
             .addCase(setProjectBaseScaleRemote.fulfilled, (state, action) => {
@@ -3972,6 +4062,7 @@ export const {
     setProjectNotesMarkdown,
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeSaveVersionConflictDialog,
     setPitchSnapToleranceCents,
     setScaleHighlightMode,
     upsertCustomScalePreset,

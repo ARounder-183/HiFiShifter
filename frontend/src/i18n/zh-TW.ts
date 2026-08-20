@@ -383,6 +383,15 @@ export const zhTW = {
         "此工程檔案由較新版本（v{fileVersion}）建立，目前程式的工程檔案版本為 v{currentVersion}。工程檔案可能不相容，是否仍要繼續嘗試載入？",
     project_version_too_new_continue: "繼續載入",
 
+    status_save_version_confirmation: "儲存版本確認",
+    save_version_conflict_title: "覆蓋已存在的工程檔案？",
+    save_version_conflict_desc_lower:
+        "目標位置已存在由較低版本（v{existingVersion}）建立、與目前版本（v{currentVersion}）不一致的 HiFiShifter 工程檔案。覆蓋儲存會將該檔案升級為新版本，可能導致舊版本無法讀取或遺失其可理解的參數，請在操作前確認。您希望執行哪一項操作？",
+    save_version_conflict_desc_higher:
+        "目標位置已存在由較高版本（v{existingVersion}）建立、與目前版本（v{currentVersion}）不一致的 HiFiShifter 工程檔案。覆蓋儲存可能導致儲存後參數缺失或工程檔案不相容。您希望執行哪一項操作？",
+    save_version_conflict_save_as: "另存新檔...",
+    save_version_conflict_continue: "繼續儲存",
+
     fade_curve_linear: "線性",
     fade_curve_sine: "正弦",
     fade_curve_exponential: "指數",

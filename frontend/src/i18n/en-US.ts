@@ -399,6 +399,15 @@ export const enUS = {
         "This project file was created with a newer version (v{fileVersion}) than this app (v{currentVersion}). It may be incompatible. Do you want to continue and try to load it anyway?",
     project_version_too_new_continue: "Continue Loading",
 
+    status_save_version_confirmation: "Save version confirmation required",
+    save_version_conflict_title: "Overwrite Existing Project File?",
+    save_version_conflict_desc_lower:
+        "The target location already contains a HiFiShifter project file from an OLDER version (v{existingVersion}) than the current one (v{currentVersion}). Overwriting it will upgrade that file and may lose parameters the older app does not understand, which could make it incompatible if you open it with the older app later. What do you want to do?",
+    save_version_conflict_desc_higher:
+        "The target location already contains a HiFiShifter project file from a NEWER version (v{existingVersion}) than the current one (v{currentVersion}). Overwriting it may cause some parameters to be missing or the file to become incompatible. What do you want to do?",
+    save_version_conflict_save_as: "Save As...",
+    save_version_conflict_continue: "Continue Saving",
+
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",
     fade_curve_exponential: "Exponential",

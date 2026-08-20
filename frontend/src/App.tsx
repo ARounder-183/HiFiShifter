@@ -10,6 +10,7 @@ import { IS_LINUX } from "./utils/platform";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeSaveVersionConflictDialog,
     fetchTimeline,
     refreshRuntime,
     loadUiSettings,
@@ -29,6 +30,7 @@ import {
     importAudioFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
+    saveProjectToPathRemote,
     setTrackMeters,
     setToolMode,
     checkpointHistory,
@@ -84,6 +86,7 @@ const statusKey: Record<string, string> = {
     "Save failed": "status_save_failed",
     "Save As canceled": "status_save_as_canceled",
     "Save As failed": "status_save_as_failed",
+    "Save version confirmation required": "status_save_version_confirmation",
     "Project saved": "status_project_saved",
     "Clips created": "status_clips_created",
     "Glue done": "status_glue_done",
@@ -300,6 +303,9 @@ function AppInner() {
     );
     const reaperSkippedFilesDialog = useAppSelector(
         (state) => state.session.reaperSkippedFilesDialog,
+    );
+    const saveVersionConflictDialog = useAppSelector(
+        (state) => state.session.saveVersionConflictDialog,
     );
 
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1264,8 +1270,10 @@ function AppInner() {
             try {
                 const result = await dispatch(
                     projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap();
-                if ((result as { canceled?: boolean } | undefined)?.canceled) {
+                ).unwrap() as any;
+                // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
+                // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
+                if (result?.canceled || result?.versionConflict) {
                     return;
                 }
                 await executePendingUnsavedAction();
@@ -1304,6 +1312,25 @@ function AppInner() {
     const cancelContinueLoadingNewerProject = useCallback(() => {
         setProjectVersionDialog((current) => ({ ...current, open: false }));
     }, []);
+
+    // ── 保存/另存为目标存在版本不一致工程文件时的确认操作 ──
+    const cancelSaveVersionConflict = useCallback(() => {
+        dispatch(closeSaveVersionConflictDialog());
+    }, [dispatch]);
+
+    // 用户选择"另存为"：关闭确认框并重新弹出另存为选择器。
+    const saveAsFromVersionConflict = useCallback(() => {
+        dispatch(closeSaveVersionConflictDialog());
+        void dispatch(saveProjectAsRemote());
+    }, [dispatch]);
+
+    // 用户确认"继续保存"：向已选路径执行强制覆盖保存。
+    const continueForceSave = useCallback(() => {
+        const path = saveVersionConflictDialog?.path;
+        dispatch(closeSaveVersionConflictDialog());
+        if (!path) return;
+        void dispatch(saveProjectToPathRemote(path));
+    }, [dispatch, saveVersionConflictDialog?.path]);
 
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
@@ -2620,6 +2647,56 @@ function AppInner() {
                         </Button>
                         <Button color="amber" onClick={confirmContinueLoadingNewerProject}>
                             {t("project_version_too_new_continue")}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* 保存/另存为目标已存在版本不一致的工程文件 — 覆盖前询问用户 */}
+            <Dialog.Root
+                open={Boolean(saveVersionConflictDialog)}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        dispatch(closeSaveVersionConflictDialog());
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="520px">
+                    <Dialog.Title>{t("save_version_conflict_title")}</Dialog.Title>
+                    <Dialog.Description>
+                        {saveVersionConflictDialog?.existingIsNewer
+                            ? t("save_version_conflict_desc_higher")
+                                  .replace(
+                                      "{existingVersion}",
+                                      String(saveVersionConflictDialog.existingVersion),
+                                  )
+                                  .replace(
+                                      "{currentVersion}",
+                                      String(saveVersionConflictDialog.currentVersion),
+                                  )
+                            : t("save_version_conflict_desc_lower")
+                                  .replace(
+                                      "{existingVersion}",
+                                      String(saveVersionConflictDialog?.existingVersion ?? "?"),
+                                  )
+                                  .replace(
+                                      "{currentVersion}",
+                                      String(saveVersionConflictDialog?.currentVersion ?? "?"),
+                                  )}
+                    </Dialog.Description>
+                    <Flex justify="end" gap="2" mt="4">
+                        <Button
+                            variant="soft"
+                            color="gray"
+                            onClick={cancelSaveVersionConflict}
+                        >
+                            {t("progress_cancel")}
+                        </Button>
+                        <Button variant="soft" onClick={saveAsFromVersionConflict}>
+                            {t("save_version_conflict_save_as")}
+                        </Button>
+                        <Button color="red" onClick={continueForceSave}>
+                            {t("save_version_conflict_continue")}
                         </Button>
                     </Flex>
                 </Dialog.Content>

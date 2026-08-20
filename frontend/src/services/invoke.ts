@@ -381,6 +381,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_project_as":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 
+        case "save_project_to_path":
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { notesMarkdown: args[1] } : {}),
+                ...(args[2] !== undefined ? { force: args[2] } : {}),
+            };
+
         case "import_vocalshifter_project":
             return { vspPath: args[0] };
 

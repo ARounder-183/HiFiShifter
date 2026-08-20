@@ -398,6 +398,15 @@ export const jaJP = {
         "このプロジェクトファイルは、このアプリ（v{currentVersion}）より新しいバージョン（v{fileVersion}）で作成されています。互換性がない可能性があります。それでも読み込みを続行しますか？",
     project_version_too_new_continue: "続行して読み込む",
 
+    status_save_version_confirmation: "保存バージョンの確認",
+    save_version_conflict_title: "既存のプロジェクトファイルを上書きしますか？",
+    save_version_conflict_desc_lower:
+        "保存先には、現在のバージョン（v{currentVersion}）より古いバージョン（v{existingVersion}）の HiFiShifter プロジェクトファイルが既に存在します。上書き保存するとファイルが新しいバージョンに更新され、古いアプリで開けなくなる、または理解できないパラメーターが失われる可能性があります。どの操作を実行しますか？",
+    save_version_conflict_desc_higher:
+        "保存先には、現在のバージョン（v{currentVersion}）より新しいバージョン（v{existingVersion}）の HiFiShifter プロジェクトファイルが既に存在します。上書き保存すると、保存後に一部のパラメーターが欠落したり、ファイルが互換性を失う可能性があります。どの操作を実行しますか？",
+    save_version_conflict_save_as: "名前を付けて保存...",
+    save_version_conflict_continue: "続行して保存",
+
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",
     fade_curve_exponential: "エクスポネンシャル",
