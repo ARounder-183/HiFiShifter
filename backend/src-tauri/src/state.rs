@@ -319,6 +319,10 @@ pub struct CreateClipTemplatePayload {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    #[serde(default)]
+    pub auto_fade_in_sec: Option<f64>,
+    #[serde(default)]
+    pub auto_fade_out_sec: Option<f64>,
     pub linked_params: Option<LinkedParamCurvesPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
@@ -437,6 +441,19 @@ pub struct Clip {
     #[serde(default = "default_fade_curve")]
     pub fade_out_curve: String,
 
+    /// 自动交叉淡化长度（秒，由剪辑重叠派生；**不覆盖手动 fade**）。
+    ///
+    /// 对齐 REAPER 的存储方式：手动 fade（`fade_in_sec` / `fade_out_sec`）始终保留，
+    /// 自动交叉淡化独立记录在 `auto_fade_*_sec`。渲染/显示使用“有效 fade”：
+    /// `auto_fade_*_sec > 0` 时用自动值，否则用手动值。分离后自动值归 0，
+    /// 手动 fade 自然恢复。
+    ///
+    /// 旧版本工程没有这两个字段（serde default = 0），有效 fade = 手动值，完全兼容。
+    #[serde(default)]
+    pub auto_fade_in_sec: f64,
+    #[serde(default)]
+    pub auto_fade_out_sec: f64,
+
     /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_curves: Option<HashMap<String, Vec<f32>>>,
@@ -458,6 +475,26 @@ pub struct Clip {
     pub midi_fill_gaps: bool,
 }
 
+impl Clip {
+    /// 有效淡入长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_in_sec(&self) -> f64 {
+        if self.auto_fade_in_sec > 0.0 {
+            self.auto_fade_in_sec
+        } else {
+            self.fade_in_sec
+        }
+    }
+
+    /// 有效淡出长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_out_sec(&self) -> f64 {
+        if self.auto_fade_out_sec > 0.0 {
+            self.auto_fade_out_sec
+        } else {
+            self.fade_out_sec
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipStatePatch {
@@ -474,6 +511,8 @@ pub struct ClipStatePatch {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
     pub formant_morph: Option<ClipFormantMorph>,
 }
@@ -660,6 +699,37 @@ pub struct SplitTransitionOptions {
     pub curve: Option<String>,
     /// 延伸重叠模式下，是否同时为重叠区域设置淡入淡出。
     pub overlap_fades: bool,
+}
+
+/// 波纹编辑（自动跟进）模式，对应 REAPER 的 Ripple Editing。
+///
+/// - `Off`：关闭。编辑只影响被编辑对象本身，后续剪辑保持原位（默认，与 REAPER 默认一致）。
+/// - `Track`：仅被编辑剪辑所在轨道上的后续剪辑一起平移（对应 REAPER“per selected track”）。
+/// - `All`：所有轨道上位于编辑点之后的剪辑一起平移，保持多轨内容时间对齐（对应 REAPER“all tracks”）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RippleMode {
+    Off,
+    Track,
+    All,
+}
+
+impl RippleMode {
+    /// 从持久化字符串解析；未知值回退为 `Off`。
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "track" => Self::Track,
+            "all" => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Track => "track",
+            Self::All => "all",
+        }
+    }
 }
 
 impl TimelineState {
@@ -1762,6 +1832,15 @@ impl AppState {
 mod tests {
     use super::*;
 
+    fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
+        timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .map(|clip| clip.start_sec)
+            .unwrap_or(f64::NAN)
+    }
+
     #[test]
     fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
         let base = TimelineState::default();
@@ -1917,6 +1996,71 @@ mod tests {
     }
 
     #[test]
+    fn ripple_track_mode_moves_following_clips_on_same_track_only() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a0 = timeline.add_clip(Some(track_a.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(2.0), None);
+
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let affected: HashSet<String> = HashSet::from([track_a]);
+        let shifted = timeline.ripple_shift_clips(&edited, Some(&affected), 2.0, 1.0, false);
+
+        // A 轨上的后续剪辑 a2 右移 1s。
+        assert!(shifted.contains(&a2));
+        // 被编辑的 a1 与更早的 a0 不动。
+        assert!(!shifted.contains(&a1));
+        assert!(!shifted.contains(&a0));
+        // B 轨上的 b0（与 a1 同时刻）不动（Track 模式）。
+        assert!(!shifted.contains(&b0));
+
+        assert_eq!(find_clip_start(&timeline, &a0), 0.0);
+        assert_eq!(find_clip_start(&timeline, &a1), 2.0);
+        assert_eq!(find_clip_start(&timeline, &a2), 5.0);
+        assert_eq!(find_clip_start(&timeline, &b0), 2.0);
+    }
+
+    #[test]
+    fn ripple_all_mode_moves_following_clips_on_every_track() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(4.0), None);
+
+        // 删除 a1（2~4s）：All 模式下所有轨道上 start >= 2 的后续剪辑左移 2s。
+        let delta = 2.0 - 4.0; // origin - old_right_edge
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let shifted = timeline.ripple_shift_clips(&edited, None, 2.0, delta, false);
+
+        assert_eq!(find_clip_start(&timeline, &a2), 2.0);
+        // b0 起点 2 >= origin 2，被平移左移 2s → 0。
+        assert_eq!(find_clip_start(&timeline, &b0), 0.0);
+        assert!(shifted.contains(&a2));
+        assert!(shifted.contains(&b0));
+    }
+
+    #[test]
+    fn ripple_off_and_zero_delta_are_noops() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+
+        // delta = 0（如“锁定参数线关闭时的纯纵向/无位移编辑”）不产生平移。
+        let shifted = timeline.ripple_shift_clips(&[a1.as_str()], None, 2.0, 0.0, false);
+        assert!(shifted.is_empty());
+        assert_eq!(find_clip_start(&timeline, &a2), 4.0);
+    }
+
+    #[test]
     fn create_clips_bulk_creates_multiple_snapshot_clips() {
         let mut timeline = TimelineState::default();
         let track_id = timeline.add_track(Some("Track".to_string()), None, None);
@@ -1940,6 +2084,8 @@ mod tests {
                     fade_out_sec: Some(0.25),
                     fade_in_curve: Some("sine".into()),
                     fade_out_curve: Some("logarithmic".into()),
+                    auto_fade_in_sec: None,
+                    auto_fade_out_sec: None,
                     linked_params: None,
                     midi_fill_gaps: Some(false),
                     midi_note_data: None,
@@ -1961,6 +2107,8 @@ mod tests {
                     fade_out_sec: Some(0.1),
                     fade_in_curve: Some("linear".into()),
                     fade_out_curve: Some("scurve".into()),
+                    auto_fade_in_sec: None,
+                    auto_fade_out_sec: None,
                     linked_params: None,
                     midi_fill_gaps: Some(false),
                     midi_note_data: None,
@@ -2043,6 +2191,8 @@ mod tests {
                 fade_out_sec: Some(0.2),
                 fade_in_curve: Some("linear".into()),
                 fade_out_curve: Some("scurve".into()),
+                auto_fade_in_sec: None,
+                auto_fade_out_sec: None,
                 linked_params: None,
                 midi_fill_gaps: Some(false),
                 midi_note_data: None,
@@ -2425,11 +2575,13 @@ mod tests {
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((left.source_end_sec - 2.2).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
         assert!((right.length_sec - 1.6).abs() < 1e-9);
         assert!((right.source_start_sec - 1.8).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
 
         // At the split point, both clips must still reference the same source position.
         let left_source_at_split = left.source_end_sec - (left.length_sec - 0.5) * 2.0;
@@ -2504,6 +2656,8 @@ mod tests {
         assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2584,8 +2738,8 @@ mod tests {
         assert!((right.start_sec - 0.0).abs() < 1e-9);
         assert!((right.length_sec - 2.0).abs() < 1e-9);
         assert!((right.source_start_sec - 1.0).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.105).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.105).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.105).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.105).abs() < 1e-9);
     }
 
     #[test]
@@ -2627,8 +2781,48 @@ mod tests {
         assert!((right.start_sec - 0.85).abs() < 1e-9);
         assert!((right.length_sec - 1.05).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_clears_auto_fades_on_cut_edges() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("B".into()),
+            Some(0.0),
+            Some(3.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // B 与左侧邻居的自动交叉淡化在 fadeIn，与右侧邻居的自动交叉淡化在 fadeOut。
+            clip.fade_in_sec = 0.1;
+            clip.fade_out_sec = 0.2;
+            clip.auto_fade_in_sec = 0.4;
+            clip.auto_fade_out_sec = 0.5;
+        }
+
+        let right_id = tl
+            .split_clip(&clip_id, 1.5)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 切割产生的新边缘（左 clip 右缘、右 clip 左缘）不继承任何淡化（手动/自动）。
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
+
+        // 外缘仍然保留对应侧淡化，并按新长度钳制。
+        assert!((left.fade_in_sec - 0.1).abs() < 1e-9);
+        assert!((left.auto_fade_in_sec - 0.4).abs() < 1e-9);
+        assert!((right.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_out_sec - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -2762,6 +2956,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -2833,6 +3029,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -3535,6 +3733,8 @@ impl TimelineState {
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
             fade_out_curve: default_fade_curve(),
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -3549,6 +3749,61 @@ impl TimelineState {
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
+    }
+
+    /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
+    /// 整体平移 `delta_sec`（秒，可正可负）。
+    ///
+    /// - `edited_ids`：本次编辑直接作用到的剪辑（被移动/删除/重设尺寸），排除在平移之外；
+    /// - `affected_tracks`：`Some(轨道集合)` 时只平移这些轨道上的后续剪辑（Track 模式）；
+    ///   `None` 表示所有轨道（All 模式）。`Off` 模式由调用方直接跳过，无需传入；
+    /// - `move_linked_params`：是否把后续剪辑携带的轨道组参数线一起平移
+    ///   （与普通拖拽移动的 `move_linked_params` / “锁定参数线” 语义一致）。
+    ///
+    /// 返回实际被平移的剪辑 id 列表（供调用方调度音高重分析）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn ripple_shift_clips(
+        &mut self,
+        edited_ids: &[&str],
+        affected_tracks: Option<&HashSet<String>>,
+        origin: f64,
+        delta_sec: f64,
+        move_linked_params: bool,
+    ) -> Vec<String> {
+        if !delta_sec.is_finite() || delta_sec.abs() < 1e-9 {
+            return Vec::new();
+        }
+        let edited: HashSet<&str> = edited_ids.iter().copied().collect();
+        let origin_ok = origin.is_finite();
+
+        // 收集需要平移的剪辑 id 与目标位置（所有被波及剪辑共用同一平移量）。
+        let mut moves: Vec<MoveClipPayload> = Vec::new();
+        let mut shifted_ids: Vec<String> = Vec::new();
+        for clip in &self.clips {
+            if edited.contains(clip.id.as_str()) {
+                continue;
+            }
+            if let Some(ref tracks) = affected_tracks {
+                if !tracks.contains(&clip.track_id) {
+                    continue;
+                }
+            }
+            if !origin_ok || clip.start_sec + 1e-9 < origin {
+                continue;
+            }
+            let next_start = (clip.start_sec + delta_sec).max(0.0);
+            moves.push(MoveClipPayload {
+                clip_id: clip.id.clone(),
+                start_sec: next_start,
+                track_id: None,
+            });
+            shifted_ids.push(clip.id.clone());
+        }
+        if moves.is_empty() {
+            return Vec::new();
+        }
+        self.move_clips(&moves, move_linked_params);
+        shifted_ids
     }
 
     pub fn remove_clip(&mut self, clip_id: &str) {
@@ -3741,6 +3996,8 @@ impl TimelineState {
                 fade_out_sec,
                 fade_in_curve: None,
                 fade_out_curve: None,
+                auto_fade_in_sec: None,
+                auto_fade_out_sec: None,
                 color: None,
                 formant_morph: None,
             },
@@ -3792,6 +4049,12 @@ impl TimelineState {
             }
             if let Some(v) = patch.fade_out_curve {
                 c.fade_out_curve = v;
+            }
+            if let Some(v) = patch.auto_fade_in_sec {
+                c.auto_fade_in_sec = v.max(0.0);
+            }
+            if let Some(v) = patch.auto_fade_out_sec {
+                c.auto_fade_out_sec = v.max(0.0);
             }
             if let Some(v) = patch.color {
                 c.color = v;
@@ -3867,6 +4130,8 @@ impl TimelineState {
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
                     fade_out_curve: template.fade_out_curve.clone(),
+                    auto_fade_in_sec: template.auto_fade_in_sec,
+                    auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
                     formant_morph: None,
                 },
@@ -4147,9 +4412,13 @@ impl TimelineState {
         // Fade semantics on split:
         // - fade-in is anchored to the original start, so only the left clip should keep it.
         // - fade-out is anchored to the original end, so only the right clip should keep it.
+        // - 切割产生的新边缘（左 clip 的右缘、右 clip 的左缘）**不继承任何淡化**，
+        //   包括自动交叉淡化与手动淡化。
         // Clamp fades to the new clip lengths.
         self.clips[idx].fade_in_sec = self.clips[idx].fade_in_sec.min(left_len.max(0.0));
         self.clips[idx].fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_in_sec = self.clips[idx].auto_fade_in_sec.min(left_len.max(0.0));
 
         let mut right = clip;
         right.id = new_id("clip");
@@ -4157,6 +4426,8 @@ impl TimelineState {
         right.length_sec = right_len;
         right.fade_in_sec = 0.0;
         right.fade_out_sec = right.fade_out_sec.min(right_len.max(0.0));
+        right.auto_fade_in_sec = 0.0;
+        right.auto_fade_out_sec = right.auto_fade_out_sec.min(right_len.max(0.0));
 
         // Preserve the original audio offset: the right clip should continue from where the left ended.
         // trim_* are in sec (source time), while playback_rate scales source progress per timeline time.
@@ -4246,9 +4517,24 @@ impl TimelineState {
             return;
         }
 
-        let set_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+        // 仅淡入淡出模式：切割处创建的是“手动淡化”（不随重叠自动变化）。
+        let set_manual_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
             left.fade_out_sec = fade_len.min(left.length_sec);
             right.fade_in_sec = fade_len.min(right.length_sec);
+            left.auto_fade_out_sec = 0.0;
+            right.auto_fade_in_sec = 0.0;
+            if let Some(curve) = opts.curve.as_deref() {
+                left.fade_out_curve = curve.to_string();
+                right.fade_in_curve = curve.to_string();
+            }
+        };
+        // 延伸重叠模式：重叠区的交叉淡化写入“自动交叉淡化”长度（跟随重叠，
+        // 分开后自动归零、手动 fade 恢复），适配新的自动交叉淡化模型。
+        let set_auto_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+            left.auto_fade_out_sec = fade_len.min(left.length_sec);
+            right.auto_fade_in_sec = fade_len.min(right.length_sec);
+            left.fade_out_sec = 0.0;
+            right.fade_in_sec = 0.0;
             if let Some(curve) = opts.curve.as_deref() {
                 left.fade_out_curve = curve.to_string();
                 right.fade_in_curve = curve.to_string();
@@ -4258,7 +4544,7 @@ impl TimelineState {
         match opts.mode {
             SplitTransitionMode::FadeOnly => {
                 let (left, right) = self.clips.split_at_mut(right_idx);
-                set_fade(&mut left[left_idx], &mut right[0], duration);
+                set_manual_fade(&mut left[left_idx], &mut right[0], duration);
             }
             SplitTransitionMode::ExtendOverlap => {
                 // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
@@ -4342,7 +4628,7 @@ impl TimelineState {
 
                 if opts.overlap_fades {
                     let (left, right) = self.clips.split_at_mut(right_idx);
-                    set_fade(&mut left[left_idx], &mut right[0], overlap_sec);
+                    set_auto_fade(&mut left[left_idx], &mut right[0], overlap_sec);
                 }
             }
         }

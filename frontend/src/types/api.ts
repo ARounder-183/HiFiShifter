@@ -61,6 +61,9 @@ export interface TimelineClip {
     fade_out_sec?: number;
     fade_in_curve?: string;
     fade_out_curve?: string;
+    /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
+    auto_fade_in_sec?: number;
+    auto_fade_out_sec?: number;
     formant_morph?: {
         enabled: boolean;
         target_f1_hz: number;

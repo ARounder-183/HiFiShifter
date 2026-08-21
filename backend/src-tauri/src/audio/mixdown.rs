@@ -590,10 +590,10 @@ pub fn render_mixdown_interleaved(
                 .unwrap_or((None, 5.0, None, 5.0));
 
         // Apply fades (linear) and gain (timeline-referenced).
-        let fade_in_frames = (clip.fade_in_sec.max(0.0) * out_rate as f64)
+        let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
-        let fade_out_frames = (clip.fade_out_sec.max(0.0) * out_rate as f64)
+        let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
 

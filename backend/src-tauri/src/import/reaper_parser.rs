@@ -548,25 +548,82 @@ fn parse_hex_byte(s: &str) -> u8 {
     u8::from_str_radix(s, 16).unwrap_or(0)
 }
 
-/// 解析 FADEIN/FADEOUT 参数，并将有效淡入淡出长度标准化到索引 1。
+/// 解析 FADEIN/FADEOUT 参数（不做任何长度归一化）。
 ///
-/// Reaper 规则：倒数第 3 个参数为 1 时，长度取第 3 个参数；否则取第 2 个参数。
+/// REAPER 的 fade 数组中同时携带「手动淡化长度」与「自动交叉淡化长度」：
+/// - 索引 1：手动淡化的长度（始终存在，是用户手动设置/持久保存的值）；
+/// - 索引 2：自动交叉淡化的长度（仅在自动标记开启时有意义，通常等于与相邻
+///   item 的重叠量）；
+/// - 倒数第 3 个参数（0 基索引 len-3）为 1 时表示「自动交叉淡化」生效
+///   （见 reaper_fade_is_auto）。
+///
+/// ⚠️ 本函数不再把“有效长度”覆写到索引 1（旧实现会据此丢失手动长度）。
+/// 要取手动 / 自动 / 有效长度，请分别使用：
+/// reaper_fade_manual_length_sec / reaper_fade_auto_length_sec /
+/// reaper_fade_effective_length_sec。
 fn parse_fade_array(tokens: &[&str]) -> Vec<f64> {
-    let mut values = parse_double_array(tokens);
-    if values.len() < 2 {
-        return values;
+    parse_double_array(tokens)
+}
+
+/// 判断某条 FADEIN/FADEOUT 是否被 REAPER 标记为「自动（交叉淡化）淡化」。
+///
+/// REAPER 在 fade 数组“倒数第 3 个参数”（0 基索引 len-3，与 parse_fade_array
+/// 使用同一 selector）写入标记：为 1 时该淡化由 REAPER 自动生成并跟踪与相邻
+/// item 的重叠量（如拖动重叠形成的自动交叉淡化），其真实长度位于第 3 个参数
+/// （索引 2）；为 0 时是普通手动淡化（长度位于第 2 个参数，索引 1）。
+///
+/// 真实 .rpp 示例（karate killo.rpp）：
+/// - 手动 FADEOUT：`FADEIN 1 0.01 0 1 0 0 0` → 长度 0.01（索引 1），非自动；
+/// - 自动交叉淡化：`FADEOUT 1.1 0.01 0.022018 1 1 0 0` → 长度 0.022018（索引 2，
+///   恰等于两 item 的重叠量），selector（索引 4）为 1 → 自动。
+pub fn reaper_fade_is_auto(values: &[f64]) -> bool {
+    if values.len() < 4 {
+        return false;
     }
-
     let selector_idx = values.len().saturating_sub(3);
-    let selector = values.get(selector_idx).copied().unwrap_or(0.0).round() as i32;
-    let effective = if selector == 1 {
-        values.get(2).copied().unwrap_or(values[1])
-    } else {
-        values[1]
-    };
-
-    values[1] = effective;
     values
+        .get(selector_idx)
+        .copied()
+        .unwrap_or(0.0)
+        .round() as i32
+        == 1
+}
+
+/// 读取 fade 数组中的“手动淡化长度”（索引 1）。
+///
+/// REAPER 的 fade 数组中索引 1 始终保存用户手动设置/持久保存的淡化长度；
+/// 即使当前有自动交叉淡化生效，这个手动值也会被保留，供自动淡化移除后恢复。
+pub fn reaper_fade_manual_length_sec(values: &[f64]) -> f64 {
+    if values.len() >= 2 {
+        values[1]
+    } else {
+        values.first().copied().unwrap_or(0.0)
+    }
+    .max(0.0)
+}
+
+/// 读取 fade 数组中的“自动交叉淡化长度”（索引 2；仅自动标记开启时有意义）。
+///
+/// 非自动淡化返回 0；自动淡化时索引 2 通常是该 item 与相邻 item 的重叠量。
+pub fn reaper_fade_auto_length_sec(values: &[f64]) -> f64 {
+    if reaper_fade_is_auto(values) {
+        values.get(2).copied().unwrap_or(0.0).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// 计算 fade 数组的“有效淡化长度”。
+///
+/// 与应用模型一致：自动交叉淡化生效（>0）时取自动长度，否则取手动长度。
+/// 用于淡化的存在性判断（take vs item 优先级、音量包络兜底等）。
+pub fn reaper_fade_effective_length_sec(values: &[f64]) -> f64 {
+    let auto = reaper_fade_auto_length_sec(values);
+    if auto > 1e-9 {
+        auto
+    } else {
+        reaper_fade_manual_length_sec(values)
+    }
 }
 
 /// 解析可能带引号的路径字符串
@@ -1452,5 +1509,58 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         assert!((last.bpm - 145.6).abs() < 1e-9);
         assert_eq!(last.numerator, Some(3));
         assert_eq!(last.denominator, Some(4));
+    }
+
+    #[test]
+    fn distinguishes_auto_crossfade_fades_from_manual_fades() {
+        // 真实 .rpp（karate killo.rpp / ces.rpp / fade_test.rpp）中的实际 FADEIN/FADEOUT 行。
+        // - 手动淡化：selector（索引 4）为 0，长度在手动的索引 1、自动为 0。
+        let manual_in = parse_fade_array(&["FADEIN", "1", "0.01", "0", "1", "0", "0", "0"]);
+        assert!(!reaper_fade_is_auto(&manual_in));
+        assert!((reaper_fade_manual_length_sec(&manual_in) - 0.01).abs() < 1e-12);
+        assert!(reaper_fade_auto_length_sec(&manual_in) == 0.0);
+
+        let manual_long = parse_fade_array(&["FADEIN", "1", "0.674609629036", "0", "1", "0", "0", "0"]);
+        assert!(!reaper_fade_is_auto(&manual_long));
+        assert!((reaper_fade_manual_length_sec(&manual_long) - 0.674609629036).abs() < 1e-12);
+        assert_eq!(
+            reaper_fade_effective_length_sec(&manual_long),
+            reaper_fade_manual_length_sec(&manual_long),
+        );
+
+        // - 自动交叉淡化：selector（索引 4）为 1；索引 1 = 手动长度（保留），
+        //   索引 2 = 自动长度（= 重叠量）。有效长度取自动。
+        let auto_out = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        assert!(reaper_fade_is_auto(&auto_out));
+        assert_eq!(auto_out[1], 0.01); // 手动长度不被自动值覆盖
+        assert!((reaper_fade_manual_length_sec(&auto_out) - 0.01).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
+        assert!((reaper_fade_effective_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
+
+        let auto_in = parse_fade_array(&["FADEIN", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        assert!(reaper_fade_is_auto(&auto_in));
+        assert!(reaper_fade_manual_length_sec(&auto_in) == 0.01);
+        assert!((reaper_fade_auto_length_sec(&auto_in) - 0.022018).abs() < 1e-12);
+
+        // fade_test.rpp 场景：Item A 手动淡出 0.6711s → 重叠后自动交叉淡化 0.176286s
+        // （自动 = 重叠量），手动淡化被保留在索引 1。
+        let a_fadeout = parse_fade_array(&[
+            "FADEOUT", "1.1", "0.67114827520773", "0.17628573810208", "1", "1", "0", "0",
+        ]);
+        assert!(reaper_fade_is_auto(&a_fadeout));
+        assert!((reaper_fade_manual_length_sec(&a_fadeout) - 0.67114827520773).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
+        assert!((reaper_fade_effective_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
+
+        let b_fadein = parse_fade_array(&[
+            "FADEIN", "1.1", "0", "0.17628573810208", "1", "1", "0", "0",
+        ]);
+        assert!(reaper_fade_is_auto(&b_fadein));
+        assert!(reaper_fade_manual_length_sec(&b_fadein) == 0.0);
+        assert!((reaper_fade_auto_length_sec(&b_fadein) - 0.17628573810208).abs() < 1e-12);
+
+        // 过短数组（<4 个值）不能把 shape 误当 selector / 自动标记。
+        assert!(!reaper_fade_is_auto(&[1.0, 0.1]));
+        assert!(!reaper_fade_is_auto(&[1.0, 0.1, 0.0]));
     }
 }

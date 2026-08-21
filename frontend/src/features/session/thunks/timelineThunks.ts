@@ -267,6 +267,8 @@ export const setClipStateRemote = createAsyncThunk(
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         formantMorph?: {
             enabled: boolean;
             targetF1Hz: number;

@@ -156,6 +156,9 @@ export interface ClipInfo {
     fadeOutSec: number;
     fadeInCurve: FadeCurveType;
     fadeOutCurve: FadeCurveType;
+    /** 自动交叉淡化长度（秒），与手动 fade（fadeInSec/fadeOutSec）分离存储。 */
+    autoFadeInSec?: number;
+    autoFadeOutSec?: number;
     formantMorph?: ClipFormantMorph;
     midiNoteCount?: number;
     midiNoteData?: MidiNoteEvent[];

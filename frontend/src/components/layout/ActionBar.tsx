@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
 import {
     DoubleArrowRightIcon,
@@ -27,6 +27,8 @@ import {
     togglePlayheadZoom,
     toggleAutoScroll,
     toggleIgnoreGrouping,
+    cycleRippleMode,
+    setRippleMode,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     persistUiSettings,
@@ -831,6 +833,19 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
+                {/* Ripple Edit (Auto Follow) */}
+                <RippleModeButton
+                    mode={s.rippleMode}
+                    onCycle={() => {
+                        dispatch(cycleRippleMode());
+                        void dispatch(persistUiSettings());
+                    }}
+                    onSelect={(next) => {
+                        dispatch(setRippleMode(next));
+                        void dispatch(persistUiSettings());
+                    }}
+                />
+
                 <Separator orientation="vertical" size="2" />
 
                 {/* Playhead Zoom */}
@@ -1037,3 +1052,200 @@ export function ActionBar() {
         </Flex>
     );
 }
+
+// ── 波纹编辑（自动跟进）按钮 ──────────────────────────────────────
+
+/** 波纹编辑图标：一组“被向前推的剪辑块”+ 右侧箭头，表达后续剪辑自动跟进。
+ *  `multiTrack` 为 true（全部轨道模式）时显示两行剪辑块，否则显示单行（按轨道模式）。
+ */
+function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
+    const rows = multiTrack ? [2.9, 6.9] : [4.9];
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            {rows.map((y) => (
+                <g key={y}>
+                    <rect
+                        x="1.6"
+                        y={y}
+                        width="2.9"
+                        height="2.4"
+                        rx="0.6"
+                        fill="currentColor"
+                        opacity="0.45"
+                    />
+                    <rect
+                        x="5.1"
+                        y={y}
+                        width="2.9"
+                        height="2.4"
+                        rx="0.6"
+                        fill="currentColor"
+                        opacity="0.75"
+                    />
+                    <rect
+                        x="8.6"
+                        y={y}
+                        width="2.9"
+                        height="2.4"
+                        rx="0.6"
+                        fill="currentColor"
+                    />
+                </g>
+            ))}
+            <path
+                d="M1.6 12.4H11.6"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinecap="round"
+            />
+            <path
+                d="M8.9 10.5L11.6 12.4L8.9 14.3"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    );
+}
+
+/** 波纹模式选择菜单（右键打开），与 Snap / 分割过渡的右键菜单行为一致。 */
+function RippleModeMenu({
+    x,
+    y,
+    mode,
+    onChange,
+    onClose,
+}: {
+    x: number;
+    y: number;
+    mode: "off" | "track" | "all";
+    onChange: (mode: "off" | "track" | "all") => void;
+    onClose: () => void;
+}) {
+    const { t } = useI18n();
+    const tAny = t as (key: string) => string;
+    const menuRef = useRef<HTMLDivElement>(null);
+    const onCloseRef = useRef(onClose);
+
+    useLayoutEffect(() => {
+        onCloseRef.current = onClose;
+    }, [onClose]);
+
+    useLayoutEffect(() => {
+        const el = menuRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        if (rect.right > vw) {
+            el.style.left = `${Math.max(0, vw - rect.width)}px`;
+        }
+        if (rect.bottom > vh) {
+            el.style.top = `${Math.max(0, vh - rect.height)}px`;
+        }
+
+        const onPointerDown = (e: PointerEvent) => {
+            if (el && !el.contains(e.target as Node)) {
+                onCloseRef.current();
+            }
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                onCloseRef.current();
+            }
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
+        window.addEventListener("keydown", onKeyDown);
+        return () => {
+            window.removeEventListener("pointerdown", onPointerDown, true);
+            window.removeEventListener("keydown", onKeyDown);
+        };
+    }, [x, y]);
+
+    const options: Array<{ value: "off" | "track" | "all"; label: string }> = [
+        { value: "off", label: tAny("ripple_mode_off") as string },
+        { value: "track", label: tAny("ripple_mode_track") as string },
+        { value: "all", label: tAny("ripple_mode_all") as string },
+    ];
+
+    return (
+        <div
+            ref={menuRef}
+            data-hs-context-menu="1"
+            className="fixed z-50 min-w-[150px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            style={{ left: x, top: y }}
+            onPointerDown={(e) => e.stopPropagation()}
+        >
+            {options.map((opt) => (
+                <button
+                    key={opt.value}
+                    className="px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 hover:bg-qt-highlight hover:text-white"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onChange(opt.value);
+                        onClose();
+                    }}
+                >
+                    <span>{opt.label}</span>
+                    {mode === opt.value && <span className="text-qt-accent">✓</span>}
+                </button>
+            ))}
+        </div>
+    );
+}
+
+/** 波纹编辑工具栏按钮：左键三态循环切换，右键打开模式菜单。 */
+function RippleModeButton({
+    mode,
+    onCycle,
+    onSelect,
+}: {
+    mode: "off" | "track" | "all";
+    onCycle: () => void;
+    onSelect: (mode: "off" | "track" | "all") => void;
+}) {
+    const { t } = useI18n();
+    const tAny = t as (key: string) => string;
+    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+    return (
+        <>
+            <IconButton
+                size="1"
+                variant={mode !== "off" ? "solid" : "ghost"}
+                color="gray"
+                data-tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
+                tabIndex={-1}
+                onClick={onCycle}
+                onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ x: e.clientX, y: e.clientY });
+                }}
+            >
+                <RippleIcon multiTrack={mode === "all"} />
+            </IconButton>
+            {menu && (
+                <RippleModeMenu
+                    x={menu.x}
+                    y={menu.y}
+                    mode={mode}
+                    onChange={(next) => {
+                        onSelect(next);
+                        setMenu(null);
+                    }}
+                    onClose={() => setMenu(null)}
+                />
+            )}
+        </>
+    );
+}
+

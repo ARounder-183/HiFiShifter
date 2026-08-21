@@ -5,8 +5,9 @@
 use crate::audio_utils::try_read_audio_header_only;
 use crate::models::PitchRange;
 use crate::reaper_parser::{
-    self, stretch_segments_from_markers, ReaperData, ReaperEnvelope, ReaperItem,
-    ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
+    self, reaper_fade_auto_length_sec, reaper_fade_effective_length_sec,
+    reaper_fade_manual_length_sec, stretch_segments_from_markers, ReaperData, ReaperEnvelope,
+    ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
 };
 use crate::state::{
     Clip, PitchAnalysisAlgo, TempoPointData, TimelineState, Track, TrackParamsState,
@@ -54,14 +55,6 @@ fn is_audio_supported(path: &str) -> bool {
 /// 将 Reaper 音量倍率转换为 HiFiShifter 的 0.0–1.0 范围。
 fn convert_volume(vol: f64) -> f32 {
     (vol as f32).clamp(0.0, 1.0)
-}
-
-fn reaper_fade_length_sec(values: &[f64]) -> f64 {
-    if values.len() >= 2 {
-        values[1].max(0.0)
-    } else {
-        values.first().copied().unwrap_or(0.0).max(0.0)
-    }
 }
 
 fn reaper_fade_curve(values: &[f64]) -> String {
@@ -155,37 +148,63 @@ fn derive_fades_from_item_volume_envelope(
     (fade_in, fade_out)
 }
 
-fn effective_item_fades(item: &ReaperItem, take: &ReaperTake, item_length: f64) -> (f64, f64) {
+/// 计算 item 的淡入淡出，拆分为「手动淡化长度」与「自动交叉淡化长度」。
+///
+/// 返回值：`(manual_fade_in_sec, manual_fade_out_sec, auto_fade_in_sec, auto_fade_out_sec)`。
+///
+/// REAPER 的 FADEIN/FADEOUT 同时携带两个长度（见 reaper_parser 的说明）：
+/// - 索引 1 = 手动淡化长度（用户手动设置、永久保留）；
+/// - 索引 2 = 自动交叉淡化长度（自动标记开启时才有，通常 = 与相邻 item 的重叠量）。
+/// 因此这里把二者分别解析出来：手动值写入 `fade_in_sec / fade_out_sec`，
+/// 自动值写入 `auto_fade_in_sec / auto_fade_out_sec`。这样当 clip 被分开
+/// （自动交叉淡化归零）后，REAPER 原来的手动淡化长度能正确恢复。
+fn effective_item_fades(
+    item: &ReaperItem,
+    take: &ReaperTake,
+    item_length: f64,
+) -> (f64, f64, f64, f64) {
     let max_len = item_length.max(0.0);
-    let take_fade_in = reaper_fade_length_sec(&take.fade_in);
-    let take_fade_out = reaper_fade_length_sec(&take.fade_out);
 
-    let mut fade_in_sec = if take_fade_in > 1e-9 {
-        take_fade_in.clamp(0.0, max_len)
+    // 淡化的存在性与“来源选择”（take 优先，其次 item）按“有效长度”判定
+    // （自动交叉淡化生效时用自动长度，否则用手动长度）。
+    let (mut fade_in_manual, mut fade_in_auto);
+    if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
+        fade_in_manual = reaper_fade_manual_length_sec(&take.fade_in);
+        fade_in_auto = reaper_fade_auto_length_sec(&take.fade_in);
     } else {
-        reaper_fade_length_sec(&item.fade_in).clamp(0.0, max_len)
-    };
-    let mut fade_out_sec = if take_fade_out > 1e-9 {
-        take_fade_out.clamp(0.0, max_len)
+        fade_in_manual = reaper_fade_manual_length_sec(&item.fade_in);
+        fade_in_auto = reaper_fade_auto_length_sec(&item.fade_in);
+    }
+    let (mut fade_out_manual, mut fade_out_auto);
+    if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9 {
+        fade_out_manual = reaper_fade_manual_length_sec(&take.fade_out);
+        fade_out_auto = reaper_fade_auto_length_sec(&take.fade_out);
     } else {
-        reaper_fade_length_sec(&item.fade_out).clamp(0.0, max_len)
-    };
+        fade_out_manual = reaper_fade_manual_length_sec(&item.fade_out);
+        fade_out_auto = reaper_fade_auto_length_sec(&item.fade_out);
+    }
+
+    // 显式 FADEIN/FADEOUT 完全缺失（手动与自动都为 0）时才从音量包络推导；
+    // 包络推导出的淡化没有 REAPER 的自动标记，一律作为手动淡化。
     let (env_fade_in, env_fade_out) =
         derive_fades_from_item_volume_envelope(item, item_length.max(0.0));
-
-    // 仅在显式 fade 长度缺失时才从音量包络推导，避免覆盖 Reaper 的直接 FADEIN/FADEOUT。
-    if fade_in_sec <= 1e-9 {
+    if fade_in_manual <= 1e-9 && fade_in_auto <= 1e-9 {
         if let Some(v) = env_fade_in {
-            fade_in_sec = v.clamp(0.0, item_length.max(0.0));
+            fade_in_manual = v.clamp(0.0, max_len.max(0.0));
         }
     }
-    if fade_out_sec <= 1e-9 {
+    if fade_out_manual <= 1e-9 && fade_out_auto <= 1e-9 {
         if let Some(v) = env_fade_out {
-            fade_out_sec = v.clamp(0.0, item_length.max(0.0));
+            fade_out_manual = v.clamp(0.0, max_len.max(0.0));
         }
     }
 
-    (fade_in_sec, fade_out_sec)
+    (
+        fade_in_manual.clamp(0.0, max_len),
+        fade_out_manual.clamp(0.0, max_len),
+        fade_in_auto.clamp(0.0, max_len),
+        fade_out_auto.clamp(0.0, max_len),
+    )
 }
 
 fn compute_take_source_bounds_sec(
@@ -940,13 +959,18 @@ fn process_item(
     let s_offs = take.s_offs; // source offset (seconds)
     let item_pos = item.position; // timeline position (seconds)
     let item_length = item.length; // visible length (seconds)
-    let (fade_in_sec, fade_out_sec) = effective_item_fades(item, take, item_length.max(0.0));
-    let fade_in_curve = if reaper_fade_length_sec(&take.fade_in) > 1e-9 {
+    let (
+        manual_fade_in_sec,
+        manual_fade_out_sec,
+        auto_fade_in_sec,
+        auto_fade_out_sec,
+    ) = effective_item_fades(item, take, item_length.max(0.0));
+    let fade_in_curve = if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
         reaper_fade_curve(&take.fade_in)
     } else {
         reaper_fade_curve(&item.fade_in)
     };
-    let fade_out_curve = if reaper_fade_length_sec(&take.fade_out) > 1e-9 {
+    let fade_out_curve = if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9 {
         reaper_fade_curve(&take.fade_out)
     } else {
         reaper_fade_curve(&item.fade_out)
@@ -1062,6 +1086,8 @@ fn process_item(
                 fade_out_sec: 0.0,
                 fade_in_curve: "sine".to_string(),
                 fade_out_curve: "sine".to_string(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
                 extra_curves: None,
                 extra_params: None,
                 formant_morph: None,
@@ -1102,13 +1128,13 @@ fn process_item(
                 (segment_actual_pre_tl[seg_idx] + segment_actual_post_tl[seg_idx - 1])
                     .min(clip.length_sec.max(0.0))
             } else {
-                fade_in_sec.min(clip.length_sec.max(0.0))
+                manual_fade_in_sec.min(clip.length_sec.max(0.0))
             };
             let fade_out_sec = if seg_idx + 1 < seg_count {
                 (segment_actual_post_tl[seg_idx] + segment_actual_pre_tl[seg_idx + 1])
                     .min(clip.length_sec.max(0.0))
             } else {
-                fade_out_sec.min(clip.length_sec.max(0.0))
+                manual_fade_out_sec.min(clip.length_sec.max(0.0))
             };
 
             let fade_in_curve_name = if seg_idx == 0 {
@@ -1126,6 +1152,16 @@ fn process_item(
             clip.fade_out_sec = fade_out_sec;
             clip.fade_in_curve = fade_in_curve_name;
             clip.fade_out_curve = fade_out_curve_name;
+
+            // item 自身首/尾缘淡化：手动长度写入 fade_*（来自 REAPER 索引 1），
+            // 自动交叉淡化长度写入 auto_fade_*（来自 REAPER 索引 2，仅该侧有自动标记）。
+            // 段间合成淡化保持手动（auto 保持 0）。
+            if seg_idx == 0 {
+                clip.auto_fade_in_sec = auto_fade_in_sec.min(clip.length_sec.max(0.0));
+            }
+            if seg_idx + 1 == seg_count {
+                clip.auto_fade_out_sec = auto_fade_out_sec.min(clip.length_sec.max(0.0));
+            }
         }
     } else {
         // 无 stretch markers：使用 take 的 play_rate
@@ -1194,10 +1230,14 @@ fn process_item(
             source_end_sec: source_end,
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             reversed: item_reversed,
-            fade_in_sec,
-            fade_out_sec,
+            // 手动淡化长度写入 fade_*（REAPER 索引 1），自动交叉淡化长度写入
+            // auto_fade_*（REAPER 索引 2）。分开后自动值归零、手动值正确恢复。
+            fade_in_sec: manual_fade_in_sec,
+            fade_out_sec: manual_fade_out_sec,
             fade_in_curve,
             fade_out_curve,
+            auto_fade_in_sec,
+            auto_fade_out_sec,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -1590,6 +1630,8 @@ fn process_midi_item(
         fade_out_sec: 0.0,
         fade_in_curve: "sine".to_string(),
         fade_out_curve: "sine".to_string(),
+        auto_fade_in_sec: 0.0,
+        auto_fade_out_sec: 0.0,
         extra_curves: None,
         extra_params: None,
         formant_morph: None,

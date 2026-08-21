@@ -31,6 +31,8 @@ export interface UiSettings {
     pitchSnapToleranceCents?: number;
     scaleHighlightMode?: string;
     ignoreGrouping?: boolean;
+    /** 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER Ripple Editing）。 */
+    rippleMode?: "off" | "track" | "all";
     playheadZoom: boolean;
     autoScroll: boolean;
     paramEditorSeekPlayhead?: boolean;

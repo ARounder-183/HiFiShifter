@@ -15,6 +15,9 @@ type SparseRenderClip = {
     fadeOutSec: number;
     fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
     fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+    /** 自动交叉淡化长度（可选；缺省 0），用于“有效 fade”显示。 */
+    autoFadeInSec?: number;
+    autoFadeOutSec?: number;
 };
 
 export type TimelineCanvasClipModel = {
@@ -99,6 +102,27 @@ export function buildSparseClipRenderModel(args: {
     const multiSelectedSet =
         args.multiSelectedClipIds.length > 0 ? new Set(args.multiSelectedClipIds) : null;
 
+    // 重叠区可编辑性：把“同轨道存在重叠”的两个 clip 都加入 DOM overlay。
+    // 否则重叠时只有“后绘制/选中的那个”有 DOM 边缘/淡入淡出手柄，较早 clip 的
+    // 边缘（延长截短/拉伸/淡入淡出）完全不可达。配合 ClipItem 去掉会建立独立层叠
+    // 上下文的 transform，交叉处两个 clip 的手柄都位于其它 clip body 之上、可被编辑。
+    for (const trackClips of Object.values(args.visibleTrackClipsById)) {
+        for (let i = 0; i < trackClips.length; i += 1) {
+            const a = trackClips[i];
+            for (let j = i + 1; j < trackClips.length; j += 1) {
+                const b = trackClips[j];
+                const aStart = a.startSec;
+                const aEnd = aStart + a.lengthSec;
+                const bStart = b.startSec;
+                const bEnd = bStart + b.lengthSec;
+                if (Math.min(aEnd, bEnd) > Math.max(aStart, bStart) + 1e-9) {
+                    overlayClipIds.add(a.id);
+                    overlayClipIds.add(b.id);
+                }
+            }
+        }
+    }
+
     const drawClips = args.visibleTracks.flatMap((track, visibleIndex) =>
         (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
@@ -109,8 +133,16 @@ export function buildSparseClipRenderModel(args: {
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),
             heightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y),
             headerHeightPx: CLIP_HEADER_HEIGHT,
-            fadeInPx: Math.max(0, clip.fadeInSec * args.pxPerSec),
-            fadeOutPx: Math.max(0, clip.fadeOutSec * args.pxPerSec),
+            fadeInPx: Math.max(
+                0,
+                ((clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : clip.fadeInSec) *
+                    args.pxPerSec,
+            ),
+            fadeOutPx: Math.max(
+                0,
+                ((clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec) *
+                    args.pxPerSec,
+            ),
             fadeInCurve: clip.fadeInCurve,
             fadeOutCurve: clip.fadeOutCurve,
             selected:

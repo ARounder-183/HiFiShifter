@@ -190,6 +190,8 @@ export const timelineApi = {
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         color?: string;
         formantMorph?: {
             enabled: boolean;
@@ -216,6 +218,8 @@ export const timelineApi = {
             payload.fadeOutSec,
             payload.fadeInCurve,
             payload.fadeOutCurve,
+            payload.autoFadeInSec,
+            payload.autoFadeOutSec,
             payload.color,
             payload.formantMorph,
             payload.checkpoint,

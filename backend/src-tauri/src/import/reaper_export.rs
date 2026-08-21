@@ -147,8 +147,9 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     item.snap_offs = 0.0;
     item.is_loop = false;
     item.all_takes = false;
-    item.fade_in = fade_values(&clip.fade_in_curve, clip.fade_in_sec);
-    item.fade_out = fade_values(&clip.fade_out_curve, clip.fade_out_sec);
+    // 导出“有效 fade”（自动交叉淡化覆盖手动 fade），与渲染一致。
+    item.fade_in = fade_values(&clip.fade_in_curve, clip.effective_fade_in_sec());
+    item.fade_out = fade_values(&clip.fade_out_curve, clip.effective_fade_out_sec());
     item.mute = vec![if clip.muted { 1 } else { 0 }, 0];
     item.selected = false;
 
