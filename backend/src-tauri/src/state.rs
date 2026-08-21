@@ -2575,11 +2575,13 @@ mod tests {
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((left.source_end_sec - 2.2).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
         assert!((right.length_sec - 1.6).abs() < 1e-9);
         assert!((right.source_start_sec - 1.8).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
 
         // At the split point, both clips must still reference the same source position.
         let left_source_at_split = left.source_end_sec - (left.length_sec - 0.5) * 2.0;
@@ -2654,6 +2656,8 @@ mod tests {
         assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2734,8 +2738,8 @@ mod tests {
         assert!((right.start_sec - 0.0).abs() < 1e-9);
         assert!((right.length_sec - 2.0).abs() < 1e-9);
         assert!((right.source_start_sec - 1.0).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.105).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.105).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.105).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.105).abs() < 1e-9);
     }
 
     #[test]
@@ -2777,8 +2781,48 @@ mod tests {
         assert!((right.start_sec - 0.85).abs() < 1e-9);
         assert!((right.length_sec - 1.05).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_clears_auto_fades_on_cut_edges() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("B".into()),
+            Some(0.0),
+            Some(3.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // B 与左侧邻居的自动交叉淡化在 fadeIn，与右侧邻居的自动交叉淡化在 fadeOut。
+            clip.fade_in_sec = 0.1;
+            clip.fade_out_sec = 0.2;
+            clip.auto_fade_in_sec = 0.4;
+            clip.auto_fade_out_sec = 0.5;
+        }
+
+        let right_id = tl
+            .split_clip(&clip_id, 1.5)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 切割产生的新边缘（左 clip 右缘、右 clip 左缘）不继承任何淡化（手动/自动）。
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
+
+        // 外缘仍然保留对应侧淡化，并按新长度钳制。
+        assert!((left.fade_in_sec - 0.1).abs() < 1e-9);
+        assert!((left.auto_fade_in_sec - 0.4).abs() < 1e-9);
+        assert!((right.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_out_sec - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -4368,9 +4412,13 @@ impl TimelineState {
         // Fade semantics on split:
         // - fade-in is anchored to the original start, so only the left clip should keep it.
         // - fade-out is anchored to the original end, so only the right clip should keep it.
+        // - 切割产生的新边缘（左 clip 的右缘、右 clip 的左缘）**不继承任何淡化**，
+        //   包括自动交叉淡化与手动淡化。
         // Clamp fades to the new clip lengths.
         self.clips[idx].fade_in_sec = self.clips[idx].fade_in_sec.min(left_len.max(0.0));
         self.clips[idx].fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_in_sec = self.clips[idx].auto_fade_in_sec.min(left_len.max(0.0));
 
         let mut right = clip;
         right.id = new_id("clip");
@@ -4378,6 +4426,8 @@ impl TimelineState {
         right.length_sec = right_len;
         right.fade_in_sec = 0.0;
         right.fade_out_sec = right.fade_out_sec.min(right_len.max(0.0));
+        right.auto_fade_in_sec = 0.0;
+        right.auto_fade_out_sec = right.auto_fade_out_sec.min(right_len.max(0.0));
 
         // Preserve the original audio offset: the right clip should continue from where the left ended.
         // trim_* are in sec (source time), while playback_rate scales source progress per timeline time.
@@ -4467,9 +4517,24 @@ impl TimelineState {
             return;
         }
 
-        let set_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+        // 仅淡入淡出模式：切割处创建的是“手动淡化”（不随重叠自动变化）。
+        let set_manual_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
             left.fade_out_sec = fade_len.min(left.length_sec);
             right.fade_in_sec = fade_len.min(right.length_sec);
+            left.auto_fade_out_sec = 0.0;
+            right.auto_fade_in_sec = 0.0;
+            if let Some(curve) = opts.curve.as_deref() {
+                left.fade_out_curve = curve.to_string();
+                right.fade_in_curve = curve.to_string();
+            }
+        };
+        // 延伸重叠模式：重叠区的交叉淡化写入“自动交叉淡化”长度（跟随重叠，
+        // 分开后自动归零、手动 fade 恢复），适配新的自动交叉淡化模型。
+        let set_auto_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+            left.auto_fade_out_sec = fade_len.min(left.length_sec);
+            right.auto_fade_in_sec = fade_len.min(right.length_sec);
+            left.fade_out_sec = 0.0;
+            right.fade_in_sec = 0.0;
             if let Some(curve) = opts.curve.as_deref() {
                 left.fade_out_curve = curve.to_string();
                 right.fade_in_curve = curve.to_string();
@@ -4479,7 +4544,7 @@ impl TimelineState {
         match opts.mode {
             SplitTransitionMode::FadeOnly => {
                 let (left, right) = self.clips.split_at_mut(right_idx);
-                set_fade(&mut left[left_idx], &mut right[0], duration);
+                set_manual_fade(&mut left[left_idx], &mut right[0], duration);
             }
             SplitTransitionMode::ExtendOverlap => {
                 // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
@@ -4563,7 +4628,7 @@ impl TimelineState {
 
                 if opts.overlap_fades {
                     let (left, right) = self.clips.split_at_mut(right_idx);
-                    set_fade(&mut left[left_idx], &mut right[0], overlap_sec);
+                    set_auto_fade(&mut left[left_idx], &mut right[0], overlap_sec);
                 }
             }
         }
