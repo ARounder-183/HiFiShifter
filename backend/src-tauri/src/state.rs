@@ -662,6 +662,37 @@ pub struct SplitTransitionOptions {
     pub overlap_fades: bool,
 }
 
+/// 波纹编辑（自动跟进）模式，对应 REAPER 的 Ripple Editing。
+///
+/// - `Off`：关闭。编辑只影响被编辑对象本身，后续剪辑保持原位（默认，与 REAPER 默认一致）。
+/// - `Track`：仅被编辑剪辑所在轨道上的后续剪辑一起平移（对应 REAPER“per selected track”）。
+/// - `All`：所有轨道上位于编辑点之后的剪辑一起平移，保持多轨内容时间对齐（对应 REAPER“all tracks”）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RippleMode {
+    Off,
+    Track,
+    All,
+}
+
+impl RippleMode {
+    /// 从持久化字符串解析；未知值回退为 `Off`。
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "track" => Self::Track,
+            "all" => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Track => "track",
+            Self::All => "all",
+        }
+    }
+}
+
 impl TimelineState {
     fn clip_frame_bounds(
         &self,
@@ -1762,6 +1793,15 @@ impl AppState {
 mod tests {
     use super::*;
 
+    fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
+        timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .map(|clip| clip.start_sec)
+            .unwrap_or(f64::NAN)
+    }
+
     #[test]
     fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
         let base = TimelineState::default();
@@ -1914,6 +1954,71 @@ mod tests {
         assert_eq!(timeline.clips[0].gain, 1.5);
         assert!(timeline.clips[1].muted);
         assert_eq!(timeline.clips[1].fade_in_sec, 0.25);
+    }
+
+    #[test]
+    fn ripple_track_mode_moves_following_clips_on_same_track_only() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a0 = timeline.add_clip(Some(track_a.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(2.0), None);
+
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let affected: HashSet<String> = HashSet::from([track_a]);
+        let shifted = timeline.ripple_shift_clips(&edited, Some(&affected), 2.0, 1.0, false);
+
+        // A 轨上的后续剪辑 a2 右移 1s。
+        assert!(shifted.contains(&a2));
+        // 被编辑的 a1 与更早的 a0 不动。
+        assert!(!shifted.contains(&a1));
+        assert!(!shifted.contains(&a0));
+        // B 轨上的 b0（与 a1 同时刻）不动（Track 模式）。
+        assert!(!shifted.contains(&b0));
+
+        assert_eq!(find_clip_start(&timeline, &a0), 0.0);
+        assert_eq!(find_clip_start(&timeline, &a1), 2.0);
+        assert_eq!(find_clip_start(&timeline, &a2), 5.0);
+        assert_eq!(find_clip_start(&timeline, &b0), 2.0);
+    }
+
+    #[test]
+    fn ripple_all_mode_moves_following_clips_on_every_track() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(4.0), None);
+
+        // 删除 a1（2~4s）：All 模式下所有轨道上 start >= 2 的后续剪辑左移 2s。
+        let delta = 2.0 - 4.0; // origin - old_right_edge
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let shifted = timeline.ripple_shift_clips(&edited, None, 2.0, delta, false);
+
+        assert_eq!(find_clip_start(&timeline, &a2), 2.0);
+        // b0 起点 2 >= origin 2，被平移左移 2s → 0。
+        assert_eq!(find_clip_start(&timeline, &b0), 0.0);
+        assert!(shifted.contains(&a2));
+        assert!(shifted.contains(&b0));
+    }
+
+    #[test]
+    fn ripple_off_and_zero_delta_are_noops() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+
+        // delta = 0（如“锁定参数线关闭时的纯纵向/无位移编辑”）不产生平移。
+        let shifted = timeline.ripple_shift_clips(&[a1.as_str()], None, 2.0, 0.0, false);
+        assert!(shifted.is_empty());
+        assert_eq!(find_clip_start(&timeline, &a2), 4.0);
     }
 
     #[test]
@@ -3549,6 +3654,61 @@ impl TimelineState {
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
+    }
+
+    /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
+    /// 整体平移 `delta_sec`（秒，可正可负）。
+    ///
+    /// - `edited_ids`：本次编辑直接作用到的剪辑（被移动/删除/重设尺寸），排除在平移之外；
+    /// - `affected_tracks`：`Some(轨道集合)` 时只平移这些轨道上的后续剪辑（Track 模式）；
+    ///   `None` 表示所有轨道（All 模式）。`Off` 模式由调用方直接跳过，无需传入；
+    /// - `move_linked_params`：是否把后续剪辑携带的轨道组参数线一起平移
+    ///   （与普通拖拽移动的 `move_linked_params` / “锁定参数线” 语义一致）。
+    ///
+    /// 返回实际被平移的剪辑 id 列表（供调用方调度音高重分析）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn ripple_shift_clips(
+        &mut self,
+        edited_ids: &[&str],
+        affected_tracks: Option<&HashSet<String>>,
+        origin: f64,
+        delta_sec: f64,
+        move_linked_params: bool,
+    ) -> Vec<String> {
+        if !delta_sec.is_finite() || delta_sec.abs() < 1e-9 {
+            return Vec::new();
+        }
+        let edited: HashSet<&str> = edited_ids.iter().copied().collect();
+        let origin_ok = origin.is_finite();
+
+        // 收集需要平移的剪辑 id 与目标位置（所有被波及剪辑共用同一平移量）。
+        let mut moves: Vec<MoveClipPayload> = Vec::new();
+        let mut shifted_ids: Vec<String> = Vec::new();
+        for clip in &self.clips {
+            if edited.contains(clip.id.as_str()) {
+                continue;
+            }
+            if let Some(ref tracks) = affected_tracks {
+                if !tracks.contains(&clip.track_id) {
+                    continue;
+                }
+            }
+            if !origin_ok || clip.start_sec + 1e-9 < origin {
+                continue;
+            }
+            let next_start = (clip.start_sec + delta_sec).max(0.0);
+            moves.push(MoveClipPayload {
+                clip_id: clip.id.clone(),
+                start_sec: next_start,
+                track_id: None,
+            });
+            shifted_ids.push(clip.id.clone());
+        }
+        if moves.is_empty() {
+            return Vec::new();
+        }
+        self.move_clips(&moves, move_linked_params);
+        shifted_ids
     }
 
     pub fn remove_clip(&mut self, clip_id: &str) {

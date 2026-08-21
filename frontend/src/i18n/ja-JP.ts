@@ -633,6 +633,16 @@ export const jaJP = {
 
     // ツールバートグルボタン
     auto_crossfade: "自動クロスフェード",
+    ripple: "リップル編集（オートフォロー）",
+    ripple_tooltip_off:
+        "リップル編集（オートフォロー）：オフ。左クリックで有効化（トラック単位）；右クリックでモード選択。",
+    ripple_tooltip_track:
+        "リップル編集（オートフォロー）：編集したトラック上の後続クリップだけが追従します。左クリックで「全トラック」へ切替；右クリックでモード選択。",
+    ripple_tooltip_all:
+        "リップル編集（オートフォロー）：編集位置より後ろの全トラックのクリップが追従します。左クリックでオフ；右クリックでモード選択。",
+    ripple_mode_off: "オフ",
+    ripple_mode_track: "トラック単位",
+    ripple_mode_all: "全トラック",
     split_transition: "分割トランジション",
     split_transition_tooltip: "分割トランジション（右クリックで詳細設定）",
     split_transition_settings_title: "分割トランジション設定",

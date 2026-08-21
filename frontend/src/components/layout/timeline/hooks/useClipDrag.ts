@@ -37,6 +37,12 @@ import {
 } from "../runtime/timelineTrackDragLock";
 import { webApi } from "../../../../services/webviewApi";
 import { resolveClipDragCopyMode } from "./clipDragCopyMode";
+import {
+    applyRippleFollowerShift,
+    buildRippleFollowers,
+    type RippleFollowerMap,
+    type RippleMode,
+} from "../../../../features/session/ripplePreview";
 
 export const NEW_TRACK_SENTINEL = "__hs_new_track__";
 
@@ -80,6 +86,10 @@ export type ClipDragState = {
     startClientX: number;
     startClientY: number;
     hasMoved: boolean;
+    /** 拖拽开始时读取的波纹模式（与后端提交时读到的设置保持一致）。 */
+    rippleMode: RippleMode;
+    /** 波纹跟随集：clipId → 初始起点（仅波纹开启且有跟随对象时非空）。 */
+    rippleFollowers: RippleFollowerMap;
 };
 
 export function useClipDrag(deps: {
@@ -225,6 +235,17 @@ export function useClipDrag(deps: {
         }
         if (!Number.isFinite(minstartSec)) minstartSec = 0;
 
+        // 波纹（自动跟进）实时预览：拖拽开始时快照“后续跟随剪辑”的初始位置。
+        // 起点 = 被拖拽选择的最早起点；作用域轨道 = 各被拖拽剪辑的初始轨道。
+        const rippleMode = sessionRef.current.rippleMode;
+        const rippleFollowers = buildRippleFollowers(
+            sessionRef.current.clips,
+            new Set(clipIds),
+            minstartSec,
+            rippleMode,
+            new Set(Object.values(initialById).map((i) => String(i.trackId))),
+        );
+
         const hasMixedTrackSelection = clipIds.some((id) => {
             const initial = initialById[id];
             return initial && baseTrackId != null && initial.trackId !== baseTrackId;
@@ -277,6 +298,8 @@ export function useClipDrag(deps: {
             startClientX: e.clientX,
             startClientY: e.clientY,
             hasMoved: false,
+            rippleMode,
+            rippleFollowers,
         };
         setVerticalTrackLockTrackId(null);
         scroller.setPointerCapture(e.pointerId);
@@ -403,6 +426,8 @@ export function useClipDrag(deps: {
                         allowTrackMove: drag.allowTrackMove,
                     };
                 });
+                // 复制模式下原 clip 不移动，波纹跟随集保持原位（覆盖拖动中途切到复制的残留预览）。
+                applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
             } else {
                 batch(() => {
                     for (const id of drag.clipIds) {
@@ -427,6 +452,11 @@ export function useClipDrag(deps: {
                                 }),
                             );
                         }
+                    }
+                    // 波纹（自动跟进）实时预览：后续剪辑随拖拽同步平移。
+                    // 与后端“右缘位移”规则一致：同一拖拽位移量同时作用于所有跟随剪辑。
+                    if (drag.rippleMode !== "off") {
+                        applyRippleFollowerShift(dispatch, drag.rippleFollowers, drag.lastDeltaBeat);
                     }
                 });
             }
@@ -533,6 +563,8 @@ export function useClipDrag(deps: {
             if (drag.copyMode) {
                 // copyMode 下原 clip 未被移动，直接根据 ghost 偏移量计算副本位置
                 // copyMode 不使用交互锁（原 clip 未被拖动改变位置）
+                // 复制不产生波纹，松手前把跟随集恢复原位（覆盖预览残留）。
+                applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
                 void (async () => {
                     const sourceClipIds = drag.clipIds.filter((id) =>
                         sessionRef.current.clips.some((clip) => clip.id === id),
@@ -788,6 +820,8 @@ export function useClipDrag(deps: {
                                         }),
                                     );
                                 }
+                                // 波纹跟随集同样回滚到初始位置。
+                                applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
                             });
                         } finally {
                             void webApi.endUndoGroup();

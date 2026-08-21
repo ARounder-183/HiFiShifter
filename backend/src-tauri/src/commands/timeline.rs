@@ -472,14 +472,7 @@ pub(super) fn remove_clip(
     state: State<'_, AppState>,
     clip_id: String,
 ) -> crate::models::TimelineStatePayload {
-    crate::formant_cache::cancel_formant_rebuild_generation(&clip_id);
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
-    tl.remove_clip(&clip_id);
-    state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
-    payload
+    remove_clips(state, vec![clip_id])
 }
 
 pub(super) fn remove_clips(
@@ -491,25 +484,59 @@ pub(super) fn remove_clips(
     }
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
-    // Collect root track IDs before removing clips
-    let root_ids: Vec<String> = clip_ids
-        .iter()
-        .filter_map(|clip_id| {
-            tl.clips
-                .iter()
-                .find(|c| c.id == *clip_id)
-                .map(|c| c.track_id.clone())
-                .and_then(|tid| tl.resolve_root_track_id(&tid))
-        })
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+
+    // 波纹编辑：删除前的被删除剪辑信息（用于计算平移量与轨道归属）。
+    let (ripple_mode, ripple_link) = ripple_settings(&state);
+    let mut affected_root_tracks: HashSet<String> = HashSet::new();
+    let mut origin = f64::INFINITY;
+    let mut old_right_edge = f64::NEG_INFINITY;
+    let mut removed_tracks: HashSet<String> = HashSet::new();
+    let mut found_any = false;
+
+    for clip_id in &clip_ids {
+        if let Some(clip) = tl.clips.iter().find(|c| c.id == *clip_id) {
+            found_any = true;
+            origin = origin.min(clip.start_sec);
+            old_right_edge = old_right_edge.max(clip.start_sec + clip.length_sec);
+            removed_tracks.insert(clip.track_id.clone());
+            if let Some(root_id) = tl.resolve_root_track_id(&clip.track_id) {
+                affected_root_tracks.insert(root_id);
+            }
+        }
+    }
+
+    let edited: Vec<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
     tl.remove_clips(&clip_ids);
+
+    // 波纹编辑：删除后“收拢”时间轴——后续剪辑左移（origin - old_right_edge）。
+    if ripple_mode != crate::state::RippleMode::Off && found_any {
+        let delta = origin - old_right_edge;
+        let affected_tracks = match ripple_mode {
+            crate::state::RippleMode::All => None,
+            crate::state::RippleMode::Track => Some(removed_tracks),
+            crate::state::RippleMode::Off => None,
+        };
+        let shifted = tl.ripple_shift_clips(
+            &edited,
+            affected_tracks.as_ref(),
+            origin,
+            delta,
+            ripple_link,
+        );
+        for clip_id in shifted {
+            if let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) {
+                if let Some(root_id) = tl.resolve_root_track_id(&clip.track_id) {
+                    affected_root_tracks.insert(root_id);
+                }
+            }
+        }
+    }
+
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     drop(tl);
-    for root_id in root_ids {
+    for root_id in affected_root_tracks {
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
     }
     payload
@@ -522,41 +549,15 @@ pub(super) fn move_clip(
     track_id: Option<String>,
     move_linked_params: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
-    let old_root = tl.resolve_root_track_id(
-        &tl.clips
-            .iter()
-            .find(|c| c.id == clip_id)
-            .map(|c| c.track_id.clone())
-            .unwrap_or_default(),
-    );
-    tl.move_clip(
-        &clip_id,
-        start_sec,
-        track_id,
-        move_linked_params.unwrap_or(false),
-    );
-    let new_root = tl
-        .clips
-        .iter()
-        .find(|c| c.id == clip_id)
-        .map(|c| c.track_id.clone())
-        .and_then(|tid| tl.resolve_root_track_id(&tid));
-    state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
-    drop(tl);
-    // Trigger pitch_orig reassembly for affected root tracks
-    if let Some(ref root_id) = old_root {
-        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
-    }
-    if new_root != old_root {
-        if let Some(ref root_id) = new_root {
-            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
-        }
-    }
-    payload
+    move_clips(
+        state,
+        vec![crate::state::MoveClipPayload {
+            clip_id,
+            start_sec,
+            track_id,
+        }],
+        move_linked_params,
+    )
 }
 
 pub(super) fn move_clips(
@@ -564,12 +565,102 @@ pub(super) fn move_clips(
     moves: Vec<crate::state::MoveClipPayload>,
     move_linked_params: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
-    tl.move_clips(&moves, move_linked_params.unwrap_or(false));
-    state.audio_engine.update_timeline(tl.clone());
-    let mut payload = tl.to_payload();
-    payload.project = Some(state.project_meta_payload());
+    let move_linked_params = move_linked_params.unwrap_or(false);
+    let payload = {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl);
+
+        // 波纹编辑：记录被编辑剪辑的移动前状态（起点 / 右边缘 / 原轨道）。
+        let (ripple_mode, ripple_link) = ripple_settings(&state);
+        let mut affected_root_tracks: HashSet<String> = HashSet::new();
+        let before: HashMap<String, (String, f64, f64)> = moves
+            .iter()
+            .filter_map(|m| {
+                tl.clips.iter().find(|c| c.id == m.clip_id).map(|c| {
+                    (
+                        c.id.clone(),
+                        (c.track_id.clone(), c.start_sec, c.length_sec),
+                    )
+                })
+            })
+            .collect();
+
+        // 移动前轨道所属 root（换轨时旧 root 也需要重分析音高）。
+        for (track_id, _, _) in before.values() {
+            if let Some(root_id) = tl.resolve_root_track_id(track_id) {
+                affected_root_tracks.insert(root_id);
+            }
+        }
+
+        tl.move_clips(&moves, move_linked_params);
+
+        // 波纹编辑：以“编辑区右边缘的变化量”平移后续剪辑。
+        if ripple_mode != crate::state::RippleMode::Off && !before.is_empty() {
+            let origin = before
+                .values()
+                .map(|(_, s, _)| *s)
+                .fold(f64::INFINITY, f64::min);
+            let old_right_edge = before
+                .values()
+                .map(|(_, s, l)| *s + *l)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let new_right_edge = moves
+                .iter()
+                .filter_map(|m| {
+                    tl.clips
+                        .iter()
+                        .find(|c| c.id == m.clip_id)
+                        .map(|c| c.start_sec + c.length_sec)
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            let delta = new_right_edge - old_right_edge;
+
+            let affected_tracks = match ripple_mode {
+                crate::state::RippleMode::All => None,
+                crate::state::RippleMode::Track => Some(
+                    before
+                        .values()
+                        .map(|(t, _, _)| t.clone())
+                        .collect::<HashSet<String>>(),
+                ),
+                crate::state::RippleMode::Off => None,
+            };
+            let edited: Vec<&str> = before.keys().map(|s| s.as_str()).collect();
+            let shifted = tl.ripple_shift_clips(
+                &edited,
+                affected_tracks.as_ref(),
+                origin,
+                delta,
+                ripple_link,
+            );
+            for clip_id in shifted {
+                if let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) {
+                    if let Some(root_id) = tl.resolve_root_track_id(&clip.track_id) {
+                        affected_root_tracks.insert(root_id);
+                    }
+                }
+            }
+        }
+
+        // 移动后的新 root 也应重分析。
+        for m in &moves {
+            if let Some(clip) = tl.clips.iter().find(|c| c.id == m.clip_id) {
+                if let Some(root_id) = tl.resolve_root_track_id(&clip.track_id) {
+                    affected_root_tracks.insert(root_id);
+                }
+            }
+        }
+
+        state.audio_engine.update_timeline(tl.clone());
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        drop(tl);
+
+        for root_id in affected_root_tracks {
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+        }
+        payload
+    };
     payload
 }
 
@@ -654,6 +745,44 @@ pub(super) fn set_clip_state(
             formant_morph,
         },
     );
+    // 波纹编辑（自动跟进）：当起点/长度改变（右边缘位移）时，平移后续剪辑。
+    let mut ripple_root_track_ids: HashSet<String> = HashSet::new();
+    if start_sec.is_some() || length_sec.is_some() {
+        let (ripple_mode, ripple_link) = ripple_settings(&state);
+        if ripple_mode != crate::state::RippleMode::Off {
+            if let Some(before_clip) = previous_clip.as_ref() {
+                let old_end = before_clip.start_sec + before_clip.length_sec;
+                if let Some(after) = tl.clips.iter().find(|c| c.id == clip_id) {
+                    let new_end = after.start_sec + after.length_sec;
+                    let delta = new_end - old_end;
+                    if delta.abs() > 1e-9 {
+                        let affected_tracks = match ripple_mode {
+                            crate::state::RippleMode::All => None,
+                            crate::state::RippleMode::Track => Some(HashSet::from([
+                                before_clip.track_id.clone(),
+                            ])),
+                            crate::state::RippleMode::Off => None,
+                        };
+                        let shifted = tl.ripple_shift_clips(
+                            &[clip_id.as_str()],
+                            affected_tracks.as_ref(),
+                            before_clip.start_sec,
+                            delta,
+                            ripple_link,
+                        );
+                        for shifted_id in shifted {
+                            if let Some(clip) = tl.clips.iter().find(|c| c.id == shifted_id) {
+                                if let Some(root_id) = tl.resolve_root_track_id(&clip.track_id) {
+                                    ripple_root_track_ids.insert(root_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let next_clip = tl.clips.iter().find(|clip| clip.id == clip_id).cloned();
     let root_track_id = tl
         .clips
@@ -667,6 +796,9 @@ pub(super) fn set_clip_state(
     drop(tl);
 
     if let Some(root_id) = root_track_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+    }
+    for root_id in ripple_root_track_ids {
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
     }
     if let Some(next_clip) = next_clip {
@@ -686,6 +818,24 @@ pub(super) fn set_clips_state_bulk(
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
+    // 波纹编辑（自动跟进，防御性）：批量更新可能携带起点/长度（尺寸）变更时生效。
+    // 前端当前的 set_clips_state_bulk 只传 gain/muted/fades，不会触发；该路径用于覆盖
+    // 未来“多选尺寸调整”类调用。每个被改尺寸的剪辑按“右边缘位移”独立平移后续剪辑。
+    let resized_before: Vec<(String, String, f64, f64)> = updates
+        .iter()
+        .filter(|u| u.patch.start_sec.is_some() || u.patch.length_sec.is_some())
+        .filter_map(|u| {
+            tl.clips.iter().find(|c| c.id == u.clip_id).map(|c| {
+                (
+                    u.clip_id.clone(),
+                    c.track_id.clone(),
+                    c.start_sec,
+                    c.start_sec + c.length_sec,
+                )
+            })
+        })
+        .collect();
+
     tl.patch_clips_state(&updates);
     let mut root_track_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for update in &updates {
@@ -695,12 +845,69 @@ pub(super) fn set_clips_state_bulk(
             }
         }
     }
+
+    let (ripple_mode, ripple_link) = ripple_settings(&state);
+    let mut ripple_roots: HashSet<String> = HashSet::new();
+    if ripple_mode != crate::state::RippleMode::Off && !resized_before.is_empty() {
+        // 区域化波纹：把被批量重设尺寸的剪辑视为一个“编辑区域”，以区域最左起点
+        // 为原点、区域右缘净位移为平移量，一次平移后续剪辑；避免多个成员各自波纹
+        // 时后置跟随剪辑被重复平移（与 move/delete 的“单次波纹”语义一致）。
+        let origin = resized_before
+            .iter()
+            .map(|(_, _, s, _)| *s)
+            .fold(f64::INFINITY, f64::min);
+        let old_right_edge = resized_before
+            .iter()
+            .map(|(_, _, _, e)| *e)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut new_right_edge = old_right_edge;
+        for (clip_id, _, _, _) in &resized_before {
+            if let Some(after) = tl.clips.iter().find(|c| c.id == *clip_id) {
+                new_right_edge = new_right_edge.max(after.start_sec + after.length_sec);
+            }
+        }
+        let delta = new_right_edge - old_right_edge;
+        if delta.abs() > 1e-9 {
+            let edited: Vec<&str> = resized_before
+                .iter()
+                .map(|(id, _, _, _)| id.as_str())
+                .collect();
+            let affected_tracks = match ripple_mode {
+                crate::state::RippleMode::All => None,
+                crate::state::RippleMode::Track => Some(
+                    resized_before
+                        .iter()
+                        .map(|(_, track_id, _, _)| track_id.clone())
+                        .collect::<HashSet<String>>(),
+                ),
+                crate::state::RippleMode::Off => None,
+            };
+            let shifted = tl.ripple_shift_clips(
+                &edited,
+                affected_tracks.as_ref(),
+                origin,
+                delta,
+                ripple_link,
+            );
+            for shifted_id in shifted {
+                if let Some(clip) = tl.clips.iter().find(|c| c.id == shifted_id) {
+                    if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
+                        ripple_roots.insert(root);
+                    }
+                }
+            }
+        }
+    }
+
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root in &root_track_ids {
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root);
+    }
+    for root in ripple_roots {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
     }
     payload
 }
@@ -1011,6 +1218,26 @@ pub(super) fn split_clips_at(
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
     }
     payload
+}
+
+/// 读取波纹编辑（自动跟进）模式与“参数线是否随剪辑一起平移”的设置。
+///
+/// 返回 `(模式, 是否平移参数线)`。参数线跟随开关读取全局“锁定参数线”
+/// 设置，与前端拖拽移动时传入的 `moveLinkedParams` 语义保持一致。
+fn ripple_settings(
+    state: &State<'_, AppState>,
+) -> (crate::state::RippleMode, bool) {
+    let settings = if let Some(dir) = state.config_dir.get() {
+        let mut settings = crate::config::load_ui_settings(dir);
+        settings.normalize_ripple_mode();
+        settings
+    } else {
+        crate::config::UiSettings::default()
+    };
+    (
+        crate::state::RippleMode::from_str(&settings.ripple_mode),
+        settings.lock_param_lines,
+    )
 }
 
 fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptions {

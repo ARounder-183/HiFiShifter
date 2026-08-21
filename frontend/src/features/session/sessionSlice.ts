@@ -363,6 +363,13 @@ export interface SessionState {
     autoScrollEnabled: boolean;
     /** 忽略编组（启用后编组同步编辑操作不生效） */
     ignoreGrouping: boolean;
+    /**
+     * 波纹编辑（自动跟进）模式：
+     * - `"off"`：关闭（默认）。
+     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进。
+     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     */
+    rippleMode: "off" | "track" | "all";
     /** 被禁用的编组 ID 列表（禁用后该编组内同步编辑不生效） */
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */
@@ -1212,6 +1219,7 @@ const initialState: SessionState = {
     playheadZoomEnabled: false,
     autoScrollEnabled: false,
     ignoreGrouping: false,
+    rippleMode: "off",
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
     paramEditorTimelineClickSelectTrackEnabled: true,
@@ -1680,6 +1688,24 @@ const sessionSlice = createSlice({
         },
         toggleIgnoreGrouping(state) {
             state.ignoreGrouping = !state.ignoreGrouping;
+        },
+        /** 循环波纹编辑模式：off → track → all → off（对应 REAPER 波纹编辑按钮的三态切换）。 */
+        cycleRippleMode(state) {
+            state.rippleMode =
+                state.rippleMode === "off"
+                    ? "track"
+                    : state.rippleMode === "track"
+                      ? "all"
+                      : "off";
+        },
+        setRippleMode(state, action: PayloadAction<"off" | "track" | "all">) {
+            if (
+                action.payload === "off" ||
+                action.payload === "track" ||
+                action.payload === "all"
+            ) {
+                state.rippleMode = action.payload;
+            }
         },
         toggleGroupDisabledLocal(state, action: PayloadAction<string>) {
             const idx = state.disabledGroupIds.indexOf(action.payload);
@@ -2298,6 +2324,12 @@ const sessionSlice = createSlice({
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
                 if (s.ignoreGrouping != null)
                     state.ignoreGrouping = Boolean(s.ignoreGrouping);
+                const loadedRippleMode = s.rippleMode;
+                if (loadedRippleMode === "track" || loadedRippleMode === "all") {
+                    state.rippleMode = loadedRippleMode;
+                } else {
+                    state.rippleMode = "off";
+                }
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
                 if (s.quickSearchAutoNormalize != null)
@@ -3673,7 +3705,9 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：移动是本次交互的权威结果（含波纹编辑对后续剪辑的平移）。
+                // 交互锁期间若不强制应用，后端返回的波纹位移会被丢弃，导致波纹“无效”。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(moveClipsRemote.fulfilled, (state, action) => {
@@ -3683,7 +3717,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：见 moveClipRemote.fulfilled 注释（交互锁期间也必须应用波纹结果）。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(splitClipRemote.fulfilled, (state, action) => {
@@ -3774,7 +3809,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：重设尺寸（右缘位移）的权威结果含波纹平移，交互锁期间不能丢弃。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(setClipStateRemote.pending, (state, action) => {
@@ -3799,7 +3835,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：批量状态（含未来尺寸波纹路径）的权威结果，交互锁期间不能丢弃。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(setClipsStateBulkRemote.pending, (state, action) => {
@@ -4047,6 +4084,8 @@ export const {
     togglePlayheadZoom,
     toggleAutoScroll,
     toggleIgnoreGrouping,
+    cycleRippleMode,
+    setRippleMode,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,

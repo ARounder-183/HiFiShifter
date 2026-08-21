@@ -613,6 +613,15 @@ export const zhTW = {
 
     // 工具列切換按鈕
     auto_crossfade: "自動交叉淡化",
+    ripple: "波紋編輯（自動跟進）",
+    ripple_tooltip_off: "波紋編輯（自動跟進）：關閉。左鍵開啟（按軌道跟進）；右鍵選擇模式。",
+    ripple_tooltip_track:
+        "波紋編輯（自動跟進）：僅被編輯的軌道上的後續剪輯一起跟進。左鍵切換到「全部軌道」；右鍵選擇模式。",
+    ripple_tooltip_all:
+        "波紋編輯（自動跟進）：所有軌道上位於編輯點之後的剪輯一起跟進。左鍵關閉；右鍵選擇模式。",
+    ripple_mode_off: "關閉",
+    ripple_mode_track: "按軌道",
+    ripple_mode_all: "全部軌道",
     split_transition: "分割過渡",
     split_transition_tooltip: "分割過渡（右鍵開啟詳細設定）",
     split_transition_settings_title: "分割過渡設定",

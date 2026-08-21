@@ -248,6 +248,13 @@ pub struct UiSettings {
     pub custom_scale_presets: Vec<CustomScale>,
     #[serde(default)]
     pub ignore_grouping: bool,
+    /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
+    /// - `off`：关闭（默认）。
+    /// - `track`：仅被编辑的轨道上的后续剪辑一起跟进。
+    /// - `all`：所有轨道上位于编辑点之后的剪辑一起跟进。
+    #[serde(default = "default_ripple_mode")]
+    pub ripple_mode: String,
+
     #[serde(default = "default_midi_import_position")]
     pub midi_import_position: String,
     #[serde(default)]
@@ -436,6 +443,10 @@ fn default_hifigan_mel_stretch() -> bool {
     true
 }
 
+fn default_ripple_mode() -> String {
+    "off".to_string()
+}
+
 fn default_split_transition_mode() -> String {
     "overlap".to_string()
 }
@@ -518,6 +529,8 @@ impl Default for UiSettings {
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
             ignore_grouping: false,
+            ripple_mode: default_ripple_mode(),
+
             midi_import_position: default_midi_import_position(),
             midi_fill_gaps: false,
             midi_multi_track_merge: true,
@@ -578,6 +591,14 @@ impl UiSettings {
         }
         self.normalize_time_display();
         self.timeline_snap.normalize();
+        self.normalize_ripple_mode();
+    }
+
+    /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
+    pub fn normalize_ripple_mode(&mut self) {
+        if !["off", "track", "all"].contains(&self.ripple_mode.as_str()) {
+            self.ripple_mode = default_ripple_mode();
+        }
     }
 
     /// 规范化时间轴时间显示相关设置，避免损坏/越界的持久化值影响界面。
@@ -636,6 +657,27 @@ mod tests {
         assert_eq!(settings.split_transition_curve, "sine");
         assert_eq!(settings.split_transition_overlap_crossfade, "auto");
     }
+
+    #[test]
+    fn ui_settings_normalizes_ripple_mode() {
+        let mut settings = UiSettings::default();
+        assert_eq!(settings.ripple_mode, "off");
+
+        let mut bogus = UiSettings {
+            ripple_mode: "sideways".to_string(),
+            ..UiSettings::default()
+        };
+        bogus.normalize_ripple_mode();
+        assert_eq!(bogus.ripple_mode, "off");
+
+        let mut track_mode = UiSettings {
+            ripple_mode: "track".to_string(),
+            ..UiSettings::default()
+        };
+        track_mode.normalize_ripple_mode();
+        assert_eq!(track_mode.ripple_mode, "track");
+    }
+
 }
 
 /// 持久化配置根结构。

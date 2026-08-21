@@ -705,6 +705,16 @@ export const koKR = {
 
     // 도구 모음 토글 버튼
     auto_crossfade: "자동 크로스페이드",
+    ripple: "리플 편집 (자동 추적)",
+    ripple_tooltip_off:
+        "리플 편집 (자동 추적): 꺼짐. 왼쪽 클릭으로 켜기 (트랙 단위); 오른쪽 클릭으로 모드 선택.",
+    ripple_tooltip_track:
+        "리플 편집 (자동 추적): 편집한 트랙의 뒤따르는 클립만 함께 이동. 왼쪽 클릭으로 '전체 트랙' 전환; 오른쪽 클릭으로 모드 선택.",
+    ripple_tooltip_all:
+        "리플 편집 (자동 추적): 편집 지점 이후의 모든 트랙 클립이 함께 이동. 왼쪽 클릭으로 끄기; 오른쪽 클릭으로 모드 선택.",
+    ripple_mode_off: "끄기",
+    ripple_mode_track: "트랙 단위",
+    ripple_mode_all: "전체 트랙",
     split_transition: "분할 트랜지션",
     split_transition_tooltip: "분할 트랜지션 (우클릭하여 상세 설정)",
     split_transition_settings_title: "분할 트랜지션 설정",

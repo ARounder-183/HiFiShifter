@@ -625,6 +625,16 @@ export const enUS = {
 
     // Toolbar toggle buttons
     auto_crossfade: "Auto Crossfade",
+    ripple: "Ripple Editing (Auto Follow)",
+    ripple_tooltip_off:
+        "Ripple Editing (Auto Follow): Off. Left-click to enable (per track); right-click to choose mode.",
+    ripple_tooltip_track:
+        "Ripple Editing (Auto Follow): Only clips on the edited track move along. Left-click for All Tracks; right-click to choose mode.",
+    ripple_tooltip_all:
+        "Ripple Editing (Auto Follow): Clips after the edit on all tracks move along. Left-click to turn off; right-click to choose mode.",
+    ripple_mode_off: "Off",
+    ripple_mode_track: "Per Track",
+    ripple_mode_all: "All Tracks",
     split_transition: "Split Transition",
     split_transition_tooltip: "Split Transition (right-click for settings)",
     split_transition_settings_title: "Split Transition Settings",
