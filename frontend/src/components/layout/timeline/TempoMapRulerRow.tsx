@@ -492,6 +492,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         pointId: string;
         startClientX: number;
         startSec: number;
+        /** 拖拽开始时的 Tempo Map 快照，用于吸附计算时固定网格，避免变化点自身移动改变网格。 */
+        baseTempoMap: TempoMap;
     } | null>(null);
     const [draggingId, setDraggingId] = useState<string | null>(null);
     const dialogStateRef = useRef(dialogState);
@@ -839,6 +841,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 pointId: point.id,
                 startClientX: clientX,
                 startSec: point.positionSec,
+                baseTempoMap: appliedMap ?? tempoMap ?? { points: [point] },
             };
             // 即便指针抬起时没有任何进一步移动，也要把“确认的编辑/新增”
             // 提交出去（否则仅停留在本地 Redux）。
@@ -1006,11 +1009,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 pointId: point.id,
                 startClientX: e.clientX,
                 startSec: point.positionSec,
+                baseTempoMap: tempoMap ?? { points: [point] },
             };
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [],
+        [tempoMap],
     );
 
     useEffect(() => {
@@ -1020,10 +1024,18 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             if (!drag || !tempoMap) return;
             const dx = e.clientX - drag.startClientX;
             const rawSec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
-            const mapFallback = baseFallbackOf(tempoMap);
+            // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
+            // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，
+            // 造成“刚脱离吸附又被自己拉回”的一顿一顿效果。
+            const mapFallback = baseFallbackOf(drag.baseTempoMap);
             let sec = rawSec;
             if (snapEnabled && !isModifierActive(noSnapKb, e)) {
-                sec = snapTempoPosition(rawSec, tempoMap, mapFallback.bpm, drag.startSec);
+                sec = snapTempoPosition(
+                    rawSec,
+                    drag.baseTempoMap,
+                    mapFallback.bpm,
+                    drag.startSec,
+                );
             }
             // 不与其它点重叠、不越过相邻点、不越过工程末尾：
             // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。

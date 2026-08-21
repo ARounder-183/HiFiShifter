@@ -984,12 +984,15 @@ export const PianoRollPanel: React.FC = () => {
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
-            if (syncEnabled && !timelineSyncApplyingRef.current) {
-                timelineViewportSync.setViewport({
-                    scrollLeft: native,
-                    pxPerSec,
-                });
-            }
+        }
+        // 同步模式下手动缩放后必须把新的 pxPerSec 写回共享视口；即使滚动位置
+        // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
+        // 也要广播缩放，否则轨道视图不会跟着缩放。
+        if (syncEnabled && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport({
+                scrollLeft: native,
+                pxPerSec,
+            });
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
