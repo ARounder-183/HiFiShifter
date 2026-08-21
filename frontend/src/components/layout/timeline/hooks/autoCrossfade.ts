@@ -6,9 +6,12 @@ import { webApi } from "../../../../services/webviewApi";
 /**
  * 编辑前某 clip 每侧是否有同轨重叠。
  *
- * 因为自动交叉淡化长度与手动 fade 分离存储，我们需要知道“这一侧的 fade 是否由
- * 交叉淡化持有”：在重叠期间自动值覆盖手动值；一旦分开（当前无重叠、编辑前该侧
- * 有重叠）就把自动值清成 0，手动 fade（fade_in_sec / fade_out_sec）自然恢复显示。
+ * 由于自动交叉淡化长度与手动 fade 分离存储，我们需要知道“这一侧的 fade 是否由
+ * 交叉淡化持有”：编辑开始时该侧有重叠，则本次编辑后如果该侧失去重叠，就应把
+ * auto 清成 0，手动 fade 自动恢复显示。
+ *
+ * 该信息**只包含真正受本次编辑影响的 clip**：被编辑 clip 本身 + 编辑前与它们
+ * 直接重叠的同轨邻居。不会包含同一轨道上无关的其它 clip。
  */
 export interface CrossfadeAffectedClip {
     /** 编辑前该 clip 的 fadeIn 侧（左侧）是否有同轨重叠。 */
@@ -23,24 +26,90 @@ export interface AutoFadeUpdate {
     autoFadeOutSec: number;
 }
 
+type AutoCrossfadeClipLike = {
+    id: string;
+    trackId: string;
+    startSec: number;
+    lengthSec: number;
+    autoFadeInSec?: number;
+    autoFadeOutSec?: number;
+};
+
+/** 两个同轨剪辑的重叠长度（秒）；不重叠返回 ≤ 0。 */
+function overlapLengthSec(
+    a: { startSec: number; lengthSec: number },
+    b: { startSec: number; lengthSec: number },
+): number {
+    const aStart = Number(a.startSec ?? 0);
+    const aEnd = aStart + Number(a.lengthSec ?? 0);
+    const bStart = Number(b.startSec ?? 0);
+    const bEnd = bStart + Number(b.lengthSec ?? 0);
+    return Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
+}
+
 /**
- * 计算自动交叉淡化（预览与提交共用同一套判定，保证二者一致）。
+ * 构建“编辑开始前”的受影响侧信息。
  *
- * 规则（对齐 REAPER：自动交叉淡化长度 ≠ 手动 fade）：
- * - “受影响集合” = 被编辑剪辑 ∪ `affectedSides` 的键（编辑前与之重叠/相邻的邻居，
- *   用于在分开时把旧的自动交叉淡化清成 0）∪ 当前与被编辑剪辑重叠的同轨剪辑。
- * - 对每个受影响剪辑的每一侧，计算**自动交叉淡化长度**：
- *   - 当前有同轨重叠 → auto = 当前重叠长度（渲染/显示用 auto 覆盖手动）；
- *   - 当前无重叠、但编辑前该侧有重叠（被“拖开”）→ auto = 0（手动 fade 恢复生效）；
- *   - 当前无重叠、编辑前也无重叠 → auto 保持当前值（通常为 0；不影响手动 fade）。
- * - 手动 fade（fade_in_sec / fade_out_sec）**永不被修改**。
+ * @param clips 编辑开始前的全部 clips（未移动的原始位置）
+ * @param editedIds 真正被本次编辑改变的 clip（如被拖拽/裁剪/拉伸的 clip，
+ *                  以及波纹编辑中随动的 follower）
+ *
+ * 只包含被编辑 clip 本身 + 编辑前与它们直接重叠的同轨邻居；其它同轨 clip
+ * 不会进入结果，从而保证“只服务因编辑而受影响的淡入淡出包络”。
  */
-export function computeAutoCrossfadeUpdates(
-    session: SessionState,
+export function computeInitialCrossfadeSides(
+    clips: Array<{ id: string; trackId: string; startSec: number; lengthSec: number }>,
+    editedIds: string[],
+): Record<string, CrossfadeAffectedClip> {
+    const result: Record<string, CrossfadeAffectedClip> = {};
+    for (const id of editedIds) {
+        result[id] = { fadeIn: false, fadeOut: false };
+    }
+
+    for (const id of editedIds) {
+        const a = clips.find((c) => c.id === id);
+        if (!a) continue;
+        for (const b of clips) {
+            if (b.trackId !== a.trackId || b.id === a.id) continue;
+            if (overlapLengthSec(a, b) <= 0.001) continue;
+            if (!result[a.id]) result[a.id] = { fadeIn: false, fadeOut: false };
+            if (!result[b.id]) result[b.id] = { fadeIn: false, fadeOut: false };
+            if (a.startSec <= b.startSec) {
+                result[a.id].fadeOut = true;
+                result[b.id].fadeIn = true;
+            } else {
+                result[a.id].fadeIn = true;
+                result[b.id].fadeOut = true;
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * 自动交叉淡化的核心计算（预览与提交共用，保证一致）。
+ *
+ * 语义（对齐 REAPER）：
+ * - 自动交叉淡化只服务于“因本次编辑而受影响”的淡入淡出侧；
+ * - 受影响集合 = 被编辑 clip（含波纹随动 follower）∪ 编辑前直接重叠的邻居
+ *   （affectedSides 的键）∪ 当前直接重叠的邻居；
+ * - 对每个受影响 clip，只有**面对被编辑 clip 的那一侧**（或编辑前被标记重叠的
+ *   那一侧）会被重新计算：有重叠 → auto = 当前重叠量；无重叠 → auto = 0；
+ * - **其它侧一律保持原值**——不会因为无关 clip 的编辑而改变既有交叉淡化，
+ *   也不会把“用户介入后已关闭的自动淡化”错误地重新开启。
+ *
+ * @param mode "full" 用于开关打开：受影响侧 = 重叠量或 0；
+ *             "clear-only" 用于开关关闭：仅在受影响侧失去重叠时清 0，不创建/更新。
+ */
+function computeAutoCrossfadeCore(
+    clips: AutoCrossfadeClipLike[],
     movedIds: string[],
-    affectedSides?: Record<string, CrossfadeAffectedClip>,
+    affectedSides: Record<string, CrossfadeAffectedClip> | undefined,
+    mode: "full" | "clear-only",
 ): AutoFadeUpdate[] {
-    const clipById = new Map(session.clips.map((c) => [c.id, c] as const));
+    const clipById = new Map(clips.map((c) => [c.id, c] as const));
+    const movedSet = new Set(movedIds);
     const affected = new Set<string>(movedIds);
     if (affectedSides) {
         for (const id of Object.keys(affectedSides)) {
@@ -48,14 +117,14 @@ export function computeAutoCrossfadeUpdates(
         }
     }
 
-    // 扩展受影响集合：当前与被编辑剪辑重叠的同轨剪辑。
+    // 当前与被编辑 clip 直接重叠的同轨邻居。
     for (const id of movedIds) {
-        const clip = clipById.get(id);
-        if (!clip) continue;
-        for (const other of session.clips) {
-            if (other.trackId !== clip.trackId || other.id === id) continue;
-            if (overlapLengthSec(clip, other) > 0.001) {
-                affected.add(other.id);
+        const a = clipById.get(id);
+        if (!a) continue;
+        for (const b of clips) {
+            if (b.trackId !== a.trackId || b.id === a.id) continue;
+            if (overlapLengthSec(a, b) > 0.001) {
+                affected.add(b.id);
             }
         }
     }
@@ -65,10 +134,14 @@ export function computeAutoCrossfadeUpdates(
         const clip = clipById.get(clipId);
         if (!clip) continue;
 
+        const pre = affectedSides?.[clipId] ?? { fadeIn: false, fadeOut: false };
+        const isMoved = movedSet.has(clipId);
+
+        // 当前该 clip 每侧与所有同轨 clip 的最大重叠量。
         let fadeInOverlap = 0;
         let fadeOutOverlap = 0;
-        for (const other of session.clips) {
-            if (other.trackId !== clip.trackId || other.id === clip.id) continue;
+        for (const other of clips) {
+            if (other.trackId !== clip.trackId || other.id === clipId) continue;
             const overlap = overlapLengthSec(clip, other);
             if (overlap <= 0.001) continue;
             // clip 是“左侧”一方 → 用 fadeOut；是“右侧”一方 → 用 fadeIn。
@@ -79,13 +152,62 @@ export function computeAutoCrossfadeUpdates(
             }
         }
 
-        const pre = affectedSides?.[clipId] ?? { fadeIn: false, fadeOut: false };
+        // 是否有“被编辑 clip”当前在本 clip 的某一侧与之重叠。
+        const movedOverlapsOnSide = (side: "fadeIn" | "fadeOut"): boolean => {
+            for (const other of clips) {
+                if (!movedSet.has(other.id) || other.id === clipId) continue;
+                if (other.trackId !== clip.trackId) continue;
+                const overlap = overlapLengthSec(clip, other);
+                if (overlap <= 0.001) continue;
+                if (side === "fadeOut") {
+                    // 被编辑 clip 在本 clip 右侧 → 本 clip 的 fadeOut 侧受影响。
+                    if (other.startSec >= clip.startSec) return true;
+                } else if (other.startSec < clip.startSec) {
+                    // 被编辑 clip 在本 clip 左侧 → 本 clip 的 fadeIn 侧受影响。
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 受影响侧：
+        // - 被编辑 clip 自身：编辑前有重叠或当前该侧有重叠都算（它动过，可能创建/移除重叠）；
+        // - 未被编辑的邻居：只有“面对被编辑 clip”的侧，或编辑前被标记的侧。
+        const fadeInInvolved =
+            pre.fadeIn || (isMoved ? fadeInOverlap > 0.001 : movedOverlapsOnSide("fadeIn"));
+        const fadeOutInvolved =
+            pre.fadeOut || (isMoved ? fadeOutOverlap > 0.001 : movedOverlapsOnSide("fadeOut"));
+
+        // 记录“本次拖拽已影响的侧”：即使后续该侧不再重叠（例如拖拽中先重叠、
+        // 又分开），它仍会持续被视为受影响侧，从而在无重叠时正确清 0。
+        // 这样“开始时未重叠 → 拖成重叠 → 再拖开”也能在预览中实时回到手动 fade。
+        if (affectedSides) {
+            let entry = affectedSides[clipId];
+            if (!entry) {
+                entry = affectedSides[clipId] = { fadeIn: false, fadeOut: false };
+            }
+            if (fadeInInvolved) entry.fadeIn = true;
+            if (fadeOutInvolved) entry.fadeOut = true;
+        }
+
         const currentAutoIn = Number(clip.autoFadeInSec ?? 0);
         const currentAutoOut = Number(clip.autoFadeOutSec ?? 0);
 
-        const nextAutoIn = fadeInOverlap > 0.001 ? fadeInOverlap : pre.fadeIn ? 0 : currentAutoIn;
-        const nextAutoOut =
-            fadeOutOverlap > 0.001 ? fadeOutOverlap : pre.fadeOut ? 0 : currentAutoOut;
+        const computeNext = (overlap: number, current: number): number => {
+            if (mode === "clear-only") {
+                // 开关关闭：只在受影响侧失去重叠时清 0，有重叠则保持现状。
+                return overlap > 0.001 ? current : 0;
+            }
+            // 开关打开：受影响侧 = 当前重叠量（无重叠为 0）。
+            return overlap > 0.001 ? overlap : 0;
+        };
+
+        const nextAutoIn = fadeInInvolved
+            ? computeNext(fadeInOverlap, currentAutoIn)
+            : currentAutoIn;
+        const nextAutoOut = fadeOutInvolved
+            ? computeNext(fadeOutOverlap, currentAutoOut)
+            : currentAutoOut;
 
         if (
             Math.abs(nextAutoIn - currentAutoIn) > 0.001 ||
@@ -98,16 +220,28 @@ export function computeAutoCrossfadeUpdates(
     return updates;
 }
 
-/** 两个同轨剪辑的重叠长度（秒）；不重叠返回 ≤ 0。 */
-function overlapLengthSec(
-    a: { startSec: number; lengthSec: number },
-    b: { startSec: number; lengthSec: number },
-): number {
-    const aStart = Number(a.startSec ?? 0);
-    const aEnd = aStart + Number(a.lengthSec ?? 0);
-    const bStart = Number(b.startSec ?? 0);
-    const bEnd = bStart + Number(b.lengthSec ?? 0);
-    return Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
+function sessionClipsToLike(session: SessionState): AutoCrossfadeClipLike[] {
+    return session.clips.map((c) => ({
+        id: c.id,
+        trackId: String(c.trackId),
+        startSec: Number(c.startSec ?? 0),
+        lengthSec: Number(c.lengthSec ?? 0),
+        autoFadeInSec: c.autoFadeInSec,
+        autoFadeOutSec: c.autoFadeOutSec,
+    }));
+}
+
+/**
+ * 计算自动交叉淡化（拖拽/裁剪：预览与提交共用同一套判定，保证二者一致）。
+ *
+ * 只影响“因本次编辑而受影响”的淡入淡出侧；无关侧保持原值。
+ */
+export function computeAutoCrossfadeUpdates(
+    session: SessionState,
+    movedIds: string[],
+    affectedSides?: Record<string, CrossfadeAffectedClip>,
+): AutoFadeUpdate[] {
+    return computeAutoCrossfadeCore(sessionClipsToLike(session), movedIds, affectedSides, "full");
 }
 
 /**
@@ -150,6 +284,53 @@ export function applyAutoCrossfade(
 }
 
 /**
+ * 计算“应当被清空”的自动交叉淡化（auto → 0）。
+ *
+ * 当编辑使某个原本有自动交叉淡化的侧不再有重叠时，即使“自动交叉淡化”开关
+ * 处于关闭状态，也必须把该侧 auto 清成 0，否则导入/历史遗留的自动值会永久
+ * 盖住手动淡化。同样只处理“因本次编辑而受影响”的侧。
+ *
+ * 本函数**只清除、绝不创建/更新**自动淡化。
+ */
+export function computeDetachedAutoCrossfadeClears(
+    session: SessionState,
+    movedIds: string[],
+    affectedSides?: Record<string, CrossfadeAffectedClip>,
+): AutoFadeUpdate[] {
+    return computeAutoCrossfadeCore(sessionClipsToLike(session), movedIds, affectedSides, "clear-only");
+}
+
+/**
+ * 应用“仅清除已脱离重叠的自动交叉淡化”（开关关闭时也执行）。
+ *
+ * 用于：开关关闭但已有自动 fade（如 REAPER 导入）时，clip 分开后手动 fade
+ * 能恢复显示；不会创建新的自动交叉淡化。
+ */
+export function applyDetachedAutoCrossfadeClears(
+    session: SessionState,
+    movedIds: string[],
+    dispatch: AppDispatch,
+    affectedSides?: Record<string, CrossfadeAffectedClip>,
+): Promise<void> {
+    const updates = computeDetachedAutoCrossfadeClears(session, movedIds, affectedSides);
+
+    if (updates.length === 0) return Promise.resolve();
+
+    for (const u of updates) {
+        dispatch(setClipAutoFades(u));
+    }
+    const remotePromises = updates.map((u) =>
+        webApi.setClipState({
+            clipId: u.clipId,
+            autoFadeInSec: u.autoFadeInSec,
+            autoFadeOutSec: u.autoFadeOutSec,
+            checkpoint: false,
+        }),
+    );
+    return Promise.allSettled(remotePromises).then(() => undefined);
+}
+
+/**
  * 自动交叉淡化（拖拽实时预览）：仅本地乐观更新“自动 fade”，不持久化。
  */
 export function previewAutoCrossfade(
@@ -164,7 +345,10 @@ export function previewAutoCrossfade(
 }
 
 /**
- * 从后端响应的原始 clip 数据计算自动交叉淡化值（import/paste 路径）。
+ * 从后端响应的原始 clip 数据计算自动交叉淡化值（复制粘贴/导入路径）。
+ *
+ * `movedIds` 为本次新建/复制的 clip；结果只更新“面对这些新 clip 的重叠侧”，
+ * 既有 clip 与其它邻居（如既有交叉淡化）的那一侧保持原值。
  */
 export function computeAutoCrossfadeFromPayload(
     allClips: Array<{
@@ -177,62 +361,15 @@ export function computeAutoCrossfadeFromPayload(
     }>,
     movedIds: string[],
 ): AutoFadeUpdate[] {
-    const fadeInOverlaps = new Map<string, number>();
-    const fadeOutOverlaps = new Map<string, number>();
-
-    for (const id of movedIds) {
-        const clip = allClips.find((c) => c.id === id);
-        if (!clip) continue;
-        const clipStart = Number(clip.start_sec ?? 0);
-        const clipEnd = clipStart + Number(clip.length_sec ?? 0);
-
-        const sameTrack = allClips.filter((c) => c.track_id === clip.track_id && c.id !== id);
-
-        for (const other of sameTrack) {
-            const otherStart = Number(other.start_sec ?? 0);
-            const otherEnd = otherStart + Number(other.length_sec ?? 0);
-            const overlapStart = Math.max(clipStart, otherStart);
-            const overlapEnd = Math.min(clipEnd, otherEnd);
-            const overlap = overlapEnd - overlapStart;
-            if (overlap <= 0.001) continue;
-
-            if (clipStart <= otherStart) {
-                fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, overlap));
-                fadeInOverlaps.set(
-                    other.id!,
-                    Math.max(fadeInOverlaps.get(other.id!) ?? 0, overlap),
-                );
-            } else {
-                fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
-                fadeOutOverlaps.set(
-                    other.id!,
-                    Math.max(fadeOutOverlaps.get(other.id!) ?? 0, overlap),
-                );
-            }
-        }
-    }
-
-    const results: AutoFadeUpdate[] = [];
-    const allClipIds = new Set([...fadeInOverlaps.keys(), ...fadeOutOverlaps.keys(), ...movedIds]);
-    for (const clipId of allClipIds) {
-        const clip = allClips.find((c) => c.id === clipId);
-        if (!clip) continue;
-
-        const hasOverlapIn = fadeInOverlaps.has(clipId);
-        const hasOverlapOut = fadeOutOverlaps.has(clipId);
-
-        const autoFadeInSec = hasOverlapIn ? (fadeInOverlaps.get(clipId) ?? 0) : 0;
-        const autoFadeOutSec = hasOverlapOut ? (fadeOutOverlaps.get(clipId) ?? 0) : 0;
-
-        const currentAutoIn = Number(clip.auto_fade_in_sec ?? 0) || 0;
-        const currentAutoOut = Number(clip.auto_fade_out_sec ?? 0) || 0;
-        if (
-            Math.abs(autoFadeInSec - currentAutoIn) > 0.001 ||
-            Math.abs(autoFadeOutSec - currentAutoOut) > 0.001
-        ) {
-            results.push({ clipId, autoFadeInSec, autoFadeOutSec });
-        }
-    }
-
-    return results;
+    const clips: AutoCrossfadeClipLike[] = allClips
+        .filter((c): c is { id: string; track_id?: string } & typeof c => Boolean(c.id))
+        .map((c) => ({
+            id: c.id!,
+            trackId: String(c.track_id ?? ""),
+            startSec: Number(c.start_sec ?? 0),
+            lengthSec: Number(c.length_sec ?? 0),
+            autoFadeInSec: Number(c.auto_fade_in_sec ?? 0),
+            autoFadeOutSec: Number(c.auto_fade_out_sec ?? 0),
+        }));
+    return computeAutoCrossfadeCore(clips, movedIds, undefined, "full");
 }

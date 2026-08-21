@@ -248,6 +248,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     pointerId,
                     clientX: ev.clientX,
                     clientY: ev.clientY,
+                    dragStartClientX: startX,
                     altKey: ev.altKey,
                     metaKey: ev.metaKey,
                     ctrlKey: ev.ctrlKey,

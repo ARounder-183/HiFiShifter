@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { batch } from "react-redux";
-import type { AppDispatch } from "../../../../app/store";
+import { store, type AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
@@ -18,7 +18,12 @@ import {
     beginInteraction,
     endInteraction,
 } from "../../../../features/session/sessionSlice";
-import { applyAutoCrossfade, previewAutoCrossfade } from "./autoCrossfade";
+import {
+    applyAutoCrossfade,
+    applyDetachedAutoCrossfadeClears,
+    computeInitialCrossfadeSides,
+    previewAutoCrossfade,
+} from "./autoCrossfade";
 import { clamp } from "../math";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
@@ -331,6 +336,8 @@ export type EditDragState = {
     baseSourceEndSec: number;
     basefadeInSec: number;
     basefadeOutSec: number;
+    /** 淡入淡出相对拖拽的指针锚点（秒）：用于“相对偏移”而不是“边缘线对齐指针”。 */
+    basePointerSec: number;
     baseGain: number;
     sourceBeats: number | null;
     rightEdgeBeat: number;
@@ -346,10 +353,12 @@ export type EditDragState = {
     /** 波纹跟随集：clipId → 初始起点（仅波纹开启且有跟随对象时非空）。 */
     rippleFollowers: RippleFollowerMap;
     /**
-     * 自动交叉淡化：编辑前每侧重叠关系（被编辑剪辑 + 同轨邻居）。
+     * 自动交叉淡化：编辑前每侧重叠关系（被编辑剪辑 + 编辑前直接重叠邻居）。
      * 用于编辑导致“分开”时，只清掉自动交叉淡化、保留手动 fade（预览/提交一致）。
      */
     initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
+    /** 自动交叉淡化真正受影响的 clip（被编辑 + 波纹随动 follower）。 */
+    crossfadeClipIds: string[];
     /** Per-clip base state for multi-clip trim operations */
     baseByClipId: Record<
         string,
@@ -446,6 +455,16 @@ export function useEditDrag(deps: {
         const scroller = scrollRef.current;
         if (!scroller) return;
         const rightEdgeBeat = clip.startSec + clip.lengthSec;
+        // 淡入淡出的相对拖拽锚点：以“鼠标按下位置”（deferred 起点通过 dragStartClientX
+        // 传入）作为零偏移，而不是“实时把边缘线对齐到指针位置”。这样从包络线中间
+        // 开始拖拽也不会发生跳变。
+        const dragStartClientX =
+            (e as unknown as { dragStartClientX?: number }).dragStartClientX ?? e.clientX;
+        const basePointerSec = beatFromClientX(
+            dragStartClientX,
+            scroller.getBoundingClientRect(),
+            scroller.scrollLeft,
+        );
 
         // Resolve which clips to operate on.
         // Trim / stretch / slip expand to all selected + their group members.
@@ -516,32 +535,25 @@ export function useEditDrag(deps: {
             rippleTracks,
         );
 
-        // 自动交叉淡化：快照“编辑前受影响集合”（被编辑剪辑 + 与它们同轨重叠/相邻的剪辑）
-        // 的每侧重叠关系，用于分开时只清自动交叉淡化、保留手动 fade（预览与提交一致）。
-        const editedSet = new Set(selectedClipIds);
-        const trackIdsOfEdited = new Set(selectedClipIds.map((id) => {
-            const c = id === clipId ? clip : sessionRef.current.clips.find((x) => x.id === id);
-            return c ? String(c.trackId) : "";
-        }));
-        trackIdsOfEdited.delete("");
-        const initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }> = {};
-        for (const c of sessionRef.current.clips) {
-            if (!editedSet.has(c.id) && !trackIdsOfEdited.has(String(c.trackId))) continue;
-            let leftOverlap = false;
-            let rightOverlap = false;
-            const cStart = Number(c.startSec);
-            const cEnd = cStart + Number(c.lengthSec);
-            for (const other of sessionRef.current.clips) {
-                if (other.trackId !== c.trackId || other.id === c.id) continue;
-                const oStart = Number(other.startSec);
-                const oEnd = oStart + Number(other.lengthSec);
-                if (Math.min(cEnd, oEnd) - Math.max(cStart, oStart) <= 1e-3) continue;
-                if (oStart < cStart) leftOverlap = true;
-                else rightOverlap = true;
-            }
-            initialCrossfadeSides[c.id] = { fadeIn: leftOverlap, fadeOut: rightOverlap };
-        }
+        // 自动交叉淡化：真正受影响的 clip = 被编辑剪辑 + 波纹随动 follower。
+        // 只快照“编辑前直接重叠”的邻居，同轨但无关的 clip 不会被波及。
+        const crossfadeClipIds = Array.from(
+            new Set<string>([...selectedClipIds, ...Object.keys(rippleFollowers)]),
+        );
+        const initialCrossfadeSides = computeInitialCrossfadeSides(
+            sessionRef.current.clips,
+            crossfadeClipIds,
+        );
 
+        // 淡入淡出相对拖拽的“视觉/有效”起点：自动交叉淡化生效时用自动长度，
+        // 否则用手动长度。这样从“自动交叉淡化”直接拖成“手动淡入淡出”时，
+        // 以用户当前看到的长度作为起点，拖拽过程不会从自动值跳变到隐藏的手动值。
+        const effectiveFadeInSec =
+            Number(clip.autoFadeInSec ?? 0) > 0 ? Number(clip.autoFadeInSec) : Number(clip.fadeInSec);
+        const effectiveFadeOutSec =
+            Number(clip.autoFadeOutSec ?? 0) > 0
+                ? Number(clip.autoFadeOutSec)
+                : Number(clip.fadeOutSec);
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -551,8 +563,9 @@ export function useEditDrag(deps: {
             basePlaybackRate: Number(clip.playbackRate ?? 1) || 1,
             baseSourceStartSec: clip.sourceStartSec,
             baseSourceEndSec: clip.sourceEndSec,
-            basefadeInSec: clip.fadeInSec,
-            basefadeOutSec: clip.fadeOutSec,
+            basefadeInSec: effectiveFadeInSec,
+            basefadeOutSec: effectiveFadeOutSec,
+            basePointerSec,
             baseGain: clip.gain,
             sourceBeats: null,
             rightEdgeBeat,
@@ -566,6 +579,7 @@ export function useEditDrag(deps: {
             rippleMode,
             rippleFollowers,
             initialCrossfadeSides,
+            crossfadeClipIds,
             baseByClipId: Object.fromEntries(
                 selectedClipIds.map((id) => {
                     const c =
@@ -648,8 +662,14 @@ export function useEditDrag(deps: {
 
                 const minLen = 0.0;
                 if (drag.type === "fade_in") {
-                    const raw = beat - drag.basestartSec;
-                    const next = clamp(raw, 0, Math.max(0, drag.baselengthSec));
+                    // 相对拖拽：记录起点偏移，新长度 = 基础长度 + 指针位移。
+                    // 不再“让边缘线实时对齐指针”，从包络线任意位置拖动都不会跳变。
+                    const delta = beat - drag.basePointerSec;
+                    const next = clamp(
+                        drag.basefadeInSec + delta,
+                        0,
+                        Math.max(0, drag.baselengthSec),
+                    );
                     const fadeUpdates = applyBulkFadeValue({
                         clipIds: drag.selectedClipIds,
                         clipsById: new Map(
@@ -687,8 +707,14 @@ export function useEditDrag(deps: {
                     return;
                 }
                 if (drag.type === "fade_out") {
-                    const raw = drag.rightEdgeBeat - beat;
-                    const next = clamp(raw, 0, Math.max(0, drag.baselengthSec));
+                    // 相对拖拽：新长度 = 基础长度 − 指针位移（向右缩短、向左增长），
+                    // 从包络线中间开始拖也不再跳变。
+                    const delta = beat - drag.basePointerSec;
+                    const next = clamp(
+                        drag.basefadeOutSec - delta,
+                        0,
+                        Math.max(0, drag.baselengthSec),
+                    );
                     const fadeUpdates = applyBulkFadeValue({
                         clipIds: drag.selectedClipIds,
                         clipsById: new Map(
@@ -790,9 +816,11 @@ export function useEditDrag(deps: {
                 // affectedSides = 编辑前的每侧重叠关系（分开时仅清自动交叉淡化、保留手动 fade）。
                 const previewAutoCrossfadeNow = () => {
                     if (!sessionRef.current.autoCrossfadeEnabled) return;
+                    // 用同步新鲜的 store.getState().session，避免 batch 内 sessionRef 滞后一帧，
+                    // 导致“拖开瞬间”预览滞留最后一帧自动交叉淡化长度（松手后才跳变）。
                     previewAutoCrossfade(
-                        sessionRef.current,
-                        drag.stretchGroup?.clipIds ?? drag.selectedClipIds,
+                        store.getState().session,
+                        drag.crossfadeClipIds,
                         dispatch,
                         drag.initialCrossfadeSides,
                     );
@@ -1154,11 +1182,7 @@ export function useEditDrag(deps: {
             // 保存拉伸后的播放速率，persist 后重新应用（两阶段更新策略）
             let reapplyRates: Array<{ clipId: string; rate: number }> | null = null;
 
-            const isMultiClipEdit = drag.selectedClipIds.length > 1;
-            const autoCrossfadeClipIds =
-                isMultiClipEdit || (isGroupStretch && drag.stretchGroup)
-                    ? (drag.stretchGroup?.clipIds ?? drag.selectedClipIds)
-                    : [drag.clipId];
+            const autoCrossfadeClipIds = drag.crossfadeClipIds;
             const shouldApplyAutoCrossfade =
                 sessionRef.current.autoCrossfadeEnabled &&
                 (drag.type === "trim_left" ||
@@ -1180,6 +1204,14 @@ export function useEditDrag(deps: {
             ): Promise<void> => {
                 if (!shouldApplyAutoCrossfade) {
                     await task();
+                    // 开关关闭时也要清理“已脱离重叠”的自动交叉淡化，
+                    // 保证 REAPER 导入等历史 auto 值不会盖住应恢复的手动 fade。
+                    await applyDetachedAutoCrossfadeClears(
+                        sessionRef.current,
+                        autoCrossfadeClipIds,
+                        dispatch,
+                        drag.initialCrossfadeSides,
+                    );
                     return;
                 }
 

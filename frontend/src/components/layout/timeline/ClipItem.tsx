@@ -208,6 +208,8 @@ export const ClipItem = React.memo(function ClipItem({
                     {
                         button: 0,
                         pointerId,
+                        clientX: startX,
+                        dragStartClientX: startX,
                         currentTarget: targetEl,
                     } as unknown as React.PointerEvent,
                     clip.id,
