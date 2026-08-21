@@ -369,8 +369,15 @@ export const WaveformTrackCanvas = React.memo(
                     reversed: Boolean(clip.reversed),
                     sourceDurationSec: clip.durationSec,
                     volumeGain: Number(clip.gain ?? 1) || 1,
-                    fadeInSec: Number(clip.fadeInSec ?? 0) || 0,
-                    fadeOutSec: Number(clip.fadeOutSec ?? 0) || 0,
+                    // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
+                    fadeInSec:
+                        Number(clip.autoFadeInSec ?? 0) > 0
+                            ? Number(clip.autoFadeInSec)
+                            : Number(clip.fadeInSec ?? 0) || 0,
+                    fadeOutSec:
+                        Number(clip.autoFadeOutSec ?? 0) > 0
+                            ? Number(clip.autoFadeOutSec)
+                            : Number(clip.fadeOutSec ?? 0) || 0,
                     fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
                     fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
                     dataStartSec: result.dataStartSec,

@@ -59,7 +59,7 @@ export const jaJP = {
     export_conflict_source_title:
         "重大な警告：エクスポート先がプロジェクトのメディアファイルと一致しています",
     export_conflict_source_desc:
-        "エクスポート先のパスが、現在のプロジェクトで使用中のオーディオクリップのソースファイルと一致しています。\nこのファイルを上書きすると、プロジェクトのメディアが破損し、復旧不能なデータ損失を招く可能性があります。十分に注意してください。",
+        "エクスポート先のパスが、現在のプロジェクトで使用中のメディアクリップのソースファイルと一致しています。\nこのファイルを上書きすると、プロジェクトのメディアが破損し、復旧不能なデータ損失を招く可能性があります。十分に注意してください。",
     export_conflict_apply_all: "以降の同種の競合にも同じ操作を適用する",
     export_conflict_skip: "スキップ",
     export_conflict_cancel: "エクスポートを中止",
@@ -71,7 +71,8 @@ export const jaJP = {
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
     media_stream_select_title: "音声トラックを選択",
-    media_stream_select_hint: "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
+    media_stream_select_hint:
+        "この動画には複数の音声トラックが含まれています。抽出してインポートするトラックを選択してください。",
     media_stream_track: "トラック",
     menu_import_media: "メディアファイルをインポート...",
     menu_import_reaper: "Reaper プロジェクトをインポート...",
@@ -104,7 +105,7 @@ export const jaJP = {
     quick_export_error_missing_file_name: "ファイル名を入力してください。",
     quick_export_error_pick_directory_failed: "出力フォルダの選択に失敗しました。",
     reaper_import_skipped_header:
-        "Reaper インポート時に以下のオーディオファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
+        "Reaper インポート時に以下のメディアファイルがスキップされました（非対応形式またはファイルが見つかりません）：",
     menu_pick_output: "出力先を選択",
     language: "言語",
     stretch_project_override: "プロジェクトストレッチ上書き",
@@ -161,6 +162,7 @@ export const jaJP = {
     reference_root_tracks_all: "すべて選択",
     reference_root_tracks_clear: "クリア",
     reference_root_tracks_empty: "他のトラックグループはありません",
+    reference_root_tracks_short: "参照",
     tool_mode: "ツールモード",
     edit_param: "パラメータ編集",
     draw: "描画",
@@ -185,7 +187,7 @@ export const jaJP = {
         "タイムライン上のクリップをドラッグして開始位置を移動（通常はグリッドにスナップ；Shift を押しながらでフリー移動）",
     hint_add_point: "パラメータパネルをダブルクリックしてポイントを追加",
     hint_drag_point: "ポイントをドラッグしてカーブを編集",
-    hint_drop_audio: "オーディオファイルをドロップしてインポート・分析",
+    hint_drop_audio: "メディアファイルをドロップしてインポート・分析",
     hint_alt_drag:
         "クリップをドラッグ中に Alt を押すと Slip-Edit（内部コンテンツを移動；スナップなし）",
 
@@ -197,6 +199,7 @@ export const jaJP = {
     track_remove_selected: "選択トラックを削除",
 
     param_editor: "パラメータエディタ",
+    param_editor_short: "パラメータ",
     pitch_requires_compose:
         "ルートトラックで Compose（C）を有効にしてピッチカーブを生成してください",
     pitch_requires_algo:
@@ -231,6 +234,17 @@ export const jaJP = {
     vslib_synth_mode_chorus: "コーラス",
     switch_on: "オン",
     switch_off: "オフ",
+
+    // パラメータエディタのツールバー向け短縮ラベル (省略形)
+    param_btn_pitch: "PIT",
+    param_btn_breath: "BRE",
+    param_btn_volume: "VOL",
+    param_btn_pan: "PAN",
+    param_btn_formant: "FRM",
+    param_btn_tension: "TEN",
+    param_btn_breathiness: "BRE",
+    breath_state_on: "ブレスオン",
+    breath_state_off: "ブレスオフ",
     points_help: "ダブルクリックで追加 · ドラッグで移動 · 右クリックで削除",
     points_count: "ポイント数",
     selected: "選択中",
@@ -281,6 +295,7 @@ export const jaJP = {
     status_target_none: "待機中",
     dropped_audio_imported: "ドロップされたメディアをインポートしました",
     import_audio_failed: "メディアのインポートに失敗しました",
+    status_project_version_confirmation: "プロジェクトファイルのバージョン確認",
 
     menu_about: "HiFiShifter について",
     glue: "グルー",
@@ -302,6 +317,10 @@ export const jaJP = {
     fade_out: "フェードアウト",
     show_secondary_param: "サブパラメータオーバーレイを表示",
     hide_secondary_param: "サブパラメータオーバーレイを非表示",
+    secondary_overlay_tooltip_visible: "サブパラメータオーバーレイ：表示\nクリックで非表示",
+    secondary_overlay_tooltip_hidden: "サブパラメータオーバーレイ：非表示\nクリックで表示",
+    breath_tooltip_on: "ブレス：オン\nクリックでオフ",
+    breath_tooltip_off: "ブレス：オフ\nクリックでオン",
     onnx_compile_required: "ONNX モデルが未コンパイルです。実行：cargo tauri dev --features onnx",
     onnx_unavailable_label: "（利用不可）",
     solo: "ソロ",
@@ -346,15 +365,65 @@ export const jaJP = {
     ctx_unreverse_selected: "選択項目の逆再生を解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
-    source_file_changed_title: "ソースファイルが変更されました",
-    source_file_changed_modified_desc:
-        "以下の音声ファイルが外部で変更されました。プロジェクトに再読み込みしますか？",
-    source_file_changed_deleted_desc:
-        "以下の音声ファイルが移動または削除されました。代替ファイルを選択しますか？",
-    source_file_changed_reload: "再読み込み",
-    source_file_changed_ignore: "無視",
-    source_file_changed_status_deleted: "削除済み",
-    source_file_changed_status_modified: "変更済み",
+    recapture_missing_media_title: "欠落メディアを再取得",
+    recapture_missing_media_desc:
+        "以下のメディアファイルが欠落しているか、内容が変更されています。各項目を無視するか、「変更済み」のファイルは元のパスから再読み込みし、「削除済み」のファイルは別のファイルに置き換えることができます。",
+    recapture_missing_media_modified_desc: "以下のメディアファイルは外部で変更されています。",
+    recapture_missing_media_deleted_desc: "以下のメディアファイルは移動または削除されています。",
+    recapture_missing_media_reload: "再読み込み",
+    recapture_missing_media_replace: "置き換え",
+    recapture_missing_media_reload_all: "すべて再読み込み",
+    recapture_missing_media_refresh: "更新",
+    recapture_missing_media_reset: "すべてリセット",
+    recapture_missing_media_reset_all: "すべてリセット",
+    recapture_missing_media_reset_item: "リセット",
+    recapture_missing_media_ignore: "無視",
+    recapture_missing_media_ignore_all: "すべて無視",
+    recapture_missing_media_status_deleted: "削除済み",
+    recapture_missing_media_status_modified: "変更済み",
+    recapture_missing_media_item_processing: "処理中…",
+    recapture_missing_media_item_pending: "未処理",
+    recapture_missing_media_item_ignored: "無視しました",
+    recapture_missing_media_item_reloaded: "再読み込みしました",
+    recapture_missing_media_item_replaced: "置き換えました",
+    recapture_missing_media_item_failed: "処理に失敗",
+    recapture_missing_media_summary:
+        "無視 {ignored} · 再読み込み {reloaded} · 置き換え {replaced} · 合計 {total}",
+    recapture_missing_media_reload_dialog_title: "「{name}」の代替ファイルを選択",
+    recapture_missing_media_replace_dialog_title: "「{name}」の代替ファイルを選択",
+    recapture_missing_media_reloaded_path: "再読み込みパス：",
+    recapture_missing_media_replaced_path: "置き換え後：",
+    recapture_missing_media_col_file_status: "状態",
+    recapture_missing_media_col_file: "ファイル",
+    recapture_missing_media_col_process_status: "処理状態",
+    recapture_missing_media_col_action: "操作",
+    recapture_missing_media_search_folder: "フォルダーを検索…",
+    recapture_missing_media_searching: "検索中…",
+    recapture_missing_media_search_mode_label: "検索モード：",
+    recapture_missing_media_search_mode_file_name: "ファイル名を完全一致",
+    recapture_missing_media_search_mode_extension_hash:
+        "ファイル拡張子 + ハッシュ（時間がかかる場合があります！）",
+    recapture_missing_media_search_result_summary:
+        "一致 {total} 件 · ハッシュ完全一致 {exact} 件 · {selected} 件選択中",
+    recapture_missing_media_match_exact: "ハッシュ完全一致",
+    recapture_missing_media_use_selected: "選択を使用",
+    recapture_missing_media_apply_all_exact: "全ハッシュ一致を適用",
+    recapture_missing_media_apply_all_selected: "選択中の全候補を適用",
+    recapture_missing_media_search_no_matches: "一致するファイルが見つかりません",
+    menu_recapture_missing_media: "欠落メディアを再取得...",
+    project_version_too_new_title: "新しいバージョンのプロジェクトファイルを検出しました",
+    project_version_too_new_desc:
+        "このプロジェクトファイルは、このアプリ（v{currentVersion}）より新しいバージョン（v{fileVersion}）で作成されています。互換性がない可能性があります。それでも読み込みを続行しますか？",
+    project_version_too_new_continue: "続行して読み込む",
+
+    status_save_version_confirmation: "保存バージョンの確認",
+    save_version_conflict_title: "既存のプロジェクトファイルを上書きしますか？",
+    save_version_conflict_desc_lower:
+        "保存先には、現在のバージョン（v{currentVersion}）より古いバージョン（v{existingVersion}）の HiFiShifter プロジェクトファイルが既に存在します。上書き保存するとファイルが新しいバージョンに更新され、古いアプリで開けなくなる、または理解できないパラメーターが失われる可能性があります。どの操作を実行しますか？",
+    save_version_conflict_desc_higher:
+        "保存先には、現在のバージョン（v{currentVersion}）より新しいバージョン（v{existingVersion}）の HiFiShifter プロジェクトファイルが既に存在します。上書き保存すると、保存後に一部のパラメーターが欠落したり、ファイルが互換性を失う可能性があります。どの操作を実行しますか？",
+    save_version_conflict_save_as: "名前を付けて保存...",
+    save_version_conflict_continue: "続行して保存",
 
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",
@@ -381,12 +450,18 @@ export const jaJP = {
     progress_cancel: "キャンセル",
     pitch_analyzing_clips: "分析中{clipName}{clipCount} {percentage}%",
     algo_label: "アルゴリズム",
+    algo_label_short: "アルゴ",
     child_pitch_mode_cents: "セント差",
     child_pitch_mode_degrees: "度数差",
     child_formant_mode: "フォルマント差",
     child_pitch_offset_cents_label: "子トラックのセント差",
     child_pitch_offset_degrees_label: "子トラックの度数差",
     child_formant_offset_cents_label: "子トラックのフォルマント差",
+    child_pitch_root_option: "ピッチ（トラックグループ）",
+    child_pitch_cents_option: "セント差（現在の子トラック）",
+    child_pitch_degrees_option: "度数差（現在の子トラック）",
+    child_formant_root_option: "フォルマントシフト（トラックグループ）",
+    child_formant_offset_option: "フォルマント差（現在の子トラック）",
     child_pitch_offset_cents_short: "セント",
     child_pitch_offset_degrees_short: "度数",
     child_formant_offset_cents_short: "セント",
@@ -494,7 +569,7 @@ export const jaJP = {
     vs_import_read_failed: "VocalShifter プロジェクトファイルの読み取りに失敗しました。",
     vs_import_parse_failed: "VocalShifter プロジェクトの解析に失敗しました。",
     vs_import_skipped_header:
-        "以下のオーディオファイルはスキップされました（非対応形式またはファイルが見つかりません）：",
+        "以下のメディアファイルはスキップされました（非対応形式またはファイルが見つかりません）：",
 
     // MIDI インポート
     midi_import: "MIDI をインポート",
@@ -558,6 +633,16 @@ export const jaJP = {
 
     // ツールバートグルボタン
     auto_crossfade: "自動クロスフェード",
+    ripple: "リップル編集（オートフォロー）",
+    ripple_tooltip_off:
+        "リップル編集（オートフォロー）：オフ。左クリックで有効化（トラック単位）；右クリックでモード選択。",
+    ripple_tooltip_track:
+        "リップル編集（オートフォロー）：編集したトラック上の後続クリップだけが追従します。左クリックで「全トラック」へ切替；右クリックでモード選択。",
+    ripple_tooltip_all:
+        "リップル編集（オートフォロー）：編集位置より後ろの全トラックのクリップが追従します。左クリックでオフ；右クリックでモード選択。",
+    ripple_mode_off: "オフ",
+    ripple_mode_track: "トラック単位",
+    ripple_mode_all: "全トラック",
     split_transition: "分割トランジション",
     split_transition_tooltip: "分割トランジション（右クリックで詳細設定）",
     split_transition_settings_title: "分割トランジション設定",
@@ -628,6 +713,7 @@ export const jaJP = {
     param_value_popup: "パラメータ値ポップアップ",
     lock_param_lines: "パラメータ線をロック",
     edge_smoothness: "平滑度",
+    edge_smoothness_short: "平滑",
 
     // グリッド音符タイプラベル
     grid_note_normal: "通常",
@@ -982,6 +1068,7 @@ export const jaJP = {
     menu_background_prerender: "バックグラウンド事前レンダリング",
     menu_background_prerender_desc:
         "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
+    options_auto_reload_modified_media: "変更されたメディアファイルを自動で再読み込み",
 
     benchmark_title: "推論デバイスベンチマーク",
     benchmark_desc:

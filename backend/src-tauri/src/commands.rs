@@ -154,8 +154,9 @@ pub fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
-    project::open_project(state, window, project_path)
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
+    project::open_project(state, window, project_path, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -174,6 +175,19 @@ pub fn save_project_as(
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
     project::save_project_as(state, window, notes_markdown)
+}
+
+/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
+/// 确认"继续保存"。
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_project_to_path(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
+) -> serde_json::Value {
+    project::save_project_to_path(state, window, project_path, notes_markdown, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -270,6 +284,14 @@ pub fn open_audio_dialog() -> serde_json::Value {
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_audio_dialog_multi() -> serde_json::Value {
     dialogs::open_audio_dialog_multi()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_audio_dialog_for_source(
+    source_path: String,
+    dialog_title: String,
+) -> serde_json::Value {
+    dialogs::open_audio_dialog_for_source(source_path, dialog_title)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -554,6 +576,8 @@ pub fn set_clip_state(
     fade_out_sec: Option<f64>,
     fade_in_curve: Option<String>,
     fade_out_curve: Option<String>,
+    auto_fade_in_sec: Option<f64>,
+    auto_fade_out_sec: Option<f64>,
     color: Option<String>,
     formant_morph: Option<crate::state::ClipFormantMorph>,
     checkpoint: Option<bool>,
@@ -574,6 +598,8 @@ pub fn set_clip_state(
         fade_out_sec,
         fade_in_curve,
         fade_out_curve,
+        auto_fade_in_sec,
+        auto_fade_out_sec,
         color,
         formant_morph,
         checkpoint,
@@ -612,6 +638,16 @@ pub fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
     timeline::check_source_files_changed(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_source_file_replacements(
+    state: State<'_, AppState>,
+    folder_path: String,
+    clip_ids: Vec<String>,
+    search_mode: crate::models::SearchSourceFileMode,
+) -> Result<crate::models::SearchSourceFileMatchesPayload, String> {
+    timeline::search_source_file_replacements(state, folder_path, clip_ids, search_mode).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -27,7 +27,7 @@ pub struct ProjectFragment {
     /// Per-source-clip automation slices for clip selections.  For whole-track
     /// and whole-project fragments the complete `timeline.params_by_root_track`
     /// is used instead.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub linked_params_by_clip: BTreeMap<String, LinkedParamCurvesPayload>,
 }
 
@@ -603,6 +603,8 @@ mod tests {
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,

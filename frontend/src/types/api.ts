@@ -61,6 +61,9 @@ export interface TimelineClip {
     fade_out_sec?: number;
     fade_in_curve?: string;
     fade_out_curve?: string;
+    /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
+    auto_fade_in_sec?: number;
+    auto_fade_out_sec?: number;
     formant_morph?: {
         enabled: boolean;
         target_f1_hz: number;
@@ -156,6 +159,10 @@ export interface TimelineResult {
     skipped_files?: string[];
     disabled_group_ids?: string[];
     tempo_map?: TempoMapPayload;
+    /** `open_project` 专用：工程文件版本高于当前程序，等待用户确认。 */
+    project_version_too_new?: boolean;
+    project_file_version?: number;
+    current_project_file_version?: number;
 }
 
 export interface TrackSummaryResult {

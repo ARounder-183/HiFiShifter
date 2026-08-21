@@ -257,6 +257,96 @@ textarea {
     font-family: var(--qt-font-family) !important;
 }
 
+/*
+ * 工具栏/开关图标按钮尺寸稳定：
+ * Radix 的「ghost」变体会改用 content-box 尺寸并用 padding + 负 margin 做补偿，
+ * 导致其占用的盒子与固定尺寸的 solid/soft 变体不一致。这样在启用/禁用（solid ↔ ghost）
+ * 切换时，按钮会产生约 1px 的尺寸/位置抖动。这里把 ghost 图标按钮统一为与其他变体
+ * 相同的固定尺寸（border-box + 无内边距 + 无负 margin），保证开关切换时布局零位移。
+ * 用户通过 margin 属性（如 ml="2"）设置的外边距仍然生效。
+ */
+.rt-IconButton.rt-variant-ghost {
+    box-sizing: border-box;
+    width: var(--base-button-height);
+    height: var(--base-button-height);
+    padding: 0;
+    --margin-top-override: var(--margin-top);
+    --margin-right-override: var(--margin-right);
+    --margin-bottom-override: var(--margin-bottom);
+    --margin-left-override: var(--margin-left);
+}
+
+/*
+ * 参数编辑器工具栏的“参数分组药丸”：
+ * 把「眼睛 + 参数名 + 子参数下拉」三个片段整合成一个连续背景的整体，
+ * 让用户自然看出眼睛/下拉菜单都属于该参数；激活参数的强调色整体铺满，
+ * 各片段仍保留独立的悬停高亮以提示可点击。
+ */
+.param-pill {
+    display: inline-flex;
+    align-items: stretch;
+    height: var(--space-5); /* 与 size-1 按钮一致：24px */
+    border: 1px solid var(--qt-border);
+    border-radius: 6px;
+    background: var(--qt-panel);
+    overflow: hidden;
+    white-space: nowrap;
+}
+.param-pill[data-active] {
+    border-color: transparent;
+    background: var(--accent-9);
+}
+.param-pill__seg {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    border: 0;
+    background: transparent;
+    color: var(--qt-text);
+    font: inherit;
+    text-align: center;
+    cursor: pointer;
+}
+.param-pill[data-active] .param-pill__seg {
+    color: var(--accent-contrast, #ffffff);
+}
+/* 片段之间的细分隔线，取代各自独立的背景 */
+.param-pill__seg + .param-pill__seg {
+    box-shadow: inset 1px 0 0 0 var(--qt-divider);
+}
+.param-pill[data-active] .param-pill__seg + .param-pill__seg {
+    box-shadow: inset 1px 0 0 0 rgba(255, 255, 255, 0.22);
+}
+/* 悬停：仅高亮当前片段 */
+.param-pill__seg:not(.param-pill__seg--inert):hover {
+    background: color-mix(in oklab, var(--accent-9) 16%, transparent);
+}
+.param-pill[data-active] .param-pill__seg:not(.param-pill__seg--inert):hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+/* 主参数的眼睛只展示“睁开”状态、不响应点击：不高亮、指针 default */
+.param-pill__seg--inert {
+    cursor: default;
+}
+.param-pill__seg--eye {
+    min-width: 24px;
+    padding-inline: 4px;
+}
+.param-pill__seg--label {
+    padding-inline: 5px;
+    font-size: var(--font-size-1);
+    line-height: 16px;
+}
+.param-pill__seg--chev {
+    min-width: 20px;
+    padding-inline: 2px 4px;
+}
+.param-pill__seg--breath {
+    min-width: 22px;
+    padding-inline: 3px;
+}
+
 .rt-DropdownMenuItem,
 .rt-SelectItem,
 .rt-ContextMenuItem {

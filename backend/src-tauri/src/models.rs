@@ -82,6 +82,9 @@ pub struct TimelineClip {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    /// 自动交叉淡化长度（秒），与手动 fade（fade_in_sec/fade_out_sec）分离存储。
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formant_morph: Option<ClipFormantMorphPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +115,7 @@ impl From<&ClipFormantMorph> for ClipFormantMorphPayload {
     }
 }
 
-/// 源文件变更检测结果：当用户切换回窗口时，检测导入的音频文件是否被外部替换或删除。
+/// 源文件变更检测结果：当用户切换回窗口时，检测导入的媒体文件是否被外部替换或删除。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceFileChangePayload {
@@ -127,6 +130,34 @@ pub struct SourceFileChangePayload {
 #[serde(rename_all = "snake_case")]
 pub struct CheckSourceFilesChangedPayload {
     pub changed: Vec<SourceFileChangePayload>,
+}
+
+/// “搜索文件夹”的匹配模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SearchSourceFileMode {
+    /// 精准文件名匹配：按源文件的完整文件名（含扩展名）搜索。
+    #[serde(rename = "file_name")]
+    ByFileName,
+    /// 文件扩展名 + 哈希匹配：扫描所有相同扩展名的文件，按内容指纹匹配。
+    #[serde(rename = "extension_hash")]
+    ByExtensionHash,
+}
+
+/// 按文件名称搜索到的候选源文件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceFileMatchCandidatePayload {
+    /// 候选文件的绝对路径。
+    pub path: String,
+    /// 内容指纹是否与工程记录的源文件完全一致。
+    pub exact_hash: bool,
+}
+
+/// 批量搜索候选源文件的返回载荷，key 为 clip_id。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SearchSourceFileMatchesPayload {
+    pub matches: std::collections::HashMap<String, Vec<SourceFileMatchCandidatePayload>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +209,24 @@ pub struct TimelineStatePayload {
     /// Tempo Map（None = 无 Tempo Map）。始终序列化该字段，保证前端能区分“无 Tempo Map”。
     #[serde(default)]
     pub tempo_map: Option<Vec<TempoPointPayload>>,
+}
+
+/// `open_project` 的返回载荷。
+///
+/// 除正常时间轴状态外，还可能携带“工程文件版本高于当前程序”的确认信息。
+/// 该确认信息出现时后端尚未加载工程，前端应展示警告并在用户确认后以
+/// `force = true` 再次调用 `open_project`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenProjectPayload {
+    #[serde(flatten)]
+    pub timeline: TimelineStatePayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_version_too_new: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_file_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_project_file_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -8,6 +8,7 @@ import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/se
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
+import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
 import { WaveformTrackCanvas } from "../../waveform/WaveformTrackCanvas";
@@ -285,6 +286,11 @@ export const TrackLane = React.memo(
         const isClipItemTarget = React.useCallback((target: EventTarget | null) => {
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
         }, []);
+        const isOverlapLayerTarget = React.useCallback((target: EventTarget | null) => {
+            return (
+                (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null
+            );
+        }, []);
         const primeSelection = React.useCallback(
             (clipId: string, shouldPrimeSelection: boolean, clientX?: number) => {
                 if (!shouldPrimeSelection) {
@@ -495,7 +501,10 @@ export const TrackLane = React.memo(
                     );
                 }}
                 onContextMenuCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (
+                        isClipItemTarget(event.target) ||
+                        isOverlapLayerTarget(event.target)
+                    ) {
                         return;
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
@@ -511,7 +520,10 @@ export const TrackLane = React.memo(
                     openContextMenu(hit.clipId, event.clientX, event.clientY);
                 }}
                 onPointerDownCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (
+                        isClipItemTarget(event.target) ||
+                        isOverlapLayerTarget(event.target)
+                    ) {
                         return;
                     }
                     if (event.button !== 0) {
@@ -620,6 +632,24 @@ export const TrackLane = React.memo(
                         />
                     );
                 })}
+                {/* 交叉（重叠）区确定性编辑层：双方边缘/淡入淡出都可在合适位置编辑 */}
+                <OverlapEditLayer
+                    trackClips={trackClips}
+                    pxPerSec={pxPerSec}
+                    rowHeight={rowHeight}
+                    altPressed={altPressed}
+                    selectedClipId={selectedClipId}
+                    multiSelectedClipIds={multiSelectedClipIds}
+                    multiSelectedSet={multiSelectedSet}
+                    ensureSelected={ensureSelected}
+                    selectClipRemote={selectClipRemote}
+                    recordLastClickPosition={recordLastClickPosition}
+                    startEditDrag={startEditDrag as (
+                        e: React.PointerEvent,
+                        clipId: string,
+                        type: Parameters<typeof startEditDrag>[2],
+                    ) => void}
+                />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
                     const ghostLeft = Math.max(0, ghostStartSec * pxPerSec);

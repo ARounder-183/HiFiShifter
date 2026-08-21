@@ -56,7 +56,7 @@ export const koKR = {
     export_conflict_exists_desc: "다음 내보내기 대상 파일이 이미 존재합니다:",
     export_conflict_source_title: "치명적 경고: 내보내기 대상이 프로젝트 미디어 파일과 동일합니다",
     export_conflict_source_desc:
-        "내보내기 대상 경로가 현재 프로젝트에서 사용 중인 오디오 클립의 원본 파일 경로와 일치합니다.\n이 파일을 덮어쓰면 프로젝트 미디어가 손상되어 복구 불가능한 데이터 손실이 발생할 수 있습니다. 신중하게 진행하세요.",
+        "내보내기 대상 경로가 현재 프로젝트에서 사용 중인 미디어 클립의 원본 파일 경로와 일치합니다.\n이 파일을 덮어쓰면 프로젝트 미디어가 손상되어 복구 불가능한 데이터 손실이 발생할 수 있습니다. 신중하게 진행하세요.",
     export_conflict_apply_all: "이후 동일한 유형의 충돌에도 같은 작업 적용",
     export_conflict_skip: "건너뛰기",
     export_conflict_cancel: "내보내기 취소",
@@ -68,7 +68,8 @@ export const koKR = {
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
     media_stream_select_title: "오디오 트랙 선택",
-    media_stream_select_hint: "이 동영상에는 여러 오디오 트랙이 포함되어 있습니다. 추출하여 가져올 트랙을 선택하세요.",
+    media_stream_select_hint:
+        "이 동영상에는 여러 오디오 트랙이 포함되어 있습니다. 추출하여 가져올 트랙을 선택하세요.",
     media_stream_track: "트랙",
     menu_import_media: "미디어 파일 가져오기...",
     menu_import_reaper: "Reaper 프로젝트 가져오기...",
@@ -182,7 +183,7 @@ export const koKR = {
     appearance_color_meter_rail: "미터 레일",
     appearance_color_meter_well: "미터 웰",
     reaper_import_skipped_header:
-        "Reaper 가져오기 중 다음 오디오 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
+        "Reaper 가져오기 중 다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
     menu_pick_output: "출력 경로 선택",
     language: "언어",
     stretch_project_override: "프로젝트 스트레치 재정의",
@@ -239,6 +240,7 @@ export const koKR = {
     reference_root_tracks_all: "모두 선택",
     reference_root_tracks_clear: "지우기",
     reference_root_tracks_empty: "다른 트랙 그룹이 없습니다",
+    reference_root_tracks_short: "참조",
     tool_mode: "도구 모드",
     edit_param: "파라미터 편집",
     draw: "그리기",
@@ -263,7 +265,7 @@ export const koKR = {
         "타임라인의 클립을 드래그하여 시작 위치 이동 (기본은 스냅, Shift를 누르면 자유 이동)",
     hint_add_point: "파라미터 패널을 더블 클릭하여 포인트 추가",
     hint_drag_point: "포인트를 드래그하여 커브 편집",
-    hint_drop_audio: "오디오 파일을 드롭하여 가져오기 및 분석",
+    hint_drop_audio: "미디어 파일을 드롭하여 가져오기 및 분석",
     hint_alt_drag: "클립 드래그 중 Alt 키를 누르면 Slip-Edit (내부 콘텐츠 이동; 스냅 없음)",
 
     timeline_title: "타임라인",
@@ -274,6 +276,7 @@ export const koKR = {
     track_remove_selected: "선택한 트랙 삭제",
 
     param_editor: "파라미터 에디터",
+    param_editor_short: "파라미터",
     pitch_requires_compose: "루트 트랙에서 Compose(C)를 활성화하여 피치 커브를 생성하세요",
     pitch_requires_algo: "피치 편집을 활성화하려면 '없음' 이외의 피치 알고리즘을 선택하세요",
     midi_compose_required_title: "Compose가 비활성화됨",
@@ -305,6 +308,17 @@ export const koKR = {
     vslib_synth_mode_chorus: "코러스",
     switch_on: "켜짐",
     switch_off: "꺼짐",
+
+    // 파라미터 에디터 툴바용 축약 라벨
+    param_btn_pitch: "PIT",
+    param_btn_breath: "BRE",
+    param_btn_volume: "VOL",
+    param_btn_pan: "PAN",
+    param_btn_formant: "FRM",
+    param_btn_tension: "TEN",
+    param_btn_breathiness: "BRE",
+    breath_state_on: "브레스 켜짐",
+    breath_state_off: "브레스 꺼짐",
     points_help: "더블 클릭으로 추가 · 드래그로 이동 · 우클릭으로 삭제",
     points_count: "포인트 수",
     selected: "선택됨",
@@ -355,6 +369,7 @@ export const koKR = {
     status_target_none: "대기 중",
     dropped_audio_imported: "드롭된 미디어를 가져왔습니다",
     import_audio_failed: "미디어 가져오기에 실패했습니다",
+    status_project_version_confirmation: "프로젝트 파일 버전 확인",
 
     menu_about: "HiFiShifter 정보",
     glue: "붙이기",
@@ -376,6 +391,10 @@ export const koKR = {
     fade_out: "페이드 아웃",
     show_secondary_param: "보조 파라미터 오버레이 표시",
     hide_secondary_param: "보조 파라미터 오버레이 숨기기",
+    secondary_overlay_tooltip_visible: "보조 파라미터 오버레이: 표시\n클릭하여 숨기기",
+    secondary_overlay_tooltip_hidden: "보조 파라미터 오버레이: 숨김\n클릭하여 표시",
+    breath_tooltip_on: "브레스: 켜짐\n클릭하여 끄기",
+    breath_tooltip_off: "브레스: 꺼짐\n클릭하여 켜기",
     onnx_compile_required:
         "ONNX 모델이 컴파일되지 않았습니다. 실행: cargo tauri dev --features onnx",
     onnx_unavailable_label: " (사용 불가)",
@@ -421,15 +440,64 @@ export const koKR = {
     ctx_unreverse_selected: "선택 항목 역재생 해제",
     clip_replace_same_source_confirm:
         "프로젝트 안에 선택한 클립과 같은 원본 파일 경로를 사용하는 다른 클립이 있습니다. 같은 원본 경로를 사용하는 클립도 함께 교체할까요?",
-    source_file_changed_title: "소스 파일 변경됨",
-    source_file_changed_modified_desc:
-        "다음 오디오 파일이 외부에서 수정되었습니다. 프로젝트에 다시 로드하시겠습니까?",
-    source_file_changed_deleted_desc:
-        "다음 오디오 파일이 이동 또는 삭제되었습니다. 대체 파일을 선택하시겠습니까?",
-    source_file_changed_reload: "다시 로드",
-    source_file_changed_ignore: "무시",
-    source_file_changed_status_deleted: "삭제됨",
-    source_file_changed_status_modified: "수정됨",
+    recapture_missing_media_title: "누락 미디어 다시 가져오기",
+    recapture_missing_media_desc:
+        "다음 미디어 파일이 누락되었거나 내용이 변경되었습니다. 항목을 무시하거나, '수정됨' 파일은 원래 경로에서 다시 로드하고, '삭제됨' 파일은 다른 파일로 교체할 수 있습니다.",
+    recapture_missing_media_modified_desc: "다음 미디어 파일이 외부에서 수정되었습니다.",
+    recapture_missing_media_deleted_desc: "다음 미디어 파일이 이동 또는 삭제되었습니다.",
+    recapture_missing_media_reload: "다시 로드",
+    recapture_missing_media_replace: "교체",
+    recapture_missing_media_reload_all: "모두 다시 로드",
+    recapture_missing_media_refresh: "새로 고침",
+    recapture_missing_media_reset: "모두 초기화",
+    recapture_missing_media_reset_all: "모두 초기화",
+    recapture_missing_media_reset_item: "초기화",
+    recapture_missing_media_ignore: "무시",
+    recapture_missing_media_ignore_all: "모두 무시",
+    recapture_missing_media_status_deleted: "삭제됨",
+    recapture_missing_media_status_modified: "수정됨",
+    recapture_missing_media_item_processing: "처리 중…",
+    recapture_missing_media_item_pending: "처리 안 됨",
+    recapture_missing_media_item_ignored: "무시됨",
+    recapture_missing_media_item_reloaded: "다시 로드됨",
+    recapture_missing_media_item_replaced: "교체됨",
+    recapture_missing_media_item_failed: "처리 실패",
+    recapture_missing_media_summary:
+        "무시 {ignored} · 다시 로드 {reloaded} · 교체 {replaced} · 전체 {total}",
+    recapture_missing_media_reload_dialog_title: '"{name}"의 대체 파일 선택',
+    recapture_missing_media_replace_dialog_title: '"{name}"의 대체 파일 선택',
+    recapture_missing_media_reloaded_path: "다시 로드 경로:",
+    recapture_missing_media_replaced_path: "교체 경로:",
+    recapture_missing_media_col_file_status: "파일 상태",
+    recapture_missing_media_col_file: "파일",
+    recapture_missing_media_col_process_status: "처리 상태",
+    recapture_missing_media_col_action: "동작",
+    recapture_missing_media_search_folder: "폴더 검색…",
+    recapture_missing_media_searching: "검색 중…",
+    recapture_missing_media_search_mode_label: "검색 모드:",
+    recapture_missing_media_search_mode_file_name: "파일 이름 정확히 일치",
+    recapture_missing_media_search_mode_extension_hash: "파일 확장자 + 해시 (느릴 수 있습니다!)",
+    recapture_missing_media_search_result_summary:
+        "일치 {total}개 · 해시 완전 일치 {exact}개 · 선택됨 {selected}개",
+    recapture_missing_media_match_exact: "해시 완전 일치",
+    recapture_missing_media_use_selected: "선택 사용",
+    recapture_missing_media_apply_all_exact: "모든 해시 일치 적용",
+    recapture_missing_media_apply_all_selected: "모든 선택 적용",
+    recapture_missing_media_search_no_matches: "일치하는 파일을 찾지 못했습니다",
+    menu_recapture_missing_media: "누락 미디어 다시 가져오기...",
+    project_version_too_new_title: "최신 버전의 프로젝트 파일을 감지했습니다",
+    project_version_too_new_desc:
+        "이 프로젝트 파일은 현재 프로그램(v{currentVersion})보다 최신 버전(v{fileVersion})으로 만들어졌습니다. 호환되지 않을 수 있습니다. 그래도 계속해서 로드를 시도하시겠습니까?",
+    project_version_too_new_continue: "계속 로드",
+
+    status_save_version_confirmation: "저장 버전 확인",
+    save_version_conflict_title: "기존 프로젝트 파일을 덮어쓰시겠습니까?",
+    save_version_conflict_desc_lower:
+        "대상 위치에 현재 버전(v{currentVersion})보다 오래된 버전(v{existingVersion})의 HiFiShifter 프로젝트 파일이 이미 있습니다. 덮어쓰면 파일이 새 버전으로 업그레이드되어 이전 앱에서 열 수 없거나 인식하지 못하는 매개변수가 손실될 수 있습니다. 어떤 작업을 수행하시겠습니까?",
+    save_version_conflict_desc_higher:
+        "대상 위치에 현재 버전(v{currentVersion})보다 최신 버전(v{existingVersion})의 HiFiShifter 프로젝트 파일이 이미 있습니다. 덮어쓰면 저장 후 일부 매개변수가 누락되거나 파일이 호환되지 않을 수 있습니다. 어떤 작업을 수행하시겠습니까?",
+    save_version_conflict_save_as: "다른 이름으로 저장...",
+    save_version_conflict_continue: "계속 저장",
 
     fade_curve_linear: "직선",
     fade_curve_sine: "사인",
@@ -456,12 +524,18 @@ export const koKR = {
     progress_cancel: "취소",
     pitch_analyzing_clips: "분석 중{clipName}{clipCount} {percentage}%",
     algo_label: "알고리즘",
+    algo_label_short: "알고",
     child_pitch_mode_cents: "센트 차",
     child_pitch_mode_degrees: "도수 차",
     child_formant_mode: "포먼트 차",
     child_pitch_offset_cents_label: "자식 트랙 센트 차",
     child_pitch_offset_degrees_label: "자식 트랙 도수 차",
     child_formant_offset_cents_label: "자식 트랙 포먼트 차",
+    child_pitch_root_option: "피치 (트랙 그룹)",
+    child_pitch_cents_option: "센트 차 (현재 서브트랙)",
+    child_pitch_degrees_option: "도수 차 (현재 서브트랙)",
+    child_formant_root_option: "포먼트 시프트 (트랙 그룹)",
+    child_formant_offset_option: "포먼트 차 (현재 서브트랙)",
     child_pitch_offset_cents_short: "센트",
     child_pitch_offset_degrees_short: "도수",
     child_formant_offset_cents_short: "센트",
@@ -567,7 +641,7 @@ export const koKR = {
     vs_import_read_failed: "VocalShifter 프로젝트 파일을 읽지 못했습니다.",
     vs_import_parse_failed: "VocalShifter 프로젝트 파싱에 실패했습니다.",
     vs_import_skipped_header:
-        "다음 오디오 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
+        "다음 미디어 파일이 건너뛰어졌습니다 (지원하지 않는 형식 또는 파일을 찾을 수 없음):",
 
     // MIDI 가져오기
     midi_import: "MIDI 가져오기",
@@ -631,6 +705,16 @@ export const koKR = {
 
     // 도구 모음 토글 버튼
     auto_crossfade: "자동 크로스페이드",
+    ripple: "리플 편집 (자동 추적)",
+    ripple_tooltip_off:
+        "리플 편집 (자동 추적): 꺼짐. 왼쪽 클릭으로 켜기 (트랙 단위); 오른쪽 클릭으로 모드 선택.",
+    ripple_tooltip_track:
+        "리플 편집 (자동 추적): 편집한 트랙의 뒤따르는 클립만 함께 이동. 왼쪽 클릭으로 '전체 트랙' 전환; 오른쪽 클릭으로 모드 선택.",
+    ripple_tooltip_all:
+        "리플 편집 (자동 추적): 편집 지점 이후의 모든 트랙 클립이 함께 이동. 왼쪽 클릭으로 끄기; 오른쪽 클릭으로 모드 선택.",
+    ripple_mode_off: "끄기",
+    ripple_mode_track: "트랙 단위",
+    ripple_mode_all: "전체 트랙",
     split_transition: "분할 트랜지션",
     split_transition_tooltip: "분할 트랜지션 (우클릭하여 상세 설정)",
     split_transition_settings_title: "분할 트랜지션 설정",
@@ -701,6 +785,7 @@ export const koKR = {
     param_value_popup: "파라미터 값 팝업",
     lock_param_lines: "파라미터 라인 잠금",
     edge_smoothness: "스무딩",
+    edge_smoothness_short: "스무딩",
 
     // 그리드 음표 유형 라벨
     grid_note_normal: "보통",
@@ -999,6 +1084,7 @@ export const koKR = {
     menu_background_prerender: "백그라운드 사전 렌더링",
     menu_background_prerender_desc:
         "편집 후 즉시 백그라운드에서 사전 렌더링을 시작합니다. 재생 시 이미 렌더링된 부분을 바로 사용할 수 있습니다.",
+    options_auto_reload_modified_media: "수정된 미디어 파일 자동 다시 로드",
 
     benchmark_title: "추론 장치 벤치마크",
     benchmark_desc:

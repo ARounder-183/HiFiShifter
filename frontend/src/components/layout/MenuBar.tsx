@@ -82,11 +82,14 @@ interface MenuBarProps {
     onNewProject: () => void;
     onOpenProject: () => void;
     onOpenRecentProject: (projectPath: string) => void;
+    onRecaptureMissingMedia: () => void;
     onExit: () => void;
     onImportMidiFromMenu: () => void;
     onImportProject: () => void;
     autoBackupSettings: AutoBackupSettings;
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
+    autoReloadModifiedMedia: boolean;
+    onAutoReloadModifiedMediaChange: (value: boolean) => void;
 }
 
 function timeUnitLabelKey(unit: TimeUnit): string {
@@ -106,11 +109,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     onNewProject,
     onOpenProject,
     onOpenRecentProject,
+    onRecaptureMissingMedia,
     onExit,
     onImportMidiFromMenu,
     onImportProject,
     autoBackupSettings,
     onAutoBackupSettingsSaved,
+    autoReloadModifiedMedia,
+    onAutoReloadModifiedMediaChange,
 }) => {
     const { t, setLocale } = useI18n();
     const tAny = t as (key: string) => string;
@@ -443,6 +449,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             )}
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
+
+                    <DropdownMenu.Item onSelect={onRecaptureMissingMedia}>
+                        {t("menu_recapture_missing_media")}
+                    </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
 
@@ -973,6 +983,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
+                    </DropdownMenu.Item>
+
+                    {/* Auto-reload modified media — same level as Background Pre-render */}
+                    <DropdownMenu.Item
+                        onSelect={() => onAutoReloadModifiedMediaChange(!autoReloadModifiedMedia)}
+                    >
+                        {withCheck(
+                            autoReloadModifiedMedia,
+                            tAny("options_auto_reload_modified_media"),
+                        )}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />

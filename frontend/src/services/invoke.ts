@@ -238,9 +238,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 fadeOutSec: args[11],
                 fadeInCurve: args[12],
                 fadeOutCurve: args[13],
-                color: args[14],
-                formantMorph: args[15],
-                checkpoint: args[16],
+                autoFadeInSec: args[14],
+                autoFadeOutSec: args[15],
+                color: args[16],
+                formantMorph: args[17],
+                checkpoint: args[18],
             };
 
         case "set_clips_state_bulk":
@@ -257,6 +259,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 clipIds: args[0],
                 newSourcePath: args[1],
                 replaceSameSource: args[2],
+            };
+
+        case "search_source_file_replacements":
+            return {
+                folderPath: args[0],
+                clipIds: args[1],
+                searchMode: args[2],
             };
 
         case "split_clip":
@@ -314,7 +323,10 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { startSec: args[0] };
 
         case "open_project":
-            return { projectPath: args[0] };
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { force: args[1] } : {}),
+            };
 
         case "run_timed_auto_backup":
             return { pathTemplate: args[0] };
@@ -371,6 +383,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_project_as":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 
+        case "save_project_to_path":
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { notesMarkdown: args[1] } : {}),
+                ...(args[2] !== undefined ? { force: args[2] } : {}),
+            };
+
         case "import_vocalshifter_project":
             return { vspPath: args[0] };
 
@@ -389,6 +408,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[0] !== undefined ? { selectionStartFrame: args[0] } : {}),
                 ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
             };
+
+        case "open_audio_dialog_for_source":
+            return { sourcePath: args[0], dialogTitle: args[1] };
 
         case "open_midi_dialog":
             return {};

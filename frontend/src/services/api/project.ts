@@ -92,11 +92,19 @@ export const projectApi = {
     openProjectDialog: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_project_dialog"),
 
-    openProject: (projectPath: string) => invoke<TimelineResult>("open_project", projectPath),
+    openProject: (projectPath: string, force?: boolean) =>
+        invoke<TimelineResult>("open_project", projectPath, force),
 
     saveProject: (notesMarkdown?: string) => invoke<any>("save_project", notesMarkdown),
 
     saveProjectAs: (notesMarkdown?: string) => invoke<any>("save_project_as", notesMarkdown),
+
+    /**
+     * 保存到指定路径；`force=true` 表示用户已在"版本不一致覆盖"对话框中确认。
+     * 目标已存在版本不一致的工程文件（且未 force）时返回 versionConflict 信号。
+     */
+    saveProjectToPath: (projectPath: string, notesMarkdown?: string, force?: boolean) =>
+        invoke<any>("save_project_to_path", projectPath, notesMarkdown, force),
 
     getAutoBackupSettings: () => invoke<AutoBackupSettings>("get_auto_backup_settings"),
 

@@ -171,22 +171,207 @@ import {
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = 1600;
 
+/**
+ * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
+ * - 「音高」为核心参数，固定在最左侧（在 JSX 中单独渲染，不在此排序）；
+ * - 「音量/声像」是所有算法的共通参数，固定在最右侧；
+ * - 中间参数随算法不同而变化。
+ */
+function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
+    switch (algo) {
+        case "nsf_hifigan_onnx":
+            // 音高、共振峰、气声音量、张力、音量、声像
+            switch (paramId) {
+                case "formant_shift_cents":
+                    return 10;
+                case "breath_gain":
+                    return 20;
+                case "hifigan_tension":
+                    return 30;
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+        case "vslib":
+            // 音高、共振峰、气声强度、音量、声像
+            switch (paramId) {
+                case "formant_shift_cents":
+                    return 10;
+                case "breathiness":
+                    return 20;
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+        default:
+            // world / 其它：仅保证音量/声像在右侧，其余保持后端顺序
+            switch (paramId) {
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+    }
+}
+
 function sameStringArray(a: string[], b: string[]) {
     if (a.length !== b.length) return false;
     return a.every((value, index) => value === b[index]);
 }
 
+/**
+ * “气声/气流”图标：三道向右上方倾斜流动的曲线，表示风/气流（类似 Material “Air” 图标），
+ * 避免被误认为汉堡菜单；关闭（off）时气流变淡并叠加一条斜杠。
+ * 用于代替冗长的“气声开启/气声关闭”文本。
+ */
+const BreathAirIcon: React.FC<{ off?: boolean }> = ({ off = false }) => (
+    <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ display: "block" }}
+    >
+        {/* 三道右倾的流动曲线 = 风/气流 */}
+        <path
+            d="M2.2 3.6C4.8 1.9 8.2 2.5 11 5.2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.4 6.8C4.6 5.1 8.1 5.9 11.4 8.9"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.9 10.1C4.7 9.3 7.5 9.5 9.9 11.7"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        {off ? (
+            <path d="M3 11L11 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        ) : null}
+    </svg>
+);
+
+type ParamToolbarPillProps = {
+    /** 参数按钮上的简短标签（如 PIT / 共振峰） */
+    label: string;
+    /** 完整参数名（ToolTip） */
+    labelTooltip?: string;
+    /** 是否为主参数（激活）：整个药丸整体高亮 */
+    active: boolean;
+    /** 激活时的强调色（音高=grass，共振峰/其它=amber） */
+    accent: "grass" | "amber";
+    /** 点击标签：选中该参数 */
+    onSelect: () => void;
+    /** 眼睛状态：main=主参数（仅展示“睁开”，不响应点击）；on/off=副曲线叠加可见/隐藏 */
+    eyeMode: "main" | "on" | "off";
+    /** 点击眼睛（非 main 时调用；main 时不响应，以保持排版稳定） */
+    onToggleEye?: () => void;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    eyeTooltip?: string;
+    /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
+    eyeLabel?: string;
+    /** 可选尾部片段（如气声开关）：渲染在参数名之后、子参数下拉之前 */
+    trailing?: React.ReactNode;
+    /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
+    dropdown?: React.ReactNode;
+};
+
+/**
+ * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
+ * 各片段共享一块连续背景（由 data-accent-color 决定激活色），
+ * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
+ */
+const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
+    label,
+    labelTooltip,
+    active,
+    accent,
+    onSelect,
+    eyeMode,
+    onToggleEye,
+    eyeTooltip,
+    eyeLabel,
+    trailing,
+    dropdown,
+}) => {
+    const eyeInert = eyeMode === "main";
+    const eyeIcon = eyeMode === "off" ? <EyeClosedIcon /> : <EyeOpenIcon />;
+    return (
+        <div
+            className="param-pill"
+            data-accent-color={accent}
+            data-active={active ? "true" : undefined}
+        >
+            <button
+                type="button"
+                tabIndex={-1}
+                className={
+                    eyeInert
+                        ? "param-pill__seg param-pill__seg--eye param-pill__seg--inert"
+                        : "param-pill__seg param-pill__seg--eye"
+                }
+                data-tooltip={eyeInert ? undefined : eyeTooltip}
+                aria-label={eyeInert ? label : (eyeLabel ?? eyeTooltip)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    if (!eyeInert) onToggleEye?.();
+                }}
+            >
+                {eyeIcon}
+            </button>
+            <button
+                type="button"
+                className="param-pill__seg param-pill__seg--label"
+                data-tooltip={labelTooltip}
+                onClick={onSelect}
+            >
+                {label}
+            </button>
+            {trailing}
+            {dropdown}
+        </div>
+    );
+};
+
 type FormantParamButtonProps = {
     rootParamId: string;
+    /** 按钮上的简短标签（如 FRM / 共振峰） */
     rootLabel: string;
+    /** 下拉菜单中“根参数”选项的详细说明（如 Formant Shift (Track Group)） */
+    rootMenuLabel?: string;
+    rootTooltip?: string;
     childParamId: string | null;
+    /** 按钮上的简短子参数标签（如 共振峰差） */
     childLabel: string;
+    /** 下拉菜单中“子参数”选项的详细说明（如 Formant Offset (Current Sub-track)） */
+    childMenuLabel?: string;
     rootActive: boolean;
     childActive: boolean;
     secondaryVisible: boolean;
-    showSecondary: boolean;
+    /** 眼睛的无障碍标签（简短动作说明） */
     hideSecondaryLabel: string;
     showSecondaryLabel: string;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    hideSecondaryTooltip: string;
+    showSecondaryTooltip: string;
     onSelectRoot: () => void;
     onSelectChild: () => void;
     onToggleSecondary: () => void;
@@ -195,107 +380,89 @@ type FormantParamButtonProps = {
 const FormantParamButton: React.FC<FormantParamButtonProps> = ({
     rootParamId,
     rootLabel,
+    rootMenuLabel,
+    rootTooltip,
     childParamId,
     childLabel,
+    childMenuLabel,
     rootActive,
     childActive,
     secondaryVisible,
-    showSecondary,
     hideSecondaryLabel,
     showSecondaryLabel,
+    hideSecondaryTooltip,
+    showSecondaryTooltip,
     onSelectRoot,
     onSelectChild,
     onToggleSecondary,
 }) => {
+    const eyeMode: "main" | "on" | "off" =
+        rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
+
     if (!childParamId) {
         return (
-            <React.Fragment>
-                <Button
-                    size="1"
-                    variant={rootActive ? "solid" : "soft"}
-                    color={rootActive ? "amber" : "gray"}
-                    onClick={onSelectRoot}
-                    style={{ cursor: "pointer" }}
-                >
-                    {rootLabel}
-                </Button>
-                {showSecondary ? (
-                    <IconButton
-                        size="1"
-                        variant={secondaryVisible ? "soft" : "ghost"}
-                        color={secondaryVisible ? "orange" : "gray"}
-                        onClick={onToggleSecondary}
-                        style={{ cursor: "pointer" }}
-                        data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
-                    >
-                        {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
-                    </IconButton>
-                ) : null}
-            </React.Fragment>
+            <ParamToolbarPill
+                label={rootLabel}
+                labelTooltip={rootTooltip}
+                active={rootActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+            />
         );
     }
 
     return (
-        <React.Fragment>
-            <Button
-                size="1"
-                variant={rootActive || childActive ? "solid" : "soft"}
-                color={rootActive || childActive ? "amber" : "gray"}
-                onClick={onSelectRoot}
-                style={{ cursor: "pointer" }}
-            >
-                {childActive ? childLabel : rootLabel}
-            </Button>
-            {showSecondary ? (
-                <IconButton
-                    size="1"
-                    variant={secondaryVisible ? "soft" : "ghost"}
-                    color={secondaryVisible ? "orange" : "gray"}
-                    onClick={onToggleSecondary}
-                    style={{ cursor: "pointer" }}
-                    data-tooltip={secondaryVisible ? hideSecondaryLabel : showSecondaryLabel}
-                >
-                    {secondaryVisible ? <EyeOpenIcon /> : <EyeClosedIcon />}
-                </IconButton>
-            ) : null}
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger data-tooltip={childActive ? childLabel : rootLabel}>
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        style={{ cursor: "pointer" }}
+        <DropdownMenu.Root>
+            <ParamToolbarPill
+                label={childActive ? childLabel : rootLabel}
+                labelTooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                active={rootActive || childActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+                dropdown={
+                    <DropdownMenu.Trigger
+                        className="param-pill__seg param-pill__seg--chev"
+                        data-tooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                        tabIndex={-1}
                     >
                         <ChevronDownIcon width="12" height="12" />
-                    </IconButton>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.RadioGroup
-                        value={
-                            rootActive
-                                ? rootParamId
-                                : childActive && childParamId
-                                  ? childParamId
-                                  : undefined
+                    </DropdownMenu.Trigger>
+                }
+            />
+            <DropdownMenu.Content variant="soft" color="gray">
+                <DropdownMenu.RadioGroup
+                    value={
+                        rootActive
+                            ? rootParamId
+                            : childActive && childParamId
+                              ? childParamId
+                              : undefined
+                    }
+                    onValueChange={(value) => {
+                        if (value === rootParamId) {
+                            onSelectRoot();
+                        } else if (value === childParamId) {
+                            onSelectChild();
                         }
-                        onValueChange={(value) => {
-                            if (value === rootParamId) {
-                                onSelectRoot();
-                            } else if (value === childParamId) {
-                                onSelectChild();
-                            }
-                        }}
-                    >
-                        <DropdownMenu.RadioItem value={rootParamId}>
-                            {rootLabel}
-                        </DropdownMenu.RadioItem>
-                        <DropdownMenu.RadioItem value={childParamId}>
-                            {childLabel}
-                        </DropdownMenu.RadioItem>
-                    </DropdownMenu.RadioGroup>
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
-        </React.Fragment>
+                    }}
+                >
+                    <DropdownMenu.RadioItem value={rootParamId}>
+                        {rootMenuLabel ?? rootLabel}
+                    </DropdownMenu.RadioItem>
+                    <DropdownMenu.RadioItem value={childParamId}>
+                        {childMenuLabel ?? childLabel}
+                    </DropdownMenu.RadioItem>
+                </DropdownMenu.RadioGroup>
+            </DropdownMenu.Content>
+        </DropdownMenu.Root>
     );
 };
 
@@ -817,12 +984,15 @@ export const PianoRollPanel: React.FC = () => {
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
-            if (syncEnabled && !timelineSyncApplyingRef.current) {
-                timelineViewportSync.setViewport({
-                    scrollLeft: native,
-                    pxPerSec,
-                });
-            }
+        }
+        // 同步模式下手动缩放后必须把新的 pxPerSec 写回共享视口；即使滚动位置
+        // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
+        // 也要广播缩放，否则轨道视图不会跟着缩放。
+        if (syncEnabled && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport({
+                scrollLeft: native,
+                pxPerSec,
+            });
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
@@ -969,11 +1139,18 @@ export const PianoRollPanel: React.FC = () => {
         editParam === "pitch" ||
         editParam === childPitchOffsetCentsParam ||
         editParam === childPitchOffsetDegreesParam;
+    // 工具栏上的音高组按钮使用简写（非中文语系为 PIT），完整名称放入 ToolTip。
     const pitchGroupLabel =
         editParam === childPitchOffsetCentsParam
             ? t("child_pitch_mode_cents")
             : editParam === childPitchOffsetDegreesParam
               ? t("child_pitch_mode_degrees")
+              : t("param_btn_pitch");
+    const pitchGroupTooltip =
+        editParam === childPitchOffsetCentsParam
+            ? t("child_pitch_offset_cents_label")
+            : editParam === childPitchOffsetDegreesParam
+              ? t("child_pitch_offset_degrees_label")
               : t("pitch");
 
     // 声码器参数描述符（由 algo 动态定制面板）
@@ -983,6 +1160,14 @@ export const PianoRollPanel: React.FC = () => {
         [],
     );
     const [processorStaticValues, setProcessorStaticValues] = useState<Record<string, number>>({});
+
+    // 工具栏参数按钮按“音高 → 中间参数（随算法变化）→ 音量/声像”的顺序排列
+    const orderedProcessorParams = useMemo(() => {
+        const algo = rootTrack?.pitchAnalysisAlgo;
+        return [...processorParams].sort(
+            (a, b) => getParamToolbarRank(a.id, algo) - getParamToolbarRank(b.id, algo),
+        );
+    }, [processorParams, rootTrack?.pitchAnalysisAlgo]);
     const currentParamRange = useMemo(() => {
         if (editParam === "pitch") {
             return { min: 24, max: 108 };
@@ -1178,6 +1363,34 @@ export const PianoRollPanel: React.FC = () => {
             }
         },
         [t],
+    );
+
+    // 工具栏参数按钮的简写标签（非中文语系用三个大写字形的缩写，如 PIT/BRE/VOL）。
+    // 全称仍通过 getProcessorParamLabel() 提供，用于 ToolTip。
+    const getProcessorParamShortLabel = useCallback(
+        (param: ProcessorParamDescriptor) => {
+            switch (param.id) {
+                case "breath_enabled":
+                case "breath_gain":
+                    return t("param_btn_breath");
+                case "hifigan_tension":
+                case "tension":
+                    return t("param_btn_tension");
+                case "formant_shift_cents":
+                    return t("param_btn_formant");
+                case "hifigan_volume":
+                case "volume":
+                case "vslib_volume":
+                    return t("param_btn_volume");
+                case "pan":
+                    return t("param_btn_pan");
+                case "breathiness":
+                    return t("param_btn_breathiness");
+                default:
+                    return getProcessorParamLabel(param);
+            }
+        },
+        [getProcessorParamLabel, t],
     );
 
     const getStaticOptionLabel = useCallback(
@@ -1402,10 +1615,7 @@ export const PianoRollPanel: React.FC = () => {
     // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
     // 想让原生最大滚动位置为“工程宽 + 同步偏移”，spacer 需再加一个视口宽。
     const paddedContentWidth = useMemo(
-        () =>
-            contentWidth +
-            viewSize.w +
-            (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
+        () => contentWidth + viewSize.w + (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
         [contentWidth, viewSize.w, s.paramEditorSyncTimeline, timelineOffsetPx],
     );
 
@@ -2185,10 +2395,7 @@ export const PianoRollPanel: React.FC = () => {
             scaleSegments: buildScaleSegments(
                 s.tempoMap,
                 effectiveProjectScale,
-                Math.max(
-                    0,
-                    scrollLeftRef.current / Math.max(1e-9, pxPerSecRef.current) - 5,
-                ),
+                Math.max(0, scrollLeftRef.current / Math.max(1e-9, pxPerSecRef.current) - 5),
                 (scrollLeftRef.current + viewSizeRef.current.w) /
                     Math.max(1e-9, pxPerSecRef.current) +
                     5,
@@ -3141,28 +3348,25 @@ export const PianoRollPanel: React.FC = () => {
                         scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const degreeSteps = degreeInputToScaleSteps(degrees);
                     if (degreeSteps === 0) return;
-                    await applySelectionEditWithEdgeSmoothing(
-                        (vals) => {
-                            const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
-                            return editParam === "pitch"
-                                ? vals.map((midi, i) => {
-                                      if (midi === 0) return 0;
-                                      const scale =
-                                          fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
-                                          "C";
-                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
-                                  })
-                                : vals.map((midi, i) => {
-                                      const scale =
-                                          fixedScale ??
-                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
-                                          "C";
-                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
-                                  });
-                        },
-                        Number(data?.edgeSmoothnessPercent),
-                    );
+                    await applySelectionEditWithEdgeSmoothing((vals) => {
+                        const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                        return editParam === "pitch"
+                            ? vals.map((midi, i) => {
+                                  if (midi === 0) return 0;
+                                  const scale =
+                                      fixedScale ??
+                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                      "C";
+                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                              })
+                            : vals.map((midi, i) => {
+                                  const scale =
+                                      fixedScale ??
+                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                      "C";
+                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                              });
+                    }, Number(data?.edgeSmoothnessPercent));
                     break;
                 }
                 case "setPitch": {
@@ -3319,9 +3523,7 @@ export const PianoRollPanel: React.FC = () => {
                     const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
                     const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
                     const scaleAt = (i: number): ScaleLike =>
-                        fixedScale ??
-                        projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
-                        "C";
+                        fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
                     const quantized =
                         unit === "semitone"
                             ? vals.map((v) =>
@@ -3760,30 +3962,9 @@ export const PianoRollPanel: React.FC = () => {
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
         >
-            <rect
-                x="2.5"
-                y="10.5"
-                width="4"
-                height="2"
-                rx="0.5"
-                fill="currentColor"
-            />
-            <rect
-                x="6.5"
-                y="7.5"
-                width="4"
-                height="2"
-                rx="0.5"
-                fill="currentColor"
-            />
-            <rect
-                x="10.5"
-                y="4.5"
-                width="2.5"
-                height="2"
-                rx="0.5"
-                fill="currentColor"
-            />
+            <rect x="2.5" y="10.5" width="4" height="2" rx="0.5" fill="currentColor" />
+            <rect x="6.5" y="7.5" width="4" height="2" rx="0.5" fill="currentColor" />
+            <rect x="10.5" y="4.5" width="2.5" height="2" rx="0.5" fill="currentColor" />
         </svg>
     );
 
@@ -3905,7 +4086,7 @@ export const PianoRollPanel: React.FC = () => {
                 justify="between"
                 className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
-                <Flex align="center" gap="2">
+                <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
                     <IconButton
                         size="1"
                         variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
@@ -3921,7 +4102,7 @@ export const PianoRollPanel: React.FC = () => {
                         {s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
                     </IconButton>
                     <Text size="1" weight="bold" color="gray">
-                        {t("param_editor")}
+                        {tAny("param_editor_short")}
                     </Text>
                     {/* 音高吸附按钮，紧邻 param_editor 右侧，留 8px 空白 */}
                     <Flex gap="1" align="center" style={{ marginLeft: 8 }}>
@@ -3983,10 +4164,7 @@ export const PianoRollPanel: React.FC = () => {
                                             fill="none"
                                             xmlns="http://www.w3.org/2000/svg"
                                         >
-                                            <path
-                                                d="M0 6L6 0V6Z"
-                                                fill="currentColor"
-                                            />
+                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
                                         </svg>
                                     </Box>
                                 </Box>
@@ -4153,37 +4331,37 @@ export const PianoRollPanel: React.FC = () => {
                                             justifyContent: "center",
                                         }}
                                     >
-                            {!effectivePitchSnapVisual ? (
-                                <Box
-                                    style={{
-                                        position: "relative",
-                                        width: 15,
-                                        height: 15,
-                                        opacity: 0.45,
-                                    }}
-                                >
-                                    {pitchSnapSemitoneIcon}
-                                    <svg
-                                        className="absolute inset-0"
-                                        width="15"
-                                        height="15"
-                                        viewBox="0 0 15 15"
-                                        fill="none"
-                                        xmlns="http://www.w3.org/2000/svg"
-                                    >
-                                        <path
-                                            d="M3 3L12 12"
-                                            stroke="currentColor"
-                                            strokeWidth="1.2"
-                                            strokeLinecap="round"
-                                        />
-                                    </svg>
-                                </Box>
-                            ) : s.pitchSnapUnit === "semitone" ? (
-                                pitchSnapSemitoneIcon
-                            ) : (
-                                pitchSnapScaleIcon
-                            )}
+                                        {!effectivePitchSnapVisual ? (
+                                            <Box
+                                                style={{
+                                                    position: "relative",
+                                                    width: 15,
+                                                    height: 15,
+                                                    opacity: 0.45,
+                                                }}
+                                            >
+                                                {pitchSnapSemitoneIcon}
+                                                <svg
+                                                    className="absolute inset-0"
+                                                    width="15"
+                                                    height="15"
+                                                    viewBox="0 0 15 15"
+                                                    fill="none"
+                                                    xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                    <path
+                                                        d="M3 3L12 12"
+                                                        stroke="currentColor"
+                                                        strokeWidth="1.2"
+                                                        strokeLinecap="round"
+                                                    />
+                                                </svg>
+                                            </Box>
+                                        ) : s.pitchSnapUnit === "semitone" ? (
+                                            pitchSnapSemitoneIcon
+                                        ) : (
+                                            pitchSnapScaleIcon
+                                        )}
                                     </Box>
                                     <Box
                                         style={{
@@ -4202,10 +4380,7 @@ export const PianoRollPanel: React.FC = () => {
                                             fill="none"
                                             xmlns="http://www.w3.org/2000/svg"
                                         >
-                                            <path
-                                                d="M0 6L6 0V6Z"
-                                                fill="currentColor"
-                                            />
+                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
                                         </svg>
                                     </Box>
                                 </Box>
@@ -4394,8 +4569,10 @@ export const PianoRollPanel: React.FC = () => {
                                 />
                             </svg>
                         </IconButton>
-                        <Flex align="center" gap="1" ml="2">
-                            <Text size="1">{tAny("edge_smoothness")}:</Text>
+                        <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
+                            <Text size="1" data-tooltip={tAny("edge_smoothness")}>
+                                {tAny("edge_smoothness_short")}:
+                            </Text>
                             <input
                                 type="range"
                                 min={0}
@@ -4425,7 +4602,13 @@ export const PianoRollPanel: React.FC = () => {
                                 onKeyUp={() => {
                                     void dispatch(persistUiSettings());
                                 }}
-                                style={{ width: 120 }}
+                                style={{
+                                    // 根据工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时缩到 48px
+                                    flex: "1 1 auto",
+                                    width: 120,
+                                    minWidth: 48,
+                                    maxWidth: 120,
+                                }}
                             />
                             <Text size="1" style={{ minWidth: 36, textAlign: "right" }}>
                                 {Math.round(s.edgeSmoothnessPercent)}%
@@ -4443,283 +4626,27 @@ export const PianoRollPanel: React.FC = () => {
 
                 <Flex gap="2" align="center">
                     <Flex gap="1" align="center">
-                        {selectedIsChildTrack &&
-                        (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
+                        {/* 参考轨道组 / 导入 MIDI：仅当切换到“音高”参数时显示（位置固定在“音高”左侧）。
+                            按钮样式与其他工具按钮一致（Radix soft），简写 + ToolTip 保留全称。 */}
+                        {rootTrack && editParam === "pitch" ? (
                             <React.Fragment>
-                                <Button
-                                    size="1"
-                                    variant={pitchGroupActive ? "solid" : "soft"}
-                                    color={pitchGroupActive ? "grass" : "gray"}
-                                    onClick={() => dispatch(setEditParam("pitch"))}
-                                    style={{ cursor: "pointer" }}
-                                >
-                                    {pitchGroupLabel}
-                                </Button>
-                                {editParam !== "pitch" && pitchEnabled ? (
-                                    <IconButton
-                                        size="1"
-                                        variant={
-                                            secondaryParamVisible["pitch"] ? "soft" : "ghost"
-                                        }
-                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                        onClick={() => toggleSecondaryParam("pitch")}
-                                        style={{ cursor: "pointer" }}
-                                        data-tooltip={
-                                            secondaryParamVisible["pitch"]
-                                                ? t("hide_secondary_param")
-                                                : t("show_secondary_param")
-                                        }
-                                    >
-                                        {secondaryParamVisible["pitch"] ? (
-                                            <EyeOpenIcon />
-                                        ) : (
-                                            <EyeClosedIcon />
-                                        )}
-                                    </IconButton>
-                                ) : null}
                                 <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger data-tooltip={pitchGroupLabel}>
-                                        <IconButton
+                                    <DropdownMenu.Trigger data-tooltip={t("reference_root_tracks")}>
+                                        <Button
                                             size="1"
-                                            variant="ghost"
+                                            variant="soft"
                                             color="gray"
                                             style={{ cursor: "pointer" }}
                                         >
-                                            <ChevronDownIcon width="12" height="12" />
-                                        </IconButton>
-                                    </DropdownMenu.Trigger>
-                                    <DropdownMenu.Content variant="soft" color="gray">
-                                        <DropdownMenu.RadioGroup
-                                            value={editParam}
-                                            onValueChange={(value) =>
-                                                dispatch(setEditParam(value))
-                                            }
-                                        >
-                                            <DropdownMenu.RadioItem value="pitch">
-                                                {t("pitch")}
-                                            </DropdownMenu.RadioItem>
-                                            {childPitchOffsetCentsParam ? (
-                                                <DropdownMenu.RadioItem
-                                                    value={childPitchOffsetCentsParam}
-                                                >
-                                                    {t("child_pitch_mode_cents")}
-                                                </DropdownMenu.RadioItem>
-                                            ) : null}
-                                            {childPitchOffsetDegreesParam ? (
-                                                <DropdownMenu.RadioItem
-                                                    value={childPitchOffsetDegreesParam}
-                                                >
-                                                    {t("child_pitch_mode_degrees")}
-                                                </DropdownMenu.RadioItem>
-                                            ) : null}
-                                        </DropdownMenu.RadioGroup>
-                                    </DropdownMenu.Content>
-                                </DropdownMenu.Root>
-                            </React.Fragment>
-                        ) : (
-                            <React.Fragment>
-                                <Button
-                                    size="1"
-                                    variant={editParam === "pitch" ? "solid" : "soft"}
-                                    color={editParam === "pitch" ? "grass" : "gray"}
-                                    onClick={() => dispatch(setEditParam("pitch"))}
-                                    style={{ cursor: "pointer" }}
-                                >
-                                    {t("pitch")}
-                                </Button>
-                                {editParam !== "pitch" && pitchEnabled ? (
-                                    <IconButton
-                                        size="1"
-                                        variant={
-                                            secondaryParamVisible["pitch"] ? "soft" : "ghost"
-                                        }
-                                        color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                        onClick={() => toggleSecondaryParam("pitch")}
-                                        style={{ cursor: "pointer" }}
-                                        data-tooltip={
-                                            secondaryParamVisible["pitch"]
-                                                ? t("hide_secondary_param")
-                                                : t("show_secondary_param")
-                                        }
-                                    >
-                                        {secondaryParamVisible["pitch"] ? (
-                                            <EyeOpenIcon />
-                                        ) : (
-                                            <EyeClosedIcon />
-                                        )}
-                                    </IconButton>
-                                ) : null}
-                            </React.Fragment>
-                        )}
-                        {/* 由后端 processorParams 驱动的动态参数按钮 */}
-                        {processorParams.map((p) => {
-                            if (p.id === "formant_shift_cents") {
-                                return (
-                                    <FormantParamButton
-                                        key={p.id}
-                                        rootParamId={p.id}
-                                        rootLabel={getProcessorParamLabel(p)}
-                                        childParamId={
-                                            selectedIsChildTrack ? childFormantOffsetParam : null
-                                        }
-                                        childLabel={t("child_formant_mode")}
-                                        rootActive={editParam === p.id}
-                                        childActive={editParam === childFormantOffsetParam}
-                                        secondaryVisible={secondaryParamVisible[p.id] ?? false}
-                                        showSecondary={editParam !== p.id}
-                                        hideSecondaryLabel={t("hide_secondary_param")}
-                                        showSecondaryLabel={t("show_secondary_param")}
-                                        onSelectRoot={() => dispatch(setEditParam(p.id))}
-                                        onSelectChild={() => {
-                                            if (childFormantOffsetParam) {
-                                                dispatch(setEditParam(childFormantOffsetParam));
-                                            }
-                                        }}
-                                        onToggleSecondary={() => toggleSecondaryParam(p.id)}
-                                    />
-                                );
-                            }
-
-                            return (
-                                <React.Fragment key={p.id}>
-                                    <Button
-                                        size="1"
-                                        variant={editParam === p.id ? "solid" : "soft"}
-                                        color={editParam === p.id ? "amber" : "gray"}
-                                        onClick={() => dispatch(setEditParam(p.id))}
-                                        style={{ cursor: "pointer" }}
-                                    >
-                                        {getProcessorParamLabel(p)}
-                                    </Button>
-                                    {editParam !== p.id ? (
-                                        <IconButton
-                                            size="1"
-                                            variant={
-                                                secondaryParamVisible[p.id] ? "soft" : "ghost"
-                                            }
-                                            color={
-                                                secondaryParamVisible[p.id] ? "orange" : "gray"
-                                            }
-                                            onClick={() => toggleSecondaryParam(p.id)}
-                                            style={{ cursor: "pointer" }}
-                                            data-tooltip={
-                                                secondaryParamVisible[p.id]
-                                                    ? t("hide_secondary_param")
-                                                    : t("show_secondary_param")
-                                            }
-                                        >
-                                            {secondaryParamVisible[p.id] ? (
-                                                <EyeOpenIcon />
-                                            ) : (
-                                                <EyeClosedIcon />
+                                            {buildReferenceRootTrackTriggerElement(
+                                                `${tAny("reference_root_tracks_short")}${
+                                                    visibleReferenceRootTrackIds.length > 0
+                                                        ? ` (${visibleReferenceRootTrackIds.length})`
+                                                        : ""
+                                                }`,
                                             )}
-                                        </IconButton>
-                                    ) : null}
-                                </React.Fragment>
-                            );
-                        })}
-                    </Flex>
-
-                    {rootTrack ? (
-                        <Flex align="center" gap="2">
-                            <Text size="1" color="gray">
-                                {t("algo_label")}
-                            </Text>
-                            <Select.Root
-                                value={
-                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
-                                        rootTrack.pitchAnalysisAlgo,
-                                    )
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
-                                onValueChange={(v) => {
-                                    if (!rootTrackId) return;
-                                    dispatch(
-                                        setTrackStateRemote({
-                                            trackId: rootTrackId,
-                                            pitchAnalysisAlgo: v,
-                                        }),
-                                    );
-                                }}
-                            >
-                                <Select.Trigger
-                                    className="min-w-[140px]"
-                                    onWheel={(event) => {
-                                        const currentValue = [
-                                            "world_dll",
-                                            "nsf_hifigan_onnx",
-                                            "vslib",
-                                            "none",
-                                        ].includes(rootTrack.pitchAnalysisAlgo)
-                                            ? rootTrack.pitchAnalysisAlgo
-                                            : "nsf_hifigan_onnx";
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue,
-                                            options: [
-                                                "world_dll",
-                                                "nsf_hifigan_onnx",
-                                                "vslib",
-                                                "none",
-                                            ],
-                                            onChange: (next) => {
-                                                if (!rootTrackId) return;
-                                                dispatch(
-                                                    setTrackStateRemote({
-                                                        trackId: rootTrackId,
-                                                        pitchAnalysisAlgo: next,
-                                                    }),
-                                                );
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="world_dll">world</Select.Item>
-                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
-                                    <Select.Item value="vslib">vslib</Select.Item>
-                                    <Select.Item value="none">{t("none")}</Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                            {processorStaticParams.map((param) => {
-                                if (param.kind.type !== "static_enum") return null;
-                                const currentValue =
-                                    processorStaticValues[param.id] ?? param.kind.default_value;
-                                return (
-                                    <Flex key={param.id} align="center" gap="1">
-                                        <Text size="1" color="gray">
-                                            {getProcessorParamLabel(param)}
-                                        </Text>
-                                        {param.kind.options.map(([label, value]) => (
-                                            <Button
-                                                key={`${param.id}-${value}`}
-                                                size="1"
-                                                variant={currentValue === value ? "solid" : "soft"}
-                                                color={currentValue === value ? "blue" : "gray"}
-                                                onClick={() => {
-                                                    void handleStaticParamChange(param.id, value);
-                                                }}
-                                                style={{
-                                                    cursor: "pointer",
-                                                }}
-                                            >
-                                                {getStaticOptionLabel(param.id, label, value)}
-                                            </Button>
-                                        ))}
-                                    </Flex>
-                                );
-                            })}
-                            {editParam === "pitch" ? (
-                                <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger className="shrink-0 rounded border border-qt-border bg-qt-panel px-2 py-1 text-xs text-qt-text hover:bg-qt-hover">
-                                        {buildReferenceRootTrackTriggerElement(
-                                            `${t("reference_root_tracks")}${
-                                                visibleReferenceRootTrackIds.length > 0
-                                                    ? ` (${visibleReferenceRootTrackIds.length})`
-                                                    : ""
-                                            }`,
-                                        )}
+                                            <ChevronDownIcon width="12" height="12" />
+                                        </Button>
                                     </DropdownMenu.Trigger>
                                     <DropdownMenu.Content variant="soft" color="gray">
                                         <DropdownMenu.Item
@@ -4783,11 +4710,9 @@ export const PianoRollPanel: React.FC = () => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                            ) : null}
-                            {editParam === "pitch" ? (
                                 <span
                                     className="inline-flex"
-                                    data-tooltip={pitchHardDisableReason ?? undefined}
+                                    data-tooltip={pitchHardDisableReason ?? tAny("midi_import")}
                                 >
                                     <Button
                                         size="1"
@@ -4797,10 +4722,359 @@ export const PianoRollPanel: React.FC = () => {
                                         disabled={!pitchEnabled}
                                         style={{ cursor: "pointer" }}
                                     >
-                                        {(t as (key: string) => string)("midi_import")}
+                                        {tAny("midi_import")}
                                     </Button>
                                 </span>
-                            ) : null}
+                            </React.Fragment>
+                        ) : null}
+                        {selectedIsChildTrack &&
+                        (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
+                            <DropdownMenu.Root>
+                                <ParamToolbarPill
+                                    label={pitchGroupLabel}
+                                    labelTooltip={pitchGroupTooltip}
+                                    active={pitchGroupActive}
+                                    accent="grass"
+                                    onSelect={() => dispatch(setEditParam("pitch"))}
+                                    eyeMode={
+                                        pitchGroupActive
+                                            ? "main"
+                                            : secondaryParamVisible["pitch"]
+                                              ? "on"
+                                              : "off"
+                                    }
+                                    onToggleEye={() => toggleSecondaryParam("pitch")}
+                                    eyeTooltip={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    dropdown={
+                                        <DropdownMenu.Trigger
+                                            className="param-pill__seg param-pill__seg--chev"
+                                            data-tooltip={pitchGroupTooltip}
+                                            tabIndex={-1}
+                                        >
+                                            <ChevronDownIcon width="12" height="12" />
+                                        </DropdownMenu.Trigger>
+                                    }
+                                />
+                                <DropdownMenu.Content variant="soft" color="gray">
+                                    <DropdownMenu.RadioGroup
+                                        value={editParam}
+                                        onValueChange={(value) => dispatch(setEditParam(value))}
+                                    >
+                                        <DropdownMenu.RadioItem value="pitch">
+                                            {t("child_pitch_root_option")}
+                                        </DropdownMenu.RadioItem>
+                                        {childPitchOffsetCentsParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetCentsParam}
+                                            >
+                                                {t("child_pitch_cents_option")}
+                                            </DropdownMenu.RadioItem>
+                                        ) : null}
+                                        {childPitchOffsetDegreesParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetDegreesParam}
+                                            >
+                                                {t("child_pitch_degrees_option")}
+                                            </DropdownMenu.RadioItem>
+                                        ) : null}
+                                    </DropdownMenu.RadioGroup>
+                                </DropdownMenu.Content>
+                            </DropdownMenu.Root>
+                        ) : (
+                            <ParamToolbarPill
+                                label={t("param_btn_pitch")}
+                                labelTooltip={t("pitch")}
+                                active={editParam === "pitch"}
+                                accent="grass"
+                                onSelect={() => dispatch(setEditParam("pitch"))}
+                                eyeMode={
+                                    editParam === "pitch"
+                                        ? "main"
+                                        : secondaryParamVisible["pitch"]
+                                          ? "on"
+                                          : "off"
+                                }
+                                onToggleEye={() => toggleSecondaryParam("pitch")}
+                                eyeTooltip={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("secondary_overlay_tooltip_visible")
+                                        : t("secondary_overlay_tooltip_hidden")
+                                }
+                                eyeLabel={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("hide_secondary_param")
+                                        : t("show_secondary_param")
+                                }
+                            />
+                        )}
+                        {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
+                        {orderedProcessorParams.map((p) => {
+                            if (p.id === "formant_shift_cents") {
+                                return (
+                                    <FormantParamButton
+                                        key={p.id}
+                                        rootParamId={p.id}
+                                        rootLabel={getProcessorParamShortLabel(p)}
+                                        rootMenuLabel={t("child_formant_root_option")}
+                                        rootTooltip={getProcessorParamLabel(p)}
+                                        childParamId={
+                                            selectedIsChildTrack ? childFormantOffsetParam : null
+                                        }
+                                        childLabel={t("child_formant_mode")}
+                                        childMenuLabel={t("child_formant_offset_option")}
+                                        rootActive={editParam === p.id}
+                                        childActive={editParam === childFormantOffsetParam}
+                                        secondaryVisible={secondaryParamVisible[p.id] ?? false}
+                                        hideSecondaryLabel={t("hide_secondary_param")}
+                                        showSecondaryLabel={t("show_secondary_param")}
+                                        hideSecondaryTooltip={t("secondary_overlay_tooltip_hidden")}
+                                        showSecondaryTooltip={t(
+                                            "secondary_overlay_tooltip_visible",
+                                        )}
+                                        onSelectRoot={() => dispatch(setEditParam(p.id))}
+                                        onSelectChild={() => {
+                                            if (childFormantOffsetParam) {
+                                                dispatch(setEditParam(childFormantOffsetParam));
+                                            }
+                                        }}
+                                        onToggleSecondary={() => toggleSecondaryParam(p.id)}
+                                    />
+                                );
+                            }
+
+                            const paramActive = editParam === p.id;
+                            const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
+
+                            // nsf-hifigan：把“气声开关”以图标片段融合进“气声音量”药丸。
+                            let breathTrailing: React.ReactNode = null;
+                            if (p.id === "breath_gain") {
+                                const breathDesc = processorStaticParams.find(
+                                    (sp) => sp.id === "breath_enabled",
+                                );
+                                const breathDefault =
+                                    breathDesc && breathDesc.kind.type === "static_enum"
+                                        ? breathDesc.kind.default_value
+                                        : 0;
+                                const breathOn =
+                                    (processorStaticValues["breath_enabled"] ?? breathDefault) ===
+                                    1;
+                                breathTrailing = (
+                                    <button
+                                        type="button"
+                                        tabIndex={-1}
+                                        className="param-pill__seg param-pill__seg--breath"
+                                        data-tooltip={
+                                            breathOn
+                                                ? t("breath_tooltip_on")
+                                                : t("breath_tooltip_off")
+                                        }
+                                        aria-label={`${t("breath_mode_label")}: ${
+                                            breathOn ? t("switch_on") : t("switch_off")
+                                        }`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleStaticParamChange(
+                                                "breath_enabled",
+                                                breathOn ? 0 : 1,
+                                            );
+                                        }}
+                                    >
+                                        <BreathAirIcon off={!breathOn} />
+                                    </button>
+                                );
+                            }
+
+                            return (
+                                <ParamToolbarPill
+                                    key={p.id}
+                                    label={getProcessorParamShortLabel(p)}
+                                    labelTooltip={getProcessorParamLabel(p)}
+                                    active={paramActive}
+                                    accent="amber"
+                                    onSelect={() => dispatch(setEditParam(p.id))}
+                                    eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
+                                    onToggleEye={() => toggleSecondaryParam(p.id)}
+                                    eyeTooltip={
+                                        paramEyeVisible
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        paramEyeVisible
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    trailing={breathTrailing}
+                                />
+                            );
+                        })}
+                    </Flex>
+
+                    {rootTrack ? (
+                        <Flex align="center" gap="2">
+                            {processorStaticParams.map((param) => {
+                                if (param.kind.type !== "static_enum") return null;
+                                const currentValue =
+                                    processorStaticValues[param.id] ?? param.kind.default_value;
+
+                                // 气声开关已融合进“气声音量”参数的药丸中（见下方
+                                // breath_gain 的 trailing 片段），此处不再单独渲染。
+                                if (param.id === "breath_enabled") {
+                                    return null;
+                                }
+
+                                // vslib 的合成模式：改为支持滚轮切换的下拉栏。
+                                if (param.id === "synth_mode") {
+                                    const stringOptions = param.kind.options.map(([, value]) =>
+                                        String(value),
+                                    );
+                                    const currentString = String(currentValue);
+                                    const selectOptions = param.kind.options.map(
+                                        ([label, value]) => ({
+                                            value,
+                                            label: getStaticOptionLabel(param.id, label, value),
+                                        }),
+                                    );
+                                    const currentOptionLabel =
+                                        selectOptions.find(
+                                            (opt) => String(opt.value) === currentString,
+                                        )?.label ?? currentString;
+                                    return (
+                                        <Select.Root
+                                            key={param.id}
+                                            value={currentString}
+                                            onValueChange={(v) =>
+                                                void handleStaticParamChange(param.id, Number(v))
+                                            }
+                                        >
+                                            <Select.Trigger
+                                                // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变
+                                                className="w-[140px]"
+                                                data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
+                                                onWheel={(event) => {
+                                                    applySelectWheelChange({
+                                                        event,
+                                                        currentValue: currentString,
+                                                        options: stringOptions,
+                                                        onChange: (next) =>
+                                                            void handleStaticParamChange(
+                                                                param.id,
+                                                                Number(next),
+                                                            ),
+                                                    });
+                                                }}
+                                            />
+                                            <Select.Content>
+                                                {selectOptions.map((opt) => (
+                                                    <Select.Item
+                                                        key={`${param.id}-${opt.value}`}
+                                                        value={String(opt.value)}
+                                                    >
+                                                        {opt.label}
+                                                    </Select.Item>
+                                                ))}
+                                            </Select.Content>
+                                        </Select.Root>
+                                    );
+                                }
+
+                                return (
+                                    <Flex key={param.id} align="center" gap="1">
+                                        <Text
+                                            size="1"
+                                            color="gray"
+                                            data-tooltip={getProcessorParamLabel(param)}
+                                        >
+                                            {getProcessorParamLabel(param)}
+                                        </Text>
+                                        {param.kind.options.map(([label, value]) => (
+                                            <Button
+                                                key={`${param.id}-${value}`}
+                                                size="1"
+                                                variant={currentValue === value ? "solid" : "soft"}
+                                                color={currentValue === value ? "blue" : "gray"}
+                                                onClick={() => {
+                                                    void handleStaticParamChange(param.id, value);
+                                                }}
+                                                style={{
+                                                    cursor: "pointer",
+                                                }}
+                                            >
+                                                {getStaticOptionLabel(param.id, label, value)}
+                                            </Button>
+                                        ))}
+                                    </Flex>
+                                );
+                            })}
+                            <Text size="1" color="gray" data-tooltip={tAny("algo_label")}>
+                                {tAny("algo_label_short")}
+                            </Text>
+                            <Select.Root
+                                value={
+                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
+                                        rootTrack.pitchAnalysisAlgo,
+                                    )
+                                        ? rootTrack.pitchAnalysisAlgo
+                                        : "nsf_hifigan_onnx"
+                                }
+                                onValueChange={(v) => {
+                                    if (!rootTrackId) return;
+                                    dispatch(
+                                        setTrackStateRemote({
+                                            trackId: rootTrackId,
+                                            pitchAnalysisAlgo: v,
+                                        }),
+                                    );
+                                }}
+                            >
+                                <Select.Trigger
+                                    className="min-w-[140px]"
+                                    onWheel={(event) => {
+                                        const currentValue = [
+                                            "world_dll",
+                                            "nsf_hifigan_onnx",
+                                            "vslib",
+                                            "none",
+                                        ].includes(rootTrack.pitchAnalysisAlgo)
+                                            ? rootTrack.pitchAnalysisAlgo
+                                            : "nsf_hifigan_onnx";
+                                        applySelectWheelChange({
+                                            event,
+                                            currentValue,
+                                            options: [
+                                                "world_dll",
+                                                "nsf_hifigan_onnx",
+                                                "vslib",
+                                                "none",
+                                            ],
+                                            onChange: (next) => {
+                                                if (!rootTrackId) return;
+                                                dispatch(
+                                                    setTrackStateRemote({
+                                                        trackId: rootTrackId,
+                                                        pitchAnalysisAlgo: next,
+                                                    }),
+                                                );
+                                            },
+                                        });
+                                    }}
+                                />
+                                <Select.Content>
+                                    <Select.Item value="world_dll">world</Select.Item>
+                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
+                                    <Select.Item value="vslib">vslib</Select.Item>
+                                    <Select.Item value="none">{t("none")}</Select.Item>
+                                </Select.Content>
+                            </Select.Root>
                         </Flex>
                     ) : null}
                 </Flex>
@@ -4863,9 +5137,7 @@ export const PianoRollPanel: React.FC = () => {
                             width: AXIS_W,
                             height: timeRulerHeightPx(
                                 Boolean(
-                                    s.tempoMap &&
-                                        s.tempoMap.points.length > 0 &&
-                                        s.tempoMapVisible,
+                                    s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible,
                                 ),
                             ),
                         }}

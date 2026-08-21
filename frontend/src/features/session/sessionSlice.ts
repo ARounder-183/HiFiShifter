@@ -56,6 +56,7 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromDialog,
@@ -65,6 +66,7 @@ import {
     redoRemote,
     saveProjectAsRemote,
     saveProjectRemote,
+    saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -361,6 +363,13 @@ export interface SessionState {
     autoScrollEnabled: boolean;
     /** 忽略编组（启用后编组同步编辑操作不生效） */
     ignoreGrouping: boolean;
+    /**
+     * 波纹编辑（自动跟进）模式：
+     * - `"off"`：关闭（默认）。
+     * - `"track"`：仅被编辑的轨道上的后续剪辑一起跟进。
+     * - `"all"`：所有轨道上位于编辑点之后的剪辑一起跟进。
+     */
+    rippleMode: "off" | "track" | "all";
     /** 被禁用的编组 ID 列表（禁用后该编组内同步编辑不生效） */
     disabledGroupIds: string[];
     /** 允许参数编辑器点击时调整播放头 */
@@ -485,6 +494,17 @@ export interface SessionState {
     lastResult?: unknown;
     vocalShifterSkippedFilesDialog: string[] | null;
     reaperSkippedFilesDialog: string[] | null;
+
+    /**
+     * 保存/另存为目标位置已存在版本不一致的工程文件时，弹出的覆盖确认对话框。
+     * 为 null 表示没有待确认的覆盖。
+     */
+    saveVersionConflictDialog: {
+        path: string;
+        existingVersion: number;
+        currentVersion: number;
+        existingIsNewer: boolean;
+    } | null;
 
     /**
      * 交互锁计数器：当用户正在进行连续操作（拖动、滑动等）时 > 0。
@@ -738,6 +758,8 @@ function applyOptimisticClipState(
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         formantMorph?: ClipFormantMorph;
     },
 ) {
@@ -784,6 +806,12 @@ function applyOptimisticClipState(
     }
     if (payload.fadeOutCurve !== undefined) {
         clip.fadeOutCurve = payload.fadeOutCurve as FadeCurveType;
+    }
+    if (payload.autoFadeInSec !== undefined) {
+        clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
+    }
+    if (payload.autoFadeOutSec !== undefined) {
+        clip.autoFadeOutSec = Math.max(0, Number(payload.autoFadeOutSec) || 0);
     }
     if (payload.formantMorph !== undefined) {
         clip.formantMorph = payload.formantMorph ? { ...payload.formantMorph } : undefined;
@@ -900,6 +928,8 @@ function applyTimelineState(
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
             fadeOutCurve: (clip.fade_out_curve ?? "sine") as FadeCurveType,
+            autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
+            autoFadeOutSec: Math.max(0, Number(clip.auto_fade_out_sec ?? 0) || 0),
             formantMorph: clip.formant_morph
                 ? {
                       enabled: Boolean(clip.formant_morph.enabled),
@@ -1199,6 +1229,7 @@ const initialState: SessionState = {
     playheadZoomEnabled: false,
     autoScrollEnabled: false,
     ignoreGrouping: false,
+    rippleMode: "off",
     disabledGroupIds: [],
     paramEditorSeekPlayheadEnabled: true,
     paramEditorTimelineClickSelectTrackEnabled: true,
@@ -1302,6 +1333,7 @@ const initialState: SessionState = {
     status: "Ready",
     vocalShifterSkippedFilesDialog: null,
     reaperSkippedFilesDialog: null,
+    saveVersionConflictDialog: null,
     _interactionLockCount: 0,
 };
 
@@ -1311,6 +1343,7 @@ export {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromDialog,
@@ -1319,6 +1352,7 @@ export {
     openReaperFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
+    saveProjectToPathRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -1665,6 +1699,24 @@ const sessionSlice = createSlice({
         toggleIgnoreGrouping(state) {
             state.ignoreGrouping = !state.ignoreGrouping;
         },
+        /** 循环波纹编辑模式：off → track → all → off（对应 REAPER 波纹编辑按钮的三态切换）。 */
+        cycleRippleMode(state) {
+            state.rippleMode =
+                state.rippleMode === "off"
+                    ? "track"
+                    : state.rippleMode === "track"
+                      ? "all"
+                      : "off";
+        },
+        setRippleMode(state, action: PayloadAction<"off" | "track" | "all">) {
+            if (
+                action.payload === "off" ||
+                action.payload === "track" ||
+                action.payload === "all"
+            ) {
+                state.rippleMode = action.payload;
+            }
+        },
         toggleGroupDisabledLocal(state, action: PayloadAction<string>) {
             const idx = state.disabledGroupIds.indexOf(action.payload);
             if (idx >= 0) {
@@ -1757,6 +1809,9 @@ const sessionSlice = createSlice({
         },
         closeReaperSkippedFilesDialog(state) {
             state.reaperSkippedFilesDialog = null;
+        },
+        closeSaveVersionConflictDialog(state) {
+            state.saveVersionConflictDialog = null;
         },
         setSelectedClip(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
@@ -1855,6 +1910,24 @@ const sessionSlice = createSlice({
             }
             if (action.payload.fadeOutCurve !== undefined) {
                 clip.fadeOutCurve = action.payload.fadeOutCurve;
+            }
+        },
+        /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
+        setClipAutoFades(
+            state,
+            action: PayloadAction<{
+                clipId: string;
+                autoFadeInSec?: number;
+                autoFadeOutSec?: number;
+            }>,
+        ) {
+            const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
+            if (!clip) return;
+            if (action.payload.autoFadeInSec !== undefined) {
+                clip.autoFadeInSec = Math.max(0, action.payload.autoFadeInSec);
+            }
+            if (action.payload.autoFadeOutSec !== undefined) {
+                clip.autoFadeOutSec = Math.max(0, action.payload.autoFadeOutSec);
             }
         },
         setClipGain(state, action: PayloadAction<{ clipId: string; gain: number }>) {
@@ -2279,6 +2352,12 @@ const sessionSlice = createSlice({
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
                 if (s.ignoreGrouping != null)
                     state.ignoreGrouping = Boolean(s.ignoreGrouping);
+                const loadedRippleMode = s.rippleMode;
+                if (loadedRippleMode === "track" || loadedRippleMode === "all") {
+                    state.rippleMode = loadedRippleMode;
+                } else {
+                    state.rippleMode = "off";
+                }
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
                 if (s.quickSearchAutoNormalize != null)
@@ -2914,9 +2993,18 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as
                     | { ok: true; canceled: true }
-                    | { ok: true; canceled: false; timeline: TimelineState };
+                    | {
+                          ok: true;
+                          canceled: false;
+                          timeline: TimelineState;
+                          projectVersionTooNew?: boolean;
+                      };
                 if (!payload || (payload as any).canceled) {
                     state.status = "Open canceled";
+                    return;
+                }
+                if ((payload as { projectVersionTooNew?: boolean }).projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
                     return;
                 }
                 applyTimelineState(state, (payload as any).timeline, {
@@ -2938,8 +3026,13 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    projectVersionTooNew?: boolean;
                 } & TimelineState;
                 if (!payload.ok) return;
+                if (payload.projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
+                    return;
+                }
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
@@ -2947,6 +3040,32 @@ const sessionSlice = createSlice({
                 state.status = "Project opened";
             })
             .addCase(openProjectFromPath.rejected, (state, action) => {
+                state.busy = false;
+                state.error = action.error?.message ?? "Open project failed";
+                state.status = "Open failed";
+            })
+
+            .addCase(openProjectFromPathForced.pending, (state) =>
+                setPending(state, "Opening project..."),
+            )
+            .addCase(openProjectFromPathForced.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    projectVersionTooNew?: boolean;
+                } & TimelineState;
+                if (!payload.ok) return;
+                if (payload.projectVersionTooNew) {
+                    state.status = "Project version confirmation required";
+                    return;
+                }
+                applyTimelineState(state, payload, {
+                    force: true,
+                    preserveProjectNotes: false,
+                });
+                state.status = "Project opened";
+            })
+            .addCase(openProjectFromPathForced.rejected, (state, action) => {
                 state.busy = false;
                 state.error = action.error?.message ?? "Open project failed";
                 state.status = "Open failed";
@@ -3166,6 +3285,16 @@ const sessionSlice = createSlice({
 
             .addCase(saveProjectRemote.fulfilled, (state, action) => {
                 const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
                 if (payload?.ok && payload?.canceled) {
                     state.status = "Save canceled";
                     return;
@@ -3205,6 +3334,16 @@ const sessionSlice = createSlice({
 
             .addCase(saveProjectAsRemote.fulfilled, (state, action) => {
                 const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
                 if (payload?.ok && payload?.canceled) {
                     state.status = "Save As canceled";
                     return;
@@ -3240,6 +3379,59 @@ const sessionSlice = createSlice({
                 }
 
                 state.status = "Save As failed";
+            })
+
+            .addCase(saveProjectToPathRemote.fulfilled, (state, action) => {
+                const payload = action.payload as any;
+                if (payload?.versionConflict) {
+                    // 理论上 force 保存不会再冲突；兜底再次弹出确认框。
+                    state.saveVersionConflictDialog = {
+                        path: payload.path,
+                        existingVersion: Number(payload.existingVersion ?? 0),
+                        currentVersion: Number(payload.currentVersion ?? 0),
+                        existingIsNewer: Boolean(payload.existingIsNewer),
+                    };
+                    state.status = "Save version confirmation required";
+                    return;
+                }
+                if (payload?.ok && payload?.canceled) {
+                    state.status = "Save canceled";
+                    return;
+                }
+
+                // 保留播放头位置和音高曲线，避免 UI 跳变
+                const currentPlayheadSec = state.playheadSec;
+                const currentParamsEpoch = state.paramsEpoch;
+                const currentClipPitchCurves = state.clipPitchCurves;
+
+                if (payload?.ok && payload?.timeline?.ok) {
+                    applyTimelineState(state, payload.timeline as TimelineState, { force: true });
+                    state.playheadSec = currentPlayheadSec;
+                    state.paramsEpoch = currentParamsEpoch;
+                    state.clipPitchCurves = currentClipPitchCurves;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                if (payload?.ok && payload?.tracks && payload?.clips) {
+                    applyTimelineState(state, payload as TimelineState, { force: true });
+                    state.playheadSec = currentPlayheadSec;
+                    state.paramsEpoch = currentParamsEpoch;
+                    state.clipPitchCurves = currentClipPitchCurves;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                if (payload?.ok) {
+                    state.project.dirty = false;
+                    state.status = "Project saved";
+                    return;
+                }
+
+                state.status = "Save failed";
+            })
+            .addCase(saveProjectToPathRemote.rejected, (state) => {
+                state.status = "Save failed";
             })
 
             .addCase(setProjectBaseScaleRemote.fulfilled, (state, action) => {
@@ -3541,7 +3733,9 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：移动是本次交互的权威结果（含波纹编辑对后续剪辑的平移）。
+                // 交互锁期间若不强制应用，后端返回的波纹位移会被丢弃，导致波纹“无效”。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(moveClipsRemote.fulfilled, (state, action) => {
@@ -3551,7 +3745,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：见 moveClipRemote.fulfilled 注释（交互锁期间也必须应用波纹结果）。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(splitClipRemote.fulfilled, (state, action) => {
@@ -3642,7 +3837,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：重设尺寸（右缘位移）的权威结果含波纹平移，交互锁期间不能丢弃。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(setClipStateRemote.pending, (state, action) => {
@@ -3667,7 +3863,8 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload);
+                // force：批量状态（含未来尺寸波纹路径）的权威结果，交互锁期间不能丢弃。
+                applyTimelineState(state, payload, { force: true });
             })
 
             .addCase(setClipsStateBulkRemote.pending, (state, action) => {
@@ -3915,6 +4112,8 @@ export const {
     togglePlayheadZoom,
     toggleAutoScroll,
     toggleIgnoreGrouping,
+    cycleRippleMode,
+    setRippleMode,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
@@ -3930,6 +4129,7 @@ export const {
     setProjectNotesMarkdown,
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeSaveVersionConflictDialog,
     setPitchSnapToleranceCents,
     setScaleHighlightMode,
     upsertCustomScalePreset,
@@ -3953,6 +4153,7 @@ export const {
     setClipPlaybackRate,
     setClipSourceRange,
     setClipFades,
+    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipsGroupId,

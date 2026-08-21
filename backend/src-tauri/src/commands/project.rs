@@ -1,6 +1,7 @@
 use crate::project::{
-    load_project_file, prepare_source_paths_for_save, project_name_from_path,
-    resolve_source_paths_on_open, serialize_project_file_for_path, CustomScale, ProjectFile,
+    load_project_file, prepare_timeline_for_project_save, project_name_from_path,
+    read_project_file_version, resolve_source_paths_on_open, serialize_project_file_for_path,
+    CustomScale, ProjectFile, CURRENT_PROJECT_FILE_VERSION,
 };
 use crate::state::AppState;
 use crate::synth_clip_cache;
@@ -429,7 +430,7 @@ fn build_project_file_snapshot(
         )
     };
 
-    let tl_saved = prepare_source_paths_for_save(tl, project_path);
+    let tl_saved = prepare_timeline_for_project_save(tl, project_path);
     let mut pf = ProjectFile::new(
         project_name.to_string(),
         tl_saved,
@@ -851,15 +852,35 @@ pub(super) fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
     let path = PathBuf::from(&project_path);
-    // 读取字节流，自动检测 MessagePack（v2）或 JSON（v1 兼容）格式。
+    // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
     let bytes = fs::read(&path).unwrap_or_default();
+    // 先只读取版本号：即使未来版本工程因结构变化而无法完整解析，
+    // 也能在尝试加载前给出明确的“可能不兼容”警告。
+    let project_file_version = read_project_file_version(&bytes).unwrap_or(0);
+    if project_file_version > CURRENT_PROJECT_FILE_VERSION && !force.unwrap_or(false) {
+        let mut payload = get_timeline_state(state);
+        payload.ok = true;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            project_version_too_new: Some(true),
+            project_file_version: Some(project_file_version),
+            current_project_file_version: Some(CURRENT_PROJECT_FILE_VERSION),
+        };
+    }
+
     let parsed = load_project_file(&bytes);
     let Ok(mut pf) = parsed else {
         let mut payload = get_timeline_state(state);
         payload.ok = false;
-        return payload;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            project_version_too_new: None,
+            project_file_version: None,
+            current_project_file_version: None,
+        };
     };
 
     let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
@@ -965,7 +986,12 @@ pub(super) fn open_project(
     if !missing_files.is_empty() {
         payload.missing_files = Some(missing_files);
     }
-    payload
+    crate::models::OpenProjectPayload {
+        timeline: payload,
+        project_version_too_new: None,
+        project_file_version: None,
+        current_project_file_version: None,
+    }
 }
 
 pub(super) fn save_project(
@@ -982,7 +1008,7 @@ pub(super) fn save_project(
         p.path.clone()
     };
     if let Some(path) = existing_path {
-        return save_project_to_path(state, window, path);
+        return save_project_to_path(state, window, path, None, None);
     }
     // No path yet -> Save As
     save_project_as(state, window, None)
@@ -1013,16 +1039,66 @@ pub(super) fn save_project_as(
         .save_file();
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
-        Some(path) => save_project_to_path(state, window, path.display().to_string()),
+        Some(path) => save_project_to_path(state, window, path.display().to_string(), None, None),
     }
 }
 
-fn save_project_to_path(
+/// 读取目标路径已有 HiFiShifter 工程文件的版本号（仅当目标确实是工程文件时）。
+///
+/// - 目标不存在、不是工程文件或读取失败时返回 `None`（无需覆盖警告）。
+/// - ZIP 归档是打包容器而非直接的工程文件，跳过检查。
+fn detect_save_target_version_conflict(path: &Path) -> Option<u32> {
+    if !path.exists() {
+        return None;
+    }
+    if is_zip_path(path) {
+        return None;
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if !matches!(ext.as_deref(), Some("hshp") | Some("hsp") | Some("json")) {
+        return None;
+    }
+    let bytes = fs::read(path).unwrap_or_default();
+    if bytes.is_empty() {
+        return None;
+    }
+    read_project_file_version(&bytes)
+}
+
+/// 保存到指定路径；若目标已存在版本不同的 HiFiShifter 工程文件，先返回
+/// 版本冲突信号而不直接覆盖，由前端弹出确认窗口（force=true 表示已确认）。
+pub(super) fn save_project_to_path(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
 ) -> serde_json::Value {
+    if let Some(notes_markdown) = notes_markdown {
+        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown = notes_markdown;
+    }
     let path = PathBuf::from(&project_path);
+
+    if !force.unwrap_or(false) {
+        if let Some(existing_version) = detect_save_target_version_conflict(&path) {
+            if existing_version != CURRENT_PROJECT_FILE_VERSION {
+                return serde_json::json!({
+                    "ok": false,
+                    "canceled": false,
+                    "versionConflict": true,
+                    "path": project_path,
+                    "existingVersion": existing_version,
+                    "currentVersion": CURRENT_PROJECT_FILE_VERSION,
+                    "existingIsNewer": existing_version > CURRENT_PROJECT_FILE_VERSION,
+                });
+            }
+        }
+    }
+
     if is_zip_path(&path) {
         match save_project_archive_to_zip_inner(state.inner(), &path) {
             Ok(timeline) => {

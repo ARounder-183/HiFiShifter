@@ -462,10 +462,10 @@ pub(crate) fn build_snapshot(
             }
         }
 
-        let fade_in_frames = (clip.fade_in_sec.max(0.0) * out_rate as f64)
+        let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as u64;
-        let fade_out_frames = (clip.fade_out_sec.max(0.0) * out_rate as f64)
+        let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as u64;
 

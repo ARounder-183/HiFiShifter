@@ -16,6 +16,15 @@ export interface CheckSourceFilesChangedResult {
     changed: SourceFileChange[];
 }
 
+export interface SourceFileMatchCandidate {
+    path: string;
+    exact_hash: boolean;
+}
+
+export interface SearchSourceFileMatchesResult {
+    matches: Record<string, SourceFileMatchCandidate[]>;
+}
+
 export const timelineApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: () => invoke<TimelineResult>("undo_timeline"),
@@ -181,6 +190,8 @@ export const timelineApi = {
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         color?: string;
         formantMorph?: {
             enabled: boolean;
@@ -207,6 +218,8 @@ export const timelineApi = {
             payload.fadeOutSec,
             payload.fadeInCurve,
             payload.fadeOutCurve,
+            payload.autoFadeInSec,
+            payload.autoFadeOutSec,
             payload.color,
             payload.formantMorph,
             payload.checkpoint,
@@ -305,7 +318,21 @@ export const timelineApi = {
     hasReaperClipboard: () =>
         invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
 
-    /// 检查所有已导入的音频源文件是否被外部修改或删除。
+    /// 在指定文件夹及其子文件夹中搜索候选源文件。
+    /// searchMode 为 "file_name"（精准文件名）或 "extension_hash"（文件扩展名 + 哈希）。
+    searchSourceFileReplacements: (
+        folderPath: string,
+        clipIds: string[],
+        searchMode: "file_name" | "extension_hash",
+    ) =>
+        invoke<SearchSourceFileMatchesResult>(
+            "search_source_file_replacements",
+            folderPath,
+            clipIds,
+            searchMode,
+        ),
+
+    /// 检查所有已导入的媒体源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。
     checkSourceFilesChanged: () =>
         invoke<CheckSourceFilesChangedResult>("check_source_files_changed"),

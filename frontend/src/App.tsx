@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react";
 import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
@@ -10,6 +17,7 @@ import { IS_LINUX } from "./utils/platform";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
+    closeSaveVersionConflictDialog,
     fetchTimeline,
     refreshRuntime,
     loadUiSettings,
@@ -21,6 +29,7 @@ import {
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
+    openProjectFromPathForced,
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromPath,
@@ -28,6 +37,7 @@ import {
     importAudioFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
+    saveProjectToPathRemote,
     setTrackMeters,
     setToolMode,
     checkpointHistory,
@@ -50,7 +60,8 @@ import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep"
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
-import type { SourceFileChange } from "./services/api/timeline";
+import type { SourceFileChange, SourceFileMatchCandidate } from "./services/api/timeline";
+import { waveformMipmapStore } from "./utils/waveformMipmapStore";
 import { projectApi, type AutoBackupSettings } from "./services/api/project";
 import type { ParamFramesPayload, ProcessorParamDescriptor } from "./types/api";
 import {
@@ -76,11 +87,13 @@ const statusKey: Record<string, string> = {
     "Open canceled": "status_open_canceled",
     "Opening project...": "status_opening_project",
     "Open failed": "status_open_failed",
+    "Project version confirmation required": "status_project_version_confirmation",
     "Project opened": "status_project_opened",
     "Save canceled": "status_save_canceled",
     "Save failed": "status_save_failed",
     "Save As canceled": "status_save_as_canceled",
     "Save As failed": "status_save_as_failed",
+    "Save version confirmation required": "status_save_version_confirmation",
     "Project saved": "status_project_saved",
     "Clips created": "status_clips_created",
     "Glue done": "status_glue_done",
@@ -101,7 +114,7 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
 };
 
-// 这些状态表示工程内容刚被替换/导入，需立即执行一次源文件变更检测，
+// 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，
 // 不依赖窗口 focus（例如启动时通过命令行打开工程时窗口可能一直保持聚焦）。
 const SOURCE_FILE_CHECK_TRIGGER_STATUSES = new Set([
     "Project opened",
@@ -119,6 +132,191 @@ const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
     timedBackupPathTemplate:
         "<ProjectFolder>/HiFiShifter Backup/<ProjectName>_%Y-%m-%d-%H-%M-%S.hshp",
 };
+
+type SourceFileChangeAction =
+    | "pending"
+    | "processing"
+    | "ignored"
+    | "reloaded"
+    | "replaced"
+    | "failed";
+
+type SourceFileChangedItem = SourceFileChange & {
+    action: SourceFileChangeAction;
+    /** 重新加载成功后实际使用的新文件路径。 */
+    reloadedPath?: string;
+    /** 已修改文件是否已经尝试过“重新加载”。之后按钮转为“替换”。 */
+    reloadAttempted?: boolean;
+    /** 搜索得到的候选文件（哈希完全匹配项排在前面）。 */
+    candidates?: SourceFileMatchCandidate[];
+    /** 用户在候选列表中当前选中的路径。 */
+    selectedCandidatePath?: string;
+};
+
+function normalizeSourceFileChanges(rawChanges: SourceFileChange[]): SourceFileChange[] {
+    const seen = new Set<string>();
+    return rawChanges.filter((change) => {
+        if (!change || typeof change.source_path !== "string" || !change.source_path.trim()) {
+            return false;
+        }
+        if (change.change !== "deleted" && change.change !== "modified") return false;
+        const key = `${change.source_path}::${change.change}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function markMissingSourceFilesUnavailable(changes: SourceFileChange[]): void {
+    for (const change of changes) {
+        if (change.change === "deleted") {
+            waveformMipmapStore.markUnavailable(change.source_path);
+        }
+    }
+}
+
+function resetSourceFileItemToPending(item: SourceFileChangedItem): SourceFileChangedItem {
+    return {
+        ...item,
+        action: "pending",
+        reloadedPath: undefined,
+        reloadAttempted: false,
+    };
+}
+
+interface WheelSelectProps {
+    value: string;
+    onValueChange: (value: string) => void;
+    disabled?: boolean;
+    className?: string;
+    children: ReactNode;
+}
+
+/**
+ * 支持滚轮调整选项的下拉框。
+ * 监听原生 wheel 事件（非 passive），滚动时切换选项并阻止默认滚动传播，
+ * 避免其所在的可滚动网格列表被一并滚动。
+ */
+function WheelSelect({
+    value,
+    onValueChange,
+    disabled,
+    className,
+    children,
+}: WheelSelectProps) {
+    const selectRef = useRef<HTMLSelectElement | null>(null);
+
+    useEffect(() => {
+        const select = selectRef.current;
+        if (!select || disabled) return;
+
+        const handleWheel = (event: WheelEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const total = select.options.length;
+            if (total === 0) return;
+            const current = select.selectedIndex;
+            const step = event.deltaY > 0 ? 1 : -1;
+            const next = Math.max(0, Math.min(total - 1, current + step));
+            if (next !== current) {
+                const nextValue = select.options[next]?.value;
+                if (nextValue !== undefined) {
+                    onValueChange(nextValue);
+                }
+            }
+        };
+
+        select.addEventListener("wheel", handleWheel, { passive: false });
+        return () => select.removeEventListener("wheel", handleWheel);
+    }, [value, disabled, onValueChange]);
+
+    return (
+        <select
+            ref={selectRef}
+            value={value}
+            disabled={disabled}
+            className={className}
+            onChange={(event) => onValueChange(event.target.value)}
+        >
+            {children}
+        </select>
+    );
+}
+
+/** 若条目保留着候选列表但没有当前选择，则默认选回第一个候选。 */
+function defaultSelectedCandidatePath(item: SourceFileChangedItem): SourceFileChangedItem {
+    if (item.selectedCandidatePath) return item;
+    const first = item.candidates?.[0]?.path;
+    return first ? { ...item, selectedCandidatePath: first } : item;
+}
+
+function mergeLatestSourceFileChanges(
+    items: SourceFileChangedItem[],
+    rawChanges: SourceFileChange[],
+): SourceFileChangedItem[] {
+    const rawByClipId = new Map(rawChanges.map((change) => [change.clip_id, change]));
+    const rawByPath = new Map(rawChanges.map((change) => [change.source_path, change]));
+    const consumedClipIds = new Set<string>();
+
+    const merged: SourceFileChangedItem[] = items.map((item) => {
+        // 优先按 clip_id 匹配：即使替换后路径从 A 变为 B/C，也仍然属于同一项目。
+        const latest =
+            rawByClipId.get(item.clip_id) ??
+            rawByPath.get(item.source_path) ??
+            (item.reloadedPath ? rawByPath.get(item.reloadedPath) : undefined);
+        if (!latest) return item;
+        consumedClipIds.add(latest.clip_id);
+
+        const handled = item.action === "reloaded" || item.action === "replaced";
+        if (latest.change === "deleted") {
+            if (item.action === "ignored") {
+                return { ...item, change: "deleted", reloadedPath: undefined };
+            }
+            if (handled) {
+                // 替换/重新加载后的文件又失效了：回到原始文件缺失状态。
+                return resetSourceFileItemToPending({
+                    ...item,
+                    change: "deleted",
+                });
+            }
+            return {
+                ...item,
+                change: "deleted",
+                action: "pending",
+            };
+        }
+
+        // latest.change === "modified"
+        if (item.action === "ignored") {
+            return { ...item, change: "modified", reloadedPath: undefined };
+        }
+        if (handled) {
+            // 已处理文件再次被修改：重新变为未处理，保留原路径以便重新加载。
+            return resetSourceFileItemToPending({
+                ...item,
+                change: "modified",
+                reloadedPath: latest.source_path,
+            });
+        }
+        return {
+            ...item,
+            change: "modified",
+        };
+    });
+
+    const knownPaths = new Set(
+        merged.flatMap((item) => [item.source_path, item.reloadedPath].filter(Boolean) as string[]),
+    );
+    for (const change of rawChanges) {
+        if (consumedClipIds.has(change.clip_id) || knownPaths.has(change.source_path)) {
+            continue;
+        }
+        merged.push({ ...change, action: "pending" as const });
+        knownPaths.add(change.source_path);
+    }
+
+    return merged;
+}
 
 function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
     const normalized = String(path ?? "").trim();
@@ -173,6 +371,9 @@ function AppInner() {
     const reaperSkippedFilesDialog = useAppSelector(
         (state) => state.session.reaperSkippedFilesDialog,
     );
+    const saveVersionConflictDialog = useAppSelector(
+        (state) => state.session.saveVersionConflictDialog,
+    );
 
     const containerRef = useRef<HTMLDivElement | null>(null);
     const dragRef = useRef<{ pointerId: number } | null>(null);
@@ -190,6 +391,13 @@ function AppInner() {
         open: boolean;
         mode: "switch" | "exit";
     }>({ open: false, mode: "switch" });
+    // 打开工程时发现文件版本高于当前程序：等待用户确认是否继续尝试加载。
+    const [projectVersionDialog, setProjectVersionDialog] = useState<{
+        open: boolean;
+        path: string;
+        fileVersion: number;
+        currentVersion: number;
+    }>({ open: false, path: "", fileVersion: 0, currentVersion: 0 });
     const [projectImportPick, setProjectImportPick] = useState<{
         open: boolean;
         path: string | null;
@@ -198,18 +406,23 @@ function AppInner() {
     const sourceFileCheckBusyRef = useRef(false);
     const sourceFileChangeHandlingRef = useRef(false);
     const sourceFileDialogOpenRef = useRef(false);
-    // 源文件变更检测对话框（窗口重新获得焦点或工程内容变更后触发）
+    const sourceFileInitialChangesRef = useRef<SourceFileChangedItem[]>([]);
+    // 重新捕获缺失媒体对话框（窗口重新获得焦点或工程内容变更后触发）
     const [sourceFileChangedDialog, setSourceFileChangedDialog] = useState<{
         open: boolean;
-        changes: SourceFileChange[];
+        changes: SourceFileChangedItem[];
     }>({ open: false, changes: [] });
+    const [sourceFileSearchBusy, setSourceFileSearchBusy] = useState(false);
+    const [sourceFileSearchMode, setSourceFileSearchMode] = useState<
+        "file_name" | "extension_hash"
+    >("file_name");
     useEffect(() => {
         sourceFileDialogOpenRef.current = sourceFileChangedDialog.open;
     }, [sourceFileChangedDialog.open]);
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
     const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
-    // 当前会话中已忽略的源文件变更路径集合（用户点击"忽略"后不再重复弹窗）
+    // 当前会话中已忽略的缺失媒体路径集合（用户点击"忽略"后不再重复弹窗）
     const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
 
     // MIDI clip import dialog state (lifted from TimelinePanel)
@@ -232,6 +445,7 @@ function AppInner() {
     const [midiImportTargetMenu, setMidiImportTargetMenu] = useState<string>("pitchRef");
     const [midiImportTargetDragDrop, setMidiImportTargetDragDrop] = useState<string>("pitchRef");
     const [midiDialogSource, setMidiDialogSource] = useState<"menu" | "dragDrop">("menu");
+    const [autoReloadModifiedMedia, setAutoReloadModifiedMedia] = useState(true);
 
     // 加载 MIDI 相关设置
     useEffect(() => {
@@ -284,6 +498,9 @@ function AppInner() {
                 } else if (s?.midiImportTarget != null) {
                     setMidiImportTargetDragDrop(s.midiImportTarget);
                 }
+                if (typeof s?.autoReloadModifiedMedia === "boolean") {
+                    setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
+                }
             });
         });
     }, []);
@@ -301,6 +518,13 @@ function AppInner() {
         setFillGaps(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
             settingsApi.saveUiSettings({ midiFillGaps: v }),
+        );
+    }, []);
+
+    const handleAutoReloadModifiedMediaChange = useCallback((v: boolean) => {
+        setAutoReloadModifiedMedia(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ autoReloadModifiedMedia: v }),
         );
     }, []);
 
@@ -869,6 +1093,25 @@ function AppInner() {
                             ? Math.max(0, Math.min(1, payload.progress))
                             : null;
 
+                    // 已被用户忽略的源文件不显示任何波形分析进度；若此前正显示该
+                    // 文件的进度，立即清除，避免后端仍在收尾时导致状态条停留。
+                    if (sourcePath && ignoredSourcePathsRef.current.has(sourcePath)) {
+                        if (currentComputingPath === sourcePath) {
+                            if (fadeOutTimer) {
+                                clearTimeout(fadeOutTimer);
+                                fadeOutTimer = null;
+                            }
+                            currentProgress = -1;
+                            currentComputingPath = null;
+                            setWaveformAnalysis({
+                                active: false,
+                                sourcePath: null,
+                                progress: null,
+                            });
+                        }
+                        return;
+                    }
+
                     if (status === "computing") {
                         // 如果已在显示进度且新进度比当前低，忽略（防止并发去重后
                         // 残留的事件或不同触发点导致进度回退）
@@ -922,8 +1165,37 @@ function AppInner() {
                                     });
                                 }
                             }, 1500);
+                        } else if (currentComputingPath === sourcePath) {
+                            // 缓存命中是终态：如果之前曾进入 computing，立刻结束进度显示。
+                            if (fadeOutTimer) {
+                                clearTimeout(fadeOutTimer);
+                                fadeOutTimer = null;
+                            }
+                            currentProgress = -1;
+                            currentComputingPath = null;
+                            setWaveformAnalysis({
+                                active: false,
+                                sourcePath: null,
+                                progress: null,
+                            });
                         }
                         // cached 状态不显示进度条
+                    } else if (status === "failed") {
+                        // 计算失败（例如文件缺失）也是终态：立即清除“正在分析波形”，
+                        // 避免缺失/被忽略的文件让左下角状态永久停留。
+                        if (sourcePath === null || currentComputingPath === sourcePath) {
+                            if (fadeOutTimer) {
+                                clearTimeout(fadeOutTimer);
+                                fadeOutTimer = null;
+                            }
+                            currentProgress = -1;
+                            currentComputingPath = null;
+                            setWaveformAnalysis({
+                                active: false,
+                                sourcePath: null,
+                                progress: null,
+                            });
+                        }
                     }
                 });
             } catch {
@@ -1065,8 +1337,10 @@ function AppInner() {
             try {
                 const result = await dispatch(
                     projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap();
-                if ((result as { canceled?: boolean } | undefined)?.canceled) {
+                ).unwrap() as any;
+                // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
+                // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
+                if (result?.canceled || result?.versionConflict) {
                     return;
                 }
                 await executePendingUnsavedAction();
@@ -1076,6 +1350,55 @@ function AppInner() {
         })();
     }, [dispatch, executePendingUnsavedAction, projectPath]);
 
+    const showProjectVersionConfirmationIfNeeded = useCallback((result: unknown) => {
+        const payload = result as
+            | {
+                  projectVersionTooNew?: boolean;
+                  path?: string;
+                  projectFileVersion?: number;
+                  currentProjectFileVersion?: number;
+              }
+            | undefined;
+        if (payload?.projectVersionTooNew && payload.path) {
+            setProjectVersionDialog({
+                open: true,
+                path: payload.path,
+                fileVersion: Number(payload.projectFileVersion ?? 0),
+                currentVersion: Number(payload.currentProjectFileVersion ?? 0),
+            });
+        }
+    }, []);
+
+    const confirmContinueLoadingNewerProject = useCallback(() => {
+        const path = projectVersionDialog.path;
+        setProjectVersionDialog((current) => ({ ...current, open: false }));
+        if (!path) return;
+        void dispatch(openProjectFromPathForced(path));
+    }, [dispatch, projectVersionDialog.path]);
+
+    const cancelContinueLoadingNewerProject = useCallback(() => {
+        setProjectVersionDialog((current) => ({ ...current, open: false }));
+    }, []);
+
+    // ── 保存/另存为目标存在版本不一致工程文件时的确认操作 ──
+    const cancelSaveVersionConflict = useCallback(() => {
+        dispatch(closeSaveVersionConflictDialog());
+    }, [dispatch]);
+
+    // 用户选择"另存为"：关闭确认框并重新弹出另存为选择器。
+    const saveAsFromVersionConflict = useCallback(() => {
+        dispatch(closeSaveVersionConflictDialog());
+        void dispatch(saveProjectAsRemote());
+    }, [dispatch]);
+
+    // 用户确认"继续保存"：向已选路径执行强制覆盖保存。
+    const continueForceSave = useCallback(() => {
+        const path = saveVersionConflictDialog?.path;
+        dispatch(closeSaveVersionConflictDialog());
+        if (!path) return;
+        void dispatch(saveProjectToPathRemote(path));
+    }, [dispatch, saveVersionConflictDialog?.path]);
+
     const handleNewProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
             await dispatch(newProjectRemote()).unwrap();
@@ -1084,17 +1407,19 @@ function AppInner() {
 
     const handleOpenProject = useCallback(() => {
         runOrPromptUnsavedAction("switch", async () => {
-            await dispatch(openProjectFromDialog()).unwrap();
+            const result = await dispatch(openProjectFromDialog()).unwrap();
+            showProjectVersionConfirmationIfNeeded(result);
         });
-    }, [dispatch, runOrPromptUnsavedAction]);
+    }, [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded]);
 
     const handleOpenRecentProject = useCallback(
         (path: string) => {
             runOrPromptUnsavedAction("switch", async () => {
-                await dispatch(openProjectFromPath(path)).unwrap();
+                const result = await dispatch(openProjectFromPath(path)).unwrap();
+                showProjectVersionConfirmationIfNeeded(result);
             });
         },
-        [dispatch, runOrPromptUnsavedAction],
+        [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded],
     );
 
     const handleImportProject = useCallback(async () => {
@@ -1131,7 +1456,8 @@ function AppInner() {
             if (!normalized) return;
             if (kind === "openProject") {
                 runOrPromptUnsavedAction("switch", async () => {
-                    await dispatch(openProjectFromPath(normalized)).unwrap();
+                    const result = await dispatch(openProjectFromPath(normalized)).unwrap();
+                    showProjectVersionConfirmationIfNeeded(result);
                 });
                 return;
             }
@@ -1147,7 +1473,7 @@ function AppInner() {
                 void dispatch(importAudioFromPath(normalized));
             }
         },
-        [dispatch, runOrPromptUnsavedAction],
+        [dispatch, runOrPromptUnsavedAction, showProjectVersionConfirmationIfNeeded],
     );
 
     const handleExitApp = useCallback(() => {
@@ -1305,7 +1631,7 @@ function AppInner() {
         };
     }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
 
-    // 检测已导入的音频源文件是否被外部修改或删除。
+    // 检测已导入的媒体源文件是否被外部修改或删除。
     // 触发时机：窗口重新获得焦点，以及工程/导入内容刚替换完成时。
     const checkSourceFileChanges = useCallback(async () => {
         if (
@@ -1320,28 +1646,112 @@ function AppInner() {
             const result = (await webApi.checkSourceFilesChanged()) as
                 | { changed?: SourceFileChange[] }
                 | undefined;
-            const rawChanges = result?.changed ?? [];
             const ignored = ignoredSourcePathsRef.current;
-            const seen = new Set<string>();
-            const changes = rawChanges
-                .filter((c) => {
-                    if (!c || typeof c.source_path !== "string" || !c.source_path.trim()) {
-                        return false;
+            const changes = normalizeSourceFileChanges(result?.changed ?? []).filter(
+                (change) => !ignored.has(change.source_path),
+            );
+
+            const modified = changes.filter((change) => change.change === "modified");
+
+            // 设置开启时，后台自动重新加载“已修改”的文件，不弹出确认窗口。
+            if (autoReloadModifiedMedia && modified.length > 0) {
+                sourceFileChangeHandlingRef.current = true;
+                try {
+                    const uniqueByPath = new Map<string, SourceFileChange>();
+                    for (const change of modified) {
+                        if (!uniqueByPath.has(change.source_path)) {
+                            uniqueByPath.set(change.source_path, change);
+                        }
                     }
-                    if (c.change !== "deleted" && c.change !== "modified") return false;
-                    // 后端按 source_path 去重，这里再做一次防御性去重。
-                    const key = `${c.source_path}::${c.change}`;
-                    if (seen.has(key)) return false;
-                    seen.add(key);
-                    return true;
-                })
-                .filter((c) => !ignored.has(c.source_path));
+                    for (const item of uniqueByPath.values()) {
+                        try {
+                            await dispatch(
+                                replaceClipSourceRemote({
+                                    clipIds: item.clip_id ? [item.clip_id] : [],
+                                    newSourcePath: item.source_path,
+                                    replaceSameSource: true,
+                                }),
+                            ).unwrap();
+                        } catch {
+                            // 单个文件失败时继续处理其他文件；稍后统一复核。
+                        }
+                    }
+                } finally {
+                    sourceFileChangeHandlingRef.current = false;
+                }
+
+                const refreshed = (await webApi.checkSourceFilesChanged()) as
+                    | { changed?: SourceFileChange[] }
+                    | undefined;
+                const remaining = normalizeSourceFileChanges(
+                    refreshed?.changed ?? [],
+                ).filter((change) => !ignored.has(change.source_path));
+
+                if (remaining.length > 0) {
+                    markMissingSourceFilesUnavailable(remaining);
+                    const items = remaining.map((change) => ({
+                        ...change,
+                        action: "pending" as const,
+                    }));
+                    sourceFileInitialChangesRef.current = items;
+                    sourceFileDialogOpenRef.current = true;
+                    setSourceFileChangedDialog({ open: true, changes: items });
+                }
+                return;
+            }
+
             if (changes.length > 0) {
+                markMissingSourceFilesUnavailable(changes);
+                const items = changes.map((change) => ({ ...change, action: "pending" as const }));
+                sourceFileInitialChangesRef.current = items;
                 sourceFileDialogOpenRef.current = true;
-                setSourceFileChangedDialog({ open: true, changes });
+                setSourceFileChangedDialog({
+                    open: true,
+                    changes: items,
+                });
             }
         } catch {
             // 静默失败；此检测为可选增强功能
+        } finally {
+            sourceFileCheckBusyRef.current = false;
+        }
+    }, [autoReloadModifiedMedia, dispatch]);
+
+    // 窗口已打开时执行“刷新”：按 clip_id / 路径匹配后端最新状态。
+    // 现有条目永不删除；已替换文件失效时回退为原始文件的“已删除”状态。
+    const refreshSourceFileChanges = useCallback(async () => {
+        if (sourceFileCheckBusyRef.current || sourceFileChangeHandlingRef.current) {
+            return;
+        }
+        sourceFileCheckBusyRef.current = true;
+        try {
+            const result = (await webApi.checkSourceFilesChanged()) as
+                | { changed?: SourceFileChange[] }
+                | undefined;
+            const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
+
+            setSourceFileChangedDialog((prev) => {
+                const changes = mergeLatestSourceFileChanges(prev.changes, rawChanges);
+                const knownClipIds = new Set(prev.changes.map((item) => item.clip_id));
+                for (const change of rawChanges) {
+                    if (!knownClipIds.has(change.clip_id)) {
+                        const existingInitial = sourceFileInitialChangesRef.current.some(
+                            (item) => item.clip_id === change.clip_id,
+                        );
+                        if (!existingInitial) {
+                            sourceFileInitialChangesRef.current = [
+                                ...sourceFileInitialChangesRef.current,
+                                { ...change, action: "pending" as const },
+                            ];
+                        }
+                    }
+                }
+                return { ...prev, open: true, changes };
+            });
+
+            markMissingSourceFilesUnavailable(rawChanges);
+        } catch {
+            // 刷新失败时保持当前列表，避免误导用户。
         } finally {
             sourceFileCheckBusyRef.current = false;
         }
@@ -1349,19 +1759,433 @@ function AppInner() {
 
     useEffect(() => {
         function onFocus() {
-            void checkSourceFileChanges();
+            // 窗口仍然打开时执行刷新而不是重新弹窗；窗口未打开时才执行常规检测。
+            if (sourceFileDialogOpenRef.current) {
+                void refreshSourceFileChanges();
+            } else {
+                void checkSourceFileChanges();
+            }
         }
         window.addEventListener("focus", onFocus);
         return () => {
             window.removeEventListener("focus", onFocus);
         };
-    }, [checkSourceFileChanges]);
+    }, [checkSourceFileChanges, refreshSourceFileChanges]);
 
     useEffect(() => {
         if (SOURCE_FILE_CHECK_TRIGGER_STATUSES.has(status)) {
             void checkSourceFileChanges();
         }
     }, [status, checkSourceFileChanges]);
+
+    // 文件菜单：重新捕获缺失媒体。
+    // 清除本会话的忽略记录，重新拉取所有缺失/修改的媒体并始终打开窗口（列表可为空）。
+    const handleRecaptureMissingMedia = useCallback(async () => {
+        if (sourceFileCheckBusyRef.current || sourceFileChangeHandlingRef.current) return;
+        ignoredSourcePathsRef.current.clear();
+        sourceFileDialogOpenRef.current = false;
+        sourceFileCheckBusyRef.current = true;
+        try {
+            const result = (await webApi.checkSourceFilesChanged()) as
+                | { changed?: SourceFileChange[] }
+                | undefined;
+            const changes = normalizeSourceFileChanges(result?.changed ?? []);
+            markMissingSourceFilesUnavailable(changes);
+            const items = changes.map((change) => ({ ...change, action: "pending" as const }));
+            sourceFileInitialChangesRef.current = items;
+            sourceFileDialogOpenRef.current = true;
+            setSourceFileChangedDialog({ open: true, changes: items });
+        } catch {
+            // 读取失败时也打开空窗口，让用户可再次手动操作。
+            sourceFileInitialChangesRef.current = [];
+            sourceFileDialogOpenRef.current = true;
+            setSourceFileChangedDialog({ open: true, changes: [] });
+        } finally {
+            sourceFileCheckBusyRef.current = false;
+        }
+    }, []);
+
+    const updateSourceFileChangeItem = useCallback(
+        (
+            clipId: string,
+            patch: Partial<
+                Pick<
+                    SourceFileChangedItem,
+                    | "action"
+                    | "reloadedPath"
+                    | "reloadAttempted"
+                    | "change"
+                    | "candidates"
+                    | "selectedCandidatePath"
+                >
+            >,
+        ) => {
+            setSourceFileChangedDialog((prev) => ({
+                ...prev,
+                changes: prev.changes.map((item) =>
+                    item.clip_id === clipId ? { ...item, ...patch } : item,
+                ),
+            }));
+        },
+        [],
+    );
+
+    const ignoreSourceFileChangeItem = useCallback(
+        (item: SourceFileChangedItem) => {
+            if (item.action === "processing") return;
+            // 本次会话内不再重复提示该源文件路径。
+            ignoredSourcePathsRef.current.add(item.source_path);
+            // 被忽略的文件不再继续请求/展示波形分析；若已缓存的数据仍可正常显示。
+            waveformMipmapStore.markUnavailable(item.source_path);
+            updateSourceFileChangeItem(item.clip_id, { action: "ignored" });
+        },
+        [updateSourceFileChangeItem],
+    );
+
+    const ignoreAllSourceFileChanges = useCallback(() => {
+        if (sourceFileChangeHandlingRef.current) return;
+        const targets = sourceFileChangedDialog.changes.filter(
+            (item) =>
+                item.action !== "ignored" &&
+                item.action !== "reloaded" &&
+                item.action !== "replaced" &&
+                item.action !== "processing",
+        );
+        if (targets.length === 0) return;
+
+        for (const item of targets) {
+            ignoredSourcePathsRef.current.add(item.source_path);
+            waveformMipmapStore.markUnavailable(item.source_path);
+        }
+        const ignoredClipIds = new Set(targets.map((item) => item.clip_id));
+        setSourceFileChangedDialog((prev) => ({
+            ...prev,
+            changes: prev.changes.map((item) =>
+                ignoredClipIds.has(item.clip_id) ? { ...item, action: "ignored" } : item,
+            ),
+        }));
+    }, [sourceFileChangedDialog.changes]);
+
+    const applySourceFileReplacement = useCallback(
+        async (
+            item: SourceFileChangedItem,
+            replacementPath: string,
+            mode: "reload" | "replace",
+        ) => {
+            if (item.action === "processing" || sourceFileChangeHandlingRef.current) {
+                return false;
+            }
+
+            updateSourceFileChangeItem(item.clip_id, { action: "processing" });
+            sourceFileChangeHandlingRef.current = true;
+            try {
+                await dispatch(
+                    replaceClipSourceRemote({
+                        clipIds: item.clip_id ? [item.clip_id] : [],
+                        newSourcePath: replacementPath,
+                        replaceSameSource: true,
+                    }),
+                ).unwrap();
+                updateSourceFileChangeItem(item.clip_id, {
+                    action: mode === "reload" ? "reloaded" : "replaced",
+                    reloadedPath: replacementPath,
+                    selectedCandidatePath: undefined,
+                });
+                return true;
+            } catch {
+                // 已处理过的条目再次重选失败时保留原状态；未处理条目才显示失败。
+                if (item.action === "reloaded" || item.action === "replaced") {
+                    updateSourceFileChangeItem(item.clip_id, { action: item.action });
+                } else if (item.action === "ignored") {
+                    updateSourceFileChangeItem(item.clip_id, { action: "ignored" });
+                } else {
+                    updateSourceFileChangeItem(item.clip_id, { action: "failed" });
+                }
+                return false;
+            } finally {
+                sourceFileChangeHandlingRef.current = false;
+            }
+        },
+        [dispatch, updateSourceFileChangeItem],
+    );
+
+    const replaceSourceFileChangeItem = useCallback(
+        async (item: SourceFileChangedItem) => {
+            if (item.action === "processing" || sourceFileChangeHandlingRef.current) {
+                return;
+            }
+
+            const dialogTitle = t("recapture_missing_media_replace_dialog_title").replace(
+                "{name}",
+                item.clip_name || item.source_path,
+            );
+            const picked = await coreApi.openAudioDialogForSource(item.source_path, dialogTitle);
+            if (!picked?.ok || picked.canceled || !picked.path) {
+                // 取消时保留原状态（含“已忽略 / 已重新加载 / 已替换”）。
+                return;
+            }
+            await applySourceFileReplacement(item, picked.path, "replace");
+        },
+        [applySourceFileReplacement, t],
+    );
+
+    const reloadSourceFileChangeItem = useCallback(
+        async (item: SourceFileChangedItem) => {
+            if (
+                item.action === "processing" ||
+                item.change !== "modified" ||
+                sourceFileChangeHandlingRef.current
+            ) {
+                return;
+            }
+
+            // 按下“重新加载”后，该按钮语义立即转为“替换”。
+            updateSourceFileChangeItem(item.clip_id, {
+                action: "processing",
+                reloadAttempted: true,
+            });
+            sourceFileChangeHandlingRef.current = true;
+            let becameMissing = false;
+            try {
+                const result = (await webApi.checkSourceFilesChanged()) as
+                    | { changed?: SourceFileChange[] }
+                    | undefined;
+                const latest = normalizeSourceFileChanges(result?.changed ?? []).find(
+                    (change) =>
+                        change.clip_id === item.clip_id ||
+                        change.source_path === item.source_path ||
+                        (item.reloadedPath && change.source_path === item.reloadedPath),
+                );
+                if (latest?.change === "deleted") {
+                    // 用户在点击后中途删除了文件：状态从“已修改”变为“已删除”，
+                    // 按钮转成“替换”，无需额外弹窗。
+                    updateSourceFileChangeItem(item.clip_id, {
+                        action: "failed",
+                        change: "deleted",
+                    });
+                    becameMissing = true;
+                }
+            } catch {
+                // 检测失败时不中断，继续尝试按原路径重新加载。
+            } finally {
+                sourceFileChangeHandlingRef.current = false;
+            }
+
+            if (!becameMissing) {
+                await applySourceFileReplacement(
+                    item,
+                    item.reloadedPath ?? item.source_path,
+                    "reload",
+                );
+            }
+        },
+        [applySourceFileReplacement, updateSourceFileChangeItem],
+    );
+
+    const reloadAllModifiedSourceFiles = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.filter(
+            (item) =>
+                item.change === "modified" &&
+                !item.reloadAttempted &&
+                item.action !== "ignored" &&
+                item.action !== "reloaded" &&
+                item.action !== "replaced" &&
+                item.action !== "processing",
+        );
+        for (const target of targets) {
+            await reloadSourceFileChangeItem(target);
+        }
+    }, [reloadSourceFileChangeItem, sourceFileChangedDialog.changes]);
+
+    const searchSourceFileReplacements = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.filter(
+            (item) =>
+                item.action !== "ignored" &&
+                item.action !== "reloaded" &&
+                item.action !== "replaced" &&
+                item.action !== "processing",
+        );
+        if (targets.length === 0 || sourceFileSearchBusy || sourceFileChangeHandlingRef.current) {
+            return;
+        }
+
+        const { fileBrowserApi } = await import("./services/api/fileBrowser");
+        let picked: { ok: boolean; canceled?: boolean; path?: string } | undefined;
+        try {
+            picked = await fileBrowserApi.pickDirectory();
+        } catch {
+            return;
+        }
+        if (!picked?.ok || picked.canceled || !picked.path) return;
+
+        setSourceFileSearchBusy(true);
+        try {
+            const result = await webApi.searchSourceFileReplacements(
+                picked.path,
+                targets.map((item) => item.clip_id),
+                sourceFileSearchMode,
+            );
+            const targetIds = new Set(targets.map((item) => item.clip_id));
+            setSourceFileChangedDialog((prev) => ({
+                ...prev,
+                changes: prev.changes.map((item) => {
+                    if (!targetIds.has(item.clip_id)) return item;
+                    const candidates = result.matches?.[item.clip_id] ?? [];
+                    return {
+                        ...item,
+                        candidates,
+                        selectedCandidatePath: candidates[0]?.path,
+                    };
+                }),
+            }));
+        } catch {
+            // 搜索失败保持现有状态；用户可以重新选择文件夹再试。
+        } finally {
+            setSourceFileSearchBusy(false);
+        }
+    }, [sourceFileChangedDialog.changes, sourceFileSearchBusy, sourceFileSearchMode]);
+
+    const selectSourceFileMatchCandidate = useCallback(
+        (clipId: string, candidatePath: string) => {
+            updateSourceFileChangeItem(clipId, { selectedCandidatePath: candidatePath });
+        },
+        [updateSourceFileChangeItem],
+    );
+
+    const applySelectedSourceFileMatch = useCallback(
+        async (item: SourceFileChangedItem) => {
+            const candidatePath = item.selectedCandidatePath;
+            if (!candidatePath) return;
+            await applySourceFileReplacement(item, candidatePath, "replace");
+        },
+        [applySourceFileReplacement],
+    );
+
+    const applyAllExactSourceFileMatches = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.flatMap((item) => {
+            if (
+                item.action === "ignored" ||
+                item.action === "reloaded" ||
+                item.action === "replaced" ||
+                item.action === "processing"
+            ) {
+                return [];
+            }
+            const candidates = item.candidates ?? [];
+            const exactCandidates = candidates.filter((candidate) => candidate.exact_hash);
+            if (exactCandidates.length === 0) return [];
+            // 若用户当前选中的恰是哈希完全匹配项，优先尊重用户的选择；
+            // 否则按候选顺序取第一个哈希完全匹配项。
+            const selected = item.selectedCandidatePath
+                ? candidates.find((candidate) => candidate.path === item.selectedCandidatePath)
+                : undefined;
+            const chosen = selected?.exact_hash ? selected : exactCandidates[0];
+            return [{ item, path: chosen.path }];
+        });
+        for (const target of targets) {
+            await applySourceFileReplacement(target.item, target.path, "replace");
+        }
+    }, [applySourceFileReplacement, sourceFileChangedDialog.changes]);
+
+    const applyAllSelectedSourceFileMatches = useCallback(async () => {
+        const targets = sourceFileChangedDialog.changes.flatMap((item) => {
+            if (
+                item.action === "ignored" ||
+                item.action === "reloaded" ||
+                item.action === "replaced" ||
+                item.action === "processing"
+            ) {
+                return [];
+            }
+            const path = item.selectedCandidatePath;
+            return path ? [{ item, path }] : [];
+        });
+        for (const target of targets) {
+            await applySourceFileReplacement(target.item, target.path, "replace");
+        }
+    }, [applySourceFileReplacement, sourceFileChangedDialog.changes]);
+
+    // 全部重置：先刷新最新状态，再恢复为窗口初始的“未处理”快照。
+    // 重置时保留“搜索文件夹”已搜索到的候选列表与当前选择，方便用户继续操作。
+    const resetAllSourceFileChanges = useCallback(async () => {
+        if (sourceFileCheckBusyRef.current || sourceFileChangeHandlingRef.current) return;
+        const searchResultsByClipId = new Map(
+            sourceFileChangedDialog.changes.map((item) => [
+                item.clip_id,
+                {
+                    candidates: item.candidates,
+                    selectedCandidatePath: item.selectedCandidatePath,
+                },
+            ]),
+        );
+        const attachSearchResults = (item: SourceFileChangedItem): SourceFileChangedItem => {
+            const saved = searchResultsByClipId.get(item.clip_id);
+            if (!saved) return item;
+            return { ...item, ...saved };
+        };
+
+        sourceFileCheckBusyRef.current = true;
+        try {
+            const result = (await webApi.checkSourceFilesChanged()) as
+                | { changed?: SourceFileChange[] }
+                | undefined;
+            const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
+            const baseItems = sourceFileInitialChangesRef.current.map((item) => ({ ...item }));
+            const changes = mergeLatestSourceFileChanges(baseItems, rawChanges)
+                .map((item) => resetSourceFileItemToPending(item))
+                .map(attachSearchResults)
+                .map(defaultSelectedCandidatePath);
+            for (const item of changes) {
+                ignoredSourcePathsRef.current.delete(item.source_path);
+            }
+            sourceFileInitialChangesRef.current = changes.map((item) => ({ ...item }));
+            setSourceFileChangedDialog((prev) => ({ ...prev, open: true, changes }));
+        } catch {
+            // 读取失败时仍恢复到初始快照，避免列表停留在错误状态。
+            const changes = sourceFileInitialChangesRef.current
+                .map((item) => ({
+                    ...resetSourceFileItemToPending(item),
+                }))
+                .map(attachSearchResults)
+                .map(defaultSelectedCandidatePath);
+            for (const item of changes) {
+                ignoredSourcePathsRef.current.delete(item.source_path);
+            }
+            setSourceFileChangedDialog((prev) => ({ ...prev, open: true, changes }));
+        } finally {
+            sourceFileCheckBusyRef.current = false;
+        }
+    }, [sourceFileChangedDialog.changes]);
+
+    // 单条重置：仅将该条目恢复为窗口打开时的初始状态。
+    // 重置时保留该条目“搜索文件夹”搜索到的候选列表与当前选择。
+    const resetSourceFileChangeItem = useCallback((clipId: string) => {
+        setSourceFileChangedDialog((prev) => ({
+            ...prev,
+            changes: prev.changes.map((item) => {
+                if (item.clip_id !== clipId) return item;
+                const initial = sourceFileInitialChangesRef.current.find(
+                    (candidate) => candidate.clip_id === clipId,
+                );
+                const restored = initial
+                    ? resetSourceFileItemToPending({ ...initial })
+                    : resetSourceFileItemToPending(item);
+                const merged = defaultSelectedCandidatePath({
+                    ...restored,
+                    candidates: item.candidates,
+                    selectedCandidatePath: item.selectedCandidatePath,
+                } as SourceFileChangedItem);
+                if (restored.source_path) {
+                    ignoredSourcePathsRef.current.delete(restored.source_path);
+                }
+                return merged;
+            }),
+        }));
+    }, []);
+
+    const closeSourceFileChangedDialog = useCallback(() => {
+        setSourceFileChangedDialog((prev) => ({ ...prev, open: false }));
+    }, []);
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
@@ -1762,6 +2586,50 @@ function AppInner() {
         };
     }, [isDragging]);
 
+    const sourceFileSearchMatchTotal = sourceFileChangedDialog.changes.reduce(
+        (total, item) =>
+            item.action === "pending" || item.action === "failed"
+                ? total + (item.candidates?.length ?? 0)
+                : total,
+        0,
+    );
+    const sourceFileSearchExactTotal = sourceFileChangedDialog.changes.reduce(
+        (total, item) =>
+            item.action === "pending" || item.action === "failed"
+                ? total +
+                  (item.candidates?.filter((candidate) => candidate.exact_hash).length ?? 0)
+                : total,
+        0,
+    );
+    const sourceFileExactApplyTotal = sourceFileChangedDialog.changes.reduce((total, item) => {
+        if (item.action !== "pending" && item.action !== "failed") {
+            return total;
+        }
+        return total + (item.candidates?.some((candidate) => candidate.exact_hash) ? 1 : 0);
+    }, 0);
+    const sourceFileSelectedApplyTotal = sourceFileChangedDialog.changes.reduce((total, item) => {
+        if (
+            (item.action !== "pending" && item.action !== "failed") ||
+            !item.selectedCandidatePath
+        ) {
+            return total;
+        }
+        return total + 1;
+    }, 0);
+    const sourceFileReloadAllTotal = sourceFileChangedDialog.changes.reduce((total, item) => {
+        if (
+            item.change === "modified" &&
+            !item.reloadAttempted &&
+            (item.action === "pending" || item.action === "failed")
+        ) {
+            return total + 1;
+        }
+        return total;
+    }, 0);
+    const sourceFileAnyProcessing = sourceFileChangedDialog.changes.some(
+        (item) => item.action === "processing",
+    );
+
     return (
         <Flex
             direction="column"
@@ -1848,145 +2716,472 @@ function AppInner() {
                 </Dialog.Content>
             </Dialog.Root>
 
-            {/* Source file changed dialog — triggered on focus or project content change */}
+            {/* Project file version newer than this build — ask before attempting load */}
             <Dialog.Root
-                open={sourceFileChangedDialog.open}
+                open={projectVersionDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
-                        setSourceFileChangedDialog((prev) => ({ ...prev, open: false }));
+                        setProjectVersionDialog((current) => ({ ...current, open: false }));
                     }
                 }}
             >
-                <Dialog.Content maxWidth="620px">
-                    <Dialog.Title>{t("source_file_changed_title")}</Dialog.Title>
+                <Dialog.Content maxWidth="480px">
+                    <Dialog.Title>{t("project_version_too_new_title")}</Dialog.Title>
                     <Dialog.Description>
-                        {sourceFileChangedDialog.changes.some((c) => c.change === "deleted")
-                            ? t("source_file_changed_deleted_desc")
-                            : t("source_file_changed_modified_desc")}
+                        {t("project_version_too_new_desc")
+                            .replace(
+                                "{fileVersion}",
+                                String(projectVersionDialog.fileVersion || "?"),
+                            )
+                            .replace(
+                                "{currentVersion}",
+                                String(projectVersionDialog.currentVersion || "?"),
+                            )}
                     </Dialog.Description>
-                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
-                        {sourceFileChangedDialog.changes.map((item) => (
-                            <div
-                                key={item.clip_id}
-                                className="truncate py-0.5"
-                                data-tooltip={item.source_path}
-                            >
-                                <span
-                                    className={
-                                        item.change === "deleted"
-                                            ? "text-red-500"
-                                            : "text-amber-500"
-                                    }
-                                >
-                                    [{item.change === "deleted" ? t("source_file_changed_status_deleted") : t("source_file_changed_status_modified")}]
-                                </span>{" "}
-                                {item.clip_name} — {item.source_path}
-                            </div>
-                        ))}
-                    </div>
                     <Flex justify="end" gap="2" mt="4">
                         <Button
                             variant="soft"
                             color="gray"
-                            onClick={() => {
-                                // 将当前变更列表中的所有源路径加入忽略集合，
-                                // 本次打开工程期间不再弹出相关提示
-                                for (const c of sourceFileChangedDialog.changes) {
-                                    ignoredSourcePathsRef.current.add(c.source_path);
-                                }
-                                setSourceFileChangedDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-                            }}
+                            onClick={cancelContinueLoadingNewerProject}
                         >
-                            {t("source_file_changed_ignore")}
+                            {t("progress_cancel")}
                         </Button>
+                        <Button color="amber" onClick={confirmContinueLoadingNewerProject}>
+                            {t("project_version_too_new_continue")}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* 保存/另存为目标已存在版本不一致的工程文件 — 覆盖前询问用户 */}
+            <Dialog.Root
+                open={Boolean(saveVersionConflictDialog)}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        dispatch(closeSaveVersionConflictDialog());
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="520px">
+                    <Dialog.Title>{t("save_version_conflict_title")}</Dialog.Title>
+                    <Dialog.Description>
+                        {saveVersionConflictDialog?.existingIsNewer
+                            ? t("save_version_conflict_desc_higher")
+                                  .replace(
+                                      "{existingVersion}",
+                                      String(saveVersionConflictDialog.existingVersion),
+                                  )
+                                  .replace(
+                                      "{currentVersion}",
+                                      String(saveVersionConflictDialog.currentVersion),
+                                  )
+                            : t("save_version_conflict_desc_lower")
+                                  .replace(
+                                      "{existingVersion}",
+                                      String(saveVersionConflictDialog?.existingVersion ?? "?"),
+                                  )
+                                  .replace(
+                                      "{currentVersion}",
+                                      String(saveVersionConflictDialog?.currentVersion ?? "?"),
+                                  )}
+                    </Dialog.Description>
+                    <Flex justify="end" gap="2" mt="4">
                         <Button
-                            onClick={async () => {
-                                const changes = sourceFileChangedDialog.changes;
-                                setSourceFileChangedDialog((prev) => ({
-                                    ...prev,
-                                    open: false,
-                                }));
-
-                                // 处理期间阻止窗口 focus 检测重复弹窗。
-                                sourceFileChangeHandlingRef.current = true;
-                                try {
-                                    // 重新加载被修改的文件：按 source_path 去重，
-                                    // replaceSameSource: true 会让后端扩展至所有同源 clip。
-                                    const modifiedItems = new Map<string, SourceFileChange>();
-                                    for (const c of changes) {
-                                        if (
-                                            c.change === "modified" &&
-                                            c.source_path &&
-                                            !modifiedItems.has(c.source_path)
-                                        ) {
-                                            modifiedItems.set(c.source_path, c);
-                                        }
-                                    }
-                                    for (const item of modifiedItems.values()) {
-                                        try {
-                                            await dispatch(
-                                                replaceClipSourceRemote({
-                                                    clipIds: item.clip_id ? [item.clip_id] : [],
-                                                    newSourcePath: item.source_path,
-                                                    replaceSameSource: true,
-                                                }),
-                                            ).unwrap();
-                                        } catch {
-                                            // continue with remaining files
-                                        }
-                                    }
-
-                                    // 已删除文件同样按 source_path 去重；后端每个路径只返回
-                                    // 一条 clip 记录，因此也必须使用 replaceSameSource: true，
-                                    // 否则引用同一源文件的其他 clip 不会被一起替换。
-                                    const deletedItems = new Map<string, SourceFileChange>();
-                                    for (const c of changes) {
-                                        if (
-                                            c.change === "deleted" &&
-                                            c.source_path &&
-                                            !deletedItems.has(c.source_path)
-                                        ) {
-                                            deletedItems.set(c.source_path, c);
-                                        }
-                                    }
-                                    for (const item of deletedItems.values()) {
-                                        try {
-                                            const picked = await coreApi.openAudioDialog();
-                                            if (
-                                                (
-                                                    picked as {
-                                                        ok?: boolean;
-                                                        canceled?: boolean;
-                                                    }
-                                                )?.canceled ||
-                                                !(picked as { path?: string })?.path
-                                            ) {
-                                                continue;
-                                            }
-                                            const newPath = (picked as { path: string }).path;
-                                            await dispatch(
-                                                replaceClipSourceRemote({
-                                                    clipIds: item.clip_id
-                                                        ? [item.clip_id]
-                                                        : [],
-                                                    newSourcePath: newPath,
-                                                    replaceSameSource: true,
-                                                }),
-                                            ).unwrap();
-                                        } catch {
-                                            // continue with remaining files
-                                        }
-                                    }
-                                } finally {
-                                    sourceFileChangeHandlingRef.current = false;
-                                }
-                            }}
+                            variant="soft"
+                            color="gray"
+                            onClick={cancelSaveVersionConflict}
                         >
-                            {t("source_file_changed_reload")}
+                            {t("progress_cancel")}
                         </Button>
+                        <Button variant="soft" onClick={saveAsFromVersionConflict}>
+                            {t("save_version_conflict_save_as")}
+                        </Button>
+                        <Button color="red" onClick={continueForceSave}>
+                            {t("save_version_conflict_continue")}
+                        </Button>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
+
+            {/* Recapture missing media dialog — grid: file status / file / processing status / ignore / action */}
+            <Dialog.Root
+                open={sourceFileChangedDialog.open}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        closeSourceFileChangedDialog();
+                    }
+                }}
+            >
+                <Dialog.Content maxWidth="860px">
+                    <Dialog.Title>{t("recapture_missing_media_title")}</Dialog.Title>
+                    <Dialog.Description>{t("recapture_missing_media_desc")}</Dialog.Description>
+
+                    <Flex justify="between" align="center" gap="2" mt="2">
+                        <Flex gap="1" align="center" className="shrink-0">
+                            <span className="shrink-0 text-[10px] text-qt-text-muted">
+                                {t("recapture_missing_media_search_mode_label")}
+                            </span>
+                            <WheelSelect
+                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                value={sourceFileSearchMode}
+                                disabled={
+                                    sourceFileSearchBusy ||
+                                    sourceFileAnyProcessing ||
+                                    !sourceFileChangedDialog.changes.some(
+                                        (item) =>
+                                            item.action === "pending" ||
+                                            item.action === "failed",
+                                    )
+                                }
+                                onValueChange={(value) =>
+                                    setSourceFileSearchMode(
+                                        value as "file_name" | "extension_hash",
+                                    )
+                                }
+                            >
+                                <option value="file_name">
+                                    {t("recapture_missing_media_search_mode_file_name")}
+                                </option>
+                                <option value="extension_hash">
+                                    {t("recapture_missing_media_search_mode_extension_hash")}
+                                </option>
+                            </WheelSelect>
+                            <Button
+                                size="1"
+                                variant="soft"
+                                disabled={
+                                    sourceFileSearchBusy ||
+                                    sourceFileAnyProcessing ||
+                                    !sourceFileChangedDialog.changes.some(
+                                        (item) =>
+                                            item.action === "pending" ||
+                                            item.action === "failed",
+                                    )
+                                }
+                                onClick={() => void searchSourceFileReplacements()}
+                            >
+                                {sourceFileSearchBusy
+                                    ? t("recapture_missing_media_searching")
+                                    : t("recapture_missing_media_search_folder")}
+                            </Button>
+                        </Flex>
+                        <Flex gap="1" align="center" className="shrink-0">
+                            <Button
+                                size="1"
+                                variant="soft"
+                                disabled={sourceFileAnyProcessing || sourceFileReloadAllTotal === 0}
+                                onClick={() => void reloadAllModifiedSourceFiles()}
+                            >
+                                {t("recapture_missing_media_reload_all")}
+                            </Button>
+                            <Button
+                                size="1"
+                                variant="soft"
+                                disabled={sourceFileAnyProcessing || sourceFileSearchBusy}
+                                onClick={() => void refreshSourceFileChanges()}
+                            >
+                                {t("recapture_missing_media_refresh")}
+                            </Button>
+                            <Button
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                disabled={sourceFileAnyProcessing}
+                                onClick={() => void resetAllSourceFileChanges()}
+                            >
+                                {t("recapture_missing_media_reset_all")}
+                            </Button>
+                            <Button
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                disabled={
+                                    sourceFileAnyProcessing ||
+                                    !sourceFileChangedDialog.changes.some(
+                                        (item) =>
+                                            item.action !== "ignored" &&
+                                            item.action !== "reloaded" &&
+                                            item.action !== "replaced" &&
+                                            item.action !== "processing",
+                                    )
+                                }
+                                onClick={ignoreAllSourceFileChanges}
+                            >
+                                {t("recapture_missing_media_ignore_all")}
+                            </Button>
+                        </Flex>
+                    </Flex>
+
+                    {sourceFileSearchMatchTotal > 0 && (
+                        <Flex
+                            justify="between"
+                            align="center"
+                            gap="2"
+                            mt="1"
+                            className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
+                        >
+                            <Text size="1" color="gray" className="min-w-0 truncate">
+                                {t("recapture_missing_media_search_result_summary")
+                                    .replace("{total}", String(sourceFileSearchMatchTotal))
+                                    .replace("{exact}", String(sourceFileSearchExactTotal))
+                                    .replace("{selected}", String(sourceFileSelectedApplyTotal))}
+                            </Text>
+                            <Flex gap="1" align="center" className="shrink-0">
+                                {(sourceFileExactApplyTotal > 0 ||
+                                    sourceFileSelectedApplyTotal > 0) && (
+                                    <>
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            color="green"
+                                            disabled={
+                                                sourceFileAnyProcessing ||
+                                                sourceFileExactApplyTotal === 0
+                                            }
+                                            onClick={() => void applyAllExactSourceFileMatches()}
+                                        >
+                                            {t("recapture_missing_media_apply_all_exact")}
+                                        </Button>
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            disabled={
+                                                sourceFileAnyProcessing ||
+                                                sourceFileSelectedApplyTotal === 0
+                                            }
+                                            onClick={() =>
+                                                void applyAllSelectedSourceFileMatches()
+                                            }
+                                        >
+                                            {t("recapture_missing_media_apply_all_selected")}
+                                        </Button>
+                                    </>
+                                )}
+                            </Flex>
+                        </Flex>
+                    )}
+
+                    <div className="mt-2 max-h-[320px] overflow-auto rounded border border-qt-border bg-qt-base p-1">
+                        <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-[10px] font-semibold text-qt-text-muted">
+                            <div>{t("recapture_missing_media_col_file_status")}</div>
+                            <div>{t("recapture_missing_media_col_file")}</div>
+                            <div>{t("recapture_missing_media_col_process_status")}</div>
+                            <div />
+                            <div className="text-right">{t("recapture_missing_media_col_action")}</div>
+                            <div className="text-right">{t("recapture_missing_media_reset_item")}</div>
+                        </div>
+                        {sourceFileChangedDialog.changes.map((item) => {
+                            const itemKey = `${item.clip_id}::${item.change}`;
+                            const isBusy = item.action === "processing";
+                            const isProcessed =
+                                item.action === "ignored" ||
+                                item.action === "reloaded" ||
+                                item.action === "replaced";
+                            const statusBadgeClass =
+                                item.action === "ignored"
+                                    ? "border border-gray-500/25 bg-gray-500/10 text-gray-600"
+                                    : item.action === "reloaded" || item.action === "replaced"
+                                      ? "border border-green-500/25 bg-green-500/10 text-green-600"
+                                      : item.action === "failed"
+                                        ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                        : item.action === "processing"
+                                          ? "border border-blue-500/25 bg-blue-500/10 text-blue-600"
+                                          : "border border-qt-border bg-qt-base text-qt-text-muted";
+                            const statusLabel =
+                                item.action === "ignored"
+                                    ? t("recapture_missing_media_item_ignored")
+                                    : item.action === "reloaded"
+                                      ? t("recapture_missing_media_item_reloaded")
+                                      : item.action === "replaced"
+                                        ? t("recapture_missing_media_item_replaced")
+                                        : item.action === "failed"
+                                          ? t("recapture_missing_media_item_failed")
+                                          : item.action === "processing"
+                                            ? t("recapture_missing_media_item_processing")
+                                            : t("recapture_missing_media_item_pending");
+                            const useReplaceAction =
+                                item.change === "deleted" ||
+                                Boolean(item.reloadAttempted) ||
+                                item.action === "ignored" ||
+                                item.action === "reloaded" ||
+                                item.action === "replaced";
+                            return (
+                                <div
+                                    key={itemKey}
+                                    className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-xs last:border-b-0"
+                                >
+                                    <div
+                                        className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
+                                            item.change === "deleted"
+                                                ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                                : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
+                                        }`}
+                                    >
+                                        {item.change === "deleted"
+                                            ? t("recapture_missing_media_status_deleted")
+                                            : t("recapture_missing_media_status_modified")}
+                                    </div>
+                                    <div className="min-w-0">
+                                        <div className="truncate" data-tooltip={item.source_path}>
+                                            <span className="font-medium">{item.clip_name}</span>
+                                            <span className="text-gray-500">
+                                                {" "}
+                                                — {item.source_path}
+                                            </span>
+                                        </div>
+                                        {item.reloadedPath && (
+                                            <div
+                                                className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-green-600"
+                                                data-tooltip={item.reloadedPath}
+                                            >
+                                                <span className="shrink-0 font-semibold">
+                                                    {item.action === "reloaded"
+                                                        ? t("recapture_missing_media_reloaded_path")
+                                                        : t("recapture_missing_media_replaced_path")}
+                                                </span>
+                                                <span className="truncate">
+                                                    {item.reloadedPath}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {!isProcessed &&
+                                            item.candidates &&
+                                            item.candidates.length > 0 && (
+                                                <div className="mt-1 flex items-center gap-1">
+                                                    <WheelSelect
+                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                        value={item.selectedCandidatePath ?? ""}
+                                                        disabled={isBusy}
+                                                        onValueChange={(value) =>
+                                                            selectSourceFileMatchCandidate(
+                                                                item.clip_id,
+                                                                value,
+                                                            )
+                                                        }
+                                                    >
+                                                        {item.candidates.map((candidate) => (
+                                                            <option
+                                                                key={candidate.path}
+                                                                value={candidate.path}
+                                                            >
+                                                                {candidate.exact_hash
+                                                                    ? `✓ ${t("recapture_missing_media_match_exact")} · `
+                                                                    : ""}
+                                                                {candidate.path}
+                                                            </option>
+                                                        ))}
+                                                    </WheelSelect>
+                                                    <Button
+                                                        size="1"
+                                                        variant="soft"
+                                                        disabled={
+                                                            isBusy || !item.selectedCandidatePath
+                                                        }
+                                                        onClick={() =>
+                                                            void applySelectedSourceFileMatch(item)
+                                                        }
+                                                    >
+                                                        {t("recapture_missing_media_use_selected")}
+                                                    </Button>
+                                                </div>
+                                            )}
+                                        {!isProcessed &&
+                                            item.candidates &&
+                                            item.candidates.length === 0 && (
+                                                <div className="mt-1 truncate text-[10px] text-qt-text-muted">
+                                                    {t("recapture_missing_media_search_no_matches")}
+                                                </div>
+                                            )}
+                                    </div>
+                                    <div
+                                        className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${statusBadgeClass}`}
+                                    >
+                                        {statusLabel}
+                                    </div>
+                                    <div className="flex justify-start">
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            color="gray"
+                                            disabled={isBusy || isProcessed}
+                                            onClick={() => void ignoreSourceFileChangeItem(item)}
+                                        >
+                                            {t("recapture_missing_media_ignore")}
+                                        </Button>
+                                    </div>
+                                    <div className="flex justify-end">
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            disabled={isBusy}
+                                            onClick={() =>
+                                                useReplaceAction
+                                                    ? void replaceSourceFileChangeItem(item)
+                                                    : void reloadSourceFileChangeItem(item)
+                                            }
+                                        >
+                                            {useReplaceAction
+                                                ? t("recapture_missing_media_replace")
+                                                : t("recapture_missing_media_reload")}
+                                        </Button>
+                                    </div>
+                                    <div className="flex justify-end">
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            color="gray"
+                                            disabled={isBusy}
+                                            onClick={() => resetSourceFileChangeItem(item.clip_id)}
+                                        >
+                                            {t("recapture_missing_media_reset_item")}
+                                        </Button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <Flex justify="between" align="center" gap="2" mt="3">
+                        <Text size="1" color="gray">
+                            {t("recapture_missing_media_summary")
+                                .replace(
+                                    "{ignored}",
+                                    String(
+                                        sourceFileChangedDialog.changes.filter(
+                                            (item) => item.action === "ignored",
+                                        ).length,
+                                    ),
+                                )
+                                .replace(
+                                    "{reloaded}",
+                                    String(
+                                        sourceFileChangedDialog.changes.filter(
+                                            (item) => item.action === "reloaded",
+                                        ).length,
+                                    ),
+                                )
+                                .replace(
+                                    "{replaced}",
+                                    String(
+                                        sourceFileChangedDialog.changes.filter(
+                                            (item) => item.action === "replaced",
+                                        ).length,
+                                    ),
+                                )
+                                .replace("{total}", String(sourceFileChangedDialog.changes.length))}
+                        </Text>
+                        <Flex gap="2" align="center" className="shrink-0">
+                            <Button
+                                disabled={
+                                    sourceFileAnyProcessing ||
+                                    sourceFileChangedDialog.changes.some(
+                                        (item) => item.action === "pending",
+                                    )
+                                }
+                                onClick={closeSourceFileChangedDialog}
+                            >
+                                {t("ok")}
+                            </Button>
+                        </Flex>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>
@@ -2004,11 +3199,14 @@ function AppInner() {
                 onNewProject={handleNewProject}
                 onOpenProject={handleOpenProject}
                 onOpenRecentProject={handleOpenRecentProject}
+                onRecaptureMissingMedia={handleRecaptureMissingMedia}
                 onImportProject={handleImportProject}
                 onExit={handleExitApp}
                 onImportMidiFromMenu={handleImportMidiFromMenu}
                 autoBackupSettings={autoBackupSettings}
                 onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
+                autoReloadModifiedMedia={autoReloadModifiedMedia}
+                onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
             />
             <ActionBar />
 

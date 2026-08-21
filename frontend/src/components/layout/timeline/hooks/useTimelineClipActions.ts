@@ -19,6 +19,7 @@ import {
     removeTrackRemote,
     seekPlayhead,
     selectClipRemote,
+    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipStateRemote,
@@ -620,29 +621,27 @@ export function useTimelineClipActions(
                             track_id?: string;
                             start_sec?: number;
                             length_sec?: number;
-                            fade_in_sec?: number;
-                            fade_out_sec?: number;
+                            auto_fade_in_sec?: number;
+                            auto_fade_out_sec?: number;
                         }>;
                         const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
                         if (fadeUpdates.length > 0) {
-                            const changesById = new Map(
-                                fadeUpdates.map((u) => [
-                                    u.clipId,
-                                    {
-                                        fadeInSec: u.fadeInSec,
-                                        fadeOutSec: u.fadeOutSec,
-                                    },
-                                ]),
-                            );
-                            await dispatch(
-                                setClipsStateBulkRemote({
-                                    updates: buildBulkClipStateUpdates({
-                                        clipIds: [...changesById.keys()],
-                                        changesById,
+                            // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
+                            for (const u of fadeUpdates) {
+                                dispatch(
+                                    setClipAutoFades({
+                                        clipId: u.clipId,
+                                        autoFadeInSec: u.autoFadeInSec,
+                                        autoFadeOutSec: u.autoFadeOutSec,
                                     }),
+                                );
+                                await webApi.setClipState({
+                                    clipId: u.clipId,
+                                    autoFadeInSec: u.autoFadeInSec,
+                                    autoFadeOutSec: u.autoFadeOutSec,
                                     checkpoint: false,
-                                }),
-                            ).unwrap();
+                                });
+                            }
                         }
                     }
                 } catch {

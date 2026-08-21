@@ -62,7 +62,7 @@ export const enUS = {
     export_conflict_exists_desc: "The following export target already exists:",
     export_conflict_source_title: "Critical Warning: Export Target Matches Project Media",
     export_conflict_source_desc:
-        "The export target path matches an audio clip source file used by the current project.\nOverwriting this file may permanently damage project media and cause irreversible data loss. Proceed carefully.",
+        "The export target path matches a media clip source file used by the current project.\nOverwriting this file may permanently damage project media and cause irreversible data loss. Proceed carefully.",
     export_conflict_apply_all: "Apply the same action to subsequent similar conflicts",
     export_conflict_skip: "Skip",
     export_conflict_cancel: "Cancel Export",
@@ -74,7 +74,8 @@ export const enUS = {
     shortcut_ctrl_o: "Ctrl+O",
     shortcut_ctrl_e: "Ctrl+E",
     media_stream_select_title: "Select Audio Stream",
-    media_stream_select_hint: "This video contains multiple audio streams. Select one to extract and import.",
+    media_stream_select_hint:
+        "This video contains multiple audio streams. Select one to extract and import.",
     media_stream_track: "Track",
     menu_import_media: "Import Media File...",
     menu_import_reaper: "Import Reaper Project...",
@@ -107,7 +108,7 @@ export const enUS = {
     quick_export_error_missing_file_name: "Please enter a file name.",
     quick_export_error_pick_directory_failed: "Failed to choose output folder.",
     reaper_import_skipped_header:
-        "Some audio files were skipped during Reaper import (unsupported format or file not found):",
+        "Some media files were skipped during Reaper import (unsupported format or file not found):",
     menu_pick_output: "Pick Output",
     stretch_project_override: "Project Stretch Override",
     stretch_global_default: "Global Stretch Default",
@@ -164,6 +165,7 @@ export const enUS = {
     reference_root_tracks_all: "Select All",
     reference_root_tracks_clear: "Clear",
     reference_root_tracks_empty: "No other track groups",
+    reference_root_tracks_short: "Ref Tracks",
     tool_mode: "Tool Mode",
     edit_param: "Edit Param",
     draw: "Draw",
@@ -188,7 +190,7 @@ export const enUS = {
         "Drag clips on timeline to move start (snaps to grid; hold Shift for free movement)",
     hint_add_point: "Double click in parameter panel to add points",
     hint_drag_point: "Drag points to edit the curve",
-    hint_drop_audio: "Drop audio file onto app to import and analyze",
+    hint_drop_audio: "Drop media file onto app to import and analyze",
     hint_alt_drag: "Hold Alt while dragging a clip to Slip-Edit (move content internally; no snap)",
 
     timeline_title: "Timeline",
@@ -199,6 +201,7 @@ export const enUS = {
     track_remove_selected: "Remove Selected Track",
 
     param_editor: "Parameter Editor",
+    param_editor_short: "Param Editor",
     pitch_requires_compose: "Enable Compose (C) on the root track to generate pitch curve",
     pitch_requires_algo: "Select a non-None pitch algorithm to enable pitch editing",
     midi_compose_required_title: "Compose Not Enabled",
@@ -230,6 +233,17 @@ export const enUS = {
     vslib_synth_mode_chorus: "Chorus",
     switch_on: "On",
     switch_off: "Off",
+
+    // Short toolbar labels for the parameter editor (acronyms keep non-CJK toolbars compact)
+    param_btn_pitch: "PIT",
+    param_btn_breath: "BRE",
+    param_btn_volume: "VOL",
+    param_btn_pan: "PAN",
+    param_btn_formant: "FRM",
+    param_btn_tension: "TEN",
+    param_btn_breathiness: "BRE",
+    breath_state_on: "Breath On",
+    breath_state_off: "Breath Off",
     points_help: "Double click add · Drag move · Right click delete",
     points_count: "Points",
     selected: "Selected",
@@ -280,6 +294,7 @@ export const enUS = {
     status_target_none: "Idle",
     dropped_audio_imported: "Dropped media imported",
     import_audio_failed: "Import media failed",
+    status_project_version_confirmation: "Project version confirmation required",
 
     menu_about: "About HiFiShifter",
     glue: "Glue",
@@ -301,6 +316,10 @@ export const enUS = {
     fade_out: "Fade Out",
     show_secondary_param: "Show secondary parameter overlay",
     hide_secondary_param: "Hide secondary parameter overlay",
+    secondary_overlay_tooltip_visible: "Secondary overlay: visible\nClick to hide",
+    secondary_overlay_tooltip_hidden: "Secondary overlay: hidden\nClick to show",
+    breath_tooltip_on: "Breath: on\nClick to turn off",
+    breath_tooltip_off: "Breath: off\nClick to turn on",
     onnx_compile_required: "ONNX model not compiled. Run: cargo tauri dev --features onnx",
     onnx_unavailable_label: " (unavailable)",
     solo: "Solo",
@@ -345,15 +364,65 @@ export const enUS = {
     ctx_unreverse_selected: "Unreverse Selected",
     clip_replace_same_source_confirm:
         "Other clips in this project use the same source file path as the selected clip(s). Replace those same-source clips as well?",
-    source_file_changed_title: "Source File Changed",
-    source_file_changed_modified_desc:
-        "The following audio file(s) have been modified externally. Do you want to reload them into the project?",
-    source_file_changed_deleted_desc:
-        "The following audio file(s) have been moved or deleted. Do you want to pick replacement files?",
-    source_file_changed_reload: "Reload Files",
-    source_file_changed_ignore: "Ignore",
-    source_file_changed_status_deleted: "DELETED",
-    source_file_changed_status_modified: "MODIFIED",
+    recapture_missing_media_title: "Recapture Missing Media",
+    recapture_missing_media_desc:
+        "The following media files are missing or their contents have changed. You can ignore each item, reload modified files from their original paths, or replace missing files with other files.",
+    recapture_missing_media_modified_desc:
+        "The following media file(s) have been modified externally.",
+    recapture_missing_media_deleted_desc: "The following media file(s) have been moved or deleted.",
+    recapture_missing_media_reload: "Reload",
+    recapture_missing_media_replace: "Replace",
+    recapture_missing_media_reload_all: "Reload All",
+    recapture_missing_media_refresh: "Refresh",
+    recapture_missing_media_reset: "Reset All",
+    recapture_missing_media_reset_all: "Reset All",
+    recapture_missing_media_reset_item: "Reset",
+    recapture_missing_media_ignore: "Ignore",
+    recapture_missing_media_ignore_all: "Ignore All",
+    recapture_missing_media_status_deleted: "DELETED",
+    recapture_missing_media_status_modified: "MODIFIED",
+    recapture_missing_media_item_processing: "Processing...",
+    recapture_missing_media_item_pending: "Unprocessed",
+    recapture_missing_media_item_ignored: "Ignored",
+    recapture_missing_media_item_reloaded: "Reloaded",
+    recapture_missing_media_item_replaced: "Replaced",
+    recapture_missing_media_item_failed: "Failed",
+    recapture_missing_media_summary:
+        "Ignored {ignored} · Reloaded {reloaded} · Replaced {replaced} · Total {total}",
+    recapture_missing_media_reload_dialog_title: 'Choose a replacement for "{name}"',
+    recapture_missing_media_replace_dialog_title: 'Choose a replacement for "{name}"',
+    recapture_missing_media_reloaded_path: "Reloaded path:",
+    recapture_missing_media_replaced_path: "Replaced with:",
+    recapture_missing_media_col_file_status: "STATUS",
+    recapture_missing_media_col_file: "FILE",
+    recapture_missing_media_col_process_status: "HANDLING",
+    recapture_missing_media_col_action: "ACTION",
+    recapture_missing_media_search_folder: "Search Folder...",
+    recapture_missing_media_searching: "Searching...",
+    recapture_missing_media_search_mode_label: "Search mode:",
+    recapture_missing_media_search_mode_file_name: "Exact file name",
+    recapture_missing_media_search_mode_extension_hash: "File extension + hash (may be slow!)",
+    recapture_missing_media_search_result_summary:
+        "{total} match(es) · {exact} exact hash · {selected} selected",
+    recapture_missing_media_match_exact: "exact hash",
+    recapture_missing_media_use_selected: "Use Selected",
+    recapture_missing_media_apply_all_exact: "Apply All Exact Matches",
+    recapture_missing_media_apply_all_selected: "Apply All Selected",
+    recapture_missing_media_search_no_matches: "No matching file found",
+    menu_recapture_missing_media: "Recapture Missing Media...",
+    project_version_too_new_title: "Newer Project File Detected",
+    project_version_too_new_desc:
+        "This project file was created with a newer version (v{fileVersion}) than this app (v{currentVersion}). It may be incompatible. Do you want to continue and try to load it anyway?",
+    project_version_too_new_continue: "Continue Loading",
+
+    status_save_version_confirmation: "Save version confirmation required",
+    save_version_conflict_title: "Overwrite Existing Project File?",
+    save_version_conflict_desc_lower:
+        "The target location already contains a HiFiShifter project file from an OLDER version (v{existingVersion}) than the current one (v{currentVersion}). Overwriting it will upgrade that file and may lose parameters the older app does not understand, which could make it incompatible if you open it with the older app later. What do you want to do?",
+    save_version_conflict_desc_higher:
+        "The target location already contains a HiFiShifter project file from a NEWER version (v{existingVersion}) than the current one (v{currentVersion}). Overwriting it may cause some parameters to be missing or the file to become incompatible. What do you want to do?",
+    save_version_conflict_save_as: "Save As...",
+    save_version_conflict_continue: "Continue Saving",
 
     fade_curve_linear: "Linear",
     fade_curve_sine: "Sine",
@@ -380,12 +449,18 @@ export const enUS = {
     progress_cancel: "Cancel",
     pitch_analyzing_clips: "Analyzing{clipName}{clipCount} {percentage}%",
     algo_label: "Algo",
+    algo_label_short: "Algo",
     child_pitch_mode_cents: "Cents",
     child_pitch_mode_degrees: "Degrees",
     child_formant_mode: "Formant",
     child_pitch_offset_cents_label: "Child Track Cents Offset",
     child_pitch_offset_degrees_label: "Child Track Degree Offset",
     child_formant_offset_cents_label: "Child Track Formant Offset",
+    child_pitch_root_option: "Pitch (Track Group)",
+    child_pitch_cents_option: "Cents (Current Sub-track)",
+    child_pitch_degrees_option: "Degrees (Current Sub-track)",
+    child_formant_root_option: "Formant Shift (Track Group)",
+    child_formant_offset_option: "Formant Offset (Current Sub-track)",
     child_pitch_offset_cents_short: "cents",
     child_pitch_offset_degrees_short: "degrees",
     child_formant_offset_cents_short: "cents",
@@ -486,7 +561,7 @@ export const enUS = {
     vs_import_read_failed: "Failed to read VocalShifter project file.",
     vs_import_parse_failed: "Failed to parse VocalShifter project.",
     vs_import_skipped_header:
-        "The following audio files were skipped (unsupported format or not found):",
+        "The following media files were skipped (unsupported format or not found):",
 
     // MIDI 导入
     midi_import: "Import MIDI",
@@ -550,6 +625,16 @@ export const enUS = {
 
     // Toolbar toggle buttons
     auto_crossfade: "Auto Crossfade",
+    ripple: "Ripple Editing (Auto Follow)",
+    ripple_tooltip_off:
+        "Ripple Editing (Auto Follow): Off. Left-click to enable (per track); right-click to choose mode.",
+    ripple_tooltip_track:
+        "Ripple Editing (Auto Follow): Only clips on the edited track move along. Left-click for All Tracks; right-click to choose mode.",
+    ripple_tooltip_all:
+        "Ripple Editing (Auto Follow): Clips after the edit on all tracks move along. Left-click to turn off; right-click to choose mode.",
+    ripple_mode_off: "Off",
+    ripple_mode_track: "Per Track",
+    ripple_mode_all: "All Tracks",
     split_transition: "Split Transition",
     split_transition_tooltip: "Split Transition (right-click for settings)",
     split_transition_settings_title: "Split Transition Settings",
@@ -620,6 +705,7 @@ export const enUS = {
     param_value_popup: "Popup Param Values",
     lock_param_lines: "Lock Param Lines",
     edge_smoothness: "Smoothness",
+    edge_smoothness_short: "Smooth",
 
     // Grid note type labels
     grid_note_normal: "Normal",
@@ -977,6 +1063,7 @@ export const enUS = {
     menu_background_prerender: "Background Pre-render",
     menu_background_prerender_desc:
         "Immediately start pre-rendering after edits. Playback uses already-rendered content without waiting for full render.",
+    options_auto_reload_modified_media: "Automatically reload modified media files",
 
     // ── Benchmark ────────────────────────────────────────────────────────
     benchmark_title: "Inference Device Benchmark",

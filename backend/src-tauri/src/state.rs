@@ -34,6 +34,30 @@ fn default_formant_strength() -> f64 {
     0.50
 }
 
+fn default_gain() -> f32 {
+    1.0
+}
+
+fn default_playback_rate() -> f32 {
+    1.0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_default_frame_period(value: &f64) -> bool {
+    *value == default_frame_period_ms()
+}
+
+fn btree_map_string_track_params_is_empty(value: &BTreeMap<String, TrackParamsState>) -> bool {
+    value.is_empty()
+}
+
+fn hash_set_string_is_empty(value: &HashSet<String>) -> bool {
+    value.is_empty()
+}
+
 /// 内置音阶键名 → 音级集合（未知键名返回 None）。
 pub(crate) fn scale_notes_for_key(scale: &str) -> Option<Vec<u8>> {
     let notes = match scale {
@@ -133,24 +157,27 @@ impl SynthPipelineKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrackParamsState {
-    #[serde(default = "default_frame_period_ms")]
+    #[serde(
+        default = "default_frame_period_ms",
+        skip_serializing_if = "is_default_frame_period"
+    )]
     pub frame_period_ms: f64,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_orig: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_edit: Vec<f32>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub pitch_edit_user_modified: bool,
 
     /// 是否有活跃的音高参考块（非静音 MIDI clip）在此轨道组中
     #[serde(skip)]
     pub has_pitch_adjustment_active: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_orig: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_edit: Vec<f32>,
 
     #[serde(skip)]
@@ -164,25 +191,44 @@ pub struct TrackParamsState {
     /// 自动化曲线（key = ParamDescriptor::id）。
     /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
     /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, f64>,
+}
+
+impl TrackParamsState {
+    /// 保存工程文件时，没有任何用户数据需要持久化的状态。
+    ///
+    /// 全零/空的 pitch、tension 和自动化曲线在反序列化后与默认状态语义一致，
+    /// 因此整条 root-track 参数记录都可以省略。
+    pub fn is_empty_project_data(&self) -> bool {
+        self.pitch_orig.is_empty()
+            && self.pitch_edit.is_empty()
+            && !self.pitch_edit_user_modified
+            && self.tension_orig.is_empty()
+            && self.tension_edit.is_empty()
+            && self.extra_curves.is_empty()
+            && self.extra_params.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkedParamCurvesPayload {
-    #[serde(default = "default_frame_period_ms")]
+    #[serde(
+        default = "default_frame_period_ms",
+        skip_serializing_if = "is_default_frame_period"
+    )]
     pub frame_period_ms: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pitch_edit: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tension_edit: Vec<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
 }
 
@@ -273,6 +319,10 @@ pub struct CreateClipTemplatePayload {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    #[serde(default)]
+    pub auto_fade_in_sec: Option<f64>,
+    #[serde(default)]
+    pub auto_fade_out_sec: Option<f64>,
     pub linked_params: Option<LinkedParamCurvesPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
@@ -292,10 +342,17 @@ pub struct CreateClipsBulkPayload {
 pub struct Track {
     pub id: String,
     pub name: String,
+    /// 轨道分组父级；`None` 表示根轨道。始终序列化以兼容旧版本读取。
+    #[serde(default)]
     pub parent_id: Option<String>,
     pub order: i32,
+    /// 轨道音量/静音/独奏/合成开关/分析算法等基础参数属于工程语义内容，
+    /// 始终序列化，避免依赖"缺省 = 默认值"的隐式规则（默认值可能在跨版本间变化）。
+    #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
     pub solo: bool,
+    #[serde(default = "default_gain")]
     pub volume: f32,
 
     #[serde(default)]
@@ -318,13 +375,20 @@ pub struct Clip {
     pub name: String,
     pub start_sec: f64,
     pub length_sec: f64,
+    /// Clip 颜色、来源路径、时长/采样率等基础参数始终序列化，兼容旧版本读取；
+    /// `source_path_relative` 为可推导的派生路径，仍按需省略。
+    #[serde(default = "default_clip_color")]
     pub color: String,
 
-    pub source_path: Option<String>,
     #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path_relative: Option<String>,
-    pub duration_sec: Option<f64>,       // 兼容性保留
-    pub duration_frames: Option<u64>,    // 精确的frame总数
+    #[serde(default)]
+    pub duration_sec: Option<f64>, // 兼容性保留
+    #[serde(default)]
+    pub duration_frames: Option<u64>, // 精确的frame总数
+    #[serde(default)]
     pub source_sample_rate: Option<u32>, // 源文件采样率
     /// 文件导入时的 mtime（Unix 时间戳，秒），用于检测外部文件替换/删除。
     /// None 表示运行时从字节流导入（无磁盘文件）或尚未初始化。
@@ -336,22 +400,39 @@ pub struct Clip {
     #[serde(skip)]
     pub source_file_size: Option<u64>,
     /// 源文件内容指纹（头 64KB + 尾 64KB FNV-1a 64-bit）。
-    /// 用于元数据变化后的第二层内容确认。仅在程序运行期间有效，不持久化。
-    #[serde(skip)]
+    ///
+    /// 用于：
+    /// 1. 元数据变化后的第二层内容确认；
+    /// 2. 源文件缺失时按文件名搜索候选文件并进行哈希匹配。
+    ///
+    /// 该字段随工程文件持久化；打开工程时优先使用工程中保存的值，
+    /// 即使源文件当前缺失，也能用于后续重新匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_file_fingerprint: Option<u64>,
+    /// 波形预览与音高范围属于可重新生成的缓存，仅在保存时以 None/null 形式
+    /// 落盘（保持字段存在以兼容旧版本读取，但不携带任何波形数据）。
+    #[serde(default)]
     pub waveform_preview: Option<Vec<f32>>,
+    #[serde(default)]
     pub pitch_range: Option<PitchRange>,
 
+    /// 增益/静音/裁剪/播放速率/反向/淡入淡出/曲线类型等 clip 基础参数
+    /// 始终序列化，避免依赖"缺省 = 默认值"的隐式规则。
+    #[serde(default = "default_gain")]
     pub gain: f32,
+    #[serde(default)]
     pub muted: bool,
-    #[serde(alias = "trim_start_sec")]
+    #[serde(alias = "trim_start_sec", default)]
     pub source_start_sec: f64,
     #[serde(alias = "trim_end_sec")]
     pub source_end_sec: f64,
+    #[serde(default = "default_playback_rate")]
     pub playback_rate: f32,
     #[serde(default)]
     pub reversed: bool,
+    #[serde(default)]
     pub fade_in_sec: f64,
+    #[serde(default)]
     pub fade_out_sec: f64,
     /// 淡入曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
     #[serde(default = "default_fade_curve")]
@@ -360,14 +441,27 @@ pub struct Clip {
     #[serde(default = "default_fade_curve")]
     pub fade_out_curve: String,
 
-    /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
+    /// 自动交叉淡化长度（秒，由剪辑重叠派生；**不覆盖手动 fade**）。
+    ///
+    /// 对齐 REAPER 的存储方式：手动 fade（`fade_in_sec` / `fade_out_sec`）始终保留，
+    /// 自动交叉淡化独立记录在 `auto_fade_*_sec`。渲染/显示使用“有效 fade”：
+    /// `auto_fade_*_sec > 0` 时用自动值，否则用手动值。分离后自动值归 0，
+    /// 手动 fade 自然恢复。
+    ///
+    /// 旧版本工程没有这两个字段（serde default = 0），有效 fade = 手动值，完全兼容。
     #[serde(default)]
+    pub auto_fade_in_sec: f64,
+    #[serde(default)]
+    pub auto_fade_out_sec: f64,
+
+    /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_curves: Option<HashMap<String, Vec<f32>>>,
 
     /// Clip 级别的声码器静态参数覆盖（None = 使用 Track 级别的 extra_params）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_params: Option<HashMap<String, f64>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formant_morph: Option<ClipFormantMorph>,
 
     /// MIDI 音符数据（仅用于 MIDI clip，无音频源）。
@@ -377,8 +471,28 @@ pub struct Clip {
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
 
     /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub midi_fill_gaps: bool,
+}
+
+impl Clip {
+    /// 有效淡入长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_in_sec(&self) -> f64 {
+        if self.auto_fade_in_sec > 0.0 {
+            self.auto_fade_in_sec
+        } else {
+            self.fade_in_sec
+        }
+    }
+
+    /// 有效淡出长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_out_sec(&self) -> f64 {
+        if self.auto_fade_out_sec > 0.0 {
+            self.auto_fade_out_sec
+        } else {
+            self.fade_out_sec
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -397,6 +511,8 @@ pub struct ClipStatePatch {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
     pub formant_morph: Option<ClipFormantMorph>,
 }
@@ -416,10 +532,13 @@ pub struct RuntimeState {
 #[serde(rename_all = "camelCase")]
 pub struct TempoScaleData {
     /// 内置音阶键名（如 "C"、"Db"）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// 自定义音阶名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// 自定义音阶音级集合（0-11）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<u8>>,
 }
 
@@ -431,8 +550,11 @@ pub struct TempoPointData {
     pub id: String,
     pub position_sec: f64,
     pub bpm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub numerator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denominator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<TempoScaleData>,
 }
 
@@ -440,26 +562,35 @@ pub struct TempoPointData {
 pub struct TimelineState {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
+    #[serde(default)]
     pub selected_track_id: Option<String>,
+    #[serde(default)]
     pub selected_clip_id: Option<String>,
     pub bpm: f64,
+    #[serde(default)]
     pub playhead_sec: f64,
     pub project_sec: f64,
 
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "btree_map_string_track_params_is_empty"
+    )]
     pub params_by_root_track: BTreeMap<String, TrackParamsState>,
 
-    #[serde(default = "default_project_scale_notes")]
+    #[serde(
+        default = "default_project_scale_notes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub project_scale_notes: Vec<u8>,
 
     /// Tempo Map（None = 无 Tempo Map，使用全局 BPM/拍号/音阶）。
     /// 点按 position_sec 升序；第一个点必须位于 0。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tempo_map: Option<Vec<TempoPointData>>,
 
     pub next_track_order: i32,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "hash_set_string_is_empty")]
     pub disabled_group_ids: HashSet<String>,
 }
 
@@ -568,6 +699,37 @@ pub struct SplitTransitionOptions {
     pub curve: Option<String>,
     /// 延伸重叠模式下，是否同时为重叠区域设置淡入淡出。
     pub overlap_fades: bool,
+}
+
+/// 波纹编辑（自动跟进）模式，对应 REAPER 的 Ripple Editing。
+///
+/// - `Off`：关闭。编辑只影响被编辑对象本身，后续剪辑保持原位（默认，与 REAPER 默认一致）。
+/// - `Track`：仅被编辑剪辑所在轨道上的后续剪辑一起平移（对应 REAPER“per selected track”）。
+/// - `All`：所有轨道上位于编辑点之后的剪辑一起平移，保持多轨内容时间对齐（对应 REAPER“all tracks”）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RippleMode {
+    Off,
+    Track,
+    All,
+}
+
+impl RippleMode {
+    /// 从持久化字符串解析；未知值回退为 `Off`。
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "track" => Self::Track,
+            "all" => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Track => "track",
+            Self::All => "all",
+        }
+    }
 }
 
 impl TimelineState {
@@ -1339,6 +1501,20 @@ impl AppState {
         let peaks = match result {
             Ok(p) => p,
             Err(e) => {
+                // 必须发送终态事件：前端依赖 done/failed 隐藏“正在分析波形”状态，
+                // 缺失/无法读取的文件如果没有终态事件会导致进度提示永久停留。
+                if let Some(handle) = self.app_handle.get() {
+                    use tauri::Emitter;
+                    let _ = handle.emit(
+                        "waveform_analysis_progress",
+                        serde_json::json!({
+                            "sourcePath": &source_path_owned,
+                            "progress": 1.0,
+                            "status": "failed",
+                            "error": e,
+                        }),
+                    );
+                }
                 self.remove_waveform_inflight(source_path);
                 return Err(e);
             }
@@ -1656,6 +1832,15 @@ impl AppState {
 mod tests {
     use super::*;
 
+    fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
+        timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .map(|clip| clip.start_sec)
+            .unwrap_or(f64::NAN)
+    }
+
     #[test]
     fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
         let base = TimelineState::default();
@@ -1811,6 +1996,71 @@ mod tests {
     }
 
     #[test]
+    fn ripple_track_mode_moves_following_clips_on_same_track_only() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a0 = timeline.add_clip(Some(track_a.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(2.0), None);
+
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let affected: HashSet<String> = HashSet::from([track_a]);
+        let shifted = timeline.ripple_shift_clips(&edited, Some(&affected), 2.0, 1.0, false);
+
+        // A 轨上的后续剪辑 a2 右移 1s。
+        assert!(shifted.contains(&a2));
+        // 被编辑的 a1 与更早的 a0 不动。
+        assert!(!shifted.contains(&a1));
+        assert!(!shifted.contains(&a0));
+        // B 轨上的 b0（与 a1 同时刻）不动（Track 模式）。
+        assert!(!shifted.contains(&b0));
+
+        assert_eq!(find_clip_start(&timeline, &a0), 0.0);
+        assert_eq!(find_clip_start(&timeline, &a1), 2.0);
+        assert_eq!(find_clip_start(&timeline, &a2), 5.0);
+        assert_eq!(find_clip_start(&timeline, &b0), 2.0);
+    }
+
+    #[test]
+    fn ripple_all_mode_moves_following_clips_on_every_track() {
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.add_track(Some("A".into()), None, None);
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+
+        let a1 = timeline.add_clip(Some(track_a.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track_a.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+        let b0 = timeline.add_clip(Some(track_b.clone()), Some("b0".into()), Some(2.0), Some(4.0), None);
+
+        // 删除 a1（2~4s）：All 模式下所有轨道上 start >= 2 的后续剪辑左移 2s。
+        let delta = 2.0 - 4.0; // origin - old_right_edge
+        let edited: Vec<&str> = vec![a1.as_str()];
+        let shifted = timeline.ripple_shift_clips(&edited, None, 2.0, delta, false);
+
+        assert_eq!(find_clip_start(&timeline, &a2), 2.0);
+        // b0 起点 2 >= origin 2，被平移左移 2s → 0。
+        assert_eq!(find_clip_start(&timeline, &b0), 0.0);
+        assert!(shifted.contains(&a2));
+        assert!(shifted.contains(&b0));
+    }
+
+    #[test]
+    fn ripple_off_and_zero_delta_are_noops() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(0.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(2.0), Some(2.0), None);
+        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(4.0), Some(2.0), None);
+
+        // delta = 0（如“锁定参数线关闭时的纯纵向/无位移编辑”）不产生平移。
+        let shifted = timeline.ripple_shift_clips(&[a1.as_str()], None, 2.0, 0.0, false);
+        assert!(shifted.is_empty());
+        assert_eq!(find_clip_start(&timeline, &a2), 4.0);
+    }
+
+    #[test]
     fn create_clips_bulk_creates_multiple_snapshot_clips() {
         let mut timeline = TimelineState::default();
         let track_id = timeline.add_track(Some("Track".to_string()), None, None);
@@ -1834,6 +2084,8 @@ mod tests {
                     fade_out_sec: Some(0.25),
                     fade_in_curve: Some("sine".into()),
                     fade_out_curve: Some("logarithmic".into()),
+                    auto_fade_in_sec: None,
+                    auto_fade_out_sec: None,
                     linked_params: None,
                     midi_fill_gaps: Some(false),
                     midi_note_data: None,
@@ -1855,6 +2107,8 @@ mod tests {
                     fade_out_sec: Some(0.1),
                     fade_in_curve: Some("linear".into()),
                     fade_out_curve: Some("scurve".into()),
+                    auto_fade_in_sec: None,
+                    auto_fade_out_sec: None,
                     linked_params: None,
                     midi_fill_gaps: Some(false),
                     midi_note_data: None,
@@ -1937,6 +2191,8 @@ mod tests {
                 fade_out_sec: Some(0.2),
                 fade_in_curve: Some("linear".into()),
                 fade_out_curve: Some("scurve".into()),
+                auto_fade_in_sec: None,
+                auto_fade_out_sec: None,
                 linked_params: None,
                 midi_fill_gaps: Some(false),
                 midi_note_data: None,
@@ -2319,11 +2575,13 @@ mod tests {
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((left.source_end_sec - 2.2).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
         assert!((right.length_sec - 1.6).abs() < 1e-9);
         assert!((right.source_start_sec - 1.8).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.2).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
 
         // At the split point, both clips must still reference the same source position.
         let left_source_at_split = left.source_end_sec - (left.length_sec - 0.5) * 2.0;
@@ -2398,6 +2656,8 @@ mod tests {
         assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
         assert!((left.length_sec - 0.6).abs() < 1e-9);
         assert!((right.start_sec - 0.4).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2478,8 +2738,8 @@ mod tests {
         assert!((right.start_sec - 0.0).abs() < 1e-9);
         assert!((right.length_sec - 2.0).abs() < 1e-9);
         assert!((right.source_start_sec - 1.0).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.105).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.105).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.105).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.105).abs() < 1e-9);
     }
 
     #[test]
@@ -2521,8 +2781,108 @@ mod tests {
         assert!((right.start_sec - 0.85).abs() < 1e-9);
         assert!((right.length_sec - 1.05).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
-        assert!((left.fade_out_sec - 0.15).abs() < 1e-9);
-        assert!((right.fade_in_sec - 0.15).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_clears_auto_fades_on_cut_edges() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("B".into()),
+            Some(0.0),
+            Some(3.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // B 与左侧邻居的自动交叉淡化在 fadeIn，与右侧邻居的自动交叉淡化在 fadeOut。
+            clip.fade_in_sec = 0.1;
+            clip.fade_out_sec = 0.2;
+            clip.auto_fade_in_sec = 0.4;
+            clip.auto_fade_out_sec = 0.5;
+        }
+
+        let right_id = tl
+            .split_clip(&clip_id, 1.5)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 切割产生的新边缘（左 clip 右缘、右 clip 左缘）不继承任何淡化（手动/自动）。
+        assert!((left.fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((left.auto_fade_out_sec - 0.0).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.0).abs() < 1e-9);
+        assert!((right.auto_fade_in_sec - 0.0).abs() < 1e-9);
+
+        // 外缘仍然保留对应侧淡化，并按新长度钳制。
+        assert!((left.fade_in_sec - 0.1).abs() < 1e-9);
+        assert!((left.auto_fade_in_sec - 0.4).abs() < 1e-9);
+        assert!((right.fade_out_sec - 0.2).abs() < 1e-9);
+        assert!((right.auto_fade_out_sec - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn check_source_files_changed_uses_persisted_fingerprint_after_open_baseline_refresh() {
+        let test_path = std::env::temp_dir().join(format!(
+            "hifishifter_fingerprint_check_{}.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&test_path);
+
+        // 保存工程时磁盘上是内容 A。
+        std::fs::write(&test_path, b"content-A").unwrap();
+        let saved_fingerprint =
+            crate::audio_utils::compute_file_fingerprint(&test_path).expect("fingerprint A");
+
+        // 关闭工程后，用户在资源管理器中用内容 B 替换了同名文件。
+        std::fs::write(&test_path, b"content-B-different").unwrap();
+
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            Some(test_path.display().to_string()),
+        );
+
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 模拟打开工程后的状态：持久化指纹仍是 A，但 mtime/size 已按 B 刷新。
+            clip.source_file_fingerprint = Some(saved_fingerprint);
+            let meta = std::fs::metadata(&test_path).unwrap();
+            clip.source_file_size = Some(meta.len());
+            clip.source_file_mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+        }
+
+        let changed = tl.check_source_files_changed().changed;
+        assert!(
+            changed.iter().any(|item| {
+                item.clip_id == clip_id
+                    && item.source_path == test_path.display().to_string()
+                    && item.change == "modified"
+            }),
+            "fingerprint change must be detected even when mtime/size match the just-opened file"
+        );
+
+        // 用户重新加载 B 后，运行时指纹更新为 B，不应再报告变更。
+        if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+            clip.source_file_fingerprint =
+                crate::audio_utils::compute_file_fingerprint(&test_path);
+        }
+        let changed = tl.check_source_files_changed().changed;
+        assert!(changed.is_empty(), "same fingerprint must not report a change");
+
+        let _ = std::fs::remove_file(&test_path);
     }
 }
 
@@ -2596,6 +2956,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -2667,6 +3029,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -3200,9 +3564,30 @@ impl TimelineState {
         }
     }
 
+    /// 从 `duration_frames` / `source_sample_rate` 重建被省略的 `duration_sec`。
+    ///
+    /// 工程文件保存时会省略可精确推导的 `duration_sec`，这里在加载/导入时
+    /// 恢复它，保证所有读取路径看到的仍是完整 Clip。
+    pub fn restore_derived_clip_fields(&mut self) {
+        for clip in &mut self.clips {
+            if clip.duration_sec.is_some() {
+                continue;
+            }
+            if let (Some(frames), Some(sample_rate)) =
+                (clip.duration_frames, clip.source_sample_rate)
+            {
+                if sample_rate > 0 {
+                    clip.duration_sec = Some(frames as f64 / sample_rate as f64);
+                }
+            }
+        }
+    }
+
     /// 根据 clip 的 source_path 从磁盘读取文件元数据 + 内容指纹，
     /// 填充 `source_file_size`、`source_file_mtime`、`source_file_fingerprint`。
-    /// 仅在 source_path 存在且文件可访问时生效。
+    ///
+    /// 内容指纹优先保留工程文件中已持久化的值：它代表“用于匹配的原始文件
+    /// 哈希”。仅当工程中没有保存指纹时，才用当前磁盘文件计算一次。
     pub fn populate_clip_file_metadata(clip: &mut Clip) {
         let Some(ref source_path) = clip.source_path else {
             return;
@@ -3219,8 +3604,10 @@ impl TimelineState {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs());
         }
-        if let Some(fp) = crate::audio_utils::compute_file_fingerprint(p) {
-            clip.source_file_fingerprint = Some(fp);
+        if clip.source_file_fingerprint.is_none() {
+            if let Some(fp) = crate::audio_utils::compute_file_fingerprint(p) {
+                clip.source_file_fingerprint = Some(fp);
+            }
         }
     }
 
@@ -3346,6 +3733,8 @@ impl TimelineState {
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
             fade_out_curve: default_fade_curve(),
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -3360,6 +3749,61 @@ impl TimelineState {
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
+    }
+
+    /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
+    /// 整体平移 `delta_sec`（秒，可正可负）。
+    ///
+    /// - `edited_ids`：本次编辑直接作用到的剪辑（被移动/删除/重设尺寸），排除在平移之外；
+    /// - `affected_tracks`：`Some(轨道集合)` 时只平移这些轨道上的后续剪辑（Track 模式）；
+    ///   `None` 表示所有轨道（All 模式）。`Off` 模式由调用方直接跳过，无需传入；
+    /// - `move_linked_params`：是否把后续剪辑携带的轨道组参数线一起平移
+    ///   （与普通拖拽移动的 `move_linked_params` / “锁定参数线” 语义一致）。
+    ///
+    /// 返回实际被平移的剪辑 id 列表（供调用方调度音高重分析）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn ripple_shift_clips(
+        &mut self,
+        edited_ids: &[&str],
+        affected_tracks: Option<&HashSet<String>>,
+        origin: f64,
+        delta_sec: f64,
+        move_linked_params: bool,
+    ) -> Vec<String> {
+        if !delta_sec.is_finite() || delta_sec.abs() < 1e-9 {
+            return Vec::new();
+        }
+        let edited: HashSet<&str> = edited_ids.iter().copied().collect();
+        let origin_ok = origin.is_finite();
+
+        // 收集需要平移的剪辑 id 与目标位置（所有被波及剪辑共用同一平移量）。
+        let mut moves: Vec<MoveClipPayload> = Vec::new();
+        let mut shifted_ids: Vec<String> = Vec::new();
+        for clip in &self.clips {
+            if edited.contains(clip.id.as_str()) {
+                continue;
+            }
+            if let Some(ref tracks) = affected_tracks {
+                if !tracks.contains(&clip.track_id) {
+                    continue;
+                }
+            }
+            if !origin_ok || clip.start_sec + 1e-9 < origin {
+                continue;
+            }
+            let next_start = (clip.start_sec + delta_sec).max(0.0);
+            moves.push(MoveClipPayload {
+                clip_id: clip.id.clone(),
+                start_sec: next_start,
+                track_id: None,
+            });
+            shifted_ids.push(clip.id.clone());
+        }
+        if moves.is_empty() {
+            return Vec::new();
+        }
+        self.move_clips(&moves, move_linked_params);
+        shifted_ids
     }
 
     pub fn remove_clip(&mut self, clip_id: &str) {
@@ -3552,6 +3996,8 @@ impl TimelineState {
                 fade_out_sec,
                 fade_in_curve: None,
                 fade_out_curve: None,
+                auto_fade_in_sec: None,
+                auto_fade_out_sec: None,
                 color: None,
                 formant_morph: None,
             },
@@ -3603,6 +4049,12 @@ impl TimelineState {
             }
             if let Some(v) = patch.fade_out_curve {
                 c.fade_out_curve = v;
+            }
+            if let Some(v) = patch.auto_fade_in_sec {
+                c.auto_fade_in_sec = v.max(0.0);
+            }
+            if let Some(v) = patch.auto_fade_out_sec {
+                c.auto_fade_out_sec = v.max(0.0);
             }
             if let Some(v) = patch.color {
                 c.color = v;
@@ -3678,6 +4130,8 @@ impl TimelineState {
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
                     fade_out_curve: template.fade_out_curve.clone(),
+                    auto_fade_in_sec: template.auto_fade_in_sec,
+                    auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
                     formant_morph: None,
                 },
@@ -3958,9 +4412,13 @@ impl TimelineState {
         // Fade semantics on split:
         // - fade-in is anchored to the original start, so only the left clip should keep it.
         // - fade-out is anchored to the original end, so only the right clip should keep it.
+        // - 切割产生的新边缘（左 clip 的右缘、右 clip 的左缘）**不继承任何淡化**，
+        //   包括自动交叉淡化与手动淡化。
         // Clamp fades to the new clip lengths.
         self.clips[idx].fade_in_sec = self.clips[idx].fade_in_sec.min(left_len.max(0.0));
         self.clips[idx].fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_out_sec = 0.0;
+        self.clips[idx].auto_fade_in_sec = self.clips[idx].auto_fade_in_sec.min(left_len.max(0.0));
 
         let mut right = clip;
         right.id = new_id("clip");
@@ -3968,6 +4426,8 @@ impl TimelineState {
         right.length_sec = right_len;
         right.fade_in_sec = 0.0;
         right.fade_out_sec = right.fade_out_sec.min(right_len.max(0.0));
+        right.auto_fade_in_sec = 0.0;
+        right.auto_fade_out_sec = right.auto_fade_out_sec.min(right_len.max(0.0));
 
         // Preserve the original audio offset: the right clip should continue from where the left ended.
         // trim_* are in sec (source time), while playback_rate scales source progress per timeline time.
@@ -4057,9 +4517,24 @@ impl TimelineState {
             return;
         }
 
-        let set_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+        // 仅淡入淡出模式：切割处创建的是“手动淡化”（不随重叠自动变化）。
+        let set_manual_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
             left.fade_out_sec = fade_len.min(left.length_sec);
             right.fade_in_sec = fade_len.min(right.length_sec);
+            left.auto_fade_out_sec = 0.0;
+            right.auto_fade_in_sec = 0.0;
+            if let Some(curve) = opts.curve.as_deref() {
+                left.fade_out_curve = curve.to_string();
+                right.fade_in_curve = curve.to_string();
+            }
+        };
+        // 延伸重叠模式：重叠区的交叉淡化写入“自动交叉淡化”长度（跟随重叠，
+        // 分开后自动归零、手动 fade 恢复），适配新的自动交叉淡化模型。
+        let set_auto_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
+            left.auto_fade_out_sec = fade_len.min(left.length_sec);
+            right.auto_fade_in_sec = fade_len.min(right.length_sec);
+            left.fade_out_sec = 0.0;
+            right.fade_in_sec = 0.0;
             if let Some(curve) = opts.curve.as_deref() {
                 left.fade_out_curve = curve.to_string();
                 right.fade_in_curve = curve.to_string();
@@ -4069,7 +4544,7 @@ impl TimelineState {
         match opts.mode {
             SplitTransitionMode::FadeOnly => {
                 let (left, right) = self.clips.split_at_mut(right_idx);
-                set_fade(&mut left[left_idx], &mut right[0], duration);
+                set_manual_fade(&mut left[left_idx], &mut right[0], duration);
             }
             SplitTransitionMode::ExtendOverlap => {
                 // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
@@ -4153,7 +4628,7 @@ impl TimelineState {
 
                 if opts.overlap_fades {
                     let (left, right) = self.clips.split_at_mut(right_idx);
-                    set_fade(&mut left[left_idx], &mut right[0], overlap_sec);
+                    set_auto_fade(&mut left[left_idx], &mut right[0], overlap_sec);
                 }
             }
         }
@@ -5161,13 +5636,17 @@ impl TimelineState {
             let old_size = clip.source_file_size;
             let old_fp = clip.source_file_fingerprint;
 
-            // 若大小和 mtime 均与记录一致 → 未修改，跳过
-            if current_size == old_size && current_mtime == old_mtime {
+            // 若大小和 mtime 均与记录一致，通常可跳过。
+            // 但工程文件可能保存了旧的源文件指纹：例如用户在关闭工程后手动替换了
+            // 同名文件，重新打开工程时 mtime/size 会以“新文件”为基线刷新，因此
+            // 元数据一致并不代表内容与工程保存时一致。只要存在指纹，就必须进入
+            // 指纹验证层，用工程中保存的哈希重新判断内容是否发生变化。
+            if current_size == old_size && current_mtime == old_mtime && old_fp.is_none() {
                 continue;
             }
 
-            // 旧工程无元数据 → 跳过检测（无法判断是否变更）
-            if old_mtime.is_none() && old_size.is_none() {
+            // 旧工程既无元数据也无指纹 → 跳过检测（无法判断是否变更）
+            if old_mtime.is_none() && old_size.is_none() && old_fp.is_none() {
                 continue;
             }
 
