@@ -19,6 +19,7 @@ import {
     endInteraction,
 } from "../../../../features/session/sessionSlice";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import { isPrimaryModifierDown } from "../../../../utils/platform";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import {
     applyAutoCrossfade,
@@ -159,7 +160,7 @@ export function useClipDrag(deps: {
     autoCrossfadeEnabled: boolean;
     /** 忽略编组 */
     ignoreGrouping: boolean;
-    /** Ctrl+点击（未拖动）时的多选切换回调 */
+    /** 主修饰键 + 点击（未拖动）时的多选切换回调（macOS: Command / Windows: Ctrl） */
     onCtrlClick?: (clipId: string) => void;
 }) {
     const {
@@ -351,9 +352,9 @@ export function useClipDrag(deps: {
             lastTrackId: targetTrackId,
             lastDeltaBeat: 0,
             copyMode: false,
-            // Ctrl+点击（无拖动）多选切换标记；仅在未发生拖动时生效。
-            // 拖动开始后此标记被清除，由拖拽逻辑接管（Ctrl 拖动 = 复制模式）。
-            ctrlSelectionToggle: e.ctrlKey || e.metaKey,
+            // 主修饰键 + 点击（无拖动）多选切换标记；仅在未发生拖动时生效。
+            // 拖动开始后此标记被清除，由拖拽逻辑接管（是否复制由复制拖动绑定决定）。
+            ctrlSelectionToggle: isPrimaryModifierDown(e),
             startClientX: e.clientX,
             startClientY: e.clientY,
             hasMoved: false,
@@ -381,7 +382,6 @@ export function useClipDrag(deps: {
                 drag.copyMode = resolveClipDragCopyMode({
                     existingCopyMode: drag.copyMode,
                     ctrlKey: ev.ctrlKey,
-                    metaKey: ev.metaKey,
                     modifierActive: isModifierActive(copyDragKb, ev),
                 });
                 if (!drag.copyMode) {
@@ -397,7 +397,6 @@ export function useClipDrag(deps: {
             const copyMode = resolveClipDragCopyMode({
                 existingCopyMode: drag.copyMode,
                 ctrlKey: ev.ctrlKey,
-                metaKey: ev.metaKey,
                 modifierActive: isModifierActive(copyDragKb, ev),
             });
             if (copyMode !== drag.copyMode) {
@@ -557,7 +556,7 @@ export function useClipDrag(deps: {
             setGhostDrag(null);
 
             if (!drag.hasMoved) {
-                // Ctrl+点击（未移动）：执行多选切换
+                // 主修饰键 + 点击（未移动）：执行多选切换
                 if (drag.ctrlSelectionToggle && onCtrlClick) {
                     onCtrlClick(drag.anchorClipId);
                 }

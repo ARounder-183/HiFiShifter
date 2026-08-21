@@ -20,6 +20,7 @@ import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
+import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -507,14 +508,15 @@ export function useTimelineState(): TimelineStateResult {
     useEffect(() => {
         function isStretchModifier(e: KeyboardEvent): boolean {
             const kb = stretchKbRef.current;
-            if (kb.ctrl && (e.key === "Control" || e.ctrlKey || e.metaKey)) return true;
+            if (kb.ctrl && (e.key === (IS_MAC ? "Meta" : "Control") || isPrimaryModifierDown(e)))
+                return true;
             if (kb.alt && (e.key === "Alt" || e.altKey)) return true;
             if (kb.shift && (e.key === "Shift" || e.shiftKey)) return true;
             return false;
         }
         function checkStretchState(e: KeyboardEvent): boolean {
             const kb = stretchKbRef.current;
-            if (kb.ctrl) return e.ctrlKey || e.metaKey;
+            if (kb.ctrl) return isPrimaryModifierDown(e);
             if (kb.alt) return e.altKey;
             if (kb.shift) return e.shiftKey;
             return false;

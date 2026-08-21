@@ -11,6 +11,7 @@ import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
 import { snapTimelinePosition } from "../../../utils/timelineSnapping";
+import { isPrimaryModifierDown } from "../../../utils/platform";
 
 export function shouldStartTimelineSelectionRect(button: number): boolean {
     // Only start selection for right-click (button === 2).
@@ -36,10 +37,10 @@ export function isTimelineSelectionDrag(
 export function computeTimelineRectSelection(params: {
     selectionBeforeDrag: string[];
     selectedInRect: string[];
-    ctrlOrMetaPressedAtStart: boolean;
+    primaryModifierPressedAtStart: boolean;
 }): string[] {
-    const { selectionBeforeDrag, selectedInRect, ctrlOrMetaPressedAtStart } = params;
-    if (!ctrlOrMetaPressedAtStart) {
+    const { selectionBeforeDrag, selectedInRect, primaryModifierPressedAtStart } = params;
+    if (!primaryModifierPressedAtStart) {
         return selectedInRect;
     }
     const beforeSet = new Set(selectionBeforeDrag);
@@ -76,7 +77,7 @@ export function useTimelineSelectionRect(params: {
         curX: number;
         curY: number;
         hasSelectionDrag: boolean;
-        ctrlOrMetaPressedAtStart: boolean;
+        primaryModifierPressedAtStart: boolean;
         selectionBeforeDrag: string[];
         deferredContextMenu: {
             clientX: number;
@@ -142,7 +143,7 @@ export function useTimelineSelectionRect(params: {
             curX: x,
             curY: y,
             hasSelectionDrag: false,
-            ctrlOrMetaPressedAtStart: e.ctrlKey || e.metaKey,
+            primaryModifierPressedAtStart: isPrimaryModifierDown(e),
             selectionBeforeDrag: currentSelectionIds,
             deferredContextMenu: null,
         };
@@ -262,7 +263,7 @@ export function useTimelineSelectionRect(params: {
             const selected = computeTimelineRectSelection({
                 selectionBeforeDrag: drag.selectionBeforeDrag,
                 selectedInRect,
-                ctrlOrMetaPressedAtStart: drag.ctrlOrMetaPressedAtStart,
+                primaryModifierPressedAtStart: drag.primaryModifierPressedAtStart,
             });
 
             setMultiSelectedClipIds(selected);

@@ -146,6 +146,21 @@ pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     }
 }
 
+/// Run the inference-device benchmark and return the serialized results.
+/// Used by the in-app benchmark dialog and by the `--benchmark` CLI flag.
+pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
+    #[cfg(feature = "onnx")]
+    {
+        let results = nsf_hifigan_onnx::run_benchmark()?;
+        serde_json::to_string_pretty(&results)
+            .map_err(|e| format!("failed to serialize benchmark results: {e}"))
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        Err("onnx feature disabled".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -168,7 +183,9 @@ pub fn run() {
             // 打包后的应用：从 resource_dir 查找内嵌的 ONNX 模型
             if let Ok(res_dir) = app.path().resource_dir() {
                 let p = res_dir.join("models").join("nsf_hifigan");
-                if p.join("pc_nsf_hifigan.onnx").exists() && p.join("config.json").exists() {
+                let has_model = p.join("pc_nsf_hifigan.onnx").exists()
+                    || p.join("pc_nsf_hifigan_coreml.onnx").exists();
+                if has_model && p.join("config.json").exists() {
                     let _ = NSF_HIFIGAN_MODEL_DIR.set(p);
                 }
             }

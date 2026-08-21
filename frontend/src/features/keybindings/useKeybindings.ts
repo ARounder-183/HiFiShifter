@@ -4,8 +4,7 @@ import { isModifierActive, selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId, Keybinding, KeybindingMap } from "./types";
 import type { RootState } from "../../app/store";
-const IS_MAC =
-    typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+import { IS_MAC } from "../../utils/platform";
 const EXCLUDE_QUICK_SEARCH = new Set(["quickSearch", "pianoRollVibratoDrag"]);
 const EXCLUDE_BOTH = new Set(["paramEditorSelect", "quickSearch", "pianoRollVibratoDrag"]);
 const REPEATABLE_ACTIONS = new Set<ActionId>([

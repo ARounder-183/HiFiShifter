@@ -1,4 +1,5 @@
 import React from "react";
+import { isPrimaryModifierDown } from "../../../../utils/platform";
 
 export const ClipEdgeHandles: React.FC<{
     clipId: string;
@@ -61,12 +62,12 @@ export const ClipEdgeHandles: React.FC<{
                     // configured as stretch modifiers.
                     const stretchActive = altPressed;
                     const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                    const ctrlOrMeta = e.ctrlKey || e.metaKey;
-                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+                    const primaryModifierDown = isPrimaryModifierDown(e);
+                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+                    const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
                     const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
                     const startX = e.clientX;
@@ -138,12 +139,12 @@ export const ClipEdgeHandles: React.FC<{
                     // altKeyDown for click-selection bypass only.
                     const stretchActive = altPressed;
                     const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                    const ctrlOrMeta = e.ctrlKey || e.metaKey;
-                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+                    const primaryModifierDown = isPrimaryModifierDown(e);
+                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+                    const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
                     const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
 
                     const startX = e.clientX;

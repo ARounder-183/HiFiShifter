@@ -3,6 +3,7 @@
  */
 import React from "react";
 
+import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
@@ -138,7 +139,7 @@ type TrackLaneProps = {
     disabledGroupIds?: string[];
     onToggleGroupDisabled?: (groupId: string) => void;
 
-    /** Ctrl+拖动复制时的 ghost 预览信息 */
+    /** 复制拖动时的 ghost 预览信息 */
     ghostDrag?: GhostDragInfo | null;
     /** 当前拖拽处于纯竖直换轨锁定时，高亮的目标轨道 */
     verticalTrackLockTrackId?: string | null;
@@ -319,11 +320,11 @@ export const TrackLane = React.memo(
                 const altKeyDown = Boolean(
                     event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const primaryModifierDown = isPrimaryModifierDown(event);
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
-                const allowSeek = !altKeyDown && !ctrlOrMeta && !event.shiftKey;
+                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
+                const allowSeek = !altKeyDown && !primaryModifierDown && !event.shiftKey;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
@@ -400,10 +401,10 @@ export const TrackLane = React.memo(
                 const altKeyDown = Boolean(
                     event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const primaryModifierDown = isPrimaryModifierDown(event);
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
+                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
@@ -649,7 +650,7 @@ export const TrackLane = React.memo(
                         type: Parameters<typeof startEditDrag>[2],
                     ) => void}
                 />
-                {/* Ghost clip 预览：Ctrl+拖动复制时显示半透明副本 */}
+                {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
                     const ghostLeft = Math.max(0, ghostStartSec * pxPerSec);
                     const ghostWidth = Math.max(1, clip.lengthSec * pxPerSec);
