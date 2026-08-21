@@ -7,6 +7,7 @@ import {
     bumpParamsEpoch,
     checkpointHistory,
     moveClipStart,
+    setClipAutoFades,
     setClipFades,
     setClipGain,
     setClipLength,
@@ -17,7 +18,7 @@ import {
     beginInteraction,
     endInteraction,
 } from "../../../../features/session/sessionSlice";
-import { applyAutoCrossfade } from "./autoCrossfade";
+import { applyAutoCrossfade, previewAutoCrossfade } from "./autoCrossfade";
 import { clamp } from "../math";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
@@ -344,6 +345,11 @@ export type EditDragState = {
     rippleMode: RippleMode;
     /** 波纹跟随集：clipId → 初始起点（仅波纹开启且有跟随对象时非空）。 */
     rippleFollowers: RippleFollowerMap;
+    /**
+     * 自动交叉淡化：编辑前每侧重叠关系（被编辑剪辑 + 同轨邻居）。
+     * 用于编辑导致“分开”时，只清掉自动交叉淡化、保留手动 fade（预览/提交一致）。
+     */
+    initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
     /** Per-clip base state for multi-clip trim operations */
     baseByClipId: Record<
         string,
@@ -484,6 +490,12 @@ export function useEditDrag(deps: {
         // changed the backend, and undo would bounce back to the post-drag value.
         const gainUndoGroupPromise = type === "gain" ? webApi.beginUndoGroup() : null;
 
+        // Fade drag（fade_in / fade_out）同理：拖动过程中节流写入多次后端，
+        // 若各自独立生成 undo entry 会导致“撤销一次只撤销一半、需要按多次”。
+        // 用一个 undo group 把整个 fade 拖拽包成单次撤销步。
+        const fadeUndoGroupPromise =
+            type === "fade_in" || type === "fade_out" ? webApi.beginUndoGroup() : null;
+
         // 波纹（自动跟进）实时预览：拖拽开始时快照“后续跟随剪辑”的初始位置。
         // 区域语义与后端一致：原点 = 被编辑剪辑的最早起点；作用域轨道 = 全部被编辑
         // 剪辑所在轨道。只对右缘类编辑（trim_right / stretch_right）产生非零右缘位移。
@@ -503,6 +515,32 @@ export function useEditDrag(deps: {
             rippleMode,
             rippleTracks,
         );
+
+        // 自动交叉淡化：快照“编辑前受影响集合”（被编辑剪辑 + 与它们同轨重叠/相邻的剪辑）
+        // 的每侧重叠关系，用于分开时只清自动交叉淡化、保留手动 fade（预览与提交一致）。
+        const editedSet = new Set(selectedClipIds);
+        const trackIdsOfEdited = new Set(selectedClipIds.map((id) => {
+            const c = id === clipId ? clip : sessionRef.current.clips.find((x) => x.id === id);
+            return c ? String(c.trackId) : "";
+        }));
+        trackIdsOfEdited.delete("");
+        const initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }> = {};
+        for (const c of sessionRef.current.clips) {
+            if (!editedSet.has(c.id) && !trackIdsOfEdited.has(String(c.trackId))) continue;
+            let leftOverlap = false;
+            let rightOverlap = false;
+            const cStart = Number(c.startSec);
+            const cEnd = cStart + Number(c.lengthSec);
+            for (const other of sessionRef.current.clips) {
+                if (other.trackId !== c.trackId || other.id === c.id) continue;
+                const oStart = Number(other.startSec);
+                const oEnd = oStart + Number(other.lengthSec);
+                if (Math.min(cEnd, oEnd) - Math.max(cStart, oStart) <= 1e-3) continue;
+                if (oStart < cStart) leftOverlap = true;
+                else rightOverlap = true;
+            }
+            initialCrossfadeSides[c.id] = { fadeIn: leftOverlap, fadeOut: rightOverlap };
+        }
 
         editDragRef.current = {
             type,
@@ -527,6 +565,7 @@ export function useEditDrag(deps: {
             baseGainById,
             rippleMode,
             rippleFollowers,
+            initialCrossfadeSides,
             baseByClipId: Object.fromEntries(
                 selectedClipIds.map((id) => {
                     const c =
@@ -566,6 +605,13 @@ export function useEditDrag(deps: {
             } finally {
                 await webApi.endUndoGroup();
             }
+        };
+
+        const finishFadeUndoGroup = async () => {
+            if (!fadeUndoGroupPromise) return;
+            // 由调用方在 persistPromise 完成后再调用（见 end() 的 finally）。
+            // 这里只释放 undo group，使整个 fade 拖拽成为单个撤销步。
+            await webApi.endUndoGroup();
         };
 
         function onMove(ev: PointerEvent) {
@@ -623,9 +669,16 @@ export function useEditDrag(deps: {
                             const last = lastRemoteSentRef.current[drag.clipId] || 0;
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
-                                void dispatch(
-                                    setClipStateRemote({ clipId: drag.clipId, fadeInSec: next }),
-                                );
+                                // 手动拖拽淡入 = 用户手动 fade，且清除该侧自动交叉淡化。
+                                dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }));
+                                // 直接 webApi 持久化（不走 thunk）：其 fulfilled 不会 force-apply
+                                // 整份时间线覆盖本地乐观值，避免拖拽中淡入淡出包络闪烁。
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeInSec: next,
+                                    autoFadeInSec: 0,
+                                    checkpoint: false,
+                                });
                             }
                         }
                     } catch {
@@ -655,9 +708,16 @@ export function useEditDrag(deps: {
                             const last = lastRemoteSentRef.current[drag.clipId] || 0;
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
-                                void dispatch(
-                                    setClipStateRemote({ clipId: drag.clipId, fadeOutSec: next }),
-                                );
+                                // 手动拖拽淡出 = 手动 fade，且清除该侧自动交叉淡化。
+                                dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }));
+                                // 直接 webApi 持久化（不走 thunk）：避免 force-apply 覆盖本地
+                                // 乐观 fade 导致拖拽中淡入淡出包络闪烁。
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeOutSec: next,
+                                    autoFadeOutSec: 0,
+                                    checkpoint: false,
+                                });
                             }
                         }
                     } catch {
@@ -725,6 +785,19 @@ export function useEditDrag(deps: {
                     return;
                 }
 
+                // 自动交叉淡化实时预览：在位置/尺寸变化的每个分支，按当前乐观状态
+                // 计算重叠并实时更新自动 fade 包络；松手时由 applyAutoCrossfade 持久化权威结果。
+                // affectedSides = 编辑前的每侧重叠关系（分开时仅清自动交叉淡化、保留手动 fade）。
+                const previewAutoCrossfadeNow = () => {
+                    if (!sessionRef.current.autoCrossfadeEnabled) return;
+                    previewAutoCrossfade(
+                        sessionRef.current,
+                        drag.stretchGroup?.clipIds ?? drag.selectedClipIds,
+                        dispatch,
+                        drag.initialCrossfadeSides,
+                    );
+                };
+
                 if (
                     drag.stretchGroup &&
                     (drag.type === "stretch_left" || drag.type === "stretch_right")
@@ -780,6 +853,8 @@ export function useEditDrag(deps: {
                             );
                         }
                     }
+                    // 自动交叉淡化实时预览（编组拉伸）。
+                    previewAutoCrossfadeNow();
                     return;
                 }
 
@@ -862,6 +937,8 @@ export function useEditDrag(deps: {
                             }
                         }
                     });
+                    // 自动交叉淡化实时预览（左缘截短：重叠变化也会改变 fade）。
+                    previewAutoCrossfadeNow();
                     return;
                 }
 
@@ -892,6 +969,8 @@ export function useEditDrag(deps: {
                             fadeOutSec: scaledFades.fadeOutSec,
                         }),
                     );
+                    // 自动交叉淡化实时预览（左缘拉伸）。
+                    previewAutoCrossfadeNow();
                     return;
                 }
 
@@ -1002,6 +1081,8 @@ export function useEditDrag(deps: {
                             );
                         }
                     }
+                    // 自动交叉淡化实时预览（右缘截短/延伸）。
+                    previewAutoCrossfadeNow();
                     return;
                 }
 
@@ -1045,6 +1126,8 @@ export function useEditDrag(deps: {
                             );
                         }
                     }
+                    // 自动交叉淡化实时预览（右缘拉伸）。
+                    previewAutoCrossfadeNow();
                 }
             });
         }
@@ -1102,7 +1185,9 @@ export function useEditDrag(deps: {
 
                 await runInsideUndoGroup(async () => {
                     await task();
-                    await applyAutoCrossfade(sessionRef.current, autoCrossfadeClipIds, dispatch);
+                    await applyAutoCrossfade(sessionRef.current, autoCrossfadeClipIds, dispatch, {
+                        affectedSides: drag.initialCrossfadeSides,
+                    });
                 });
             };
 
@@ -1163,6 +1248,7 @@ export function useEditDrag(deps: {
                                 sessionRef.current,
                                 autoCrossfadeClipIds,
                                 dispatch,
+                                { affectedSides: drag.initialCrossfadeSides },
                             );
                         }
                     });
@@ -1205,6 +1291,7 @@ export function useEditDrag(deps: {
                                     sessionRef.current,
                                     autoCrossfadeClipIds,
                                     dispatch,
+                                    { affectedSides: drag.initialCrossfadeSides },
                                 );
                             }
                         });
@@ -1272,6 +1359,7 @@ export function useEditDrag(deps: {
                                     sessionRef.current,
                                     autoCrossfadeClipIds,
                                     dispatch,
+                                    { affectedSides: drag.initialCrossfadeSides },
                                 );
                             }
                         });
@@ -1372,8 +1460,21 @@ export function useEditDrag(deps: {
                             clipIds: drag.selectedClipIds,
                             changesById,
                         }),
+                        // 在 fade undo group 内：最终写入不产生独立撤销步，
+                        // 整个 fade 拖拽 = 单个撤销步。
+                        checkpoint: false,
                     }),
-                ).unwrap();
+                )
+                    .unwrap()
+                    .then(() => {
+                        // 用户手动拖拽淡入 → 手动 fade 生效，清除该侧自动交叉淡化。
+                        dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }));
+                        return webApi.setClipState({
+                            clipId: drag.clipId,
+                            autoFadeInSec: 0,
+                            checkpoint: false,
+                        });
+                    });
             } else if (drag.type === "fade_out" && singleClipNow) {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
@@ -1387,8 +1488,20 @@ export function useEditDrag(deps: {
                             clipIds: drag.selectedClipIds,
                             changesById,
                         }),
+                        // 在 fade undo group 内：最终写入不产生独立撤销步。
+                        checkpoint: false,
                     }),
-                ).unwrap();
+                )
+                    .unwrap()
+                    .then(() => {
+                        // 用户手动拖拽淡出 → 手动 fade 生效，清除该侧自动交叉淡化。
+                        dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }));
+                        return webApi.setClipState({
+                            clipId: drag.clipId,
+                            autoFadeOutSec: 0,
+                            checkpoint: false,
+                        });
+                    });
             } else if (drag.type === "gain" && singleClipNow) {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
@@ -1477,6 +1590,13 @@ export function useEditDrag(deps: {
                 if (gainUndoGroupPromise) {
                     try {
                         await finishGainUndoGroup();
+                    } catch {
+                        // Best-effort undo-group cleanup.
+                    }
+                }
+                if (fadeUndoGroupPromise) {
+                    try {
+                        await finishFadeUndoGroup();
                     } catch {
                         // Best-effort undo-group cleanup.
                     }

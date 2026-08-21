@@ -758,6 +758,8 @@ function applyOptimisticClipState(
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         formantMorph?: ClipFormantMorph;
     },
 ) {
@@ -804,6 +806,12 @@ function applyOptimisticClipState(
     }
     if (payload.fadeOutCurve !== undefined) {
         clip.fadeOutCurve = payload.fadeOutCurve as FadeCurveType;
+    }
+    if (payload.autoFadeInSec !== undefined) {
+        clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
+    }
+    if (payload.autoFadeOutSec !== undefined) {
+        clip.autoFadeOutSec = Math.max(0, Number(payload.autoFadeOutSec) || 0);
     }
     if (payload.formantMorph !== undefined) {
         clip.formantMorph = payload.formantMorph ? { ...payload.formantMorph } : undefined;
@@ -920,6 +928,8 @@ function applyTimelineState(
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
             fadeOutCurve: (clip.fade_out_curve ?? "sine") as FadeCurveType,
+            autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
+            autoFadeOutSec: Math.max(0, Number(clip.auto_fade_out_sec ?? 0) || 0),
             formantMorph: clip.formant_morph
                 ? {
                       enabled: Boolean(clip.formant_morph.enabled),
@@ -1900,6 +1910,24 @@ const sessionSlice = createSlice({
             }
             if (action.payload.fadeOutCurve !== undefined) {
                 clip.fadeOutCurve = action.payload.fadeOutCurve;
+            }
+        },
+        /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
+        setClipAutoFades(
+            state,
+            action: PayloadAction<{
+                clipId: string;
+                autoFadeInSec?: number;
+                autoFadeOutSec?: number;
+            }>,
+        ) {
+            const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
+            if (!clip) return;
+            if (action.payload.autoFadeInSec !== undefined) {
+                clip.autoFadeInSec = Math.max(0, action.payload.autoFadeInSec);
+            }
+            if (action.payload.autoFadeOutSec !== undefined) {
+                clip.autoFadeOutSec = Math.max(0, action.payload.autoFadeOutSec);
             }
         },
         setClipGain(state, action: PayloadAction<{ clipId: string; gain: number }>) {
@@ -4125,6 +4153,7 @@ export const {
     setClipPlaybackRate,
     setClipSourceRange,
     setClipFades,
+    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipsGroupId,

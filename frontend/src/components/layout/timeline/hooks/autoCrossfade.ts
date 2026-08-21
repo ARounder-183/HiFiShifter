@@ -1,19 +1,124 @@
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
-import { setClipFades } from "../../../../features/session/sessionSlice";
+import { setClipAutoFades } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
 
 /**
- * 自动交叉淡入淡出：为同轨道重叠的 clip 对设置 fade。
- * 对每个被拖动的 clip，找同轨道其它 clip 的重叠区域，
- * 设置左侧 clip 的 fadeOut 和右侧 clip 的 fadeIn 为重叠长度。
- * 无论新值比原值大还是小，都直接设置为重叠长度。
- * 同时将 fade 值持久化到后端。
+ * 编辑前某 clip 每侧是否有同轨重叠。
  *
- * 对于没有重叠的方向，保留 clip 原有的 fade 值。
+ * 因为自动交叉淡化长度与手动 fade 分离存储，我们需要知道“这一侧的 fade 是否由
+ * 交叉淡化持有”：在重叠期间自动值覆盖手动值；一旦分开（当前无重叠、编辑前该侧
+ * 有重叠）就把自动值清成 0，手动 fade（fade_in_sec / fade_out_sec）自然恢复显示。
+ */
+export interface CrossfadeAffectedClip {
+    /** 编辑前该 clip 的 fadeIn 侧（左侧）是否有同轨重叠。 */
+    fadeIn: boolean;
+    /** 编辑前该 clip 的 fadeOut 侧（右侧）是否有同轨重叠。 */
+    fadeOut: boolean;
+}
+
+export interface AutoFadeUpdate {
+    clipId: string;
+    autoFadeInSec: number;
+    autoFadeOutSec: number;
+}
+
+/**
+ * 计算自动交叉淡化（预览与提交共用同一套判定，保证二者一致）。
  *
- * 为了性能原因，这里直接调用 webApi.setClipState 持久化到后端，而不是分发 setClipStateRemote。
+ * 规则（对齐 REAPER：自动交叉淡化长度 ≠ 手动 fade）：
+ * - “受影响集合” = 被编辑剪辑 ∪ `affectedSides` 的键（编辑前与之重叠/相邻的邻居，
+ *   用于在分开时把旧的自动交叉淡化清成 0）∪ 当前与被编辑剪辑重叠的同轨剪辑。
+ * - 对每个受影响剪辑的每一侧，计算**自动交叉淡化长度**：
+ *   - 当前有同轨重叠 → auto = 当前重叠长度（渲染/显示用 auto 覆盖手动）；
+ *   - 当前无重叠、但编辑前该侧有重叠（被“拖开”）→ auto = 0（手动 fade 恢复生效）；
+ *   - 当前无重叠、编辑前也无重叠 → auto 保持当前值（通常为 0；不影响手动 fade）。
+ * - 手动 fade（fade_in_sec / fade_out_sec）**永不被修改**。
+ */
+export function computeAutoCrossfadeUpdates(
+    session: SessionState,
+    movedIds: string[],
+    affectedSides?: Record<string, CrossfadeAffectedClip>,
+): AutoFadeUpdate[] {
+    const clipById = new Map(session.clips.map((c) => [c.id, c] as const));
+    const affected = new Set<string>(movedIds);
+    if (affectedSides) {
+        for (const id of Object.keys(affectedSides)) {
+            if (clipById.has(id)) affected.add(id);
+        }
+    }
+
+    // 扩展受影响集合：当前与被编辑剪辑重叠的同轨剪辑。
+    for (const id of movedIds) {
+        const clip = clipById.get(id);
+        if (!clip) continue;
+        for (const other of session.clips) {
+            if (other.trackId !== clip.trackId || other.id === id) continue;
+            if (overlapLengthSec(clip, other) > 0.001) {
+                affected.add(other.id);
+            }
+        }
+    }
+
+    const updates: AutoFadeUpdate[] = [];
+    for (const clipId of affected) {
+        const clip = clipById.get(clipId);
+        if (!clip) continue;
+
+        let fadeInOverlap = 0;
+        let fadeOutOverlap = 0;
+        for (const other of session.clips) {
+            if (other.trackId !== clip.trackId || other.id === clip.id) continue;
+            const overlap = overlapLengthSec(clip, other);
+            if (overlap <= 0.001) continue;
+            // clip 是“左侧”一方 → 用 fadeOut；是“右侧”一方 → 用 fadeIn。
+            if (clip.startSec <= other.startSec) {
+                fadeOutOverlap = Math.max(fadeOutOverlap, overlap);
+            } else {
+                fadeInOverlap = Math.max(fadeInOverlap, overlap);
+            }
+        }
+
+        const pre = affectedSides?.[clipId] ?? { fadeIn: false, fadeOut: false };
+        const currentAutoIn = Number(clip.autoFadeInSec ?? 0);
+        const currentAutoOut = Number(clip.autoFadeOutSec ?? 0);
+
+        const nextAutoIn = fadeInOverlap > 0.001 ? fadeInOverlap : pre.fadeIn ? 0 : currentAutoIn;
+        const nextAutoOut =
+            fadeOutOverlap > 0.001 ? fadeOutOverlap : pre.fadeOut ? 0 : currentAutoOut;
+
+        if (
+            Math.abs(nextAutoIn - currentAutoIn) > 0.001 ||
+            Math.abs(nextAutoOut - currentAutoOut) > 0.001
+        ) {
+            updates.push({ clipId, autoFadeInSec: nextAutoIn, autoFadeOutSec: nextAutoOut });
+        }
+    }
+
+    return updates;
+}
+
+/** 两个同轨剪辑的重叠长度（秒）；不重叠返回 ≤ 0。 */
+function overlapLengthSec(
+    a: { startSec: number; lengthSec: number },
+    b: { startSec: number; lengthSec: number },
+): number {
+    const aStart = Number(a.startSec ?? 0);
+    const aEnd = aStart + Number(a.lengthSec ?? 0);
+    const bStart = Number(b.startSec ?? 0);
+    const bEnd = bStart + Number(b.lengthSec ?? 0);
+    return Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
+}
+
+/**
+ * 自动交叉淡化（提交持久化）：本地广播“自动 fade”更新，并把变更持久化到后端。
+ *
+ * 为了性能原因，这里直接调用 webApi.setClipState 持久化到后端，而不是分发
+ * setClipStateRemote thunk（其 fulfilled 会调用 applyTimelineState 替换整个
+ * clips 数组，多个并行请求时旧快照会覆盖本地乐观值导致 fade 闪烁）。
  * 返回一个 Promise，在所有 webApi.setClipState 调用完成后 resolve。
+ *
+ * `checkpoint` 默认 false：这些改动必须并入调用方已开启的 undo group。
  */
 export function applyAutoCrossfade(
     session: SessionState,
@@ -21,85 +126,23 @@ export function applyAutoCrossfade(
     dispatch: AppDispatch,
     opts?: {
         checkpoint?: boolean;
+        /** 编辑前每侧重叠关系（分开时只清自动交叉淡化、保留手动 fade）。 */
+        affectedSides?: Record<string, CrossfadeAffectedClip>;
     },
 ): Promise<void> {
     const checkpoint = Boolean(opts?.checkpoint);
-
-    // 收集每个 clip 的 fadeIn/fadeOut 由重叠产生的值
-    const fadeInOverlaps = new Map<string, number>();
-    const fadeOutOverlaps = new Map<string, number>();
-
-    for (const id of movedIds) {
-        const clip = session.clips.find((c) => c.id === id);
-        if (!clip) continue;
-        const clipStart = Number(clip.startSec);
-        const clipEnd = clipStart + Number(clip.lengthSec);
-
-        const sameTrack = session.clips.filter((c) => c.trackId === clip.trackId && c.id !== id);
-
-        for (const other of sameTrack) {
-            const otherStart = Number(other.startSec);
-            const otherEnd = otherStart + Number(other.lengthSec);
-            const overlapStart = Math.max(clipStart, otherStart);
-            const overlapEnd = Math.min(clipEnd, otherEnd);
-            const overlap = overlapEnd - overlapStart;
-            if (overlap <= 0.001) continue;
-
-            if (clipStart <= otherStart) {
-                fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, overlap));
-                fadeInOverlaps.set(other.id, Math.max(fadeInOverlaps.get(other.id) ?? 0, overlap));
-            } else {
-                fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
-                fadeOutOverlaps.set(
-                    other.id,
-                    Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap),
-                );
-            }
-        }
-    }
-
-    // 先收集所有需要变更的 fade，统一批量处理
-    const updates: Array<{ clipId: string; fadeInSec: number; fadeOutSec: number }> = [];
-    const allClipIds = new Set([...fadeInOverlaps.keys(), ...fadeOutOverlaps.keys(), ...movedIds]);
-    for (const clipId of allClipIds) {
-        const clip = session.clips.find((c) => c.id === clipId);
-        if (!clip) continue;
-
-        const hasOverlapIn = fadeInOverlaps.has(clipId);
-        const hasOverlapOut = fadeOutOverlaps.has(clipId);
-
-        // 有重叠方向 → 使用重叠长度；无重叠方向 → 保留原始 fade 值
-        const fadeInSec = hasOverlapIn
-            ? (fadeInOverlaps.get(clipId) ?? 0)
-            : Number(clip.fadeInSec ?? 0);
-        const fadeOutSec = hasOverlapOut
-            ? (fadeOutOverlaps.get(clipId) ?? 0)
-            : Number(clip.fadeOutSec ?? 0);
-
-        if (
-            Math.abs(fadeInSec - Number(clip.fadeInSec ?? 0)) > 0.001 ||
-            Math.abs(fadeOutSec - Number(clip.fadeOutSec ?? 0)) > 0.001
-        ) {
-            updates.push({ clipId, fadeInSec, fadeOutSec });
-        }
-    }
+    const updates = computeAutoCrossfadeUpdates(session, movedIds, opts?.affectedSides);
 
     if (updates.length === 0) return Promise.resolve();
 
-    // 同步批量 dispatch 所有 setClipFades（React 18 自动合并为一次重绘），
-    // 然后直接调用 webApi 持久化到后端，而不走 setClipStateRemote thunk。
-    // setClipStateRemote.fulfilled 会调用 applyTimelineState 替换整个 clips
-    // 数组，当多个请求并行时，先完成的响应会用后端旧状态覆盖尚未更新的
-    // clip 的本地乐观值，导致 fade 包络闪烁。直接调用 webApi 只做持久化，
-    // 不触发 reducer，从而避免闪烁。
     for (const u of updates) {
-        dispatch(setClipFades(u));
+        dispatch(setClipAutoFades(u));
     }
     const remotePromises = updates.map((u) =>
         webApi.setClipState({
             clipId: u.clipId,
-            fadeInSec: u.fadeInSec,
-            fadeOutSec: u.fadeOutSec,
+            autoFadeInSec: u.autoFadeInSec,
+            autoFadeOutSec: u.autoFadeOutSec,
             checkpoint,
         }),
     );
@@ -107,9 +150,21 @@ export function applyAutoCrossfade(
 }
 
 /**
- * 从后端响应的原始 clip 数据计算自动交叉淡入淡出值。
- * 用于 import thunk 中，在 fulfilled reducer 运行前（Redux state 尚未更新）
- * 直接从后端响应计算并同步 fade 到后端。
+ * 自动交叉淡化（拖拽实时预览）：仅本地乐观更新“自动 fade”，不持久化。
+ */
+export function previewAutoCrossfade(
+    session: SessionState,
+    movedIds: string[],
+    dispatch: AppDispatch,
+    affectedSides?: Record<string, CrossfadeAffectedClip>,
+): void {
+    for (const u of computeAutoCrossfadeUpdates(session, movedIds, affectedSides)) {
+        dispatch(setClipAutoFades(u));
+    }
+}
+
+/**
+ * 从后端响应的原始 clip 数据计算自动交叉淡化值（import/paste 路径）。
  */
 export function computeAutoCrossfadeFromPayload(
     allClips: Array<{
@@ -117,11 +172,11 @@ export function computeAutoCrossfadeFromPayload(
         track_id?: string;
         start_sec?: number;
         length_sec?: number;
-        fade_in_sec?: number;
-        fade_out_sec?: number;
+        auto_fade_in_sec?: number;
+        auto_fade_out_sec?: number;
     }>,
     movedIds: string[],
-): Array<{ clipId: string; fadeInSec: number; fadeOutSec: number }> {
+): AutoFadeUpdate[] {
     const fadeInOverlaps = new Map<string, number>();
     const fadeOutOverlaps = new Map<string, number>();
 
@@ -157,7 +212,7 @@ export function computeAutoCrossfadeFromPayload(
         }
     }
 
-    const results: Array<{ clipId: string; fadeInSec: number; fadeOutSec: number }> = [];
+    const results: AutoFadeUpdate[] = [];
     const allClipIds = new Set([...fadeInOverlaps.keys(), ...fadeOutOverlaps.keys(), ...movedIds]);
     for (const clipId of allClipIds) {
         const clip = allClips.find((c) => c.id === clipId);
@@ -166,18 +221,16 @@ export function computeAutoCrossfadeFromPayload(
         const hasOverlapIn = fadeInOverlaps.has(clipId);
         const hasOverlapOut = fadeOutOverlaps.has(clipId);
 
-        const fadeInSec = hasOverlapIn
-            ? (fadeInOverlaps.get(clipId) ?? 0)
-            : Number(clip.fade_in_sec ?? 0);
-        const fadeOutSec = hasOverlapOut
-            ? (fadeOutOverlaps.get(clipId) ?? 0)
-            : Number(clip.fade_out_sec ?? 0);
+        const autoFadeInSec = hasOverlapIn ? (fadeInOverlaps.get(clipId) ?? 0) : 0;
+        const autoFadeOutSec = hasOverlapOut ? (fadeOutOverlaps.get(clipId) ?? 0) : 0;
 
+        const currentAutoIn = Number(clip.auto_fade_in_sec ?? 0) || 0;
+        const currentAutoOut = Number(clip.auto_fade_out_sec ?? 0) || 0;
         if (
-            Math.abs(fadeInSec - Number(clip.fade_in_sec ?? 0)) > 0.001 ||
-            Math.abs(fadeOutSec - Number(clip.fade_out_sec ?? 0)) > 0.001
+            Math.abs(autoFadeInSec - currentAutoIn) > 0.001 ||
+            Math.abs(autoFadeOutSec - currentAutoOut) > 0.001
         ) {
-            results.push({ clipId, fadeInSec, fadeOutSec });
+            results.push({ clipId, autoFadeInSec, autoFadeOutSec });
         }
     }
 

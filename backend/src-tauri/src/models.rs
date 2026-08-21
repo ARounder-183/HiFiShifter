@@ -82,6 +82,9 @@ pub struct TimelineClip {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    /// 自动交叉淡化长度（秒），与手动 fade（fade_in_sec/fade_out_sec）分离存储。
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formant_morph: Option<ClipFormantMorphPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]

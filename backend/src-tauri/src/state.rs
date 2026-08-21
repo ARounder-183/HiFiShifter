@@ -319,6 +319,10 @@ pub struct CreateClipTemplatePayload {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    #[serde(default)]
+    pub auto_fade_in_sec: Option<f64>,
+    #[serde(default)]
+    pub auto_fade_out_sec: Option<f64>,
     pub linked_params: Option<LinkedParamCurvesPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
@@ -437,6 +441,19 @@ pub struct Clip {
     #[serde(default = "default_fade_curve")]
     pub fade_out_curve: String,
 
+    /// 自动交叉淡化长度（秒，由剪辑重叠派生；**不覆盖手动 fade**）。
+    ///
+    /// 对齐 REAPER 的存储方式：手动 fade（`fade_in_sec` / `fade_out_sec`）始终保留，
+    /// 自动交叉淡化独立记录在 `auto_fade_*_sec`。渲染/显示使用“有效 fade”：
+    /// `auto_fade_*_sec > 0` 时用自动值，否则用手动值。分离后自动值归 0，
+    /// 手动 fade 自然恢复。
+    ///
+    /// 旧版本工程没有这两个字段（serde default = 0），有效 fade = 手动值，完全兼容。
+    #[serde(default)]
+    pub auto_fade_in_sec: f64,
+    #[serde(default)]
+    pub auto_fade_out_sec: f64,
+
     /// Clip 级别的声码器曲线覆盖（None = 使用 Track 级别的 extra_curves）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_curves: Option<HashMap<String, Vec<f32>>>,
@@ -458,6 +475,26 @@ pub struct Clip {
     pub midi_fill_gaps: bool,
 }
 
+impl Clip {
+    /// 有效淡入长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_in_sec(&self) -> f64 {
+        if self.auto_fade_in_sec > 0.0 {
+            self.auto_fade_in_sec
+        } else {
+            self.fade_in_sec
+        }
+    }
+
+    /// 有效淡出长度：自动交叉淡化启用时用自动值，否则用手动值。
+    pub fn effective_fade_out_sec(&self) -> f64 {
+        if self.auto_fade_out_sec > 0.0 {
+            self.auto_fade_out_sec
+        } else {
+            self.fade_out_sec
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipStatePatch {
@@ -474,6 +511,8 @@ pub struct ClipStatePatch {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
     pub formant_morph: Option<ClipFormantMorph>,
 }
@@ -2867,6 +2906,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -2938,6 +2979,8 @@ impl TimelineState {
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
                 fade_out_curve: Some(c.fade_out_curve.clone()),
+                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
                     .as_ref()
@@ -3640,6 +3683,8 @@ impl TimelineState {
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
             fade_out_curve: default_fade_curve(),
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -3901,6 +3946,8 @@ impl TimelineState {
                 fade_out_sec,
                 fade_in_curve: None,
                 fade_out_curve: None,
+                auto_fade_in_sec: None,
+                auto_fade_out_sec: None,
                 color: None,
                 formant_morph: None,
             },
@@ -3952,6 +3999,12 @@ impl TimelineState {
             }
             if let Some(v) = patch.fade_out_curve {
                 c.fade_out_curve = v;
+            }
+            if let Some(v) = patch.auto_fade_in_sec {
+                c.auto_fade_in_sec = v.max(0.0);
+            }
+            if let Some(v) = patch.auto_fade_out_sec {
+                c.auto_fade_out_sec = v.max(0.0);
             }
             if let Some(v) = patch.color {
                 c.color = v;
@@ -4027,6 +4080,8 @@ impl TimelineState {
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
                     fade_out_curve: template.fade_out_curve.clone(),
+                    auto_fade_in_sec: template.auto_fade_in_sec,
+                    auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
                     formant_morph: None,
                 },

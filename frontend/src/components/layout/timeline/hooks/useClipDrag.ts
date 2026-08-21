@@ -11,7 +11,7 @@ import {
     moveClipStart,
     moveClipTrack,
     selectClipRemote,
-    setClipsStateBulkRemote,
+    setClipAutoFades,
     selectTrackRemote,
     seekPlayhead,
     setplayheadSec,
@@ -20,12 +20,13 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { applyAutoCrossfade, computeAutoCrossfadeFromPayload } from "./autoCrossfade";
-import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import {
-    buildBulkClipStateUpdates,
-    buildDuplicateClipsBulkPayload,
-} from "./bulkClipRemotePayloads";
+    applyAutoCrossfade,
+    computeAutoCrossfadeFromPayload,
+    previewAutoCrossfade,
+} from "./autoCrossfade";
+import { expandClipIdsWithGroups } from "./useGroupExpansion";
+import { buildDuplicateClipsBulkPayload } from "./bulkClipRemotePayloads";
 import {
     buildDropToNewTrackMoves,
     computeSelectedTrackSpan,
@@ -45,6 +46,22 @@ import {
 } from "../../../../features/session/ripplePreview";
 
 export const NEW_TRACK_SENTINEL = "__hs_new_track__";
+
+/** 把自动交叉淡化实时预览改动过的**自动** fade 恢复为拖拽初始值（取消/复制时调用）。 */
+export function restoreInitialAutoFades(
+    dispatch: AppDispatch,
+    initialAutoFadeById: Record<string, { autoFadeInSec: number; autoFadeOutSec: number }>,
+): void {
+    for (const [clipId, fades] of Object.entries(initialAutoFadeById)) {
+        dispatch(
+            setClipAutoFades({
+                clipId,
+                autoFadeInSec: fades.autoFadeInSec,
+                autoFadeOutSec: fades.autoFadeOutSec,
+            }),
+        );
+    }
+}
 
 /** copyMode 拖动时的 ghost 预览信息 */
 export type GhostDragInfo = {
@@ -90,6 +107,16 @@ export type ClipDragState = {
     rippleMode: RippleMode;
     /** 波纹跟随集：clipId → 初始起点（仅波纹开启且有跟随对象时非空）。 */
     rippleFollowers: RippleFollowerMap;
+    /**
+     * 自动交叉淡化实时预览用：受影响 clip（被拖拽 + 同轨邻居）的初始**自动** fade 值。
+     * 用于取消/复制时把实时预览的自动 fade 恢复原位（手动 fade 永不被改动）。
+     */
+    initialAutoFadeById: Record<string, { autoFadeInSec: number; autoFadeOutSec: number }>;
+    /**
+     * 自动交叉淡化：受影响 clip 在编辑前的每侧重叠关系。
+     * 用于“拖开”时只清掉自动交叉淡化、保留手动 fade；预览与提交保持一致。
+     */
+    initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
 };
 
 export function useClipDrag(deps: {
@@ -246,6 +273,44 @@ export function useClipDrag(deps: {
             new Set(Object.values(initialById).map((i) => String(i.trackId))),
         );
 
+        // 自动交叉淡化实时预览：快照受影响 clip（被拖拽 + 同轨邻居）的初始**自动**
+        // fade 与每侧重叠关系。自动 fade 用于取消/复制时恢复；每侧重叠关系用于
+        // 拖开时把旧的自动交叉淡化清成 0（手动 fade 永不被改动）。
+        const autoXfadeAffected = new Set<string>(clipIds);
+        for (const id of clipIds) {
+            const initial = initialById[id];
+            if (!initial) continue;
+            for (const c of sessionRef.current.clips) {
+                if (c.trackId === String(initial.trackId)) autoXfadeAffected.add(c.id);
+            }
+        }
+        const initialAutoFadeById: Record<string, { autoFadeInSec: number; autoFadeOutSec: number }> =
+            {};
+        const initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }> = {};
+        for (const id of autoXfadeAffected) {
+            const c = sessionRef.current.clips.find((x) => x.id === id);
+            if (!c) continue;
+            initialAutoFadeById[id] = {
+                autoFadeInSec: Number(c.autoFadeInSec ?? 0),
+                autoFadeOutSec: Number(c.autoFadeOutSec ?? 0),
+            };
+            // 编辑前每侧重叠关系：left = 有同轨剪辑从左侧压进本 clip（→ fadeIn 侧），
+            // right = 有同轨剪辑从本 clip 右侧压进来（→ fadeOut 侧）。
+            let leftOverlap = false;
+            let rightOverlap = false;
+            const cStart = Number(c.startSec);
+            const cEnd = cStart + Number(c.lengthSec);
+            for (const other of sessionRef.current.clips) {
+                if (other.trackId !== c.trackId || other.id === c.id) continue;
+                const oStart = Number(other.startSec);
+                const oEnd = oStart + Number(other.lengthSec);
+                if (Math.min(cEnd, oEnd) - Math.max(cStart, oStart) <= 1e-3) continue;
+                if (oStart < cStart) leftOverlap = true;
+                else rightOverlap = true;
+            }
+            initialCrossfadeSides[id] = { fadeIn: leftOverlap, fadeOut: rightOverlap };
+        }
+
         const hasMixedTrackSelection = clipIds.some((id) => {
             const initial = initialById[id];
             return initial && baseTrackId != null && initial.trackId !== baseTrackId;
@@ -300,6 +365,8 @@ export function useClipDrag(deps: {
             hasMoved: false,
             rippleMode,
             rippleFollowers,
+            initialAutoFadeById,
+            initialCrossfadeSides,
         };
         setVerticalTrackLockTrackId(null);
         scroller.setPointerCapture(e.pointerId);
@@ -428,6 +495,8 @@ export function useClipDrag(deps: {
                 });
                 // 复制模式下原 clip 不移动，波纹跟随集保持原位（覆盖拖动中途切到复制的残留预览）。
                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
+                // 复制不移动原片，实时预览的交叉淡化也恢复原位。
+                restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
             } else {
                 batch(() => {
                     for (const id of drag.clipIds) {
@@ -457,6 +526,16 @@ export function useClipDrag(deps: {
                     // 与后端“右缘位移”规则一致：同一拖拽位移量同时作用于所有跟随剪辑。
                     if (drag.rippleMode !== "off") {
                         applyRippleFollowerShift(dispatch, drag.rippleFollowers, drag.lastDeltaBeat);
+                    }
+                    // 自动交叉淡化实时预览：按当前（乐观）位置计算重叠并实时更新自动 fade 包络。
+                    // affectedSides = 拖拽前的每侧重叠关系（分开时仅清自动交叉淡化、保留手动 fade）。
+                    if (autoCrossfadeEnabled) {
+                        previewAutoCrossfade(
+                            sessionRef.current,
+                            drag.clipIds,
+                            dispatch,
+                            drag.initialCrossfadeSides,
+                        );
                     }
                 });
             }
@@ -565,6 +644,7 @@ export function useClipDrag(deps: {
                 // copyMode 不使用交互锁（原 clip 未被拖动改变位置）
                 // 复制不产生波纹，松手前把跟随集恢复原位（覆盖预览残留）。
                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
+                restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
                 void (async () => {
                     const sourceClipIds = drag.clipIds.filter((id) =>
                         sessionRef.current.clips.some((clip) => clip.id === id),
@@ -688,24 +768,22 @@ export function useClipDrag(deps: {
                                     created,
                                 );
                                 if (fadeUpdates.length > 0) {
-                                    const changesById = new Map(
-                                        fadeUpdates.map((u) => [
-                                            u.clipId,
-                                            {
-                                                fadeInSec: u.fadeInSec,
-                                                fadeOutSec: u.fadeOutSec,
-                                            },
-                                        ]),
-                                    );
-                                    await dispatch(
-                                        setClipsStateBulkRemote({
-                                            updates: buildBulkClipStateUpdates({
-                                                clipIds: [...changesById.keys()],
-                                                changesById,
+                                    // 复制后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
+                                    for (const u of fadeUpdates) {
+                                        dispatch(
+                                            setClipAutoFades({
+                                                clipId: u.clipId,
+                                                autoFadeInSec: u.autoFadeInSec,
+                                                autoFadeOutSec: u.autoFadeOutSec,
                                             }),
+                                        );
+                                        await webApi.setClipState({
+                                            clipId: u.clipId,
+                                            autoFadeInSec: u.autoFadeInSec,
+                                            autoFadeOutSec: u.autoFadeOutSec,
                                             checkpoint: false,
-                                        }),
-                                    ).unwrap();
+                                        });
+                                    }
                                 }
                             }
                         } finally {
@@ -800,7 +878,9 @@ export function useClipDrag(deps: {
                             }
                             if (autoCrossfadeEnabled) {
                                 const latestSession = sessionRef.current;
-                                await applyAutoCrossfade(latestSession, drag.clipIds, dispatch);
+                                await applyAutoCrossfade(latestSession, drag.clipIds, dispatch, {
+                                    affectedSides: drag.initialCrossfadeSides,
+                                });
                             }
                         } catch {
                             batch(() => {
@@ -822,6 +902,8 @@ export function useClipDrag(deps: {
                                 }
                                 // 波纹跟随集同样回滚到初始位置。
                                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
+                                // 自动交叉淡化（实时预览）的 fade 也回滚到初始值。
+                                restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
                             });
                         } finally {
                             void webApi.endUndoGroup();
@@ -890,7 +972,9 @@ export function useClipDrag(deps: {
                         } finally {
                             if (autoCrossfadeEnabled) {
                                 const latestSession = sessionRef.current;
-                                await applyAutoCrossfade(latestSession, movedIds, dispatch);
+                                await applyAutoCrossfade(latestSession, movedIds, dispatch, {
+                                    affectedSides: drag.initialCrossfadeSides,
+                                });
                             }
                             await webApi.endUndoGroup();
                             dispatch(endInteraction());
@@ -899,7 +983,9 @@ export function useClipDrag(deps: {
                 } else {
                     void (async () => {
                         if (autoCrossfadeEnabled) {
-                            await applyAutoCrossfade(session, drag.clipIds, dispatch);
+                            await applyAutoCrossfade(session, drag.clipIds, dispatch, {
+                                affectedSides: drag.initialCrossfadeSides,
+                            });
                         }
                         await webApi.endUndoGroup();
                         dispatch(endInteraction());

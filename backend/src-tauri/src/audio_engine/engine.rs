@@ -1681,6 +1681,8 @@ mod tests {
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,

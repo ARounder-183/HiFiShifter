@@ -41,8 +41,8 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
             dispatch(
                 setClipStateRemote({
                     clipId: u.clipId,
-                    fadeInSec: u.fadeInSec,
-                    fadeOutSec: u.fadeOutSec,
+                    autoFadeInSec: u.autoFadeInSec,
+                    autoFadeOutSec: u.autoFadeOutSec,
                     checkpoint: false,
                 }),
             ).unwrap(),
