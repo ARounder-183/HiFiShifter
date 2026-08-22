@@ -526,6 +526,7 @@ export const zhTW = {
     kb_modifier_stretch: "拉伸（拖動邊緣時按住）",
     kb_modifier_no_snap: "拖動時切換吸附（按住可反轉目前吸附）",
     kb_modifier_copy_drag: "複製拖動（拖動音訊片段時按住）",
+    kb_modifier_crossfade_grip: "交叉淡化手柄（拖動交叉點手柄時按住）",
     kb_modifier_horizontal_zoom: "水平縮放（按住+滾輪）",
     kb_modifier_pr_vzoom: "垂直縮放（按住+滾輪）",
     kb_modifier_param_morph: "參數形變（參數編輯器選取區內按住）",

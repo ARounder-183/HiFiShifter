@@ -611,6 +611,8 @@ export const koKR = {
     kb_modifier_stretch: "타임 스트레치 (엣지 드래그 중 누르기)",
     kb_modifier_no_snap: "드래그 중 스냅을 전환합니다 (누르면 현재 스냅을 반전)",
     kb_modifier_copy_drag: "복사 드래그 (클립 드래그 중 누르기)",
+    kb_modifier_crossfade_grip:
+        "크로스페이드 핸들 (크로스페이드 교차점 드래그 중 누르기)",
     kb_modifier_horizontal_zoom: "수평 줌 (누른 채 스크롤)",
     kb_modifier_pr_vzoom: "수직 줌 (누른 채 스크롤)",
     kb_modifier_param_morph: "파라미터 형태 변형 (선택 영역에서 누르기)",

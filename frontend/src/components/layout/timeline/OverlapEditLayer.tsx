@@ -22,6 +22,7 @@ import React from "react";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
 import { buildFadeHitTargets } from "./fadeHitTargets";
+import { fadeCurveGain, type FadeCurveType } from "./paths";
 
 export type OverlapEditType =
     | "trim_left"
@@ -29,7 +30,8 @@ export type OverlapEditType =
     | "stretch_left"
     | "stretch_right"
     | "fade_in"
-    | "fade_out";
+    | "fade_out"
+    | "crossfade_edges";
 
 function overlapLengthSec(
     a: { startSec: number; lengthSec: number },
@@ -48,6 +50,90 @@ function effectiveFadeOutSec(clip: ClipInfo): number {
     return (clip.autoFadeOutSec ?? 0) > 0 ? (clip.autoFadeOutSec ?? 0) : (clip.fadeOutSec ?? 0);
 }
 
+/**
+ * 计算两条“真实淡入淡出包络曲线”（非直线近似）在重叠区内的交点。
+ *
+ * 画布上用 fadeCurveGain 绘制的是曲线（sine/exponential/scurve 等），
+ * 直接用两端点连线求交点会在 Y 轴明显偏离视觉交叉点。这里用二分法
+ * 精确求解两条单调曲线的交点，使交叉点手柄正好落在用户看到的交叉处。
+ *
+ * @returns 交点坐标；若两条曲线在重叠淡化区间内不相交则返回 null。
+ */
+function computeCrossfadeGripPoint(args: {
+    /** 前一个 clip 的右边缘 X（px，时间轴坐标）。 */
+    earlierEndPx: number;
+    /** 前一个 clip 淡出包络的像素宽度。 */
+    earlierFadePx: number;
+    earlierCurve: FadeCurveType;
+    /** 后一个 clip 的左边缘 X（px，时间轴坐标）。 */
+    laterStartPx: number;
+    /** 后一个 clip 淡入包络的像素宽度。 */
+    laterFadePx: number;
+    laterCurve: FadeCurveType;
+    bodyTop: number;
+    bodyHeight: number;
+}): { x: number; y: number } | null {
+    const {
+        earlierEndPx,
+        earlierFadePx,
+        earlierCurve,
+        laterStartPx,
+        laterFadePx,
+        laterCurve,
+        bodyTop,
+        bodyHeight,
+    } = args;
+    const earlierLeftPx = earlierEndPx - earlierFadePx;
+    const laterRightPx = laterStartPx + laterFadePx;
+    const lo = Math.max(earlierLeftPx, laterStartPx);
+    const hi = Math.min(earlierEndPx, laterRightPx);
+    if (hi - lo <= 0.01 || earlierFadePx <= 0 || laterFadePx <= 0) return null;
+
+    // 两条曲线在重叠淡化区的 X 区间单调：A 淡出 y 随 x 增大而增大，
+    // B 淡入 y 随 x 增大而减小，因此 yA-yB 严格单调 → 二分求零点。
+    const yDiff = (x: number): number => {
+        const tA = (x - earlierLeftPx) / earlierFadePx;
+        const gainA = fadeCurveGain(1 - tA, earlierCurve);
+        const yA = bodyTop + bodyHeight * (1 - gainA);
+        const tB = (x - laterStartPx) / laterFadePx;
+        const gainB = fadeCurveGain(tB, laterCurve);
+        const yB = bodyTop + bodyHeight * (1 - gainB);
+        return yA - yB;
+    };
+
+    let low = lo;
+    let high = hi;
+    const fLow = yDiff(low);
+    const fHigh = yDiff(high);
+
+    // 不相交：视觉交叉点在两个淡化区之外，不显示手柄。
+    if (fLow * fHigh > 0) {
+        return null;
+    }
+
+    for (let i = 0; i < 40; i += 1) {
+        const mid = (low + high) / 2;
+        const fMid = yDiff(mid);
+        if (Math.abs(fMid) < 1e-3) {
+            low = high = mid;
+            break;
+        }
+        if (fLow * fMid < 0) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    const x = (low + high) / 2;
+    const tA = (x - earlierLeftPx) / earlierFadePx;
+    const gainA = fadeCurveGain(1 - tA, earlierCurve);
+    return {
+        x,
+        y: bodyTop + bodyHeight * (1 - gainA),
+    };
+}
+
 type EditZone = {
     key: string;
     clipId: string;
@@ -57,6 +143,10 @@ type EditZone = {
     topPx: number;
     heightPx: number;
     cursor: string;
+    /** 交叉点拖拽时的另一个 clip id；仅 type === "crossfade_edges" 时有意义。 */
+    partnerClipId?: string;
+    /** 显式层叠优先级（交叉点手柄应高于所有淡入淡出/边缘控件）。 */
+    zIndex?: number;
 };
 
 export const OverlapEditLayer = React.memo(function OverlapEditLayer({
@@ -201,6 +291,39 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 heightPx: rowHeight,
                 cursor: altPressed ? "col-resize" : "ew-resize",
             });
+
+            // ── 4) 交叉点手柄：两条淡入淡出包络线（按实际曲线）的交点 ─────────────
+            // 拖动它 = 同时移动前 clip 的右缘（结束位置）与后 clip 的左缘（起始位置），
+            // 相对偏移方式，保持两个 clip 的重叠长度不变（因此手动/自动淡化长度都不变）。
+            if (laterFadeInSec > 0 && earlierFadeOutSec > 0) {
+                const fA = Math.min(earlierFadeOutSec * pxPerSec, earlierEndPx - earlierStartPx);
+                const fB = Math.min(laterFadeInSec * pxPerSec, laterEndPx - laterStartPx);
+                const grip = computeCrossfadeGripPoint({
+                    earlierEndPx,
+                    earlierFadePx: fA,
+                    earlierCurve: earlier.fadeOutCurve,
+                    laterStartPx,
+                    laterFadePx: fB,
+                    laterCurve: later.fadeInCurve,
+                    bodyTop: bodyTopPx,
+                    bodyHeight: bodyHeightPx,
+                });
+                if (grip) {
+                    const gripSize = 16;
+                    zones.push({
+                        key: `${earlier.id}:${later.id}:crossfade-grip`,
+                        clipId: earlier.id,
+                        partnerClipId: later.id,
+                        type: "crossfade_edges",
+                        leftPx: grip.x - gripSize / 2,
+                        widthPx: gripSize,
+                        topPx: grip.y - gripSize / 2,
+                        heightPx: gripSize,
+                        cursor: altPressed ? "col-resize" : "ew-resize",
+                        zIndex: 300,
+                    });
+                }
+            }
         }
     }
 
@@ -210,6 +333,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         event: React.PointerEvent,
         clipId: string,
         type: OverlapEditType,
+        partnerClipId?: string,
     ) => {
         if (event.button !== 0) return;
         event.preventDefault();
@@ -249,6 +373,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     clientX: ev.clientX,
                     clientY: ev.clientY,
                     dragStartClientX: startX,
+                    crossfadePartnerClipId: partnerClipId,
                     altKey: ev.altKey,
                     metaKey: ev.metaKey,
                     ctrlKey: ev.ctrlKey,
@@ -288,8 +413,11 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         top: zone.topPx,
                         height: zone.heightPx,
                         cursor: zone.cursor,
+                        zIndex: zone.zIndex,
                     }}
-                    onPointerDown={(e) => startDeferredEdit(e, zone.clipId, zone.type)}
+                    onPointerDown={(e) =>
+                        startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId)
+                    }
                 />
             ))}
         </div>

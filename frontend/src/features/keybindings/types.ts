@@ -68,6 +68,7 @@ export type ActionId =
     | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
     | "modifier.clipCopyDrag" // 拖动 clip 时进入复制模式
+    | "modifier.clipCrossfadeGrip" // 交叉点手柄拖拽时切换“反向缩放”模式
     | "modifier.horizontalZoom" // 按住+滚轮水平缩放
     | "modifier.pianoRollVerticalZoom" // PianoRoll Ctrl+滚轮垂直缩放
     | "modifier.scrollHorizontal" // 按住+滚轮水平滚动

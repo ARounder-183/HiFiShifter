@@ -525,6 +525,7 @@ export const zhCN = {
     kb_modifier_stretch: "拉伸（拖动边缘时按住）",
     kb_modifier_no_snap: "拖动时切换吸附（按住可反转当前吸附）",
     kb_modifier_copy_drag: "复制拖动（拖动音频块时按住）",
+    kb_modifier_crossfade_grip: "交叉淡化手柄（拖动交叉点手柄时按住）",
     kb_modifier_horizontal_zoom: "水平缩放（按住+滚轮）",
     kb_modifier_pr_vzoom: "竖直缩放（按住+滚轮）",
     kb_modifier_param_morph: "参数形变（参数编辑器选区内按住）",

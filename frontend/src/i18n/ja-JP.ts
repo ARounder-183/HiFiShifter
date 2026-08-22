@@ -537,6 +537,8 @@ export const jaJP = {
     kb_modifier_stretch: "タイムストレッチ（エッジドラッグ中に押す）",
     kb_modifier_no_snap: "ドラッグ中にスナップを切り替えます（押すと現在のスナップを反転）",
     kb_modifier_copy_drag: "コピードラッグ（クリップドラッグ中に押す）",
+    kb_modifier_crossfade_grip:
+        "クロスフェードハンドル（クロスフェード交点ドラッグ中に押す）",
     kb_modifier_horizontal_zoom: "水平ズーム（押しながらスクロール）",
     kb_modifier_pr_vzoom: "垂直ズーム（押しながらスクロール）",
     kb_modifier_param_morph: "パラメータ形状変形（選択範囲内で押す）",

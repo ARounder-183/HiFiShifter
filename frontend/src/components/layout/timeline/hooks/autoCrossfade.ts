@@ -98,6 +98,8 @@ export function computeInitialCrossfadeSides(
  *   那一侧）会被重新计算：有重叠 → auto = 当前重叠量；无重叠 → auto = 0；
  * - **其它侧一律保持原值**——不会因为无关 clip 的编辑而改变既有交叉淡化，
  *   也不会把“用户介入后已关闭的自动淡化”错误地重新开启。
+ * - `editSides` 限定被编辑 clip 的“哪些侧真正被本次编辑触碰”（如 trim_left 只碰
+ *   左缘，不会影响右缘的淡出包络）；未提供时默认双侧都算触碰（整体移动/复制）。
  *
  * @param mode "full" 用于开关打开：受影响侧 = 重叠量或 0；
  *             "clear-only" 用于开关关闭：仅在受影响侧失去重叠时清 0，不创建/更新。
@@ -106,6 +108,7 @@ function computeAutoCrossfadeCore(
     clips: AutoCrossfadeClipLike[],
     movedIds: string[],
     affectedSides: Record<string, CrossfadeAffectedClip> | undefined,
+    editSides: Record<string, CrossfadeAffectedClip> | undefined,
     mode: "full" | "clear-only",
 ): AutoFadeUpdate[] {
     const clipById = new Map(clips.map((c) => [c.id, c] as const));
@@ -152,18 +155,36 @@ function computeAutoCrossfadeCore(
             }
         }
 
-        // 是否有“被编辑 clip”当前在本 clip 的某一侧与之重叠。
-        const movedOverlapsOnSide = (side: "fadeIn" | "fadeOut"): boolean => {
+        // 每个被编辑 clip 的“本次编辑真正触碰的侧”（未提供时默认双侧，如整体移动/复制）。
+        const defaultEdit = { fadeIn: true, fadeOut: true } as const;
+        const editFor = (id: string): CrossfadeAffectedClip =>
+            editSides?.[id] ?? defaultEdit;
+
+        // 是否有“被编辑 clip”当前在本 clip 的某一侧与之重叠，且它的对应侧被本次编辑触碰。
+        const movedCurrentlyTouchesSide = (side: "fadeIn" | "fadeOut"): boolean => {
             for (const other of clips) {
                 if (!movedSet.has(other.id) || other.id === clipId) continue;
                 if (other.trackId !== clip.trackId) continue;
-                const overlap = overlapLengthSec(clip, other);
-                if (overlap <= 0.001) continue;
+                if (overlapLengthSec(clip, other) <= 0.001) continue;
                 if (side === "fadeOut") {
-                    // 被编辑 clip 在本 clip 右侧 → 本 clip 的 fadeOut 侧受影响。
-                    if (other.startSec >= clip.startSec) return true;
-                } else if (other.startSec < clip.startSec) {
-                    // 被编辑 clip 在本 clip 左侧 → 本 clip 的 fadeIn 侧受影响。
+                    // 被编辑 clip 在本 clip 右侧 → 本 clip fadeOut 面对它的 fadeIn。
+                    if (other.startSec >= clip.startSec && editFor(other.id).fadeIn) return true;
+                } else if (other.startSec < clip.startSec && editFor(other.id).fadeOut) {
+                    // 被编辑 clip 在本 clip 左侧 → 本 clip fadeIn 面对它的 fadeOut。
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 编辑前是否有“被编辑 clip”的对应侧已被标记重叠（用于拖开后清除失去的 overlap）。
+        const movedPreTouchesSide = (side: "fadeIn" | "fadeOut"): boolean => {
+            for (const id of movedIds) {
+                if (!affectedSides?.[id]) continue;
+                if (side === "fadeIn") {
+                    // clip 的 fadeIn 面对左侧被编辑 clip 的 fadeOut。
+                    if (affectedSides[id].fadeOut && editFor(id).fadeOut) return true;
+                } else if (affectedSides[id].fadeIn && editFor(id).fadeIn) {
                     return true;
                 }
             }
@@ -171,12 +192,15 @@ function computeAutoCrossfadeCore(
         };
 
         // 受影响侧：
-        // - 被编辑 clip 自身：编辑前有重叠或当前该侧有重叠都算（它动过，可能创建/移除重叠）；
-        // - 未被编辑的邻居：只有“面对被编辑 clip”的侧，或编辑前被标记的侧。
-        const fadeInInvolved =
-            pre.fadeIn || (isMoved ? fadeInOverlap > 0.001 : movedOverlapsOnSide("fadeIn"));
-        const fadeOutInvolved =
-            pre.fadeOut || (isMoved ? fadeOutOverlap > 0.001 : movedOverlapsOnSide("fadeOut"));
+        // - 被编辑 clip 自身：只有“本次编辑真正触碰的侧”才可能受影响（例如 trim_left
+        //   不会影响右缘的淡出包络；trim_right 不会影响左缘的淡入包络）；
+        // - 未被编辑的邻居：只在“被编辑 clip 的对应侧被触碰”时受关联影响。
+        const fadeInInvolved = isMoved
+            ? editFor(clipId).fadeIn && (pre.fadeIn || fadeInOverlap > 0.001)
+            : movedPreTouchesSide("fadeIn") || movedCurrentlyTouchesSide("fadeIn");
+        const fadeOutInvolved = isMoved
+            ? editFor(clipId).fadeOut && (pre.fadeOut || fadeOutOverlap > 0.001)
+            : movedPreTouchesSide("fadeOut") || movedCurrentlyTouchesSide("fadeOut");
 
         // 记录“本次拖拽已影响的侧”：即使后续该侧不再重叠（例如拖拽中先重叠、
         // 又分开），它仍会持续被视为受影响侧，从而在无重叠时正确清 0。
@@ -240,8 +264,15 @@ export function computeAutoCrossfadeUpdates(
     session: SessionState,
     movedIds: string[],
     affectedSides?: Record<string, CrossfadeAffectedClip>,
+    editSides?: Record<string, CrossfadeAffectedClip>,
 ): AutoFadeUpdate[] {
-    return computeAutoCrossfadeCore(sessionClipsToLike(session), movedIds, affectedSides, "full");
+    return computeAutoCrossfadeCore(
+        sessionClipsToLike(session),
+        movedIds,
+        affectedSides,
+        editSides,
+        "full",
+    );
 }
 
 /**
@@ -262,10 +293,17 @@ export function applyAutoCrossfade(
         checkpoint?: boolean;
         /** 编辑前每侧重叠关系（分开时只清自动交叉淡化、保留手动 fade）。 */
         affectedSides?: Record<string, CrossfadeAffectedClip>;
+        /** 被编辑 clip 中本次编辑真正触碰的侧（缺省 = 双侧，如整体移动/复制）。 */
+        editSides?: Record<string, CrossfadeAffectedClip>;
     },
 ): Promise<void> {
     const checkpoint = Boolean(opts?.checkpoint);
-    const updates = computeAutoCrossfadeUpdates(session, movedIds, opts?.affectedSides);
+    const updates = computeAutoCrossfadeUpdates(
+        session,
+        movedIds,
+        opts?.affectedSides,
+        opts?.editSides,
+    );
 
     if (updates.length === 0) return Promise.resolve();
 
@@ -296,8 +334,15 @@ export function computeDetachedAutoCrossfadeClears(
     session: SessionState,
     movedIds: string[],
     affectedSides?: Record<string, CrossfadeAffectedClip>,
+    editSides?: Record<string, CrossfadeAffectedClip>,
 ): AutoFadeUpdate[] {
-    return computeAutoCrossfadeCore(sessionClipsToLike(session), movedIds, affectedSides, "clear-only");
+    return computeAutoCrossfadeCore(
+        sessionClipsToLike(session),
+        movedIds,
+        affectedSides,
+        editSides,
+        "clear-only",
+    );
 }
 
 /**
@@ -311,8 +356,14 @@ export function applyDetachedAutoCrossfadeClears(
     movedIds: string[],
     dispatch: AppDispatch,
     affectedSides?: Record<string, CrossfadeAffectedClip>,
+    editSides?: Record<string, CrossfadeAffectedClip>,
 ): Promise<void> {
-    const updates = computeDetachedAutoCrossfadeClears(session, movedIds, affectedSides);
+    const updates = computeDetachedAutoCrossfadeClears(
+        session,
+        movedIds,
+        affectedSides,
+        editSides,
+    );
 
     if (updates.length === 0) return Promise.resolve();
 
@@ -338,8 +389,14 @@ export function previewAutoCrossfade(
     movedIds: string[],
     dispatch: AppDispatch,
     affectedSides?: Record<string, CrossfadeAffectedClip>,
+    editSides?: Record<string, CrossfadeAffectedClip>,
 ): void {
-    for (const u of computeAutoCrossfadeUpdates(session, movedIds, affectedSides)) {
+    for (const u of computeAutoCrossfadeUpdates(
+        session,
+        movedIds,
+        affectedSides,
+        editSides,
+    )) {
         dispatch(setClipAutoFades(u));
     }
 }
@@ -371,5 +428,5 @@ export function computeAutoCrossfadeFromPayload(
             autoFadeInSec: Number(c.auto_fade_in_sec ?? 0),
             autoFadeOutSec: Number(c.auto_fade_out_sec ?? 0),
         }));
-    return computeAutoCrossfadeCore(clips, movedIds, undefined, "full");
+    return computeAutoCrossfadeCore(clips, movedIds, undefined, undefined, "full");
 }

@@ -323,6 +323,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         slipEditKb,
         noSnapKb,
         copyDragKb,
+        crossfadeGripKb,
         dropPreview,
         setDropPreview,
         clipDropNewTrack,
@@ -727,6 +728,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         snapEnabled: s.timelineSnap.enabled,
         ignoreGrouping,
         paramFineAdjustKb,
+        crossfadeGripKb,
     });
 
     const { slipDragRef: _slipDragRef, startSlipDrag } = useSlipDrag({

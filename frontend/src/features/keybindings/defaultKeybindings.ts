@@ -80,6 +80,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // macOS 上 ctrl 字段会自动映射为 Command（⌘），因此默认复制拖动为 ⌘+拖动；
     // 避免占用 Option，Option 保留给拉伸/滑动编辑等交替操作。
     "modifier.clipCopyDrag": { key: "control", modifierOnly: true, ctrl: true },
+    "modifier.clipCrossfadeGrip": {
+        key: "control",
+        modifierOnly: true,
+        ctrl: true,
+    },
     "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
     "modifier.pianoRollVerticalZoom": {
         key: "control",
@@ -275,6 +280,11 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "modifier.clipCopyDrag": {
         labelKey: "kb_modifier_copy_drag",
+        group: "modifier",
+        modifierOperationType: "drag",
+    },
+    "modifier.clipCrossfadeGrip": {
+        labelKey: "kb_modifier_crossfade_grip",
         group: "modifier",
         modifierOperationType: "drag",
     },

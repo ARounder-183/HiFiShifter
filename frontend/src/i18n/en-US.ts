@@ -531,6 +531,8 @@ export const enUS = {
     kb_modifier_stretch: "Time Stretch (hold while dragging edge)",
     kb_modifier_no_snap: "Toggle snap while dragging (hold to invert current snap)",
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip)",
+    kb_modifier_crossfade_grip:
+        "Crossfade Grip (hold while dragging the crossfade crossing point)",
     kb_modifier_horizontal_zoom: "Horizontal Zoom (hold + scroll)",
     kb_modifier_pr_vzoom: "Vertical Zoom (hold + scroll)",
     kb_modifier_param_morph: "Param Morph (hold inside param selection)",

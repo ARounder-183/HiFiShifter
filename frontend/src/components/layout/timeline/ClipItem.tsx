@@ -99,7 +99,8 @@ export const ClipItem = React.memo(function ClipItem({
             | "stretch_right"
             | "fade_in"
             | "fade_out"
-            | "gain",
+            | "gain"
+            | "crossfade_edges",
     ) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */

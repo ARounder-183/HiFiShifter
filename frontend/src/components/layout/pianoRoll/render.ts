@@ -880,8 +880,14 @@ export function drawPianoRoll(args: {
             playbackRate: pr,
             sourceDurationSec: sourceDurSec,
             volumeGain: Number(entry.gain ?? 1) || 1,
-            fadeInSec: Number(entry.fadeInSec ?? 0) || 0,
-            fadeOutSec: Number(entry.fadeOutSec ?? 0) || 0,
+            fadeInSec:
+                Number(entry.autoFadeInSec ?? 0) > 0
+                    ? Number(entry.autoFadeInSec) || 0
+                    : Number(entry.fadeInSec ?? 0) || 0,
+            fadeOutSec:
+                Number(entry.autoFadeOutSec ?? 0) > 0
+                    ? Number(entry.autoFadeOutSec) || 0
+                    : Number(entry.fadeOutSec ?? 0) || 0,
             fadeInCurve: entry.fadeInCurve ?? "linear",
             fadeOutCurve: entry.fadeOutCurve ?? "linear",
             dataStartSec: result.dataStartSec,
