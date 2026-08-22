@@ -37,6 +37,9 @@ export interface ClipPeaksEntry {
     fadeInSec: number;
     /** 淡出时长（秒） */
     fadeOutSec: number;
+    /** 自动交叉淡化时长（秒）；>0 时有效淡化 = 自动值，否则用手动值。 */
+    autoFadeInSec: number;
+    autoFadeOutSec: number;
     /** 淡入曲线类型 */
     fadeInCurve: FadeCurveType;
     /** 淡出曲线类型 */
@@ -143,6 +146,8 @@ export function useClipsPeaksForPianoRoll(args: {
                 gain: clip.gain ?? 1,
                 fadeInSec: clip.fadeInSec ?? 0,
                 fadeOutSec: clip.fadeOutSec ?? 0,
+                autoFadeInSec: clip.autoFadeInSec ?? 0,
+                autoFadeOutSec: clip.autoFadeOutSec ?? 0,
                 fadeInCurve: clip.fadeInCurve ?? "linear",
                 fadeOutCurve: clip.fadeOutCurve ?? "linear",
                 sourcePath: clip.sourcePath ?? "",

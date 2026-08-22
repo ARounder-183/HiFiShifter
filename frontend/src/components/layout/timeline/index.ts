@@ -6,6 +6,7 @@ export * from "./dnd";
 
 export * from "./TrackList";
 export * from "./TimeRuler";
+export * from "./timeFormat";
 export * from "./BackgroundGrid";
 export * from "./GlueContextMenu";
 export * from "./ClipContextMenu";

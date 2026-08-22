@@ -1,6 +1,7 @@
 {
     "bundle": {
         "resources": {
+            "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
             "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so": "libSoundTouchDLL.so"
         }
     }

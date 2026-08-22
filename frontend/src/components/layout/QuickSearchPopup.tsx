@@ -25,8 +25,8 @@ import {
 } from "./quickSearchPosition";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 
-/** 支持的音频扩展名 */
-const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"]);
+/** 支持的音频与视频媒体扩展名（视频按音轨导入） */
+const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr", "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb"]);
 const SORT_MODE_OPTIONS = ["name", "date", "size"] as const;
 
 function isAudioFile(entry: FileEntry): boolean {
@@ -41,7 +41,7 @@ interface QuickSearchPopupProps {
 /**
  * 快速搜索弹窗组件
  * - 在鼠标位置弹出浮动搜索框
- * - 搜索当前文件管理选中文件夹下的音频文件
+ * - 搜索当前文件管理选中文件夹下的音频/视频媒体文件
  * - ↑/↓ 切换候选项，空格预览，回车放置到当前轨道+playhead位置
  */
 export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClose }) => {
@@ -401,7 +401,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         size="1"
                         variant={regexEnabled ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_regex") || "Regex"}
+                        data-tooltip={tAny("fb_regex") || "Regex"}
                         onClick={() => {
                             setRegexEnabled((v) => !v);
                             focusSearchInput();
@@ -518,7 +518,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                     />
                                 </svg>
                                 {/* 文件名 */}
-                                <span className="truncate flex-1" title={entry.name}>
+                                <span className="truncate flex-1" data-tooltip={entry.name}>
                                     {entry.name}
                                 </span>
                                 {/* 预览指示 */}

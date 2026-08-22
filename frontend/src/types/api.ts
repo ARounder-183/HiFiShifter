@@ -61,6 +61,9 @@ export interface TimelineClip {
     fade_out_sec?: number;
     fade_in_curve?: string;
     fade_out_curve?: string;
+    /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
+    auto_fade_in_sec?: number;
+    auto_fade_out_sec?: number;
     formant_morph?: {
         enabled: boolean;
         target_f1_hz: number;
@@ -92,6 +95,8 @@ export interface ProjectMeta {
         notes: number[];
     } | null;
     beats_per_bar?: number;
+    /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+    time_signature_denominator?: number;
     grid_size?: string;
     stretch_algorithm_override?: "linear" | "signalsmith" | "soundtouch" | null;
     hifigan_mel_stretch_override?: boolean | null;
@@ -109,12 +114,41 @@ export interface TimelineState {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    /** Tempo Map 数据（null = 无 Tempo Map）。 */
+    tempo_map?: TempoMapPayload;
 }
+
+/** Tempo Map 变化点（后端 camelCase 载荷，与 `TempoPointPayload` 对应）。 */
+export interface TempoPointPayload {
+    id: string;
+    positionSec: number;
+    bpm: number;
+    /** 拍号分子；null 表示“跟随之前的拍号”（0 位置初始点必须显式）。 */
+    numerator: number | null;
+    /** 拍号分母；null 表示“跟随之前的拍号”。 */
+    denominator: number | null;
+    scale: {
+        key?: string | null;
+        name?: string | null;
+        notes?: number[] | null;
+    } | null;
+}
+
+/**
+ * 后端 Tempo Map 载荷：变化点的“裸数组”（null = 无 Tempo Map）。
+ *
+ * 与后端 `TimelineStatePayload.tempo_map: Option<Vec<TempoPointPayload>>` 及
+ * `set_timeline_tempo_map` 命令参数一一对应 —— 注意是数组本身，
+ * 不是 `{ points: [...] }` 包装对象。
+ */
+export type TempoMapPayload = TempoPointPayload[] | null;
 
 export interface TimelineResult {
     ok: true;
     tracks: TimelineTrack[];
     clips: TimelineClip[];
+    created_clip_ids?: string[];
+    created_track_ids?: string[];
     selected_track_id: string | null;
     selected_clip_id: string | null;
     bpm: number;
@@ -124,6 +158,11 @@ export interface TimelineResult {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    tempo_map?: TempoMapPayload;
+    /** `open_project` 专用：工程文件版本高于当前程序，等待用户确认。 */
+    project_version_too_new?: boolean;
+    project_file_version?: number;
+    current_project_file_version?: number;
 }
 
 export interface TrackSummaryResult {
@@ -317,14 +356,18 @@ export interface BenchmarkResult {
     gpuMedianMs?: number | null;
     /** WebGPU real-time factor, null if unavailable or failed. */
     gpuRtFactor?: number | null;
+    /** Display name of the GPU backend ("CoreML", "WebGPU", ...). */
+    gpuBackendName?: string | null;
+    /** Detailed error message when the GPU benchmark could not complete. */
+    gpuError?: string | null;
     /** DirectML GPU inference time (ms), null if unavailable or failed. */
     dmlMedianMs?: number | null;
     /** DirectML GPU real-time factor, null if unavailable or failed. */
     dmlRtFactor?: number | null;
     benchmarkSamples: number;
-    /** True when WebGPU EP was available and used for GPU benchmark. */
+    /** True when WebGPU EP was available for the GPU benchmark. */
     gpuAvailable: boolean;
-    /** True when DirectML EP was available and used for benchmark. */
+    /** True when DirectML EP was available for the benchmark. */
     dmlAvailable: boolean;
     /** GPU device ID that was used. */
     gpuDeviceId: number;

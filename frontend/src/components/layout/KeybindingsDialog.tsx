@@ -3,6 +3,7 @@ import { Dialog, Flex, Text, Button, ScrollArea, Separator, Select } from "@radi
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { IS_MAC } from "../../utils/platform";
 import {
     selectMergedKeybindings,
     setKeybinding,
@@ -101,7 +102,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
         if (!recordingId) return;
 
         const currentIsModifierOnly = Boolean(DEFAULT_KEYBINDINGS[recordingId]?.modifierOnly);
-        const isMac = navigator.platform?.toLowerCase().includes("mac");
+        const isMac = IS_MAC;
         const pressedModifierTokens = new Set<ModifierToken>();
 
         function applyModifierTokens(tokens: Set<ModifierToken>) {

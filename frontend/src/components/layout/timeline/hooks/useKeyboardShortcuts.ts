@@ -3,15 +3,11 @@ import type { AppDispatch } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { removeClipsRemote } from "../../../../features/session/sessionSlice";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import { selectMergedKeybindings } from "../../../../features/keybindings/keybindingsSlice";
 import type { ActionId, Keybinding, KeybindingMap } from "../../../../features/keybindings/types";
-import { writeSystemClipboardObject } from "../../../../utils/systemClipboard";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
-
-const IS_MAC =
-    typeof navigator !== "undefined" && navigator.platform?.toLowerCase().includes("mac");
+import { IS_MAC } from "../../../../utils/platform";
 
 const CLIP_ACTIONS: ActionId[] = [
     "clip.delete",
@@ -65,13 +61,8 @@ export function useKeyboardShortcuts(deps: {
     dispatch: AppDispatch;
     multiSelectedClipIds: string[];
     setMultiSelectedClipIds: (ids: string[]) => void;
-    clipClipboardRef: React.RefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
     isEditableTarget: (target: EventTarget | null) => boolean;
     onNormalize: (ids: string[]) => void;
     onPaste: () => void;
@@ -84,8 +75,8 @@ export function useKeyboardShortcuts(deps: {
         dispatch,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         isEditableTarget,
         onNormalize,
         onPaste,
@@ -166,28 +157,14 @@ export function useKeyboardShortcuts(deps: {
                     if (selectedIds.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    void (async () => {
-                        const s = sessionRef.current;
-                        const expandedIds = expandClipIdsWithGroups(
-                            selectedIds,
-                            s.clips,
-                            s.ignoreGrouping,
-                            s.disabledGroupIds,
-                        );
-                        const result = await buildClipClipboardTemplates(expandedIds);
-                        if (result.templates.length === 0) return;
-                        clipClipboardRef.current = result;
-                        try {
-                            await writeSystemClipboardObject({
-                                version: 1,
-                                kind: "clip",
-                                templates: result.templates,
-                                groupIds: result.groupIds,
-                            });
-                        } catch {
-                            // ignore
-                        }
-                    })();
+                    const s = sessionRef.current;
+                    const expandedIds = expandClipIdsWithGroups(
+                        selectedIds,
+                        s.clips,
+                        s.ignoreGrouping,
+                        s.disabledGroupIds,
+                    );
+                    void copyClips(expandedIds);
                     return;
                 }
 
@@ -195,30 +172,14 @@ export function useKeyboardShortcuts(deps: {
                     if (selectedIds.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    void (async () => {
-                        const s = sessionRef.current;
-                        const expandedIds = expandClipIdsWithGroups(
-                            selectedIds,
-                            s.clips,
-                            s.ignoreGrouping,
-                            s.disabledGroupIds,
-                        );
-                        const result = await buildClipClipboardTemplates(expandedIds);
-                        if (result.templates.length === 0) return;
-                        clipClipboardRef.current = result;
-                        try {
-                            await writeSystemClipboardObject({
-                                version: 1,
-                                kind: "clip",
-                                templates: result.templates,
-                                groupIds: result.groupIds,
-                            });
-                        } catch {
-                            // ignore
-                        }
-                        setMultiSelectedClipIds([]);
-                        void dispatch(removeClipsRemote(expandedIds));
-                    })();
+                    const s = sessionRef.current;
+                    const expandedIds = expandClipIdsWithGroups(
+                        selectedIds,
+                        s.clips,
+                        s.ignoreGrouping,
+                        s.disabledGroupIds,
+                    );
+                    cutClips(expandedIds);
                     return;
                 }
 
@@ -268,8 +229,8 @@ export function useKeyboardShortcuts(deps: {
         multiSelectedClipIds,
         sessionRef,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         isEditableTarget,
         keybindings,
         onNormalize,

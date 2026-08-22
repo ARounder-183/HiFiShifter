@@ -14,7 +14,6 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Tooltip } from "@radix-ui/themes";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -1047,31 +1046,31 @@ export const AppearanceWindow: React.FC = () => {
                                     {RADIX_ACCENT_COLORS.map((c) => {
                                         const isSelected = accentColor === c;
                                         return (
-                                            <Tooltip key={c} content={c}>
-                                                <button
-                                                    className={
-                                                        "w-6 h-6 rounded-md transition-all duration-100 cursor-pointer relative " +
-                                                        "active:scale-90 " +
-                                                        (isSelected
-                                                            ? "ring-2 ring-offset-1 ring-qt-text scale-105"
-                                                            : "hover:scale-110 ring-1 ring-transparent hover:ring-white/20")
-                                                    }
-                                                    style={{
-                                                        backgroundColor: RADIX_ACCENT_HEX[c],
-                                                        ["--tw-ring-offset-color" as string]:
-                                                            "var(--qt-panel)",
-                                                    }}
-                                                    onClick={() => {
-                                                        setAccentColor(c);
-                                                    }}
-                                                >
-                                                    {isSelected && (
-                                                        <span className="absolute inset-0 flex items-center justify-center text-white text-[10px] font-bold drop-shadow-sm">
-                                                            ✓
-                                                        </span>
-                                                    )}
-                                                </button>
-                                            </Tooltip>
+                                            <button
+                                                key={c}
+                                                data-tooltip={c}
+                                                className={
+                                                    "w-6 h-6 rounded-md transition-all duration-100 cursor-pointer relative " +
+                                                    "active:scale-90 " +
+                                                    (isSelected
+                                                        ? "ring-2 ring-offset-1 ring-qt-text scale-105"
+                                                        : "hover:scale-110 ring-1 ring-transparent hover:ring-white/20")
+                                                }
+                                                style={{
+                                                    backgroundColor: RADIX_ACCENT_HEX[c],
+                                                    ["--tw-ring-offset-color" as string]:
+                                                        "var(--qt-panel)",
+                                                }}
+                                                onClick={() => {
+                                                    setAccentColor(c);
+                                                }}
+                                            >
+                                                {isSelected && (
+                                                    <span className="absolute inset-0 flex items-center justify-center text-white text-[10px] font-bold drop-shadow-sm">
+                                                        ✓
+                                                    </span>
+                                                )}
+                                            </button>
                                         );
                                     })}
                                 </div>

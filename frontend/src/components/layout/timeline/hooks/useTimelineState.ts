@@ -19,6 +19,8 @@ import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
+import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
+import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -33,8 +35,17 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
     TRACK_ADD_ROW_HEIGHT,
+    buildRulerTicks,
     gridStepBeats,
 } from "../";
+import type { RulerTick } from "../timeFormat.js";
+import {
+    buildTempoGridLineXsForViewport,
+} from "../../../../utils/tempoMap.js";
+import {
+    snapTimelinePosition,
+    type SnapObjectKind,
+} from "../../../../utils/timelineSnapping";
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -46,11 +57,23 @@ type TimelineSessionSlice = Pick<
     | "clips"
     | "clipFormantStatus"
     | "clipFormantToolWindow"
+    | "customScalePresets"
     | "grid"
-    | "gridSnapEnabled"
+    | "snapEnabled"
+    | "timelineSnap"
+    | "paramEditorSyncTimeline"
+    | "paramEditorTimelineClickSelectTrackEnabled"
+    | "playheadSec"
+    | "primaryTimeUnit"
+    | "project"
+    | "secondaryTimeUnit"
+    | "rulerLabelSpacingPx"
+    | "showPlayheadTimeInTrackHeader"
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "tempoMap"
+    | "tempoMapVisible"
     | "trackMeters"
     | "tracks"
 >;
@@ -104,7 +127,9 @@ export interface TimelineStateResult {
     contentWidth: number;
     contentHeight: number;
     dynamicProjectSec: number;
-    bars: Array<{ beat: number; label: string }>;
+    ticks: RulerTick[];
+    /** Tempo Map 显式网格线（内容坐标 x）；无 Tempo Map 时为 null。 */
+    tempoGridLineXs: { weak: number[]; strong: number[] } | null;
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -119,6 +144,7 @@ export interface TimelineStateResult {
     slipEditKb: Keybinding;
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
+    crossfadeGripKb: Keybinding;
 
     // Drop preview
     dropPreview: {
@@ -151,8 +177,16 @@ export interface TimelineStateResult {
     rowTopForTrackId: (trackId: string | null) => number;
     ensureDropPreviewDuration: (path: string) => void;
     getDropPreviewWidthPx: (durationSec: number) => number;
-    snapSec: (sec: number) => number;
-    snapBeat: (sec: number) => number;
+    /** 完整吸附引擎入口。 */
+    snapTimeline: (
+        sec: number,
+        object: SnapObjectKind,
+        opts?: {
+            originSec?: number;
+            anchorTrackId?: string | null;
+            excludeClipIds?: ReadonlySet<string>;
+        },
+    ) => number;
     isEditableTarget: (target: EventTarget | null) => boolean;
     isPointerOnNativeScrollbar: (
         scroller: HTMLDivElement,
@@ -192,12 +226,25 @@ export function useTimelineState(): TimelineStateResult {
             clips: state.session.clips,
             clipFormantStatus: state.session.clipFormantStatus,
             clipFormantToolWindow: state.session.clipFormantToolWindow,
+            customScalePresets: state.session.customScalePresets,
             grid: state.session.grid,
-            gridSnapEnabled: state.session.gridSnapEnabled,
+            snapEnabled: state.session.snapEnabled,
+            timelineSnap: state.session.timelineSnap,
+            playheadSec: state.session.playheadSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
+            paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+            paramEditorTimelineClickSelectTrackEnabled:
+                state.session.paramEditorTimelineClickSelectTrackEnabled,
+            primaryTimeUnit: state.session.primaryTimeUnit,
             playbackRateVersion: state.session.playbackRateVersion,
+            project: state.session.project,
+            rulerLabelSpacingPx: state.session.rulerLabelSpacingPx,
+            secondaryTimeUnit: state.session.secondaryTimeUnit,
             selectedClipId: state.session.selectedClipId,
             selectedTrackId: state.session.selectedTrackId,
+            showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
+            tempoMap: state.session.tempoMap,
+            tempoMapVisible: state.session.tempoMapVisible,
             trackMeters: state.session.trackMeters,
             tracks: state.session.tracks,
         }),
@@ -217,6 +264,13 @@ export function useTimelineState(): TimelineStateResult {
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
+    const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
+    paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
+    const timelineSyncApplyingRef = useRef(false);
+    const pendingTimelineSyncViewportRef = useRef<{
+        scrollLeft: number;
+        pxPerSec: number;
+    } | null>(null);
     const playheadDragRef = useRef<{
         pointerId: number;
         lastBeat: number;
@@ -294,6 +348,12 @@ export function useTimelineState(): TimelineStateResult {
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
+        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport({
+                scrollLeft: next,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
@@ -315,6 +375,56 @@ export function useTimelineState(): TimelineStateResult {
                 : action;
         syncScrollLeft(next);
     };
+
+    // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
+    useEffect(() => {
+        if (!s.paramEditorSyncTimeline) return;
+        const apply = () => {
+            const store = timelineViewportSync.get();
+            timelineSyncApplyingRef.current = true;
+            pendingTimelineSyncViewportRef.current = {
+                scrollLeft: store.scrollLeft,
+                pxPerSec: store.pxPerSec,
+            };
+            setScrollLeft(store.scrollLeft);
+            setPxPerSec(store.pxPerSec);
+            timelineSyncApplyingRef.current = false;
+        };
+        const unsubscribe = timelineViewportSync.subscribe(apply);
+        return () => {
+            unsubscribe();
+            pendingTimelineSyncViewportRef.current = null;
+        };
+    }, [s.paramEditorSyncTimeline]);
+
+    // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
+    useEffect(() => {
+        if (s.paramEditorSyncTimeline) {
+            timelineViewportSync.setViewport({
+                scrollLeft: scrollLeftRef.current,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
+    }, [s.paramEditorSyncTimeline]);
+
+    // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
+    // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
+    // 形成“缩放已变、滚动没变”的水平漂移。
+    useLayoutEffect(() => {
+        const pending = pendingTimelineSyncViewportRef.current;
+        if (!pending || !s.paramEditorSyncTimeline) return;
+        if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
+        if (Math.abs(scrollLeft - pending.scrollLeft) > 0.5) return;
+
+        pendingTimelineSyncViewportRef.current = null;
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+
+        timelineSyncApplyingRef.current = true;
+        scroller.scrollLeft = pending.scrollLeft;
+        syncScrollLeft(pending.scrollLeft);
+        timelineSyncApplyingRef.current = false;
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {
@@ -375,6 +485,9 @@ export function useTimelineState(): TimelineStateResult {
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
+    const crossfadeGripKb = useAppSelector(
+        (state) => selectKeybinding(state, "modifier.clipCrossfadeGrip"),
+    );
     const scrollHorizontalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollHorizontal"),
     );
@@ -399,14 +512,15 @@ export function useTimelineState(): TimelineStateResult {
     useEffect(() => {
         function isStretchModifier(e: KeyboardEvent): boolean {
             const kb = stretchKbRef.current;
-            if (kb.ctrl && (e.key === "Control" || e.ctrlKey || e.metaKey)) return true;
+            if (kb.ctrl && (e.key === (IS_MAC ? "Meta" : "Control") || isPrimaryModifierDown(e)))
+                return true;
             if (kb.alt && (e.key === "Alt" || e.altKey)) return true;
             if (kb.shift && (e.key === "Shift" || e.shiftKey)) return true;
             return false;
         }
         function checkStretchState(e: KeyboardEvent): boolean {
             const kb = stretchKbRef.current;
-            if (kb.ctrl) return e.ctrlKey || e.metaKey;
+            if (kb.ctrl) return isPrimaryModifierDown(e);
             if (kb.alt) return e.altKey;
             if (kb.shift) return e.shiftKey;
             return false;
@@ -442,37 +556,51 @@ export function useTimelineState(): TimelineStateResult {
         (dropPreview && !dropPreview.trackId ? 1 : 0) + (clipDropNewTrack ? 1 : 0);
     const contentHeight = (s.tracks.length + dropExtraRows) * rowHeight + TRACK_ADD_ROW_HEIGHT;
 
-    // ── bars ─────────────────────────────────────────────────
-    const bars = useMemo(() => {
+    // ── ticks（自适应标尺刻度）──────────────────────────────────
+    const ticks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        const secPerBeatLocal = 60 / Math.max(1, s.bpm);
-        const totalBeats = Math.max(1, Math.ceil(dynamicProjectSec / secPerBeatLocal));
-        const totalBars = Math.max(1, Math.ceil(totalBeats / beatsPerBar));
+        return buildRulerTicks({
+            pxPerSec,
+            scrollLeft,
+            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            projectSec: dynamicProjectSec,
+            bpm: s.bpm,
+            beatsPerBar,
+            grid: s.grid,
+            primaryUnit: s.primaryTimeUnit,
+            secondaryUnit: s.secondaryTimeUnit,
+            minLabelSpacingPx: s.rulerLabelSpacingPx,
+            tempoMap: s.tempoMap,
+        });
+    }, [
+        s.beats,
+        s.bpm,
+        s.grid,
+        s.primaryTimeUnit,
+        s.secondaryTimeUnit,
+        s.rulerLabelSpacingPx,
+        s.tempoMap,
+        dynamicProjectSec,
+        viewportWidth,
+        pxPerSec,
+        scrollLeft,
+    ]);
 
-        let startBarIndex = 0;
-        let endBarIndex = totalBars;
-
-        if (Number.isFinite(viewportWidth) && viewportWidth > 0) {
-            const beatPx = Math.max(1e-9, secPerBeatLocal * pxPerSec);
-            const bufferPx = Math.max(240, viewportWidth * 0.5);
-            const leftPx = Math.max(0, scrollLeft - bufferPx);
-            const rightPx = scrollLeft + viewportWidth + bufferPx;
-
-            const leftBeat = leftPx / beatPx;
-            const rightBeat = rightPx / beatPx;
-
-            startBarIndex = Math.max(0, Math.floor(leftBeat / beatsPerBar) - 1);
-            endBarIndex = Math.min(totalBars, Math.ceil(rightBeat / beatsPerBar) + 1);
-        }
-
-        const result: Array<{ beat: number; label: string }> = [];
-        for (let barIndex = startBarIndex; barIndex <= endBarIndex; barIndex += 1) {
-            const beat = barIndex * beatsPerBar;
-            if (beat > totalBeats) break;
-            result.push({ beat, label: `${barIndex + 1}.1` });
-        }
-        return result;
-    }, [s.beats, dynamicProjectSec, s.bpm, viewportWidth, pxPerSec, scrollLeft]);
+    // ── Tempo Map 显式网格线（供 BackgroundGrid 使用）──────────
+    const tempoGridLineXs = useMemo(() => {
+        return buildTempoGridLineXsForViewport({
+            tempoMap: s.tempoMap,
+            scrollLeft,
+            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            pxPerSec,
+            projectSec: dynamicProjectSec,
+            stepBeats: gridStepBeats(s.grid),
+            fallbackBpm: s.bpm,
+            fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
+            minSpacingPx: s.timelineSnap.gridMinSpacingPx,
+        });
+    }, [s.tempoMap, s.bpm, s.beats, s.grid, s.timelineSnap, scrollLeft, viewportWidth, pxPerSec, dynamicProjectSec]);
 
     // ── clipsByTrackId ───────────────────────────────────────
     const clipsByTrackId = useMemo(() => {
@@ -577,10 +705,52 @@ export function useTimelineState(): TimelineStateResult {
         return durationSec > 0 ? Math.max(1, pxPerSecRef.current * durationSec) : 80;
     }
 
+    // ── snapTimeline ─────────────────────────────────────────
+    const snapTimeline = React.useCallback(
+        (
+            sec: number,
+            object: SnapObjectKind,
+            opts?: {
+                originSec?: number;
+                anchorTrackId?: string | null;
+                excludeClipIds?: ReadonlySet<string>;
+            },
+        ) => {
+            const session = sessionRef.current;
+            const result = snapTimelinePosition(
+                {
+                    settings: session.timelineSnap,
+                    grid: session.grid,
+                    bpm: session.bpm,
+                    beatsPerBar: session.beats,
+                    tempoMap: session.tempoMap,
+                    pxPerSec: pxPerSecRef.current,
+                    clips: session.clips,
+                    tracks: session.tracks,
+                    selectedClipIds:
+                        session.multiSelectedClipIds.length > 0
+                            ? session.multiSelectedClipIds
+                            : session.selectedClipId
+                              ? [session.selectedClipId]
+                              : [],
+                    playheadSec: session.playheadSec,
+                    object,
+                    originSec: opts?.originSec,
+                    anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
+                    excludeClipIds: opts?.excludeClipIds,
+                },
+                sec,
+            );
+            return result.sec;
+        },
+        [],
+    );
+
     // ── Playhead helpers ─────────────────────────────────────
     const setPlayheadFromClientX = React.useCallback(
         (clientX: number, bounds: DOMRect, xScroll: number, commit: boolean) => {
-            const beat = beatFromClientX(clientX, bounds, xScroll);
+            const rawBeat = beatFromClientX(clientX, bounds, xScroll);
+            const beat = snapTimeline(rawBeat, "cursor");
 
             if (commit) {
                 dispatch(setplayheadSec(beat));
@@ -595,7 +765,7 @@ export function useTimelineState(): TimelineStateResult {
             }
             return beat;
         },
-        [beatFromClientX, dispatch],
+        [beatFromClientX, dispatch, snapTimeline],
     );
 
     const startDeferredPlayheadSeek = React.useCallback(
@@ -648,14 +818,6 @@ export function useTimelineState(): TimelineStateResult {
         },
         [dispatch, setPlayheadFromClientX],
     );
-
-    // ── snapSec / snapBeat ───────────────────────────────────
-    function snapSec(sec: number) {
-        const stepBeats = gridStepBeats(s.grid);
-        const stepSec = stepBeats * (60 / Math.max(1, s.bpm));
-        return Math.round(sec / stepSec) * stepSec;
-    }
-    const snapBeat = snapSec;
 
     // ── isEditableTarget ─────────────────────────────────────
     function isEditableTarget(target: EventTarget | null): boolean {
@@ -782,7 +944,8 @@ export function useTimelineState(): TimelineStateResult {
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        bars,
+        ticks,
+        tempoGridLineXs,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,
@@ -796,6 +959,7 @@ export function useTimelineState(): TimelineStateResult {
         slipEditKb,
         noSnapKb,
         copyDragKb,
+        crossfadeGripKb,
 
         dropPreview,
         setDropPreview,
@@ -812,8 +976,7 @@ export function useTimelineState(): TimelineStateResult {
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
-        snapSec,
-        snapBeat,
+        snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,
         startPanPointer,

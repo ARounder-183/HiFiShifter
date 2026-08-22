@@ -12,10 +12,16 @@
 import React from "react";
 
 import { useI18n } from "../../../i18n/I18nProvider";
+import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
+import { FadeHitLayer } from "./FadeHitLayer";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
-import { ClipHeader } from "./clip/ClipHeader";
+import {
+    ClipHeader,
+    type ClipRenameClickCandidate,
+    type ClipRenameController,
+} from "./clip/ClipHeader";
 
 const LEADING_OVERLAP_ALPHA = 0.5;
 
@@ -45,8 +51,10 @@ export const ClipItem = React.memo(function ClipItem({
     recordLastClickPosition,
     clearContextMenu,
     triggerRename,
+    onRenameStart,
     onRenameCommit,
     onRenameDone,
+    onRenameClickCandidate,
     onGainCommit,
     onFormantMorphCommit,
     activeGroupIds,
@@ -91,7 +99,8 @@ export const ClipItem = React.memo(function ClipItem({
             | "stretch_right"
             | "fade_in"
             | "fade_out"
-            | "gain",
+            | "gain"
+            | "crossfade_edges",
     ) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
@@ -111,10 +120,12 @@ export const ClipItem = React.memo(function ClipItem({
 
     clearContextMenu: () => void;
 
-    /** 外部触发重命名（来自右键菜单�?*/
+    /** 外部触发重命名（来自右键菜单） */
     triggerRename?: boolean;
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
@@ -123,12 +134,22 @@ export const ClipItem = React.memo(function ClipItem({
     hovered?: boolean;
 }) {
     const { t } = useI18n();
+    const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
-    const left = Math.max(0, Math.round(clip.startSec * pxPerSec));
-    const width = Math.max(1, Math.round(clip.lengthSec * pxPerSec));
+    // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
+    // 若这里 Math.round，Clip 会相对网格最多向右偏 0.5px；在常用缩放
+    // (100-200 px/s) 下就是约 2.5-5ms 的“网格偏右”观感，且随 pxPerSec
+    // 与 BPM 改变而变化。保留浮点像素可让 Clip 与网格完全对齐。
+    const left = Math.max(0, clip.startSec * pxPerSec);
+    const width = Math.max(1, clip.lengthSec * pxPerSec);
+    // body 区高度（与 WaveformTrackCanvas 一致）：轨道高 - 上下 padding - 头部高。
+    const bodyHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
+    // 有效 fade = 自动交叉淡化（>0 时覆盖）否则手动 fade（对齐 REAPER 分离存储模型）。
+    const effectiveFadeInSec = (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : (clip.fadeInSec ?? 0);
+    const effectiveFadeOutSec = (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : (clip.fadeOutSec ?? 0);
     const leadingOverlapPx = Math.max(
         0,
-        Math.min(width, Math.round(Math.max(0, leadingOverlapSec) * pxPerSec)),
+        Math.min(width, Math.max(0, leadingOverlapSec) * pxPerSec),
     );
     const leadingOverlapMaskImage =
         leadingOverlapPx > 0
@@ -158,13 +179,20 @@ export const ClipItem = React.memo(function ClipItem({
 
             // Only check physical Alt key for click-selection bypass.
             // altPressed tracks the stretch modifier and must not interfere
-            // with Ctrl/Shift selection behavior.
+            // with primary-modifier/Shift selection behavior.
             const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-            const ctrlOrMeta = e.ctrlKey || e.metaKey;
-            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+            const primaryModifierDown = isPrimaryModifierDown(e);
+            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-            const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+            const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
             const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+            const primedSelection = shouldPrimeSelection && !selected;
+
+            if (primedSelection) {
+                ensureSelected(clip.id);
+                selectClipRemote(clip.id);
+                recordLastClickPosition?.(e.clientX);
+            }
 
             const startX = e.clientX;
             const startY = e.clientY;
@@ -182,6 +210,8 @@ export const ClipItem = React.memo(function ClipItem({
                     {
                         button: 0,
                         pointerId,
+                        clientX: startX,
+                        dragStartClientX: startX,
                         currentTarget: targetEl,
                     } as unknown as React.PointerEvent,
                     clip.id,
@@ -203,7 +233,7 @@ export const ClipItem = React.memo(function ClipItem({
                         onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
                         return;
                     }
-                    if (shouldPrimeSelection) {
+                    if (shouldPrimeSelection && !primedSelection) {
                         if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                             ensureSelected(clip.id);
                         }
@@ -230,6 +260,7 @@ export const ClipItem = React.memo(function ClipItem({
             recordLastClickPosition,
             seekFromClientX,
             selectClipRemote,
+            selected,
             startEditDrag,
             altPressed,
         ],
@@ -261,6 +292,20 @@ export const ClipItem = React.memo(function ClipItem({
                 top: 0,
                 height: rowHeight - CLIP_BODY_PADDING_Y,
                 boxShadow: interactionHintBoxShadow,
+                // 名称编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
+                // 否则 Canvas 中的原始名称会把输入框盖住。
+                zIndex: triggerRename ? 60 : undefined,
+            }}
+            onPointerDownCapture={(e) => {
+                // 正在编辑名称时，点击 Clip 内输入框以外的任意位置都先提交编辑。
+                // 输入框自身的 pointerdown 会在命中 input 时跳过。
+                const target = e.target as HTMLElement | null;
+                const isInputTarget =
+                    target?.closest?.("input,textarea,select,[contenteditable='true']") != null;
+                const controller = renameControllerRef.current;
+                if (!isInputTarget && controller?.isEditing()) {
+                    controller.commit();
+                }
             }}
             onContextMenu={(e) => {
                 e.preventDefault();
@@ -277,20 +322,27 @@ export const ClipItem = React.memo(function ClipItem({
 
                 // altPressed tracks the stretch modifier (configurable), used only
                 // for edge-handle behavior. For click-selection bypass (slip-edit),
-                // we only check the physical Alt key to avoid breaking Ctrl/Shift
+                // we only check the physical Alt key to avoid breaking primary-modifier/Shift
                 // selection when those keys are configured as stretch modifiers.
                 const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                const ctrlOrMeta = e.ctrlKey || e.metaKey;
+                const primaryModifierDown = isPrimaryModifierDown(e);
 
                 // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
-                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !e.shiftKey && !altKeyDown;
+                const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const primedSelection = shouldPrimeSelection && !selected;
+
+                if (primedSelection) {
+                    ensureSelected(clip.id);
+                    selectClipRemote(clip.id);
+                    recordLastClickPosition?.(e.clientX);
+                }
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
-                const allowSeek = !altKeyDown && !ctrlOrMeta && !e.shiftKey;
+                const allowSeek = !altKeyDown && !primaryModifierDown && !e.shiftKey;
                 const startX = e.clientX;
                 const startY = e.clientY;
                 let moved = false;
@@ -310,7 +362,7 @@ export const ClipItem = React.memo(function ClipItem({
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             if (multiSelectedCount !== 1 || !isInMultiSelectedSet) {
                                 ensureSelected(clip.id);
                             }
@@ -333,15 +385,13 @@ export const ClipItem = React.memo(function ClipItem({
 
                 startClipDrag(e, clip.id, clip.startSec, false);
             }}
-            title={
-                clip.midiNoteCount != null
-                    ? `${t("clip_type_midi_prefix")} ${clip.name}`
-                    : (clip.sourcePath ?? clip.name)
-            }
         >
             <div
                 className="absolute inset-0 overflow-visible"
                 style={{
+                    // 每个 clip 保持独立的层叠上下文（原设计）：重叠时的“同时可编辑”
+                    // 由 TrackLane 的 OverlapEditLayer（z 高于一切 clip item）确定性提供，
+                    // 这里不再依赖手柄 z 穿透其它 clip 的 body。
                     transform: "translateZ(0)",
                     backfaceVisibility: "hidden",
                     WebkitMaskImage: leadingOverlapMaskImage,
@@ -376,8 +426,11 @@ export const ClipItem = React.memo(function ClipItem({
                     startEditDrag={startEditDrag}
                     toggleClipMuted={toggleClipMuted}
                     triggerRename={triggerRename}
+                    onRenameStart={onRenameStart}
                     onRenameCommit={onRenameCommit}
                     onRenameDone={onRenameDone}
+                    onRenameClickCandidate={onRenameClickCandidate}
+                    renameControllerRef={renameControllerRef}
                     onGainCommit={onGainCommit}
                     onFormantMorphCommit={onFormantMorphCommit}
                     onToggleGroupDisabled={onToggleGroupDisabled}
@@ -394,50 +447,55 @@ export const ClipItem = React.memo(function ClipItem({
                 >
                     {/* Body (waveform + edit handles) */}
                     <div className="absolute inset-0">
-                        {/* Fade 角落 handle：始终存在，位于 body 左上�?右上角，用于�?0 开始拖拽出渐变 */}
-                        {/* left-[10px]：避开左侧 edge handle 的 10px 宽度，确保两者不重叠 */}
+                        {/* Fade 角落创建/编辑手柄：始终存在（即使当前无淡化），
+                            可从此拖拽“造出一个”淡化；淡化存在时也是有效抓取点
+                            （对齐 REAPER 顶部角落三角）。完全透明、不做悬停高亮，
+                            仅以 resize 光标提示。left/right 10px 避开
+                            ClipEdgeHandles 的 10px 宽度。 */}
                         <div
-                            className="absolute left-[10px] top-0 w-[20px] h-[20px] z-[55]"
+                            className="absolute left-[10px] top-0 w-[16px] h-[16px] z-[55]"
                             style={{ cursor: "nwse-resize" }}
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_in");
                             }}
-                            title={t("fade_in")}
+                            data-tooltip={t("fade_in")}
                         />
-                        {/* right-[10px]：避开右侧 edge handle 的 10px 宽度，确保两者不重叠 */}
                         <div
-                            className="absolute right-[10px] top-0 w-[20px] h-[20px] z-[55]"
+                            className="absolute right-[10px] top-0 w-[16px] h-[16px] z-[55]"
                             style={{ cursor: "nesw-resize" }}
                             onPointerDown={(e) => {
                                 startDeferredFadeEditDrag(e, "fade_out");
                             }}
-                            title={t("fade_out")}
+                            data-tooltip={t("fade_out")}
                         />
 
-                        {/* Fade handles: 操作区覆盖整�?fade 区域（fadeBeats > 0 时显示） */}
-                        {(clip.fadeInSec ?? 0) > 0 && (
-                            <div
-                                className="absolute left-0 top-0 h-full z-[40] cursor-nwse-resize"
-                                style={{
-                                    width: Math.min(width, (clip.fadeInSec ?? 0) * pxPerSec),
-                                }}
-                                onPointerDown={(e) => {
-                                    startDeferredFadeEditDrag(e, "fade_in");
-                                }}
-                                title={t("fade_in")}
-                            ></div>
-                        )}
-                        {(clip.fadeOutSec ?? 0) > 0 && (
-                            <div
-                                className="absolute right-0 top-0 h-full z-[40] cursor-nesw-resize"
-                                style={{
-                                    width: Math.min(width, (clip.fadeOutSec ?? 0) * pxPerSec),
-                                }}
-                                onPointerDown={(e) => {
-                                    startDeferredFadeEditDrag(e, "fade_out");
-                                }}
-                                title={t("fade_out")}
-                            ></div>
+                        {/* Fade 拖拽控件：抓「绘制的包络线」和「淡化区域边缘竖线」，
+                            而非整片淡入淡出区域（对齐 REAPER）。命中块很小，未命中处
+                            会自然穿透到 clip body（拖拽移动 clip）。 */}
+                        {(effectiveFadeInSec > 0 || effectiveFadeOutSec > 0) && (
+                            <FadeHitLayer
+                                clipLeftPx={0}
+                                clipWidthPx={width}
+                                bodyTop={0}
+                                bodyHeight={bodyHeight}
+                                fadeInPx={
+                                    effectiveFadeInSec > 0
+                                        ? Math.min(width, effectiveFadeInSec * pxPerSec)
+                                        : 0
+                                }
+                                fadeOutPx={
+                                    effectiveFadeOutSec > 0
+                                        ? Math.min(width, effectiveFadeOutSec * pxPerSec)
+                                        : 0
+                                }
+                                fadeInCurve={clip.fadeInCurve}
+                                fadeOutCurve={clip.fadeOutCurve}
+                                zIndex={40}
+                                onFadeInPointerDown={(e) => startDeferredFadeEditDrag(e, "fade_in")}
+                                onFadeOutPointerDown={(e) =>
+                                    startDeferredFadeEditDrag(e, "fade_out")
+                                }
+                            />
                         )}
 
                         {/* 波形由 WaveformTrackCanvas（轨道级 Canvas）统一渲染，此处不再包含波形内容 */}

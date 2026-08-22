@@ -55,11 +55,20 @@ export const projectApi = {
             customScale,
         ),
 
-    setProjectTimelineSettings: (beatsPerBar: number, gridSize: string) =>
+    setProjectTimelineSettings: (
+        beatsPerBar: number,
+        timeSignatureDenominator: number,
+        gridSize: string,
+    ) =>
         invoke<{
             ok: boolean;
-            project?: { beats_per_bar?: number; grid_size?: string; dirty?: boolean };
-        }>("set_project_timeline_settings", beatsPerBar, gridSize),
+            project?: {
+                beats_per_bar?: number;
+                time_signature_denominator?: number;
+                grid_size?: string;
+                dirty?: boolean;
+            };
+        }>("set_project_timeline_settings", beatsPerBar, timeSignatureDenominator, gridSize),
 
     setProjectStretchSettings: (payload: {
         stretchAlgorithmOverride?: StretchAlgorithmOption | null;
@@ -83,11 +92,19 @@ export const projectApi = {
     openProjectDialog: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_project_dialog"),
 
-    openProject: (projectPath: string) => invoke<TimelineResult>("open_project", projectPath),
+    openProject: (projectPath: string, force?: boolean) =>
+        invoke<TimelineResult>("open_project", projectPath, force),
 
     saveProject: (notesMarkdown?: string) => invoke<any>("save_project", notesMarkdown),
 
     saveProjectAs: (notesMarkdown?: string) => invoke<any>("save_project_as", notesMarkdown),
+
+    /**
+     * 保存到指定路径；`force=true` 表示用户已在"版本不一致覆盖"对话框中确认。
+     * 目标已存在版本不一致的工程文件（且未 force）时返回 versionConflict 信号。
+     */
+    saveProjectToPath: (projectPath: string, notesMarkdown?: string, force?: boolean) =>
+        invoke<any>("save_project_to_path", projectPath, notesMarkdown, force),
 
     getAutoBackupSettings: () => invoke<AutoBackupSettings>("get_auto_backup_settings"),
 
@@ -119,5 +136,30 @@ export const projectApi = {
         invoke<TimelineResult & { error?: string; skipped_files?: string[] }>(
             "import_reaper_project",
             rppPath,
+        ),
+
+    importProjectDialog: () =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>("import_project_dialog"),
+
+    importProject: (payload: {
+        projectPath: string;
+        placeAtPlayhead?: boolean;
+        importTempoMap?: boolean;
+    }) =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                empty?: boolean;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+                tempoMapImported?: boolean;
+                tempoMapSkipped?: boolean;
+            }
+        >(
+            "import_project",
+            payload.projectPath,
+            payload.placeAtPlayhead,
+            payload.importTempoMap,
         ),
 };

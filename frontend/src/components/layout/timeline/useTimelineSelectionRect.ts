@@ -10,6 +10,8 @@ import { useRef, useState } from "react";
 import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
+import { snapTimelinePosition } from "../../../utils/timelineSnapping";
+import { isPrimaryModifierDown } from "../../../utils/platform";
 
 export function shouldStartTimelineSelectionRect(button: number): boolean {
     // Only start selection for right-click (button === 2).
@@ -35,10 +37,10 @@ export function isTimelineSelectionDrag(
 export function computeTimelineRectSelection(params: {
     selectionBeforeDrag: string[];
     selectedInRect: string[];
-    ctrlOrMetaPressedAtStart: boolean;
+    primaryModifierPressedAtStart: boolean;
 }): string[] {
-    const { selectionBeforeDrag, selectedInRect, ctrlOrMetaPressedAtStart } = params;
-    if (!ctrlOrMetaPressedAtStart) {
+    const { selectionBeforeDrag, selectedInRect, primaryModifierPressedAtStart } = params;
+    if (!primaryModifierPressedAtStart) {
         return selectedInRect;
     }
     const beforeSet = new Set(selectionBeforeDrag);
@@ -75,8 +77,13 @@ export function useTimelineSelectionRect(params: {
         curX: number;
         curY: number;
         hasSelectionDrag: boolean;
-        ctrlOrMetaPressedAtStart: boolean;
+        primaryModifierPressedAtStart: boolean;
         selectionBeforeDrag: string[];
+        deferredContextMenu: {
+            clientX: number;
+            clientY: number;
+            target: EventTarget | null;
+        } | null;
     } | null>(null);
 
     const [selectionRect, setSelectionRect] = useState<{
@@ -86,8 +93,38 @@ export function useTimelineSelectionRect(params: {
         y2: number;
     } | null>(null);
 
+    /** 将框选矩形的水平像素边界吸附到当前网格/选区设置。 */
+    const snapSelectionX = (x: number): number => {
+        const session = sessionRef.current;
+        const snap = session.timelineSnap;
+        if (!snap.enabled) return x;
+        const pxPerSec = Math.max(1e-9, (pxPerBeat * Math.max(1, session.bpm)) / 60);
+        const rawSec = Math.max(0, x / pxPerSec);
+        const result = snapTimelinePosition(
+            {
+                settings: snap,
+                grid: session.grid,
+                bpm: session.bpm,
+                beatsPerBar: session.beats,
+                tempoMap: session.tempoMap,
+                pxPerSec,
+                clips: session.clips,
+                tracks: session.tracks,
+                selectedClipIds: [],
+                playheadSec: session.playheadSec,
+                object: "selection",
+                originSec: 0,
+                anchorTrackId: session.selectedTrackId,
+            },
+            rawSec,
+        );
+        return result.sec * pxPerSec;
+    };
+
     function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
         if (!shouldStartTimelineSelectionRect(e.button)) return;
+        e.preventDefault();
+
         const el = e.currentTarget as HTMLDivElement;
         const bounds = el.getBoundingClientRect();
         const x = e.clientX - bounds.left + el.scrollLeft;
@@ -106,9 +143,28 @@ export function useTimelineSelectionRect(params: {
             curX: x,
             curY: y,
             hasSelectionDrag: false,
-            ctrlOrMetaPressedAtStart: e.ctrlKey || e.metaKey,
+            primaryModifierPressedAtStart: isPrimaryModifierDown(e),
             selectionBeforeDrag: currentSelectionIds,
+            deferredContextMenu: null,
         };
+
+        // GTK/WebKit fires `contextmenu` on right-button *press* (unlike
+        // WebView2, which fires it on release). Keep the native event
+        // suppressed while a right-button press could still become a
+        // selection drag, then re-dispatch it on release when no drag
+        // happened so plain right-click menus behave the same everywhere.
+        const suppressContextMenu = (ev: Event) => {
+            const drag = selectionDragRef.current;
+            if (!drag || drag.pointerId !== e.pointerId) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            drag.deferredContextMenu = {
+                clientX: (ev as MouseEvent).clientX,
+                clientY: (ev as MouseEvent).clientY,
+                target: ev.target,
+            };
+        };
+        window.addEventListener("contextmenu", suppressContextMenu, true);
 
         function onMove(ev: PointerEvent) {
             const drag = selectionDragRef.current;
@@ -130,10 +186,12 @@ export function useTimelineSelectionRect(params: {
 
             if (!drag.hasSelectionDrag) return;
 
+            const sx1 = snapSelectionX(Math.min(drag.startX, cx));
+            const sx2 = snapSelectionX(Math.max(drag.startX, cx));
             setSelectionRect({
-                x1: Math.min(drag.startX, cx),
+                x1: sx1,
                 y1: Math.min(drag.startY, cy),
-                x2: Math.max(drag.startX, cx),
+                x2: sx2,
                 y2: Math.max(drag.startY, cy),
             });
         }
@@ -143,20 +201,49 @@ export function useTimelineSelectionRect(params: {
             if (!drag || drag.pointerId !== e.pointerId) return;
             selectionDragRef.current = null;
 
+            window.removeEventListener("contextmenu", suppressContextMenu, true);
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", end);
+            window.removeEventListener("pointercancel", end);
+
             const hasSelectionDrag = drag.hasSelectionDrag;
 
+            const sx1 = snapSelectionX(Math.min(drag.startX, drag.curX));
+            const sx2 = snapSelectionX(Math.max(drag.startX, drag.curX));
             const rect = {
-                x1: Math.min(drag.startX, drag.curX),
+                x1: sx1,
                 y1: Math.min(drag.startY, drag.curY),
-                x2: Math.max(drag.startX, drag.curX),
+                x2: sx2,
                 y2: Math.max(drag.startY, drag.curY),
             };
             setSelectionRect(null);
 
             if (!hasSelectionDrag) {
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", end);
-                window.removeEventListener("pointercancel", end);
+                // No drag: re-emit the suppressed contextmenu so plain
+                // right-click menus still open (at release time, matching
+                // Windows).
+                const deferred = drag.deferredContextMenu;
+                if (deferred) {
+                    const clientX = deferred.clientX;
+                    const clientY = deferred.clientY;
+                    let target: EventTarget | null = deferred.target;
+                    if (!(target instanceof Element) || !document.contains(target)) {
+                        target = document.elementFromPoint(clientX, clientY);
+                    }
+                    if (target) {
+                        target.dispatchEvent(
+                            new MouseEvent("contextmenu", {
+                                bubbles: true,
+                                cancelable: true,
+                                clientX,
+                                clientY,
+                                button: 2,
+                                buttons: 0,
+                                view: window,
+                            }),
+                        );
+                    }
+                }
                 return;
             }
 
@@ -176,7 +263,7 @@ export function useTimelineSelectionRect(params: {
             const selected = computeTimelineRectSelection({
                 selectionBeforeDrag: drag.selectionBeforeDrag,
                 selectedInRect,
-                ctrlOrMetaPressedAtStart: drag.ctrlOrMetaPressedAtStart,
+                primaryModifierPressedAtStart: drag.primaryModifierPressedAtStart,
             });
 
             setMultiSelectedClipIds(selected);
@@ -185,22 +272,20 @@ export function useTimelineSelectionRect(params: {
             }
 
             // 真正发生右键拖拽框选时，抑制本次 contextmenu。
-            const suppressContextMenu = (ev: Event) => {
+            const suppressContextMenuAfterDrag = (ev: Event) => {
                 ev.preventDefault();
                 ev.stopPropagation();
             };
-            window.addEventListener("contextmenu", suppressContextMenu, {
+            window.addEventListener("contextmenu", suppressContextMenuAfterDrag, {
                 capture: true,
                 once: true,
             });
             // 安全回退：200ms 后自动移除，防止意外吞掉后续正常右键
             setTimeout(() => {
-                window.removeEventListener("contextmenu", suppressContextMenu, { capture: true });
+                window.removeEventListener("contextmenu", suppressContextMenuAfterDrag, {
+                    capture: true,
+                });
             }, 200);
-
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", end);
-            window.removeEventListener("pointercancel", end);
         }
 
         window.addEventListener("pointermove", onMove);

@@ -13,6 +13,14 @@ set -euo pipefail
 
 PROFILE="${1:---release}"
 PROFILE="${PROFILE#--}"  # strip leading --
+CARGO_PROFILE="$PROFILE"
+TARGET_PROFILE="$PROFILE"
+if [ "$PROFILE" = "debug" ] || [ "$PROFILE" = "dev" ]; then
+    # Cargo calls the default debug profile "dev", but its output directory
+    # is still target/debug/.
+    CARGO_PROFILE="dev"
+    TARGET_PROFILE="debug"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -32,14 +40,14 @@ set +e  # bundling may fail; AppDir is already created
 HIFISHIFTER_SKIP_FRONTEND_BUILD=1 cargo tauri build \
     --bundles appimage \
     -- --no-default-features --features onnx \
-    ${PROFILE:+--profile "$PROFILE"} 2>&1 | tail -5
+    ${CARGO_PROFILE:+--profile "$CARGO_PROFILE"} 2>&1 | tail -5
 set -e
 echo "(Tauri bundling step may have failed — this is OK, AppDir should be ready)"
 
 # Step 2: Determine AppDir and output paths
 TARGET_DIR="$BACKEND_DIR/src-tauri/target/release"
-if [ "$PROFILE" != "release" ] && [ -n "$PROFILE" ]; then
-    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$PROFILE"
+if [ "$TARGET_PROFILE" != "release" ] && [ -n "$TARGET_PROFILE" ]; then
+    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$TARGET_PROFILE"
 fi
 APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
 OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
@@ -47,7 +55,7 @@ OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
 if [ ! -d "$APPDIR" ]; then
     # Try x86_64 target-specific path
     TARGET_TRIPLE="x86_64-unknown-linux-gnu"
-    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$TARGET_TRIPLE/release"
+    TARGET_DIR="$BACKEND_DIR/src-tauri/target/$TARGET_TRIPLE/$TARGET_PROFILE"
     APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
     OUTPUT="$TARGET_DIR/bundle/appimage/HiFiShifter.AppImage"
 fi

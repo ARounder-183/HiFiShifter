@@ -47,7 +47,7 @@ export const ClipFormantButton: React.FC<{
         <button
             ref={buttonRef}
             className="rounded flex items-center justify-center border transition-all text-[10px] font-bold"
-            title={t("clip_formant_title")}
+            data-tooltip={t("clip_formant_title")}
             style={{
                 opacity,
                 width,

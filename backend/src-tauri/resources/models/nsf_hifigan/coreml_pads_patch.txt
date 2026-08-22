@@ -1,0 +1,3 @@
+# CoreML Pad pads patch: <pads-input-name>=v0,v1,...
+/Cast_output_0=0,0,0,0,1,0
+/Cast_3_output_0=0,1,0,0,0,0

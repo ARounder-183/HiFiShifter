@@ -157,7 +157,7 @@ export function PitchStatusBadge(props: {
             variant="soft"
             size="1"
             color={color}
-            title={title}
+            data-tooltip={title}
             className={"select-none " + (className ?? "")}
         >
             {text}

@@ -193,4 +193,3 @@ squashfs-root/
 
 # AppImage build artifacts (may be generated in CWD by linuxdeploy)
 *.AppImage
-

@@ -15,6 +15,142 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+/// Fixed mel-frame length used by CoreML sessions on macOS ARM64.
+///
+/// The NSF-HiFiGAN model has a dynamic `time` axis and its f0
+/// pre-processing subgraph contains `Shape`/`Gather`/`Mod`/`ConstantOfShape`
+/// operators.  ONNX Runtime's CoreML EP cannot always resolve shapes at
+/// graph-compilation time when `time` is dynamic ("Unable to get shape for
+/// output" / `model_builder` failures), even though the same model loads
+/// fine on CPU/WebGPU.  Pinning `time` to this constant makes every shape in
+/// the graph statically resolvable, which lets the CoreML EP compile and run
+/// the model.  All inference entry points pad mel/f0 to this length and trim
+/// the output back to the requested chunk length.
+pub const COREML_FIXED_TIME_FRAMES: usize = 4096;
+
+/// Stores whether the most recently created CoreML session for each role is
+/// pinned to [`COREML_FIXED_TIME_FRAMES`].  Only the vocoder model requires
+/// the fixed dimension; FCPE/HNSEP keep their dynamic shapes.
+static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = OnceLock::new();
+
+/// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
+/// then skipped for the rest of the process (WebGPU/CPU take over) so a
+/// hung CoreML inference can never block the benchmark or rendering again.
+static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+fn coreml_disabled() -> bool {
+    COREML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn disable_coreml(reason: &str) {
+    eprintln!("ort_session: disabling CoreML EP for this process: {reason}");
+    COREML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Returns `true` when the current process is a macOS ARM64 build running
+/// with the CoreML execution provider (i.e. sessions are pinned to
+/// [`COREML_FIXED_TIME_FRAMES`] for the given role and inference inputs must
+/// be padded).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn coreml_active(role: OrtSessionRole) -> bool {
+    COREML_PINNED_BY_ROLE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .ok()
+        .map(|g| g.iter().any(|(r, pinned)| *r == role && *pinned))
+        .unwrap_or(false)
+}
+
+/// Stub for non-macOS-ARM64 builds.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn coreml_active(_role: OrtSessionRole) -> bool {
+    false
+}
+
+/// Clear the CoreML pinned-state cache (e.g. when the runtime EP is changed,
+/// so stale "coreml" state does not keep padding after switching to CPU).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn reset_coreml_pinned_state() {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        guard.clear();
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub fn reset_coreml_pinned_state() {}
+
+/// Record the CoreML pinned state for a role (macOS ARM64 only).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn set_coreml_pinned(role: OrtSessionRole, pinned: bool) {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        if let Some(entry) = guard.iter_mut().find(|(r, _)| *r == role) {
+            entry.1 = pinned;
+        } else {
+            guard.push((role, pinned));
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn set_coreml_pinned(_role: OrtSessionRole, _pinned: bool) {}
+
+/// Build a CoreML execution provider with the options that make the
+/// NSF-HiFiGAN model compile reliably on Apple Silicon.
+///
+/// - `MLProgram` format: supports more operators and is required for many
+///   models that the legacy NeuralNetwork format rejects.
+/// - `CPUAndNeuralEngine`: prefer the ANE for real-time vocoding, with CPU
+///   fallback for unsupported ops.
+/// - A persistent model cache avoids recompiling the CoreML model on every
+///   session creation (can take tens of seconds for this 56 MB model).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn build_coreml_ep(role: OrtSessionRole) -> ort::ep::CoreML {
+    use ort::ep::coreml::{ComputeUnits, ModelFormat};
+
+    let mut ep = ort::ep::CoreML::default()
+        // Use the GPU instead of the Neural Engine: HiFi-GAN's ConvTranspose
+        // upsampling layers (stride/kernel 16/8/4/2) are known to hang the
+        // ANE compiler (see Apple Developer Forums: ConvTranspose2d with
+        // stride(16,1) kernel(16,1) breaks the ANE).  CPUAndGPU keeps the
+        // model on the Metal GPU where these layers run correctly.
+        .with_compute_units(ComputeUnits::CPUAndGPU)
+        .with_model_format(ModelFormat::MLProgram)
+        // Keep FP32 accumulation for the vocoder: HiFi-GAN audio quality is
+        // sensitive to low-precision GPU accumulation.
+        .with_low_precision_accumulation_on_gpu(false)
+        // The vocoder session is built with `time`/`batch` dimension
+        // overrides, so require static shapes for that role.  FCPE and HNSEP
+        // intentionally keep their dynamic shapes.
+        .with_static_input_shapes(matches!(role, OrtSessionRole::Vocoder));
+
+    // Cache compiled CoreML programs under ~/Library/Caches/HiFiShifter so
+    // repeated session creation (e.g. after an EP switch) does not recompile
+    // the whole model.  If the cache directory cannot be created, continue
+    // without caching -- it is purely an optimization.
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("HiFiShifter")
+            // Versioned separately from the old ORT 1.24 cache: compiled
+            // CoreML artifacts from the previous runtime can reuse stale
+            // partitions and must not be loaded by the new build.
+            .join("coreml-ort1.28");
+        if std::fs::create_dir_all(&cache).is_ok() {
+            // with_model_cache_dir takes `impl ToString`, so convert the
+            // PathBuf explicitly (PathBuf itself does not implement
+            // ToString).
+            ep = ep.with_model_cache_dir(cache.to_string_lossy().into_owned());
+        }
+    }
+
+    ep
+}
+
 /// Runtime override for EP choice. Set by `set_runtime_ep_override()`.
 /// Takes precedence over the `HIFISHIFTER_ORT_EP` env var.
 static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -244,6 +380,56 @@ fn try_register_webgpu_ep(
     Err("WebGPU EP is not compiled on this platform. Use DirectML (Windows) or CPU.".to_string())
 }
 
+/// Try to register the CoreML EP on a session builder (macOS ARM64).
+///
+/// CoreML is the primary GPU/Neural Engine path on Apple Silicon: it uses
+/// Apple's Core ML framework (CPU + Neural Engine + GPU depending on the
+/// selected compute units) instead of Dawn/WebGPU.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn try_register_coreml_ep(
+    builder: ort::session::builder::SessionBuilder,
+    role: OrtSessionRole,
+) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
+    let build_result = std::panic::catch_unwind(|| {
+        build_coreml_ep(role).build()
+    });
+    let ep = match build_result {
+        Ok(ep) => ep,
+        Err(panic) => {
+            let msg = format!(
+                "CoreML EP build panicked: {}",
+                panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+            );
+            eprintln!("ort_session: {msg}");
+            return Err(msg);
+        }
+    };
+
+    let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builder.with_execution_providers([ep.clone()])
+    }));
+
+    match register_result {
+        Ok(Ok(b)) => {
+            eprintln!("ort_session: CoreML EP registered successfully");
+            Ok((b, "coreml"))
+        }
+        Ok(Err(e)) => {
+            let msg = format!("CoreML EP registration failed: {e}");
+            eprintln!("ort_session: {msg}");
+            Err(msg)
+        }
+        Err(panic) => {
+            let msg = format!(
+                "CoreML EP registration panicked: {}",
+                panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
+            );
+            eprintln!("ort_session: {msg}");
+            Err(msg)
+        }
+    }
+}
+
 /// Check if we're running under WSL2 (Windows Subsystem for Linux).
 /// WSL2 does not expose native hardware Vulkan to Linux guests — the
 /// Windows GPU driver provides D3D12/DirectX passthrough via /dev/dxg.
@@ -337,6 +523,8 @@ fn try_register_directml_ep(
 /// EP selection priority (for choice="auto"):
 ///   Windows:  1. DirectML (DX12, proven stable)  2. CPU fallback
 ///   Linux:    1. WebGPU (Dawn/Vulkan)            2. CPU fallback
+///   macOS ARM64: 1. CoreML (Neural Engine/GPU)   2. WebGPU (Dawn/Metal)
+///               3. CPU fallback
 ///
 /// WebGPU on Windows is only used when explicitly selected
 /// (choice="webgpu"), because Dawn/D3D12 probing can crash on some
@@ -385,7 +573,7 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
             Ok(builder) => {
                 match try_register_webgpu_ep(builder, role) {
                     Ok((b, ep)) => {
-                        let session = build_webgpu_session_finalize(b, onnx_path, role)?;
+                        let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
                         return Ok((session, ep.to_string()));
                     }
                     Err(e) => {
@@ -404,6 +592,69 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     }
 
     // ── Fallback: CPU ──────────────────────────────────────────────────
+    // macOS ARM64: CoreML (Neural Engine/GPU) first, WebGPU fallback, then CPU.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if choice == "auto" || choice == "coreml" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
+        // CoreML is the primary GPU path on Apple Silicon. An explicit
+        // "webgpu" selection skips CoreML and goes straight to Dawn/Metal.
+        if choice != "webgpu" && !coreml_disabled() {
+            match Session::builder() {
+                Ok(builder) => match try_register_coreml_ep(builder, role) {
+                    Ok((b, ep)) => {
+                        // Pin the vocoder model's dynamic `time` and `batch`
+                        // dimensions.  Without this, the CoreML EP fails to
+                        // compile this model ("Unable to get shape for
+                        // output") because the f0 subgraph
+                        // (Shape/Gather/Mod/ConstantOfShape) cannot resolve
+                        // dynamic shapes, and a dynamic batch is a known
+                        // CoreML EP crash/hang source.  FCPE/HNSEP keep
+                        // dynamic shapes (they are not padded downstream).
+                        let pinned = matches!(role, OrtSessionRole::Vocoder);
+                        let pinned_builder = if pinned {
+                            b.with_dimension_override("time", COREML_FIXED_TIME_FRAMES as i64)
+                                .and_then(|b| b.with_dimension_override("batch", 1))
+                                .map_err(|e| format!("set CoreML dimension override failed: {e}"))
+                        } else {
+                            Ok(b)
+                        };
+                        match pinned_builder {
+                            Ok(b) => {
+                                match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
+                                    Ok(session) => {
+                                        set_coreml_pinned(role, pinned);
+                                        return Ok((session, ep.to_string()));
+                                    }
+                                    Err(e) => eprintln!(
+                                        "ort_session[{role:?}]: CoreML session creation failed (will try WebGPU): {e}"
+                                    ),
+                                }
+                            }
+                            Err(e) => eprintln!(
+                                "ort_session[{role:?}]: failed to pin CoreML time dimension (will try WebGPU): {e}"
+                            ),
+                        }
+                    }
+                    Err(e) => eprintln!("ort_session[{role:?}]: CoreML unavailable: {e}"),
+                },
+                Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for CoreML: {e}"),
+            }
+        }
+        match Session::builder() {
+            Ok(builder) => match try_register_webgpu_ep(builder, role) {
+                Ok((b, ep)) => {
+                    match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
+                        Ok(session) => return Ok((session, ep.to_string())),
+                        Err(e) => eprintln!(
+                            "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
+                        ),
+                    }
+                }
+                Err(e) => eprintln!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
+            },
+            Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"),
+        }
+    }
+
     build_cpu_session(onnx_path, role, &choice)
 }
 
@@ -412,11 +663,16 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
 /// platforms (WSL2 with Lavapipe, misconfigured drivers, headless
 /// systems) the EP registers successfully but runtime inference fails
 /// — this catches that early so we can fall back to CPU.
-fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: &str) -> Result<(), String> {
+fn smoke_test_gpu_session(
+    mut session: Session,
+    role: OrtSessionRole,
+    ep_name: &str,
+) -> Result<Session, String> {
     use ort::value::{Tensor, ValueType};
 
-    // Collect f32 tensor inputs from the session metadata.
-    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::new();
+    // Collect f32 tensor input metadata first so the `session` borrow ends
+    // before the session is moved into the helper thread below.
+    let mut plans: Vec<(String, Vec<usize>)> = Vec::new();
     for input in session.inputs() {
         let (tensor_ty, shape) = match input.dtype() {
             ValueType::Tensor { ty, shape, .. } => (ty, shape),
@@ -426,66 +682,131 @@ fn smoke_test_gpu_session(session: &mut Session, role: OrtSessionRole, ep_name: 
             continue;
         }
         if shape.iter().any(|&d| d == 0) {
-            continue; // scalar or zero-dim — skip
+            continue; // scalar or zero-dim - skip
         }
-        // Replace dynamic dimensions (-1) with small test values:
-        //   dim 0 → 1 (batch),  other dims → 4 (one upsampling hop).
+        // Replace dynamic dimensions (-1) with realistic test values:
+        //   dim 0 -> 1 (batch),  other dims -> COREML_FIXED_TIME_FRAMES.
+        // Tiny values (e.g. 4) make ORT's buffer-reuse optimizer collide
+        // with the model's fixed intermediate shapes ("{1,4,1} !=
+        // {1,2048,1}"), so use the same frame length the app actually runs.
+        let fallback_dim = COREML_FIXED_TIME_FRAMES as i64;
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
-            .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
+            .map(|(i, &d)| {
+                if d > 0 {
+                    d as usize
+                } else if i == 0 {
+                    1
+                } else {
+                    fallback_dim as usize
+                }
+            })
             .collect();
+        plans.push((input.name().to_string(), test_shape));
+    }
+    let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::with_capacity(plans.len());
+    for (name, test_shape) in plans {
         let total: usize = test_shape.iter().product::<usize>().max(1);
-        let data: Vec<f32> = vec![0.0f32; total];
+        // Use a non-zero f0: this model's f0 pre-processing computes a
+        // differential that becomes the Pad "pads" input, and an all-zero f0
+        // produces an empty/zero-sized tensor that crashes ORT's buffer
+        // reuse ("{1,0,112}", "{1,4096,1} vs {1,4096,4096}").  440 Hz is a
+        // realistic mid-range pitch and keeps every intermediate shape valid.
+        let fill = if name == "f0" { 440.0f32 } else { 0.0f32 };
+        let data: Vec<f32> = vec![fill; total];
         let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
-            .map_err(|e| format!("smoke test: tensor '{}' creation failed: {e}", input.name()))?;
-        input_pairs.push((input.name().to_string(), tensor.into()));
+            .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?;
+        input_pairs.push((name, tensor.into()));
     }
 
     if input_pairs.is_empty() {
         eprintln!("ort_session[{role:?}]: GPU smoke test skipped (no f32 tensor inputs)");
-        return Ok(());
+        return Ok(session);
     }
 
-    session
-        .run(input_pairs)
-        .map_err(|e| {
-            format!(
-                "{ep_name} inference is not functional on this system. \
-                 The EP registered but compute shader execution failed: {e}. \
-                 Falling back to CPU."
-            )
-        })?;
+    // CoreML can take a long time (or hang forever) on its first inference:
+    // MLProgram compilation is deferred to the first run, and a dynamic
+    // batch is a known hang source.  Run the smoke test on a helper thread
+    // with a generous timeout so a stuck CoreML session can never freeze the
+    // benchmark.  If it times out we return an error and the caller falls
+    // back to WebGPU/CPU; the orphaned thread (if truly hung) is harmless.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let timeout = std::time::Duration::from_secs(60);
+    let run_thread = std::thread::spawn(move || {
+        // Run inside a block so the returned SessionOutputs (which borrow
+        // the session) are dropped before we move the session back.
+        let result = {
+            let outputs = session.run(input_pairs);
+            outputs.map(|_| ())
+        };
+        let _ = tx.send((result, session));
+    });
 
-    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed — EP is functional");
-    Ok(())
+    match rx.recv_timeout(timeout) {
+        Ok((result, session)) => {
+            let _ = run_thread.join();
+            match result {
+                Ok(_) => {
+                    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
+                    Ok(session)
+                }
+                Err(e) => Err(format!(
+                    "{ep_name} inference is not functional on this system.                      The EP registered but compute shader execution failed: {e}.                      Falling back to CPU."
+                )),
+            }
+        }
+        Err(_) => {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            disable_coreml(&format!(
+                "{ep_name} smoke test exceeded {timeout:?} (first inference hung)"
+            ));
+            Err(format!(
+                "{ep_name} smoke test timed out after {timeout:?}.                  The EP registered but the first inference did not complete.                  Falling back to WebGPU/CPU."
+            ))
+        }
+    }
 }
 
-/// Finalize a WebGPU session with appropriate optimization settings.
+
+/// Finalize a GPU session (CoreML / WebGPU) with appropriate optimization
+/// settings, then smoke-test it so broken GPU backends fall back to CPU early.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
-fn build_webgpu_session_finalize(
+fn build_gpu_session_finalize(
     mut builder: ort::session::builder::SessionBuilder,
     onnx_path: &Path,
     role: OrtSessionRole,
+    ep_name: &str,
 ) -> Result<Session, String> {
     let model_name = onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     eprintln!(
-        "ort_session[{role:?}]: model={model_name} ep=webgpu (global_env={})",
+        "ort_session[{role:?}]: model={model_name} ep={ep_name} (global_env={})",
         env_ep_choice(),
     );
 
+    let coreml_session = ep_name == "CoreML";
     builder = builder
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("set graph optimization level failed: {e}"))?
-        .with_memory_pattern(true)
-        .map_err(|e| format!("set memory pattern failed: {e}"))?;
+        // CoreML MLProgram sessions have their own execution queues.  ORT's
+        // CPU memory-pattern/parallel-execution optimizers have been observed
+        // to leave CoreML sessions stuck on repeated runs, so disable both for
+        // CoreML and let Apple's runtime manage its buffers.
+        .with_memory_pattern(!coreml_session)
+        .map_err(|e| format!("set memory pattern failed: {e}"))?
+        .with_parallel_execution(!coreml_session)
+        .map_err(|e| format!("set parallel execution failed: {e}"))?;
 
     let cores = std::thread::available_parallelism()
         .map(|n| n.get()).unwrap_or(4).max(2);
-    let threads = match role {
-        OrtSessionRole::Separator => cores,
-        OrtSessionRole::Vocoder => (cores / 2).max(2),
-        OrtSessionRole::PitchDetector => (cores / 2).max(2),
+    let threads = if coreml_session {
+        0
+    } else {
+        match role {
+            OrtSessionRole::Separator => cores,
+            OrtSessionRole::Vocoder => (cores / 2).max(2),
+            OrtSessionRole::PitchDetector => (cores / 2).max(2),
+        }
     };
     builder = builder
         .with_intra_threads(threads)
@@ -496,7 +817,7 @@ fn build_webgpu_session_finalize(
         .commit_from_file(onnx_path)
         .map_err(|e| {
             let msg = format!(
-                "load onnx into WebGPU ort session failed: {e}"
+                "load onnx into {ep_name} ort session failed: {e}"
             );
             eprintln!("ort_session[{role:?}]: {msg}");
             msg
@@ -504,7 +825,7 @@ fn build_webgpu_session_finalize(
     let create_ms = t_create.elapsed().as_millis();
 
     eprintln!(
-        "ort_session[{role:?}]: created session ep=webgpu intra_threads={threads} commit_ms={create_ms}",
+        "ort_session[{role:?}]: created session ep={ep_name} intra_threads={threads} commit_ms={create_ms}",
     );
 
     // Log session I/O metadata
@@ -527,12 +848,10 @@ fn build_webgpu_session_finalize(
     // but compute shader execution fails at runtime.  Running a tiny
     // inference now catches this early and lets us fall back to CPU
     // instead of silently returning a broken session.
-    match smoke_test_gpu_session(&mut session, role, "WebGPU") {
-        Ok(()) => {}
+    match smoke_test_gpu_session(session, role, ep_name) {
+        Ok(s) => session = s,
         Err(e) => {
-            eprintln!("ort_session[{role:?}]: WebGPU smoke test failed, discarding session and falling back to CPU: {e}");
-            // Drop the session so ORT releases any partially-allocated GPU resources
-            drop(session);
+            eprintln!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
             return Err(e);
         }
     }
@@ -642,11 +961,10 @@ fn build_dml_session_inner(
     }
 
     // ── Smoke test: verify DirectML can actually run inference ─────────
-    match smoke_test_gpu_session(&mut session, role, "DirectML") {
-        Ok(()) => {}
+    match smoke_test_gpu_session(session, role, "DirectML") {
+        Ok(s) => session = s,
         Err(e) => {
             eprintln!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
-            drop(session);
             return Err(e);
         }
     }
@@ -721,10 +1039,11 @@ pub struct GpuDiagnostic {
 ///
 /// Checks each provider by attempting to query its availability through ORT.
 ///
-/// NOTE: WebGPU probing is ONLY performed on Linux, where Dawn uses the
-/// Vulkan backend which is safe to probe. On Windows, Dawn uses D3D12
-/// and probing can trigger native crashes on some GPU/driver combos.
-/// WebGPU on Windows is only used when the user explicitly selects it.
+/// NOTE: WebGPU probing is performed on Linux x86_64 and macOS ARM64,
+/// where Dawn uses the Vulkan/Metal backend which is safe to probe.
+/// On Windows, Dawn uses D3D12 and probing can trigger native crashes on
+/// some GPU/driver combos; WebGPU on Windows is only used when the user
+/// explicitly selects it.
 pub fn diagnose_available_providers() -> Vec<String> {
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
@@ -734,6 +1053,12 @@ pub fn diagnose_available_providers() -> Vec<String> {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
     if !is_wsl2() && probe_webgpu_ep_available() {
         providers.push("WebGpuExecutionProvider".to_string());
+    }
+
+    // CoreML -- macOS ARM64 only (Apple Neural Engine / GPU).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if probe_coreml_ep_available() {
+        providers.push("CoreMLExecutionProvider".to_string());
     }
 
     // DirectML — Windows only
@@ -786,6 +1111,42 @@ fn probe_webgpu_ep_available() -> bool {
             let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
             eprintln!("ort_session: probe_webgpu_ep — PANICKED: {msg}");
             log_vulkan_diagnostics();
+            false
+        }
+    }
+}
+
+/// Quick check: try registering the CoreML EP on a temporary session builder.
+/// Returns true if CoreML EP is available in the loaded ORT binary.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn probe_coreml_ep_available() -> bool {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match Session::builder() {
+            Ok(builder) => {
+                let ep = build_coreml_ep(OrtSessionRole::Vocoder).build();
+                match builder.with_execution_providers([ep]) {
+                    Ok(_) => {
+                        eprintln!("ort_session: probe_coreml_ep - AVAILABLE");
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("ort_session: probe_coreml_ep - NOT available: {e}");
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ort_session: probe_coreml_ep - session builder failed: {e}");
+                false
+            }
+        }
+    }));
+
+    match result {
+        Ok(available) => available,
+        Err(panic) => {
+            let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
+            eprintln!("ort_session: probe_coreml_ep - PANICKED: {msg}");
             false
         }
     }

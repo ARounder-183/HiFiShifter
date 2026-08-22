@@ -29,6 +29,7 @@ import {
     childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
 
 /**
@@ -322,6 +323,12 @@ export function drawPianoRoll(args: {
     // pitch snap visual helpers
     pitchSnapUnit?: "semitone" | "scale";
     projectScale?: ScaleLike | null;
+    /** Tempo Map 音阶高亮分段（null = 无 Tempo Map 音阶数据，使用单音阶路径）。 */
+    scaleSegments?: Array<{
+        startSec: number;
+        endSec: number;
+        scale: ScaleLike | null;
+    }> | null;
     toolMode?: string;
     snapToggleHeld?: boolean;
     scaleHighlightMode?: import("../../../features/session/sessionTypes").ScaleHighlightMode;
@@ -560,6 +567,30 @@ export function drawPianoRoll(args: {
                         ctx.lineTo(w, y + 0.5);
                         ctx.stroke();
                     }
+                } else if (isChildFormantOffsetCentsParam(editParam)) {
+                    // 共振峰差使用 cents 单位，强线每 600 cents。
+                    const range = vMax - vMin;
+                    const candidates = [1200, 600, 300, 200, 100, 50, 25, 10, 5, 1];
+                    let chosen = candidates[candidates.length - 1];
+                    for (const c of candidates) {
+                        const count = Math.ceil(range / c) + 1;
+                        if (count >= 5 && count <= 12) {
+                            chosen = c;
+                            break;
+                        }
+                    }
+                    const firstMark = Math.ceil(vMin / chosen) * chosen;
+                    for (let m = firstMark; m <= vMax + chosen * 0.01; m += chosen) {
+                        const y = valueToY(editParam, m, h);
+                        const isStrong = Math.round(m) % 600 === 0;
+                        ctx.fillText(formatAxisMark(m, editParam), 6, y);
+                        ctx.strokeStyle = colors.tensionLine;
+                        ctx.lineWidth = isStrong ? 1.25 : 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y + 0.5);
+                        ctx.lineTo(w, y + 0.5);
+                        ctx.stroke();
+                    }
                 } else if (isChildPitchOffsetDegreesParam(editParam)) {
                     // 度数使用内部 degree-step 单位，强线每 7 个单位
                     const candidates = [14, 7, 3, 1];
@@ -647,23 +678,51 @@ export function drawPianoRoll(args: {
             return mode === "always";
         })();
         const projectScaleNotes = args.projectScale ? resolveScaleNotes(args.projectScale) : [];
+        const scaleSegments = args.scaleSegments ?? null;
 
         for (let midi = startMidi; midi <= endMidi; midi += 1) {
             const y = valueToY("pitch", midi + 0.5, h);
             const pc = ((midi % 12) + 12) % 12;
             const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
 
-            if (isScaleNote) {
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-            } else {
-                ctx.strokeStyle = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
-                ctx.lineWidth = 1;
-            }
+            const normalColor =
+                pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
+            ctx.strokeStyle = normalColor;
+            ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(0, y + 0.5);
             ctx.lineTo(w, y + 0.5);
             ctx.stroke();
+
+            if (!highlightActive) continue;
+
+            if (scaleSegments && scaleSegments.length > 0) {
+                // Tempo Map 路径：按时间段绘制高亮段。
+                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
+                ctx.lineWidth = 2;
+                for (const segment of scaleSegments) {
+                    if (!segment.scale) continue;
+                    const segmentNotes = resolveScaleNotes(segment.scale);
+                    if (!segmentNotes.includes(pc)) continue;
+                    const x0 = segment.startSec * pxPerSec - scrollLeft;
+                    const x1 = segment.endSec * pxPerSec - scrollLeft;
+                    if (x1 < 0 || x0 > w) continue;
+                    ctx.beginPath();
+                    ctx.moveTo(Math.max(0, x0), y + 0.5);
+                    ctx.lineTo(Math.min(w, x1), y + 0.5);
+                    ctx.stroke();
+                }
+                continue;
+            }
+
+            if (isScaleNote) {
+                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(0, y + 0.5);
+                ctx.lineTo(w, y + 0.5);
+                ctx.stroke();
+            }
         }
     } else if (isChildPitchOffsetCentsParam(editParam)) {
         const view = paramViews[editParam] ?? { center: 0, span: 1 };
@@ -701,6 +760,31 @@ export function drawPianoRoll(args: {
             const y = valueToY(editParam, v, h);
             const rounded = Math.round(v);
             const isStrong = rounded % 7 === 0;
+            ctx.strokeStyle = isStrong
+                ? isDark
+                    ? "rgba(255,255,255,0.14)"
+                    : "rgba(0,0,0,0.16)"
+                : isDark
+                  ? "rgba(255,255,255,0.07)"
+                  : "rgba(0,0,0,0.08)";
+            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.beginPath();
+            ctx.moveTo(0, y + 0.5);
+            ctx.lineTo(w, y + 0.5);
+            ctx.stroke();
+        }
+    } else if (isChildFormantOffsetCentsParam(editParam)) {
+        const view = paramViews[editParam] ?? { center: 0, span: 1 };
+        const span = Math.max(1e-6, view.span);
+        const vMin = view.center - span / 2;
+        const vMax = view.center + span / 2;
+        const step = 50;
+        const start = Math.ceil(vMin / step) * step;
+
+        for (let v = start; v <= vMax + step * 0.01; v += step) {
+            const y = valueToY(editParam, v, h);
+            const rounded = Math.round(v);
+            const isStrong = rounded % 600 === 0;
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -796,8 +880,14 @@ export function drawPianoRoll(args: {
             playbackRate: pr,
             sourceDurationSec: sourceDurSec,
             volumeGain: Number(entry.gain ?? 1) || 1,
-            fadeInSec: Number(entry.fadeInSec ?? 0) || 0,
-            fadeOutSec: Number(entry.fadeOutSec ?? 0) || 0,
+            fadeInSec:
+                Number(entry.autoFadeInSec ?? 0) > 0
+                    ? Number(entry.autoFadeInSec) || 0
+                    : Number(entry.fadeInSec ?? 0) || 0,
+            fadeOutSec:
+                Number(entry.autoFadeOutSec ?? 0) > 0
+                    ? Number(entry.autoFadeOutSec) || 0
+                    : Number(entry.fadeOutSec ?? 0) || 0,
             fadeInCurve: entry.fadeInCurve ?? "linear",
             fadeOutCurve: entry.fadeOutCurve ?? "linear",
             dataStartSec: result.dataStartSec,

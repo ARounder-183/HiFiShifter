@@ -33,11 +33,18 @@
             }
         },
         "resources": {
-            "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
             "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
             "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",
             "resources/models/fcpe/fcpe.onnx": "models/fcpe/fcpe.onnx"
+        },
+        "macOS": {
+            "frameworks": [
+                "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib"
+            ],
+            "files": {
+                "Resources/libSoundTouchDLL.dylib": "third_party/soundtouch-static/soundtouch/libSoundTouchDLL.dylib"
+            }
         },
         "icon": [
             "icons/32x32.png",

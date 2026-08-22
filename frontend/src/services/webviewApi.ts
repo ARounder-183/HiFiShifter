@@ -35,6 +35,7 @@ export const webApi = {
     getPlaybackState: coreApi.getPlaybackState,
     openAudioDialog: coreApi.openAudioDialog,
     openAudioDialogMultiple: coreApi.openAudioDialogMultiple,
+    openAudioDialogForSource: coreApi.openAudioDialogForSource,
     openMidiDialog: coreApi.openMidiDialog,
     pickOutputPath: coreApi.pickOutputPath,
     closeWindow: coreApi.closeWindow,
@@ -68,6 +69,7 @@ export const webApi = {
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
     saveProjectAs: projectApi.saveProjectAs,
+    saveProjectToPath: projectApi.saveProjectToPath,
     setProjectBaseScale: projectApi.setProjectBaseScale,
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,
@@ -86,6 +88,8 @@ export const webApi = {
 
     openReaperDialog: projectApi.openReaperDialog,
     importReaperProject: projectApi.importReaperProject,
+    importProjectDialog: projectApi.importProjectDialog,
+    importProject: projectApi.importProject,
 
     // Waveform peaks (Mix)
     getRootMixWaveformPeaksSegment: waveformApi.getRootMixWaveformPeaksSegment,
@@ -128,6 +132,7 @@ export const webApi = {
     setClipsStateBulk: timelineApi.setClipsStateBulk,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,
     replaceClipSource: timelineApi.replaceClipSource,
+    searchSourceFileReplacements: timelineApi.searchSourceFileReplacements,
     splitClip: timelineApi.splitClip,
     splitClipsAt: timelineApi.splitClipsAt,
     glueClips: timelineApi.glueClips,
@@ -137,8 +142,13 @@ export const webApi = {
     convertClipsToPitchReference: timelineApi.convertClipsToPitchReference,
     updatePitchReference: timelineApi.updatePitchReference,
     selectClip: timelineApi.selectClip,
+    copyTimelineClips: timelineApi.copyTimelineClips,
+    copyTimelineTracks: timelineApi.copyTimelineTracks,
+    pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
+    hasTimelineClipboard: timelineApi.hasTimelineClipboard,
+    hasReaperClipboard: timelineApi.hasReaperClipboard,
 
-    // 检查已导入音频源文件是否被外部修改或删除
+    // 检查已导入媒体源文件是否被外部修改或删除
     checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,
 
     setTransport: timelineApi.setTransport,

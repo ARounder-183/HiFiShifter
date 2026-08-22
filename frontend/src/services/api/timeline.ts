@@ -1,4 +1,4 @@
-import type { TimelineResult, TrackSummaryResult } from "../../types/api";
+import type { TimelineResult, TrackSummaryResult, TempoMapPayload } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
@@ -14,6 +14,15 @@ export interface SourceFileChange {
 
 export interface CheckSourceFilesChangedResult {
     changed: SourceFileChange[];
+}
+
+export interface SourceFileMatchCandidate {
+    path: string;
+    exact_hash: boolean;
+}
+
+export interface SearchSourceFileMatchesResult {
+    matches: Record<string, SourceFileMatchCandidate[]>;
 }
 
 export const timelineApi = {
@@ -38,9 +47,24 @@ export const timelineApi = {
     setProjectLength: (projectSec: number) =>
         invoke<TimelineResult>("set_project_length", projectSec),
 
+    // Tempo Map
+    setTimelineTempoMap: (tempoMap: TempoMapPayload | null) =>
+        invoke<TimelineResult>("set_timeline_tempo_map", tempoMap),
+
     // Import
-    importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>
-        invoke<TimelineResult>("import_audio_item", audioPath, trackId, startSec),
+    importAudioItem: (
+        audioPath: string,
+        trackId?: string | null,
+        startSec?: number,
+        mediaAudioStreamIndex?: number,
+    ) =>
+        invoke<TimelineResult>(
+            "import_audio_item",
+            audioPath,
+            trackId,
+            startSec,
+            mediaAudioStreamIndex,
+        ),
 
     importAudioBytes: (
         fileName: string,
@@ -166,6 +190,8 @@ export const timelineApi = {
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         color?: string;
         formantMorph?: {
             enabled: boolean;
@@ -192,6 +218,8 @@ export const timelineApi = {
             payload.fadeOutSec,
             payload.fadeInCurve,
             payload.fadeOutCurve,
+            payload.autoFadeInSec,
+            payload.autoFadeOutSec,
             payload.color,
             payload.formantMorph,
             payload.checkpoint,
@@ -254,7 +282,57 @@ export const timelineApi = {
 
     selectClip: (clipId: string | null) => invoke<TimelineResult>("select_clip", clipId),
 
-    /// 检查所有已导入的音频源文件是否被外部修改或删除。
+    // Native cross-process timeline clipboard (backend system clipboard)
+    copyTimelineClips: (clipIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_clips",
+            clipIds,
+        ),
+
+    copyTimelineTracks: (trackIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_tracks",
+            trackIds,
+        ),
+
+    pasteTimelineClipboard: (mode?: "selected" | "new_tracks") =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+            }
+        >("paste_timeline_clipboard", mode),
+
+    hasTimelineClipboard: () =>
+        invoke<{
+            ok: boolean;
+            available?: boolean;
+            kind?: "clips" | "tracks" | "project" | "reaper";
+            clipCount?: number;
+            trackCount?: number;
+            sourceProject?: string;
+        }>("has_timeline_clipboard"),
+
+    hasReaperClipboard: () =>
+        invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
+
+    /// 在指定文件夹及其子文件夹中搜索候选源文件。
+    /// searchMode 为 "file_name"（精准文件名）或 "extension_hash"（文件扩展名 + 哈希）。
+    searchSourceFileReplacements: (
+        folderPath: string,
+        clipIds: string[],
+        searchMode: "file_name" | "extension_hash",
+    ) =>
+        invoke<SearchSourceFileMatchesResult>(
+            "search_source_file_replacements",
+            folderPath,
+            clipIds,
+            searchMode,
+        ),
+
+    /// 检查所有已导入的媒体源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。
     checkSourceFilesChanged: () =>
         invoke<CheckSourceFilesChangedResult>("check_source_files_changed"),

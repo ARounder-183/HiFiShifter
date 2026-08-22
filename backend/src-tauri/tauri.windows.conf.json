@@ -1,6 +1,7 @@
 {
     "bundle": {
         "resources": {
+            "resources/models/nsf_hifigan/pc_nsf_hifigan.onnx": "models/nsf_hifigan/pc_nsf_hifigan.onnx",
             "third_party/soundtouch-static/soundtouch/SoundTouchDLL.dll": "SoundTouchDLL.dll",
             "third_party/vslib/vslib_x64.dll": "vslib_x64.dll",
             "resources/DirectML.dll": "DirectML.dll"

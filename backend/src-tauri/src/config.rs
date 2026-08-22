@@ -3,6 +3,156 @@ use crate::time_stretch::UserStretchAlgorithm;
 use std::fs;
 use std::path::Path;
 
+/// 时间轴吸附/网格设置（对标 REAPER Snap/Grid Settings）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSnapSettings {
+    #[serde(default = "default_true")]
+    pub grid_visible: bool,
+    #[serde(default = "default_grid_min_spacing_px")]
+    pub grid_min_spacing_px: u32,
+    #[serde(default)]
+    pub swing_enabled: bool,
+    #[serde(default)]
+    pub swing_percent: u32,
+    #[serde(default = "default_true")]
+    pub adjust_items_on_swing_change: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_snap_distance_px")]
+    pub snap_distance_px: u32,
+    #[serde(default)]
+    pub snap_relative_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_items_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_items_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_selection_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_selection_to_grid: bool,
+    #[serde(default = "default_true")]
+    pub snap_cursor_to_selection_markers_cursor: bool,
+    #[serde(default = "default_true")]
+    pub snap_cursor_to_grid: bool,
+    #[serde(default = "default_true", alias = "gridSnapFollowsGridVisibility", alias = "grid_snap_follows_grid_visibility")]
+    pub snap_follows_grid_visibility: bool,
+    #[serde(default)]
+    pub snap_to_grid_any_distance: bool,
+    #[serde(default)]
+    pub use_independent_snap_spacing: bool,
+    #[serde(default = "default_grid_size")]
+    pub snap_spacing: String,
+    #[serde(default = "default_grid_min_spacing_px")]
+    pub snap_spacing_min_px: u32,
+    #[serde(default = "default_true")]
+    pub snap_item_start: bool,
+    #[serde(default = "default_true")]
+    pub snap_item_snap_offset: bool,
+    #[serde(default = "default_true")]
+    pub snap_across_tracks: bool,
+    #[serde(default)]
+    pub snap_track_distance: u32,
+    #[serde(default = "default_true")]
+    pub snap_razor_edits: bool,
+    #[serde(default)]
+    pub snap_to_project_sample_rate: bool,
+    #[serde(default = "default_true")]
+    pub snap_media_edges_to_source: bool,
+    #[serde(default)]
+    pub force_selections_to_multiples: bool,
+    #[serde(default = "default_grid_size")]
+    pub selection_multiple: String,
+    #[serde(default = "default_true")]
+    pub sync_arrange_and_midi_grid: bool,
+}
+
+fn default_grid_min_spacing_px() -> u32 {
+    8
+}
+
+fn default_snap_distance_px() -> u32 {
+    4
+}
+
+impl Default for TimelineSnapSettings {
+    fn default() -> Self {
+        Self {
+            grid_visible: true,
+            grid_min_spacing_px: default_grid_min_spacing_px(),
+            swing_enabled: false,
+            swing_percent: 0,
+            adjust_items_on_swing_change: true,
+            enabled: true,
+            snap_distance_px: default_snap_distance_px(),
+            snap_relative_to_grid: false,
+            snap_media_items_to_selection_markers_cursor: true,
+            snap_media_items_to_grid: true,
+            snap_selection_to_selection_markers_cursor: true,
+            snap_selection_to_grid: true,
+            snap_cursor_to_selection_markers_cursor: true,
+            snap_cursor_to_grid: true,
+            snap_follows_grid_visibility: true,
+            snap_to_grid_any_distance: false,
+            use_independent_snap_spacing: false,
+            snap_spacing: default_grid_size(),
+            snap_spacing_min_px: default_grid_min_spacing_px(),
+            snap_item_start: true,
+            snap_item_snap_offset: true,
+            snap_across_tracks: true,
+            snap_track_distance: 0,
+            snap_razor_edits: true,
+            snap_to_project_sample_rate: false,
+            snap_media_edges_to_source: true,
+            force_selections_to_multiples: false,
+            selection_multiple: default_grid_size(),
+            sync_arrange_and_midi_grid: true,
+        }
+    }
+}
+
+impl TimelineSnapSettings {
+    fn valid_grid(value: &str) -> bool {
+        matches!(
+            value,
+            "1/1" | "1/2"
+                | "1/4"
+                | "1/8"
+                | "1/16"
+                | "1/32"
+                | "1/64"
+                | "1/1d"
+                | "1/2d"
+                | "1/4d"
+                | "1/8d"
+                | "1/16d"
+                | "1/32d"
+                | "1/64d"
+                | "1/1t"
+                | "1/2t"
+                | "1/4t"
+                | "1/8t"
+                | "1/16t"
+                | "1/32t"
+                | "1/64t"
+        )
+    }
+
+    pub fn normalize(&mut self) {
+        self.grid_min_spacing_px = self.grid_min_spacing_px.clamp(2, 200);
+        self.swing_percent = self.swing_percent.clamp(0, 100);
+        self.snap_distance_px = self.snap_distance_px.clamp(0, 200);
+        self.snap_spacing_min_px = self.snap_spacing_min_px.clamp(2, 200);
+        self.snap_track_distance = self.snap_track_distance.clamp(0, 32);
+        if !Self::valid_grid(&self.snap_spacing) {
+            self.snap_spacing = default_grid_size();
+        }
+        if !Self::valid_grid(&self.selection_multiple) {
+            self.selection_multiple = default_grid_size();
+        }
+    }
+}
+
 // 最小合理窗口尺寸与坐标阈值，用于校验从磁盘读取到的窗口状态，避免异常值导致窗口无法显示。
 const MIN_WINDOW_WIDTH: f64 = 200.0;
 const MIN_WINDOW_HEIGHT: f64 = 160.0;
@@ -21,9 +171,41 @@ pub struct UiSettings {
     #[serde(default = "default_true")]
     pub auto_crossfade: bool,
     #[serde(default = "default_true")]
-    pub grid_snap: bool,
+    pub split_transition_enabled: bool,
+    #[serde(default = "default_split_transition_mode")]
+    pub split_transition_mode: String,
+    #[serde(default = "default_split_transition_duration_unit")]
+    pub split_transition_duration_unit: String,
+    #[serde(default = "default_split_transition_duration_sec")]
+    pub split_transition_duration_sec: f64,
+    #[serde(default = "default_split_transition_duration_percent")]
+    pub split_transition_duration_percent: f64,
+    #[serde(default = "default_split_transition_curve")]
+    pub split_transition_curve: String,
+    #[serde(default = "default_split_transition_overlap_crossfade")]
+    pub split_transition_overlap_crossfade: String,
+    #[serde(default = "default_true", alias = "gridSnap", alias = "grid_snap")]
+    pub snap_enabled: bool,
     #[serde(default = "default_grid_size")]
     pub grid_size: String,
+    /// 完整时间轴吸附/网格设置。
+    #[serde(default)]
+    pub timeline_snap: TimelineSnapSettings,
+    /// Tempo Map 标尺行可见性（默认开启）。
+    #[serde(default = "default_true")]
+    pub tempo_map_visible: bool,
+    #[serde(default = "default_primary_time_unit")]
+    pub primary_time_unit: String,
+    #[serde(default = "default_secondary_time_unit")]
+    pub secondary_time_unit: String,
+    #[serde(default = "default_ruler_label_spacing_px")]
+    pub ruler_label_spacing_px: u32,
+    #[serde(default = "default_true")]
+    pub show_playhead_time_in_track_header: bool,
+    #[serde(default)]
+    pub param_editor_sync_timeline: bool,
+    #[serde(default = "default_true")]
+    pub param_editor_timeline_click_select_track: bool,
     #[serde(default)]
     pub pitch_snap: bool,
     #[serde(default = "default_pitch_snap_unit")]
@@ -66,6 +248,13 @@ pub struct UiSettings {
     pub custom_scale_presets: Vec<CustomScale>,
     #[serde(default)]
     pub ignore_grouping: bool,
+    /// 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER 的 Ripple Editing）。
+    /// - `off`：关闭（默认）。
+    /// - `track`：仅被编辑的轨道上的后续剪辑一起跟进。
+    /// - `all`：所有轨道上位于编辑点之后的剪辑一起跟进。
+    #[serde(default = "default_ripple_mode")]
+    pub ripple_mode: String,
+
     #[serde(default = "default_midi_import_position")]
     pub midi_import_position: String,
     #[serde(default)]
@@ -82,6 +271,18 @@ pub struct UiSettings {
     pub midi_close_leading_gap: bool,
     #[serde(default = "default_midi_import_target")]
     pub midi_import_target: String,
+    /// MIDI 导入为 Tempo Map（默认关闭）。
+    #[serde(default)]
+    pub midi_import_as_tempo_map: bool,
+    /// 导入 Tempo（默认开启）。
+    #[serde(default = "default_true")]
+    pub midi_import_tempo_map_tempo: bool,
+    /// 导入拍号（默认开启）。
+    #[serde(default = "default_true")]
+    pub midi_import_tempo_map_time_signature: bool,
+    /// 导入音阶（默认关闭：大多数 MIDI 文件只写默认 C 大调）。
+    #[serde(default)]
+    pub midi_import_tempo_map_key_signature: bool,
     /// ONNX Runtime execution provider preference ("auto", "cpu", "gpu").
     /// Persisted so the user's GPU/CPU choice survives restarts.
     #[serde(default = "default_ort_ep")]
@@ -102,6 +303,11 @@ pub struct UiSettings {
     /// at any time during rendering.
     #[serde(default)]
     pub auto_background_render: bool,
+    /// 自动重新加载已修改的媒体文件（默认开启）。
+    /// 启用后，窗口重新获得焦点并检测到媒体内容变化时，
+    /// 后端会在后台直接重新加载原路径，无需弹出确认窗口。
+    #[serde(default)]
+    pub auto_reload_modified_media: bool,
 }
 
 fn default_ort_ep() -> String {
@@ -397,6 +603,15 @@ fn default_pitch_snap_unit() -> String {
 fn default_grid_size() -> String {
     "1/4".to_string()
 }
+fn default_primary_time_unit() -> String {
+    "barBeats".to_string()
+}
+fn default_secondary_time_unit() -> String {
+    "clock".to_string()
+}
+fn default_ruler_label_spacing_px() -> u32 {
+    110
+}
 fn default_drag_direction() -> String {
     "y-only".to_string()
 }
@@ -406,6 +621,34 @@ fn default_draw_drag_direction() -> String {
 
 fn default_hifigan_mel_stretch() -> bool {
     true
+}
+
+fn default_ripple_mode() -> String {
+    "off".to_string()
+}
+
+fn default_split_transition_mode() -> String {
+    "overlap".to_string()
+}
+
+fn default_split_transition_duration_sec() -> f64 {
+    0.01
+}
+
+fn default_split_transition_duration_unit() -> String {
+    "seconds".to_string()
+}
+
+fn default_split_transition_duration_percent() -> f64 {
+    1.0
+}
+
+fn default_split_transition_curve() -> String {
+    "sine".to_string()
+}
+
+fn default_split_transition_overlap_crossfade() -> String {
+    "auto".to_string()
 }
 
 fn default_scale_highlight_mode() -> String {
@@ -428,8 +671,23 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             auto_crossfade: true,
-            grid_snap: true,
+            split_transition_enabled: true,
+            split_transition_mode: default_split_transition_mode(),
+            split_transition_duration_unit: default_split_transition_duration_unit(),
+            split_transition_duration_sec: default_split_transition_duration_sec(),
+            split_transition_duration_percent: default_split_transition_duration_percent(),
+            split_transition_curve: default_split_transition_curve(),
+            split_transition_overlap_crossfade: default_split_transition_overlap_crossfade(),
+            snap_enabled: true,
             grid_size: default_grid_size(),
+            timeline_snap: TimelineSnapSettings::default(),
+            tempo_map_visible: true,
+            primary_time_unit: default_primary_time_unit(),
+            secondary_time_unit: default_secondary_time_unit(),
+            ruler_label_spacing_px: default_ruler_label_spacing_px(),
+            show_playhead_time_in_track_header: true,
+            param_editor_sync_timeline: false,
+            param_editor_timeline_click_select_track: true,
             pitch_snap: false,
             pitch_snap_unit: default_pitch_snap_unit(),
             pitch_snap_tolerance_cents: 0,
@@ -451,6 +709,8 @@ impl Default for UiSettings {
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),
             ignore_grouping: false,
+            ripple_mode: default_ripple_mode(),
+
             midi_import_position: default_midi_import_position(),
             midi_fill_gaps: false,
             midi_multi_track_merge: true,
@@ -459,10 +719,80 @@ impl Default for UiSettings {
             midi_specified_bpm: None,
             midi_close_leading_gap: true,
             midi_import_target: default_midi_import_target(),
+            midi_import_as_tempo_map: false,
+            midi_import_tempo_map_tempo: true,
+            midi_import_tempo_map_time_signature: true,
+            midi_import_tempo_map_key_signature: false,
             ort_ep: default_ort_ep(),
             ort_device_id: None,
             auto_background_render: true,
+            auto_reload_modified_media: true,
         }
+    }
+}
+
+impl UiSettings {
+    /// 规范化分割过渡相关设置，避免损坏/越界的持久化值影响编辑行为。
+    pub fn normalize_split_transition(&mut self) {
+        if !["fade", "overlap"].contains(&self.split_transition_mode.as_str()) {
+            self.split_transition_mode = default_split_transition_mode();
+        }
+        if !self.split_transition_duration_sec.is_finite() {
+            self.split_transition_duration_sec = default_split_transition_duration_sec();
+        } else {
+            self.split_transition_duration_sec = self
+                .split_transition_duration_sec
+                .clamp(0.001, 10.0);
+        }
+        if !["seconds", "percent"].contains(&self.split_transition_duration_unit.as_str()) {
+            self.split_transition_duration_unit = default_split_transition_duration_unit();
+        }
+        if !self.split_transition_duration_percent.is_finite() {
+            self.split_transition_duration_percent = default_split_transition_duration_percent();
+        } else {
+            self.split_transition_duration_percent = self
+                .split_transition_duration_percent
+                .clamp(0.01, 100.0);
+        }
+        if ![
+            "linear",
+            "sine",
+            "exponential",
+            "logarithmic",
+            "scurve",
+        ]
+        .contains(&self.split_transition_curve.as_str())
+        {
+            self.split_transition_curve = default_split_transition_curve();
+        }
+        if !["auto", "always"].contains(&self.split_transition_overlap_crossfade.as_str()) {
+            self.split_transition_overlap_crossfade =
+                default_split_transition_overlap_crossfade();
+        }
+        self.normalize_time_display();
+        self.timeline_snap.normalize();
+        self.normalize_ripple_mode();
+    }
+
+    /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
+    pub fn normalize_ripple_mode(&mut self) {
+        if !["off", "track", "all"].contains(&self.ripple_mode.as_str()) {
+            self.ripple_mode = default_ripple_mode();
+        }
+    }
+
+    /// 规范化时间轴时间显示相关设置，避免损坏/越界的持久化值影响界面。
+    pub fn normalize_time_display(&mut self) {
+        const VALID_UNITS: [&str; 4] = ["barBeats", "barDivisions", "seconds", "clock"];
+        if !VALID_UNITS.contains(&self.primary_time_unit.as_str()) {
+            self.primary_time_unit = default_primary_time_unit();
+        }
+        if self.secondary_time_unit != "none"
+            && !VALID_UNITS.contains(&self.secondary_time_unit.as_str())
+        {
+            self.secondary_time_unit = default_secondary_time_unit();
+        }
+        self.ruler_label_spacing_px = self.ruler_label_spacing_px.clamp(40, 320);
     }
 }
 
@@ -479,7 +809,55 @@ mod tests {
             UserStretchAlgorithm::Signalsmith
         );
         assert!(settings.default_hifigan_mel_stretch);
+        assert!(settings.split_transition_enabled);
+        assert_eq!(settings.split_transition_mode, "overlap");
+        assert_eq!(settings.split_transition_duration_unit, "seconds");
+        assert!((settings.split_transition_duration_sec - 0.01).abs() < 1e-12);
+        assert!((settings.split_transition_duration_percent - 1.0).abs() < 1e-12);
+        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_overlap_crossfade, "auto");
     }
+
+    #[test]
+    fn ui_settings_normalizes_split_transition_values() {
+        let mut settings = UiSettings {
+            split_transition_mode: "bogus".to_string(),
+            split_transition_duration_unit: "frames".to_string(),
+            split_transition_duration_sec: 9999.0,
+            split_transition_duration_percent: 999.0,
+            split_transition_curve: "nope".to_string(),
+            split_transition_overlap_crossfade: "sometimes".to_string(),
+            ..UiSettings::default()
+        };
+        settings.normalize_split_transition();
+        assert_eq!(settings.split_transition_mode, "overlap");
+        assert_eq!(settings.split_transition_duration_unit, "seconds");
+        assert!((settings.split_transition_duration_sec - 10.0).abs() < 1e-12);
+        assert!((settings.split_transition_duration_percent - 100.0).abs() < 1e-12);
+        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_overlap_crossfade, "auto");
+    }
+
+    #[test]
+    fn ui_settings_normalizes_ripple_mode() {
+        let mut settings = UiSettings::default();
+        assert_eq!(settings.ripple_mode, "off");
+
+        let mut bogus = UiSettings {
+            ripple_mode: "sideways".to_string(),
+            ..UiSettings::default()
+        };
+        bogus.normalize_ripple_mode();
+        assert_eq!(bogus.ripple_mode, "off");
+
+        let mut track_mode = UiSettings {
+            ripple_mode: "track".to_string(),
+            ..UiSettings::default()
+        };
+        track_mode.normalize_ripple_mode();
+        assert_eq!(track_mode.ripple_mode, "track");
+    }
+
 }
 
 /// 持久化配置根结构。

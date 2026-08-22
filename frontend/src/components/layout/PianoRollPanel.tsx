@@ -10,9 +10,12 @@ import React, {
 } from "react";
 import { Flex, Text, Button, Select, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
 import {
+    ChevronDownIcon,
     CursorArrowIcon,
     EyeOpenIcon,
     EyeClosedIcon,
+    Link2Icon,
+    LinkBreak2Icon,
     Pencil1Icon,
     CheckIcon,
 } from "@radix-ui/react-icons";
@@ -26,18 +29,21 @@ import {
     setEdgeSmoothnessPercent,
     setTrackStateRemote,
     togglePitchSnap,
+    setPitchSnapUnit,
     setScaleHighlightMode,
-    toggleClipboardPreview,
-    toggleParamValuePopup,
     toggleLockParamLines,
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    setParamEditorSyncTimeline,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     createClipsRemote,
     addTrackRemote,
     importMidiAsClip,
+    setTempoMap,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -45,6 +51,7 @@ import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
 import { paramsApi } from "../../services/api/params";
 import { coreApi } from "../../services/api/core";
+import { webApi } from "../../services/webviewApi";
 import type { ParamFramesPayload } from "../../types/api";
 import {
     degreeInputToScaleSteps,
@@ -54,7 +61,12 @@ import {
     snapToSemitone,
     transposePitchByScaleSteps,
 } from "../../utils/musicalScales";
-import { computeAnchoredHorizontalZoom } from "../../utils/horizontalZoom";
+import {
+    measureTimelineViewportOffsetPx,
+    timelineViewportSync,
+    timelineViewportNativeToState,
+    timelineViewportStateToNative,
+} from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -68,9 +80,26 @@ import {
     MAX_PX_PER_SEC,
     MIN_PX_PER_SEC,
     TimeRuler,
+    buildRulerTicks,
     clamp,
+    formatCursorTime,
     gridStepBeats,
 } from "./timeline";
+import { timeRulerHeightPx } from "./timeline/rulerHeight";
+import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
+import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import type { TempoMap } from "../../utils/tempoMap";
+import {
+    buildScaleSegments,
+    buildTempoGridLineXsForViewport,
+    effectiveScaleAtSec,
+} from "../../utils/tempoMap";
+import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
+import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
+import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
@@ -90,11 +119,14 @@ import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
 import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
+    buildChildFormantOffsetCentsParam,
     childPitchOffsetValueToDisplay,
     CHILD_PITCH_OFFSET_CENTS_RANGE,
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
+    CHILD_FORMANT_OFFSET_CENTS_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
     isChildPitchOffsetParam,
     parseChildPitchOffsetParam,
 } from "./pianoRoll/childPitchOffsetParams";
@@ -139,10 +171,300 @@ import {
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = 1600;
 
+/**
+ * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
+ * - 「音高」为核心参数，固定在最左侧（在 JSX 中单独渲染，不在此排序）；
+ * - 「音量/声像」是所有算法的共通参数，固定在最右侧；
+ * - 中间参数随算法不同而变化。
+ */
+function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
+    switch (algo) {
+        case "nsf_hifigan_onnx":
+            // 音高、共振峰、气声音量、张力、音量、声像
+            switch (paramId) {
+                case "formant_shift_cents":
+                    return 10;
+                case "breath_gain":
+                    return 20;
+                case "hifigan_tension":
+                    return 30;
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+        case "vslib":
+            // 音高、共振峰、气声强度、音量、声像
+            switch (paramId) {
+                case "formant_shift_cents":
+                    return 10;
+                case "breathiness":
+                    return 20;
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+        default:
+            // world / 其它：仅保证音量/声像在右侧，其余保持后端顺序
+            switch (paramId) {
+                case "volume":
+                    return 90;
+                case "pan":
+                    return 100;
+                default:
+                    return 50;
+            }
+    }
+}
+
 function sameStringArray(a: string[], b: string[]) {
     if (a.length !== b.length) return false;
     return a.every((value, index) => value === b[index]);
 }
+
+/**
+ * “气声/气流”图标：三道向右上方倾斜流动的曲线，表示风/气流（类似 Material “Air” 图标），
+ * 避免被误认为汉堡菜单；关闭（off）时气流变淡并叠加一条斜杠。
+ * 用于代替冗长的“气声开启/气声关闭”文本。
+ */
+const BreathAirIcon: React.FC<{ off?: boolean }> = ({ off = false }) => (
+    <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ display: "block" }}
+    >
+        {/* 三道右倾的流动曲线 = 风/气流 */}
+        <path
+            d="M2.2 3.6C4.8 1.9 8.2 2.5 11 5.2"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.4 6.8C4.6 5.1 8.1 5.9 11.4 8.9"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        <path
+            d="M1.9 10.1C4.7 9.3 7.5 9.5 9.9 11.7"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            opacity={off ? 0.4 : 1}
+        />
+        {off ? (
+            <path d="M3 11L11 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        ) : null}
+    </svg>
+);
+
+type ParamToolbarPillProps = {
+    /** 参数按钮上的简短标签（如 PIT / 共振峰） */
+    label: string;
+    /** 完整参数名（ToolTip） */
+    labelTooltip?: string;
+    /** 是否为主参数（激活）：整个药丸整体高亮 */
+    active: boolean;
+    /** 激活时的强调色（音高=grass，共振峰/其它=amber） */
+    accent: "grass" | "amber";
+    /** 点击标签：选中该参数 */
+    onSelect: () => void;
+    /** 眼睛状态：main=主参数（仅展示“睁开”，不响应点击）；on/off=副曲线叠加可见/隐藏 */
+    eyeMode: "main" | "on" | "off";
+    /** 点击眼睛（非 main 时调用；main 时不响应，以保持排版稳定） */
+    onToggleEye?: () => void;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    eyeTooltip?: string;
+    /** 眼睛的无障碍标签（简短，如“显示/隐藏副参数叠加曲线”） */
+    eyeLabel?: string;
+    /** 可选尾部片段（如气声开关）：渲染在参数名之后、子参数下拉之前 */
+    trailing?: React.ReactNode;
+    /** 可选片段：子参数下拉菜单的触发按钮（已含 param-pill__seg 样式类） */
+    dropdown?: React.ReactNode;
+};
+
+/**
+ * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
+ * 各片段共享一块连续背景（由 data-accent-color 决定激活色），
+ * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
+ */
+const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
+    label,
+    labelTooltip,
+    active,
+    accent,
+    onSelect,
+    eyeMode,
+    onToggleEye,
+    eyeTooltip,
+    eyeLabel,
+    trailing,
+    dropdown,
+}) => {
+    const eyeInert = eyeMode === "main";
+    const eyeIcon = eyeMode === "off" ? <EyeClosedIcon /> : <EyeOpenIcon />;
+    return (
+        <div
+            className="param-pill"
+            data-accent-color={accent}
+            data-active={active ? "true" : undefined}
+        >
+            <button
+                type="button"
+                tabIndex={-1}
+                className={
+                    eyeInert
+                        ? "param-pill__seg param-pill__seg--eye param-pill__seg--inert"
+                        : "param-pill__seg param-pill__seg--eye"
+                }
+                data-tooltip={eyeInert ? undefined : eyeTooltip}
+                aria-label={eyeInert ? label : (eyeLabel ?? eyeTooltip)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    if (!eyeInert) onToggleEye?.();
+                }}
+            >
+                {eyeIcon}
+            </button>
+            <button
+                type="button"
+                className="param-pill__seg param-pill__seg--label"
+                data-tooltip={labelTooltip}
+                onClick={onSelect}
+            >
+                {label}
+            </button>
+            {trailing}
+            {dropdown}
+        </div>
+    );
+};
+
+type FormantParamButtonProps = {
+    rootParamId: string;
+    /** 按钮上的简短标签（如 FRM / 共振峰） */
+    rootLabel: string;
+    /** 下拉菜单中“根参数”选项的详细说明（如 Formant Shift (Track Group)） */
+    rootMenuLabel?: string;
+    rootTooltip?: string;
+    childParamId: string | null;
+    /** 按钮上的简短子参数标签（如 共振峰差） */
+    childLabel: string;
+    /** 下拉菜单中“子参数”选项的详细说明（如 Formant Offset (Current Sub-track)） */
+    childMenuLabel?: string;
+    rootActive: boolean;
+    childActive: boolean;
+    secondaryVisible: boolean;
+    /** 眼睛的无障碍标签（简短动作说明） */
+    hideSecondaryLabel: string;
+    showSecondaryLabel: string;
+    /** 眼睛 ToolTip（两行：状态 + 点击动作） */
+    hideSecondaryTooltip: string;
+    showSecondaryTooltip: string;
+    onSelectRoot: () => void;
+    onSelectChild: () => void;
+    onToggleSecondary: () => void;
+};
+
+const FormantParamButton: React.FC<FormantParamButtonProps> = ({
+    rootParamId,
+    rootLabel,
+    rootMenuLabel,
+    rootTooltip,
+    childParamId,
+    childLabel,
+    childMenuLabel,
+    rootActive,
+    childActive,
+    secondaryVisible,
+    hideSecondaryLabel,
+    showSecondaryLabel,
+    hideSecondaryTooltip,
+    showSecondaryTooltip,
+    onSelectRoot,
+    onSelectChild,
+    onToggleSecondary,
+}) => {
+    const eyeMode: "main" | "on" | "off" =
+        rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
+
+    if (!childParamId) {
+        return (
+            <ParamToolbarPill
+                label={rootLabel}
+                labelTooltip={rootTooltip}
+                active={rootActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+            />
+        );
+    }
+
+    return (
+        <DropdownMenu.Root>
+            <ParamToolbarPill
+                label={childActive ? childLabel : rootLabel}
+                labelTooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                active={rootActive || childActive}
+                accent="amber"
+                onSelect={onSelectRoot}
+                eyeMode={eyeMode}
+                onToggleEye={onToggleSecondary}
+                eyeTooltip={secondaryVisible ? showSecondaryTooltip : hideSecondaryTooltip}
+                eyeLabel={secondaryVisible ? showSecondaryLabel : hideSecondaryLabel}
+                dropdown={
+                    <DropdownMenu.Trigger
+                        className="param-pill__seg param-pill__seg--chev"
+                        data-tooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
+                        tabIndex={-1}
+                    >
+                        <ChevronDownIcon width="12" height="12" />
+                    </DropdownMenu.Trigger>
+                }
+            />
+            <DropdownMenu.Content variant="soft" color="gray">
+                <DropdownMenu.RadioGroup
+                    value={
+                        rootActive
+                            ? rootParamId
+                            : childActive && childParamId
+                              ? childParamId
+                              : undefined
+                    }
+                    onValueChange={(value) => {
+                        if (value === rootParamId) {
+                            onSelectRoot();
+                        } else if (value === childParamId) {
+                            onSelectChild();
+                        }
+                    }}
+                >
+                    <DropdownMenu.RadioItem value={rootParamId}>
+                        {rootMenuLabel ?? rootLabel}
+                    </DropdownMenu.RadioItem>
+                    <DropdownMenu.RadioItem value={childParamId}>
+                        {childMenuLabel ?? childLabel}
+                    </DropdownMenu.RadioItem>
+                </DropdownMenu.RadioGroup>
+            </DropdownMenu.Content>
+        </DropdownMenu.Root>
+    );
+};
 
 export const PianoRollPanel: React.FC = () => {
     const dispatch = useAppDispatch();
@@ -168,10 +490,24 @@ export const PianoRollPanel: React.FC = () => {
                 : s.project.baseScale,
         [s.project.baseScale, s.project.customScale, s.project.useCustomScale],
     );
+    /**
+     * 某秒位置生效的“工程音阶”（受 Tempo Map 音阶变化点影响）。
+     * 无 Tempo Map 音阶覆盖时即为工程音阶。
+     */
+    const projectScaleAtSec = useCallback(
+        (sec: number): ScaleLike | undefined =>
+            effectiveScaleAtSec(s.tempoMap, sec, effectiveProjectScale),
+        [s.tempoMap, effectiveProjectScale],
+    );
+    /**
+     * 将音阶 token 解析为 ScaleLike。
+     * `__project__` 在提供 `atSec` 时按该时刻的 Tempo Map 生效音阶解析，
+     * 否则使用工程音阶（用于全局场景）。
+     */
     const resolveScaleFromToken = useCallback(
-        (scaleToken: string): ScaleLike => {
+        (scaleToken: string, atSec?: number): ScaleLike => {
             if (scaleToken === "__project__") {
-                return effectiveProjectScale;
+                return atSec != null ? (projectScaleAtSec(atSec) ?? "C") : effectiveProjectScale;
             }
 
             const customScaleId = parseCustomScaleToken(scaleToken);
@@ -184,7 +520,7 @@ export const PianoRollPanel: React.FC = () => {
 
             return isScaleKey(scaleToken) ? scaleToken : "C";
         },
-        [effectiveProjectScale, s.customScalePresets],
+        [effectiveProjectScale, projectScaleAtSec, s.customScalePresets],
     );
     const editParam = s.editParam as ParamName;
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
@@ -244,7 +580,7 @@ export const PianoRollPanel: React.FC = () => {
         const kb = mergedKeybindings["modifier.clipNoSnap"];
         if (!kb) return;
         const onKey = (e: KeyboardEvent) => {
-            const active = isModifierActive(kb, e as any);
+            const active = isModifierActive(kb, e);
             setSnapToggleHeld(active);
         };
         window.addEventListener("keydown", onKey as EventListener);
@@ -282,6 +618,10 @@ export const PianoRollPanel: React.FC = () => {
     const [specifiedBpm, setSpecifiedBpm] = useState<number>(120);
     const [multiTrackMerge, setMultiTrackMerge] = useState<boolean>(true);
     const [closeLeadingGap, setCloseLeadingGap] = useState<boolean>(true);
+    const [importTempoMapEnabled, setImportTempoMapEnabled] = useState(false);
+    const [importTempoMapTempo, setImportTempoMapTempo] = useState(true);
+    const [importTempoMapTimeSignature, setImportTempoMapTimeSignature] = useState(true);
+    const [importTempoMapKeySignature, setImportTempoMapKeySignature] = useState(false);
     const [importTargetReaperClipboard, setImportTargetReaperClipboard] =
         useState<string>("pitchParam");
     const [importTargetParamEditor, setImportTargetParamEditor] = useState<string>("pitchParam");
@@ -310,15 +650,27 @@ export const PianoRollPanel: React.FC = () => {
             if (s?.midiCloseLeadingGap != null) {
                 setCloseLeadingGap(s.midiCloseLeadingGap);
             }
+            if (s?.midiImportAsTempoMap != null) {
+                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+            }
+            if (s?.midiImportTempoMapTempo != null) {
+                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+            }
+            if (s?.midiImportTempoMapTimeSignature != null) {
+                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+            }
+            if (s?.midiImportTempoMapKeySignature != null) {
+                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+            }
             if (s?.midiImportTargetReaperClipboard != null) {
                 setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetReaperClipboard((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetReaperClipboard(s.midiImportTarget);
             }
             if (s?.midiImportTargetParamEditor != null) {
                 setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            } else if ((s as any)?.midiImportTarget != null) {
-                setImportTargetParamEditor((s as any).midiImportTarget);
+            } else if (s?.midiImportTarget != null) {
+                setImportTargetParamEditor(s.midiImportTarget);
             }
         });
     }, []);
@@ -332,6 +684,8 @@ export const PianoRollPanel: React.FC = () => {
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
     const drawToolMenuRef = useRef<HTMLDivElement | null>(null);
+    const [pitchSnapMenuOpen, setPitchSnapMenuOpen] = useState(false);
+    const pitchSnapMenuRef = useRef<HTMLDivElement | null>(null);
     const [paramValuePreview, setParamValuePreview] = useState<{
         clientX: number;
         clientY: number;
@@ -381,15 +735,18 @@ export const PianoRollPanel: React.FC = () => {
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen) return;
+        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
+            if (pitchSnapMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
+            setPitchSnapMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
+                setPitchSnapMenuOpen(false);
             }
         };
         window.addEventListener("pointerdown", onPointerDown, true);
@@ -398,7 +755,7 @@ export const PianoRollPanel: React.FC = () => {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen]);
+    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
     const handleOpenMidiDialog = useCallback(() => {
         midiDialogSourceRef.current = "paramEditor";
@@ -440,6 +797,7 @@ export const PianoRollPanel: React.FC = () => {
         return buildChildPitchOffsetDegreesParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack]);
 
+    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.paramPxPerSec"));
@@ -452,10 +810,47 @@ export const PianoRollPanel: React.FC = () => {
     const scrollLeftRef = useRef(scrollLeft);
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
-    const keyboardZoomPendingRef = useRef<{
+    // 渲染期立即同步 ref，确保同步视口在 layout effect 落地时，
+    // Canvas 读取到的是与标尺/网格同一帧的新缩放与滚动值。
+    scrollLeftRef.current = scrollLeft;
+    pxPerBeatRef.current = pxPerBeat;
+    pxPerSecRef.current = pxPerSec;
+    const timelineSyncApplyingRef = useRef(false);
+    const timelineOffsetRef = useRef(0);
+    const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
+    const pendingParamSyncViewportRef = useRef<{
+        nativeScrollLeft: number;
+        pxPerSec: number;
+    } | null>(null);
+    const horizontalZoomPendingRef = useRef<{
         nextScale: number;
         nextScrollLeft: number;
     } | null>(null);
+    const horizontalZoomChainRef = useRef<{
+        nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>(null);
+
+    // 测量轨道时间线区与参数编辑器画布区之间的全局水平偏移，
+    // 用于同步时把参数编辑器的绘制坐标与轨道视图按同一屏幕位置对齐。
+    useLayoutEffect(() => {
+        const update = () => {
+            const next = measureTimelineViewportOffsetPx();
+            timelineOffsetRef.current = next;
+            setTimelineOffsetPx((prev) => (Math.abs(prev - next) < 0.5 ? prev : next));
+        };
+        update();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(update);
+            const scroller = scrollerRef.current;
+            if (scroller) observer.observe(scroller);
+            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
+            if (track) observer.observe(track);
+            return () => observer.disconnect();
+        }
+        window.addEventListener("resize", update);
+        return () => window.removeEventListener("resize", update);
+    }, []);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
     // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)
@@ -463,6 +858,7 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         const prevBpm = prevBpmRef.current;
         prevBpmRef.current = s.bpm;
+        if (s.paramEditorSyncTimeline) return;
         if (Math.abs(prevBpm - s.bpm) < 1e-9) return;
         const ratio = prevBpm / Math.max(1e-6, s.bpm);
         const newScrollLeft = scrollLeftRef.current * ratio;
@@ -474,43 +870,164 @@ export const PianoRollPanel: React.FC = () => {
         }
         scrollLeftRef.current = newScrollLeft;
         setScrollLeft(newScrollLeft);
-    }, [s.bpm]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.bpm, s.paramEditorSyncTimeline]);
 
     useEffect(() => {
-        scrollLeftRef.current = scrollLeft;
-    }, [scrollLeft]);
-
-    useEffect(() => {
-        pxPerBeatRef.current = pxPerBeat;
-        pxPerSecRef.current = pxPerSec;
         const timer = setTimeout(() => {
             localStorage.setItem("hifishifter.paramPxPerSec", String(pxPerSec));
         }, 500);
         return () => clearTimeout(timer);
-    }, [pxPerBeat, pxPerSec]);
+    }, [pxPerSec]);
 
+    // 同步开关（双向交互）：订阅共享视口并应用到本面板。
+    // 原生滚动位置 = 共享视口值（轨道坐标）；绘制坐标 = 原生 - 左右偏移。
     useLayoutEffect(() => {
-        const pending = keyboardZoomPendingRef.current;
-        if (!pending) return;
-        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        if (!s.paramEditorSyncTimeline) return;
+        horizontalZoomPendingRef.current = null;
+        horizontalZoomChainRef.current = null;
+        const applyViewport = () => {
+            const store = timelineViewportSync.get();
+            const offset = timelineOffsetRef.current;
+            const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
+            timelineSyncApplyingRef.current = true;
+            pendingParamSyncViewportRef.current = {
+                nativeScrollLeft: store.scrollLeft,
+                pxPerSec: store.pxPerSec,
+            };
+            setScrollLeft(drawingScrollLeft);
+            setPxPerSec(store.pxPerSec);
+            timelineSyncApplyingRef.current = false;
+        };
+        const unsubscribe = timelineViewportSync.subscribe(applyViewport);
+        // 启用瞬间以轨道视图当前值为基准：原生位置对齐共享视口。
+        applyViewport();
+        const scroller = scrollerRef.current;
+        return () => {
+            unsubscribe();
+            pendingParamSyncViewportRef.current = null;
+            horizontalZoomPendingRef.current = null;
+            horizontalZoomChainRef.current = null;
+            // 禁用时移除偏移补偿：把原生滚动位置还原为绘制坐标。
+            if (scroller) {
+                const next = Math.max(0, scrollLeftRef.current);
+                scroller.scrollLeft = next;
+                scrollLeftRef.current = next;
+                lastScrollLeftRef.current = next;
+                setScrollLeft(next);
+                applyScrollLayers(next);
+            }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.paramEditorSyncTimeline]);
+
+    // 布局偏移变化时，同一共享视口对应的绘制坐标也会变化。
+    // 重新按当前偏移计算状态，让同步对齐始终使用最新几何位置。
+    useEffect(() => {
+        if (!s.paramEditorSyncTimeline) return;
+        const store = timelineViewportSync.get();
+        const drawingScrollLeft = timelineViewportNativeToState(
+            store.scrollLeft,
+            timelineOffsetRef.current,
+        );
+        timelineSyncApplyingRef.current = true;
+        pendingParamSyncViewportRef.current = {
+            nativeScrollLeft: store.scrollLeft,
+            pxPerSec: store.pxPerSec,
+        };
+        setScrollLeft(drawingScrollLeft);
+        timelineSyncApplyingRef.current = false;
+    }, [timelineOffsetPx, s.paramEditorSyncTimeline]);
+
+    // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
+    // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
+    // 形成“缩放已变、滚动没变”的水平漂移。
+    useLayoutEffect(() => {
+        const pending = pendingParamSyncViewportRef.current;
+        if (!pending || !s.paramEditorSyncTimeline) return;
+        if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
+        if (Math.abs(timelineOffsetPx - timelineOffsetRef.current) > 0.5) return;
+
+        const offset = timelineOffsetRef.current;
+        const drawingScrollLeft = timelineViewportNativeToState(pending.nativeScrollLeft, offset);
+        if (Math.abs(scrollLeft - drawingScrollLeft) > 0.5) return;
+
+        pendingParamSyncViewportRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
-        keyboardZoomPendingRef.current = null;
-        scroller.scrollLeft = pending.nextScrollLeft;
+        timelineSyncApplyingRef.current = true;
+        pxPerSecRef.current = pending.pxPerSec;
+        pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
+        scrollLeftRef.current = drawingScrollLeft;
+        scroller.scrollLeft = pending.nativeScrollLeft;
         syncScrollLeft(scroller);
-    }, [pxPerSec]);
+        applyScrollLayers(drawingScrollLeft);
+        timelineSyncApplyingRef.current = false;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, timelineOffsetPx]);
+
+    useLayoutEffect(() => {
+        const pending = horizontalZoomPendingRef.current;
+        if (!pending) return;
+        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        horizontalZoomPendingRef.current = null;
+        horizontalZoomChainRef.current = null;
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+
+        const syncEnabled = s.paramEditorSyncTimeline;
+        const offset = syncEnabled ? timelineOffsetRef.current : 0;
+        const native = pending.nextScrollLeft;
+        const next = timelineViewportNativeToState(native, offset);
+        scroller.scrollLeft = native;
+        if (lastScrollLeftRef.current !== next) {
+            lastScrollLeftRef.current = next;
+            scrollLeftRef.current = next;
+        }
+        // 同步模式下手动缩放后必须把新的 pxPerSec 写回共享视口；即使滚动位置
+        // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
+        // 也要广播缩放，否则轨道视图不会跟着缩放。
+        if (syncEnabled && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport({
+                scrollLeft: native,
+                pxPerSec,
+            });
+        }
+        applyScrollLayers(next);
+        // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
+        const expectedNative = timelineViewportStateToNative(next, offset);
+        if (Math.abs(scroller.scrollLeft - expectedNative) > 0.5) {
+            scroller.scrollLeft = expectedNative;
+        }
+        // 同步更新状态：让标尺/网格与画布在同一帧对齐，消除缩放闪屏。
+        setScrollLeft(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
         playheadSec: s.playheadSec,
-        projectSec: s.projectSec,
+        projectSec: dynamicProjectSec,
     });
     useLayoutEffect(() => {
         zoomTimelineStateRef.current = {
             playheadSec: s.playheadSec,
-            projectSec: s.projectSec,
+            projectSec: dynamicProjectSec,
         };
     });
+
+    const queueHorizontalZoom = useCallback(
+        (nextPxPerSec: number, nextNativeScrollLeft: number) => {
+            pxPerBeatRef.current = nextPxPerSec * (60 / Math.max(1e-6, s.bpm));
+            pxPerSecRef.current = nextPxPerSec;
+            horizontalZoomPendingRef.current = {
+                nextScale: nextPxPerSec,
+                nextScrollLeft: nextNativeScrollLeft,
+            };
+            setPxPerSec(nextPxPerSec);
+        },
+        [s.bpm, setPxPerSec],
+    );
 
     useEffect(() => {
         function onZoomFocused(e: Event) {
@@ -528,39 +1045,45 @@ export const PianoRollPanel: React.FC = () => {
             const scroller = scrollerRef.current;
             if (!scroller) return;
 
-            const zoom = computeAnchoredHorizontalZoom({
-                currentScale: pxPerSecRef.current,
+            const syncEnabled = s.paramEditorSyncTimeline;
+            const zoom = resolveHorizontalWheelZoom({
                 factor,
-                minScale: MIN_PX_PER_SEC,
-                maxScale: MAX_PX_PER_SEC,
-                scrollLeft: scroller.scrollLeft,
+                basePxPerSec: pxPerSecRef.current,
+                baseScrollLeft: syncEnabled
+                    ? timelineViewportSync.get().scrollLeft
+                    : scrollLeftRef.current,
+                totalSec: projectSec,
                 viewportWidth: scroller.clientWidth,
-                anchorSec: Number(playheadSec ?? 0) || 0,
-                contentSec: projectSec,
+                playheadZoomEnabled: true,
+                playheadSec: Number(playheadSec ?? 0) || 0,
+                anchorScreenX: 0,
+                minPxPerSec: resolveTimelineMinPxPerSec({
+                    baseMinPxPerSec: MIN_PX_PER_SEC,
+                    projectSec,
+                    viewportWidthPx: scroller.clientWidth,
+                }),
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
 
-            keyboardZoomPendingRef.current = {
-                nextScale: zoom.nextScale,
-                nextScrollLeft: zoom.nextScrollLeft,
-            };
-            setPxPerSec(zoom.nextScale);
+            queueHorizontalZoom(zoom.nextPxPerSec, zoom.nextScrollLeft);
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, []); // 空依赖
+    }, [s.paramEditorSyncTimeline, queueHorizontalZoom]);
 
-    const setPxPerBeatImmediate = useCallback(
-        (next: number) => {
-            // next 是新的 pxPerBeat，需要反推回 pxPerSec
-            const nextPxPerSec = next / (60 / Math.max(1e-6, s.bpm));
-            pxPerBeatRef.current = next;
-            pxPerSecRef.current = nextPxPerSec;
-            setPxPerSec(nextPxPerSec);
+    const handleHorizontalZoom = useCallback(
+        (nextPxPerSec: number, nextScrollLeft: number) => {
+            // 计算结果为绘制坐标；同步时需换算回原生（轨道）坐标再交给 layout effect。
+            const nativeNextScrollLeft = timelineViewportStateToNative(
+                nextScrollLeft,
+                s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
+            );
+            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
         },
-        [s.bpm, setPxPerSec],
+        [s.paramEditorSyncTimeline, queueHorizontalZoom],
     );
     // 副参数独立显示开关，默认全部关闭
     const [secondaryParamVisible, setSecondaryParamVisible] = useState<
@@ -605,6 +1128,31 @@ export const PianoRollPanel: React.FC = () => {
         return s.tracks.find((tr) => tr.id === rootTrackId) ?? null;
     }, [s.tracks, rootTrackId]);
 
+    const childFormantOffsetParam = useMemo(() => {
+        if (!effectiveSelectedTrackId || !selectedIsChildTrack) return null;
+        const algo = rootTrack?.pitchAnalysisAlgo;
+        if (algo !== "nsf_hifigan_onnx" && algo !== "vslib") return null;
+        return buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+    }, [effectiveSelectedTrackId, selectedIsChildTrack, rootTrack?.pitchAnalysisAlgo]);
+
+    const pitchGroupActive =
+        editParam === "pitch" ||
+        editParam === childPitchOffsetCentsParam ||
+        editParam === childPitchOffsetDegreesParam;
+    // 工具栏上的音高组按钮使用简写（非中文语系为 PIT），完整名称放入 ToolTip。
+    const pitchGroupLabel =
+        editParam === childPitchOffsetCentsParam
+            ? t("child_pitch_mode_cents")
+            : editParam === childPitchOffsetDegreesParam
+              ? t("child_pitch_mode_degrees")
+              : t("param_btn_pitch");
+    const pitchGroupTooltip =
+        editParam === childPitchOffsetCentsParam
+            ? t("child_pitch_offset_cents_label")
+            : editParam === childPitchOffsetDegreesParam
+              ? t("child_pitch_offset_degrees_label")
+              : t("pitch");
+
     // 声码器参数描述符（由 algo 动态定制面板）
     const [processorParams, setProcessorParams] = useState<ProcessorParamDescriptor[]>([]);
     const processorParamsRef = useRef<ProcessorParamDescriptor[]>([]);
@@ -612,6 +1160,14 @@ export const PianoRollPanel: React.FC = () => {
         [],
     );
     const [processorStaticValues, setProcessorStaticValues] = useState<Record<string, number>>({});
+
+    // 工具栏参数按钮按“音高 → 中间参数（随算法变化）→ 音量/声像”的顺序排列
+    const orderedProcessorParams = useMemo(() => {
+        const algo = rootTrack?.pitchAnalysisAlgo;
+        return [...processorParams].sort(
+            (a, b) => getParamToolbarRank(a.id, algo) - getParamToolbarRank(b.id, algo),
+        );
+    }, [processorParams, rootTrack?.pitchAnalysisAlgo]);
     const currentParamRange = useMemo(() => {
         if (editParam === "pitch") {
             return { min: 24, max: 108 };
@@ -628,6 +1184,12 @@ export const PianoRollPanel: React.FC = () => {
                 max: CHILD_PITCH_OFFSET_DEGREES_RANGE.max,
             };
         }
+        if (isChildFormantOffsetCentsParam(editParam)) {
+            return {
+                min: CHILD_FORMANT_OFFSET_CENTS_RANGE.min,
+                max: CHILD_FORMANT_OFFSET_CENTS_RANGE.max,
+            };
+        }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
         if (desc?.kind.type === "automation_curve") {
             return {
@@ -640,7 +1202,11 @@ export const PianoRollPanel: React.FC = () => {
 
     const currentParamDefaultValue = useMemo(() => {
         if (editParam === "pitch") return 60;
-        if (isChildPitchOffsetCentsParam(editParam) || isChildPitchOffsetDegreesParam(editParam)) {
+        if (
+            isChildPitchOffsetCentsParam(editParam) ||
+            isChildPitchOffsetDegreesParam(editParam) ||
+            isChildFormantOffsetCentsParam(editParam)
+        ) {
             return 0;
         }
         const desc = processorParamsRef.current.find((d) => d.id === editParam);
@@ -656,6 +1222,7 @@ export const PianoRollPanel: React.FC = () => {
     const currentParamQuantizeUnit = useMemo(() => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
         if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
+        if (isChildFormantOffsetCentsParam(editParam)) return 50;
         if (editParam === "volume" || editParam === "dyn_edit") return 0.05;
         if (editParam === "formant_shift_cents") return 50;
         if (editParam === "breath_gain" || editParam === "hifigan_tension") {
@@ -673,7 +1240,9 @@ export const PianoRollPanel: React.FC = () => {
         if (paramViewsRef.current[editParam]) return;
         const range = isChildPitchOffsetCentsParam(editParam)
             ? CHILD_PITCH_OFFSET_CENTS_RANGE
-            : CHILD_PITCH_OFFSET_DEGREES_RANGE;
+            : isChildPitchOffsetDegreesParam(editParam)
+              ? CHILD_PITCH_OFFSET_DEGREES_RANGE
+              : CHILD_FORMANT_OFFSET_CENTS_RANGE;
         paramViewsRef.current = {
             ...paramViewsRef.current,
             [editParam]: {
@@ -781,13 +1350,12 @@ export const PianoRollPanel: React.FC = () => {
                 case "formant_shift_cents":
                     return t("formant_shift_label");
                 case "hifigan_volume":
-                    return t("hifigan_volume_label");
                 case "volume":
-                    return t("vslib_volume_label");
+                    return t("volume_label");
                 case "synth_mode":
                     return t("vslib_synth_mode_label");
                 case "pan":
-                    return t("vslib_pan_label");
+                    return t("pan_label");
                 case "breathiness":
                     return t("vslib_breathiness_label");
                 default:
@@ -795,6 +1363,34 @@ export const PianoRollPanel: React.FC = () => {
             }
         },
         [t],
+    );
+
+    // 工具栏参数按钮的简写标签（非中文语系用三个大写字形的缩写，如 PIT/BRE/VOL）。
+    // 全称仍通过 getProcessorParamLabel() 提供，用于 ToolTip。
+    const getProcessorParamShortLabel = useCallback(
+        (param: ProcessorParamDescriptor) => {
+            switch (param.id) {
+                case "breath_enabled":
+                case "breath_gain":
+                    return t("param_btn_breath");
+                case "hifigan_tension":
+                case "tension":
+                    return t("param_btn_tension");
+                case "formant_shift_cents":
+                    return t("param_btn_formant");
+                case "hifigan_volume":
+                case "volume":
+                case "vslib_volume":
+                    return t("param_btn_volume");
+                case "pan":
+                    return t("param_btn_pan");
+                case "breathiness":
+                    return t("param_btn_breathiness");
+                default:
+                    return getProcessorParamLabel(param);
+            }
+        },
+        [getProcessorParamLabel, t],
     );
 
     const getStaticOptionLabel = useCallback(
@@ -820,6 +1416,7 @@ export const PianoRollPanel: React.FC = () => {
             ...processorParams.map((p) => p.id),
             ...(childPitchOffsetCentsParam ? [childPitchOffsetCentsParam] : []),
             ...(childPitchOffsetDegreesParam ? [childPitchOffsetDegreesParam] : []),
+            ...(childFormantOffsetParam ? [childFormantOffsetParam] : []),
         ]);
         if (isChildPitchOffsetParam(editParam)) {
             if (!selectedIsChildTrack || !effectiveSelectedTrackId) {
@@ -840,6 +1437,13 @@ export const PianoRollPanel: React.FC = () => {
                     return;
                 }
             }
+            if (isChildFormantOffsetCentsParam(editParam)) {
+                const expected = buildChildFormantOffsetCentsParam(effectiveSelectedTrackId);
+                if (editParam !== expected) {
+                    dispatch(setEditParam(expected));
+                    return;
+                }
+            }
         }
 
         if (!available.has(editParam)) {
@@ -851,6 +1455,7 @@ export const PianoRollPanel: React.FC = () => {
         dispatch,
         childPitchOffsetCentsParam,
         childPitchOffsetDegreesParam,
+        childFormantOffsetParam,
         effectiveSelectedTrackId,
         selectedIsChildTrack,
     ]);
@@ -943,8 +1548,6 @@ export const PianoRollPanel: React.FC = () => {
         });
     }, [editParam, processorParams, secondaryParamVisible]);
 
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
-
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
             dispatch(setVisibleReferenceRootTrackIds(nextTrackIds));
@@ -966,12 +1569,6 @@ export const PianoRollPanel: React.FC = () => {
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
     const gridBoundaryRef = useRef<HTMLDivElement | null>(null);
-
-    function positiveMod(value: number, mod: number): number {
-        if (!Number.isFinite(value) || !Number.isFinite(mod) || mod <= 0) return 0;
-        const r = value % mod;
-        return (r + mod) % mod;
-    }
 
     function pitchDeltaToDegreeSteps(
         basePitch: number,
@@ -1013,6 +1610,14 @@ export const PianoRollPanel: React.FC = () => {
 
     const viewSizeRef = useRef({ w: 1, h: 1 });
     const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
+    // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
+    // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
+    // 想让原生最大滚动位置为“工程宽 + 同步偏移”，spacer 需再加一个视口宽。
+    const paddedContentWidth = useMemo(
+        () => contentWidth + viewSize.w + (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
+        [contentWidth, viewSize.w, s.paramEditorSyncTimeline, timelineOffsetPx],
+    );
 
     useLayoutEffect(() => {
         const el = scrollerRef.current;
@@ -1048,7 +1653,7 @@ export const PianoRollPanel: React.FC = () => {
                 if (rulerPlayheadHeadRef.current) {
                     rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
                 }
-                if (s.autoScrollEnabled && s.runtime.isPlaying) {
+                if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
                     if (scroller) {
                         const next = computeAutoFollowScrollLeft({
@@ -1065,7 +1670,16 @@ export const PianoRollPanel: React.FC = () => {
                 }
                 invalidate();
             },
-            [contentWidth, invalidate, s.autoScrollEnabled, s.runtime.isPlaying],
+            // syncScrollLeft reads the latest scroll state through refs and is called
+            // imperatively; including the plain render-scope function would defeat memoization.
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+            [
+                contentWidth,
+                invalidate,
+                s.paramEditorSyncTimeline,
+                s.autoScrollEnabled,
+                s.runtime.isPlaying,
+            ],
         ),
     });
 
@@ -1078,27 +1692,13 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, []);
 
-    function syncScrollLeft(scroller: HTMLDivElement) {
-        const next = scroller.scrollLeft;
-        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
-            return;
-        }
-        lastScrollLeftRef.current = next;
-        scrollLeftRef.current = next;
-
+    function applyScrollLayers(next: number) {
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
 
         if (gridLayerRef.current) {
-            const weakStepPx = Math.max(1e-6, pxPerBeatRef.current * gridStepBeats(s.grid));
-            const barStepPx = Math.max(
-                1e-6,
-                pxPerBeatRef.current * Math.max(1, Math.round(s.beats || 4)),
-            );
-            const weakOffsetPx = -positiveMod(next, weakStepPx);
-            const barOffsetPx = -positiveMod(next, barStepPx);
-            gridLayerRef.current.style.backgroundPosition = `${weakOffsetPx}px 0px, ${barOffsetPx}px 0px`;
+            invokeGridRedrawHandler(gridLayerRef.current, next);
         }
 
         if (gridBoundaryRef.current) {
@@ -1108,14 +1708,32 @@ export const PianoRollPanel: React.FC = () => {
                 left >= -2 && left <= viewSizeRef.current.w + 2 ? "0.9" : "0";
         }
 
+        invalidate();
+    }
+
+    function syncScrollLeft(scroller: HTMLDivElement) {
+        const syncEnabled = s.paramEditorSyncTimeline;
+        const offset = syncEnabled ? timelineOffsetRef.current : 0;
+        const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
+        if (lastScrollLeftRef.current != null && lastScrollLeftRef.current === next) {
+            return;
+        }
+        lastScrollLeftRef.current = next;
+        scrollLeftRef.current = next;
+        if (syncEnabled && !timelineSyncApplyingRef.current) {
+            // 原生滚动位置 == 共享视口值（轨道坐标），直接推送。
+            timelineViewportSync.setViewport({
+                scrollLeft: scroller.scrollLeft,
+                pxPerSec: pxPerSecRef.current,
+            });
+        }
+        applyScrollLayers(next);
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
                 scrollStateRafRef.current = null;
                 setScrollLeft(scrollLeftRef.current);
             });
         }
-
-        invalidate();
     }
 
     useLayoutEffect(() => {
@@ -1454,6 +2072,10 @@ export const PianoRollPanel: React.FC = () => {
             noteBpmMode?: string;
             specifiedBpm?: number;
             importBpmAsProject?: boolean;
+            importAsTempoMap?: boolean;
+            importTempo?: boolean;
+            importTimeSignature?: boolean;
+            importKeySignature?: boolean;
             clipboardGuid?: string;
             closeLeadingGap?: boolean;
         }) => {
@@ -1470,6 +2092,10 @@ export const PianoRollPanel: React.FC = () => {
                     importBpmAsProject: result.importBpmAsProject,
                     clipboardGuid: result.clipboardGuid,
                     closeLeadingGap: result.closeLeadingGap,
+                    importAsTempoMap: result.importAsTempoMap,
+                    importTempo: result.importTempo,
+                    importTimeSignature: result.importTimeSignature,
+                    importKeySignature: result.importKeySignature,
                 }),
             );
         },
@@ -1479,48 +2105,65 @@ export const PianoRollPanel: React.FC = () => {
     // 导入位置变更时持久化保存
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        void settingsApi.saveUiSettings({ midiImportPosition: position } as any);
+        void settingsApi.saveUiSettings({ midiImportPosition: position });
     }, []);
 
     // 填补空隙选项变更时持久化保存
     const handleFillGapsChange = useCallback((value: boolean) => {
         setFillGaps(value);
-        void settingsApi.saveUiSettings({ midiFillGaps: value } as any);
+        void settingsApi.saveUiSettings({ midiFillGaps: value });
     }, []);
 
     // BPM 选项变更时持久化保存
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v } as any);
+        void settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        void settingsApi.saveUiSettings({ midiNoteBpmMode: v } as any);
+        void settingsApi.saveUiSettings({ midiNoteBpmMode: v });
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v } as any);
+        void settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v } as any);
+        void settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v } as any);
+        void settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
+    }, []);
+
+    const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
+        setImportTempoMapEnabled(v);
+        void settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
+    }, []);
+    const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
+        setImportTempoMapTempo(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
+    }, []);
+    const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapTimeSignature(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
+    }, []);
+    const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
+        setImportTempoMapKeySignature(v);
+        void settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
     }, []);
 
     const handleImportTargetChange = useCallback((v: string) => {
         if (midiDialogSourceRef.current === "reaperClipboard") {
             setImportTargetReaperClipboard(v);
-            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetReaperClipboard: v });
         } else {
             setImportTargetParamEditor(v);
-            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v } as any);
+            void settingsApi.saveUiSettings({ midiImportTargetParamEditor: v });
         }
     }, []);
 
@@ -1552,6 +2195,26 @@ export const PianoRollPanel: React.FC = () => {
         const p = midiDialogOpenParamsRef.current;
         return p.editParam === "pitch" && p.toolMode === "select";
     }, [midiDialogSelection]);
+
+    // 将当前选区（帧范围）发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
+    useEffect(() => {
+        const sel = selectionUi;
+        if (!sel) {
+            publishPianoRollSelection(null);
+            return;
+        }
+        const fp = paramView?.framePeriodMs ?? 5;
+        const a = Math.min(sel.aBeat, sel.bBeat);
+        const b = Math.max(sel.aBeat, sel.bBeat);
+        publishPianoRollSelection({
+            startFrame: Math.max(0, Math.floor((a * secPerBeat * 1000) / fp)),
+            frameCount: Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp)),
+            framePeriodMs: fp,
+        });
+        return () => {
+            publishPianoRollSelection(null);
+        };
+    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
@@ -1683,6 +2346,7 @@ export const PianoRollPanel: React.FC = () => {
         s.pitchSnapUnit,
         effectiveProjectScale,
         s.scaleHighlightMode,
+        s.tempoMap,
         snapToggleHeld,
         invalidate,
     ]);
@@ -1728,6 +2392,14 @@ export const PianoRollPanel: React.FC = () => {
             pitchSnapUnit: s.pitchSnapUnit,
             projectScale: effectiveProjectScale,
             scaleHighlightMode: s.scaleHighlightMode,
+            scaleSegments: buildScaleSegments(
+                s.tempoMap,
+                effectiveProjectScale,
+                Math.max(0, scrollLeftRef.current / Math.max(1e-9, pxPerSecRef.current) - 5),
+                (scrollLeftRef.current + viewSizeRef.current.w) /
+                    Math.max(1e-9, pxPerSecRef.current) +
+                    5,
+            ),
             toolMode: s.toolMode,
             snapToggleHeld: snapToggleHeld,
             paramMorphOverlay,
@@ -1749,12 +2421,14 @@ export const PianoRollPanel: React.FC = () => {
         pitchEnabled,
         toolMode: s.toolMode,
         secPerBeat,
-        bpm: s.bpm,
         dynamicProjectSec,
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
-        setPxPerBeat: setPxPerBeatImmediate,
+        horizontalZoomChainRef,
+        onHorizontalZoom: handleHorizontalZoom,
+        syncTimelineEnabled: s.paramEditorSyncTimeline,
+        timelineOffsetRef,
         setPitchView,
         setParamViewport,
         pitchViewRef,
@@ -1808,6 +2482,8 @@ export const PianoRollPanel: React.FC = () => {
         pitchSnapEnabled: s.pitchSnapEnabled,
         pitchSnapUnit: s.pitchSnapUnit,
         projectScale: effectiveProjectScale,
+        /** Tempo Map 感知：按帧时刻解析生效音阶。 */
+        scaleAtSec: projectScaleAtSec,
         pitchSnapToleranceCents: s.pitchSnapToleranceCents,
         keybindingMap: mergedKeybindings,
         onEditAction: stableEditAction,
@@ -1897,6 +2573,7 @@ export const PianoRollPanel: React.FC = () => {
 
     // Auto-scroll: keep playhead visible in parameter editor during playback
     useEffect(() => {
+        if (s.paramEditorSyncTimeline) return;
         if (!s.autoScrollEnabled || !s.runtime.isPlaying) return;
         const scroller = scrollerRef.current;
         if (!scroller) return;
@@ -1910,7 +2587,16 @@ export const PianoRollPanel: React.FC = () => {
             scroller.scrollLeft = next;
             syncScrollLeft(scroller);
         }
-    }, [s.autoScrollEnabled, s.runtime.isPlaying, s.playheadSec, pxPerSec, contentWidth]);
+        // syncScrollLeft reads the latest scroll state through refs; see onFrame above.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        s.paramEditorSyncTimeline,
+        s.autoScrollEnabled,
+        s.runtime.isPlaying,
+        s.playheadSec,
+        pxPerSec,
+        contentWidth,
+    ]);
 
     // Piano keys (axis) area: keep touchpad wheel behavior aligned with the main editor.
     useEffect(() => {
@@ -1928,7 +2614,7 @@ export const PianoRollPanel: React.FC = () => {
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb: Keybinding) => {
                 if (isNoneBinding(kb)) return noModifierPressed;
-                return isModifierActive(kb, e as any);
+                return isModifierActive(kb, e);
             };
             const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
             const pianoVerticalScrollRequested = isWheelBindingRequested(pianoKeysVerticalScrollKb);
@@ -1998,6 +2684,12 @@ export const PianoRollPanel: React.FC = () => {
             if (wheelAction === "vertical-pan") {
                 e.preventDefault();
                 applyVerticalPanDelta(e.deltaY);
+                return;
+            }
+
+            if (wheelAction === "horizontal-zoom") {
+                // 主画布/轨道视图负责水平缩放；钢琴键区只拦截，避免原生滚动抢走事件。
+                e.preventDefault();
                 return;
             }
 
@@ -2211,11 +2903,10 @@ export const PianoRollPanel: React.FC = () => {
                 return;
             }
 
-            // External clipboard paste ops – work with or without selection
-            if (op === "pasteReaper" || op === "pasteVocalShifter") {
+            // VocalShifter clipboard paste stays a dedicated menu action
+            // (file-based clipboard), and works with or without selection.
+            if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const capturedEditParam = s.editParam;
-                const capturedToolMode = s.toolMode;
                 let selArgs:
                     | {
                           selectionStartFrame?: number;
@@ -2232,37 +2923,76 @@ export const PianoRollPanel: React.FC = () => {
                         selectionMaxFrames: fc,
                     };
                 }
-                if (op === "pasteReaper") {
-                    // 检查剪贴板是否包含 Standard MIDI File，若有则弹出统一导入弹窗
-                    void (async () => {
-                        try {
-                            const midiCheck = await paramsApi.readMidiClipboardToMemory();
-                            if (midiCheck.ok && midiCheck.guid) {
-                                midiDialogSourceRef.current = "reaperClipboard";
-                                setClipboardGuid(midiCheck.guid);
-                                setMidiPath(null);
-                                setMidiDialogSelection(sel2 ? { ...sel2 } : null);
-                                midiDialogOpenParamsRef.current = {
-                                    editParam: capturedEditParam,
-                                    toolMode: capturedToolMode,
-                                };
-                                setMidiDialogOpen(true);
-                                return;
-                            }
-                        } catch {
-                            // 检查失败，回退到普通 Reaper 粘贴
-                        }
-                        void dispatch(pasteReaperClipboard(selArgs));
-                    })();
-                } else {
-                    void dispatch(
-                        pasteVocalShifterClipboard({
-                            ...selArgs,
-                            activeParam: editParam,
-                        }),
-                    );
-                }
+                void dispatch(
+                    pasteVocalShifterClipboard({
+                        ...selArgs,
+                        activeParam: editParam,
+                    }),
+                );
                 bumpRefreshToken();
+                return;
+            }
+
+            // REAPERMedia fallback used by the normal paste operation when no
+            // HiFiShifter param clipboard data is available.
+            const pasteReaperClipboardFallback = () => {
+                const sel2 = selectionRef.current;
+                let selArgs:
+                    | {
+                          selectionStartFrame?: number;
+                          selectionMaxFrames?: number;
+                      }
+                    | undefined;
+                if (sel2) {
+                    const a = Math.min(sel2.aBeat, sel2.bBeat);
+                    const b = Math.max(sel2.aBeat, sel2.bBeat);
+                    const sf = Math.max(0, Math.floor((a * secPerBeat * 1000) / fp));
+                    const fc = Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp));
+                    selArgs = {
+                        selectionStartFrame: sf,
+                        selectionMaxFrames: fc,
+                    };
+                }
+                void (async () => {
+                    try {
+                        // Standard MIDI File on the clipboard opens the unified
+                        // MIDI import dialog.
+                        const midiCheck = await paramsApi.readMidiClipboardToMemory();
+                        if (midiCheck.ok && midiCheck.guid) {
+                            midiDialogSourceRef.current = "reaperClipboard";
+                            setClipboardGuid(midiCheck.guid);
+                            setMidiPath(null);
+                            setMidiDialogSelection(sel2 ? { ...sel2 } : null);
+                            midiDialogOpenParamsRef.current = {
+                                editParam: s.editParam,
+                                toolMode: s.toolMode,
+                            };
+                            setMidiDialogOpen(true);
+                            return;
+                        }
+                    } catch {
+                        // Check failed; fall back to ordinary REAPERMedia paste.
+                    }
+                    try {
+                        // Avoid surfacing a paste error when the system
+                        // clipboard does not contain REAPERMedia data at all.
+                        const reaperCheck = await webApi.hasReaperClipboard();
+                        if (!reaperCheck?.ok || !reaperCheck?.available) return;
+                    } catch {
+                        return;
+                    }
+                    void dispatch(pasteReaperClipboard(selArgs));
+                })();
+                bumpRefreshToken();
+            };
+
+            const selAtEntry = selectionRef.current;
+            // Normal paste prefers HiFiShifter param data. When there is no
+            // pitch selection (or pitch editing is unavailable), the normal
+            // paste still tries REAPERMedia data, matching the removed
+            // dedicated "Paste Reaper Clipboard Data" action.
+            if (op === "paste" && (!selAtEntry || !pitchEnabled)) {
+                pasteReaperClipboardFallback();
                 return;
             }
 
@@ -2502,7 +3232,11 @@ export const PianoRollPanel: React.FC = () => {
                     } catch {
                         // ignore and fallback to internal clipboard
                     }
-                    if (!clip) return;
+                    if (!clip) {
+                        // No HiFiShifter param clipboard data: try REAPERMedia.
+                        pasteReaperClipboardFallback();
+                        return;
+                    }
 
                     let pasteValues: number[];
                     if (clip.param === editParam) {
@@ -2532,10 +3266,13 @@ export const PianoRollPanel: React.FC = () => {
                             startFrame,
                             frameCount,
                             clipboardPitch: clip.values,
-                            mode: targetParam.mode,
+                            mode: targetParam.mode as "cents" | "degrees",
                             paramsApi,
                             pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
                             projectScale: effectiveProjectScale,
+                            // Tempo Map 感知：按帧时刻解析生效音阶。
+                            scaleAtFrame: (frame: number) =>
+                                projectScaleAtSec((frame * fp) / 1000) ?? effectiveProjectScale,
                         });
                         if (!converted) return;
 
@@ -2606,22 +3343,30 @@ export const PianoRollPanel: React.FC = () => {
                 case "transposeDegrees": {
                     const degrees = Number(data?.degrees ?? 0);
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：按每个帧的时刻取生效音阶。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const degreeSteps = degreeInputToScaleSteps(degrees);
                     if (degreeSteps === 0) return;
-                    await applySelectionEditWithEdgeSmoothing(
-                        (vals) =>
-                            editParam === "pitch"
-                                ? vals.map((midi) =>
-                                      midi === 0
-                                          ? 0
-                                          : transposePitchByScaleSteps(midi, degreeSteps, scale),
-                                  )
-                                : vals.map((midi) =>
-                                      transposePitchByScaleSteps(midi, degreeSteps, scale),
-                                  ),
-                        Number(data?.edgeSmoothnessPercent),
-                    );
+                    await applySelectionEditWithEdgeSmoothing((vals) => {
+                        const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                        return editParam === "pitch"
+                            ? vals.map((midi, i) => {
+                                  if (midi === 0) return 0;
+                                  const scale =
+                                      fixedScale ??
+                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                      "C";
+                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                              })
+                            : vals.map((midi, i) => {
+                                  const scale =
+                                      fixedScale ??
+                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                      "C";
+                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                              });
+                    }, Number(data?.edgeSmoothnessPercent));
                     break;
                 }
                 case "setPitch": {
@@ -2758,7 +3503,9 @@ export const PianoRollPanel: React.FC = () => {
 
                     const unit = (data?.unit as string) ?? "semitone";
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：按每个帧的时刻取生效音阶。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const toleranceCents = Math.abs(
                         Math.round(Number(data?.toleranceCents ?? 0) || 0),
                     );
@@ -2774,6 +3521,9 @@ export const PianoRollPanel: React.FC = () => {
                     if (!res?.ok) return;
                     const payload = res as ParamFramesPayload;
                     const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                    const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+                    const scaleAt = (i: number): ScaleLike =>
+                        fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
                     const quantized =
                         unit === "semitone"
                             ? vals.map((v) =>
@@ -2788,11 +3538,11 @@ export const PianoRollPanel: React.FC = () => {
                                                           toleranceSemitone;
                                         })(),
                               )
-                            : vals.map((v) =>
+                            : vals.map((v, i) =>
                                   editParam === "pitch" && v === 0
                                       ? 0
                                       : (() => {
-                                            const snapped = snapToScale(v, scale);
+                                            const snapped = snapToScale(v, scaleAt(i));
                                             return Math.abs(v - snapped) <= toleranceSemitone
                                                 ? v
                                                 : snapped +
@@ -2854,7 +3604,10 @@ export const PianoRollPanel: React.FC = () => {
 
                     const unit = (data?.unit as string) ?? "semitone";
                     const scaleToken = String(data?.scale ?? "__project__");
-                    const scale: ScaleLike = resolveScaleFromToken(scaleToken);
+                    // “工程音阶”受 Tempo Map 影响：均值吸附使用选区中点时刻的生效音阶，
+                    // 整体平移量保持统一（均值量化语义）。
+                    const fixedScale: ScaleLike | null =
+                        scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const toleranceCents = Math.abs(
                         Math.round(Number(data?.toleranceCents ?? 0) || 0),
                     );
@@ -2874,8 +3627,16 @@ export const PianoRollPanel: React.FC = () => {
                     const nonZero = editParam === "pitch" ? vals.filter((v) => v !== 0) : vals;
                     if (nonZero.length === 0) return;
                     const avg = nonZero.reduce((a, b) => a + b, 0) / nonZero.length;
+                    const midScale =
+                        fixedScale ??
+                        projectScaleAtSec(
+                            ((startFrame + Math.floor(vals.length / 2)) *
+                                (Number(payload.frame_period_ms ?? fp) || fp)) /
+                                1000,
+                        ) ??
+                        "C";
                     const quantizedAvg =
-                        unit === "semitone" ? snapToSemitone(avg) : snapToScale(avg, scale);
+                        unit === "semitone" ? snapToSemitone(avg) : snapToScale(avg, midScale);
                     const delta = quantizedAvg - avg;
                     const result =
                         editParam === "pitch"
@@ -2913,6 +3674,8 @@ export const PianoRollPanel: React.FC = () => {
             dynamicProjectSec,
             s.edgeSmoothnessPercent,
             effectiveProjectScale,
+            projectScaleAtSec,
+            resolveScaleFromToken,
             currentParamRange,
             currentParamDefaultValue,
             currentParamQuantizeUnit,
@@ -3173,19 +3936,147 @@ export const PianoRollPanel: React.FC = () => {
         </svg>
     );
 
+    const pitchSnapSemitoneIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <path
+                d="M2.5 12.5H6.5V9.5H10.5V5.5H12.5"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    );
+
+    const pitchSnapScaleIcon = (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+            <rect x="2.5" y="10.5" width="4" height="2" rx="0.5" fill="currentColor" />
+            <rect x="6.5" y="7.5" width="4" height="2" rx="0.5" fill="currentColor" />
+            <rect x="10.5" y="4.5" width="2.5" height="2" rx="0.5" fill="currentColor" />
+        </svg>
+    );
+
     const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
 
-    const timeRulerBars = useMemo(() => {
-        const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        const totalBeats = Math.max(1, Math.ceil(s.projectSec / secPerBeat));
-        const result: Array<{ beat: number; label: string }> = [];
-        let barIndex = 1;
-        for (let beat = 0; beat <= totalBeats; beat += beatsPerBar) {
-            result.push({ beat, label: `${barIndex}.1` });
-            barIndex += 1;
+    const timeRulerTicks = useMemo(
+        () =>
+            buildRulerTicks({
+                pxPerSec,
+                scrollLeft,
+                viewportWidth: viewSize.w,
+                projectSec: dynamicProjectSec,
+                bpm: s.bpm,
+                beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+                grid: s.grid,
+                primaryUnit: s.primaryTimeUnit,
+                secondaryUnit: s.secondaryTimeUnit,
+                minLabelSpacingPx: s.rulerLabelSpacingPx,
+                tempoMap: s.tempoMap,
+            }),
+        [
+            pxPerSec,
+            scrollLeft,
+            viewSize.w,
+            dynamicProjectSec,
+            s.bpm,
+            s.beats,
+            s.grid,
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            s.rulerLabelSpacingPx,
+            s.tempoMap,
+        ],
+    );
+    const timeContext = useMemo<TimeFormatContext>(
+        () => ({
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+            tempoMap: s.tempoMap,
+        }),
+        [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    // ── Tempo Map 显式网格线（参数编辑器背景网格）─────────────
+    const tempoGridLineXs = useMemo(
+        () =>
+            buildTempoGridLineXsForViewport({
+                tempoMap: s.tempoMap,
+                scrollLeft,
+                viewportWidth: viewSize.w,
+                pxPerSec,
+                projectSec: dynamicProjectSec,
+                stepBeats: gridStepBeats(s.grid),
+                fallbackBpm: s.bpm,
+                fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+                swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
+                minSpacingPx: s.timelineSnap.gridMinSpacingPx,
+            }),
+        [
+            s.tempoMap,
+            s.bpm,
+            s.beats,
+            s.grid,
+            s.timelineSnap,
+            scrollLeft,
+            viewSize.w,
+            pxPerSec,
+            dynamicProjectSec,
+        ],
+    );
+    const handlePrimaryUnitChange = useCallback(
+        (unit: TimeUnit) => {
+            dispatch(setPrimaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+    const handleSecondaryUnitChange = useCallback(
+        (unit: TimeUnitChoice) => {
+            dispatch(setSecondaryTimeUnit(unit));
+            void dispatch(persistUiSettings());
+        },
+        [dispatch],
+    );
+
+    const handleTempoMapChange = useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+        },
+        [dispatch],
+    );
+    const handleTempoMapCommit = useCallback(
+        (next: TempoMap | null) => {
+            dispatch(setTempoMap(next));
+            void dispatch(setTempoMapRemote(next));
+        },
+        [dispatch],
+    );
+    const handleCopyPlayheadTime = useCallback(async () => {
+        const text = formatCursorTime(
+            s.primaryTimeUnit,
+            s.secondaryTimeUnit,
+            Number(s.playheadSec ?? 0),
+            timeContext,
+        ).combined;
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            // 忽略复制失败
         }
-        return result;
-    }, [s.beats, s.projectSec, secPerBeat]);
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
 
     return (
         <Flex direction="column" className="h-full w-full bg-qt-graph-bg border-t border-qt-border">
@@ -3195,17 +4086,31 @@ export const PianoRollPanel: React.FC = () => {
                 justify="between"
                 className="h-8 bg-qt-base border-b border-qt-border px-2 shrink-0"
             >
-                <Flex align="center" gap="2">
+                <Flex align="center" gap="2" style={{ flex: "1 1 auto", minWidth: 0 }}>
+                    <IconButton
+                        size="1"
+                        variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
+                        color="gray"
+                        data-tooltip={tAny("sync_timeline_view_tooltip")}
+                        aria-label={tAny("sync_timeline_view")}
+                        tabIndex={-1}
+                        onClick={() => {
+                            dispatch(setParamEditorSyncTimeline(!s.paramEditorSyncTimeline));
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {s.paramEditorSyncTimeline ? <Link2Icon /> : <LinkBreak2Icon />}
+                    </IconButton>
                     <Text size="1" weight="bold" color="gray">
-                        {t("param_editor")}
+                        {tAny("param_editor_short")}
                     </Text>
-                    {/* 音高吸附和剪贴板预览按钮，紧邻 param_editor 右侧，留 8px 空白 */}
+                    {/* 音高吸附按钮，紧邻 param_editor 右侧，留 8px 空白 */}
                     <Flex gap="1" align="center" style={{ marginLeft: 8 }}>
                         <IconButton
                             size="1"
                             variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
                             color="gray"
-                            title={t("select")}
+                            data-tooltip={t("select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
                         >
@@ -3216,7 +4121,7 @@ export const PianoRollPanel: React.FC = () => {
                                 size="1"
                                 variant={s.toolModeGroup === "draw" ? "solid" : "ghost"}
                                 color="gray"
-                                title={drawToolButtonTitle}
+                                data-tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
                                 onContextMenu={(e) => {
@@ -3247,13 +4152,21 @@ export const PianoRollPanel: React.FC = () => {
                                             position: "absolute",
                                             right: -1,
                                             bottom: -1,
-                                            width: 0,
-                                            height: 0,
-                                            borderLeft: "4px solid transparent",
-                                            borderTop: "4px solid currentColor",
+                                            width: 6,
+                                            height: 6,
                                             opacity: 0.7,
                                         }}
-                                    />
+                                    >
+                                        <svg
+                                            width="6"
+                                            height="6"
+                                            viewBox="0 0 6 6"
+                                            fill="none"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                        </svg>
+                                    </Box>
                                 </Box>
                             </IconButton>
 
@@ -3261,18 +4174,7 @@ export const PianoRollPanel: React.FC = () => {
                                 <Box
                                     ref={drawToolMenuRef}
                                     data-hs-context-menu
-                                    style={{
-                                        position: "absolute",
-                                        left: 0,
-                                        top: "calc(100% + 4px)",
-                                        minWidth: 190,
-                                        padding: 4,
-                                        borderRadius: 6,
-                                        border: "1px solid var(--gray-6)",
-                                        background: "var(--gray-2)",
-                                        boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
-                                        zIndex: 30,
-                                    }}
+                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                                 >
                                     {[
                                         {
@@ -3288,23 +4190,15 @@ export const PianoRollPanel: React.FC = () => {
                                     ].map((item) => {
                                         const active = currentDrawTool === item.mode;
                                         return (
-                                            <Flex
+                                            <button
                                                 key={item.mode}
-                                                align="center"
-                                                justify="between"
-                                                px="2"
-                                                py="1"
-                                                style={{
-                                                    cursor: "pointer",
-                                                    borderRadius: 4,
-                                                    background: active
-                                                        ? "var(--accent-4)"
-                                                        : "transparent",
-                                                }}
+                                                type="button"
+                                                className={`w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover`}
                                                 onClick={() => {
                                                     dispatch(setToolMode(item.mode));
                                                     setDrawToolMenuOpen(false);
                                                 }}
+                                                onPointerDown={(e) => e.stopPropagation()}
                                             >
                                                 <Flex align="center" gap="2">
                                                     <Box
@@ -3321,7 +4215,7 @@ export const PianoRollPanel: React.FC = () => {
                                                     <Text size="1">{item.label}</Text>
                                                 </Flex>
                                                 {active ? <CheckIcon /> : null}
-                                            </Flex>
+                                            </button>
                                         );
                                     })}
                                 </Box>
@@ -3342,7 +4236,7 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             color="gray"
                             variant={activeDragDirection === "free" ? "ghost" : "solid"}
-                            title={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}`}
+                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}`}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(cycleDragDirection(activeDragDirectionTool));
@@ -3399,98 +4293,183 @@ export const PianoRollPanel: React.FC = () => {
                                 </svg>
                             )}
                         </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={effectivePitchSnapVisual ? "solid" : "ghost"}
-                            color="gray"
-                            title={`${t("pitch_snap")}: ${
-                                effectivePitchSnapVisual
-                                    ? s.pitchSnapUnit === "semitone"
-                                        ? tAny("quantize_semitone")
-                                        : tAny("quantize_scale")
-                                    : tAny("pitch_snap_off")
-                            }`}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(togglePitchSnap());
-                                void dispatch(persistUiSettings());
-                            }}
-                            onContextMenu={(e) => {
-                                e.preventDefault();
-                                setPitchSnapOpen(true);
-                            }}
-                        >
-                            {!effectivePitchSnapVisual ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
+                        <Box style={{ position: "relative" }} data-hs-context-menu>
+                            <IconButton
+                                size="1"
+                                variant={effectivePitchSnapVisual ? "solid" : "ghost"}
+                                color="gray"
+                                data-tooltip={`${t("pitch_snap")}: ${
+                                    effectivePitchSnapVisual
+                                        ? s.pitchSnapUnit === "semitone"
+                                            ? tAny("quantize_semitone")
+                                            : tAny("quantize_scale")
+                                        : tAny("pitch_snap_off")
+                                }`}
+                                tabIndex={-1}
+                                onClick={() => {
+                                    dispatch(togglePitchSnap());
+                                    void dispatch(persistUiSettings());
+                                }}
+                                onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    setPitchSnapMenuOpen(true);
+                                }}
+                            >
+                                <Box
+                                    style={{
+                                        position: "relative",
+                                        width: 15,
+                                        height: 15,
+                                    }}
                                 >
-                                    <path
-                                        d="M3 12L12 3"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <path
-                                        d="M10 2V10.5C10 11.88 8.88 13 7.5 13C6.12 13 5 11.88 5 10.5C5 9.12 6.12 8 7.5 8"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        opacity="0.6"
-                                    />
-                                </svg>
-                            ) : s.pitchSnapUnit === "semitone" ? (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
+                                    <Box
+                                        style={{
+                                            position: "absolute",
+                                            inset: 0,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                        }}
+                                    >
+                                        {!effectivePitchSnapVisual ? (
+                                            <Box
+                                                style={{
+                                                    position: "relative",
+                                                    width: 15,
+                                                    height: 15,
+                                                    opacity: 0.45,
+                                                }}
+                                            >
+                                                {pitchSnapSemitoneIcon}
+                                                <svg
+                                                    className="absolute inset-0"
+                                                    width="15"
+                                                    height="15"
+                                                    viewBox="0 0 15 15"
+                                                    fill="none"
+                                                    xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                    <path
+                                                        d="M3 3L12 12"
+                                                        stroke="currentColor"
+                                                        strokeWidth="1.2"
+                                                        strokeLinecap="round"
+                                                    />
+                                                </svg>
+                                            </Box>
+                                        ) : s.pitchSnapUnit === "semitone" ? (
+                                            pitchSnapSemitoneIcon
+                                        ) : (
+                                            pitchSnapScaleIcon
+                                        )}
+                                    </Box>
+                                    <Box
+                                        style={{
+                                            position: "absolute",
+                                            right: -1,
+                                            bottom: -1,
+                                            width: 6,
+                                            height: 6,
+                                            opacity: 0.7,
+                                        }}
+                                    >
+                                        <svg
+                                            width="6"
+                                            height="6"
+                                            viewBox="0 0 6 6"
+                                            fill="none"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                        >
+                                            <path d="M0 6L6 0V6Z" fill="currentColor" />
+                                        </svg>
+                                    </Box>
+                                </Box>
+                            </IconButton>
+
+                            {pitchSnapMenuOpen && (
+                                <Box
+                                    ref={pitchSnapMenuRef}
+                                    data-hs-context-menu
+                                    className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                                 >
-                                    <path
-                                        d="M3 5.5H12M3 9.5H12"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                    />
-                                    <circle
-                                        cx="7.5"
-                                        cy="7.5"
-                                        r="4.2"
-                                        stroke="currentColor"
-                                        strokeWidth="1"
-                                        opacity="0.7"
-                                    />
-                                </svg>
-                            ) : (
-                                <svg
-                                    width="15"
-                                    height="15"
-                                    viewBox="0 0 15 15"
-                                    fill="none"
-                                    xmlns="http://www.w3.org/2000/svg"
-                                >
-                                    <path
-                                        d="M2.5 10.5L5.5 4.5L8.5 10.5L11.5 6"
-                                        stroke="currentColor"
-                                        strokeWidth="1.2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    />
-                                    <circle cx="2.5" cy="10.5" r="1" fill="currentColor" />
-                                    <circle cx="5.5" cy="4.5" r="1" fill="currentColor" />
-                                    <circle cx="8.5" cy="10.5" r="1" fill="currentColor" />
-                                    <circle cx="11.5" cy="6" r="1" fill="currentColor" />
-                                </svg>
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            dispatch(setPitchSnapUnit("semitone"));
+                                            if (!s.pitchSnapEnabled) {
+                                                dispatch(togglePitchSnap());
+                                            }
+                                            void dispatch(persistUiSettings());
+                                            setPitchSnapMenuOpen(false);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <Flex align="center" gap="2">
+                                            <Box
+                                                style={{
+                                                    display: "flex",
+                                                    width: 15,
+                                                    height: 15,
+                                                    alignItems: "center",
+                                                    justifyContent: "center",
+                                                }}
+                                            >
+                                                {pitchSnapSemitoneIcon}
+                                            </Box>
+                                            <span>{tAny("pitch_snap_menu_semitone")}</span>
+                                        </Flex>
+                                        {s.pitchSnapUnit === "semitone" ? <CheckIcon /> : null}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            dispatch(setPitchSnapUnit("scale"));
+                                            if (!s.pitchSnapEnabled) {
+                                                dispatch(togglePitchSnap());
+                                            }
+                                            void dispatch(persistUiSettings());
+                                            setPitchSnapMenuOpen(false);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <Flex align="center" gap="2">
+                                            <Box
+                                                style={{
+                                                    display: "flex",
+                                                    width: 15,
+                                                    height: 15,
+                                                    alignItems: "center",
+                                                    justifyContent: "center",
+                                                }}
+                                            >
+                                                {pitchSnapScaleIcon}
+                                            </Box>
+                                            <span>{tAny("pitch_snap_menu_scale")}</span>
+                                        </Flex>
+                                        {s.pitchSnapUnit === "scale" ? <CheckIcon /> : null}
+                                    </button>
+                                    <div className="my-1 border-t border-qt-border" />
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() => {
+                                            setPitchSnapMenuOpen(false);
+                                            setPitchSnapOpen(true);
+                                        }}
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span>{tAny("pitch_snap_settings_action")}</span>
+                                    </button>
+                                </Box>
                             )}
-                        </IconButton>
+                        </Box>
                         <IconButton
                             size="1"
                             variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
                             color="gray"
-                            title={tAny("scale_highlight")}
+                            data-tooltip={tAny("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(
@@ -3556,88 +4535,9 @@ export const PianoRollPanel: React.FC = () => {
                         </IconButton>
                         <IconButton
                             size="1"
-                            variant={s.showClipboardPreview ? "solid" : "ghost"}
-                            color="gray"
-                            title={t("clipboard_preview")}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(toggleClipboardPreview());
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <rect
-                                    x="3"
-                                    y="1"
-                                    width="9"
-                                    height="13"
-                                    rx="1"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                                <path
-                                    d="M5.5 1V2.5H9.5V1"
-                                    stroke="currentColor"
-                                    strokeWidth="0.8"
-                                />
-                                <path
-                                    d="M5 6L7 8L10 5"
-                                    stroke="currentColor"
-                                    strokeWidth="1.2"
-                                    opacity="0.7"
-                                />
-                            </svg>
-                        </IconButton>
-                        <IconButton
-                            size="1"
-                            variant={s.showParamValuePopup ? "solid" : "ghost"}
-                            color="gray"
-                            title={t("param_value_popup")}
-                            tabIndex={-1}
-                            onClick={() => {
-                                dispatch(toggleParamValuePopup());
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
-                            <svg
-                                width="15"
-                                height="15"
-                                viewBox="0 0 15 15"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <path
-                                    d="M2.5 3.5H12.5V10.5H6.2L3.2 13.5V10.5H2.5V3.5Z"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    fill="none"
-                                />
-                                <path
-                                    d="M5 6H10"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    strokeLinecap="round"
-                                />
-                                <path
-                                    d="M5 8H8.8"
-                                    stroke="currentColor"
-                                    strokeWidth="1"
-                                    strokeLinecap="round"
-                                />
-                            </svg>
-                        </IconButton>
-                        <IconButton
-                            size="1"
                             variant={s.lockParamLinesEnabled ? "solid" : "ghost"}
                             color="gray"
-                            title={t("lock_param_lines")}
+                            data-tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(toggleLockParamLines());
@@ -3669,8 +4569,10 @@ export const PianoRollPanel: React.FC = () => {
                                 />
                             </svg>
                         </IconButton>
-                        <Flex align="center" gap="1" ml="2">
-                            <Text size="1">{tAny("edge_smoothness")}:</Text>
+                        <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
+                            <Text size="1" data-tooltip={tAny("edge_smoothness")}>
+                                {tAny("edge_smoothness_short")}:
+                            </Text>
                             <input
                                 type="range"
                                 min={0}
@@ -3700,7 +4602,13 @@ export const PianoRollPanel: React.FC = () => {
                                 onKeyUp={() => {
                                     void dispatch(persistUiSettings());
                                 }}
-                                style={{ width: 120 }}
+                                style={{
+                                    // 根据工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时缩到 48px
+                                    flex: "1 1 auto",
+                                    width: 120,
+                                    minWidth: 48,
+                                    maxWidth: 120,
+                                }}
                             />
                             <Text size="1" style={{ minWidth: 36, textAlign: "right" }}>
                                 {Math.round(s.edgeSmoothnessPercent)}%
@@ -3711,201 +4619,34 @@ export const PianoRollPanel: React.FC = () => {
 
                 {/* Pitch Snap 设置弹窗 */}
                 <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
+                <TimelineDisplaySettingsDialog
+                    open={timeDisplaySettingsOpen}
+                    onOpenChange={setTimeDisplaySettingsOpen}
+                />
 
                 <Flex gap="2" align="center">
                     <Flex gap="1" align="center">
-                        {selectedIsChildTrack && childPitchOffsetCentsParam ? (
-                            <Button
-                                size="1"
-                                variant={
-                                    editParam === childPitchOffsetCentsParam ? "solid" : "soft"
-                                }
-                                color={editParam === childPitchOffsetCentsParam ? "cyan" : "gray"}
-                                onClick={() => dispatch(setEditParam(childPitchOffsetCentsParam))}
-                                style={{ cursor: "pointer" }}
-                            >
-                                {t("child_pitch_mode_cents")}
-                            </Button>
-                        ) : null}
-                        {selectedIsChildTrack && childPitchOffsetDegreesParam ? (
-                            <Button
-                                size="1"
-                                variant={
-                                    editParam === childPitchOffsetDegreesParam ? "solid" : "soft"
-                                }
-                                color={editParam === childPitchOffsetDegreesParam ? "cyan" : "gray"}
-                                onClick={() => dispatch(setEditParam(childPitchOffsetDegreesParam))}
-                                style={{ cursor: "pointer" }}
-                            >
-                                {t("child_pitch_mode_degrees")}
-                            </Button>
-                        ) : null}
-                        <Button
-                            size="1"
-                            variant={editParam === "pitch" ? "solid" : "soft"}
-                            color={editParam === "pitch" ? "grass" : "gray"}
-                            onClick={() => dispatch(setEditParam("pitch"))}
-                            style={{ cursor: "pointer" }}
-                        >
-                            {t("pitch")}
-                        </Button>
-                        {/*  ?editParam 不是 pitch 时，显示 pitch 副参数开 ?*/}
-                        {editParam !== "pitch" && pitchEnabled ? (
-                            <IconButton
-                                size="1"
-                                variant={secondaryParamVisible["pitch"] ? "soft" : "ghost"}
-                                color={secondaryParamVisible["pitch"] ? "blue" : "gray"}
-                                onClick={() => toggleSecondaryParam("pitch")}
-                                style={{ cursor: "pointer" }}
-                                title={
-                                    secondaryParamVisible["pitch"]
-                                        ? t("hide_secondary_param")
-                                        : t("show_secondary_param")
-                                }
-                            >
-                                {secondaryParamVisible["pitch"] ? (
-                                    <EyeOpenIcon />
-                                ) : (
-                                    <EyeClosedIcon />
-                                )}
-                            </IconButton>
-                        ) : null}
-                        {/* 由后端 processorParams 驱动的动态参数按钮 */}
-                        {processorParams.map((p) => (
-                            <React.Fragment key={p.id}>
-                                <Button
-                                    size="1"
-                                    variant={editParam === p.id ? "solid" : "soft"}
-                                    color={editParam === p.id ? "amber" : "gray"}
-                                    onClick={() => dispatch(setEditParam(p.id))}
-                                    style={{ cursor: "pointer" }}
-                                >
-                                    {getProcessorParamLabel(p)}
-                                </Button>
-                                {editParam !== p.id ? (
-                                    <IconButton
-                                        size="1"
-                                        variant={secondaryParamVisible[p.id] ? "soft" : "ghost"}
-                                        color={secondaryParamVisible[p.id] ? "orange" : "gray"}
-                                        onClick={() => toggleSecondaryParam(p.id)}
-                                        style={{ cursor: "pointer" }}
-                                        title={
-                                            secondaryParamVisible[p.id]
-                                                ? t("hide_secondary_param")
-                                                : t("show_secondary_param")
-                                        }
-                                    >
-                                        {secondaryParamVisible[p.id] ? (
-                                            <EyeOpenIcon />
-                                        ) : (
-                                            <EyeClosedIcon />
-                                        )}
-                                    </IconButton>
-                                ) : null}
-                            </React.Fragment>
-                        ))}
-                    </Flex>
-
-                    {rootTrack ? (
-                        <Flex align="center" gap="2">
-                            <Text size="1" color="gray">
-                                {t("algo_label")}
-                            </Text>
-                            <Select.Root
-                                value={
-                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
-                                        rootTrack.pitchAnalysisAlgo,
-                                    )
-                                        ? rootTrack.pitchAnalysisAlgo
-                                        : "nsf_hifigan_onnx"
-                                }
-                                onValueChange={(v) => {
-                                    if (!rootTrackId) return;
-                                    dispatch(
-                                        setTrackStateRemote({
-                                            trackId: rootTrackId,
-                                            pitchAnalysisAlgo: v,
-                                        }),
-                                    );
-                                }}
-                            >
-                                <Select.Trigger
-                                    className="min-w-[140px]"
-                                    onWheel={(event) => {
-                                        const currentValue = [
-                                            "world_dll",
-                                            "nsf_hifigan_onnx",
-                                            "vslib",
-                                            "none",
-                                        ].includes(rootTrack.pitchAnalysisAlgo)
-                                            ? rootTrack.pitchAnalysisAlgo
-                                            : "nsf_hifigan_onnx";
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue,
-                                            options: [
-                                                "world_dll",
-                                                "nsf_hifigan_onnx",
-                                                "vslib",
-                                                "none",
-                                            ],
-                                            onChange: (next) => {
-                                                if (!rootTrackId) return;
-                                                dispatch(
-                                                    setTrackStateRemote({
-                                                        trackId: rootTrackId,
-                                                        pitchAnalysisAlgo: next,
-                                                    }),
-                                                );
-                                            },
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="world_dll">world</Select.Item>
-                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
-                                    <Select.Item value="vslib">vslib</Select.Item>
-                                    <Select.Item value="none">{t("none")}</Select.Item>
-                                </Select.Content>
-                            </Select.Root>
-                            {processorStaticParams.map((param) => {
-                                if (param.kind.type !== "static_enum") return null;
-                                const currentValue =
-                                    processorStaticValues[param.id] ?? param.kind.default_value;
-                                return (
-                                    <Flex key={param.id} align="center" gap="1">
-                                        <Text size="1" color="gray">
-                                            {getProcessorParamLabel(param)}
-                                        </Text>
-                                        {param.kind.options.map(([label, value]) => (
-                                            <Button
-                                                key={`${param.id}-${value}`}
-                                                size="1"
-                                                variant={currentValue === value ? "solid" : "soft"}
-                                                color={currentValue === value ? "blue" : "gray"}
-                                                onClick={() => {
-                                                    void handleStaticParamChange(param.id, value);
-                                                }}
-                                                style={{
-                                                    cursor: "pointer",
-                                                }}
-                                            >
-                                                {getStaticOptionLabel(param.id, label, value)}
-                                            </Button>
-                                        ))}
-                                    </Flex>
-                                );
-                            })}
-                            {editParam === "pitch" ? (
+                        {/* 参考轨道组 / 导入 MIDI：仅当切换到“音高”参数时显示（位置固定在“音高”左侧）。
+                            按钮样式与其他工具按钮一致（Radix soft），简写 + ToolTip 保留全称。 */}
+                        {rootTrack && editParam === "pitch" ? (
+                            <React.Fragment>
                                 <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger className="shrink-0 rounded border border-qt-border bg-qt-panel px-2 py-1 text-xs text-qt-text hover:bg-qt-hover">
-                                        {buildReferenceRootTrackTriggerElement(
-                                            `${t("reference_root_tracks")}${
-                                                visibleReferenceRootTrackIds.length > 0
-                                                    ? ` (${visibleReferenceRootTrackIds.length})`
-                                                    : ""
-                                            }`,
-                                        )}
+                                    <DropdownMenu.Trigger data-tooltip={t("reference_root_tracks")}>
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            color="gray"
+                                            style={{ cursor: "pointer" }}
+                                        >
+                                            {buildReferenceRootTrackTriggerElement(
+                                                `${tAny("reference_root_tracks_short")}${
+                                                    visibleReferenceRootTrackIds.length > 0
+                                                        ? ` (${visibleReferenceRootTrackIds.length})`
+                                                        : ""
+                                                }`,
+                                            )}
+                                            <ChevronDownIcon width="12" height="12" />
+                                        </Button>
                                     </DropdownMenu.Trigger>
                                     <DropdownMenu.Content variant="soft" color="gray">
                                         <DropdownMenu.Item
@@ -3969,20 +4710,371 @@ export const PianoRollPanel: React.FC = () => {
                                         )}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
-                            ) : null}
-                            {editParam === "pitch" ? (
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="blue"
-                                    onClick={handleOpenMidiDialog}
-                                    disabled={!pitchEnabled}
-                                    style={{ cursor: "pointer" }}
-                                    title={pitchHardDisableReason ?? undefined}
+                                <span
+                                    className="inline-flex"
+                                    data-tooltip={pitchHardDisableReason ?? tAny("midi_import")}
                                 >
-                                    {(t as (key: string) => string)("midi_import")}
-                                </Button>
-                            ) : null}
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="blue"
+                                        onClick={handleOpenMidiDialog}
+                                        disabled={!pitchEnabled}
+                                        style={{ cursor: "pointer" }}
+                                    >
+                                        {tAny("midi_import")}
+                                    </Button>
+                                </span>
+                            </React.Fragment>
+                        ) : null}
+                        {selectedIsChildTrack &&
+                        (childPitchOffsetCentsParam || childPitchOffsetDegreesParam) ? (
+                            <DropdownMenu.Root>
+                                <ParamToolbarPill
+                                    label={pitchGroupLabel}
+                                    labelTooltip={pitchGroupTooltip}
+                                    active={pitchGroupActive}
+                                    accent="grass"
+                                    onSelect={() => dispatch(setEditParam("pitch"))}
+                                    eyeMode={
+                                        pitchGroupActive
+                                            ? "main"
+                                            : secondaryParamVisible["pitch"]
+                                              ? "on"
+                                              : "off"
+                                    }
+                                    onToggleEye={() => toggleSecondaryParam("pitch")}
+                                    eyeTooltip={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        secondaryParamVisible["pitch"]
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    dropdown={
+                                        <DropdownMenu.Trigger
+                                            className="param-pill__seg param-pill__seg--chev"
+                                            data-tooltip={pitchGroupTooltip}
+                                            tabIndex={-1}
+                                        >
+                                            <ChevronDownIcon width="12" height="12" />
+                                        </DropdownMenu.Trigger>
+                                    }
+                                />
+                                <DropdownMenu.Content variant="soft" color="gray">
+                                    <DropdownMenu.RadioGroup
+                                        value={editParam}
+                                        onValueChange={(value) => dispatch(setEditParam(value))}
+                                    >
+                                        <DropdownMenu.RadioItem value="pitch">
+                                            {t("child_pitch_root_option")}
+                                        </DropdownMenu.RadioItem>
+                                        {childPitchOffsetCentsParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetCentsParam}
+                                            >
+                                                {t("child_pitch_cents_option")}
+                                            </DropdownMenu.RadioItem>
+                                        ) : null}
+                                        {childPitchOffsetDegreesParam ? (
+                                            <DropdownMenu.RadioItem
+                                                value={childPitchOffsetDegreesParam}
+                                            >
+                                                {t("child_pitch_degrees_option")}
+                                            </DropdownMenu.RadioItem>
+                                        ) : null}
+                                    </DropdownMenu.RadioGroup>
+                                </DropdownMenu.Content>
+                            </DropdownMenu.Root>
+                        ) : (
+                            <ParamToolbarPill
+                                label={t("param_btn_pitch")}
+                                labelTooltip={t("pitch")}
+                                active={editParam === "pitch"}
+                                accent="grass"
+                                onSelect={() => dispatch(setEditParam("pitch"))}
+                                eyeMode={
+                                    editParam === "pitch"
+                                        ? "main"
+                                        : secondaryParamVisible["pitch"]
+                                          ? "on"
+                                          : "off"
+                                }
+                                onToggleEye={() => toggleSecondaryParam("pitch")}
+                                eyeTooltip={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("secondary_overlay_tooltip_visible")
+                                        : t("secondary_overlay_tooltip_hidden")
+                                }
+                                eyeLabel={
+                                    secondaryParamVisible["pitch"]
+                                        ? t("hide_secondary_param")
+                                        : t("show_secondary_param")
+                                }
+                            />
+                        )}
+                        {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
+                        {orderedProcessorParams.map((p) => {
+                            if (p.id === "formant_shift_cents") {
+                                return (
+                                    <FormantParamButton
+                                        key={p.id}
+                                        rootParamId={p.id}
+                                        rootLabel={getProcessorParamShortLabel(p)}
+                                        rootMenuLabel={t("child_formant_root_option")}
+                                        rootTooltip={getProcessorParamLabel(p)}
+                                        childParamId={
+                                            selectedIsChildTrack ? childFormantOffsetParam : null
+                                        }
+                                        childLabel={t("child_formant_mode")}
+                                        childMenuLabel={t("child_formant_offset_option")}
+                                        rootActive={editParam === p.id}
+                                        childActive={editParam === childFormantOffsetParam}
+                                        secondaryVisible={secondaryParamVisible[p.id] ?? false}
+                                        hideSecondaryLabel={t("hide_secondary_param")}
+                                        showSecondaryLabel={t("show_secondary_param")}
+                                        hideSecondaryTooltip={t("secondary_overlay_tooltip_hidden")}
+                                        showSecondaryTooltip={t(
+                                            "secondary_overlay_tooltip_visible",
+                                        )}
+                                        onSelectRoot={() => dispatch(setEditParam(p.id))}
+                                        onSelectChild={() => {
+                                            if (childFormantOffsetParam) {
+                                                dispatch(setEditParam(childFormantOffsetParam));
+                                            }
+                                        }}
+                                        onToggleSecondary={() => toggleSecondaryParam(p.id)}
+                                    />
+                                );
+                            }
+
+                            const paramActive = editParam === p.id;
+                            const paramEyeVisible = secondaryParamVisible[p.id] ?? false;
+
+                            // nsf-hifigan：把“气声开关”以图标片段融合进“气声音量”药丸。
+                            let breathTrailing: React.ReactNode = null;
+                            if (p.id === "breath_gain") {
+                                const breathDesc = processorStaticParams.find(
+                                    (sp) => sp.id === "breath_enabled",
+                                );
+                                const breathDefault =
+                                    breathDesc && breathDesc.kind.type === "static_enum"
+                                        ? breathDesc.kind.default_value
+                                        : 0;
+                                const breathOn =
+                                    (processorStaticValues["breath_enabled"] ?? breathDefault) ===
+                                    1;
+                                breathTrailing = (
+                                    <button
+                                        type="button"
+                                        tabIndex={-1}
+                                        className="param-pill__seg param-pill__seg--breath"
+                                        data-tooltip={
+                                            breathOn
+                                                ? t("breath_tooltip_on")
+                                                : t("breath_tooltip_off")
+                                        }
+                                        aria-label={`${t("breath_mode_label")}: ${
+                                            breathOn ? t("switch_on") : t("switch_off")
+                                        }`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleStaticParamChange(
+                                                "breath_enabled",
+                                                breathOn ? 0 : 1,
+                                            );
+                                        }}
+                                    >
+                                        <BreathAirIcon off={!breathOn} />
+                                    </button>
+                                );
+                            }
+
+                            return (
+                                <ParamToolbarPill
+                                    key={p.id}
+                                    label={getProcessorParamShortLabel(p)}
+                                    labelTooltip={getProcessorParamLabel(p)}
+                                    active={paramActive}
+                                    accent="amber"
+                                    onSelect={() => dispatch(setEditParam(p.id))}
+                                    eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
+                                    onToggleEye={() => toggleSecondaryParam(p.id)}
+                                    eyeTooltip={
+                                        paramEyeVisible
+                                            ? t("secondary_overlay_tooltip_visible")
+                                            : t("secondary_overlay_tooltip_hidden")
+                                    }
+                                    eyeLabel={
+                                        paramEyeVisible
+                                            ? t("hide_secondary_param")
+                                            : t("show_secondary_param")
+                                    }
+                                    trailing={breathTrailing}
+                                />
+                            );
+                        })}
+                    </Flex>
+
+                    {rootTrack ? (
+                        <Flex align="center" gap="2">
+                            {processorStaticParams.map((param) => {
+                                if (param.kind.type !== "static_enum") return null;
+                                const currentValue =
+                                    processorStaticValues[param.id] ?? param.kind.default_value;
+
+                                // 气声开关已融合进“气声音量”参数的药丸中（见下方
+                                // breath_gain 的 trailing 片段），此处不再单独渲染。
+                                if (param.id === "breath_enabled") {
+                                    return null;
+                                }
+
+                                // vslib 的合成模式：改为支持滚轮切换的下拉栏。
+                                if (param.id === "synth_mode") {
+                                    const stringOptions = param.kind.options.map(([, value]) =>
+                                        String(value),
+                                    );
+                                    const currentString = String(currentValue);
+                                    const selectOptions = param.kind.options.map(
+                                        ([label, value]) => ({
+                                            value,
+                                            label: getStaticOptionLabel(param.id, label, value),
+                                        }),
+                                    );
+                                    const currentOptionLabel =
+                                        selectOptions.find(
+                                            (opt) => String(opt.value) === currentString,
+                                        )?.label ?? currentString;
+                                    return (
+                                        <Select.Root
+                                            key={param.id}
+                                            value={currentString}
+                                            onValueChange={(v) =>
+                                                void handleStaticParamChange(param.id, Number(v))
+                                            }
+                                        >
+                                            <Select.Trigger
+                                                // 与“算法”下拉栏一致使用固定宽度，选项切换时宽度不变
+                                                className="w-[140px]"
+                                                data-tooltip={`${t("vslib_synth_mode_label")}: ${currentOptionLabel}`}
+                                                onWheel={(event) => {
+                                                    applySelectWheelChange({
+                                                        event,
+                                                        currentValue: currentString,
+                                                        options: stringOptions,
+                                                        onChange: (next) =>
+                                                            void handleStaticParamChange(
+                                                                param.id,
+                                                                Number(next),
+                                                            ),
+                                                    });
+                                                }}
+                                            />
+                                            <Select.Content>
+                                                {selectOptions.map((opt) => (
+                                                    <Select.Item
+                                                        key={`${param.id}-${opt.value}`}
+                                                        value={String(opt.value)}
+                                                    >
+                                                        {opt.label}
+                                                    </Select.Item>
+                                                ))}
+                                            </Select.Content>
+                                        </Select.Root>
+                                    );
+                                }
+
+                                return (
+                                    <Flex key={param.id} align="center" gap="1">
+                                        <Text
+                                            size="1"
+                                            color="gray"
+                                            data-tooltip={getProcessorParamLabel(param)}
+                                        >
+                                            {getProcessorParamLabel(param)}
+                                        </Text>
+                                        {param.kind.options.map(([label, value]) => (
+                                            <Button
+                                                key={`${param.id}-${value}`}
+                                                size="1"
+                                                variant={currentValue === value ? "solid" : "soft"}
+                                                color={currentValue === value ? "blue" : "gray"}
+                                                onClick={() => {
+                                                    void handleStaticParamChange(param.id, value);
+                                                }}
+                                                style={{
+                                                    cursor: "pointer",
+                                                }}
+                                            >
+                                                {getStaticOptionLabel(param.id, label, value)}
+                                            </Button>
+                                        ))}
+                                    </Flex>
+                                );
+                            })}
+                            <Text size="1" color="gray" data-tooltip={tAny("algo_label")}>
+                                {tAny("algo_label_short")}
+                            </Text>
+                            <Select.Root
+                                value={
+                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
+                                        rootTrack.pitchAnalysisAlgo,
+                                    )
+                                        ? rootTrack.pitchAnalysisAlgo
+                                        : "nsf_hifigan_onnx"
+                                }
+                                onValueChange={(v) => {
+                                    if (!rootTrackId) return;
+                                    dispatch(
+                                        setTrackStateRemote({
+                                            trackId: rootTrackId,
+                                            pitchAnalysisAlgo: v,
+                                        }),
+                                    );
+                                }}
+                            >
+                                <Select.Trigger
+                                    className="min-w-[140px]"
+                                    onWheel={(event) => {
+                                        const currentValue = [
+                                            "world_dll",
+                                            "nsf_hifigan_onnx",
+                                            "vslib",
+                                            "none",
+                                        ].includes(rootTrack.pitchAnalysisAlgo)
+                                            ? rootTrack.pitchAnalysisAlgo
+                                            : "nsf_hifigan_onnx";
+                                        applySelectWheelChange({
+                                            event,
+                                            currentValue,
+                                            options: [
+                                                "world_dll",
+                                                "nsf_hifigan_onnx",
+                                                "vslib",
+                                                "none",
+                                            ],
+                                            onChange: (next) => {
+                                                if (!rootTrackId) return;
+                                                dispatch(
+                                                    setTrackStateRemote({
+                                                        trackId: rootTrackId,
+                                                        pitchAnalysisAlgo: next,
+                                                    }),
+                                                );
+                                            },
+                                        });
+                                    }}
+                                />
+                                <Select.Content>
+                                    <Select.Item value="world_dll">world</Select.Item>
+                                    <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
+                                    <Select.Item value="vslib">vslib</Select.Item>
+                                    <Select.Item value="none">{t("none")}</Select.Item>
+                                </Select.Content>
+                            </Select.Root>
                         </Flex>
                     ) : null}
                 </Flex>
@@ -3993,7 +5085,7 @@ export const PianoRollPanel: React.FC = () => {
                 <Flex className="px-3 py-2 bg-qt-base border-b border-qt-border">
                     <ProgressBar
                         percentage={asyncRefresh.progress}
-                        label={(t as any)("refreshing_pitch_data") || "Refreshing pitch data"}
+                        label={tAny("refreshing_pitch_data") || "Refreshing pitch data"}
                         showCancel={true}
                         onCancel={async () => {
                             // Task 6.6: 取消按钮点击时调 ?cancelRefresh()
@@ -4030,7 +5122,7 @@ export const PianoRollPanel: React.FC = () => {
                         color="red"
                         onClick={() => rootTrackId && void asyncRefresh.startRefresh(rootTrackId)}
                     >
-                        {(t as any)("retry") || "Retry"}
+                        {tAny("retry") || "Retry"}
                     </Button>
                 </Flex>
             )}
@@ -4040,9 +5132,19 @@ export const PianoRollPanel: React.FC = () => {
                 {/* Left axis + corner */}
                 <Flex direction="column" className="shrink-0">
                     <Box
-                        className="h-6 bg-qt-window border-b border-qt-border"
-                        style={{ width: AXIS_W }}
-                    />
+                        className="bg-qt-window border-b border-qt-border relative"
+                        style={{
+                            width: AXIS_W,
+                            height: timeRulerHeightPx(
+                                Boolean(
+                                    s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible,
+                                ),
+                            ),
+                        }}
+                    >
+                        {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
+                        <TempoMapCornerButton />
+                    </Box>
                     <div
                         ref={axisWrapRef}
                         className="bg-qt-window border-r border-qt-border relative"
@@ -4057,14 +5159,39 @@ export const PianoRollPanel: React.FC = () => {
                     <TimeRuler
                         contentWidth={contentWidth}
                         scrollLeft={scrollLeft}
-                        bars={timeRulerBars}
+                        ticks={timeRulerTicks}
                         pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
                         secPerBeat={secPerBeat}
+                        viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}
                         playheadLineRef={rulerPlayheadLineRef}
                         playheadHeadRef={rulerPlayheadHeadRef}
                         contentRef={rulerContentRef}
+                        timeContext={timeContext}
+                        primaryUnit={s.primaryTimeUnit}
+                        secondaryUnit={s.secondaryTimeUnit}
+                        onPrimaryUnitChange={handlePrimaryUnitChange}
+                        onSecondaryUnitChange={handleSecondaryUnitChange}
+                        onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                        onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                        t={t as (key: string) => string}
+                        tempoMap={s.tempoMap}
+                        tempoMapVisible={s.tempoMapVisible}
+                        projectSec={dynamicProjectSec}
+                        grid={s.grid}
+                        snapEnabled={s.snapEnabled}
+                        timelineSnap={s.timelineSnap}
+                        projectScale={effectiveProjectScale}
+                        projectScaleName={
+                            s.project.useCustomScale
+                                ? (s.project.customScale?.name ?? undefined)
+                                : undefined
+                        }
+                        fallbackDenominator={s.project.timeSignatureDenominator}
+                        customScalePresets={s.customScalePresets}
+                        onTempoMapChange={handleTempoMapChange}
+                        onTempoMapCommit={handleTempoMapCommit}
                         onMouseDown={(e) => {
                             document.body.setAttribute("data-hs-focus-window", "pianoRoll");
                             interactions.onRulerMouseDown(e);
@@ -4102,8 +5229,18 @@ export const PianoRollPanel: React.FC = () => {
                                     pxPerBeat={pxPerBeat}
                                     grid={s.grid}
                                     beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                    visible={s.timelineSnap.gridVisible}
+                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                    swingPercent={
+                                        s.timelineSnap.swingEnabled
+                                            ? s.timelineSnap.swingPercent
+                                            : 0
+                                    }
                                     layerRef={gridLayerRef}
                                     boundaryRef={gridBoundaryRef}
+                                    weakLineXs={tempoGridLineXs?.weak ?? null}
+                                    strongLineXs={tempoGridLineXs?.strong ?? null}
+                                    sticky
                                 />
 
                                 <canvas
@@ -4143,7 +5280,7 @@ export const PianoRollPanel: React.FC = () => {
                         <div
                             className="relative"
                             style={{
-                                width: contentWidth,
+                                width: paddedContentWidth,
                                 height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
                                 pointerEvents: "none",
                             }}
@@ -4185,6 +5322,14 @@ export const PianoRollPanel: React.FC = () => {
                 onMultiTrackMergeChange={handleMultiTrackMergeChange}
                 closeLeadingGap={closeLeadingGap}
                 onCloseLeadingGapChange={handleCloseLeadingGapChange}
+                importTempoMapEnabled={importTempoMapEnabled}
+                onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+                importTempoMapTempo={importTempoMapTempo}
+                onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+                importTempoMapTimeSignature={importTempoMapTimeSignature}
+                onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
+                importTempoMapKeySignature={importTempoMapKeySignature}
+                onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
             />
             {ctxMenu && s.toolMode === "select" && (
                 <EditContextMenu

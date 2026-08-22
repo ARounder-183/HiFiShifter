@@ -3,9 +3,12 @@
  */
 import React from "react";
 
+import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
+import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
+import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
 import { WaveformTrackCanvas } from "../../waveform/WaveformTrackCanvas";
@@ -104,7 +107,8 @@ type TrackLaneProps = {
             | "stretch_right"
             | "fade_in"
             | "fade_out"
-            | "gain",
+            | "gain"
+            | "crossfade_edges",
     ) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
@@ -124,17 +128,19 @@ type TrackLaneProps = {
 
     clearContextMenu: () => void;
 
-    /** 当前正在重命名的 clipId（来自右键菜单触发） */
+    /** 当前正在重命名的 clipId（来自右键菜单或双击名称） */
     renamingClipId?: string | null;
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
     disabledGroupIds?: string[];
     onToggleGroupDisabled?: (groupId: string) => void;
 
-    /** Ctrl+拖动复制时的 ghost 预览信息 */
+    /** 复制拖动时的 ghost 预览信息 */
     ghostDrag?: GhostDragInfo | null;
     /** 当前拖拽处于纯竖直换轨锁定时，高亮的目标轨道 */
     verticalTrackLockTrackId?: string | null;
@@ -173,8 +179,10 @@ export const TrackLane = React.memo(
             recordLastClickPosition,
             clearContextMenu,
             renamingClipId,
+            onRenameStart,
             onRenameCommit,
             onRenameDone,
+            onRenameClickCandidate,
             onGainCommit,
             onFormantMorphCommit,
             activeGroupIds,
@@ -279,6 +287,11 @@ export const TrackLane = React.memo(
         const isClipItemTarget = React.useCallback((target: EventTarget | null) => {
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
         }, []);
+        const isOverlapLayerTarget = React.useCallback((target: EventTarget | null) => {
+            return (
+                (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null
+            );
+        }, []);
         const primeSelection = React.useCallback(
             (clipId: string, shouldPrimeSelection: boolean, clientX?: number) => {
                 if (!shouldPrimeSelection) {
@@ -308,12 +321,17 @@ export const TrackLane = React.memo(
                 const altKeyDown = Boolean(
                     event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const primaryModifierDown = isPrimaryModifierDown(event);
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
-                const allowSeek = !altKeyDown && !ctrlOrMeta && !event.shiftKey;
+                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
+                const allowSeek = !altKeyDown && !primaryModifierDown && !event.shiftKey;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clip.id)
+                        : selectedClipId === clip.id;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const startX = event.clientX;
                 const startY = event.clientY;
                 let moved = false;
@@ -321,6 +339,10 @@ export const TrackLane = React.memo(
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
+
+                if (primedSelection) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== event.pointerId) return;
@@ -337,7 +359,7 @@ export const TrackLane = React.memo(
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clip.id, true, event.clientX);
                         }
                         if (allowSeek) {
@@ -355,6 +377,9 @@ export const TrackLane = React.memo(
             [
                 altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
                 onShiftRangeSelect,
                 primeSelection,
                 rangeSelectAnchorClipId,
@@ -377,11 +402,16 @@ export const TrackLane = React.memo(
                 const altKeyDown = Boolean(
                     event.altKey || event.nativeEvent.getModifierState?.("Alt"),
                 );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const primaryModifierDown = isPrimaryModifierDown(event);
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
+                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clipId)
+                        : selectedClipId === clipId;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const mode =
                     edge === "trim_left"
                         ? stretchActive
@@ -398,6 +428,10 @@ export const TrackLane = React.memo(
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
+
+                if (primedSelection) {
+                    primeSelection(clipId, true, event.clientX);
+                }
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== pointerId || dragStarted) return;
@@ -422,7 +456,7 @@ export const TrackLane = React.memo(
                             onShiftRangeSelect(clipId, shiftRangeAnchorClipId, startX);
                             return;
                         }
-                        if (shouldPrimeSelection) {
+                        if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clipId, true, event.clientX);
                         }
                         seekFromClientX(ev.clientX, true);
@@ -436,6 +470,9 @@ export const TrackLane = React.memo(
             [
                 altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
                 onCtrlToggleSelect,
                 onShiftRangeSelect,
                 primeSelection,
@@ -465,7 +502,10 @@ export const TrackLane = React.memo(
                     );
                 }}
                 onContextMenuCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (
+                        isClipItemTarget(event.target) ||
+                        isOverlapLayerTarget(event.target)
+                    ) {
                         return;
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
@@ -481,7 +521,10 @@ export const TrackLane = React.memo(
                     openContextMenu(hit.clipId, event.clientX, event.clientY);
                 }}
                 onPointerDownCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (
+                        isClipItemTarget(event.target) ||
+                        isOverlapLayerTarget(event.target)
+                    ) {
                         return;
                     }
                     if (event.button !== 0) {
@@ -577,8 +620,10 @@ export const TrackLane = React.memo(
                             recordLastClickPosition={recordLastClickPosition}
                             clearContextMenu={clearContextMenu}
                             triggerRename={renamingClipId === clip.id}
+                            onRenameStart={onRenameStart}
                             onRenameCommit={onRenameCommit}
                             onRenameDone={onRenameDone}
+                            onRenameClickCandidate={onRenameClickCandidate}
                             onGainCommit={onGainCommit}
                             onFormantMorphCommit={onFormantMorphCommit}
                             activeGroupIds={activeGroupIds}
@@ -588,7 +633,25 @@ export const TrackLane = React.memo(
                         />
                     );
                 })}
-                {/* Ghost clip 预览：Ctrl+拖动复制时显示半透明副本 */}
+                {/* 交叉（重叠）区确定性编辑层：双方边缘/淡入淡出都可在合适位置编辑 */}
+                <OverlapEditLayer
+                    trackClips={trackClips}
+                    pxPerSec={pxPerSec}
+                    rowHeight={rowHeight}
+                    altPressed={altPressed}
+                    selectedClipId={selectedClipId}
+                    multiSelectedClipIds={multiSelectedClipIds}
+                    multiSelectedSet={multiSelectedSet}
+                    ensureSelected={ensureSelected}
+                    selectClipRemote={selectClipRemote}
+                    recordLastClickPosition={recordLastClickPosition}
+                    startEditDrag={startEditDrag as (
+                        e: React.PointerEvent,
+                        clipId: string,
+                        type: Parameters<typeof startEditDrag>[2],
+                    ) => void}
+                />
+                {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
                     const ghostLeft = Math.max(0, ghostStartSec * pxPerSec);
                     const ghostWidth = Math.max(1, clip.lengthSec * pxPerSec);
@@ -657,8 +720,10 @@ export const TrackLane = React.memo(
             prev.recordLastClickPosition === next.recordLastClickPosition &&
             prev.clearContextMenu === next.clearContextMenu &&
             prev.renamingClipId === next.renamingClipId &&
+            prev.onRenameStart === next.onRenameStart &&
             prev.onRenameCommit === next.onRenameCommit &&
             prev.onRenameDone === next.onRenameDone &&
+            prev.onRenameClickCandidate === next.onRenameClickCandidate &&
             prev.onGainCommit === next.onGainCommit &&
             prev.onFormantMorphCommit === next.onFormantMorphCommit &&
             prev.ghostDrag === next.ghostDrag &&

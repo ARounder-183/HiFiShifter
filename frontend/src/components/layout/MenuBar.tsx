@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -19,16 +19,33 @@ import {
     setDefaultStretchAlgorithm,
     setOrtEp,
     setOrtDeviceId,
+    setPrimaryTimeUnit,
+    setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
+    toggleClipboardPreview,
+    toggleParamValuePopup,
+    toggleTempoMapVisible,
     setProjectStretchSettingsRemote,
 } from "../../features/session/sessionSlice";
+import type { TimeUnit } from "../../features/session/sessionTypes";
+import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
+import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
+import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
+import type { ScaleLike } from "../../utils/musicalScales";
+import {
+    getPianoRollSelection,
+    subscribePianoRollSelection,
+} from "../../utils/pianoRollSelectionBus";
 
 
 
 import {
+    importAudioAtPosition,
     importAudioFromDialog,
     importMultipleAudioAtPosition,
 } from "../../features/session/thunks/importThunks";
+import type { MediaAudioStream } from "../../services/api/fileBrowser";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { GlobeIcon } from "@radix-ui/react-icons";
 import {
@@ -66,20 +83,41 @@ interface MenuBarProps {
     onNewProject: () => void;
     onOpenProject: () => void;
     onOpenRecentProject: (projectPath: string) => void;
+    onRecaptureMissingMedia: () => void;
     onExit: () => void;
     onImportMidiFromMenu: () => void;
+    onImportProject: () => void;
     autoBackupSettings: AutoBackupSettings;
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
+    autoReloadModifiedMedia: boolean;
+    onAutoReloadModifiedMediaChange: (value: boolean) => void;
+}
+
+function timeUnitLabelKey(unit: TimeUnit): string {
+    switch (unit) {
+        case "barBeats":
+            return "time_unit_bar_beats";
+        case "barDivisions":
+            return "time_unit_bar_divisions";
+        case "seconds":
+            return "time_unit_seconds";
+        case "clock":
+            return "time_unit_clock";
+    }
 }
 
 export const MenuBar: React.FC<MenuBarProps> = ({
     onNewProject,
     onOpenProject,
     onOpenRecentProject,
+    onRecaptureMissingMedia,
     onExit,
     onImportMidiFromMenu,
+    onImportProject,
     autoBackupSettings,
     onAutoBackupSettingsSaved,
+    autoReloadModifiedMedia,
+    onAutoReloadModifiedMediaChange,
 }) => {
     const { t, setLocale } = useI18n();
     const tAny = t as (key: string) => string;
@@ -89,6 +127,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [appearanceDialogOpen, setAppearanceDialogOpen] = useState(false);
+    const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
+    const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
@@ -134,6 +174,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         trackId: string | null;
         startSec: number;
     } | null>(null);
+    const [mediaStreamImport, setMediaStreamImport] = useState<{
+        path: string;
+        streams: MediaAudioStream[];
+        trackId: string | null;
+        startSec: number;
+    } | null>(null);
 
     const isPitchParam = s.editParam === "pitch";
     const isChildCentsParam = isChildPitchOffsetCentsParam(s.editParam);
@@ -171,6 +217,45 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         s.project.useCustomScale && s.project.customScale
             ? `${tAny("project_scale_prefix")} (${tAny("custom_scale_short")})`
             : `${tAny("project_scale_prefix")} (${SCALE_LABELS[s.project.baseScale]})`;
+
+    // ── “工程音阶”选项受 Tempo Map 影响的提示 ─────────────────────────
+    // 读取参数编辑器当前选区（帧范围）判断是否跨过音阶变化点；
+    // 无选区时按整个工程判断（存在音阶变化点即提示）。
+    const [selectionVersion, setSelectionVersion] = useState(0);
+    useEffect(
+        () =>
+            subscribePianoRollSelection(() => {
+                setSelectionVersion((v) => v + 1);
+            }),
+        [],
+    );
+    const tempoMapScaleHint = useMemo(() => {
+        if (!s.tempoMap) return null;
+        const sel = getPianoRollSelection();
+        const startSec = sel ? (sel.startFrame * sel.framePeriodMs) / 1000 : 0;
+        const endSec = sel
+            ? ((sel.startFrame + Math.max(0, sel.frameCount)) * sel.framePeriodMs) / 1000
+            : Math.max(1, s.projectSec);
+        const projectScale: ScaleLike | null =
+            s.project.useCustomScale && s.project.customScale
+                ? s.project.customScale.notes
+                : s.project.baseScale;
+        // 仅当范围内存在“与工程音阶不同”的音阶变化（或管辖范围起点的
+        // 变化与工程音阶不同）时才提示 —— 变化点音阶等于工程音阶时
+        // 选区并未真正受到影响。
+        const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
+        if (changes.length === 0) return null;
+        if (
+            changes.every((c) => scaleLikeEquals(c.scale, projectScale))
+        ) {
+            return null;
+        }
+        return tAny("project_scale_tempo_map_hint");
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [s.tempoMap, s.projectSec, s.project, tAny, selectionVersion]);
+    const projectScaleLabelWithHint = tempoMapScaleHint
+        ? `${projectScaleLabel} ${tempoMapScaleHint}`
+        : projectScaleLabel;
     const effectiveProjectStretchAlgorithm =
         s.project.stretchAlgorithmOverride ?? s.defaultStretchAlgorithm;
     const effectiveProjectHifiganMelStretch =
@@ -239,8 +324,36 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return formatKeybinding(kb, "");
     }
 
-    /** 派发编辑操作事件给 PianoRollPanel */
+    /** 派发编辑操作事件给 PianoRollPanel / TimelinePanel */
     const dispatchEditOp = useCallback((op: string, data?: Record<string, unknown>) => {
+        const active = document.activeElement as HTMLElement | null;
+        const inPianoRoll =
+            active?.hasAttribute("data-piano-roll-scroller") ||
+            active?.closest?.("[data-piano-roll-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
+        const inTrackHeader =
+            Boolean(active?.closest?.("[data-track-list-panel]")) ||
+            document.body.getAttribute("data-hs-focus-window") === "trackHeader";
+        const inTimeline =
+            active?.hasAttribute("data-timeline-scroller") ||
+            active?.closest?.("[data-timeline-scroller]") ||
+            document.body.getAttribute("data-hs-focus-window") === "timeline";
+
+        if (
+            (op === "copy" ||
+                op === "cut" ||
+                op === "paste" ||
+                op === "pasteTracks") &&
+            inTimeline &&
+            !inPianoRoll &&
+            !inTrackHeader
+        ) {
+            window.dispatchEvent(
+                new CustomEvent("hifi:timelineEditOp", { detail: { op, ...data } }),
+            );
+            return;
+        }
+
         window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op, ...data } }));
     }, []);
 
@@ -249,11 +362,27 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             const res = (await dispatch(importAudioFromDialog()).unwrap()) as {
                 canceled?: boolean;
                 requiresModeChoice?: boolean;
+                requiresStreamChoice?: boolean;
                 audioPaths?: string[];
+                mediaAudioStreams?: MediaAudioStream[];
+                path?: string;
                 trackId?: string | null;
                 startSec?: number;
             };
-            if (res?.canceled || !res?.requiresModeChoice) {
+            if (res?.canceled) {
+                return;
+            }
+            if (res?.requiresStreamChoice && res.path) {
+                setMediaStreamImport({
+                    path: res.path,
+                    streams: res.mediaAudioStreams ?? [],
+                    trackId: res.trackId ?? s.selectedTrackId ?? null,
+                    startSec:
+                        typeof res.startSec === "number" ? res.startSec : (s.playheadSec ?? 0),
+                });
+                return;
+            }
+            if (!res?.requiresModeChoice) {
                 return;
             }
             if (!Array.isArray(res.audioPaths) || res.audioPaths.length <= 1) {
@@ -323,6 +452,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
 
+                    <DropdownMenu.Item onSelect={onRecaptureMissingMedia}>
+                        {t("menu_recapture_missing_media")}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     <DropdownMenu.Item onSelect={() => void dispatch(saveProjectRemote())}>
@@ -345,7 +478,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             void handleImportAudioFromMenu();
                         }}
                     >
-                        {t("menu_import_audio")}{" "}
+                        {t("menu_import_media")}{" "}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -353,6 +486,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_midi")}{" "}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={onImportProject}>
+                        {t("menu_import_hifishifter")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item onSelect={() => void dispatch(openReaperFromDialog())}>
                         {t("menu_import_reaper")}
@@ -399,25 +535,42 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
-                        {tAny("menu_copy")}{" "}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("pianoRoll.copy")}
-                        </div>
-                    </DropdownMenu.Item>
+                    {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
                         {tAny("menu_cut")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("clip.cut")}
                         </div>
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("copy")}>
+                        {tAny("menu_copy")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("pianoRoll.copy")}
+                        </div>
+                    </DropdownMenu.Item>
+                    {/* 剪贴板：粘贴 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("paste")}>
                         {tAny("menu_paste")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("pianoRoll.paste")}
                         </div>
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteTracks")}>
+                        {t("menu_paste_new_tracks")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.pasteTracks")}
+                        </div>
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
+                    {/* 外部剪贴板交换 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
+                        {t("menu_paste_vocalshifter_clipboard")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.pasteVocalShifter")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 选择 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("selectAll")}>
                         {tAny("menu_select_all")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
@@ -428,82 +581,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tAny("menu_deselect")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.deselect")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("initialize")}>
-                        {tAny("menu_initialize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.initialize")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    {isPitchParam && (
-                        <>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Item onSelect={() => setTransposeCentsOpen(true)}>
-                                {tAny("menu_transpose_cents")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeCents")}
-                                </div>
-                            </DropdownMenu.Item>
-                            <DropdownMenu.Item onSelect={() => setTransposeDegreesOpen(true)}>
-                                {tAny("menu_transpose_degrees")}
-                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                                    {shortcutLabel("edit.transposeDegrees")}
-                                </div>
-                            </DropdownMenu.Item>
-                        </>
-                    )}
-                    <DropdownMenu.Item onSelect={() => setSetPitchOpen(true)}>
-                        {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.setPitch")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => setAverageOpen(true)}>
-                        {tAny("menu_average")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.average")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setSmoothOpen(true)}>
-                        {tAny("menu_smooth")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.smooth")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setVibratoOpen(true)}>
-                        {tAny("menu_add_vibrato")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.addVibrato")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setQuantizeOpen(true)}>
-                        {tAny("menu_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.quantize")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => setMeanQuantizeOpen(true)}>
-                        {tAny("menu_mean_quantize")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.meanQuantize")}
-                        </div>
-                    </DropdownMenu.Item>
-
-                    <DropdownMenu.Separator />
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteReaper")}>
-                        {t("menu_paste_reaper_clipboard")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteReaper")}
-                        </div>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => dispatchEditOp("pasteVocalShifter")}>
-                        {t("menu_paste_vocalshifter_clipboard")}
-                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
-                            {shortcutLabel("edit.pasteVocalShifter")}
                         </div>
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
@@ -549,6 +626,93 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
                         onSelect={() => {
+                            dispatch(toggleClipboardPreview());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleParamValuePopup());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleTempoMapVisible());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.tempoMapVisible, tAny("menu_view_tempo_map"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+
+                    {/* Time Display */}
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {tAny("time_display")}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_primary")}:{" "}
+                                    {tAny(timeUnitLabelKey(s.primaryTimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNITS.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setPrimaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.primaryTimeUnit === unit,
+                                                tAny(timeUnitLabelKey(unit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tAny("time_unit_secondary")}:{" "}
+                                    {s.secondaryTimeUnit === "none"
+                                        ? tAny("time_unit_none")
+                                        : tAny(timeUnitLabelKey(s.secondaryTimeUnit as TimeUnit))}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {TIME_UNIT_CHOICES.map((unit) => (
+                                        <DropdownMenu.Item
+                                            key={unit}
+                                            onSelect={() => {
+                                                dispatch(setSecondaryTimeUnit(unit));
+                                                void dispatch(persistUiSettings());
+                                            }}
+                                        >
+                                            {withCheck(
+                                                s.secondaryTimeUnit === unit,
+                                                unit === "none"
+                                                    ? tAny("time_unit_none")
+                                                    : tAny(timeUnitLabelKey(unit as TimeUnit)),
+                                            )}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Item onSelect={() => setTimeDisplaySettingsOpen(true)}>
+                                {tAny("timeline_display_settings")}
+                            </DropdownMenu.Item>
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item
+                        onSelect={() => {
                             const nextMode = theme.mode === "dark" ? "light" : "dark";
                             theme.applySettings({
                                 mode: nextMode,
@@ -573,6 +737,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
+                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
+                        {tAny("snap_grid_settings_title")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tAny("stretch_project_override")}
@@ -822,6 +990,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
                     </DropdownMenu.Item>
 
+                    {/* Auto-reload modified media — same level as Background Pre-render */}
+                    <DropdownMenu.Item
+                        onSelect={() => onAutoReloadModifiedMediaChange(!autoReloadModifiedMedia)}
+                    >
+                        {withCheck(
+                            autoReloadModifiedMedia,
+                            tAny("options_auto_reload_modified_media"),
+                        )}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     {/* Keyboard Shortcuts — at the bottom */}
@@ -885,6 +1063,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setAppearanceDialogOpen}
             />
 
+            <TimelineDisplaySettingsDialog
+                open={timeDisplaySettingsOpen}
+                onOpenChange={setTimeDisplaySettingsOpen}
+            />
+
+            <SnapGridSettingsDialog
+                open={snapSettingsOpen}
+                onOpenChange={setSnapSettingsOpen}
+            />
+
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
 
             <AutoBackupDialog
@@ -914,7 +1102,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-sm font-medium text-qt-text">
-                                {tAny("import_dialog_title") || t("menu_import_audio")}
+                                {tAny("import_dialog_title") || t("menu_import_media")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
                                 {menuImportMode.audioPaths.length} file(s) selected
@@ -970,6 +1158,81 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 </div>
             )}
 
+            {/* 多音轨媒体：选择要导入的音轨 */}
+            {mediaStreamImport && (
+                <div
+                    className="fixed inset-0 z-[9999] bg-qt-overlay flex items-center justify-center"
+                    onClick={() => setMediaStreamImport(null)}
+                >
+                    <div
+                        className="w-[420px] max-w-[92vw] bg-qt-panel border border-qt-border rounded-xl shadow-[0_20px_44px_rgba(0,0,0,0.28)]"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="px-4 py-3 border-b border-qt-border">
+                            <div className="text-sm font-medium text-qt-text">
+                                {tAny("media_stream_select_title") || "Select audio stream"}
+                            </div>
+                            <div className="mt-1 text-xs text-qt-text-muted truncate">
+                                {mediaStreamImport.path}
+                            </div>
+                            <div className="mt-1 text-xs text-qt-text-muted">
+                                {tAny("media_stream_select_hint") ||
+                                    "This file contains multiple audio streams. Select one to extract and import."}
+                            </div>
+                        </div>
+
+                        <div className="px-3 py-3 flex flex-col gap-2 max-h-[50vh] overflow-y-auto custom-scrollbar">
+                            {mediaStreamImport.streams.map((stream) => {
+                                const meta = [
+                                    stream.codec,
+                                    stream.channels > 0 ? `${stream.channels} ch` : null,
+                                    stream.sampleRate > 0 ? `${stream.sampleRate} Hz` : null,
+                                    stream.title || stream.language,
+                                    stream.durationSec > 0
+                                        ? `${stream.durationSec.toFixed(2)} s`
+                                        : null,
+                                ].filter(Boolean);
+                                return (
+                                    <button
+                                        key={stream.index}
+                                        className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                        onClick={() => {
+                                            const m = mediaStreamImport;
+                                            setMediaStreamImport(null);
+                                            void dispatch(
+                                                importAudioAtPosition({
+                                                    audioPath: m.path,
+                                                    trackId: m.trackId,
+                                                    startSec: m.startSec,
+                                                    mediaAudioStreamIndex: stream.index,
+                                                }),
+                                            );
+                                        }}
+                                    >
+                                        <span className="font-medium">
+                                            {tAny("media_stream_track") || "Track"}{" "}
+                                            {stream.index + 1}
+                                        </span>
+                                        <span className="ml-2 text-xs text-qt-text-muted">
+                                            {meta.join(" · ")}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        <div className="px-3 py-2 border-t border-qt-border flex justify-end">
+                            <button
+                                className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
+                                onClick={() => setMediaStreamImport(null)}
+                            >
+                                {tAny("cancel") || "Cancel"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Edit operation dialogs */}
             <TransposeCentsDialog
                 open={transposeCentsOpen}
@@ -987,7 +1250,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setTransposeDegreesOpen}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultSmoothness={s.edgeSmoothnessPercent}
                 onConfirm={(degrees, scaleValue, edgeSmoothnessPercent) =>
                     dispatchEditOp("transposeDegrees", {
@@ -1041,7 +1304,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("quantize", {
@@ -1061,7 +1324,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultTolerance={0}
                 defaultScale={s.project.baseScale}
                 defaultUseProjectScale={true}
-                projectScaleLabel={projectScaleLabel}
+                projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
                     dispatchEditOp("meanQuantize", {

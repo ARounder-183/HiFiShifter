@@ -24,6 +24,7 @@ pub struct ProjectMetaPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_scale: Option<CustomScale>,
     pub beats_per_bar: u32,
+    pub time_signature_denominator: u32,
     pub grid_size: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
@@ -81,6 +82,9 @@ pub struct TimelineClip {
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
     pub fade_out_curve: Option<String>,
+    /// 自动交叉淡化长度（秒），与手动 fade（fade_in_sec/fade_out_sec）分离存储。
+    pub auto_fade_in_sec: Option<f64>,
+    pub auto_fade_out_sec: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formant_morph: Option<ClipFormantMorphPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,7 +115,7 @@ impl From<&ClipFormantMorph> for ClipFormantMorphPayload {
     }
 }
 
-/// 源文件变更检测结果：当用户切换回窗口时，检测导入的音频文件是否被外部替换或删除。
+/// 源文件变更检测结果：当用户切换回窗口时，检测导入的媒体文件是否被外部替换或删除。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceFileChangePayload {
@@ -126,6 +130,55 @@ pub struct SourceFileChangePayload {
 #[serde(rename_all = "snake_case")]
 pub struct CheckSourceFilesChangedPayload {
     pub changed: Vec<SourceFileChangePayload>,
+}
+
+/// “搜索文件夹”的匹配模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SearchSourceFileMode {
+    /// 精准文件名匹配：按源文件的完整文件名（含扩展名）搜索。
+    #[serde(rename = "file_name")]
+    ByFileName,
+    /// 文件扩展名 + 哈希匹配：扫描所有相同扩展名的文件，按内容指纹匹配。
+    #[serde(rename = "extension_hash")]
+    ByExtensionHash,
+}
+
+/// 按文件名称搜索到的候选源文件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceFileMatchCandidatePayload {
+    /// 候选文件的绝对路径。
+    pub path: String,
+    /// 内容指纹是否与工程记录的源文件完全一致。
+    pub exact_hash: bool,
+}
+
+/// 批量搜索候选源文件的返回载荷，key 为 clip_id。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SearchSourceFileMatchesPayload {
+    pub matches: std::collections::HashMap<String, Vec<SourceFileMatchCandidatePayload>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoScalePayload {
+    pub key: Option<String>,
+    pub name: Option<String>,
+    pub notes: Option<Vec<u8>>,
+}
+
+/// Tempo Map 变化点（前端载荷，camelCase；同时用于 `set_timeline_tempo_map` 命令参数）。
+/// 拍号 numerator/denominator 为 null 表示“跟随之前的拍号”。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoPointPayload {
+    pub id: String,
+    pub position_sec: f64,
+    pub bpm: f64,
+    pub numerator: Option<u32>,
+    pub denominator: Option<u32>,
+    pub scale: Option<TempoScalePayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +205,28 @@ pub struct TimelineStatePayload {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_group_ids: Vec<String>,
+
+    /// Tempo Map（None = 无 Tempo Map）。始终序列化该字段，保证前端能区分“无 Tempo Map”。
+    #[serde(default)]
+    pub tempo_map: Option<Vec<TempoPointPayload>>,
+}
+
+/// `open_project` 的返回载荷。
+///
+/// 除正常时间轴状态外，还可能携带“工程文件版本高于当前程序”的确认信息。
+/// 该确认信息出现时后端尚未加载工程，前端应展示警告并在用户确认后以
+/// `force = true` 再次调用 `open_project`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenProjectPayload {
+    #[serde(flatten)]
+    pub timeline: TimelineStatePayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_version_too_new: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_file_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_project_file_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

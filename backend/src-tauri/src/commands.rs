@@ -35,6 +35,8 @@ pub(crate) mod playback;
 mod processor_caps;
 #[path = "commands/project.rs"]
 pub(crate) mod project;
+#[path = "commands/project_import.rs"]
+mod project_import;
 #[path = "commands/recording.rs"]
 mod recording;
 #[path = "commands/reaper.rs"]
@@ -45,6 +47,8 @@ mod reaper_clipboard;
 mod synth;
 #[path = "commands/timeline.rs"]
 mod timeline;
+#[path = "commands/timeline_clipboard.rs"]
+mod timeline_clipboard;
 #[path = "commands/ui_settings.rs"]
 mod ui_settings;
 #[path = "commands/vocalshifter.rs"]
@@ -152,8 +156,9 @@ pub fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
-    project::open_project(state, window, project_path)
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
+    project::open_project(state, window, project_path, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -172,6 +177,19 @@ pub fn save_project_as(
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
     project::save_project_as(state, window, notes_markdown)
+}
+
+/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
+/// 确认"继续保存"。
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_project_to_path(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
+) -> serde_json::Value {
+    project::save_project_to_path(state, window, project_path, notes_markdown, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -256,9 +274,37 @@ pub fn set_project_custom_scale(
 pub fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
-    project::set_project_timeline_settings(state, beats_per_bar, grid_size)
+    project::set_project_timeline_settings(
+        state,
+        beats_per_bar,
+        time_signature_denominator,
+        grid_size,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project_dialog() -> serde_json::Value {
+    project_import::import_project_dialog()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    place_at_playhead: Option<bool>,
+    import_tempo_map: Option<bool>,
+) -> serde_json::Value {
+    project_import::import_project(
+        state,
+        window,
+        project_path,
+        place_at_playhead,
+        import_tempo_map,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -284,6 +330,14 @@ pub fn open_audio_dialog() -> serde_json::Value {
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_audio_dialog_multi() -> serde_json::Value {
     dialogs::open_audio_dialog_multi()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_audio_dialog_for_source(
+    source_path: String,
+    dialog_title: String,
+) -> serde_json::Value {
+    dialogs::open_audio_dialog_for_source(source_path, dialog_title)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -376,8 +430,15 @@ pub fn import_audio_item(
     audio_path: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
+    media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_item(state, audio_path, track_id, start_sec)
+    timeline::import_audio_item(
+        state,
+        audio_path,
+        track_id,
+        start_sec,
+        media_audio_stream_index,
+    )
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_audio_bytes(
@@ -561,6 +622,8 @@ pub fn set_clip_state(
     fade_out_sec: Option<f64>,
     fade_in_curve: Option<String>,
     fade_out_curve: Option<String>,
+    auto_fade_in_sec: Option<f64>,
+    auto_fade_out_sec: Option<f64>,
     color: Option<String>,
     formant_morph: Option<crate::state::ClipFormantMorph>,
     checkpoint: Option<bool>,
@@ -581,6 +644,8 @@ pub fn set_clip_state(
         fade_out_sec,
         fade_in_curve,
         fade_out_curve,
+        auto_fade_in_sec,
+        auto_fade_out_sec,
         color,
         formant_morph,
         checkpoint,
@@ -619,6 +684,16 @@ pub fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
     timeline::check_source_files_changed(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_source_file_replacements(
+    state: State<'_, AppState>,
+    folder_path: String,
+    clip_ids: Vec<String>,
+    search_mode: crate::models::SearchSourceFileMode,
+) -> Result<crate::models::SearchSourceFileMatchesPayload, String> {
+    timeline::search_source_file_replacements(state, folder_path, clip_ids, search_mode).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -706,6 +781,73 @@ pub fn select_clip(
     clip_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     timeline::select_clip(state, clip_id)
+}
+
+// ===================== native timeline clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_clips(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_clips(&state, clip_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_tracks(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_tracks(&state, track_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn paste_timeline_clipboard(
+    state: State<'_, AppState>,
+    mode: Option<String>,
+) -> serde_json::Value {
+    timeline_clipboard::paste_timeline_clipboard(&state, mode)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_timeline_clipboard() -> serde_json::Value {
+    timeline_clipboard::has_timeline_clipboard()
+}
+
+// ===================== generic system object clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn write_system_clipboard_object(
+    payload: String,
+    text_summary: Option<String>,
+) -> serde_json::Value {
+    let summary = text_summary
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
+    match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn read_system_clipboard_object() -> serde_json::Value {
+    match crate::system_clipboard::read_bytes() {
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
+            Err(_) => serde_json::json!({ "ok": true, "available": false }),
+        },
+        Ok(None) => serde_json::json!({ "ok": true, "available": false }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_timeline_tempo_map(
+    state: State<'_, AppState>,
+    tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_timeline_tempo_map(state, tempo_map)
 }
 
 // ===================== params =====================
@@ -961,6 +1103,13 @@ pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileI
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn get_media_audio_streams(
+    file_path: String,
+) -> Result<Vec<crate::media::MediaAudioStream>, String> {
+    file_browser::list_media_audio_streams(file_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn read_audio_preview(
     file_path: String,
     max_frames: Option<u32>,
@@ -1036,6 +1185,14 @@ pub fn paste_reaper_clipboard(
     )
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_reaper_clipboard() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "available": reaper_clipboard::has_reaper_clipboard(),
+    })
+}
+
 // ===================== cache =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1109,6 +1266,10 @@ pub fn import_midi_as_clip(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
+    import_midi_as_tempo_map: Option<bool>,
+    import_midi_tempo: Option<bool>,
+    import_midi_time_signature: Option<bool>,
+    import_midi_key_signature: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     midi::import_midi_as_clip(
         state.inner(),
@@ -1123,6 +1284,10 @@ pub fn import_midi_as_clip(
         import_midi_bpm_as_project,
         clipboard_guid,
         close_leading_gap,
+        import_midi_as_tempo_map,
+        import_midi_tempo,
+        import_midi_time_signature,
+        import_midi_key_signature,
     )
 }
 
@@ -1173,7 +1338,7 @@ pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_ui_settings(
     state: State<'_, AppState>,
-    settings: crate::config::UiSettings,
+    settings: serde_json::Value,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }

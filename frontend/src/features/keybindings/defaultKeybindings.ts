@@ -1,4 +1,5 @@
 import type { ActionId, ActionMeta, KeybindingMap } from "./types";
+import { IS_MAC } from "../../utils/platform";
 
 /**
  * 默认快捷键映射表
@@ -24,7 +25,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 
     // 编辑
     "edit.undo": { key: "z", ctrl: true },
-    "edit.redo": { key: "y", ctrl: true },
+    "edit.redo": IS_MAC ? { key: "z", ctrl: true, shift: true } : { key: "y", ctrl: true },
     "edit.selectAll": { key: "a", ctrl: true },
     "edit.deselect": { key: "r", ctrl: true },
     "edit.initialize": { key: "backspace" },
@@ -36,8 +37,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.addVibrato": { key: "b", ctrl: true },
     "edit.quantize": { key: "p", ctrl: true },
     "edit.meanQuantize": { key: "q", ctrl: true },
-    "edit.pasteReaper": { key: "v", ctrl: true, shift: true },
     "edit.pasteVocalShifter": { key: "v", shift: true },
+    "edit.pasteTracks": { key: "v", ctrl: true, alt: true },
 
     // 工程
     "project.new": { key: "n", ctrl: true },
@@ -77,7 +78,14 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.clipSlipEdit": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
+    // macOS 上 ctrl 字段会自动映射为 Command（⌘），因此默认复制拖动为 ⌘+拖动；
+    // 避免占用 Option，Option 保留给拉伸/滑动编辑等交替操作。
     "modifier.clipCopyDrag": { key: "control", modifierOnly: true, ctrl: true },
+    "modifier.clipCrossfadeGrip": {
+        key: "control",
+        modifierOnly: true,
+        ctrl: true,
+    },
     "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
     "modifier.pianoRollVerticalZoom": {
         key: "control",
@@ -190,9 +198,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "edit",
         scopedContext: "paramEditorSelect",
     },
-    "edit.pasteReaper": { labelKey: "kb_edit_paste_reaper", group: "edit" },
     "edit.pasteVocalShifter": {
         labelKey: "kb_edit_paste_vocalshifter",
+        group: "edit",
+    },
+    "edit.pasteTracks": {
+        labelKey: "kb_edit_paste_tracks",
         group: "edit",
     },
 
@@ -271,6 +282,11 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "modifier.clipCopyDrag": {
         labelKey: "kb_modifier_copy_drag",
+        group: "modifier",
+        modifierOperationType: "drag",
+    },
+    "modifier.clipCrossfadeGrip": {
+        labelKey: "kb_modifier_crossfade_grip",
         group: "modifier",
         modifierOperationType: "drag",
     },

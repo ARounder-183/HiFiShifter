@@ -267,6 +267,8 @@ export const setClipStateRemote = createAsyncThunk(
         fadeOutSec?: number;
         fadeInCurve?: string;
         fadeOutCurve?: string;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         formantMorph?: {
             enabled: boolean;
             targetF1Hz: number;
@@ -292,6 +294,29 @@ export const setClipsStateBulkRemote = createAsyncThunk(
         checkpoint?: boolean;
     }) => {
         return webApi.setClipsStateBulk(payload);
+    },
+);
+
+export const pasteTimelineClipboardRemote = createAsyncThunk(
+    "session/pasteTimelineClipboardRemote",
+    async (mode: "selected" | "new_tracks" | undefined, { rejectWithValue }) => {
+        const result = await webApi.pasteTimelineClipboard(mode);
+        if (!result?.ok) {
+            return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");
+        }
+        const createdClipIds = Array.isArray(result.created_clip_ids)
+            ? result.created_clip_ids
+            : Array.isArray((result as { createdClipIds?: string[] }).createdClipIds)
+              ? ((result as { createdClipIds?: string[] }).createdClipIds as string[])
+              : [];
+        return {
+            ok: true,
+            timeline: result,
+            newClipIds: createdClipIds,
+            sourceProject: (result as { sourceProject?: string }).sourceProject,
+            importedTrackCount: (result as { importedTrackCount?: number }).importedTrackCount,
+            importedClipCount: (result as { importedClipCount?: number }).importedClipCount,
+        } as const;
     },
 );
 

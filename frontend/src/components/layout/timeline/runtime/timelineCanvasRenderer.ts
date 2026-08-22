@@ -54,11 +54,12 @@ export function drawTimelineCanvas(
             selected: boolean;
             muted: boolean;
             gain: number;
+            playbackRate: number;
             groupId?: string;
-            playbackRate?: number;
             name: string;
             isMidiClip?: boolean;
             trackColor?: string;
+            isRenaming?: boolean;
         }>;
         fontFamily?: string;
         activeGroupIds?: Set<string>;
@@ -87,7 +88,7 @@ export function drawTimelineCanvas(
             selected: clip.selected,
             muted: clip.muted,
             gain: clip.gain,
-            playbackRate: clip.playbackRate ?? 1,
+            playbackRate: clip.playbackRate,
             name: clip.name,
             fontFamily,
             isPitchAdjustment: clip.isMidiClip,
@@ -274,7 +275,7 @@ export function drawTimelineCanvas(
             ctx.fillText(visualStyle.gainLabel, gainX, clipTop + 9);
         }
 
-        if (visualStyle.showName && visualStyle.displayName.length > 0) {
+        if (!clip.isRenaming && visualStyle.showName && visualStyle.displayName.length > 0) {
             const textStartX = clipLeft + visualStyle.leadingControlsWidth;
             const textEndX = visualStyle.showGainLabel
                 ? clipLeft + clipWidth - visualStyle.trailingReservePx + 4

@@ -999,10 +999,10 @@ fn clip_weight_at_frame(
         return 0.0;
     }
 
-    let fade_in_frames = (clip.fade_in_sec.max(0.0) * sample_rate as f64)
+    let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * sample_rate as f64)
         .round()
         .max(0.0) as usize;
-    let fade_out_frames = (clip.fade_out_sec.max(0.0) * sample_rate as f64)
+    let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * sample_rate as f64)
         .round()
         .max(0.0) as usize;
     let pre_silence_frames = (pre_silence_sec * sample_rate as f64).round().max(0.0) as usize;

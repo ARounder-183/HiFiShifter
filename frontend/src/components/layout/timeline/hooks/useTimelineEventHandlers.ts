@@ -19,13 +19,13 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
-import { computeAnchoredHorizontalZoom } from "../../../../utils/horizontalZoom";
+import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
 import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
+import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 // ── Args 类型 ─────────────────────────────────────────────────
 export interface UseTimelineEventHandlersArgs {
@@ -50,16 +50,11 @@ export interface UseTimelineEventHandlersArgs {
     setMultiSelectedClipIds: (ids: string[] | ((prev: string[]) => string[])) => void;
 
     // clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
 
     // clip actions
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     splitSelectedAtPlayhead: () => void;
     normalizeClips: (ids: string[]) => void;
     groupClips: (ids: string[]) => void;
@@ -115,8 +110,8 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -137,8 +132,8 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         dispatch,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         isEditableTarget,
         onNormalize: normalizeClips,
         onPaste: pasteClipsAtPlayhead,
@@ -193,6 +188,11 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
 
             if (op === "paste") {
                 pasteClipsAtPlayhead();
+                return;
+            }
+            if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
+                return;
             }
             if (op === "split") {
                 splitSelectedAtPlayhead();
@@ -200,7 +200,52 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [pasteClipsAtPlayhead, splitSelectedAtPlayhead]);
+    }, [
+        multiSelectedClipIds,
+        pasteClipsAtPlayhead,
+        sessionRef,
+        splitSelectedAtPlayhead,
+    ]);
+
+    // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
+    useEffect(() => {
+        function onTimelineEditOp(e: Event) {
+            const op = (e as CustomEvent<{ op?: string }>).detail?.op;
+            const selectedIds =
+                multiSelectedClipIds.length > 0
+                    ? [...multiSelectedClipIds]
+                    : sessionRef.current.selectedClipId
+                      ? [sessionRef.current.selectedClipId]
+                      : [];
+            if (op === "copy" || op === "cut") {
+                if (selectedIds.length === 0) return;
+                const s = sessionRef.current;
+                const expandedIds = expandClipIdsWithGroups(
+                    selectedIds,
+                    s.clips,
+                    s.ignoreGrouping,
+                    s.disabledGroupIds,
+                );
+                if (op === "copy") void copyClips(expandedIds);
+                else cutClips(expandedIds);
+                return;
+            }
+            if (op === "paste") {
+                pasteClipsAtPlayhead();
+            } else if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
+            }
+        }
+        window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+        return () =>
+            window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+    }, [
+        copyClips,
+        cutClips,
+        multiSelectedClipIds,
+        pasteClipsAtPlayhead,
+        sessionRef,
+    ]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {
@@ -313,27 +358,29 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const scroller = scrollRef.current;
             if (!scroller) return;
 
-            const zoom = computeAnchoredHorizontalZoom({
-                currentScale: pxPerSecRef.current,
+            const zoom = resolveHorizontalWheelZoom({
                 factor,
-                minScale: resolveTimelineMinPxPerSec({
+                basePxPerSec: pxPerSecRef.current,
+                baseScrollLeft: scroller.scrollLeft,
+                totalSec: dynamicProjectSec,
+                viewportWidth: scroller.clientWidth,
+                playheadZoomEnabled: true,
+                playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
+                anchorScreenX: 0,
+                minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
                     projectSec: dynamicProjectSec,
                     viewportWidthPx: scroller.clientWidth,
                 }),
-                maxScale: MAX_PX_PER_SEC,
-                scrollLeft: scroller.scrollLeft,
-                viewportWidth: scroller.clientWidth,
-                anchorSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
-                contentSec: dynamicProjectSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
 
             keyboardZoomPendingRef.current = {
-                nextScale: zoom.nextScale,
+                nextScale: zoom.nextPxPerSec,
                 nextScrollLeft: zoom.nextScrollLeft,
             };
-            setPxPerSec(zoom.nextScale);
+            setPxPerSec(zoom.nextPxPerSec);
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
@@ -363,7 +410,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
                 viewportWidth: scroller.clientWidth,
-                contentWidth: scroller.scrollWidth,
+                contentWidth: dynamicProjectSec * pxPerSec,
             });
             scroller.scrollLeft = next;
             syncScrollLeft(next);

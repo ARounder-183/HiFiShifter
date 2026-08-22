@@ -42,13 +42,13 @@ HiFiShifter 可以大致分為兩個功能區，分別是上部的軌道面板�
 
 HiFiShifter 提供了一個基本完備的軌道面板與音訊片段功能。該功能與大多數現代 DAW 類似。
 
-#### 音訊匯入
+#### 媒體匯入（音訊 / 視訊）
 
-HiFiShifter 支援三種方式匯入音訊：
+HiFiShifter 支援三種方式匯入媒體檔案。視訊檔會自動使用其音訊軌：
 
-1. 直接從系統檔案管理器中拖曳音訊到軌道上。
-2. 點擊工具列的資料夾圖示，開啟內建檔案瀏覽器並拖曳音訊到軌道上。
-3. 按下 `Ctrl + F` 開啟快速搜尋，選擇音訊匯入到軌道上（快速搜尋的檔案路徑與內建檔案瀏覽器的目前路徑一致）。
+1. 直接從系統檔案管理器中拖曳音訊或視訊檔到軌道上。
+2. 點擊工具列的資料夾圖示，開啟內建檔案瀏覽器並拖曳媒體檔案到軌道上。
+3. 按下 `Ctrl + F` 開啟快速搜尋，選擇媒體檔案匯入到軌道上（快速搜尋的檔案路徑與內建檔案瀏覽器的目前路徑一致）。
 
 #### 音訊編輯
 
@@ -181,7 +181,7 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-sudo bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
 
 腳本會自動安裝系統依賴、Node.js（如未安裝）、appimagetool 及前端 npm 依賴。

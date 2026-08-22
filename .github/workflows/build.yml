@@ -289,7 +289,13 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Do NOT pass --target: every runner in this matrix is native to its
+          # target architecture (windows-11-arm is a native ARM64 runner), so
+          # cargo builds for the host default target and writes to
+          # target/release, exactly like a local `cargo tauri build`.
+          # Passing --target would move the output to target/<triple>/release
+          # and diverge from local developer builds.
+          args: ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -299,16 +305,19 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Request the .app bundle explicitly: when only the DMG is requested,
+          # tauri-bundler deletes the intermediate .app from bundle/macos right
+          # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
+          # nothing on disk for the bundle verification step to inspect.
+          args: --bundles app,dmg ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
         run: |
           # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
           # linuxdeploy needs to find it to bundle it into the AppImage.
-          TARGET_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/${{ matrix.cargo_target }}/release"
           DEFAULT_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/release"
-          echo "LD_LIBRARY_PATH=${TARGET_LIB_DIR}:${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Build Linux AppImage
@@ -320,11 +329,13 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
+          args: --bundles appimage ${{ matrix.cargo_extra }}
 
-      # Resolve the actual release directory so later steps work with both
-      # target/release (host-default builds) and target/<triple>/release
-      # (CI builds that pass --target).
+      # CI builds now use the host default target (no --target), so the output
+      # directory is target/release, matching a local `cargo tauri build`.
+      # This step still resolves the path defensively: if a future contributor
+      # re-adds --target, packaging and verification keep working instead of
+      # failing with a hard-coded path.
       - name: Resolve Tauri release directory
         if: always()
         id: tauri-release-dir
@@ -335,6 +346,96 @@ jobs:
             echo "release-dir=$TRIPLE_DIR" >> "$GITHUB_OUTPUT"
           else
             echo "release-dir=$DEFAULT_DIR" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Verify SoundTouch dylib in macOS bundle
+        if: runner.os == 'macOS' && success() && steps.tauri-release-dir.outputs.release-dir != ''
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ ! -d "$APP_DIR" ]; then
+            echo "ERROR: $APP_DIR not found." >&2
+            echo "When only the DMG is requested, tauri-bundler removes the intermediate .app" >&2
+            echo "after creating the DMG. Build with --bundles app,dmg so the .app is kept." >&2
+            ls -la "$(dirname "$APP_DIR")" 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== macOS bundle layout ==="
+          find "$APP_DIR/Contents" -maxdepth 3 \( -type d -o -type f \) -print | sort
+
+          BIN="$APP_DIR/Contents/MacOS/HiFiShifter"
+          echo "=== Binary @rpath dependencies ==="
+          otool -L "$BIN" | grep -E '@rpath|@executable_path' || true
+          echo "=== Binary rpaths ==="
+          otool -l "$BIN" | grep -A2 'LC_RPATH' || true
+
+          # Every @rpath dylib referenced by the binary must be bundled in one
+          # of the locations dyld searches: Frameworks (SoundTouch),
+          # Resources (SoundTouch fallback), Resources/macos (ORT dylibs such
+          # as libwebgpu_dawn.dylib), or MacOS (cargo-run copies).
+          SEARCH_DIRS=(
+            "$APP_DIR/Contents/Frameworks"
+            "$APP_DIR/Contents/Resources"
+            "$APP_DIR/Contents/Resources/macos"
+            "$APP_DIR/Contents/MacOS"
+          )
+          MISSING=0
+          while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            found=""
+            for dir in "${SEARCH_DIRS[@]}"; do
+              if [ -f "$dir/$dep" ]; then
+                found="$dir/$dep"
+                break
+              fi
+            done
+            if [ -z "$found" ]; then
+              echo "ERROR: $dep referenced via @rpath but not bundled" >&2
+              MISSING=1
+            else
+              echo "ok: $dep -> $found"
+              # Every bundled copy must carry a relocatable @rpath install name.
+              otool -D "$found" | grep -F "@rpath/$dep" >/dev/null || MISSING=1
+            fi
+          done < <(otool -L "$BIN" | sed -n 's/.*@rpath\/\([^ ]*\.dylib\).*/\1/p' | sort -u)
+          [ "$MISSING" -eq 0 ] || exit 1
+
+          # dyld must be able to reach Frameworks, Resources, and the ORT
+          # Resources/macos directory.
+          otool -l "$BIN" | grep -F "@executable_path/../Frameworks" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources/macos" >/dev/null
+
+          # Reject stale/typo'd dependency names.
+          if otool -L "$BIN" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
+            echo "ERROR: stale libSoundTouchDL.dylib dependency found" >&2
+            exit 1
+          fi
+        shell: bash
+
+      - name: Dump macOS bundle diagnostics on failure
+        if: runner.os == 'macOS' && failure()
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          echo "=== candidate bundle dirs ==="
+          find target -maxdepth 6 -type d | grep -E 'bundle' || true
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ -d "$APP_DIR" ]; then
+            echo "=== app contents ==="
+            find "$APP_DIR/Contents" -maxdepth 3 -print | head -100
+            echo "=== binary SoundTouch deps ==="
+            otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -E '@rpath|SoundTouch|executable_path' || true
+            echo "=== binary rpaths ==="
+            otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -A2 'LC_RPATH' || true
+            echo "=== MacOS dir ==="
+            ls -la "$APP_DIR/Contents/MacOS" 2>/dev/null || true
+            echo "=== Resources SoundTouch entries ==="
+            ls -la "$APP_DIR/Contents/Resources" 2>/dev/null | grep -i soundtouch || true
+            echo "=== Resources/macos (ORT dylibs) ==="
+            ls -la "$APP_DIR/Contents/Resources/macos" 2>/dev/null || true
           fi
         shell: bash
 
