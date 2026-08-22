@@ -196,7 +196,7 @@ fn restore_rotated_project_backup(backup_path: Option<&PathBuf>, project_path: &
     }
 }
 
-fn sanitize_file_name_segment(raw: &str) -> String {
+pub(crate) fn sanitize_file_name_segment(raw: &str) -> String {
     raw.chars()
         .map(|ch| match ch {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
@@ -223,7 +223,7 @@ fn resolve_documents_dir(state: &AppState) -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
+pub(crate) fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
     let project = state.project.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(path) = project.path.as_deref() {
         let p = PathBuf::from(path);
@@ -234,7 +234,7 @@ fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
     resolve_documents_dir(state).unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn resolve_project_name_for_backup(state: &AppState) -> String {
+pub(crate) fn resolve_project_name_for_backup(state: &AppState) -> String {
     let project = state.project.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(path) = project.path.as_deref() {
@@ -255,7 +255,7 @@ fn resolve_project_name_for_backup(state: &AppState) -> String {
     }
 }
 
-fn try_apply_time_format_with_fallback(
+pub(crate) fn try_apply_time_format_with_fallback(
     template: &str,
     time: chrono::DateTime<Local>,
 ) -> Result<(String, bool), String> {

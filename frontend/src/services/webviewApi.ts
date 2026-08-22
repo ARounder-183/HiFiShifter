@@ -19,7 +19,14 @@ import type {
     WaveformPeaksSegmentPayload,
 } from "../types/api";
 
-import { coreApi, paramsApi, projectApi, timelineApi, waveformApi } from "./api";
+import {
+    coreApi,
+    paramsApi,
+    projectApi,
+    recordingApi,
+    timelineApi,
+    waveformApi,
+} from "./api";
 
 export const webApi = {
     // Core
@@ -67,6 +74,14 @@ export const webApi = {
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,
     setProjectTimelineSettings: projectApi.setProjectTimelineSettings,
+
+    getRecordingSettings: recordingApi.getSettings,
+    saveRecordingSettings: recordingApi.saveSettings,
+    getRecordingDevices: recordingApi.getDevices,
+    getRecordingApps: recordingApi.getApps,
+    startRecording: recordingApi.startRecording,
+    stopRecording: recordingApi.stopRecording,
+    getRecordingState: recordingApi.getState,
 
     openVocalShifterDialog: projectApi.openVocalShifterDialog,
     importVocalShifterProject: projectApi.importVocalShifterProject,

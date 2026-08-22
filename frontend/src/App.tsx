@@ -73,6 +73,13 @@ import type { MessageKey } from "./i18n/messages";
 import type { CloseRequestedEvent } from "@tauri-apps/api/window";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
 import { useClipFormantStatusListener } from "./hooks/useClipFormantStatusListener";
+import { useRecordingListener } from "./hooks/useRecordingListener";
+import {
+    cancelRecordingCountdown,
+    loadRecordingSettings,
+    startRecordingFlow,
+    stopRecordingFlow,
+} from "./features/recording/recordingSlice";
 
 const statusKey: Record<string, string> = {
     Ready: "status_ready",
@@ -353,6 +360,17 @@ function AppInner() {
     const playheadSec = useAppSelector((state) => state.session.playheadSec);
     const selectedTrackId = useAppSelector((state) => state.session.selectedTrackId);
     const paramsEpoch = useAppSelector((state) => state.session.paramsEpoch);
+    const recordingActive = useAppSelector((state) => state.recording.active);
+    const recordingSettings = useAppSelector((state) => state.recording.settings);
+    const recordingStartSec = useAppSelector((state) => state.recording.startSec);
+    const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
+    const multiSelectedClipIds = useAppSelector(
+        (state) => state.session.multiSelectedClipIds,
+    );
+    const sessionClips = useAppSelector((state) => state.session.clips);
+    const playbackPositionSec = useAppSelector(
+        (state) => state.session.runtime.playbackPositionSec,
+    );
     // 使用 ref 桥接最新的工程修改状态
     const projectDirtyRef = useRef(projectDirty);
     useEffect(() => {
@@ -707,6 +725,7 @@ function AppInner() {
     // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store
     useClipPitchDataListener();
     useClipFormantStatusListener();
+    useRecordingListener();
 
     // 阻止浏览器默认的 Ctrl+F 搜索、右键菜单和 Alt 键
 
@@ -838,7 +857,7 @@ function AppInner() {
             if (mod && (key === "f" || key === "p" || key === "g")) {
                 e.preventDefault();
             }
-            // Ctrl/Cmd+R 是应用内的"取消选择"快捷键；阻止 WebView 刷新但不阻断应用绑定。
+            // Ctrl/Cmd+R 是应用内的"开始/停止录音"快捷键；阻止 WebView 刷新但不阻断应用绑定。
             if (mod && key === "r") {
                 e.preventDefault();
             }
@@ -1505,6 +1524,7 @@ function AppInner() {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
+        void dispatch(loadRecordingSettings());
     }, [dispatch]);
 
     useEffect(() => {
@@ -2532,6 +2552,17 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "recording.toggle": {
+                    const rec = store.getState().recording;
+                    if (rec.active) {
+                        void dispatch(stopRecordingFlow());
+                    } else if (rec.countdownRemaining > 0) {
+                        void dispatch(cancelRecordingCountdown());
+                    } else {
+                        void dispatch(startRecordingFlow());
+                    }
+                    break;
+                }
                 case "edit.pasteTracks":
                     window.dispatchEvent(
                         new CustomEvent("hifi:editOp", {
@@ -2569,6 +2600,36 @@ function AppInner() {
         }, intervalMs);
         return () => window.clearInterval(id);
     }, [dispatch, runtimeIsPlaying, rendering.active, rendering.target]);
+
+    useEffect(() => {
+        if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;
+        const selectedIds = new Set<string>();
+        if (selectedClipId) selectedIds.add(selectedClipId);
+        for (const id of multiSelectedClipIds) selectedIds.add(id);
+        const selected = sessionClips.filter((clip) => selectedIds.has(clip.id));
+        if (selected.length === 0) return;
+        const endSec = Math.max(
+            ...selected.map((clip) => Number(clip.startSec) + Number(clip.lengthSec)),
+        );
+        if (!Number.isFinite(endSec)) return;
+        if (recordingStartSec == null || Number(recordingStartSec) > endSec + 0.05) return;
+
+        const id = window.setInterval(() => {
+            if (Number(playbackPositionSec ?? 0) >= endSec - 0.05) {
+                void dispatch(stopRecordingFlow());
+            }
+        }, 100);
+        return () => window.clearInterval(id);
+    }, [
+        dispatch,
+        multiSelectedClipIds,
+        playbackPositionSec,
+        recordingActive,
+        recordingSettings.autoStopAtSelectionEnd,
+        recordingStartSec,
+        selectedClipId,
+        sessionClips,
+    ]);
 
     useEffect(() => {
         splitRatioRef.current = splitRatio;

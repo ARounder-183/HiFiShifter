@@ -1291,4 +1291,3 @@ fn generate_coreml_model_variant() {
 
 #[cfg(not(target_os = "macos"))]
 fn generate_coreml_model_variant() {}
-

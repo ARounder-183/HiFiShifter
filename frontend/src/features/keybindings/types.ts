@@ -7,6 +7,7 @@ export type ActionId =
     // 播放控制
     | "playback.toggle" // 播放/暂停
     | "playback.stop" // 停止播放
+    | "recording.toggle" // 开始/停止录音
     | "playback.focusCursor" // 聚焦播放光标
     | "playback.seekLeft" // 播放光标左移
     | "playback.seekRight" // 播放光标右移

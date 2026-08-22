@@ -1,6 +1,7 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Flex, Select, TextField, Button, IconButton, Separator, Text } from "@radix-ui/themes";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Flex, Select, TextField, Button, IconButton, Separator, Text, Box } from "@radix-ui/themes";
 import {
+    CheckIcon,
     DoubleArrowRightIcon,
     PauseIcon,
     Pencil1Icon,
@@ -52,12 +53,24 @@ import { applySelectWheelChange } from "../../utils/selectWheel";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
+import {
+    cancelRecordingCountdown,
+    loadRecordingApps,
+    loadRecordingDevices,
+    loadRecordingSettings,
+    saveRecordingSettings,
+    startRecordingFlow,
+    stopRecordingFlow,
+} from "../../features/recording/recordingSlice";
+import type { RecordingSettings } from "../../services/api/recording";
+import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 
 export function ActionBar() {
     const dispatch = useAppDispatch();
     const s = useAppSelector((state: RootState) => state.session);
     const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
     const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const recording = useAppSelector((state: RootState) => state.recording);
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -68,6 +81,79 @@ export function ActionBar() {
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
     const [splitTransitionOpen, setSplitTransitionOpen] = useState(false);
     const [customScaleOpen, setCustomScaleOpen] = useState(false);
+    const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
+    const [recordingMenuPos, setRecordingMenuPos] = useState<{ x: number; y: number } | null>(null);
+    const recordingMenuRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+        if (!recordingMenuPos) return;
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (recordingMenuRef.current?.contains(target)) return;
+            setRecordingMenuPos(null);
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setRecordingMenuPos(null);
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
+        window.addEventListener("keydown", onKeyDown, true);
+        return () => {
+            window.removeEventListener("pointerdown", onPointerDown, true);
+            window.removeEventListener("keydown", onKeyDown, true);
+        };
+    }, [recordingMenuPos]);
+
+    const recordingSourceLabel = (() => {
+        switch (recording.settings.captureMode) {
+            case "loopback":
+                return tAny("recording_mode_loopback");
+            case "application":
+                return tAny("recording_mode_application");
+            default:
+                return tAny("recording_mode_device");
+        }
+    })();
+
+    const recordingDeviceLabel = (() => {
+        const { captureMode } = recording.settings;
+        if (captureMode === "device") {
+            const device = recording.devices.find(
+                (item) => !item.isLoopback && item.id === recording.settings.sourceDevice,
+            );
+            return device?.name ?? tAny("recording_device_default");
+        }
+        if (captureMode === "loopback") {
+            if (recording.settings.loopbackDevice === "default") {
+                return tAny("recording_loopback_default");
+            }
+            const device = recording.devices.find(
+                (item) => item.isLoopback && item.id === recording.settings.loopbackDevice,
+            );
+            return device?.name ?? tAny("recording_loopback_default");
+        }
+        const app = recording.apps.find((item) => item.id === recording.settings.captureAppId);
+        return app?.name || recording.settings.captureAppName || tAny("recording_application");
+    })();
+
+    const recordingTooltip = [
+        recording.active
+            ? tAny("recording_tooltip_stop")
+            : recording.countdownRemaining > 0
+              ? tAny("recording_tooltip_cancel_countdown")
+              : tAny("recording_tooltip_start"),
+        `${tAny("recording_source_mode")}: ${recordingSourceLabel}`,
+        `${tAny("recording_device")}: ${recordingDeviceLabel}`,
+    ].join("\n");
+
+    async function applyRecordingSettings(patch: Partial<RecordingSettings>) {
+        try {
+            await dispatch(saveRecordingSettings({ ...recording.settings, ...patch })).unwrap();
+        } catch {
+            // 快速设置失败时保持菜单关闭；详细错误仍可在录音设置对话框中查看。
+        } finally {
+            setRecordingMenuPos(null);
+        }
+    }
 
     function formatBpmValue(value: number): string {
         const normalized = Number(value);
@@ -243,6 +329,26 @@ export function ActionBar() {
         dispatch(setBpm(clamped));
         void dispatch(updateTransportBpm(clamped));
         setBpmText(formatBpmValue(clamped));
+    }
+
+    function formatRecordingTime(seconds: number): string {
+        const total = Math.max(0, Math.floor(seconds));
+        const minutes = Math.floor(total / 60);
+        const secs = total % 60;
+        return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+
+    function recordingErrorMessage(code: string): string {
+        // Backend errors may carry a `:detail` suffix (e.g.
+        // "recording_error_wasapi_init:0x80004005"); localize the base key.
+        const baseKey = code.split(":")[0] ?? code;
+        const text = tAny(baseKey);
+        if (text && text !== baseKey) return text;
+        return tAny(
+            code.startsWith("recording_error_stop")
+                ? "recording_error_stop_failed"
+                : "recording_error_start_failed",
+        );
     }
 
     // Custom styles for Radix components to match Qt look
@@ -672,6 +778,270 @@ export function ActionBar() {
                 >
                     {s.runtime.isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
+                <Box style={{ position: "relative" }} data-hs-context-menu>
+                    <IconButton
+                        size="1"
+                        variant={recording.active ? "solid" : "ghost"}
+                        color={recording.active ? "red" : "gray"}
+                        data-tooltip={recordingTooltip}
+                        disabled={recording.busy && recording.countdownRemaining === 0}
+                        onClick={() => {
+                            if (recording.active) {
+                                void dispatch(stopRecordingFlow());
+                            } else if (recording.countdownRemaining > 0) {
+                                void dispatch(cancelRecordingCountdown());
+                            } else {
+                                void dispatch(startRecordingFlow());
+                            }
+                        }}
+                        onContextMenu={(event) => {
+                            event.preventDefault();
+                            setRecordingMenuPos({ x: event.clientX, y: event.clientY });
+                            void dispatch(loadRecordingSettings());
+                            void dispatch(loadRecordingDevices());
+                            void dispatch(loadRecordingApps());
+                        }}
+                    >
+                        {recording.active ? (
+                            <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+                                <rect x="4" y="4" width="7" height="7" rx="1.2" />
+                            </svg>
+                        ) : (
+                            <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+                                <circle cx="7.5" cy="7.5" r="4.2" />
+                            </svg>
+                        )}
+                    </IconButton>
+                    {recordingMenuPos && (
+                        <div
+                            ref={recordingMenuRef}
+                            data-hs-context-menu
+                            className="fixed z-50 min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
+                        >
+                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                                {tAny("recording_source_mode")}
+                            </div>
+                            <button
+                                type="button"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                onClick={() => void applyRecordingSettings({ captureMode: "device" })}
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span>{tAny("recording_mode_device")}</span>
+                                {recording.settings.captureMode === "device" ? <CheckIcon /> : null}
+                            </button>
+                            <button
+                                type="button"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                onClick={() =>
+                                    void applyRecordingSettings({ captureMode: "loopback" })
+                                }
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span>{tAny("recording_mode_loopback")}</span>
+                                {recording.settings.captureMode === "loopback" ? <CheckIcon /> : null}
+                            </button>
+                            <button
+                                type="button"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                onClick={() =>
+                                    void applyRecordingSettings({ captureMode: "application" })
+                                }
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span>{tAny("recording_mode_application")}</span>
+                                {recording.settings.captureMode === "application" ? (
+                                    <CheckIcon />
+                                ) : null}
+                            </button>
+                            <div className="my-1 border-t border-qt-border" />
+                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                                {tAny(
+                                    recording.settings.captureMode === "application"
+                                        ? "recording_application"
+                                        : "recording_device",
+                                )}
+                            </div>
+                            {recording.settings.captureMode === "device" ? (
+                                <>
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() =>
+                                            void applyRecordingSettings({ sourceDevice: "default" })
+                                        }
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span>{tAny("recording_device_default")}</span>
+                                        {recording.settings.sourceDevice === "default" ? (
+                                            <CheckIcon />
+                                        ) : null}
+                                    </button>
+                                    {recording.devices
+                                        .filter((device) => !device.isLoopback)
+                                        .map((device) => (
+                                            <button
+                                                key={device.id}
+                                                type="button"
+                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                                onClick={() =>
+                                                    void applyRecordingSettings({
+                                                        sourceDevice: device.id,
+                                                    })
+                                                }
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                            >
+                                                <span className="truncate">{device.name}</span>
+                                                {recording.settings.sourceDevice === device.id ? (
+                                                    <CheckIcon />
+                                                ) : null}
+                                            </button>
+                                        ))}
+                                </>
+                            ) : recording.settings.captureMode === "loopback" ? (
+                                <>
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                        onClick={() =>
+                                            void applyRecordingSettings({ loopbackDevice: "default" })
+                                        }
+                                        onPointerDown={(e) => e.stopPropagation()}
+                                    >
+                                        <span>{tAny("recording_loopback_default")}</span>
+                                        {recording.settings.loopbackDevice === "default" ? (
+                                            <CheckIcon />
+                                        ) : null}
+                                    </button>
+                                    {recording.devices
+                                        .filter((device) => device.isLoopback)
+                                        .map((device) => (
+                                            <button
+                                                key={device.id}
+                                                type="button"
+                                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                                onClick={() =>
+                                                    void applyRecordingSettings({
+                                                        loopbackDevice: device.id,
+                                                    })
+                                                }
+                                                onPointerDown={(e) => e.stopPropagation()}
+                                            >
+                                                <span className="truncate">{device.name}</span>
+                                                {recording.settings.loopbackDevice === device.id ? (
+                                                    <CheckIcon />
+                                                ) : null}
+                                            </button>
+                                        ))}
+                                </>
+                            ) : (
+                                <>
+                                    {recording.settings.captureAppId &&
+                                    !recording.apps.some(
+                                        (app) => app.id === recording.settings.captureAppId,
+                                    ) ? (
+                                        <button
+                                            type="button"
+                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                            onClick={() =>
+                                                void applyRecordingSettings({
+                                                    captureAppId: recording.settings.captureAppId,
+                                                    captureAppName:
+                                                        recording.settings.captureAppName,
+                                                    captureAppProcess:
+                                                        recording.settings.captureAppProcess,
+                                                })
+                                            }
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="truncate">
+                                                {recording.settings.captureAppName ||
+                                                    recording.settings.captureAppId}
+                                            </span>
+                                            <CheckIcon />
+                                        </button>
+                                    ) : null}
+                                    {recording.apps.map((app) => (
+                                        <button
+                                            key={app.id}
+                                            type="button"
+                                            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                            onClick={() =>
+                                                void applyRecordingSettings({
+                                                    captureAppId: app.id,
+                                                    captureAppName: app.name,
+                                                    captureAppProcess: app.processName,
+                                                })
+                                            }
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <span className="truncate">{app.name}</span>
+                                            {recording.settings.captureAppId === app.id ? (
+                                                <CheckIcon />
+                                            ) : null}
+                                        </button>
+                                    ))}
+                                </>
+                            )}
+                            <div className="my-1 border-t border-qt-border" />
+                            <button
+                                type="button"
+                                className="w-full flex items-center gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                onClick={() => {
+                                    setRecordingMenuPos(null);
+                                    setRecordingSettingsOpen(true);
+                                }}
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span>{tAny("recording_context_settings")}</span>
+                            </button>
+                        </div>
+                    )}
+                </Box>
+                {recording.active || recording.countdownRemaining > 0 ? (
+                    <Flex align="center" gap="1" className="shrink-0">
+                        <Text
+                            size="1"
+                            color={recording.active ? "red" : "gray"}
+                            className="tabular-nums"
+                        >
+                            {recording.countdownRemaining > 0
+                                ? `-${recording.countdownRemaining}`
+                                : formatRecordingTime(recording.elapsedSec)}
+                        </Text>
+                        <div
+                            style={{
+                                width: 48,
+                                height: 6,
+                                borderRadius: 3,
+                                background: "var(--qt-border)",
+                                overflow: "hidden",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <div
+                                style={{
+                                    width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                    height: "100%",
+                                    background: recording.level > 0.98 ? "red" : "#e5484d",
+                                    transition: "width 80ms linear",
+                                }}
+                            />
+                        </div>
+                    </Flex>
+                ) : null}
+                {recording.error ? (
+                    <Text
+                        size="1"
+                        color="red"
+                        title={recording.error}
+                        className="truncate"
+                        style={{ maxWidth: 220 }}
+                    >
+                        {recordingErrorMessage(recording.error)}
+                    </Text>
+                ) : null}
             </Flex>
 
             <Separator orientation="vertical" size="2" />
@@ -1043,6 +1413,12 @@ export function ActionBar() {
             {customScaleOpen && (
                 <CustomScaleDialog open={customScaleOpen} onOpenChange={setCustomScaleOpen} />
             )}
+
+            <RecordingSettingsDialog
+                open={recordingSettingsOpen}
+                onOpenChange={setRecordingSettingsOpen}
+            />
+
 
             {snapSettingsOpen && (
                 <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />

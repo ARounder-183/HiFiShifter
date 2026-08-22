@@ -125,7 +125,7 @@ Common shortcuts:
 - `Ctrl + Z`: Undo
 - `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
-- `Ctrl + R`: Deselect
+
 - `Delete`: Delete audio clip
 - `-` / `=`: Shift parameter curve down/up for selected clips
 - Modifier `Alt`: Hold while dragging clip start/end to stretch the clip; drag the middle of the clip to slip-edit (internal content offset)
@@ -283,7 +283,7 @@ Common shortcuts:
 - `Ctrl + Z`: Undo
 - `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
-- `Ctrl + R`: Deselect
+
 - `BackSpace`: Initialize
 - `[` / `]`: Shift parameter curve down/up within the selection
 
@@ -418,3 +418,35 @@ Parameters:
 While typing a file path, you can click the `Placeholder` buttons to quickly insert the corresponding text.
 
 All file path strings support time format strings like `%Y-%m-%d-%H-%M-%S`. If you want to include a literal `%` in the output path, use `%%` to escape it.
+## 7. Recording
+
+HiFiShifter can record directly onto the timeline. Recording starts playback from the current playhead so you can sing along with the project's backing audio; when recording stops, playback stops automatically and the take is imported into the timeline.
+
+### Record button and shortcut
+
+- The red circular button in the transport area starts and stops recording.
+- The default shortcut is `Ctrl + R` (`⌘ + R` on macOS). You can change it in `Options -> Keybindings`.
+- Right-click the record button to open recording settings quickly.
+
+### Recording settings
+
+Open `File -> Recording...` to configure:
+
+- `Source`: choose one of three capture sources.
+- `Input Device`: defaults to `System Default`, or choose any input device (microphone) on this computer.
+- `Loopback Device`: when the source is `System Sound (Loopback)`, choose the output device to capture (default: `System Default Output`). On Windows this uses a native WASAPI loopback engine that honors the audio engine's silent-buffer flag (`AUDCLNT_BUFFERFLAGS_SILENT`) and writes zeros, so no hiss/rustle is recorded while nothing is playing.
+- `Application`: when the source is `Application Audio`, capture only the selected program (e.g. browser or media player); use `Refresh` to re-enumerate programs currently producing audio. If the program restarts (new PID), it is re-matched automatically by its process name. On Windows 10 21H2 (build 20348) and newer the OS process-loopback API is used, with an automatic fallback that mutes other audio sessions on older builds. On Linux capture uses PipeWire (`pw-dump` / `pw-cat`). macOS does not support this mode yet.
+- `Sample Rate` / `Bit Depth` / `Channels`: sample rate, bit depth (16 / 24 / 32-bit float) and channel count of the output WAV.
+- `Input Gain`: pre-recording gain compensation.
+- `Countdown`: enter the number of seconds (unit: seconds, 0–10); after clicking record, capture and playback wait until the countdown finishes.
+- `Monitor input while recording`: route the input signal back to the output device while recording, useful when singing with headphones.
+- `Auto-normalize after import`: after stopping and importing, normalize the new clip's peak to 0 dB.
+- `Auto-stop at end of selected clips`: stop and import automatically when playback reaches the end of the selected clips.
+- `Output Path Template`: supports `<ProjectFolder>`, `<ProjectName>` and strftime strings. Default: `<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav`. If the file already exists, a numeric suffix is added automatically so old takes are never overwritten.
+
+### Recording workflow and import rules
+
+1. Move the playhead to the desired start position and select the target track.
+2. Click the record button (or press `Ctrl + R`; `⌘ + R` on macOS). Timeline playback starts from the playhead while capture begins.
+3. Click record again (or press `Ctrl + R`; `⌘ + R` on macOS) to stop. Timeline playback stops at the same time.
+4. If the selected track is completely empty within the recording range, the take is imported directly to it. Otherwise a new `Recording` track is created immediately below the selected track, the take is imported there, and the new track and clip are selected automatically. The track name follows the current UI language.

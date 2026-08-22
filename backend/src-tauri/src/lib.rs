@@ -5,7 +5,7 @@ mod audio_utils;
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
-mod commands;
+pub(crate) mod commands;
 #[path = "audio/hifigan_tension.rs"]
 mod hifigan_tension;
 #[path = "audio/formant_morph.rs"]
@@ -25,6 +25,7 @@ mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
 mod renderer;
+mod recording;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
@@ -339,6 +340,13 @@ pub fn run() {
             commands::get_auto_backup_settings,
             commands::save_auto_backup_settings,
             commands::run_timed_auto_backup,
+            commands::get_recording_settings,
+            commands::save_recording_settings,
+            commands::get_recording_devices,
+            commands::get_recording_apps,
+            commands::start_recording,
+            commands::stop_recording,
+            commands::get_recording_state,
             commands::set_project_base_scale,
             commands::set_project_custom_scale,
             commands::set_project_stretch_settings,
@@ -458,6 +466,7 @@ pub fn run() {
                 // worker threads, and drop the channel sender so all worker
                 // threads exit their recv loops.
                 let state = app_handle.state::<state::AppState>();
+                crate::recording::shutdown(state.inner());
                 state.audio_engine.shutdown();
 
                 // Force-drop all ONNX sessions to release GPU memory before exit.

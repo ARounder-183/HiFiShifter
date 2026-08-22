@@ -16,6 +16,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 播放控制
     "playback.toggle": { key: "space" },
     "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
+    "recording.toggle": { key: "r", ctrl: true },
     "playback.focusCursor": { key: "'" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
     "playback.seekRight": { key: "arrowright" },
@@ -26,7 +27,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.undo": { key: "z", ctrl: true },
     "edit.redo": IS_MAC ? { key: "z", ctrl: true, shift: true } : { key: "y", ctrl: true },
     "edit.selectAll": { key: "a", ctrl: true },
-    "edit.deselect": { key: "r", ctrl: true },
+    "edit.deselect": { key: "__none__" },
     "edit.initialize": { key: "backspace" },
     "edit.transposeCents": { key: "f", ctrl: true },
     "edit.transposeDegrees": { key: "i", ctrl: true },
@@ -124,6 +125,7 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
 
     "playback.toggle": { labelKey: "kb_playback_toggle", group: "playback" },
     "playback.stop": { labelKey: "kb_playback_stop", group: "playback" },
+    "recording.toggle": { labelKey: "kb_recording_toggle", group: "playback" },
     "playback.focusCursor": {
         labelKey: "kb_playback_focus_cursor",
         group: "playback",

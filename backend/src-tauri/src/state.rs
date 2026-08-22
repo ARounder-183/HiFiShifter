@@ -1241,6 +1241,9 @@ pub struct AppState {
 
     pub audio_engine: AudioEngine,
 
+    /// 正在进行的录音会话（非录制时为 None）。
+    pub recording: std::sync::Mutex<Option<crate::recording::ActiveRecording>>,
+
     /// App config directory for persisting recent projects etc.
     pub config_dir: OnceLock<std::path::PathBuf>,
 
@@ -1279,6 +1282,7 @@ impl Default for AppState {
             pitch_timeline_snapshot: Mutex::new(HashMap::new()),
 
             audio_engine: AudioEngine::new(),
+            recording: std::sync::Mutex::new(None),
             config_dir: OnceLock::new(),
             pending_startup_project_path: Mutex::new(None),
         }
