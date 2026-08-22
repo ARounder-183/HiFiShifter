@@ -677,6 +677,36 @@ pub struct NsfHifiganOnnx {
     mel_seg_buf: Vec<f32>,
     /// 标记当前实例是在哪个 Epoch 加载的。用于检测重新加载。
     epoch: usize,
+    /// True when the ORT session's batch dimension is pinned to 1
+    /// (DirectML session builder overrides batch=1; CoreML also pins batch=1).
+    /// When true, batched tensors with B>1 are invalid and must run sequentially.
+    batch_pinned_to_one: bool,
+}
+
+/// Detect whether the current ONNX session has its batch dimension pinned to 1.
+///
+/// DirectML sessions are built with `.with_dimension_override("batch", 1)` to
+/// avoid dynamic-shape GPU shaders, so they cannot accept a batched input with
+/// B>1. CoreML sessions are likewise pinned to batch=1. CPU/WebGPU sessions
+/// usually keep the model's dynamic batch dimension and can run real batches.
+fn session_batch_pinned_to_one(session: &Arc<Mutex<Session>>) -> bool {
+    let Ok(guard) = session.lock() else {
+        // If we cannot inspect the session, prefer the safe sequential path.
+        return true;
+    };
+
+    let mut has_fixed_batch = false;
+    let mut has_dynamic_batch = false;
+    for input in guard.inputs() {
+        if let ort::value::ValueType::Tensor { shape, .. } = input.dtype() {
+            match shape.first().copied() {
+                Some(1) => has_fixed_batch = true,
+                Some(-1) => has_dynamic_batch = true,
+                _ => {}
+            }
+        }
+    }
+    has_fixed_batch && !has_dynamic_batch
 }
 
 impl NsfHifiganOnnx {
@@ -706,6 +736,8 @@ impl NsfHifiganOnnx {
         let fft_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); cfg.n_fft];
         let mel_seg_cap = CHUNK_MAX_FRAMES * cfg.num_mels;
 
+        let batch_pinned_to_one = session_batch_pinned_to_one(&session);
+
         Ok(Self {
             cfg,
             mel_fb_matrix,
@@ -715,6 +747,7 @@ impl NsfHifiganOnnx {
             pad_buf: Vec::new(),
             audio_resample_buf: Vec::new(),
             session,
+            batch_pinned_to_one,
             mel_scratch: Vec::new(),
             f0_scratch: Vec::new(),
             mel_seg_buf: Vec::with_capacity(mel_seg_cap),
@@ -979,10 +1012,11 @@ impl NsfHifiganOnnx {
             let (mel, f0, t) = &items[0];
             return self.run_model(mel.clone(), f0.clone(), *t).map(|v| vec![v]);
         }
-        // CoreML sessions are compiled with batch=1 pinned (dynamic batch is
-        // a known CoreML EP crash/hang source), so a batch of >1 items must
-        // be executed one item at a time.
-        if session_time_frames().is_some() {
+        // CoreML and DirectML sessions are compiled with batch=1 pinned
+        // (dynamic batch is a known CoreML EP crash/hang source; DirectML is
+        // explicitly built with batch=1), so a batch of >1 items must be
+        // executed one item at a time.
+        if session_time_frames().is_some() || self.batch_pinned_to_one {
             let mut results = Vec::with_capacity(items.len());
             for (mel, f0, t) in items {
                 results.push(self.run_model(mel.clone(), f0.clone(), *t)?);
@@ -2400,9 +2434,10 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
     
     with_tls_session(|sess| {
         let n = jobs.len();
-        // CoreML sessions are compiled with batch=1 pinned, so cross-clip
-        // batches must be executed one chunk at a time.
-        if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder) {
+        // CoreML and DirectML sessions are compiled with batch=1 pinned, so
+        // cross-clip batches must be executed one chunk at a time.
+        if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder)
+            || sess.batch_pinned_to_one {
             let mut results = Vec::with_capacity(n);
             for job in &jobs {
                 let waveform = sess.run_model(job.mel_seg.clone(), job.f0_seg.clone(), job.chunk_t)?;
