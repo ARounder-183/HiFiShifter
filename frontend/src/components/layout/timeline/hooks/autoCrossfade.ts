@@ -47,6 +47,35 @@ function overlapLengthSec(
     return Math.min(aEnd, bEnd) - Math.max(aStart, bStart);
 }
 
+/** 判断 a 是否完全位于 b 内部（含边界重合）。 */
+function isFullyContainedWithin(
+    a: { startSec: number; lengthSec: number },
+    b: { startSec: number; lengthSec: number },
+): boolean {
+    const aStart = Number(a.startSec ?? 0);
+    const aEnd = aStart + Number(a.lengthSec ?? 0);
+    const bStart = Number(b.startSec ?? 0);
+    const bEnd = bStart + Number(b.lengthSec ?? 0);
+    const eps = 1e-9;
+    return aStart >= bStart - eps && aEnd <= bEnd + eps;
+}
+
+/**
+ * 可用于自动交叉淡化的重叠长度。
+ *
+ * 若其中一个 clip 完全位于另一个 clip 内部（含起始/终止重合），该重叠不是
+ * 有效的交叉淡化关系，返回 0。否则返回原始重叠秒数（不重叠返回 ≤ 0）。
+ */
+function crossfadeOverlapLengthSec(
+    a: { startSec: number; lengthSec: number },
+    b: { startSec: number; lengthSec: number },
+): number {
+    const raw = overlapLengthSec(a, b);
+    if (raw <= 0.001) return raw;
+    if (isFullyContainedWithin(a, b) || isFullyContainedWithin(b, a)) return 0;
+    return raw;
+}
+
 /**
  * 构建“编辑开始前”的受影响侧信息。
  *
@@ -95,7 +124,8 @@ export function computeInitialCrossfadeSides(
  * - 受影响集合 = 被编辑 clip（含波纹随动 follower）∪ 编辑前直接重叠的邻居
  *   （affectedSides 的键）∪ 当前直接重叠的邻居；
  * - 对每个受影响 clip，只有**面对被编辑 clip 的那一侧**（或编辑前被标记重叠的
- *   那一侧）会被重新计算：有重叠 → auto = 当前重叠量；无重叠 → auto = 0；
+ *   那一侧）会被重新计算：有可交叉淡化重叠 → auto = 当前重叠量；
+ *   完全包含（一个 clip 整体在另一个内部）或无重叠 → auto = 0；
  * - **其它侧一律保持原值**——不会因为无关 clip 的编辑而改变既有交叉淡化，
  *   也不会把“用户介入后已关闭的自动淡化”错误地重新开启。
  * - `editSides` 限定被编辑 clip 的“哪些侧真正被本次编辑触碰”（如 trim_left 只碰
@@ -141,17 +171,24 @@ function computeAutoCrossfadeCore(
         const isMoved = movedSet.has(clipId);
 
         // 当前该 clip 每侧与所有同轨 clip 的最大重叠量。
+        // raw* 用于判定“这一侧是否被触碰”（任何重叠都算，包含完全包含关系）；
+        // fade*Overlap 只保存可产生自动交叉淡化的重叠（完全包含时按 0 处理）。
         let fadeInOverlap = 0;
         let fadeOutOverlap = 0;
+        let rawFadeInOverlap = 0;
+        let rawFadeOutOverlap = 0;
         for (const other of clips) {
             if (other.trackId !== clip.trackId || other.id === clipId) continue;
             const overlap = overlapLengthSec(clip, other);
             if (overlap <= 0.001) continue;
+            const eligibleOverlap = crossfadeOverlapLengthSec(clip, other);
             // clip 是“左侧”一方 → 用 fadeOut；是“右侧”一方 → 用 fadeIn。
             if (clip.startSec <= other.startSec) {
-                fadeOutOverlap = Math.max(fadeOutOverlap, overlap);
+                rawFadeOutOverlap = Math.max(rawFadeOutOverlap, overlap);
+                fadeOutOverlap = Math.max(fadeOutOverlap, eligibleOverlap);
             } else {
-                fadeInOverlap = Math.max(fadeInOverlap, overlap);
+                rawFadeInOverlap = Math.max(rawFadeInOverlap, overlap);
+                fadeInOverlap = Math.max(fadeInOverlap, eligibleOverlap);
             }
         }
 
@@ -196,10 +233,10 @@ function computeAutoCrossfadeCore(
         //   不会影响右缘的淡出包络；trim_right 不会影响左缘的淡入包络）；
         // - 未被编辑的邻居：只在“被编辑 clip 的对应侧被触碰”时受关联影响。
         const fadeInInvolved = isMoved
-            ? editFor(clipId).fadeIn && (pre.fadeIn || fadeInOverlap > 0.001)
+            ? editFor(clipId).fadeIn && (pre.fadeIn || rawFadeInOverlap > 0.001)
             : movedPreTouchesSide("fadeIn") || movedCurrentlyTouchesSide("fadeIn");
         const fadeOutInvolved = isMoved
-            ? editFor(clipId).fadeOut && (pre.fadeOut || fadeOutOverlap > 0.001)
+            ? editFor(clipId).fadeOut && (pre.fadeOut || rawFadeOutOverlap > 0.001)
             : movedPreTouchesSide("fadeOut") || movedCurrentlyTouchesSide("fadeOut");
 
         // 记录“本次拖拽已影响的侧”：即使后续该侧不再重叠（例如拖拽中先重叠、

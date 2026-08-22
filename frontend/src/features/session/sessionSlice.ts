@@ -605,11 +605,15 @@ function normalizeClipColor(color: string | undefined): ClipColor {
 /**
  * Auto-crossfade logic applied directly in a reducer (no dispatch needed).
  * For each clip in `movedIds`, detect overlaps with same-track clips and set
- * fade in/out to the overlap duration.
+ * auto fade in/out to the crossfade-eligible overlap duration.
+ *
+ * A clip fully contained inside another (start/end coincident or inside) is
+ * never a valid crossfade relationship, so its auto fade is cleared instead.
  */
 function applyAutoCrossfadeInReducer(state: SessionState, movedIds: string[]) {
     if (!state.autoCrossfadeEnabled || movedIds.length === 0) return;
 
+    const movedSet = new Set(movedIds);
     const trackClipsMap: Record<string, ClipInfo[]> = {};
     const clipMap: Record<string, ClipInfo> = {};
 
@@ -620,8 +624,21 @@ function applyAutoCrossfadeInReducer(state: SessionState, movedIds: string[]) {
         trackClipsMap[clip.trackId].push(clip);
     }
 
+    // raw* 用于判断哪一侧被触碰；fade*Overlaps 只保存可产生自动交叉淡化的值。
+    const rawFadeInOverlaps = new Map<string, number>();
+    const rawFadeOutOverlaps = new Map<string, number>();
     const fadeInOverlaps = new Map<string, number>();
     const fadeOutOverlaps = new Map<string, number>();
+
+    const isContained = (
+        aStart: number,
+        aEnd: number,
+        bStart: number,
+        bEnd: number,
+    ): boolean => {
+        const eps = 1e-9;
+        return aStart >= bStart - eps && aEnd <= bEnd + eps;
+    };
 
     for (const id of movedIds) {
         // O(1) 直接获取，消除多余的 find 遍历
@@ -640,34 +657,59 @@ function applyAutoCrossfadeInReducer(state: SessionState, movedIds: string[]) {
             const overlap = overlapEnd - overlapStart;
             if (overlap <= 0.001) continue;
 
+            const eligible =
+                isContained(clipStart, clipEnd, otherStart, otherEnd) ||
+                isContained(otherStart, otherEnd, clipStart, clipEnd)
+                    ? 0
+                    : overlap;
+
             if (clipStart <= otherStart) {
-                fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, overlap));
-                fadeInOverlaps.set(other.id, Math.max(fadeInOverlaps.get(other.id) ?? 0, overlap));
+                rawFadeOutOverlaps.set(id, Math.max(rawFadeOutOverlaps.get(id) ?? 0, overlap));
+                fadeOutOverlaps.set(id, Math.max(fadeOutOverlaps.get(id) ?? 0, eligible));
+                rawFadeInOverlaps.set(
+                    other.id,
+                    Math.max(rawFadeInOverlaps.get(other.id) ?? 0, overlap),
+                );
+                fadeInOverlaps.set(other.id, Math.max(fadeInOverlaps.get(other.id) ?? 0, eligible));
             } else {
-                fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, overlap));
+                rawFadeInOverlaps.set(id, Math.max(rawFadeInOverlaps.get(id) ?? 0, overlap));
+                fadeInOverlaps.set(id, Math.max(fadeInOverlaps.get(id) ?? 0, eligible));
+                rawFadeOutOverlaps.set(
+                    other.id,
+                    Math.max(rawFadeOutOverlaps.get(other.id) ?? 0, overlap),
+                );
                 fadeOutOverlaps.set(
                     other.id,
-                    Math.max(fadeOutOverlaps.get(other.id) ?? 0, overlap),
+                    Math.max(fadeOutOverlaps.get(other.id) ?? 0, eligible),
                 );
             }
         }
     }
 
-    const allClipIds = new Set([...fadeInOverlaps.keys(), ...fadeOutOverlaps.keys(), ...movedIds]);
+    const allClipIds = new Set([
+        ...rawFadeInOverlaps.keys(),
+        ...rawFadeOutOverlaps.keys(),
+        ...movedIds,
+    ]);
 
     for (const clipId of allClipIds) {
         // O(1) 直接获取，消除多余的 find 遍历
         const clip = clipMap[clipId];
         if (!clip) continue;
 
-        const hasOverlapIn = fadeInOverlaps.has(clipId);
-        const hasOverlapOut = fadeOutOverlaps.has(clipId);
+        const rawIn = rawFadeInOverlaps.get(clipId);
+        const rawOut = rawFadeOutOverlaps.get(clipId);
 
-        if (hasOverlapIn) {
-            clip.fadeInSec = Math.max(0, fadeInOverlaps.get(clipId) ?? 0);
+        if (rawIn !== undefined) {
+            clip.autoFadeInSec = Math.max(0, fadeInOverlaps.get(clipId) ?? 0);
+        } else if (movedSet.has(clipId)) {
+            // 新导入/新建 clip 没有合法交叉淡化重叠时，自动 fade 应为 0。
+            clip.autoFadeInSec = 0;
         }
-        if (hasOverlapOut) {
-            clip.fadeOutSec = Math.max(0, fadeOutOverlaps.get(clipId) ?? 0);
+        if (rawOut !== undefined) {
+            clip.autoFadeOutSec = Math.max(0, fadeOutOverlaps.get(clipId) ?? 0);
+        } else if (movedSet.has(clipId)) {
+            clip.autoFadeOutSec = 0;
         }
     }
 }
