@@ -1090,6 +1090,12 @@ export const zhTW = {
     recording_path_template: "輸出路徑範本",
     recording_save_settings: "儲存設定",
     recording_toggle_title: "開始/停止錄音（右鍵開啟設定）",
+    recording_tooltip_start: "開始錄音（右鍵開啟快速設定）",
+    recording_tooltip_stop: "停止錄音（右鍵開啟快速設定）",
+    recording_tooltip_cancel_countdown: "取消錄音倒數（右鍵開啟快速設定）",
+    recording_context_settings: "錄音設定...",
+
+
     kb_recording_toggle: "開始/停止錄音",
     recording_error_save_settings: "錄音設定儲存失敗。",
     recording_error_load_devices: "列舉音訊裝置失敗。",

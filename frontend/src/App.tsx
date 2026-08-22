@@ -857,7 +857,7 @@ function AppInner() {
             if (mod && (key === "f" || key === "p" || key === "g")) {
                 e.preventDefault();
             }
-            // Ctrl/Cmd+R 是应用内的"取消选择"快捷键；阻止 WebView 刷新但不阻断应用绑定。
+            // Ctrl/Cmd+R 是应用内的"开始/停止录音"快捷键；阻止 WebView 刷新但不阻断应用绑定。
             if (mod && key === "r") {
                 e.preventDefault();
             }

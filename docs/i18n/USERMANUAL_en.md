@@ -125,7 +125,7 @@ Common shortcuts:
 - `Ctrl + Z`: Undo
 - `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
-- `Ctrl + R`: Deselect
+
 - `Delete`: Delete audio clip
 - `-` / `=`: Shift parameter curve down/up for selected clips
 - Modifier `Alt`: Hold while dragging clip start/end to stretch the clip; drag the middle of the clip to slip-edit (internal content offset)
@@ -283,7 +283,7 @@ Common shortcuts:
 - `Ctrl + Z`: Undo
 - `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
-- `Ctrl + R`: Deselect
+
 - `BackSpace`: Initialize
 - `[` / `]`: Shift parameter curve down/up within the selection
 
@@ -425,7 +425,7 @@ HiFiShifter can record directly onto the timeline. Recording starts playback fro
 ### Record button and shortcut
 
 - The red circular button in the transport area starts and stops recording.
-- The default shortcut is `R`. You can change it in `Options -> Keybindings`.
+- The default shortcut is `Ctrl + R` (`⌘ + R` on macOS). You can change it in `Options -> Keybindings`.
 - Right-click the record button to open recording settings quickly.
 
 ### Recording settings
@@ -447,6 +447,6 @@ Open `File -> Recording...` to configure:
 ### Recording workflow and import rules
 
 1. Move the playhead to the desired start position and select the target track.
-2. Click the record button (or press `R`). Timeline playback starts from the playhead while capture begins.
-3. Click record again (or press `R`) to stop. Timeline playback stops at the same time.
+2. Click the record button (or press `Ctrl + R`; `⌘ + R` on macOS). Timeline playback starts from the playhead while capture begins.
+3. Click record again (or press `Ctrl + R`; `⌘ + R` on macOS) to stop. Timeline playback stops at the same time.
 4. If the selected track is completely empty within the recording range, the take is imported directly to it. Otherwise a new `Recording` track is created immediately below the selected track, the take is imported there, and the new track and clip are selected automatically. The track name follows the current UI language.

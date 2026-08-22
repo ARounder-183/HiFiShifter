@@ -1089,6 +1089,12 @@ export const zhCN = {
     recording_path_template: "输出路径模板",
     recording_save_settings: "保存设置",
     recording_toggle_title: "开始/停止录音（右键打开设置）",
+    recording_tooltip_start: "开始录音（右键打开快捷设置）",
+    recording_tooltip_stop: "停止录音（右键打开快捷设置）",
+    recording_tooltip_cancel_countdown: "取消录音倒计时（右键打开快捷设置）",
+    recording_context_settings: "录音设置...",
+
+
     kb_recording_toggle: "开始/停止录音",
     recording_error_save_settings: "录音设置保存失败。",
     recording_error_load_devices: "枚举音频设备失败。",

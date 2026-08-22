@@ -1133,6 +1133,12 @@ export const koKR = {
     recording_path_template: "출력 경로 템플릿",
     recording_save_settings: "설정 저장",
     recording_toggle_title: "녹음 시작/중지(마우스 오른쪽 클릭으로 설정)",
+    recording_tooltip_start: "녹음 시작(마우스 오른쪽 클릭으로 빠른 설정)",
+    recording_tooltip_stop: "녹음 중지(마우스 오른쪽 클릭으로 빠른 설정)",
+    recording_tooltip_cancel_countdown: "녹음 카운트다운 취소(마우스 오른쪽 클릭으로 빠른 설정)",
+    recording_context_settings: "녹음 설정...",
+
+
     kb_recording_toggle: "녹음 시작/중지",
     recording_error_save_settings: "녹음 설정 저장에 실패했습니다.",
     recording_error_load_devices: "오디오 장치를 열거하지 못했습니다.",

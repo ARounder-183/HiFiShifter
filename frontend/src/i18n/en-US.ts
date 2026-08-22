@@ -48,6 +48,12 @@ export const enUS = {
     recording_path_template: "Output Path Template",
     recording_save_settings: "Save Settings",
     recording_toggle_title: "Start / Stop Recording (right-click for settings)",
+    recording_tooltip_start: "Start Recording (right-click for quick settings)",
+    recording_tooltip_stop: "Stop Recording (right-click for quick settings)",
+    recording_tooltip_cancel_countdown: "Cancel Recording Countdown (right-click for quick settings)",
+    recording_context_settings: "Recording Settings...",
+
+
     kb_recording_toggle: "Start / Stop Recording",
     recording_error_save_settings: "Failed to save recording settings.",
     recording_error_load_devices: "Failed to enumerate audio devices.",
