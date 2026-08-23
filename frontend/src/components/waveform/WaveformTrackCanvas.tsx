@@ -34,7 +34,7 @@ import {
     renderWaveform,
     type WaveformRenderParams,
 } from "../../utils/waveformRenderer";
-import { drawLoopMarkers } from "../../utils/loopRender";
+import { drawLoopMarkers, modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 import {
     wfDiag_frameStart,
     wfDiag_frameEnd,
@@ -257,7 +257,14 @@ export const WaveformTrackCanvas = React.memo(
                 const clipSourceEndSec =
                     Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
                 const isLoop = Boolean(clip.loopEnabled);
-                const mediaDur = Math.max(0, Number(clip.durationSec) || 0);
+                // 媒体时长：frames/sr 优先（精确），durationSec 兜底 —— 与
+                // piano-roll / MIDI 画布 / 拖拽编辑 / 后端元数据同一取值链，
+                // 避免不同消费端推导出不同的回绕周期。
+                const mediaDur = resolveLoopMediaDurationSec({
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
+                });
                 const effSrcEnd = Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec);
                 let clipSourceSpanSec: number;
                 if (!isLoop) {
@@ -325,17 +332,31 @@ export const WaveformTrackCanvas = React.memo(
                         srcWinEnd: sourceStartSec + clipSourceSpanSec,
                     });
                 } else {
-                    const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDur);
-                    const anchorRev = Math.min(Math.max(effSrcEnd, 0), mediaDur);
+                    // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D)
+                    // 一致）：负 / 超界的存储锚点正确环绕，不能用 clamp，
+                    // 否则 slip 出域的锚点会让波形相位与播放错位。
+                    const anchorFwd = modEuclid(sourceStartSec, mediaDur);
+                    const anchorRev = modEuclid(effSrcEnd, mediaDur);
                     const headDur =
                         (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
                     const bodyDur = mediaDur / pr;
                     const visLocalStart = Math.max(0, visStartSec - clipStartSec);
                     const visLocalEnd = Math.min(clip.lengthSec, visEndSec - clipStartSec);
                     if (visLocalEnd <= visLocalStart) continue;
-                    // 退化保护：分段数失控时回退单片近似。
+                    // 退化保护：分段数按【可见区间】估算（而非整条 clip）——
+                    // 视口内可见的周期数天然有限，长循环 clip 不会再落入
+                    // "单片拉伸近似"，标记与波形内容保持一致。
+                    // 首个重复段取**包含视口左缘**的那一段（floor 而非 ceil，
+                    // 避免左缘出现周期级的空隙）；其左侧越界部分由裁剪矩形去掉。
+                    const firstBodyIndex = Math.max(
+                        0,
+                        Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
+                    );
                     const approxCount =
-                        1 + Math.ceil((clip.lengthSec - headDur - 1e-9) / bodyDur);
+                        2 +
+                        Math.ceil(
+                            (visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur,
+                        );
                     if (approxCount <= 4096) {
                         if (headDur > 1e-9 && visLocalStart < headDur) {
                             segmentsToRender.push({
@@ -345,7 +366,8 @@ export const WaveformTrackCanvas = React.memo(
                                 srcWinEnd: clip.reversed ? anchorRev : mediaDur,
                             });
                         }
-                        let segOffset = headDur;
+                        let segOffset =
+                            headDur + firstBodyIndex * bodyDur;
                         for (
                             let guard = 0;
                             segOffset < visLocalEnd - 1e-9 && guard < 4096;
@@ -671,8 +693,10 @@ export const WaveformTrackCanvas = React.memo(
                 // 节点位置：头部段结束处（进入段耗尽、首次环绕）及此后
                 // 每个整文件周期边界 —— 与用户示例 [0,8)=2→10、[8,18)=0→10 一致。
                 if (isLoop && mediaDur > 1e-6) {
-                    const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDur);
-                    const anchorRev = Math.min(Math.max(effSrcEnd, 0), mediaDur);
+                    // 与分段构建同一 floor_mod 归一化（不能用 clamp），
+                    // 保证标记位置 = 实际分段边界。
+                    const anchorFwd = modEuclid(sourceStartSec, mediaDur);
+                    const anchorRev = modEuclid(effSrcEnd, mediaDur);
                     const headDur = (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
                     const bodyDur = mediaDur / pr;
                     const markers: number[] = [];

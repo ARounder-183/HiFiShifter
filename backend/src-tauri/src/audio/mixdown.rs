@@ -603,12 +603,40 @@ pub fn render_mixdown_interleaved(
         let mut segment = segment;
 
         if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
+            // Loop（循环源）键必须编码**实际消费的平铺区间**（锚点推进量 + 消费
+            // 帧数）：平铺段内容随导出窗口 [start_sec, end_sec] 变化，若键固定取
+            // [0, total_sec]，不同导出窗口会命中同一条目 —— 先渲染的一方把错误
+            // 长度/内容的结果投毒给另一方（get_or_compute 不做长度校验）。
+            // 用"归一化锚点帧 + 消费帧数"（换算为秒）唯一确定 segment 内容。
+            let (key_start_sec, key_end_sec) = if loop_mode {
+                let skip_src_frames =
+                    (loop_seg_local_start_sec * playback_rate * in_rate as f64).round() as i64;
+                let advanced_anchor = if clip.reversed {
+                    anchor_frame - skip_src_frames
+                } else {
+                    anchor_frame + skip_src_frames
+                };
+                let consumed_frames = ((loop_seg_len_sec.max(0.0)
+                    * playback_rate
+                    * in_rate as f64)
+                    .ceil()
+                    .max(2.0)) as i64;
+                let start_frame = advanced_anchor.rem_euclid(
+                    ((total_sec * in_rate as f64).round() as i64).max(1),
+                );
+                (
+                    start_frame as f64 / in_rate as f64,
+                    (start_frame + consumed_frames) as f64 / in_rate as f64,
+                )
+            } else {
+                (clip.source_start_sec.max(0.0), clip.source_end_sec)
+            };
             let key = crate::formant_cache::make_formant_cache_key(
                 &clip.id,
                 Path::new(source_path),
                 out_rate,
-                if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
-                if loop_mode { total_sec } else { clip.source_end_sec },
+                key_start_sec,
+                key_end_sec,
                 clip.reversed && !loop_mode,
                 // 离线 Loop 的处理对象是"回绕平铺 segment"（锚点起、长度为
                 // clip 消费量），与实时域的完整文件自然顺序内容不同 —— 必须
@@ -730,6 +758,16 @@ pub fn render_mixdown_interleaved(
             clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
         let seg_end_sec = seg_start_sec + (seg_frames as f64) / out_rate as f64;
 
+        // Loop（循环源）：平铺段只覆盖【导出窗口 ∩ clip】，seg 内的帧偏移是
+        // "窗口内相对位置"；淡化 / 音量 / 声像曲线必须按 **clip 局部绝对位置**
+        // 求值 —— 否则局部导出（后台预渲染、区间导出、波形 peaks）会在每个
+        // 窗口边界重新触发 fade-in。非 Loop 时该偏移为 0，行为不变。
+        let loop_local_offset_frames = if loop_mode {
+            ((loop_seg_local_start_sec * out_rate as f64).round().max(0.0)) as usize
+        } else {
+            0usize
+        };
+
         let clip_window_start = seg_start_sec.max(start_sec);
         let clip_window_end = seg_end_sec.min(end_sec).min(clip_end_sec);
         let window_len_sec = (clip_window_end - clip_window_start).max(0.0);
@@ -764,7 +802,10 @@ pub fn render_mixdown_interleaved(
             let si = (seg_offset_frames + f) * 2;
 
             // Local position inside the CLIP (timeline), used for fades.
-            let local_in_clip = pre_silence_frames.saturating_add(seg_offset_frames + f);
+            // Loop：叠加窗口起点的 clip 局部偏移（见上方 loop_local_offset_frames）。
+            let local_in_clip = pre_silence_frames
+                .saturating_add(loop_local_offset_frames)
+                .saturating_add(seg_offset_frames + f);
             if local_in_clip >= clip_total_frames {
                 break;
             }

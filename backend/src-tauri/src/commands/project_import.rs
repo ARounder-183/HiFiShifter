@@ -55,11 +55,15 @@ pub(super) fn import_project(
             clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
         }
     }
-    // v4 迁移：旧工程 Clip 不携带 loop_enabled，按"为新的音频块启用循环"设置补齐。
+    // v4 迁移：旧工程 Clip 不携带 loop_enabled，按"为新的音频块启用循环"设置
+    // 补齐 —— 仅限有源媒体的音频 Clip（纯 MIDI 块保持关闭，与导入器约定一致，
+    // 见 open_project 的同名迁移注释）。
     if pf.version < 4 {
         let default_loop = crate::config::loop_new_clips_default();
         for clip in &mut timeline.clips {
-            clip.loop_enabled = default_loop;
+            if clip.source_path.is_some() {
+                clip.loop_enabled = default_loop;
+            }
         }
     }
 

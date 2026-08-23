@@ -23,6 +23,7 @@ import {
     type WaveformRenderParams,
 } from "../../../utils/waveformRenderer";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { modEuclid } from "../../../utils/loopRender";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
@@ -889,13 +890,26 @@ export function drawPianoRoll(args: {
                 srcWinEnd: sourceStartSec + clipSourceSpanSec,
             });
         } else {
-            const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDurPiano);
-            const anchorRev = Math.min(Math.max(effSrcEndPiano, 0), mediaDurPiano);
+            // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D) 一致，
+            // 与 WaveformTrackCanvas 相同）—— 负 / 超界存储锚点正确环绕。
+            const anchorFwd = modEuclid(sourceStartSec, mediaDurPiano);
+            const anchorRev = modEuclid(effSrcEndPiano, mediaDurPiano);
             const headDur = (entry.reversed ? anchorRev : mediaDurPiano - anchorFwd) / pr;
             const bodyDur = mediaDurPiano / pr;
             const visLocalStart = Math.max(0, visStartSec - clipStartSec);
             const visLocalEnd = Math.min(entry.lengthSec, visEndSec - clipStartSec);
-            const approxCount = 1 + Math.ceil((entry.lengthSec - headDur - 1e-9) / bodyDur);
+            // 分段数按【可见区间】估算（与 WaveformTrackCanvas 一致）——
+            // 长循环 clip 不会落入"单片拉伸近似"。
+            // 首个重复段取**包含视口左缘**的那一段（floor），避免左缘空隙。
+            const firstBodyIndex = Math.max(
+                0,
+                Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
+            );
+            const approxCount =
+                2 +
+                Math.ceil(
+                    (visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur,
+                );
             if (visLocalEnd > visLocalStart && approxCount <= 4096) {
                 if (headDur > 1e-9 && visLocalStart < headDur) {
                     tiles.push({
@@ -905,7 +919,8 @@ export function drawPianoRoll(args: {
                         srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
                     });
                 }
-                let segOffset = headDur;
+                let segOffset =
+                    headDur + firstBodyIndex * bodyDur;
                 for (
                     let guard = 0;
                     segOffset < visLocalEnd - 1e-9 && guard < 4096;
@@ -1025,8 +1040,11 @@ export function drawPianoRoll(args: {
 
             // clipPixelOffset = canvas 左边缘对应的瓦片局部像素：
             // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
+            // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
+            // 子像素漂移。
             const tileStartTimelinePx = clipStartPx + tile.localStartSec * pxPerSec;
-            const clipPixelOffset = viewportStartPx - tileStartTimelinePx;
+            const clipPixelOffset =
+                Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
 
             const effectiveFadeInPiano =
                 Number(entry.autoFadeInSec ?? 0) > 0

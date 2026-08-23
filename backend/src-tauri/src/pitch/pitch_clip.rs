@@ -874,6 +874,33 @@ pub fn trim_and_resample_midi(
         }
     }
 
+    // Loop（循环源）+ 媒体时长未知 + 环绕窗口（split 产生 start > end）：
+    // 若落到下方 `src_start_frame >= src_end_frame` 的空判会把曲线整体清空。
+    // 退化为"整条缓存曲线即回绕周期"（与 assemble_pitch_orig_from_cache 的
+    // 回退一致），保证仍有内容可显示/编辑。
+    if loop_enabled && src_start_frame >= src_end_frame {
+        if full_midi.is_empty() {
+            return Vec::new();
+        }
+        let n = full_midi.len();
+        let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
+        let anchor_r = src_end_frame as i64;
+        let target_frames =
+            ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+        let mut out = Vec::with_capacity(target_frames);
+        for i in 0..target_frames {
+            let consumed = (i as f64 * rate).round() as i64;
+            let idx_i = if reversed {
+                anchor_r - 1 - consumed
+            } else {
+                anchor_f + consumed
+            };
+            let idx = idx_i.rem_euclid(n as i64) as usize;
+            out.push(full_midi[idx]);
+        }
+        return out;
+    }
+
     if src_start_frame >= src_end_frame {
         eprintln!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
@@ -973,11 +1000,70 @@ pub fn clear_clip_inflight(tl: &TimelineState, clip: &Clip) {
 
 #[allow(dead_code)]
 pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec<&'a Clip> {
-    let mut out: Vec<&Clip> = tl
+    let mut out: Vec<&'a Clip> = tl
         .clips
         .iter()
         .filter(|c| tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_and_resample_midi;
+
+    /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
+    /// 不得落入"空窗口"提前返回 —— 退化为整条缓存曲线回绕，输出非空
+    /// 且相位与逐帧 floor_mod 参考一致。
+    #[test]
+    fn loop_wrapped_window_without_media_duration_does_not_collapse_to_empty() {
+        // 环绕窗口 [3.5, 3.0)（start > end），缓存曲线 100 帧（1s @10ms）。
+        let full: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let out = trim_and_resample_midi(
+            &full,
+            10.0,
+            3.5, // source_start_sec（> end）
+            3.0, // source_end_sec
+            1.0, // playback_rate
+            2.0, // clip_timeline_len_sec → target = 200 帧
+            true, // loop_enabled
+            None, // 媒体时长未知
+            false,
+        );
+        assert_eq!(out.len(), 200, "curve must cover the clip length");
+        assert!(out.iter().any(|&v| v > 0.0), "curve must not be empty");
+
+        // 与逐帧 floor_mod 参考对拍：idx = floor_mod(anchor + i, N)。
+        let anchor = ((3.5f64 * 1000.0) / 10.0).round() as i64; // 350
+        for (i, v) in out.iter().enumerate() {
+            let expect = full[(anchor + i as i64).rem_euclid(100) as usize];
+            assert!((v - expect).abs() < 1e-6, "frame {i}: {v} != {expect}");
+        }
+    }
+
+    /// Loop + 已知媒体时长：逐帧 floor_mod(anchor ± round(i·rate), N)
+    /// 映射正确（正放），且长度等于 clip 时间线帧数。
+    #[test]
+    fn loop_with_media_duration_maps_per_frame_floor_mod() {
+        // 媒体 1s（100 帧 @10ms），锚点 -0.25s（负值环绕到尾部一侧）。
+        let full: Vec<f32> = (0..100).map(|i| (i * 7) as f32 % 13.0).collect();
+        let out = trim_and_resample_midi(
+            &full,
+            10.0,
+            -0.25,
+            1.0,
+            1.0,
+            1.5,
+            true,
+            Some(1.0),
+            false,
+        );
+        assert_eq!(out.len(), 150);
+        let anchor = ((-0.25f64 * 1000.0) / 10.0).round() as i64; // -25
+        for (i, v) in out.iter().enumerate() {
+            let idx = (anchor + i as i64).rem_euclid(100);
+            assert!((v - full[idx as usize]).abs() < 1e-6, "frame {i}");
+        }
+    }
 }

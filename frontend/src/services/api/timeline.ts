@@ -234,6 +234,10 @@ export const timelineApi = {
             muted?: boolean;
             fadeInSec?: number;
             fadeOutSec?: number;
+            /** 倒放开关（后端 ClipStatePatch 支持，必须与乐观更新字段一致）。 */
+            reversed?: boolean;
+            /** Loop（循环源）开关。 */
+            loopEnabled?: boolean;
         }>;
         checkpoint?: boolean;
     }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),

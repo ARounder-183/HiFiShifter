@@ -655,6 +655,11 @@ pub(crate) fn build_snapshot(
                             clip.formant_morph.as_ref().filter(|params| params.enabled),
                             None,
                             clip.source_file_mtime,
+                            clip.loop_enabled,
+                            (
+                                (clip.source_start_sec * 1000.0).round() as i64,
+                                (clip.source_end_sec * 1000.0).round() as i64,
+                            ),
                         );
                         if debug {
                             eprintln!(

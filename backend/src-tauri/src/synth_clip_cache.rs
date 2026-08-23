@@ -482,6 +482,13 @@ pub fn compute_rendered_clip_hash(
     // 源文件的 mtime（Unix 秒），用于区分同路径不同内容的文件版本。
     // 当文件被外部替换后，此值变化 → hash 变化 → 旧渲染缓存自动失效。
     source_file_mtime: Option<u64>,
+    // Loop（循环源）属性：Loop 与非 Loop 的渲染输出完全不同（整文件平铺 vs
+    // 窗口切片），必须参与哈希 —— 否则后台预渲染与 Loop 开关切换之间的竞态
+    // 会把旧域的渲染结果当作新域的缓存命中。
+    loop_enabled: bool,
+    // 量化的源窗口 `(source_start_sec·1000, source_end_sec·1000)`：
+    // 渲染输入随 trim/split 的锚点推进而变化，同样必须参与哈希。
+    source_range_q: (i64, i64),
 ) -> u64 {
     let mut h: u64 = 14695981039346656037u64;
 
@@ -520,6 +527,9 @@ pub fn compute_rendered_clip_hash(
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
     mix_bytes!(&playback_rate.to_bits().to_le_bytes());
+    mix_bytes!(&[u8::from(loop_enabled)]);
+    mix_bytes!(&source_range_q.0.to_le_bytes());
+    mix_bytes!(&source_range_q.1.to_le_bytes());
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = frame_period_ms.max(0.1);
@@ -600,6 +610,8 @@ pub fn compute_breath_noise_hash(
     extra_params: &std::collections::HashMap<String, f64>,
     formant_morph: Option<&crate::state::ClipFormantMorph>,
     source_file_mtime: Option<u64>,
+    loop_enabled: bool,
+    source_range_q: (i64, i64),
 ) -> u64 {
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = extra_curves
         .iter()
@@ -621,6 +633,8 @@ pub fn compute_breath_noise_hash(
         formant_morph,
         None,
         source_file_mtime,
+        loop_enabled,
+        source_range_q,
     )
 }
 
@@ -1021,6 +1035,8 @@ mod tests {
             Some(&formant_a),
             None,
             None, // source_file_mtime
+            false,
+            (0, 1_000),
         );
         let hash_b = compute_rendered_clip_hash(
             "clip-1",
@@ -1037,9 +1053,39 @@ mod tests {
             Some(&formant_b),
             None,
             None, // source_file_mtime
+            false,
+            (0, 1_000),
         );
 
         assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_loop_or_source_range_changes() {
+        // Loop（循环源）与源窗口（trim/split 锚点推进）都会改变渲染输入，
+        // 任一变化必须使渲染缓存失效。
+        let base = |loop_enabled: bool, range: (i64, i64)| {
+            compute_rendered_clip_hash(
+                "clip-1",
+                "demo.wav",
+                0,
+                48_000,
+                48_000,
+                "nsf_hifigan_onnx",
+                &[60.0, 61.0, 62.0],
+                5.0,
+                1.0,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                None,
+                None,
+                None, // source_file_mtime
+                loop_enabled,
+                range,
+            )
+        };
+        assert_ne!(base(false, (0, 1_000)), base(true, (0, 1_000)));
+        assert_ne!(base(false, (0, 1_000)), base(false, (500, 1_000)));
     }
 
     #[test]
@@ -1077,6 +1123,8 @@ mod tests {
                 Some(formant),
                 None,
                 None, // source_file_mtime
+                false,
+                (0, 1_000),
             )
         };
 

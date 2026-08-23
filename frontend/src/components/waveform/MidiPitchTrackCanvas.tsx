@@ -20,7 +20,7 @@ import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import { useAppSelector } from "../../app/hooks";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
-import { drawLoopMarkers } from "../../utils/loopRender";
+import { drawLoopMarkers, modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 
 // ========================================
 // 常量
@@ -53,11 +53,20 @@ interface LoopCycleDescriptor {
     cycleSec: number;
     /** 正放锚点（原始 sourceStartSec，可为负，floor_mod 环绕）。 */
     fwdAnchorSec: number;
-    /** 倒放锚点末端 min(sourceEndSec, D)。 */
+    /**
+     * 倒放锚点末端：周期来自媒体时长时 clamp 到 D；周期退化为窗口跨度时
+     * 保持原始 sourceEndSec（与后端 place_note_occurrence_in_loop 一致 ——
+     * 否则 slip 窗口 [2,7] 的跨度 clamp 会把倒放相位错误平移 ss=2s）。
+     */
     revAnchorEndSec: number;
+    /**
+     * 周期是否来自真实媒体时长：
+     * - true：坐标是**文件域**，首个回绕点在 headDur = 进入段耗尽处；
+     * - false（纯 MIDI 窗口跨度）：坐标是**窗口相对域**，入口即窗口起点，
+     *   首个回绕点在一个完整窗口周期之后。
+     */
+    cycleFromMedia: boolean;
 }
-
-const modEuclid = (a: number, n: number): number => ((a % n) + n) % n;
 
 /**
  * 解析 Loop 回绕描述。
@@ -77,14 +86,15 @@ function resolveLoopCycleDescriptor(args: {
     sourceEndSec: number;
 }): LoopCycleDescriptor | null {
     if (!args.loopEnabled) return null;
-    let mediaDur = 0;
-    if (args.hasSourceMedia) {
-        if (args.durationFrames && args.sourceSampleRate && args.sourceSampleRate > 0) {
-            mediaDur = args.durationFrames / args.sourceSampleRate;
-        } else {
-            mediaDur = Number(args.durationSec ?? 0) || 0;
-        }
-    }
+    // 媒体时长：frames/sr 优先（精确），durationSec 兜底（共享工具，
+    // 与后端 clip_source_media_duration_sec 同一取值链）。
+    const mediaDur = args.hasSourceMedia
+        ? resolveLoopMediaDurationSec({
+              durationFrames: args.durationFrames,
+              sourceSampleRate: args.sourceSampleRate,
+              durationSec: args.durationSec,
+          })
+        : 0;
     const windowSpan = Math.abs(
         Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0),
     );
@@ -95,7 +105,11 @@ function resolveLoopCycleDescriptor(args: {
     return {
         cycleSec,
         fwdAnchorSec: srcStart,
-        revAnchorEndSec: Math.min(Math.max(srcEnd, 0), cycleSec),
+        revAnchorEndSec:
+            mediaDur > 1e-9
+                ? Math.min(Math.max(srcEnd, 0), mediaDur)
+                : Math.max(srcEnd, 0),
+        cycleFromMedia: mediaDur > 1e-9,
     };
 }
 
@@ -477,21 +491,42 @@ export const MidiPitchTrackCanvas = React.memo(
                     Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
                         ? 1
                         : Math.abs(Number(clip.playbackRate ?? 1) || 1);
-                const cycleSec = markerCycle ? markerCycle.cycleSec / markerRate : 0;
-                if (cycleSec > 0 && clip.lengthSec > cycleSec + 1e-6) {
+                const markerBodyDur = markerCycle
+                    ? markerCycle.cycleSec / markerRate
+                    : 0;
+                if (markerBodyDur > 0 && clip.lengthSec > markerBodyDur + 1e-6) {
+                    // 标记必须锚定在**实际回绕点**：与 WaveformTrackCanvas 的
+                    // 分段边界一致 ——
+                    // - 周期来自媒体：头部进入段耗尽处（headDur）及此后每个
+                    //   整文件周期边界；
+                    // - 纯 MIDI 窗口跨度（窗口相对域）：入口即窗口起点，
+                    //   首个回绕点在一个完整周期之后。
+                    // 不能一律用 k·周期：窗口不从文件原点进入时（trim/split），
+                    // 标记会与音频/曲线相位错开。
+                    const desc = markerCycle;
+                    const headDur = !desc
+                        ? 0
+                        : desc.cycleFromMedia
+                          ? ((clip.reversed
+                                ? desc.revAnchorEndSec
+                                : desc.cycleSec -
+                                  modEuclid(desc.fwdAnchorSec, desc.cycleSec)) /
+                              markerRate)
+                          : markerBodyDur;
                     const markers: number[] = [];
                     let guard = 0;
                     for (
-                        let markerT = cycleSec;
-                        markerT < clip.lengthSec - 1e-6 && guard < 8192;
-                        markerT += cycleSec
+                        let markerT = headDur;
+                        markerT < clip.lengthSec - 1e-6 &&
+                        markers.length < 4096 &&
+                        guard < 8192;
+                        markerT += markerBodyDur
                     ) {
                         guard += 1;
                         const mx =
                             (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
                         if (mx < -8 || mx > displayW + 8) continue;
                         markers.push(Math.round(mx * 2) / 2);
-                        if (markers.length >= 4096) break;
                     }
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);

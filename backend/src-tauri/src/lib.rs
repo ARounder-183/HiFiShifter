@@ -115,6 +115,17 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
+/// 仅供集成测试（tests/）使用的内部函数导出。
+///
+/// lib 的单元测试 harness 在 Windows 上因缺少内嵌清单无法启动（tauri_build
+/// 只给 bin 目标嵌清单，见 build.rs / tests/smoke.rs 说明），因此需要真正
+/// 运行纯函数回归测试时，通过 `--features __test-internals` 走集成测试
+/// 目标执行。
+#[cfg(feature = "__test-internals")]
+pub mod __test_internals {
+    pub use crate::pitch_clip::trim_and_resample_midi;
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;

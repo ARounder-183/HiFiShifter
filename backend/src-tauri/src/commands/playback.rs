@@ -849,6 +849,11 @@ fn collect_clips_needing_render(
             clip.formant_morph.as_ref().filter(|params| params.enabled),
             None,
             clip.source_file_mtime,
+            clip.loop_enabled,
+            (
+                (clip.source_start_sec * 1000.0).round() as i64,
+                (clip.source_end_sec * 1000.0).round() as i64,
+            ),
         );
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
@@ -991,12 +996,29 @@ fn render_single_clip(
     let mut segment = segment;
 
     if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
+        // Loop（循环源）键必须编码**实际消费的平铺区间**（与 mixdown 的键公式
+        // 完全一致 —— 本函数无导出窗口，skip=0、consumed=整条 clip 消费量）。
+        // 若固定取 [0, total_sec]，本函数与 mixdown 各导出窗口的内容会共享
+        // 同一条目互相投毒（get_or_compute 不校验长度/内容）。
+        let (key_start_sec, key_end_sec) = if loop_mode {
+            let total_frames = ((total_sec * in_rate as f64).round() as i64).max(1);
+            let consumed_frames =
+                ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0))
+                    as i64;
+            let start_frame = anchor_frame.rem_euclid(total_frames);
+            (
+                start_frame as f64 / in_rate as f64,
+                (start_frame + consumed_frames) as f64 / in_rate as f64,
+            )
+        } else {
+            (clip.source_start_sec.max(0.0), clip.source_end_sec)
+        };
         let key = crate::formant_cache::make_formant_cache_key(
             &clip.id,
             std::path::Path::new(source_path),
             out_rate,
-            if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
-            if loop_mode { total_sec } else { clip.source_end_sec },
+            key_start_sec,
+            key_end_sec,
             clip.reversed && !loop_mode,
             // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
             // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
@@ -1183,6 +1205,11 @@ fn render_single_clip(
                     &entry.extra_params,
                     clip.formant_morph.as_ref().filter(|params| params.enabled),
                     clip.source_file_mtime,
+                    clip.loop_enabled,
+                    (
+                        (clip.source_start_sec * 1000.0).round() as i64,
+                        (clip.source_end_sec * 1000.0).round() as i64,
+                    ),
                 );
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),

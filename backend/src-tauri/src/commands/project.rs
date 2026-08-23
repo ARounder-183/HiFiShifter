@@ -893,12 +893,17 @@ pub(super) fn open_project(
         }
     }
     // v4 迁移：v3 及更早的工程 Clip 不携带 loop_enabled（Loop / 循环源）字段，
-    // 按当前"为新的音频块启用循环"设置作为这些既有 Clip 的 Loop 属性；
+    // 按当前"为新的音频块启用循环"设置作为这些既有**音频** Clip 的 Loop 属性；
     // 绝不改动已显式携带该字段的 v4+ 工程。
+    // 纯 MIDI / 音高参考块（无源媒体路径）不参与 Loop 迁移 —— 与各格式导入器
+    // 显式创建 `loop_enabled=false` 的 MIDI 块约定保持一致（REAPER 的 LOOP
+    // 语义只作用于音频 item）。
     if pf.version < 4 {
         let default_loop = crate::config::loop_new_clips_default();
         for clip in &mut pf.timeline.clips {
-            clip.loop_enabled = default_loop;
+            if clip.source_path.is_some() {
+                clip.loop_enabled = default_loop;
+            }
         }
     }
 

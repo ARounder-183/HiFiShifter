@@ -17,6 +17,39 @@
  */
 
 /**
+ * floor_mod（欧几里得模）：结果始终落在 [0, n)。
+ *
+ * 引擎的回绕数学是 floor_mod —— 锚点可为负 / 超界，渲染端必须用同一
+ * 归一化方式（而不是 clamp），否则存储在域外的锚点会让波形相位与
+ * 实际播放错位。
+ */
+export function modEuclid(a: number, n: number): number {
+    if (!(n > 0)) return a;
+    return ((a % n) + n) % n;
+}
+
+/**
+ * 解析 Loop 回绕使用的**媒体总时长**（秒）。
+ *
+ * 统一取值顺序：`durationFrames / sourceSampleRate`（精确）优先，
+ * `durationSec`（可能被量化/舍入）兜底 —— 与后端
+ * clip_source_media_duration_sec 及 piano-roll / MIDI 画布保持一致，
+ * 避免不同消费端对同一文件推导出不同的回绕周期。
+ */
+export function resolveLoopMediaDurationSec(args: {
+    durationFrames?: number | null;
+    sourceSampleRate?: number | null;
+    durationSec?: number | null;
+}): number {
+    if (args.durationFrames && args.sourceSampleRate && args.sourceSampleRate > 0) {
+        const d = args.durationFrames / args.sourceSampleRate;
+        if (Number.isFinite(d) && d > 0) return d;
+    }
+    const fallback = Number(args.durationSec ?? 0);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
+/**
  * 在波形渲染区域内绘制回绕节点的"倒三角"标记。
  *
  * 坐标系：与 WaveformTrackCanvas / MidiPitchTrackCanvas 一致 ——

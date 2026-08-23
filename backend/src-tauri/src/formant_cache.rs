@@ -332,11 +332,22 @@ pub fn get_or_compute_formant_audio(
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         if let Some(entry) = cache.get(&key) {
+            // 防御：命中条目的帧数必须与当前输入一致 —— 不一致说明键未覆盖
+            // 某个内容维度（历史遗留条目或域泄漏），按未命中重新计算，
+            // 绝不把错误长度的音频返回给调用方（会被静音截断/混入）。
+            if entry.frames == input_stereo.len() / 2 && entry.sample_rate == sample_rate {
+                formant_debug_log(format!(
+                    "cache hit clip_id={} frames={} sr={}",
+                    key.clip_id, entry.frames, entry.sample_rate
+                ));
+                return Ok(entry.clone());
+            }
             formant_debug_log(format!(
-                "cache hit clip_id={} frames={} sr={}",
-                key.clip_id, entry.frames, entry.sample_rate
+                "cache shape-mismatch clip_id={} cached_frames={} input_frames={} → recompute",
+                key.clip_id,
+                entry.frames,
+                input_stereo.len() / 2,
             ));
-            return Ok(entry.clone());
         }
     }
 
