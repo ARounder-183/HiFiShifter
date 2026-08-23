@@ -838,12 +838,26 @@ export function drawPianoRoll(args: {
 
         const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
         const isLoop = Boolean(entry.loopEnabled);
-        const clipSourceSpanSec = isLoop
-            ? Math.max(
-                  0,
-                  Math.min(clipSourceEndSec, sourceDurSec || clipSourceEndSec) - sourceStartSec,
-              )
-            : Math.max(0, Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec));
+        const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
+        const effSrcEndPiano = Math.min(clipSourceEndSec, mediaDurPiano || clipSourceEndSec);
+        let clipSourceSpanSec: number;
+        if (!isLoop) {
+            clipSourceSpanSec = Math.max(
+                0,
+                Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
+            );
+        } else if (mediaDurPiano > 1e-6) {
+            // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与媒体
+            // 时长决定 —— split 等编辑会产生 sourceStart > sourceEnd 的"环绕
+            // 窗口"，可用性只取决于媒体时长本身（否则波形会整体消失）。
+            clipSourceSpanSec = mediaDurPiano;
+        } else {
+            // 无有效媒体时长：退化为窗口跨度
+            clipSourceSpanSec = Math.max(
+                0,
+                Math.min(clipSourceEndSec, sourceDurSec || clipSourceEndSec) - sourceStartSec,
+            );
+        }
         if (clipSourceSpanSec <= 0) continue;
 
         // ── 循环分段（Loop = 循环原始音频文件，与 WaveformTrackCanvas 一致）──
@@ -858,8 +872,6 @@ export function drawPianoRoll(args: {
             srcWinStart: number;
             srcWinEnd: number;
         }
-        const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
-        const effSrcEndPiano = Math.min(clipSourceEndSec, mediaDurPiano || clipSourceEndSec);
         const tiles: PianoRollTile[] = [];
         if (!isLoop) {
             tiles.push({
@@ -908,16 +920,37 @@ export function drawPianoRoll(args: {
                     segOffset += bodyDur;
                 }
             } else {
-                // 退化保护：单片近似
+                // 退化保护：单片近似。
+                // 用"进入段"窗口（锚点 → 媒体末端/起点）近似，
+                // 避免按 [start, start+span] 取到越界源区间。
                 tiles.push({
                     localStartSec: 0,
                     durationSec: entry.lengthSec,
-                    srcWinStart: sourceStartSec,
-                    srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                    srcWinStart: entry.reversed ? 0 : anchorFwd,
+                    srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
                 });
             }
             if (tiles.length === 0) continue;
         }
+
+        // ── 同窗口切片缓存 ─────────────────────────────────────────────
+        // Loop 的所有"整文件重复段"共享同一源窗口 [0, D]，逐瓦片重复调
+        // getInterleavedSlice 会对同一窗口反复聚合/拷贝。单条目缓存：
+        // 窗口参数不变时复用上一次切片，缓存持有 store buffer 直到换窗
+        // 或本 clip 结束（与 WaveformTrackCanvas 保持一致）。
+        let fetchCacheKey: string | null = null;
+        let fetchCacheResult: {
+            interleaved: Float32Array;
+            dataStartSec: number;
+            dataDurationSec: number;
+        } | null = null;
+        const releaseFetchCache = () => {
+            if (fetchCacheResult) {
+                waveformMipmapStore.releaseInterleaved(fetchCacheResult.interleaved);
+                fetchCacheResult = null;
+            }
+            fetchCacheKey = null;
+        };
 
         for (const tile of tiles) {
             const tileLocalEndSec = tile.localStartSec + tile.durationSec;
@@ -937,14 +970,21 @@ export function drawPianoRoll(args: {
             const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
             lastLevelByClip[levelKey] = stableLevel;
 
-            // 从 mipmap 缓存获取 interleaved 数据
-            const result = waveformMipmapStore.getInterleavedSlice(
-                entry.sourcePath,
-                stableLevel,
-                sourceTimeStart,
-                sourceDuration,
-            );
+            // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）
+            const fetchKey = `${sourceTimeStart}|${sourceDuration}`;
+            if (!fetchCacheResult || fetchKey !== fetchCacheKey) {
+                releaseFetchCache();
+                fetchCacheKey = fetchKey;
+                fetchCacheResult = waveformMipmapStore.getInterleavedSlice(
+                    entry.sourcePath,
+                    stableLevel,
+                    sourceTimeStart,
+                    sourceDuration,
+                );
+            }
+            const result = fetchCacheResult;
             if (!result || result.interleaved.length < 4) {
+                releaseFetchCache();
                 continue;
             }
 
@@ -954,7 +994,6 @@ export function drawPianoRoll(args: {
             const tileVisRight =
                 Math.round((clipStartSec + visLocalEnd) * pxPerSec) - viewportStartPx;
             if (tileVisRight <= tileVisLeft) {
-                waveformMipmapStore.releaseInterleaved(result.interleaved);
                 continue;
             }
 
@@ -1014,8 +1053,9 @@ export function drawPianoRoll(args: {
             if (withGains !== result.interleaved) {
                 releaseGainBuffer(withGains);
             }
-            waveformMipmapStore.releaseInterleaved(result.interleaved);
+            // store 复用池 buffer 由 fetchCache 统一持有/归还。
         }
+        releaseFetchCache();
     }
 
     // Selection (time band)

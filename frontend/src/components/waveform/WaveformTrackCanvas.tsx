@@ -257,12 +257,27 @@ export const WaveformTrackCanvas = React.memo(
                 const clipSourceEndSec =
                     Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
                 const isLoop = Boolean(clip.loopEnabled);
-                const clipSourceSpanSec = isLoop
-                    ? Math.max(0, Math.min(clipSourceEndSec, clip.durationSec) - sourceStartSec)
-                    : Math.max(
-                          0,
-                          Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-                      );
+                const mediaDur = Math.max(0, Number(clip.durationSec) || 0);
+                const effSrcEnd = Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec);
+                let clipSourceSpanSec: number;
+                if (!isLoop) {
+                    clipSourceSpanSec = Math.max(
+                        0,
+                        Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
+                    );
+                } else if (mediaDur > 1e-6) {
+                    // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与
+                    // 媒体时长决定 —— split 等编辑会产生 sourceStart > sourceEnd
+                    // 的"环绕窗口"，可用性只取决于媒体时长本身；
+                    // 若按窗口跨度判断，这类 clip 的波形会整体消失（而声音仍在播放）。
+                    clipSourceSpanSec = mediaDur;
+                } else {
+                    // 无有效媒体时长：退化为窗口跨度
+                    clipSourceSpanSec = Math.max(
+                        0,
+                        Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec) - sourceStartSec,
+                    );
+                }
                 if (clipSourceSpanSec <= 1e-6) continue;
 
                 // ── 循环分段（Loop = 循环原始音频文件）────────────────────────
@@ -293,9 +308,7 @@ export const WaveformTrackCanvas = React.memo(
                     /** 该分段覆盖的源窗口终点（源域秒） */
                     srcWinEnd: number;
                 }
-                const mediaDur = Math.max(0, Number(clip.durationSec) || 0);
-                const effSrcEnd = Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec);
-                let segmentsToRender: RenderSegment[] = [];
+                const segmentsToRender: RenderSegment[] = [];
                 if (!isLoop) {
                     segmentsToRender.push({
                         localStartSec: 0,
@@ -347,17 +360,41 @@ export const WaveformTrackCanvas = React.memo(
                             segOffset += bodyDur;
                         }
                     } else {
+                        // 退化保护：分段数失控时回退单片近似。
+                        // 用"进入段"窗口（锚点 → 媒体末端/起点）近似，
+                        // 避免按 [start, start+span] 取到越界源区间。
                         segmentsToRender.push({
                             localStartSec: 0,
                             durationSec: clip.lengthSec,
-                            srcWinStart: sourceStartSec,
-                            srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                            srcWinStart: clip.reversed ? 0 : anchorFwd,
+                            srcWinEnd: clip.reversed ? anchorRev : mediaDur,
                         });
                     }
                     if (segmentsToRender.length === 0) continue;
                 }
 
                 const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
+
+                // ── 同窗口切片缓存 ─────────────────────────────────────────
+                // Loop 的所有"整文件重复段"共享同一源窗口 [0, D]，逐瓦片重复
+                // 调 getInterleavedSlice 会对同一窗口反复聚合/拷贝（可见周期
+                // 越多每帧开销越大）。这里做单条目缓存：窗口参数不变时直接
+                // 复用上一次切片；缓存持有 store buffer 直到换窗或本 clip 结束。
+                let fetchCacheKey: string | null = null;
+                let fetchCacheResult: {
+                    interleaved: Float32Array;
+                    dataStartSec: number;
+                    dataDurationSec: number;
+                } | null = null;
+                const releaseFetchCache = () => {
+                    if (fetchCacheResult) {
+                        waveformMipmapStore.releaseInterleaved(
+                            fetchCacheResult.interleaved,
+                        );
+                        fetchCacheResult = null;
+                    }
+                    fetchCacheKey = null;
+                };
 
                 for (const seg of segmentsToRender) {
                     const tileLocalEndSec = seg.localStartSec + seg.durationSec;
@@ -394,20 +431,28 @@ export const WaveformTrackCanvas = React.memo(
                     const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
 
                     // ========================================
-                    // 从 mipmap 缓存获取 interleaved 数据（不 resample，与 PianoRoll 一致）
+                    // 从 mipmap 缓存获取 interleaved 数据（不 resample，与 PianoRoll 一致）。
+                    // 相同源窗口的瓦片复用同一切片（见上方缓存说明）。
                     // ========================================
                     const __tSlice0 = __perfDebug ? performance.now() : 0;
-                    const result = waveformMipmapStore.getInterleavedSlice(
-                        clip.sourcePath,
-                        stableLevel,
-                        sourceTimeStart,
-                        sourceDuration,
-                    );
+                    const fetchKey = `${sourceTimeStart}|${sourceDuration}`;
+                    if (!fetchCacheResult || fetchKey !== fetchCacheKey) {
+                        releaseFetchCache();
+                        fetchCacheKey = fetchKey;
+                        fetchCacheResult = waveformMipmapStore.getInterleavedSlice(
+                            clip.sourcePath,
+                            stableLevel,
+                            sourceTimeStart,
+                            sourceDuration,
+                        );
+                    }
+                    const result = fetchCacheResult;
                     const __tSlice1 = __perfDebug ? performance.now() : 0;
 
                     if (!result || result.interleaved.length < 4) {
                         if (!result) wfDiag_dataMissNull();
                         else wfDiag_dataMissShort();
+                        releaseFetchCache();
                         continue;
                     }
                     wfDiag_dataHit();
@@ -426,7 +471,6 @@ export const WaveformTrackCanvas = React.memo(
                     const __tDs0 = __perfDebug ? performance.now() : 0;
                     const storeInterleaved = result.interleaved;
                     let renderInterleaved: Float32Array = storeInterleaved;
-                    let releasedStoreInterleaved = false;
                     const rawSampleCount = storeInterleaved.length / 2;
                     // 使用与可见宽度绑定的稳定采样目标，避免滚屏时分桶边界漂移导致抖动
                     const stableTargetWidthPx = Math.max(1, Math.ceil(tileVisibleWidthPx * 2));
@@ -460,8 +504,8 @@ export const WaveformTrackCanvas = React.memo(
                             downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
                         }
 
-                        waveformMipmapStore.releaseInterleaved(storeInterleaved);
-                        releasedStoreInterleaved = true;
+                        // 注意：storeInterleaved 由 fetchCache 持有，此处不归还，
+                        // 供后续同窗口瓦片继续复用（见缓存说明）。
                         renderInterleaved = downsampled;
                     }
 
@@ -481,9 +525,6 @@ export const WaveformTrackCanvas = React.memo(
                         (clipStartSec + visClipEndSec) * currentPxPerSec - viewportStartPx,
                     );
                     if (tileVisRightPx <= tileVisLeftPx) {
-                        if (!releasedStoreInterleaved) {
-                            waveformMipmapStore.releaseInterleaved(storeInterleaved);
-                        }
                         continue;
                     }
 
@@ -600,10 +641,7 @@ export const WaveformTrackCanvas = React.memo(
                         releaseDownsampleBuffer(renderInterleaved);
                     }
 
-                    // 3. 归还 store 复用池 buffer
-                    if (!releasedStoreInterleaved) {
-                        waveformMipmapStore.releaseInterleaved(storeInterleaved);
-                    }
+                    // 3. store 复用池 buffer 由 fetchCache 统一持有/归还（见缓存说明）。
 
                     // 收集诊断数据
                     if (__perfDebug) {
@@ -621,6 +659,9 @@ export const WaveformTrackCanvas = React.memo(
                         });
                     }
                 }
+
+                // 本 clip 的所有瓦片处理完毕，归还缓存持有的 store buffer。
+                releaseFetchCache();
 
                 // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
                 // 节点位置：头部段结束处（进入段耗尽、首次环绕）及此后
