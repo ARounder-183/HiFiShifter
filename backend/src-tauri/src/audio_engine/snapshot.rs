@@ -449,7 +449,11 @@ pub(crate) fn build_snapshot(
                 out_rate,
                 if clip.loop_enabled { 0.0 } else { clip.source_start_sec.max(0.0) },
                 if clip.loop_enabled {
-                    src_render.frames as f64 / out_rate as f64
+                    // 与预计算（compute_formant_cache_entry_for_clip）使用同一
+                    // 来源（优先 clip 元数据）—— 避免 wav 头时长与解码帧时长在
+                    // 1ms 量化边界处错开键值，导致预计算永不命中、状态闪烁。
+                    crate::state::clip_source_media_duration_sec(clip)
+                        .unwrap_or_else(|| src_render.frames as f64 / out_rate as f64)
                 } else {
                     clip.source_end_sec
                 },
@@ -856,7 +860,14 @@ pub(crate) fn build_snapshot(
             src: src_render,
             src_start_frame: src_start,
             src_end_frame: src_end,
-            reversed: formant_params.is_some().then_some(false).unwrap_or(clip.reversed),
+            // 非 Loop：Formant 缓冲已预反转，方向归零交给正向遍历；
+            // Loop：缓冲保持自然顺序，倒放方向由 mix 的锚点回绕（anchor − f）
+            // 体现 —— 此处若清零会把"倒放循环"错放成"从文件末端正向循环"。
+            reversed: if clip.loop_enabled {
+                clip.reversed
+            } else {
+                formant_params.is_some().then_some(false).unwrap_or(clip.reversed)
+            },
             playback_rate: playback_rate_render,
             local_src_offset_frames,
             repeat,

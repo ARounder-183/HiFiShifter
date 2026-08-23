@@ -20,7 +20,7 @@ import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import { useAppSelector } from "../../app/hooks";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
-import { drawLoopMarkers, loopCycleSec } from "../../utils/loopRender";
+import { drawLoopMarkers } from "../../utils/loopRender";
 
 // ========================================
 // 常量
@@ -45,10 +45,66 @@ function strokeColorForClip(clip: { color: string }): string {
 }
 
 /**
+ * Loop（循环源）回绕描述 —— 与后端 clip_loop_cycle_span_sec /
+ * place_note_occurrence_frames 的锚点数学逐帧一致。
+ */
+interface LoopCycleDescriptor {
+    /** 回绕周期 D（源域秒）：音频 clip = 整个媒体文件时长；纯 MIDI clip = 窗口跨度。 */
+    cycleSec: number;
+    /** 正放锚点（原始 sourceStartSec，可为负，floor_mod 环绕）。 */
+    fwdAnchorSec: number;
+    /** 倒放锚点末端 min(sourceEndSec, D)。 */
+    revAnchorEndSec: number;
+}
+
+const modEuclid = (a: number, n: number): number => ((a % n) + n) % n;
+
+/**
+ * 解析 Loop 回绕描述。
+ *
+ * 关键语义：带源媒体的 clip（含由音频转换来的音高参考块）的实际声音按
+ * **整个媒体文件** floor_mod 回绕（与 WaveformTrackCanvas / 后端引擎一致），
+ * 音高曲线与回绕标记必须使用同一周期，否则相位错位；纯 MIDI 导入 clip
+ * （无源媒体）没有可循环的媒体，周期退化为音符窗口跨度。
+ */
+function resolveLoopCycleDescriptor(args: {
+    loopEnabled: boolean;
+    hasSourceMedia: boolean;
+    durationFrames?: number;
+    sourceSampleRate?: number;
+    durationSec?: number;
+    sourceStartSec: number;
+    sourceEndSec: number;
+}): LoopCycleDescriptor | null {
+    if (!args.loopEnabled) return null;
+    let mediaDur = 0;
+    if (args.hasSourceMedia) {
+        if (args.durationFrames && args.sourceSampleRate && args.sourceSampleRate > 0) {
+            mediaDur = args.durationFrames / args.sourceSampleRate;
+        } else {
+            mediaDur = Number(args.durationSec ?? 0) || 0;
+        }
+    }
+    const windowSpan = Math.abs(
+        Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0),
+    );
+    const cycleSec = mediaDur > 1e-9 ? mediaDur : windowSpan;
+    if (!Number.isFinite(cycleSec) || cycleSec <= 1e-9) return null;
+    const srcStart = Number(args.sourceStartSec ?? 0);
+    const srcEnd = Number(args.sourceEndSec ?? 0);
+    return {
+        cycleSec,
+        fwdAnchorSec: srcStart,
+        revAnchorEndSec: Math.min(Math.max(srcEnd, 0), cycleSec),
+    };
+}
+
+/**
  * 从 MIDI note data 即时生成音高曲线。
  * 逻辑与后端 emit_clip_pitch_data_for_clip 的 MIDI 分支一致，
  * 支持 source range trim、playbackRate 拉伸、reversed 倒放，
- * 以及 Loop（循环源）：超出单个循环周期的内容按周期回绕重复铺满。
+ * 以及 Loop（循环源）：按媒体时长的锚点回绕重复铺满
+ * （`loopCycle` 为 null 时走非循环路径）。
  */
 function generateMidiCurveFromNotes(
     notes: Array<{ startSec: number; endSec: number; note: number }>,
@@ -58,7 +114,7 @@ function generateMidiCurveFromNotes(
     playbackRate: number,
     reversed: boolean,
     fillGaps: boolean,
-    loopEnabled: boolean,
+    loopCycle: LoopCycleDescriptor | null,
 ): number[] {
     const fp = Math.max(FRAME_PERIOD_MS, 0.1);
     const targetFrames = Math.max(1, Math.round((clipLengthSec * 1000) / fp));
@@ -67,13 +123,42 @@ function generateMidiCurveFromNotes(
     const pr = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
     const srcTotalLen = sourceEndSec - sourceStartSec;
 
-    // Loop（循环源）：单个循环周期占用的帧数。
-    const loopCycleFrames =
-        loopEnabled && srcTotalLen > 1e-9
-            ? Math.max(1, Math.round((srcTotalLen / pr) * 1000 / fp))
-            : 0;
-
     for (const note of notes) {
+        // Loop（循环源）：按媒体时长 D 的锚点回绕放置（与音频渲染的
+        // floor_mod 映射一致）。不能用窗口比较过滤可见性 —— split 产生的
+        // "环绕窗口"（start > end）会把所有音符误判为越界而全部丢弃。
+        if (loopCycle && note.endSec - note.startSec > 1e-9) {
+            const { cycleSec, fwdAnchorSec, revAnchorEndSec } = loopCycle;
+            const u0 = reversed
+                ? modEuclid(revAnchorEndSec - note.endSec, cycleSec)
+                : modEuclid(note.startSec - fwdAnchorSec, cycleSec);
+            const firstStartFrame = Math.round(((u0 / pr) * 1000) / fp);
+            const lenFrames = Math.max(
+                1,
+                Math.round((((note.endSec - note.startSec) / pr) * 1000) / fp),
+            );
+            const cycleFrames = Math.max(1, Math.round(((cycleSec / pr) * 1000) / fp));
+            const noteValue = note.note;
+            for (
+                let cycleOffset = 0;
+                cycleOffset < targetFrames;
+                cycleOffset += cycleFrames
+            ) {
+                const writeStart = cycleOffset + firstStartFrame;
+                const writeEnd = Math.min(
+                    cycleOffset + firstStartFrame + lenFrames,
+                    targetFrames,
+                );
+                if (writeStart >= writeEnd) break;
+                for (let frame = writeStart; frame < writeEnd; frame++) {
+                    if (noteValue > curve[frame] || curve[frame] <= 0) {
+                        curve[frame] = noteValue;
+                    }
+                }
+            }
+            continue;
+        }
+
         if (note.endSec <= sourceStartSec || note.startSec >= sourceEndSec) continue;
         const relStart = Math.max(0, note.startSec - sourceStartSec);
         const relEnd = Math.min(srcTotalLen, note.endSec - sourceStartSec);
@@ -88,21 +173,12 @@ function generateMidiCurveFromNotes(
         const noteEndFrame = Math.round(((effEnd / pr) * 1000) / fp);
         const noteValue = note.note;
 
-        // Loop：按周期重复写入，铺满整个可见区间；否则只写一次。
-        for (
-            let cycleOffset = 0;
-            cycleOffset < targetFrames;
-            cycleOffset += loopCycleFrames > 0 ? loopCycleFrames : targetFrames
-        ) {
-            const writeStart = cycleOffset + noteStartFrame;
-            const writeEnd = Math.min(cycleOffset + noteEndFrame, targetFrames);
-            if (writeStart >= writeEnd) break;
-            for (let frame = writeStart; frame < writeEnd; frame++) {
-                if (noteValue > curve[frame] || curve[frame] <= 0) {
-                    curve[frame] = noteValue;
-                }
+        // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
+        const writeEnd = Math.min(noteEndFrame, targetFrames);
+        for (let frame = noteStartFrame; frame < writeEnd; frame++) {
+            if (noteValue > curve[frame] || curve[frame] <= 0) {
+                curve[frame] = noteValue;
             }
-            if (loopCycleFrames <= 0) break;
         }
     }
 
@@ -277,6 +353,17 @@ export const MidiPitchTrackCanvas = React.memo(
                         clip.sourceEndSec > 0
                             ? clip.sourceEndSec
                             : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
+                    // Loop（循环源）：有源媒体的 clip（含音高参考块）按整个媒体
+                    // 文件回绕，纯 MIDI clip 按音符窗口跨度 —— 与实际播放一致。
+                    const loopCycle = resolveLoopCycleDescriptor({
+                        loopEnabled: Boolean(clip.loopEnabled),
+                        hasSourceMedia: Boolean(clip.sourcePath),
+                        durationFrames: clip.durationFrames,
+                        sourceSampleRate: clip.sourceSampleRate,
+                        durationSec: clip.durationSec,
+                        sourceStartSec: clip.sourceStartSec,
+                        sourceEndSec: srcEnd,
+                    });
                     midiCurve = generateMidiCurveFromNotes(
                         clip.midiNoteData,
                         clip.lengthSec,
@@ -285,7 +372,7 @@ export const MidiPitchTrackCanvas = React.memo(
                         clip.playbackRate,
                         clip.reversed,
                         clip.midiFillGaps ?? false,
-                        Boolean(clip.loopEnabled),
+                        loopCycle,
                     );
                     curveStartSec = clipStartSec;
                     framePeriodMs = FRAME_PERIOD_MS;
@@ -370,8 +457,13 @@ export const MidiPitchTrackCanvas = React.memo(
                 ctx.restore();
 
                 // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
-                const cycleSec = loopCycleSec({
+                // 周期与曲线平铺一致：有源媒体 → 媒体时长 D；纯 MIDI → 窗口跨度。
+                const markerCycle = resolveLoopCycleDescriptor({
                     loopEnabled: Boolean(clip.loopEnabled),
+                    hasSourceMedia: Boolean(clip.sourcePath),
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
                     sourceStartSec: clip.sourceStartSec,
                     sourceEndSec:
                         clip.sourceEndSec > 0
@@ -380,15 +472,21 @@ export const MidiPitchTrackCanvas = React.memo(
                                   (max, n) => Math.max(max, n.endSec),
                                   0,
                               ) ?? 0),
-                    playbackRate: clip.playbackRate,
                 });
+                const markerRate =
+                    Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
+                        ? 1
+                        : Math.abs(Number(clip.playbackRate ?? 1) || 1);
+                const cycleSec = markerCycle ? markerCycle.cycleSec / markerRate : 0;
                 if (cycleSec > 0 && clip.lengthSec > cycleSec + 1e-6) {
                     const markers: number[] = [];
+                    let guard = 0;
                     for (
                         let markerT = cycleSec;
-                        markerT < clip.lengthSec - 1e-6;
+                        markerT < clip.lengthSec - 1e-6 && guard < 8192;
                         markerT += cycleSec
                     ) {
+                        guard += 1;
                         const mx =
                             (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
                         if (mx < -8 || mx > displayW + 8) continue;

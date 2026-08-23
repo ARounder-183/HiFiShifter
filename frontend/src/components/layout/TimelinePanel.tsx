@@ -30,6 +30,7 @@ import {
     replaceMidiClipDataRemote,
     importMultipleAudioAtPosition,
     setClipStateRemote,
+    setClipsStateBulkRemote,
     setClipFades,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
@@ -2110,24 +2111,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   }}
                                   onNormalize={normalizeClips}
                                   onToggleReverse={(ids, reversed) => {
-                                      for (const id of ids) {
-                                          void dispatch(
-                                              setClipStateRemote({
-                                                  clipId: id,
-                                                  reversed,
-                                              }),
-                                          );
-                                      }
+                                      // 批量走 bulk 通道：单次 IPC + 单个撤销步
+                                      //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。
+                                      void dispatch(
+                                          setClipsStateBulkRemote({
+                                              updates: ids.map((id) => ({ clipId: id, reversed })),
+                                              checkpoint: true,
+                                          }),
+                                      );
                                   }}
                                   onToggleLoop={(ids, loopEnabled) => {
-                                      for (const id of ids) {
-                                          void dispatch(
-                                              setClipStateRemote({
+                                      void dispatch(
+                                          setClipsStateBulkRemote({
+                                              updates: ids.map((id) => ({
                                                   clipId: id,
                                                   loopEnabled,
-                                              }),
-                                          );
-                                      }
+                                              })),
+                                              checkpoint: true,
+                                          }),
+                                      );
                                   }}
                               />
                           );

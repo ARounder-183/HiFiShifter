@@ -282,7 +282,13 @@ pub fn compute_formant_cache_entry_for_clip(
         Path::new(source_path),
         out_rate,
         if loop_mode { 0.0 } else { source_start_sec },
-        if loop_mode { total_sec } else { clip.source_end_sec },
+        if loop_mode {
+            // 与 snapshot 的查找键使用同一来源（优先 clip 元数据）——
+            // 避免 wav 头时长与解码帧时长在 1ms 量化边界处错开键值。
+            crate::state::clip_source_media_duration_sec(clip).unwrap_or(total_sec)
+        } else {
+            clip.source_end_sec
+        },
         clip.reversed && !loop_mode,
         false,
         params,

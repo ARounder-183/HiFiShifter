@@ -893,13 +893,18 @@ pub fn trim_and_resample_midi(
     let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
     // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
+    // 倒放从窗口末端向下遍历（与音频方向一致），不能忽略 reversed。
     if loop_enabled && target_frames > trimmed.len() {
         let window_frames = trimmed.len();
         let mut out = Vec::with_capacity(target_frames);
         for i in 0..target_frames {
             let u = i as f64 * rate;
-            let wrapped = u % (window_frames as f64);
-            let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
+            let wrapped = (u % (window_frames as f64)).round() as usize;
+            let idx = if reversed {
+                (src_end_frame - 1).saturating_sub(wrapped.min(window_frames - 1))
+            } else {
+                src_start_frame + wrapped.min(window_frames - 1)
+            };
             out.push(full_midi[idx]);
         }
         return out;

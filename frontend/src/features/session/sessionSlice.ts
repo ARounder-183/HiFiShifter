@@ -879,6 +879,8 @@ function applyOptimisticBulkClipState(
         muted?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
+        reversed?: boolean;
+        loopEnabled?: boolean;
     }>,
 ) {
     for (const update of updates) {
@@ -895,6 +897,12 @@ function applyOptimisticBulkClipState(
         }
         if (update.fadeOutSec !== undefined) {
             clip.fadeOutSec = Math.max(0, Number(update.fadeOutSec) || 0);
+        }
+        if (update.reversed !== undefined) {
+            clip.reversed = Boolean(update.reversed);
+        }
+        if (update.loopEnabled !== undefined) {
+            clip.loopEnabled = Boolean(update.loopEnabled);
         }
     }
 }

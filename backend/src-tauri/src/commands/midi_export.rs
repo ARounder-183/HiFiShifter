@@ -715,6 +715,37 @@ fn read_pitch_for_clip(
         let src_total_len = src_end - src_start;
 
         for note in notes {
+            // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与实时引擎 /
+            // assemble 的放置算法一致）。不能用窗口比较过滤可见性 —— split
+            // 产生的"环绕窗口"（start > end）会把所有音符误判为越界。
+            if let Some(placement) = crate::state::place_note_occurrence_in_loop(
+                clip,
+                note.start_sec,
+                note.end_sec,
+                fp,
+            ) {
+                let note_value = note.note as f32;
+                let mut cycle_offset = 0usize;
+                while cycle_offset < target_frames {
+                    let write_start = cycle_offset + placement.first_start_frame;
+                    let write_end = (cycle_offset
+                        + placement.first_start_frame
+                        + placement.len_frames)
+                        .min(target_frames);
+                    if write_start >= write_end {
+                        break;
+                    }
+                    for frame in write_start..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
+                    }
+                    cycle_offset += placement.cycle_frames;
+                }
+                continue;
+            }
+
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
             }

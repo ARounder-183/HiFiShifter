@@ -1516,15 +1516,39 @@ fn emit_clip_pitch_data_for_clip(
         };
         let src_total_len = src_end - src_start;
 
-        // Loop（循环源）：单个循环周期的帧数；音符内容按周期重复铺满 clip。
-        let loop_cycle_frames: Option<usize> = if clip.loop_enabled && src_total_len > 1e-9 {
-            Some(((src_total_len / pr_valid * 1000.0) / fp).round().max(1.0) as usize)
-        } else {
-            None
-        };
         let clip_visible_frames = target_frames;
 
         for note in notes {
+            // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与音频渲染的
+            // floor_mod 映射逐帧一致；纯 MIDI clip 无媒体 → 周期退化为窗口
+            // 跨度）。不能用窗口比较做可见性过滤 —— split 产生的"环绕窗口"
+            // （start > end）会把所有音符误判为越界而全部丢弃。
+            if let Some(placement) = crate::state::place_note_occurrence_in_loop(
+                clip,
+                note.start_sec,
+                note.end_sec,
+                fp,
+            ) {
+                let note_value = note.note as f32;
+                let mut cycle_offset = 0usize;
+                while cycle_offset < clip_visible_frames {
+                    let write_start = cycle_offset + placement.first_start_frame;
+                    let write_end = (cycle_offset + placement.first_start_frame + placement.len_frames)
+                        .min(clip_visible_frames);
+                    if write_start >= write_end {
+                        break;
+                    }
+                    for frame in write_start..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
+                    }
+                    cycle_offset += placement.cycle_frames;
+                }
+                continue;
+            }
+
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
             }
@@ -1548,33 +1572,14 @@ fn emit_clip_pitch_data_for_clip(
             let note_start_frame = ((eff_start / pr_valid * 1000.0) / fp).round() as usize;
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
             let note_value = note.note as f32;
-            match loop_cycle_frames {
-                Some(cycle_frames) => {
-                    let mut cycle_offset = 0usize;
-                    while cycle_offset < clip_visible_frames {
-                        let write_start = cycle_offset + note_start_frame;
-                        let write_end =
-                            (cycle_offset + note_end_frame).min(clip_visible_frames);
-                        if write_start >= write_end {
-                            break;
-                        }
-                        for frame in write_start..write_end {
-                            let current = midi_curve[frame];
-                            if note_value > current || current <= 0.0 {
-                                midi_curve[frame] = note_value;
-                            }
-                        }
-                        cycle_offset += cycle_frames;
-                    }
-                }
-                None => {
-                    let write_end = note_end_frame.min(target_frames);
-                    if note_start_frame < write_end {
-                        for frame in note_start_frame..write_end {
-                            let current = midi_curve[frame];
-                            if note_value > current || current <= 0.0 {
-                                midi_curve[frame] = note_value;
-                            }
+            // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
+            {
+                let write_end = note_end_frame.min(target_frames);
+                if note_start_frame < write_end {
+                    for frame in note_start_frame..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
                         }
                     }
                 }

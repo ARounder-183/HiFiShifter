@@ -527,8 +527,26 @@ pub fn render_mixdown_interleaved(
         } else {
             (clip.source_start_sec * in_rate as f64).round() as i64
         };
+        // Loop（循环源）：只物化【导出窗口 ∩ clip】对应的消费量 —— 整条 clip
+        // 的平铺段在"导出局部区间 / 长循环 clip"场景会产生多份全尺寸缓冲的
+        // 瞬时峰值（tiled 段 + resample 副本 + formant 产物），分配失败即
+        // 进程 abort。锚点按窗口起点前移等量消费帧，内容相位不变。
+        let (loop_seg_local_start_sec, loop_seg_len_sec) = if loop_mode {
+            let local_start = (start_sec - clip_start_sec).max(0.0);
+            let local_end = (end_sec - clip_start_sec).min(clip_timeline_len_sec);
+            (local_start, (local_end - local_start).max(0.0))
+        } else {
+            (0.0, clip_timeline_len_sec)
+        };
         let segment: Vec<f32> = if loop_mode {
-            let out_source_frames = ((clip_timeline_len_sec.max(0.0)
+            let skip_src_frames =
+                (loop_seg_local_start_sec * playback_rate * in_rate as f64).round() as i64;
+            let advanced_anchor = if clip.reversed {
+                anchor_frame - skip_src_frames
+            } else {
+                anchor_frame + skip_src_frames
+            };
+            let out_source_frames = ((loop_seg_len_sec.max(0.0)
                 * playback_rate
                 * in_rate as f64)
                 .ceil()
@@ -536,7 +554,7 @@ pub fn render_mixdown_interleaved(
             build_loop_tiled_segment(
                 &pcm,
                 in_channels_usize,
-                anchor_frame,
+                advanced_anchor,
                 clip.reversed,
                 out_source_frames,
             )
@@ -643,7 +661,8 @@ pub fn render_mixdown_interleaved(
 
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
-            let seg_start_sec = clip_start_sec + pre_silence_sec;
+            let seg_start_sec =
+                clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
             let mut seg = segment;
             let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
                 timeline,
@@ -705,8 +724,10 @@ pub fn render_mixdown_interleaved(
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
 
         // Mix into output, considering overlap window.
-        // The audio segment starts after pre_silence_sec and lasts seg_frames/out_rate.
-        let seg_start_sec = clip_start_sec + pre_silence_sec;
+        // The audio segment starts after pre_silence_sec (Loop：再叠加窗口
+        // 起点的 clip 局部偏移 —— 平铺段只覆盖窗口交集，见上方) and lasts seg_frames/out_rate.
+        let seg_start_sec =
+            clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
         let seg_end_sec = seg_start_sec + (seg_frames as f64) / out_rate as f64;
 
         let clip_window_start = seg_start_sec.max(start_sec);

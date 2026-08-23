@@ -3,6 +3,10 @@ type BulkClipRemoteChange = {
     muted?: boolean;
     fadeInSec?: number;
     fadeOutSec?: number;
+    /** 倒放开关（后端 ClipStatePatch 支持，乐观更新同步应用）。 */
+    reversed?: boolean;
+    /** Loop（循环源）开关。 */
+    loopEnabled?: boolean;
 };
 
 export function buildBulkClipStateUpdates(args: {

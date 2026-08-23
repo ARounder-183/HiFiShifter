@@ -1068,6 +1068,10 @@ export function drawPianoRoll(args: {
             const withGains = applyGainsToPeaks(result.interleaved, params);
 
             ctx.save();
+            // beginPath 必须先于 rect：canvas 路径不受 save/restore 管理，
+            // 缺失会让 rect 永久累积（clip 区域 = 历史所有矩形并集，
+            // 跨瓦片/跨 clip 渗透，且每帧路径增长造成渐进卡顿）。
+            ctx.beginPath();
             ctx.rect(tileVisLeft, 0, tileVisRight - tileVisLeft, h);
             ctx.clip();
 

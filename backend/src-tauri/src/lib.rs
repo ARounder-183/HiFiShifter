@@ -245,6 +245,14 @@ pub fn run() {
                 let _ = state.config_dir.set(cfg_dir);
             }
 
+            // 启动即同步"为新的音频块启用循环"的进程级默认值：拖放导入、
+            // 打开 v<4 工程的迁移等都可能在 get_ui_settings 之前发生，
+            // 不能假设前端已先拉取过设置。
+            if let Some(cfg_dir) = state.config_dir.get() {
+                let ui = crate::config::load_ui_settings(cfg_dir);
+                crate::config::set_loop_new_clips_default(ui.loop_new_clips);
+            }
+
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
             if let Some(cfg_dir) = state.config_dir.get() {
                 if let Some(win) = app.get_webview_window("main") {

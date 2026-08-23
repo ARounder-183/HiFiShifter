@@ -375,11 +375,13 @@ export const WaveformTrackCanvas = React.memo(
 
                 const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
 
-                // ── 同窗口切片缓存 ─────────────────────────────────────────
-                // Loop 的所有"整文件重复段"共享同一源窗口 [0, D]，逐瓦片重复
-                // 调 getInterleavedSlice 会对同一窗口反复聚合/拷贝（可见周期
-                // 越多每帧开销越大）。这里做单条目缓存：窗口参数不变时直接
-                // 复用上一次切片；缓存持有 store buffer 直到换窗或本 clip 结束。
+                // ── 同窗口切片缓存（单条目）─────────────────────────────────
+                // 取数按"瓦片 ∩ 视口"裁剪后，相邻整文件重复段的可见子窗通常
+                // 各不相同，跨瓦片复用只在退化场景成立（如视口只覆盖单个
+                // 瓦片、重绘间窗口未变）。此缓存的实际作用是：同一渲染帧内
+                // 相同窗口参数不重复聚合/拷贝，且 store 复用池 buffer 的持有
+                // 权集中在本缓存上 —— 换窗或本 clip 结束时统一归还，
+                // 保证降采样路径不会提前归还仍在使用的 store buffer。
                 let fetchCacheKey: string | null = null;
                 let fetchCacheResult: {
                     interleaved: Float32Array;
@@ -674,11 +676,18 @@ export const WaveformTrackCanvas = React.memo(
                     const headDur = (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
                     const bodyDur = mediaDur / pr;
                     const markers: number[] = [];
+                    // 独立迭代上限：4096 只统计可见标记；极短媒体被循环成
+                    // 超长 clip 时（视口内可能一个标记都没有），迭代次数
+                    // = lengthSec/bodyDur 无界 —— 用 guard 兜底防止每帧空转。
+                    let guard = 0;
                     for (
                         let markerT = headDur;
-                        markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
+                        markerT < clip.lengthSec - 1e-6 &&
+                        markers.length < 4096 &&
+                        guard < 8192;
                         markerT += bodyDur
                     ) {
+                        guard += 1;
                         if (markerT > 1e-6) {
                             const mx =
                                 (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
