@@ -196,13 +196,33 @@ pub(crate) fn build_loop_tiled_segment(
     let mut remaining = out_source_frames as i64;
     while remaining > 0 {
         // 本轮可连续拷贝的帧数：到达文件边界的距离 与 剩余需求 取小。
+        // 正放连续区间向上：[idx, idx+run)；倒放连续区间向下：
+        // [idx−run+1, idx]（随后帧序就地反转，通道内样本保持配对）。
         let run = if reversed {
             (idx + 1).min(remaining)
         } else {
             (total - idx).min(remaining)
         };
-        let base = (idx as usize) * channels;
-        out.extend_from_slice(&pcm[base..base + (run as usize) * channels]);
+        let (base, end_base) = if reversed {
+            let start_frame = (idx + 1 - run) as usize;
+            (start_frame * channels, (idx as usize + 1) * channels)
+        } else {
+            ((idx as usize) * channels, (idx as usize + run as usize) * channels)
+        };
+        out.extend_from_slice(&pcm[base..end_base]);
+        if reversed {
+            // 就地反转刚追加的 run 个帧的帧序（每帧 channels 个样本整体交换）。
+            let len = out.len();
+            let block = &mut out[len - (run as usize) * channels ..];
+            let half = run as usize / 2;
+            for f in 0..half {
+                let a = f * channels;
+                let b = (run as usize - 1 - f) * channels;
+                for c in 0..channels {
+                    block.swap(a + c, b + c);
+                }
+            }
+        }
         remaining -= run;
         // 推进索引并环绕（正放越过末尾回到 0；倒放越过 0 回到末尾）。
         idx = if reversed {
@@ -531,10 +551,21 @@ pub fn render_mixdown_interleaved(
         // 的平铺段在"导出局部区间 / 长循环 clip"场景会产生多份全尺寸缓冲的
         // 瞬时峰值（tiled 段 + resample 副本 + formant 产物），分配失败即
         // 进程 abort。锚点按窗口起点前移等量消费帧，内容相位不变。
+        //
+        // 窗口起点/终点量化到固定网格（1s）：波形 peaks 与区间导出以任意
+        // 浮点窗口反复调用本函数，若直接使用原始窗口，Loop+Formant 的缓存
+        // key 会随每次滚动/缩放变化 → 全量 Formant DSP 重算并冲刷 LRU。
+        // 量化后滑动窗口只命中小集合 key；多消费的边界帧由下方
+        // 【导出窗口 ∩ clip】交集裁掉，不影响输出内容与淡化相位。
+        const LOOP_SEG_QUANTUM_SEC: f64 = 1.0;
         let (loop_seg_local_start_sec, loop_seg_len_sec) = if loop_mode {
             let local_start = (start_sec - clip_start_sec).max(0.0);
             let local_end = (end_sec - clip_start_sec).min(clip_timeline_len_sec);
-            (local_start, (local_end - local_start).max(0.0))
+            let q_start =
+                (local_start - local_start % LOOP_SEG_QUANTUM_SEC).max(0.0);
+            let q_end = ((local_end / LOOP_SEG_QUANTUM_SEC).ceil() * LOOP_SEG_QUANTUM_SEC)
+                .min(clip_timeline_len_sec.max(0.0));
+            (q_start, (q_end - q_start).max(0.0))
         } else {
             (0.0, clip_timeline_len_sec)
         };

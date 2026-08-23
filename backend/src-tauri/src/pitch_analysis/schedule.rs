@@ -257,10 +257,11 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 // 正放锚点用**原始** source_start_sec（可为负，floor_mod 环绕），
                 // 与音频回绕（mix/snapshot/mixdown）保持一致。
                 let anchor_f = ((clip.source_start_sec * 1000.0) / fp).round() as i64;
+                // 倒放锚点同音频约定：min(source_end, D) 后不做 max(0)，
+                // 负 source_end 由 rem_euclid 统一环绕（避免音符/音频错相）。
                 let end_eff = clip
                     .source_end_sec
-                    .min(media_total.unwrap_or(f64::INFINITY))
-                    .max(0.0);
+                    .min(media_total.unwrap_or(f64::INFINITY));
                 let anchor_r = ((end_eff * 1000.0) / fp).round() as i64;
                 if write_len > 0 && !cached.midi.is_empty() {
                     let n_frames = n_frames.max(1);

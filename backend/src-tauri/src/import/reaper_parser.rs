@@ -531,7 +531,13 @@ fn split_tokens(line: &str) -> Vec<&str> {
 }
 
 fn parse_double(s: &str) -> f64 {
-    s.parse::<f64>().unwrap_or(0.0)
+    s.parse::<f64>()
+        .ok()
+        // 拒绝非有限值（"inf"/"NaN"/"-inf"）：畸形 RPP 里的 POSITION/LENGTH/
+        // SOFFS 若携带 inf/NaN 会静默污染下游几何运算（缓存 key、环绕数学、
+        // 序列化往返），统一回退 0.0。
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
 }
 
 fn parse_int(s: &str) -> i32 {
@@ -1497,8 +1503,14 @@ PT 0.679860541427 198.4000000000 1\n\
 PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
 >";
         let lines: Vec<String> = block_text.lines().map(|s| s.to_string()).collect();
-        let block = parse_blocks(&lines);
-        let envelope = parse_tempo_envelope_block(&block);
+        let root = parse_blocks(&lines);
+        // parse_blocks 返回根块；TEMPOENVEX 是其子块。
+        let tempo_block = root
+            .children
+            .first()
+            .expect("TEMPOENVEX should parse as a child block");
+        assert_eq!(tempo_block.block_type().as_deref(), Some("TEMPOENVEX"));
+        let envelope = parse_tempo_envelope_block(tempo_block);
 
         assert_eq!(envelope.points.len(), 4);
         // 首点：169.6 BPM、4/4。

@@ -142,7 +142,10 @@ export function useClipsPeaksForPianoRoll(args: {
                 clipId: clip.id,
                 startSec: clip.startSec,
                 lengthSec: clip.lengthSec,
-                sourceStartSec: Math.max(0, Number(clip.sourceStartSec ?? 0) || 0),
+                // 保留原始值（可为负 / 超界）：渲染端按 loopRender 约定用
+                // floor_mod（modEuclid）归一化，不能在此处 clamp —— 否则
+                // slip/左延伸产生的域外锚点会与 arrange 画布相位错位。
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
                 sourceDurationSec: sourceDurationSec > 0 ? sourceDurationSec : 0,
                 sourceEndSec: clipSourceEndSec,
                 sourceSampleRate,

@@ -219,6 +219,19 @@ export const WaveformTrackCanvas = React.memo(
 
             ctx.clearRect(0, 0, displayW, displayH);
 
+            // 级别提示键清理：已删除/不再渲染的 clip 的 `${path}::${id}` 键
+            // 若不清理会随会话无限累积（每 clip 一个小条目，长会话可感知）。
+            {
+                const liveKeys = new Set<string>();
+                for (const c of currentClips) {
+                    if (c.sourcePath) liveKeys.add(`${c.sourcePath}::${c.id}`);
+                }
+                const levelMap = lastLevelByClipRef.current;
+                for (const key of Object.keys(levelMap)) {
+                    if (!liveKeys.has(key)) delete levelMap[key];
+                }
+            }
+
             // CSS 尺寸也只在变化时写入，避免触发不必要的 layout
             if (canvas.style.width !== `${displayW}px`) canvas.style.width = `${displayW}px`;
             if (canvas.style.height !== `${displayH}px`) canvas.style.height = `${displayH}px`;
@@ -226,7 +239,17 @@ export const WaveformTrackCanvas = React.memo(
             if (__perfDebug) __tSetup = performance.now() - __t0;
 
             for (const clip of currentClips) {
-                if (!clip.sourcePath || !clip.durationSec || clip.durationSec <= 0) continue;
+                if (!clip.sourcePath) continue;
+                // 媒体时长可用性按统一取值链（frames/sr 优先，durationSec 兜底）
+                // 判断：只带 durationFrames+sourceSampleRate 的 clip 同样可渲染，
+                // 与 piano-roll 消费端保持一致。mediaDur 同时作为后续所有
+                // "媒体时长"消费点的具体数值（替代旧 durationSec 守卫的收窄）。
+                const mediaDur = resolveLoopMediaDurationSec({
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
+                });
+                if (!(mediaDur > 1e-6)) continue;
 
                 const clipStartSec = clip.startSec;
                 const clipEndSec = clipStartSec + clip.lengthSec;
@@ -255,35 +278,21 @@ export const WaveformTrackCanvas = React.memo(
                 lastLevelByClipRef.current[levelKey] = stableLevel;
 
                 const clipSourceEndSec =
-                    Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
+                    Number(clip.sourceEndSec ?? mediaDur) || mediaDur;
                 const isLoop = Boolean(clip.loopEnabled);
-                // 媒体时长：frames/sr 优先（精确），durationSec 兜底 —— 与
-                // piano-roll / MIDI 画布 / 拖拽编辑 / 后端元数据同一取值链，
-                // 避免不同消费端推导出不同的回绕周期。
-                const mediaDur = resolveLoopMediaDurationSec({
-                    durationFrames: clip.durationFrames,
-                    sourceSampleRate: clip.sourceSampleRate,
-                    durationSec: clip.durationSec,
-                });
-                const effSrcEnd = Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec);
+                const effSrcEnd = Math.min(clipSourceEndSec, mediaDur);
                 let clipSourceSpanSec: number;
                 if (!isLoop) {
                     clipSourceSpanSec = Math.max(
                         0,
                         Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
                     );
-                } else if (mediaDur > 1e-6) {
+                } else {
                     // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与
                     // 媒体时长决定 —— split 等编辑会产生 sourceStart > sourceEnd
                     // 的"环绕窗口"，可用性只取决于媒体时长本身；
                     // 若按窗口跨度判断，这类 clip 的波形会整体消失（而声音仍在播放）。
                     clipSourceSpanSec = mediaDur;
-                } else {
-                    // 无有效媒体时长：退化为窗口跨度
-                    clipSourceSpanSec = Math.max(
-                        0,
-                        Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec) - sourceStartSec,
-                    );
                 }
                 if (clipSourceSpanSec <= 1e-6) continue;
 
@@ -420,6 +429,21 @@ export const WaveformTrackCanvas = React.memo(
                     fetchCacheKey = null;
                 };
 
+                // ── 派生降采样缓存（clip 渲染帧内）───────────────────────────
+                // 整文件重复段共享同一 fetchKey（相同源窗口），其降采样结果只依赖
+                // (源切片内容, 目标宽度 w)。视口内部的重复段可见宽度相等 → w 相同，
+                // 可直接复用 —— 否则缩小时一帧内每个瓦片都要重扫 O(slice) 做
+                // min/max（数千周期场景下是主要卡顿源）。缓存仅存活于本 clip 的
+                // 本次绘制，瓦片循环结束统一归还池缓冲；内容为拷贝值，不持有
+                // store buffer 引用，与 fetch 缓存的生命周期解耦。
+                const derivedDownsampleCache = new Map<string, Float32Array>();
+                const releaseDerivedDownsampleCache = () => {
+                    for (const buf of derivedDownsampleCache.values()) {
+                        releaseDownsampleBuffer(buf);
+                    }
+                    derivedDownsampleCache.clear();
+                };
+
                 for (const seg of segmentsToRender) {
                     const tileLocalEndSec = seg.localStartSec + seg.durationSec;
                     // 该分段与可见区间、clip 长度的交集（clip 局部时间）
@@ -517,34 +541,39 @@ export const WaveformTrackCanvas = React.memo(
 
                     if (rawSampleCount > targetSamples && targetSamples >= 2) {
                         const w = Math.ceil(targetSamples);
+                        const derivedKey = `${fetchKey}|${w}`;
+                        let downsampled = derivedDownsampleCache.get(derivedKey);
+                        if (!downsampled) {
+                            // 从局部池获取 Buffer
+                            downsampled = acquireDownsampleBuffer(w * 2);
 
-                        // 从局部池获取 Buffer
-                        const downsampled = acquireDownsampleBuffer(w * 2);
+                            // 提取线性步长常数，将循环内的 4 次浮点乘除降至 1 次加法
+                            const srcStep = rawSampleCount / w;
 
-                        // 提取线性步长常数，将循环内的 4 次浮点乘除降至 1 次加法
-                        const srcStep = rawSampleCount / w;
+                            for (let i = 0; i < w; i++) {
+                                const srcStart = i * srcStep;
+                                const srcEnd = srcStart + srcStep;
 
-                        for (let i = 0; i < w; i++) {
-                            const srcStart = i * srcStep;
-                            const srcEnd = srcStart + srcStep;
+                                const iStart = Math.max(0, Math.floor(srcStart));
+                                const iEnd = Math.min(rawSampleCount - 1, Math.ceil(srcEnd));
 
-                            const iStart = Math.max(0, Math.floor(srcStart));
-                            const iEnd = Math.min(rawSampleCount - 1, Math.ceil(srcEnd));
-
-                            let pMin = Infinity;
-                            let pMax = -Infinity;
-                            for (let j = iStart; j <= iEnd; j++) {
-                                const sMin = storeInterleaved[j * 2];
-                                const sMax = storeInterleaved[j * 2 + 1];
-                                if (sMin < pMin) pMin = sMin;
-                                if (sMax > pMax) pMax = sMax;
+                                let pMin = Infinity;
+                                let pMax = -Infinity;
+                                for (let j = iStart; j <= iEnd; j++) {
+                                    const sMin = storeInterleaved[j * 2];
+                                    const sMax = storeInterleaved[j * 2 + 1];
+                                    if (sMin < pMin) pMin = sMin;
+                                    if (sMax > pMax) pMax = sMax;
+                                }
+                                downsampled[i * 2] = pMin === Infinity ? 0 : pMin;
+                                downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
                             }
-                            downsampled[i * 2] = pMin === Infinity ? 0 : pMin;
-                            downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
+                            derivedDownsampleCache.set(derivedKey, downsampled);
                         }
 
-                        // 注意：storeInterleaved 由 fetchCache 持有，此处不归还，
-                        // 供后续同窗口瓦片继续复用（见缓存说明）。
+                        // 注意：缓存持有的派生缓冲由 releaseDerivedDownsampleCache
+                        // 统一归还（本 clip 瓦片循环结束时），此处不归还，
+                        // 供后续同窗口瓦片继续复用。
                         renderInterleaved = downsampled;
                     }
 
@@ -572,7 +601,7 @@ export const WaveformTrackCanvas = React.memo(
                         clipDuration: seg.durationSec,
                         playbackRate: Number(clip.playbackRate ?? 1) || 1,
                         reversed: Boolean(clip.reversed),
-                        sourceDurationSec: clip.durationSec,
+                        sourceDurationSec: mediaDur,
                         volumeGain: Number(clip.gain ?? 1) || 1,
                         // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
                         // 每个分段都携带完整淡化参数，增益按 clip 局部时间求值
@@ -662,10 +691,8 @@ export const WaveformTrackCanvas = React.memo(
                         releaseGainBuffer(withGains);
                     }
 
-                    // 2. 归还预降采样产生的 buffer（如果有）
-                    if (renderInterleaved !== storeInterleaved) {
-                        releaseDownsampleBuffer(renderInterleaved);
-                    }
+                    // 2. 派生降采样缓冲由 derivedDownsampleCache 持有，
+                    //    在本 clip 瓦片循环结束后统一归还（见缓存说明）。
 
                     // 3. store 复用池 buffer 由 fetchCache 统一持有/归还（见缓存说明）。
 
@@ -686,8 +713,10 @@ export const WaveformTrackCanvas = React.memo(
                     }
                 }
 
-                // 本 clip 的所有瓦片处理完毕，归还缓存持有的 store buffer。
+                // 本 clip 的所有瓦片处理完毕，归还缓存持有的 store buffer
+                // 与派生降采样缓冲。
                 releaseFetchCache();
+                releaseDerivedDownsampleCache();
 
                 // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
                 // 节点位置：头部段结束处（进入段耗尽、首次环绕）及此后
@@ -700,24 +729,27 @@ export const WaveformTrackCanvas = React.memo(
                     const headDur = (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
                     const bodyDur = mediaDur / pr;
                     const markers: number[] = [];
-                    // 独立迭代上限：4096 只统计可见标记；极短媒体被循环成
-                    // 超长 clip 时（视口内可能一个标记都没有），迭代次数
-                    // = lengthSec/bodyDur 无界 —— 用 guard 兜底防止每帧空转。
-                    let guard = 0;
-                    for (
-                        let markerT = headDur;
-                        markerT < clip.lengthSec - 1e-6 &&
-                        markers.length < 4096 &&
-                        guard < 8192;
-                        markerT += bodyDur
-                    ) {
-                        guard += 1;
-                        if (markerT > 1e-6) {
+                    // 直接跳到可视范围内的第一个回绕点（与分段构建的直接寻址
+                    // 一致）：既避免从 clip 入口逐周期空转，也修复"深入长循环
+                    // clip 后标记消失"（旧 guard<8192 限制）。
+                    {
+                        const visLocalStart =
+                            viewportStartPx / Math.max(1e-9, currentPxPerSec) - clipStartSec;
+                        const k0 = Math.max(
+                            0,
+                            Math.ceil((visLocalStart - headDur - 1e-6) / bodyDur),
+                        );
+                        for (
+                            let markerT = headDur + k0 * bodyDur;
+                            markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
+                            markerT += bodyDur
+                        ) {
+                            if (markerT <= 1e-6) continue; // 起点回绕点不绘制
                             const mx =
                                 (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
-                            if (mx >= -8 && mx <= displayW + 8) {
-                                markers.push(Math.round(mx * 2) / 2);
-                            }
+                            if (mx > displayW + 8) break;
+                            if (mx < -8) continue;
+                            markers.push(Math.round(mx * 2) / 2);
                         }
                     }
                     if (markers.length > 0) {

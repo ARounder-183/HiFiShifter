@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
+import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
 import {
     checkpointHistory,
     setClipStateRemote,
@@ -9,6 +10,11 @@ import {
     endInteraction,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
+import {
+    clipMediaDurationSec,
+    loopSnapThresholdSec,
+    nearestBoundarySnapOffsetSec,
+} from "../../../../utils/loopSnap";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 export type SlipDragState = {
@@ -24,6 +30,14 @@ export type SlipDragState = {
             playbackRate: number;
             sourceDurationSec: number | null;
             maxSlipSec: number;
+            /** Loop（循环源）：内容按整个媒体时长回绕，Slip 可无限平移。 */
+            loopEnabled: boolean;
+            reversed: boolean;
+            /** 有真实音频媒体（非纯 MIDI）：非 Loop 采用派生窗口模型自由平移。 */
+            hasMedia: boolean;
+            lengthSec: number;
+            durationFrames: number | null;
+            sourceSampleRate: number | null;
         }
     >;
 };
@@ -36,6 +50,10 @@ export function useSlipDrag(deps: {
     multiSelectedSet: Set<string>;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     ignoreGrouping: boolean;
+    /** 完整吸附设置：循环节吸附距离从 snapDistancePx 读取（无论 enabled 与否都生效）。 */
+    timelineSnap: TimelineSnapSettings;
+    /** 当前缩放（像素/秒）：用于把吸附距离换算成秒。 */
+    pxPerSec: number;
 }) {
     const {
         scrollRef,
@@ -45,6 +63,8 @@ export function useSlipDrag(deps: {
         multiSelectedSet,
         beatFromClientX,
         ignoreGrouping,
+        timelineSnap,
+        pxPerSec,
     } = deps;
 
     const slipDragRef = useRef<SlipDragState | null>(null);
@@ -99,6 +119,12 @@ export function useSlipDrag(deps: {
                 playbackRate: Number(c.playbackRate ?? 1) || 1,
                 sourceDurationSec,
                 maxSlipSec,
+                loopEnabled: !!c.loopEnabled,
+                reversed: !!c.reversed,
+                hasMedia: !!c.sourcePath && !(c.midiNoteData && c.midiNoteData.length > 0),
+                lengthSec: Math.max(0, Number(c.lengthSec ?? 0) || 0),
+                durationFrames: c.durationFrames ?? null,
+                sourceSampleRate: c.sourceSampleRate ?? null,
             };
         }
 
@@ -120,6 +146,39 @@ export function useSlipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let deltaBeat = drag.initialPointerBeat - beatNow;
 
+            // ── 循环节/内容边界吸附（Slip 版）─────────────────────────
+            // 无论"吸附"功能是否启用都生效；吸附距离读自吸附设置的 snapDistancePx。
+            // 候选偏移族（相对 Clip 基准起点的 Slip 偏移 δ，δ·rate 为源域平移量）：
+            // - Loop：媒体边界相位与 Clip 起点对齐的 mod-D 族（±len 第二族见工具注释）；
+            // - 非 Loop：媒体边界（s=0 与 s=D）对齐到 Clip 起点/终点的有限候选
+            //   —— 即让"原始媒体内容在 Clip 内的终止位置"精确落到边缘上。
+            {
+                const anchorInitial = drag.initialById[drag.anchorClipId];
+                if (anchorInitial?.hasMedia || anchorInitial?.loopEnabled) {
+                    const snappedOffset = nearestBoundarySnapOffsetSec(
+                        {
+                            loopEnabled: !!anchorInitial.loopEnabled,
+                            reversed: !!anchorInitial.reversed,
+                            sourceStartSec: anchorInitial.sourceStartSec,
+                            sourceEndSec: anchorInitial.sourceEndSec,
+                            playbackRate: anchorInitial.playbackRate,
+                            lengthSec: anchorInitial.lengthSec,
+                            durationFrames: anchorInitial.durationFrames,
+                            sourceSampleRate: anchorInitial.sourceSampleRate,
+                        },
+                        "slip",
+                        deltaBeat,
+                    );
+                    if (
+                        snappedOffset != null &&
+                        Math.abs(snappedOffset - deltaBeat) <=
+                            loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                    ) {
+                        deltaBeat = snappedOffset;
+                    }
+                }
+            }
+
             for (const id of drag.clipIds) {
                 const initial = drag.initialById[id];
                 if (!initial) continue;
@@ -131,15 +190,49 @@ export function useSlipDrag(deps: {
                 let nextSourceStart = initial.sourceStartSec + deltaSrcSec;
                 let nextSourceEnd = initial.sourceEndSec + deltaSrcSec;
 
-                // clamp: sourceStart 不能小于 0，sourceEnd 不能超过源文件时长
-                if (Number.isFinite(initial.maxSlipSec) && initial.maxSlipSec > 1e-6) {
-                    if (nextSourceStart < 0) {
-                        nextSourceEnd -= nextSourceStart;
-                        nextSourceStart = 0;
+                if (initial.loopEnabled) {
+                    // Loop（循环源）：内容按整个媒体文件回绕，Slip 可无限向左/向右
+                    // 平移 —— 源窗口两端对媒体时长取模环绕（floor_mod），与渲染/
+                    // 引擎的回绕映射一致。窗口跨越边界时 end < start 为合法的
+                    // "环绕窗口"状态（split 等操作已产生同类状态）。
+                    const mediaDur = clipMediaDurationSec(initial);
+                    if (mediaDur != null && mediaDur > 1e-9) {
+                        nextSourceStart = ((nextSourceStart % mediaDur) + mediaDur) % mediaDur;
+                        nextSourceEnd = ((nextSourceEnd % mediaDur) + mediaDur) % mediaDur;
+                    } else {
+                        // 媒体时长未知：退化为不钳制（保持平移），避免卡死。
                     }
-                    if (nextSourceEnd > initial.maxSlipSec) {
-                        nextSourceStart -= nextSourceEnd - initial.maxSlipSec;
-                        nextSourceEnd = initial.maxSlipSec;
+                } else if (initial.hasMedia) {
+                    // 非 Loop 音频 Clip：**派生窗口模型**（REAPER 语义）——
+                    // Clip 消费源区间 [source_start, source_start + len·rate)，
+                    // 区间落在 [0, D) 之外的部分渲染为静音。因此 Slip 不再被
+                    // 源长度钳制：静音是"源时间轴上不存在的部分"，随内容一起
+                    // 平移（修复切割后 Slip 尾部静音纹丝不动的问题）。
+                    // 同时把 source_end 归一到派生值，自愈历史数据中
+                    // length 与窗口跨度不一致的状态。
+                    nextSourceEnd = nextSourceStart + initial.lengthSec * rate;
+                    // 防御性钳制：避免极端值破坏下游运算（与后端 patch 一致）。
+                    if (nextSourceEnd < 0) {
+                        nextSourceStart -= nextSourceEnd;
+                        nextSourceEnd = 0;
+                    }
+                    if (nextSourceStart < -1_000_000) {
+                        const lift = -1_000_000 - nextSourceStart;
+                        nextSourceStart += lift;
+                        nextSourceEnd += lift;
+                    }
+                } else {
+                    // 纯 MIDI（无音频媒体）：维持既有音符窗口内钳制。
+                    const maxSlipSec = initial.maxSlipSec;
+                    if (Number.isFinite(maxSlipSec) && maxSlipSec > 1e-6) {
+                        if (nextSourceStart < 0) {
+                            nextSourceEnd -= nextSourceStart;
+                            nextSourceStart = 0;
+                        }
+                        if (nextSourceEnd > maxSlipSec) {
+                            nextSourceStart -= nextSourceEnd - maxSlipSec;
+                            nextSourceEnd = maxSlipSec;
+                        }
                     }
                 }
                 dispatch(

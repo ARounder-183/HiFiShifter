@@ -28,6 +28,11 @@ import { clamp } from "../math";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
+import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
+import {
+    loopSnapThresholdSec,
+    nearestBoundarySnapOffsetSec,
+} from "../../../../utils/loopSnap";
 import { paramsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import {
@@ -464,6 +469,10 @@ export function useEditDrag(deps: {
     noSnapKb: Keybinding;
     /** 吸附全局开关 */
     snapEnabled: boolean;
+    /** 完整吸附设置：循环节吸附距离读自 snapDistancePx（无论 enabled 与否都生效）。 */
+    timelineSnap: TimelineSnapSettings;
+    /** 当前缩放（像素/秒）：用于把吸附距离换算成秒。 */
+    pxPerSec: number;
     /** 忽略编组 */
     ignoreGrouping: boolean;
     /** modifier.paramFineAdjust 绑定 */
@@ -481,6 +490,8 @@ export function useEditDrag(deps: {
         beatFromClientX,
         noSnapKb,
         snapEnabled,
+        timelineSnap,
+        pxPerSec,
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
@@ -763,6 +774,47 @@ export function useEditDrag(deps: {
                         excludeClipIds: new Set(drag.selectedClipIds),
                     });
                 }
+                // ── 循环节 / 内容边界吸附 ───────────────────────────────
+                // 无论"吸附"功能是否启用都生效；吸附距离读自吸附设置的
+                // snapDistancePx。目标：媒体边界（s=0 与 s=D）在时间线上的
+                // 投影位置 —— Loop Clip 呈 mod-D 等差族；未循环 Clip 的
+                // "循环节"即原始媒体内容在 Clip 内的终止位置（s=D 投影），
+                // 以及内容起始位置（s=0 投影，覆盖前导静音场景）。
+                // 命中时优先于普通网格吸附（语义更具体）。trim_left /
+                // trim_right 的边界同余式都只依赖"移动边缘相对 Clip 基准
+                // 起点的时间线偏移"，故统一处理。
+                if (
+                    shouldSnap &&
+                    (drag.type === "trim_left" || drag.type === "trim_right") &&
+                    timelineSnap.snapDistancePx > 0
+                ) {
+                    const anchorBase = drag.baseByClipId[drag.clipId];
+                    if (anchorBase) {
+                        const rawOffset = beat - anchorBase.startSec;
+                        const snappedOffset = nearestBoundarySnapOffsetSec(
+                            {
+                                loopEnabled: anchorBase.loopEnabled,
+                                reversed: anchorBase.reversed,
+                                sourceStartSec: anchorBase.sourceStartSec,
+                                sourceEndSec: anchorBase.sourceEndSec,
+                                playbackRate: anchorBase.playbackRate,
+                                lengthSec: anchorBase.lengthSec,
+                                durationFrames: anchorBase.durationFrames,
+                                sourceSampleRate: anchorBase.sourceSampleRate,
+                                durationSec: anchorBase.durationSec,
+                            },
+                            "edge",
+                            rawOffset,
+                        );
+                        if (
+                            snappedOffset != null &&
+                            Math.abs(snappedOffset - rawOffset) <=
+                                loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                        ) {
+                            beat = anchorBase.startSec + snappedOffset;
+                        }
+                    }
+                }
 
                 const minLen = 0.0;
                 if (drag.type === "crossfade_edges") {
@@ -776,16 +828,6 @@ export function useEditDrag(deps: {
                     const bBase = drag.baseByClipId[partner];
                     if (!aBase || !bBase) return;
 
-                    const aSourceDuration = (() => {
-                        if (
-                            aBase.durationFrames &&
-                            aBase.sourceSampleRate &&
-                            aBase.sourceSampleRate > 0
-                        ) {
-                            return aBase.durationFrames / aBase.sourceSampleRate;
-                        }
-                        return aBase.durationSec || 0;
-                    })();
                     const bSourceDuration = (() => {
                         if (
                             bBase.durationFrames &&
@@ -799,21 +841,11 @@ export function useEditDrag(deps: {
 
                     // 计算两个 clip 允许的 delta 范围（A 右缘 / B 左缘），取交集 → 任一达到限制，
                     // 两者同时停止（共享同一 delta）。
-                    // Loop（循环源）clip：边缘移动不受源媒体长度限制，
-                    // 且不修改源窗口（超出部分由循环回绕内容填充）。
+                    // A 右缘延伸不受源媒体长度限制：Loop 由回绕内容填充，
+                    // 非 Loop 超出源窗口/媒体末尾的部分按静音渲染（派生窗口）。
                     const aRate = aBase.playbackRate > 0 ? aBase.playbackRate : 1;
-                    const aMaxSource = aBase.loopEnabled
-                        ? Number.POSITIVE_INFINITY
-                        : aBase.reversed
-                          ? aBase.sourceEndSec
-                          : aSourceDuration > 0
-                            ? aSourceDuration - aBase.sourceStartSec
-                            : Number.POSITIVE_INFINITY;
                     let minDelta = -aBase.lengthSec;
-                    let maxDelta =
-                        aMaxSource === Number.POSITIVE_INFINITY
-                            ? Number.POSITIVE_INFINITY
-                            : aMaxSource / aRate - aBase.lengthSec;
+                    let maxDelta = Number.POSITIVE_INFINITY;
 
                     const bRate = bBase.playbackRate > 0 ? bBase.playbackRate : 1;
                     const bStartSign = opposite ? -1 : 1; // B.start = baseStart + bStartSign * delta
@@ -888,36 +920,28 @@ export function useEditDrag(deps: {
                                 lengthSec: Math.max(0, base.lengthSec + delta),
                             });
                         } else if (base.reversed) {
-                            let nextTrimStart = base.sourceStartSec - delta * rate;
-                            nextTrimStart = Math.max(0, nextTrimStart);
+                            // 倒放非 Loop：右缘延伸向下消费窗口起点（→0），
+                            // 耗尽后继续增长的部分为静音尾巴，窗口保持不变。
+                            let nextTrimStart = Math.max(
+                                0,
+                                base.sourceStartSec - delta * rate,
+                            );
                             nextTrimStart = Math.min(nextTrimStart, base.sourceEndSec);
-                            const actualSourceLen = base.sourceEndSec - nextTrimStart;
-                            const maxTimelineLen = actualSourceLen / rate;
                             updates.push({
                                 clipId: drag.clipId,
                                 startSec: base.startSec,
-                                lengthSec:
-                                    maxTimelineLen > 0
-                                        ? Math.min(base.lengthSec + delta, maxTimelineLen)
-                                        : base.lengthSec + delta,
+                                lengthSec: Math.max(0, base.lengthSec + delta),
                                 sourceStartSec: nextTrimStart,
                             });
                         } else {
-                            let nextTrimEnd = base.sourceEndSec + delta * rate;
-                            nextTrimEnd = Math.max(0, nextTrimEnd);
-                            if (aSourceDuration > 0) {
-                                nextTrimEnd = Math.min(nextTrimEnd, aSourceDuration);
-                            }
-                            const actualSourceLen = nextTrimEnd - base.sourceStartSec;
-                            const maxTimelineLen = actualSourceLen / rate;
+                            // 正放非 Loop：派生窗口 —— source_end = 起点 + 长度×速率。
+                            // 超出媒体末尾的部分由渲染管线填充静音。
+                            const nextLen = Math.max(0, base.lengthSec + delta);
                             updates.push({
                                 clipId: drag.clipId,
                                 startSec: base.startSec,
-                                lengthSec:
-                                    maxTimelineLen > 0
-                                        ? Math.min(base.lengthSec + delta, maxTimelineLen)
-                                        : base.lengthSec + delta,
-                                sourceEndSec: nextTrimEnd,
+                                lengthSec: nextLen,
+                                sourceEndSec: base.sourceStartSec + nextLen * rate,
                             });
                         }
                     }
@@ -1340,6 +1364,23 @@ export function useEditDrag(deps: {
                         } else if (base.reversed) {
                             const maxDelta = (base.sourceEndSec - base.sourceStartSec) / rate;
                             limitedDelta = Math.min(limitedDelta, maxDelta);
+                            // 向左延伸（delta<0）仍需钳制：倒放锚点(source_end)
+                            // 最高回退到源媒体时长，不产生越界窗口。
+                            const sourceDuration = (() => {
+                                if (
+                                    base.durationFrames &&
+                                    base.sourceSampleRate &&
+                                    base.sourceSampleRate > 0
+                                ) {
+                                    return base.durationFrames / base.sourceSampleRate;
+                                }
+                                return base.durationSec || 0;
+                            })();
+                            if (sourceDuration > 0) {
+                                const minAllowed =
+                                    (base.sourceEndSec - sourceDuration) / rate;
+                                limitedDelta = Math.max(limitedDelta, minAllowed);
+                            }
                         } else {
                             limitedDelta = Math.min(limitedDelta, base.lengthSec - minLen);
                             const minAllowed = -base.sourceStartSec / rate;
@@ -1527,41 +1568,15 @@ export function useEditDrag(deps: {
                     const desiredDeltaTimeline = nextLen - anchorBase.lengthSec;
 
                     // Find the most constrained delta across all group members
+                    // 右缘延伸（delta>0）不再受源媒体长度限制：非 Loop 的 Clip
+                    // 超出源窗口/媒体末尾的部分按静音渲染（REAPER 同语义）。
+                    // Loop 则由回绕内容填充。两者都只受全局长度上限约束。
                     let limitedDelta = desiredDeltaTimeline;
                     for (const id of drag.selectedClipIds) {
                         const base = drag.baseByClipId[id];
                         if (!base) continue;
-                        const rate = base.playbackRate > 0 ? base.playbackRate : 1;
-                        if (base.loopEnabled) {
-                            // Loop：右缘延伸/裁短不受源媒体长度限制（内容按周期回绕）。
-                            limitedDelta = Math.min(limitedDelta, 10_000 - base.lengthSec);
-                            limitedDelta = Math.max(limitedDelta, -base.lengthSec + minLen);
-                            continue;
-                        }
-                        const sourceDuration = (() => {
-                            if (
-                                base.durationFrames &&
-                                base.sourceSampleRate &&
-                                base.sourceSampleRate > 0
-                            ) {
-                                return base.durationFrames / base.sourceSampleRate;
-                            }
-                            return base.durationSec || 0;
-                        })();
-                        if (base.reversed) {
-                            const maxSourceLen = base.sourceEndSec;
-                            const maxTimelineLen = maxSourceLen / rate;
-                            limitedDelta = Math.min(limitedDelta, maxTimelineLen - base.lengthSec);
-                            limitedDelta = Math.max(limitedDelta, -base.lengthSec + minLen);
-                        } else {
-                            const maxSourceLen =
-                                sourceDuration > 0
-                                    ? sourceDuration - base.sourceStartSec
-                                    : Number.POSITIVE_INFINITY;
-                            const maxTimelineLen = maxSourceLen / rate;
-                            limitedDelta = Math.min(limitedDelta, maxTimelineLen - base.lengthSec);
-                            limitedDelta = Math.max(limitedDelta, -base.lengthSec + minLen);
-                        }
+                        limitedDelta = Math.min(limitedDelta, 10_000 - base.lengthSec);
+                        limitedDelta = Math.max(limitedDelta, -base.lengthSec + minLen);
                     }
 
                     batch(() => {
@@ -1581,48 +1596,54 @@ export function useEditDrag(deps: {
                                 continue;
                             }
                             const rate = base.playbackRate > 0 ? base.playbackRate : 1;
-                            const sourceDuration = (() => {
-                                if (
-                                    base.durationFrames &&
-                                    base.sourceSampleRate &&
-                                    base.sourceSampleRate > 0
-                                ) {
-                                    return base.durationFrames / base.sourceSampleRate;
-                                }
-                                return base.durationSec || 0;
-                            })();
+                            const nextLen = clamp(base.lengthSec + limitedDelta, 0, 10_000);
+                            // 源窗口当前覆盖的可听时间线跨度（倒放分支使用）。
+                            const spanTimeline =
+                                Math.max(0, base.sourceEndSec - base.sourceStartSec) / rate;
                             if (base.reversed) {
-                                let nextTrimStart = base.sourceStartSec - limitedDelta * rate;
-                                nextTrimStart = Math.max(0, nextTrimStart);
-                                nextTrimStart = Math.min(nextTrimStart, base.sourceEndSec);
-                                const actualSourceLen = base.sourceEndSec - nextTrimStart;
-                                const maxTimelineLen = actualSourceLen / rate;
-                                const finalLen =
-                                    maxTimelineLen > 0
-                                        ? Math.min(base.lengthSec + limitedDelta, maxTimelineLen)
-                                        : base.lengthSec + limitedDelta;
-                                dispatch(setClipLength({ clipId: id, lengthSec: finalLen }));
-                                dispatch(
-                                    setClipSourceRange({
-                                        clipId: id,
-                                        sourceStartSec: nextTrimStart,
-                                    }),
-                                );
+                                // 倒放：右缘对应窗口起点(source_start)。
+                                let nextTrimStart = base.sourceStartSec;
+                                if (nextLen <= spanTimeline + 1e-9) {
+                                    // 窗口内截短：起点随右缘上移（不越过窗口终点）。
+                                    nextTrimStart = Math.min(
+                                        base.sourceEndSec,
+                                        base.sourceEndSec - nextLen * rate,
+                                    );
+                                } else if (base.sourceStartSec > 1e-9) {
+                                    // 延伸：先向下消费窗口下方余量（→0），
+                                    // 耗尽后继续增长的部分为静音尾巴，窗口保持不变。
+                                    nextTrimStart = Math.max(
+                                        0,
+                                        base.sourceEndSec - nextLen * rate,
+                                    );
+                                    nextTrimStart = Math.min(nextTrimStart, base.sourceStartSec);
+                                }
+                                dispatch(setClipLength({ clipId: id, lengthSec: nextLen }));
+                                if (Math.abs(nextTrimStart - base.sourceStartSec) > 1e-12) {
+                                    dispatch(
+                                        setClipSourceRange({
+                                            clipId: id,
+                                            sourceStartSec: nextTrimStart,
+                                        }),
+                                    );
+                                }
                             } else {
-                                let nextTrimEnd = base.sourceEndSec + limitedDelta * rate;
-                                nextTrimEnd = Math.max(0, nextTrimEnd);
-                                if (sourceDuration > 0)
-                                    nextTrimEnd = Math.min(nextTrimEnd, sourceDuration);
-                                const actualSourceLen = nextTrimEnd - base.sourceStartSec;
-                                const maxTimelineLen = actualSourceLen / rate;
-                                const finalLen =
-                                    maxTimelineLen > 0
-                                        ? Math.min(base.lengthSec + limitedDelta, maxTimelineLen)
-                                        : base.lengthSec + limitedDelta;
-                                dispatch(setClipLength({ clipId: id, lengthSec: finalLen }));
-                                dispatch(
-                                    setClipSourceRange({ clipId: id, sourceEndSec: nextTrimEnd }),
-                                );
+                                // 正放非 Loop：**派生窗口模型** —— 消费区间为
+                                // [source_start, source_start + len·rate)，
+                                // 落在媒体之外的部分渲染为静音。右缘移动只改
+                                // 长度，source_end 随之派生（自愈历史数据中
+                                // length 与窗口跨度不一致的状态；向右延伸不再
+                                // 受源媒体长度限制）。
+                                const derivedEnd = base.sourceStartSec + nextLen * rate;
+                                dispatch(setClipLength({ clipId: id, lengthSec: nextLen }));
+                                if (Math.abs(derivedEnd - base.sourceEndSec) > 1e-12) {
+                                    dispatch(
+                                        setClipSourceRange({
+                                            clipId: id,
+                                            sourceEndSec: derivedEnd,
+                                        }),
+                                    );
+                                }
                             }
                         }
                     });

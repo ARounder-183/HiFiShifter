@@ -227,6 +227,63 @@ function generateMidiCurveFromNotes(
     return curve;
 }
 
+/**
+ * 曲线生成缓存（F6 性能修复）：
+ * generateMidiCurveFromNotes 在每个绘制帧对每个可见 MIDI clip 全量重算 ——
+ * 分配 lengthSec×200 的数组（10000s clip ⇒ 2M 元素），且 Loop 分支按重复
+ * 周期放大写入量。绘制帧之间同一 clip 的（notes 引用, 几何参数）几乎总是
+ * 不变，直接复用上次结果即可。
+ *
+ * 缓存键：notes 数组**引用**（WeakMap 随 clip 释放，无泄漏）+ 几何参数串。
+ * 每个 notes 引用最多保留 4 份几何变体（拖拽编辑时的中间态）。
+ */
+const midiCurveCache = new WeakMap<
+    Array<{ startSec: number; endSec: number; note: number }>,
+    Map<string, number[]>
+>();
+const MIDI_CURVE_CACHE_MAX_PER_NOTES = 4;
+
+function getCachedMidiCurve(
+    notes: Array<{ startSec: number; endSec: number; note: number }>,
+    clipLengthSec: number,
+    sourceStartSec: number,
+    sourceEndSec: number,
+    playbackRate: number,
+    reversed: boolean,
+    fillGaps: boolean,
+    loopCycle: LoopCycleDescriptor | null,
+): number[] {
+    let inner = midiCurveCache.get(notes);
+    if (!inner) {
+        inner = new Map();
+        midiCurveCache.set(notes, inner);
+    }
+    const key =
+        `${clipLengthSec}|${sourceStartSec}|${sourceEndSec}|${playbackRate}|` +
+        `${reversed ? 1 : 0}|${fillGaps ? 1 : 0}|` +
+        (loopCycle
+            ? `${loopCycle.cycleSec}|${loopCycle.fwdAnchorSec}|${loopCycle.revAnchorEndSec}|${loopCycle.cycleFromMedia ? 1 : 0}`
+            : "null");
+    const hit = inner.get(key);
+    if (hit) return hit;
+    const curve = generateMidiCurveFromNotes(
+        notes,
+        clipLengthSec,
+        sourceStartSec,
+        sourceEndSec,
+        playbackRate,
+        reversed,
+        fillGaps,
+        loopCycle,
+    );
+    if (inner.size >= MIDI_CURVE_CACHE_MAX_PER_NOTES) {
+        const oldest = inner.keys().next().value;
+        if (oldest !== undefined) inner.delete(oldest);
+    }
+    inner.set(key, curve);
+    return curve;
+}
+
 // ========================================
 // 类型定义
 // ========================================
@@ -378,7 +435,7 @@ export const MidiPitchTrackCanvas = React.memo(
                         sourceStartSec: clip.sourceStartSec,
                         sourceEndSec: srcEnd,
                     });
-                    midiCurve = generateMidiCurveFromNotes(
+                    midiCurve = getCachedMidiCurve(
                         clip.midiNoteData,
                         clip.lengthSec,
                         clip.sourceStartSec,
@@ -514,19 +571,30 @@ export const MidiPitchTrackCanvas = React.memo(
                               markerRate)
                           : markerBodyDur;
                     const markers: number[] = [];
-                    let guard = 0;
-                    for (
-                        let markerT = headDur;
-                        markerT < clip.lengthSec - 1e-6 &&
-                        markers.length < 4096 &&
-                        guard < 8192;
-                        markerT += markerBodyDur
-                    ) {
-                        guard += 1;
-                        const mx =
-                            (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
-                        if (mx < -8 || mx > displayW + 8) continue;
-                        markers.push(Math.round(mx * 2) / 2);
+                    {
+                        // 直接跳到可视范围内的第一个回绕点：既避免从 clip 入口
+                        // 逐周期空转数千次，也修复"深入长循环 clip 后标记消失"
+        //（旧实现受 guard<8192 限制，波形分段是直接寻址的）。
+                        const visLocalStart =
+                            viewportStartPx / Math.max(1e-9, currentPxPerSec) - clipStartSec;
+                        const k0 = Math.max(
+                            0,
+                            Math.ceil((visLocalStart - headDur - 1e-6) / markerBodyDur),
+                        );
+                        for (
+                            let markerT = headDur + k0 * markerBodyDur;
+                            markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
+                            markerT += markerBodyDur
+                        ) {
+                            const mx =
+                                (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                            if (mx > displayW + 8) break;
+                            // 恰好在 clip 起点/终点的回绕点不绘制（loopRender 约定；
+                            // 倒放整文件 Loop 的 revAnchor=D 时 headDur=0 会命中）。
+                            if (markerT <= 1e-6) continue;
+                            if (mx < -8) continue;
+                            markers.push(Math.round(mx * 2) / 2);
+                        }
                     }
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);

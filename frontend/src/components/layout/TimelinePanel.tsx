@@ -727,6 +727,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         beatFromClientX,
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
+        timelineSnap: s.timelineSnap,
+        pxPerSec,
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
@@ -740,6 +742,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedSet,
         beatFromClientX,
         ignoreGrouping,
+        timelineSnap: s.timelineSnap,
+        pxPerSec,
     });
 
     const {

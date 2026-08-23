@@ -271,10 +271,22 @@ fn compute_take_source_anchor_sec(
             take.s_offs
         }
     } else {
-        take.s_offs
+        // 兼容 REAPER 左延伸 item（负 SOFFS = 前导静音）：正放无 SECTION 时
+        // 保留原始符号，仅在媒体时长已知时对上界钳制。引擎侧以
+        // pre-silence / Loop 回绕锚点两种方式都原生支持负 source_start。
+        take.s_offs.clamp(-1_000_000.0, max_bound)
     };
 
-    let mut anchor = primary_anchor.clamp(min_bound, max_bound);
+    let mut anchor = if has_section || is_reversed {
+        primary_anchor.clamp(min_bound, max_bound)
+    } else {
+        // 正放无 SECTION：下界允许为负（前导静音），只做有限性兜底。
+        if primary_anchor.is_finite() {
+            primary_anchor
+        } else {
+            0.0
+        }
+    };
 
     if has_section {
         // 兼容部分工程里 SOFFS 已经是绝对源坐标的写法。
@@ -1062,13 +1074,27 @@ fn process_item(
                 let end = raw_end.max(start).min(source_max_bound);
                 (start, end)
             } else {
-                let start = (s_offs + cumulative_source_pos - actual_pre_src)
-                    .max(source_min_bound)
+                // 正放：允许段起点为负（REAPER 左延伸 item = 前导静音），
+                // 仅对上界与有限性做钳制；下界不再强制 ≥0。
+                let raw_start = (s_offs + cumulative_source_pos - actual_pre_src)
                     .min(source_max_bound);
+                let start = if raw_start.is_finite() { raw_start } else { 0.0 };
                 let raw_end =
                     s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
-                let end = raw_end.max(start).min(source_max_bound);
-                (start, end)
+                let clamped_end = if raw_end.is_finite() {
+                    raw_end
+                } else {
+                    start
+                };
+                let end = clamped_end.max(start).min(source_max_bound);
+                // 整段完全落在媒体起点之前的病态 item：回退为非负窗口，
+                // 避免零长度/全负窗口。
+                if end - start <= 1e-9 {
+                    let fallback_start = start.max(0.0);
+                    (fallback_start, end.max(fallback_start))
+                } else {
+                    (start, end)
+                }
             };
             let clip_start = current_timeline_pos - actual_pre_tl;
             let clip_length = (seg_timeline_duration + actual_pre_tl + actual_post_tl).max(0.001);
@@ -1104,7 +1130,9 @@ fn process_item(
                 }),
                 gain: convert_volume(take_gain),
                 muted: item_muted,
-                source_start_sec: clip_src_start.max(0.0),
+                // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
+                // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
+                source_start_sec: clip_src_start,
                 source_end_sec: clip_src_end,
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
                 reversed: item_reversed,
@@ -1254,7 +1282,9 @@ fn process_item(
             }),
             gain: convert_volume(take_gain),
             muted: item_muted,
-            source_start_sec: source_start.max(0.0),
+            // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
+            // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
+            source_start_sec: source_start,
             source_end_sec: source_end,
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             reversed: item_reversed,

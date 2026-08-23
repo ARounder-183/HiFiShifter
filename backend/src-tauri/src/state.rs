@@ -171,11 +171,13 @@ pub(crate) fn place_note_occurrence_in_loop(
     //   相位平移 ss=2s。此时保持原始 source_end（窗口 exclusive 末端）。
     let media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
     let cycle_src_sec = clip_loop_cycle_span_sec(clip)?;
+    // 倒放锚点与音频路径（mix/snapshot/mixdown）同约定：min(source_end, D)
+    // 后**不做** max(0) —— 负 source_end（slip/split + Loop 组合可达）由
+    // rem_euclid 统一环绕，避免音符域与音频域出现恒定相位差。
     let rev_anchor_end = match media_total {
         Some(d) => clip.source_end_sec.min(d),
         None => clip.source_end_sec,
-    }
-    .max(0.0);
+    };
     place_note_occurrence_frames(
         clip.reversed,
         clip.playback_rate as f64,
@@ -2040,7 +2042,9 @@ mod tests {
         // 窗口 [2, 6)，D = 窗口跨度 4s（纯 MIDI clip 场景）。
         let cycle = 4.0f64;
         let fwd_anchor = 2.0f64;
-        let rev_anchor_end = 6.0f64.min(cycle).max(0.0);
+        // 倒放锚点传**原始** source_end（函数内部用 rem_euclid 归一），
+        // 与音频路径约定一致 —— 不得在调用方预 clamp。
+        let rev_anchor_end = 6.0f64;
         let fp = 10.0f64;
 
         // 正放：音符源位置 3.0~4.5 → 首现于消费 1.0s（= 帧 100）。
@@ -2050,7 +2054,7 @@ mod tests {
         assert_eq!(p.len_frames, 150);
         assert_eq!(p.cycle_frames, 400);
 
-        // 倒放：镜像后首现于消费 (6−4.5)=1.5s（= 帧 150）。
+        // 倒放：(6−4.5) mod 4 = 1.5s（= 帧 150）—— 与窗口镜像语义等价。
         let p_rev =
             place_note_occurrence_frames(true, 1.0, fp, fwd_anchor, rev_anchor_end, cycle, 3.0, 4.5)
                 .expect("valid placement");
@@ -2664,23 +2668,25 @@ mod tests {
 
     #[test]
     fn clip_formant_morph_defaults_to_disabled_when_missing() {
+        // Clip 的持久化格式是 snake_case（无 rename_all）；
+        // formant_morph 缺失时必须反序列化为 None → 默认禁用。
         let json = serde_json::json!({
             "id": "clip-1",
-            "trackId": "track_main",
+            "track_id": "track_main",
             "name": "clip",
-            "startSec": 0.0,
-            "lengthSec": 1.0,
+            "start_sec": 0.0,
+            "length_sec": 1.0,
             "color": "#fff",
-            "sourcePath": "demo.wav",
-            "sourceStartSec": 0.0,
-            "sourceEndSec": 1.0,
-            "playbackRate": 1.0,
+            "source_path": "demo.wav",
+            "source_start_sec": 0.0,
+            "source_end_sec": 1.0,
+            "playback_rate": 1.0,
             "gain": 1.0,
             "muted": false,
-            "fadeInSec": 0.0,
-            "fadeOutSec": 0.0,
-            "fadeInCurve": "sine",
-            "fadeOutCurve": "sine"
+            "fade_in_sec": 0.0,
+            "fade_out_sec": 0.0,
+            "fade_in_curve": "sine",
+            "fade_out_curve": "sine"
         });
 
         let clip: Clip = serde_json::from_value(json).expect("clip should deserialize");
@@ -2800,8 +2806,10 @@ mod tests {
 
         assert_ne!(group_a, group_b);
 
-        // Split one clip from each group
-        tl.split_clips_at(&[a1.clone(), b1.clone()], 1.0);
+        // Split one clip from each group（切割点必须落在对应 clip 范围内，
+        // 否则 split 是无操作、不会产生右组 —— 见 split_clips_at 的 clamp 规则）
+        tl.split_clips_at(&[a1.clone()], 1.0);
+        tl.split_clips_at(&[b1.clone()], 6.0);
 
         // Each group should have at least 2 distinct group_ids after split (original + new)
         let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2827,6 +2835,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 本用例验证**非 Loop** 的分割窗口推进语义（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 1.0;
             clip.source_end_sec = 5.0;
             clip.playback_rate = 2.0;
@@ -2871,6 +2881,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 1.0;
             clip.source_end_sec = 5.0;
             clip.playback_rate = 2.0;
@@ -3001,10 +3013,13 @@ mod tests {
         assert!((left.length_sec - 1.5).abs() < 1e-9);
         assert!((left.source_start_sec - 0.0).abs() < 1e-9);
         assert!((left.source_end_sec - 2.0).abs() < 1e-9);
-        // 右段向左延伸 0.5s：同样不修改源窗口。
+        // 右段向左延伸 0.5s：锚点沿消费方向**等价回退并环绕**
+        // （floor_mod(1.0 − 0.5, 2) = 0.5），保持原有内容的绝对时间线位置
+        // —— 与非 Loop 分支"扩展窗口保内容位置"的语义一致；否则重叠区内
+        // 左尾与右头会播放错相的内容。另一端字段在 Loop 下不参与渲染。
         assert!((right.start_sec - 0.5).abs() < 1e-9);
         assert!((right.length_sec - 1.5).abs() < 1e-9);
-        assert!((right.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((right.source_start_sec - 0.5).abs() < 1e-9);
         assert!((right.source_end_sec - 2.0).abs() < 1e-9);
     }
 
@@ -3090,6 +3105,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 3.0;
             clip.source_end_sec = 7.0;
             clip.playback_rate = 2.0;
@@ -3172,6 +3189,9 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）：
+            // 右缘延伸受媒体素材末尾（3.0s）钳制。
+            clip.loop_enabled = false;
             clip.source_start_sec = 2.0;
             clip.source_end_sec = 3.0;
             clip.duration_sec = Some(3.0);
@@ -3196,7 +3216,9 @@ mod tests {
         assert!((left.length_sec - 1.0).abs() < 1e-9);
         assert!((left.source_end_sec - 3.0).abs() < 1e-9);
         assert!((right.start_sec - 0.85).abs() < 1e-9);
-        assert!((right.length_sec - 1.05).abs() < 1e-9);
+        // 右段原长 0.05 + 头部延伸 0.1 = 0.15（尾部保持在原 clip 末端 1.0，
+        // 延伸只向外侧扩展 —— 测试早期版本曾把"末端位置"误写作长度）。
+        assert!((right.length_sec - 0.15).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
         assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
         assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
@@ -4905,8 +4927,13 @@ impl TimelineState {
                     (right.source_end_sec - left_len * rate).max(right.source_start_sec);
             }
         } else if right.source_start_sec.is_finite() {
+            // 派生窗口（REAPER 语义）：非 Loop 正放的右段消费区间为
+            // [新起点, 新起点 + 右段长度×速率)，source_end 随之派生 ——
+            // 与前端的 Slip/拖边模型一致，也自愈历史数据中的陈旧窗口。
             right.source_start_sec =
                 (right.source_start_sec + left_len * rate).clamp(-1_000_000.0, 1_000_000.0);
+            right.source_end_sec =
+                right.source_start_sec + right_len * rate;
         }
         // Propagate group_id to the split-off right clip
         right.group_id = self.clips[idx].group_id.clone();
@@ -5084,17 +5111,38 @@ impl TimelineState {
 
                 // 后 clip 起始位置向前延长 right_grow，同时扩展 source 范围。
                 {
+                    let media_dur = self.source_file_duration_sec(&self.clips[right_idx]);
+                    // Loop（循环源）锚点环绕：媒体时长未知时原样保留。
+                    let wrap_anchor = |value: f64| -> f64 {
+                        match media_dur.filter(|d| d.is_finite() && *d > 1e-9) {
+                            Some(d) => {
+                                let m = value % d;
+                                if m < 0.0 { m + d } else { m }
+                            }
+                            None => value,
+                        }
+                    };
                     let right = &mut self.clips[right_idx];
                     right.start_sec = (right.start_sec - right_grow).max(0.0);
                     right.length_sec += right_grow;
-                    if !right.loop_enabled {
+                    if right.loop_enabled {
+                        // Loop：头部增长若不动源窗口，新起点会从旧相位重新消费，
+                        // 内容整体后移并与左尾交叉淡化错相。锚点须按增长量沿
+                        // 消费方向回退并环绕（正放减 / 倒放加），保持内容的
+                        // 绝对时间线位置不变 —— 与非 Loop 分支的语义一致。
                         if right.reversed {
                             right.source_end_sec =
-                                (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                                wrap_anchor(right.source_end_sec + right_grow * right_rate);
                         } else {
                             right.source_start_sec =
-                                (right.source_start_sec - right_grow * right_rate).max(0.0);
+                                wrap_anchor(right.source_start_sec - right_grow * right_rate);
                         }
+                    } else if right.reversed {
+                        right.source_end_sec =
+                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                    } else {
+                        right.source_start_sec =
+                            (right.source_start_sec - right_grow * right_rate).max(0.0);
                     }
                 }
 
@@ -5187,41 +5235,51 @@ impl TimelineState {
             return;
         }
 
-        // 5. For each affected group, generate a new group UUID for right-side clips
-        let mut right_group_map: HashMap<Option<String>, Option<String>> = HashMap::new();
+        // 5. 仅对**确实发生了分割**的组生成右组 UUID。
+        //    输入 clip 的切割点可能被 clamp 在其范围外（返回 None、无新 clip），
+        //    这类组不得发生右侧迁移 —— 否则整个组会被错误地搬进一个空降的新组。
+        //    判定依据：该组内出现了本次新增的 clip（右半继承原组 id，见 split_clip）。
+        let mut right_group_map: HashMap<String, Option<String>> = HashMap::new();
         for gid_opt in &affected_groups {
-            let new_gid = gid_opt
-                .as_ref()
-                .map(|_| Some(new_id("group")))
-                .unwrap_or(None);
-            right_group_map.insert(gid_opt.clone(), new_gid);
+            let Some(ref gid) = gid_opt else { continue };
+            let has_actual_split = self.clips.iter().any(|clip| {
+                new_ids.contains(&clip.id) && clip.group_id.as_ref() == Some(gid)
+            });
+            if has_actual_split {
+                right_group_map.insert(gid.clone(), Some(new_id("group")));
+            }
         }
 
-        // 6. Assign new group_id to right-side clips (new clips and unsplit clips to the right)
-        for gid_opt in affected_groups.iter().filter(|g| g.is_some()) {
-            let Some(ref gid) = gid_opt else {
-                continue;
-            };
-            let new_gid = right_group_map
-                .get(gid_opt)
-                .and_then(|g| g.clone());
-
+        // 6. 右侧成员迁移（仅限实际发生分割的组）：新右半必然进入新组；
+        //    未被切开但完全位于切割点右侧的同组成员也迁入新组；
+        //    位于左侧的成员保留原组。
+        for (gid, new_gid) in &right_group_map {
+            let Some(ref migrated_gid) = new_gid else { continue };
             for clip in self.clips.iter_mut() {
                 if clip.group_id.as_ref() != Some(gid) {
                     continue;
                 }
                 if new_ids.contains(&clip.id) {
-                    // Newly created right-half clip → assign new group
-                    clip.group_id = new_gid.clone();
+                    clip.group_id = Some(migrated_gid.clone());
                 } else if clip.start_sec >= split_sec - 1e-6 {
-                    // Unsplit clip entirely to the right → move to new group
-                    clip.group_id = new_gid.clone();
+                    clip.group_id = Some(migrated_gid.clone());
                 }
-                // else: unsplit clip to the left → keep original group
             }
         }
 
-        // 7. Dissolve single-member groups
+        // 7. Dissolve single-member groups（仅限本次操作涉及的组）
+        // 只溶解"本次分割新建"的单成员组；用户原有的编组即使因成员迁移到
+        // 右组而暂时只剩 1 个成员也不得拆散。此外必须**只扫描本次涉及**的组：
+        // 连续多次 split 时，前一次调用合法保留下来的单成员原组，
+        // 不能被后一次调用的全局溶解误伤。
+        let protected_original_groups: HashSet<&String> = affected_groups
+            .iter()
+            .filter_map(|gid_opt| gid_opt.as_ref())
+            .collect();
+        let mut involved_groups: HashSet<&String> = protected_original_groups.clone();
+        for gid in right_group_map.values().flatten() {
+            involved_groups.insert(gid);
+        }
         let mut group_counts: HashMap<String, usize> = HashMap::new();
         for clip in &self.clips {
             if let Some(ref gid) = clip.group_id {
@@ -5231,6 +5289,12 @@ impl TimelineState {
 
         for clip in &mut self.clips {
             if let Some(ref gid) = clip.group_id {
+                if !involved_groups.contains(gid) {
+                    continue;
+                }
+                if protected_original_groups.contains(gid) {
+                    continue;
+                }
                 if group_counts.get(gid).copied().unwrap_or(0) < 2 {
                     clip.group_id = None;
                 }

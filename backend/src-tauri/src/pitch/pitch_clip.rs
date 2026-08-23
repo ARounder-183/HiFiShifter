@@ -855,8 +855,10 @@ pub fn trim_and_resample_midi(
                 .min(full_midi.len())
                 .max(1);
             let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
+            // 倒放锚点与音频路径同约定：min(source_end, D) 后不做 max(0)，
+            // 负 source_end 由 rem_euclid 统一环绕。
             let anchor_r =
-                ((source_end_sec.min(total_sec).max(0.0)) * 1000.0 / fp).round() as i64;
+                ((source_end_sec.min(total_sec)) * 1000.0 / fp).round() as i64;
             let target_frames =
                 ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
             let mut out = Vec::with_capacity(target_frames);

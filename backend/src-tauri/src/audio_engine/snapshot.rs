@@ -361,7 +361,10 @@ pub(crate) fn build_snapshot(
 
         let (mut src_start, mut src_end) = clip_source_bounds_frames(clip, src.frames, out_rate);
         // Keep 1-frame slices audible; only drop truly empty source ranges.
-        if src_end.saturating_sub(src_start) == 0 {
+        // Loop（循环源）只依赖锚点 + 完整媒体缓冲（窗口字段仅承载锚点相位，
+        // 甚至可能是 split 产生的环绕窗口），不能因窗口退化被跳过 ——
+        // 否则实时渲染静音而离线导出有声。
+        if !clip.loop_enabled && src_end.saturating_sub(src_start) == 0 {
             continue;
         }
 

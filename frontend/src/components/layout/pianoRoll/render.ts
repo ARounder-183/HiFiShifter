@@ -812,6 +812,18 @@ export function drawPianoRoll(args: {
     }
     const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
 
+    // 级别提示键清理：该 map 挂在模块级函数属性上（跨卸载存活），
+    // 已删除/不可见 clip 的 `${path}::${clipId}` 键若不清理会无限累积。
+    {
+        const liveKeys = new Set<string>();
+        for (const entry of clipPeaks) {
+            if (entry.sourcePath) liveKeys.add(`${entry.sourcePath}::${entry.clipId}`);
+        }
+        for (const key of Object.keys(lastLevelByClip)) {
+            if (!liveKeys.has(key)) delete lastLevelByClip[key];
+        }
+    }
+
     // Background waveform: per-clip 叠加绘制
     // 与 WaveformTrackCanvas 保持一致的数据路径：
     // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform

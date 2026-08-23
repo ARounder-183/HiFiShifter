@@ -129,6 +129,10 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
         // Loop（循环源）会改变 pitch_orig 的组装内容（回绕铺满），
         // 必须参与缓存 key，否则切换 Loop 后旧曲线不会失效。
         hasher.update(&[if c.loop_enabled { 1 } else { 0 }]);
+        // Loop 下 pitch_orig 组装方向依赖 reversed（schedule.rs 的
+        // anchor_r − i / anchor_f + i 锚点选择与回绕方向），翻转倒放后
+        // 必须使旧曲线失效，否则合成仍驱动翻转前的音高曲线。
+        hasher.update(&[if c.reversed { 1 } else { 0 }]);
         if let Some(notes) = c.midi_note_data.as_ref() {
             for note in notes {
                 hasher.update(&quantize_u32(note.start_sec, 1000.0).to_le_bytes());
