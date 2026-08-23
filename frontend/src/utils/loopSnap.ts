@@ -110,6 +110,7 @@ export function nearestBoundarySnapOffsetSec(
     }
 
     // ── 非 Loop：有限候选（媒体边界的一次性穿越）───────────────
+    // 向左/向右延伸均已放开（对称无界），所有候选都可达。
     const bounds: number[] = [0];
     const d = clipMediaDurationSec(clip);
     if (d != null && d > 1e-9) bounds.push(d);
@@ -125,19 +126,10 @@ export function nearestBoundarySnapOffsetSec(
             cands.push(clip.reversed ? base + len : base - len);
         }
     }
-    // 过滤与"向左延伸钳制"冲突的不可达候选：
-    //   正放 slip：左缘 source_start' = ss+δ ≥ 0；
-    //   倒放 slip：左缘 source_end'   = se+δ ≤ D。
-    const filtered = cands.filter((offset) => {
-        if (!Number.isFinite(offset)) return false;
-        if (mode !== "slip") return true;
-        const leftEdge = clip.reversed ? se + offset : ss + offset;
-        if (!clip.reversed) return leftEdge >= -1e-9;
-        return d == null || leftEdge <= d + 1e-9;
-    });
     let best: number | null = null;
     let bestDist = Number.POSITIVE_INFINITY;
-    for (const offset of filtered) {
+    for (const offset of cands) {
+        if (!Number.isFinite(offset)) continue;
         const dist = Math.abs(offset - raw);
         if (dist < bestDist - 1e-12) {
             best = offset;

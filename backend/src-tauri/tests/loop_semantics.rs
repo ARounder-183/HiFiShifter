@@ -58,15 +58,24 @@ fn loop_with_media_duration_maps_per_frame_floor_mod() {
     }
 }
 
-/// 非 Loop 行为回归：rate≈1 且 target 超出窗口时按既有约定 clamp 到窗口长度。
+/// 非 Loop 行为回归：source_end 按 起点+长度×速率 **派生**。
+///
+/// - 陈旧 source_end（历史工程/循环开关切换残留）必须被自愈：
+///   窗口不得被截短到旧值，否则静音区冻结、音频被错误丢弃；
+/// - 一致输入下输出恰好铺满 clip 长度，内容按窗口顺序保留。
 #[test]
-fn non_loop_rate_near_one_clamps_target_to_window() {
-    // 窗口 [0.5, 1.5) → 100 帧；clip 长度 2s → target 200 帧；
-    // 非 Loop + rate≈1 → 输出应被 clamp 为 trimmed.len()=100。
+fn non_loop_derives_source_end_from_start_and_length() {
     let full: Vec<f32> = (0..300).map(|i| i as f32).collect();
+
+    // 存储窗口 [0.5, 1.5) 与长度 2s 脱钩（陈旧值）：
+    // 派生终点 = 0.5 + 2·1 = 2.5 → 输出 200 帧，内容为源 [0.5, 2.5)。
     let out = trim_and_resample_midi(&full, 10.0, 0.5, 1.5, 1.0, 2.0, false, None, false);
-    assert_eq!(out.len(), 100, "clamped to window length");
+    assert_eq!(out.len(), 200, "derived end must heal the stale window");
     for (i, v) in out.iter().enumerate() {
         assert!((v - full[50 + i]).abs() < 1e-6, "frame {i} content preserved");
     }
+
+    // 一致输入（se == start + len·rate）行为不变。
+    let out2 = trim_and_resample_midi(&full, 10.0, 0.5, 2.5, 1.0, 2.0, false, None, false);
+    assert_eq!(out2, out);
 }

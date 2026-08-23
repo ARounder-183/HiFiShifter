@@ -3194,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn split_clip_with_transition_overlap_clamps_to_source_material_end() {
+    fn split_clip_with_transition_overlap_grows_into_silence_beyond_material() {
         let mut tl = TimelineState::default();
         let track_id = tl.add_track(Some("Track".to_string()), None, None);
         let clip_id = tl.add_clip(
@@ -3206,8 +3206,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
-            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）：
-            // 右缘延伸受媒体素材末尾（3.0s）钳制。
+            // 非 Loop：向左/向右延伸均无界 —— 左段尾部越过素材末尾(3.0)的
+            // 部分渲染为静音；不再按素材可用量钳制。
             clip.loop_enabled = false;
             clip.source_start_sec = 2.0;
             clip.source_end_sec = 3.0;
@@ -3230,14 +3230,16 @@ mod tests {
 
         let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
-        assert!((left.length_sec - 1.0).abs() < 1e-9);
-        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!((left.length_sec - 1.05).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.05).abs() < 1e-9);
         assert!((right.start_sec - 0.85).abs() < 1e-9);
         // 右段原长 0.05 + 头部延伸 0.1 = 0.15（尾部保持在原 clip 末端 1.0，
-        // 延伸只向外侧扩展 —— 测试早期版本曾把"末端位置"误写作长度）。
+        // 延伸只向外侧扩展）。
         assert!((right.length_sec - 0.15).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
-        assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
+        // 重叠 = 左尾增长 + 右头增长 = 0.2；写入时按各自长度钳制
+        //（右段长 0.15 < 重叠 0.2）。
+        assert!((left.auto_fade_out_sec - 0.2).abs() < 1e-9);
         assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
     }
 
@@ -4966,12 +4968,6 @@ impl TimelineState {
         split_sec: f64,
         opts: &SplitTransitionOptions,
     ) -> Option<String> {
-        let orig_source_end = self
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
-            .map(|c| c.source_end_sec)
-            .unwrap_or(0.0);
         let right_id = self.split_clip(clip_id, split_sec)?;
         let effective_duration_sec = match opts.duration_unit {
             SplitTransitionDurationUnit::Seconds => opts.duration_sec,
@@ -4992,13 +4988,7 @@ impl TimelineState {
             }
         };
         if opts.enabled && effective_duration_sec.is_finite() && effective_duration_sec > 0.0 {
-            self.apply_split_transition(
-                clip_id,
-                &right_id,
-                opts,
-                effective_duration_sec,
-                orig_source_end,
-            );
+            self.apply_split_transition(clip_id, &right_id, opts, effective_duration_sec);
         }
         Some(right_id)
     }
@@ -5009,7 +4999,6 @@ impl TimelineState {
         right_id: &str,
         opts: &SplitTransitionOptions,
         duration_sec: f64,
-        orig_source_end: f64,
     ) {
         let Some(left_idx) = self.clips.iter().position(|c| c.id == left_id) else {
             return;
@@ -5054,12 +5043,9 @@ impl TimelineState {
             }
             SplitTransitionMode::ExtendOverlap => {
                 // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
-                // 两侧都会钳制在 Clip 原素材的实际长度范围内（source 0 .. 文件时长），
-                // 后 clip 同时不能越过时间轴起点 0。
-                let source_end_limit = self
-                    .source_file_duration_sec(&self.clips[left_idx])
-                    .unwrap_or(orig_source_end.max(0.0));
-
+                // 源媒体可用量不再设限（产品决策：向左/向右延伸均无界）——
+                // 越出源素材的部分由渲染管线按静音填充；仅保留时间轴约束
+                //（后 clip 不能越过时间轴起点 0）。
                 let left_rate = {
                     let left = &self.clips[left_idx];
                     if left.playback_rate.is_finite() && left.playback_rate > 0.0 {
@@ -5068,18 +5054,7 @@ impl TimelineState {
                         1.0
                     }
                 };
-                let left_source_avail_sec = {
-                    let left = &self.clips[left_idx];
-                    if left.loop_enabled {
-                        // Loop（循环源）：延长部分由循环内容回绕填充，不受源长度限制。
-                        f64::INFINITY
-                    } else if left.reversed {
-                        left.source_start_sec.max(0.0) / left_rate
-                    } else {
-                        (source_end_limit - left.source_end_sec).max(0.0) / left_rate
-                    }
-                };
-                let left_grow = duration.min(left_source_avail_sec).max(0.0);
+                let left_grow = duration.max(0.0);
 
                 let right_rate = {
                     let right = &self.clips[right_idx];
@@ -5089,19 +5064,8 @@ impl TimelineState {
                         1.0
                     }
                 };
-                let right_source_avail_sec = {
-                    let right = &self.clips[right_idx];
-                    if right.loop_enabled {
-                        f64::INFINITY
-                    } else if right.reversed {
-                        (source_end_limit - right.source_end_sec).max(0.0) / right_rate
-                    } else {
-                        right.source_start_sec.max(0.0) / right_rate
-                    }
-                };
                 let right_grow = duration
                     .min(self.clips[right_idx].start_sec)
-                    .min(right_source_avail_sec)
                     .max(0.0);
 
                 let overlap_sec = left_grow + right_grow;
@@ -5112,16 +5076,17 @@ impl TimelineState {
                 // 前 clip 末尾向后延长 left_grow，同时扩展 source 范围，
                 // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
                 // Loop（循环源）clip：延长部分由循环回绕内容填充，不改源窗口。
+                // 非 Loop：正放终点/倒放起点随增长派生，越出媒体的部分为静音。
                 {
                     let left = &mut self.clips[left_idx];
                     left.length_sec += left_grow;
                     if !left.loop_enabled {
                         if left.reversed {
                             left.source_start_sec =
-                                (left.source_start_sec - left_grow * left_rate).max(0.0);
+                                left.source_start_sec - left_grow * left_rate;
                         } else {
                             left.source_end_sec =
-                                (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                                left.source_end_sec + left_grow * left_rate;
                         }
                     }
                 }
@@ -5155,11 +5120,15 @@ impl TimelineState {
                                 wrap_anchor(right.source_start_sec - right_grow * right_rate);
                         }
                     } else if right.reversed {
+                        // 倒放非 Loop：头部延伸使锚点(source_end)越过媒体时长
+                        // → 前导静音，不再按媒体时长钳制。
                         right.source_end_sec =
-                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                            right.source_end_sec + right_grow * right_rate;
                     } else {
+                        // 正放非 Loop：头部延伸使起点向下穿越媒体起点 → 前导
+                        // 静音（派生窗口），不再钳制到 0。
                         right.source_start_sec =
-                            (right.source_start_sec - right_grow * right_rate).max(0.0);
+                            right.source_start_sec - right_grow * right_rate;
                     }
                 }
 

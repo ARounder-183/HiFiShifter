@@ -611,6 +611,33 @@ export const MidiPitchTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);
                     }
+                } else if (clip.sourcePath && !clip.reversed) {
+                    // ── 非 Loop 音频源：媒体边界标记 ──
+                    // 循环节 = 源媒体在该 Clip 内的真实起始/终止位置
+                    //（音频与静音的分界线），落在 Clip 内部时绘制。
+                    const mediaDur = resolveLoopMediaDurationSec({
+                        durationFrames: clip.durationFrames,
+                        sourceSampleRate: clip.sourceSampleRate,
+                        durationSec: clip.durationSec,
+                    });
+                    if (mediaDur > 1e-6) {
+                        const rate =
+                            Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
+                                ? 1
+                                : Math.abs(Number(clip.playbackRate ?? 1) || 1);
+                        const markers: number[] = [];
+                        for (const b of [0, mediaDur]) {
+                            const tLocal = (b - (Number(clip.sourceStartSec) || 0)) / rate;
+                            if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
+                            const mx =
+                                (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
+                            if (mx < -8 || mx > displayW + 8) continue;
+                            markers.push(Math.round(mx * 2) / 2);
+                        }
+                        if (markers.length > 0) {
+                            drawLoopMarkers(ctx, markers, displayH, clipColor);
+                        }
+                    }
                 }
             }
 

@@ -769,6 +769,24 @@ export const WaveformTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
                     }
+                } else if (!clip.reversed && mediaDur > 1e-6) {
+                    // ── 非 Loop：媒体边界标记（"循环节"的退化形式）──────
+                    // 未循环 Clip 的循环节 = 源媒体在该 Clip 内的真实起始
+                    // 位置（s=0）与真实终止位置（s=D）。它们是音频与静音的
+                    // 分界线，落在 Clip 内部时绘制倒三角（前导/尾部静音、
+                    // 左右延伸的视觉锚点）。
+                    const markers: number[] = [];
+                    for (const b of [0, mediaDur]) {
+                        const tLocal = (b - sourceStartSec) / pr;
+                        if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
+                        const mx =
+                            (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
+                        if (mx < -8 || mx > displayW + 8) continue;
+                        markers.push(Math.round(mx * 2) / 2);
+                    }
+                    if (markers.length > 0) {
+                        drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
+                    }
                 }
             }
 

@@ -208,29 +208,11 @@ export function useSlipDrag(deps: {
                     // 区间落在 [0, D) 之外的部分渲染为静音。同时把 source_end
                     // 归一到派生值，自愈历史数据中 length 与窗口跨度不一致的
                     // 状态。
+                    // 向左 / 向右延伸**完全对称、均不设限**（产品决策更新）：
+                    // 左延伸产生前导静音（source_start < 0），右延伸产生尾部
+                    // 静音（终点 > D），静音都随内容一起平移。Loop 开关切换
+                    // 或历史数据留下的陈旧窗口由派生值自愈。
                     nextSourceEnd = nextSourceStart + initial.lengthSec * rate;
-                    // ── 向左延伸钳制（Req 2）───────────────────────────
-                    // 左缘不得越过源媒体边界；越界的"向左延伸"（露出媒体之外
-                    // 的内容）被禁止。对带负 SOFFS 的 REAPER 导入数据，任何
-                    // 拖动都会瞬间归零跳回常规状态（Req 4，有意为之）。
-                    // 右侧（尾段静音）不设上限 —— 对应"向右无限延伸"。
-                    if (!initial.reversed) {
-                        // 正放：左缘 = source_start，不得 < 0。
-                        if (nextSourceStart < 0) {
-                            const lift = -nextSourceStart;
-                            nextSourceStart += lift;
-                            nextSourceEnd += lift;
-                        }
-                    } else {
-                        // 倒放：左缘 = source_end，不得越过媒体末尾；
-                        // 尾部（source_start 向下穿越 0）属于右延伸，允许。
-                        const mediaDur = clipMediaDurationSec(initial);
-                        if (mediaDur != null && nextSourceEnd > mediaDur) {
-                            const drop = nextSourceEnd - mediaDur;
-                            nextSourceStart -= drop;
-                            nextSourceEnd -= drop;
-                        }
-                    }
                 } else {
                     // 纯 MIDI（无音频媒体）：维持既有音符窗口内钳制。
                     const maxSlipSec = initial.maxSlipSec;
