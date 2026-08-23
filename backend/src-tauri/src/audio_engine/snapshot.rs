@@ -84,9 +84,12 @@ pub(crate) fn source_bounds_frames(
 }
 
 fn clip_source_bounds_frames(clip: &Clip, src_total_frames: usize, sr: u32) -> (u64, u64) {
+    // 派生窗口：非 Loop 正放取 起点+长度×速率（与离线渲染一致），
+    // 陈旧/被循环开关扰动的存储窗口不再冻结静音区或截断音频。
+    let source_end = crate::state::clip_effective_source_end_sec(clip);
     source_bounds_frames(
         clip.source_start_sec.max(0.0),
-        clip.source_end_sec,
+        source_end,
         src_total_frames,
         sr,
     )
@@ -172,7 +175,12 @@ pub(crate) fn schedule_stretch_jobs(
         let (job_start_sec, job_end_sec) = if clip.loop_enabled {
             (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
         } else {
-            (clip.source_start_sec.max(0.0), clip.source_end_sec)
+            // 派生窗口：与 build_snapshot 换入键（下方 clip_source_bounds_frames
+            // / 同一 effective 端点）保持成对，否则键不匹配永远无法命中。
+            (
+                clip.source_start_sec.max(0.0),
+                crate::state::clip_effective_source_end_sec(clip),
+            )
         };
 
         let key = make_stretch_key(
@@ -458,7 +466,8 @@ pub(crate) fn build_snapshot(
                     crate::state::clip_source_media_duration_sec(clip)
                         .unwrap_or_else(|| src_render.frames as f64 / out_rate as f64)
                 } else {
-                    clip.source_end_sec
+                    // 派生窗口：非 Loop 正放取 起点+长度×速率。
+                    crate::state::clip_effective_source_end_sec(clip)
                 },
                 clip.reversed && !clip.loop_enabled,
                 // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
@@ -530,7 +539,11 @@ pub(crate) fn build_snapshot(
             let (key_start, key_end) = if clip.loop_enabled {
                 (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
             } else {
-                (clip.source_start_sec.max(0.0), clip.source_end_sec)
+                // 派生窗口：与上方 schedule_stretch_jobs 的生产者键成对。
+                (
+                    clip.source_start_sec.max(0.0),
+                    crate::state::clip_effective_source_end_sec(clip),
+                )
             };
             let key = make_stretch_key(path, out_rate, stretch_algorithm, key_start, key_end, playback_rate);
             if let Ok(m) = stretch_cache.lock() {

@@ -881,6 +881,8 @@ function applyOptimisticBulkClipState(
         fadeOutSec?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        sourceStartSec?: number;
+        sourceEndSec?: number;
     }>,
 ) {
     for (const update of updates) {
@@ -891,6 +893,12 @@ function applyOptimisticBulkClipState(
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);
+        }
+        if (update.sourceStartSec !== undefined) {
+            clip.sourceStartSec = Number(update.sourceStartSec) || 0;
+        }
+        if (update.sourceEndSec !== undefined) {
+            clip.sourceEndSec = Math.max(0, Number(update.sourceEndSec) || 0);
         }
         if (update.fadeInSec !== undefined) {
             clip.fadeInSec = Math.max(0, Number(update.fadeInSec) || 0);

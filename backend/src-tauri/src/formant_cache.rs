@@ -225,7 +225,11 @@ pub fn compute_formant_cache_entry_for_clip(
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
         .ok_or_else(|| "cannot_determine_clip_duration".to_string())?;
     let source_start_sec = clip.source_start_sec.max(0.0);
-    let source_end_sec = clip.source_end_sec.min(total_sec).max(source_start_sec);
+    // 派生窗口：与 build_snapshot 实时分支一致，非 Loop 正放取
+    // 起点+长度×速率（陈旧存储窗口不再冻结静音区/截断音频）。
+    let source_end_sec = crate::state::clip_effective_source_end_sec(clip)
+        .min(total_sec)
+        .max(source_start_sec);
 
     // Loop（循环源）：与 build_snapshot 的实时 Formant 分支保持一致 ——
     // 处理对象是**完整文件的自然顺序** PCM（方向由 mix 阶段的锚点回绕体现，

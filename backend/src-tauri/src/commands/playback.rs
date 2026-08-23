@@ -930,7 +930,9 @@ fn render_single_clip(
     } else {
         (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6)
     };
-    let src_end_limit_sec = source_end_sec.min(total_sec).max(source_start_sec);
+    let src_end_limit_sec = crate::state::clip_effective_source_end_sec(clip)
+        .min(total_sec)
+        .max(source_start_sec);
     if !loop_mode && src_end_limit_sec - source_start_sec <= 1e-9 {
         return Err("trimmed clip too short".to_string());
     }

@@ -74,6 +74,23 @@ pub(crate) fn clip_loop_wrap_total_sec(clip: &Clip) -> f64 {
         .max(0.0)
 }
 
+/// 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
+/// se' = source_start + length×rate。
+///
+/// 消费区间为 [source_start, se')，落在媒体之外的部分渲染为静音
+/// （右缘延伸的尾部静音 / REAPER 左延伸的前导静音）。存储的
+/// `source_end_sec` 在循环开关、历史数据等场景下可能与长度脱钩 ——
+/// 所有切片/窗口消费点都应使用本函数取**有效**终点，避免陈旧窗口
+/// 冻结静音区或截断音频。Loop（回绕锚点语义）与倒放（反向锚点）
+/// 保持存储字段不变。
+pub(crate) fn clip_effective_source_end_sec(clip: &Clip) -> f64 {
+    if !clip.loop_enabled && !clip.reversed {
+        clip.source_start_sec + clip.length_sec.max(0.0) * clip.playback_rate as f64
+    } else {
+        clip.source_end_sec
+    }
+}
+
 /// Loop（循环源）下**音符内容**的回绕周期（源域秒）。
 ///
 /// 音频 clip 的实际声音按整个媒体时长 D 回绕（mix / snapshot / mixdown 的

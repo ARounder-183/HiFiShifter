@@ -1368,7 +1368,6 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
         // Source range (already in sec).
         let source_start_sec = clip.source_start_sec.max(0.0);
-        let source_end_sec = clip.source_end_sec;
         let pre_silence_sec = (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6);
 
         let total_sec = (in_frames as f64) / (in_rate.max(1) as f64);
@@ -1376,7 +1375,9 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
             continue;
         }
 
-        let src_end_limit_sec = source_end_sec.min(total_sec).max(source_start_sec);
+        let src_end_limit_sec = crate::state::clip_effective_source_end_sec(clip)
+            .min(total_sec)
+            .max(source_start_sec);
         if src_end_limit_sec - source_start_sec <= 1e-9 {
             continue;
         }

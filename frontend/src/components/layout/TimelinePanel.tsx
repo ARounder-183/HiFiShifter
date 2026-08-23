@@ -2125,12 +2125,41 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       );
                                   }}
                                   onToggleLoop={(ids, loopEnabled) => {
+                                      const session = sessionRef.current;
+                                      const updates = ids.map((id) => {
+                                          const clip = session.clips.find(
+                                              (entry) => entry.id === id,
+                                          );
+                                          const update: {
+                                              clipId: string;
+                                              loopEnabled: boolean;
+                                              sourceEndSec?: number;
+                                          } = { clipId: id, loopEnabled };
+                                          // 关闭循环的瞬间：非 Loop 正放 Clip 按
+                                          // 派生窗口模型归一 source_end
+                                          //（= 起点+长度×速率）。循环期间锚点被
+                                          // 回绕/窗口被保持，直接关掉会把陈旧
+                                          // 窗口带入非 Loop 状态 —— 静音区冻结、
+                                          // 音频错位都源于此。
+                                          if (
+                                              !loopEnabled &&
+                                              clip &&
+                                              !clip.reversed &&
+                                              !(clip.midiNoteData && clip.midiNoteData.length > 0)
+                                          ) {
+                                              const rate =
+                                                  Number(clip.playbackRate) > 0
+                                                      ? Number(clip.playbackRate)
+                                                      : 1;
+                                              update.sourceEndSec =
+                                                  (Number(clip.sourceStartSec) || 0) +
+                                                  Math.max(0, clip.lengthSec) * rate;
+                                          }
+                                          return update;
+                                      });
                                       void dispatch(
                                           setClipsStateBulkRemote({
-                                              updates: ids.map((id) => ({
-                                                  clipId: id,
-                                                  loopEnabled,
-                                              })),
+                                              updates,
                                               checkpoint: true,
                                           }),
                                       );

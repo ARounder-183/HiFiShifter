@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
+import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 /** 单个 clip 的波形数据条目（v2：interleaved 格式，与 WaveformTrackCanvas 一致） */
@@ -134,9 +135,18 @@ export function useClipsPeaksForPianoRoll(args: {
             const playbackRate = Number(clip.playbackRate ?? 1);
             const pr = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
 
-            // sourceEndSec：与 WaveformTrackCanvas 一致，优先使用 clip.sourceEndSec
-            const clipSourceEndSec =
-                Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec;
+            // sourceEndSec：派生窗口（REAPER 语义）—— 非 Loop 正放取
+            // 起点+长度×速率，与 WaveformTrackCanvas 一致；陈旧存储窗口
+            // 不再冻结静音区。Loop/倒放保持原字段。
+            const clipSourceEndSec = resolveSourceEndSec({
+                loopEnabled: Boolean(clip.loopEnabled),
+                reversed: Boolean(clip.reversed),
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
+                playbackRate: pr,
+                lengthSec: clip.lengthSec,
+                sourceEndSec:
+                    Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec,
+            });
 
             return {
                 clipId: clip.id,

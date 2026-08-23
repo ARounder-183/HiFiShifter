@@ -526,7 +526,9 @@ pub fn render_mixdown_interleaved(
             continue;
         }
 
-        let src_end_limit_sec = source_end_sec_src.min(total_sec).max(source_start_sec);
+        let src_end_limit_sec = crate::state::clip_effective_source_end_sec(clip)
+            .min(total_sec)
+            .max(source_start_sec);
         if !clip.loop_enabled && src_end_limit_sec - source_start_sec <= 1e-9 {
             continue;
         }
@@ -660,7 +662,8 @@ pub fn render_mixdown_interleaved(
                     (start_frame + consumed_frames) as f64 / in_rate as f64,
                 )
             } else {
-                (clip.source_start_sec.max(0.0), clip.source_end_sec)
+                // 派生窗口：非 Loop 正放的实际消费终点（已按媒体时长钳制）。
+                (clip.source_start_sec.max(0.0), src_end_limit_sec)
             };
             let key = crate::formant_cache::make_formant_cache_key(
                 &clip.id,

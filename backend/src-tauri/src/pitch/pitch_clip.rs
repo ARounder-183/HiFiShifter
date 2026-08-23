@@ -832,6 +832,17 @@ pub fn trim_and_resample_midi(
         1.0
     };
 
+    // 派生窗口（非 Loop 正放）：终点 = 起点 + 时间线长度×速率，与音频渲染、
+    // 前端编辑模型一致。循环开关反复切换或历史数据可能留下与长度脱钩的
+    // 陈旧 source_end —— 在此统一派生，避免曲线窗口被冻结在错误位置。
+    // 注意用**原始** source_start（可为负，前导静音场景），不是上面的
+    // clamp 值；Loop / 倒放保持调用方传入的锚点字段。
+    let source_end_sec = if !loop_enabled && !reversed {
+        source_start_sec + clip_timeline_len_sec.max(0.0) * rate
+    } else {
+        source_end_sec
+    };
+
     // 从全量曲线中截取 source range 区间
     let src_start_frame = ((src_start * 1000.0) / fp).round().max(0.0) as usize;
 

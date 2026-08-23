@@ -34,7 +34,12 @@ import {
     renderWaveform,
     type WaveformRenderParams,
 } from "../../utils/waveformRenderer";
-import { drawLoopMarkers, modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
+import {
+    drawLoopMarkers,
+    modEuclid,
+    resolveLoopMediaDurationSec,
+    resolveSourceEndSec,
+} from "../../utils/loopRender";
 import {
     wfDiag_frameStart,
     wfDiag_frameEnd,
@@ -277,8 +282,17 @@ export const WaveformTrackCanvas = React.memo(
                 const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
                 lastLevelByClipRef.current[levelKey] = stableLevel;
 
-                const clipSourceEndSec =
-                    Number(clip.sourceEndSec ?? mediaDur) || mediaDur;
+                // 派生窗口（REAPER 语义）：非 Loop 正放的消费终点 = 起点+长度×速率。
+                // 存储的 sourceEndSec 在循环开关切换/历史工程下可能陈旧，
+                // 直接信任会把"需要有音频的地方"冻结成空白。
+                const clipSourceEndSec = resolveSourceEndSec({
+                    loopEnabled: Boolean(clip.loopEnabled),
+                    reversed: Boolean(clip.reversed),
+                    sourceStartSec,
+                    playbackRate: pr,
+                    lengthSec: clip.lengthSec,
+                    sourceEndSec: Number(clip.sourceEndSec ?? mediaDur) || mediaDur,
+                });
                 const isLoop = Boolean(clip.loopEnabled);
                 const effSrcEnd = Math.min(clipSourceEndSec, mediaDur);
                 let clipSourceSpanSec: number;

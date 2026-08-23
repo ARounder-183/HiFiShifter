@@ -7,6 +7,9 @@ type BulkClipRemoteChange = {
     reversed?: boolean;
     /** Loop（循环源）开关。 */
     loopEnabled?: boolean;
+    /** 源窗口（派生窗口模型下随 Loop 开关等操作一并归一）。 */
+    sourceStartSec?: number;
+    sourceEndSec?: number;
 };
 
 export function buildBulkClipStateUpdates(args: {

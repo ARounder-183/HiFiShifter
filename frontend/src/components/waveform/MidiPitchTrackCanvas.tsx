@@ -420,10 +420,17 @@ export const MidiPitchTrackCanvas = React.memo(
                 let framePeriodMs: number;
 
                 if (clip.midiNoteData && clip.midiNoteData.length > 0) {
+                    // 派生窗口：非 Loop 正放的音频源（含音高参考块）终点 =
+                    // 起点+长度×速率（陈旧存储窗口不再冻结静音区）；纯 MIDI
+                    // 与 Loop/倒放保持原字段。
                     const srcEnd =
-                        clip.sourceEndSec > 0
-                            ? clip.sourceEndSec
-                            : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
+                        clip.sourcePath && !clip.loopEnabled && !clip.reversed
+                            ? (Number(clip.sourceStartSec) || 0) +
+                              Math.max(0, Number(clip.lengthSec) || 0) *
+                                  (Math.abs(Number(clip.playbackRate) || 1) || 1)
+                            : clip.sourceEndSec > 0
+                              ? clip.sourceEndSec
+                              : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
                     // Loop（循环源）：有源媒体的 clip（含音高参考块）按整个媒体
                     // 文件回绕，纯 MIDI clip 按音符窗口跨度 —— 与实际播放一致。
                     const loopCycle = resolveLoopCycleDescriptor({
@@ -529,6 +536,17 @@ export const MidiPitchTrackCanvas = React.memo(
 
                 // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
                 // 周期与曲线平铺一致：有源媒体 → 媒体时长 D；纯 MIDI → 窗口跨度。
+                const markerSrcEnd =
+                    clip.sourcePath && !clip.loopEnabled && !clip.reversed
+                        ? (Number(clip.sourceStartSec) || 0) +
+                          Math.max(0, Number(clip.lengthSec) || 0) *
+                              (Math.abs(Number(clip.playbackRate) || 1) || 1)
+                        : clip.sourceEndSec > 0
+                          ? clip.sourceEndSec
+                          : (clip.midiNoteData?.reduce(
+                                (max, n) => Math.max(max, n.endSec),
+                                0,
+                            ) ?? 0);
                 const markerCycle = resolveLoopCycleDescriptor({
                     loopEnabled: Boolean(clip.loopEnabled),
                     hasSourceMedia: Boolean(clip.sourcePath),
@@ -536,13 +554,7 @@ export const MidiPitchTrackCanvas = React.memo(
                     sourceSampleRate: clip.sourceSampleRate,
                     durationSec: clip.durationSec,
                     sourceStartSec: clip.sourceStartSec,
-                    sourceEndSec:
-                        clip.sourceEndSec > 0
-                            ? clip.sourceEndSec
-                            : (clip.midiNoteData?.reduce(
-                                  (max, n) => Math.max(max, n.endSec),
-                                  0,
-                              ) ?? 0),
+                    sourceEndSec: markerSrcEnd,
                 });
                 const markerRate =
                     Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6

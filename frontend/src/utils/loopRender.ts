@@ -29,6 +29,37 @@ export function modEuclid(a: number, n: number): number {
 }
 
 /**
+ * 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
+ * se' = source_start + length×rate。
+ *
+ * Clip 的消费区间为 [source_start, se')，落在媒体 [0, D) 之外的部分是静音
+ * （右缘延伸的尾部静音 / REAPER 左延伸的前导静音）。存储的 sourceEndSec 在
+ * 循环开关切换、历史工程等场景下可能与长度脱钩 —— 渲染端必须使用派生值，
+ * 否则陈旧窗口会把"需要有音频的地方"冻结成空白。Loop（回绕锚点）与倒放
+ * （反向锚点）保持原字段。
+ */
+export function resolveSourceEndSec(clip: {
+    loopEnabled: boolean;
+    reversed: boolean;
+    sourceStartSec: number;
+    playbackRate: number;
+    lengthSec: number;
+    sourceEndSec: number;
+}): number {
+    if (!clip.loopEnabled && !clip.reversed) {
+        const rate =
+            Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
+                ? clip.playbackRate
+                : 1;
+        return (
+            (Number(clip.sourceStartSec) || 0) +
+            Math.max(0, Number(clip.lengthSec) || 0) * rate
+        );
+    }
+    return Number(clip.sourceEndSec) || 0;
+}
+
+/**
  * 解析 Loop 回绕使用的**媒体总时长**（秒）。
  *
  * 统一取值顺序：`durationFrames / sourceSampleRate`（精确）优先，

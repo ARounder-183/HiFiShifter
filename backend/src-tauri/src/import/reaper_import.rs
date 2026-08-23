@@ -381,8 +381,12 @@ fn compute_item_source_window_sec(
         let start = (end - consumed).max(min_bound).min(end);
         (start, end)
     } else {
+        // 非 Loop 正放：派生窗口 —— 终点 = 起点 + 消耗量，**不**按媒体时长
+        // 钳制。REAPER 中 LENGTH 大于可用源的 item 其超出部分为静音尾巴，
+        // 导入必须保真（渲染管线自行把越界区间处理为静音；派生模型下
+        // source_end 与 length 保持一致，Slip/拖边的语义才成立）。
         let start = anchor;
-        let end = (start + consumed).min(max_bound).max(start);
+        let end = start + consumed;
         (start, end)
     }
 }
@@ -1081,12 +1085,9 @@ fn process_item(
                 let start = if raw_start.is_finite() { raw_start } else { 0.0 };
                 let raw_end =
                     s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
-                let clamped_end = if raw_end.is_finite() {
-                    raw_end
-                } else {
-                    start
-                };
-                let end = clamped_end.max(start).min(source_max_bound);
+                // 派生窗口：终点不按媒体时长钳制（超出部分 = 静音尾巴）。
+                let clamped_end = if raw_end.is_finite() { raw_end } else { start };
+                let end = clamped_end.max(start);
                 // 整段完全落在媒体起点之前的病态 item：回退为非负窗口，
                 // 避免零长度/全负窗口。
                 if end - start <= 1e-9 {
