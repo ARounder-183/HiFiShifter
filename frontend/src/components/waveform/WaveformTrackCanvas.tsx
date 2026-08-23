@@ -167,18 +167,18 @@ export const WaveformTrackCanvas = React.memo(
                 typeof window !== "undefined" &&
                 window.localStorage?.getItem("hifishifter.debugWaveformPerf") === "1";
             const __t0 = __perfDebug ? performance.now() : 0;
-            let __tSetup = 0,
-                __clipTimings: {
-                    name: string;
-                    sliceMs: number;
-                    downsampleMs: number;
-                    gainMs: number;
-                    renderMs: number;
-                    drawImageMs: number;
-                    interleavedLen: number;
-                    visibleWidthPx: number;
-                    downsampledTo: number;
-                }[] = [];
+            let __tSetup = 0;
+            const __clipTimings: {
+                name: string;
+                sliceMs: number;
+                downsampleMs: number;
+                gainMs: number;
+                renderMs: number;
+                drawImageMs: number;
+                interleavedLen: number;
+                visibleWidthPx: number;
+                downsampledTo: number;
+            }[] = [];
 
             const currentPxPerSec = pxPerSecRef.current;
             const currentViewportStartSec = viewportStartSecRef.current;
@@ -409,6 +409,21 @@ export const WaveformTrackCanvas = React.memo(
                     );
                     if (visClipEndSec <= visClipStartSec) continue;
 
+                    // 瓦片在主 Canvas 上的可见像素范围 —— 必须在取数/降采样
+                    // 之前判定：像素区间塌陷时直接跳过，避免白做一次切片聚合，
+                    // 以及降采样池缓冲取出后未归还的泄漏。
+                    const tileVisLeftPx = Math.max(
+                        0,
+                        (clipStartSec + visClipStartSec) * currentPxPerSec - viewportStartPx,
+                    );
+                    const tileVisRightPx = Math.min(
+                        displayW,
+                        (clipStartSec + visClipEndSec) * currentPxPerSec - viewportStartPx,
+                    );
+                    if (tileVisRightPx <= tileVisLeftPx) {
+                        continue;
+                    }
+
                     // 该分段的源窗口（头部段 / 整文件重复段，见上方划分注释）
                     const tileSpanStartSec = seg.srcWinStart;
                     const tileSpanEndSec = seg.srcWinEnd;
@@ -514,19 +529,6 @@ export const WaveformTrackCanvas = React.memo(
                     const tileStartPx = clipStartPx + seg.localStartSec * currentPxPerSec;
                     const clipPixelOffset =
                         Math.round((viewportStartPx - tileStartPx) * 2) / 2;
-
-                    // 瓦片在主 Canvas 上的可见像素范围
-                    const tileVisLeftPx = Math.max(
-                        0,
-                        (clipStartSec + visClipStartSec) * currentPxPerSec - viewportStartPx,
-                    );
-                    const tileVisRightPx = Math.min(
-                        displayW,
-                        (clipStartSec + visClipEndSec) * currentPxPerSec - viewportStartPx,
-                    );
-                    if (tileVisRightPx <= tileVisLeftPx) {
-                        continue;
-                    }
 
                     // 构建渲染参数（以单个循环瓦片为坐标系）
                     const effectiveFadeInSec =

@@ -998,6 +998,9 @@ fn render_single_clip(
             if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
             if loop_mode { total_sec } else { clip.source_end_sec },
             clip.reversed && !loop_mode,
+            // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
+            // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
+            loop_mode,
             params,
         );
         match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params) {

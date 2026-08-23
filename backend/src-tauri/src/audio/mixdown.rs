@@ -167,6 +167,10 @@ pub(crate) fn reverse_interleaved_frames(samples: &mut [f32], channels: usize) {
 /// 另一侧继续 —— 即"循环原始音频文件"，与 REAPER Loop source 一致。
 /// 输出保持自然时间顺序（倒放的方向已体现在索引递减中，
 /// 调用方无需再做整体反转）。
+///
+/// 实现：在回绕点之间源索引是连续的，因此按"整段拷贝到边界"的方式用
+/// `extend_from_slice` 分块复制，而不是逐帧取模 + 逐样本 push —— 长输出
+/// （循环多个周期）下每帧成本从"取模+分支+逐样本写"降为 memcpy 级别。
 pub(crate) fn build_loop_tiled_segment(
     pcm: &[f32],
     channels: usize,
@@ -183,17 +187,29 @@ pub(crate) fn build_loop_tiled_segment(
         return out;
     }
     out.reserve(out_source_frames.saturating_mul(channels));
-    for f in 0..out_source_frames {
-        let fi = f as i64;
-        let idx = if reversed {
-            (anchor_frame_exclusive - 1 - fi).rem_euclid(total)
+    // 起始索引（首帧实际写入的源帧号，已归一化进 [0, total)）：
+    let mut idx = if reversed {
+        (anchor_frame_exclusive - 1).rem_euclid(total)
+    } else {
+        anchor_frame_exclusive.rem_euclid(total)
+    };
+    let mut remaining = out_source_frames as i64;
+    while remaining > 0 {
+        // 本轮可连续拷贝的帧数：到达文件边界的距离 与 剩余需求 取小。
+        let run = if reversed {
+            (idx + 1).min(remaining)
         } else {
-            (anchor_frame_exclusive + fi).rem_euclid(total)
+            (total - idx).min(remaining)
         };
         let base = (idx as usize) * channels;
-        for c in 0..channels {
-            out.push(pcm[base + c]);
-        }
+        out.extend_from_slice(&pcm[base..base + (run as usize) * channels]);
+        remaining -= run;
+        // 推进索引并环绕（正放越过末尾回到 0；倒放越过 0 回到末尾）。
+        idx = if reversed {
+            (idx - run).rem_euclid(total)
+        } else {
+            (idx + run) % total
+        };
     }
     out
 }
@@ -576,6 +592,10 @@ pub fn render_mixdown_interleaved(
                 if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
                 if loop_mode { total_sec } else { clip.source_end_sec },
                 clip.reversed && !loop_mode,
+                // 离线 Loop 的处理对象是"回绕平铺 segment"（锚点起、长度为
+                // clip 消费量），与实时域的完整文件自然顺序内容不同 —— 必须
+                // 用 tiled_wrap 域判别隔离，避免两个域互相毒化缓存。
+                loop_mode,
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params)
@@ -785,8 +805,7 @@ pub fn render_mixdown_interleaved(
             end_sec,
             out_rate,
             out_frames,
-            max_abs
-            ,
+            max_abs,
             clips_considered,
             clips_decoded,
             clips_mixed
@@ -794,4 +813,87 @@ pub fn render_mixdown_interleaved(
     }
 
     Ok((out_rate, out_channels, duration_sec, mix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_loop_tiled_segment;
+
+    /// 交错 PCM：帧 i 的样本值为 [i as f32, i as f32 + 0.5]。
+    fn make_pcm(frames: usize, channels: usize) -> Vec<f32> {
+        let mut pcm = Vec::with_capacity(frames * channels);
+        for f in 0..frames {
+            for c in 0..channels {
+                pcm.push(f as f32 + if channels > 1 { c as f32 * 0.5 } else { 0.0 });
+            }
+        }
+        pcm
+    }
+
+    #[test]
+    fn loop_tiled_forward_wraps_over_whole_file() {
+        // 5 帧立体声媒体，锚点 3：期望序列 3,4,0,1,2,3,4,0
+        let channels = 2;
+        let pcm = make_pcm(5, channels);
+        let out = build_loop_tiled_segment(&pcm, channels, 3, false, 8);
+        assert_eq!(out.len(), 8 * channels);
+        let expected = [3.0f32, 4.0, 0.0, 1.0, 2.0, 3.0, 4.0, 0.0];
+        for (i, f) in expected.iter().enumerate() {
+            assert_eq!(out[i * 2], *f, "forward frame {i} left");
+            assert_eq!(out[i * 2 + 1], *f + 0.5, "forward frame {i} right");
+        }
+    }
+
+    #[test]
+    fn loop_tiled_reverse_descends_and_wraps() {
+        // 锚点 exclusive=4（即从帧 3 开始向下）：3,2,1,0,4,3,2
+        let pcm = make_pcm(5, 1);
+        let out = build_loop_tiled_segment(&pcm, 1, 4, true, 7);
+        let expected = [3.0f32, 2.0, 1.0, 0.0, 4.0, 3.0, 2.0];
+        assert_eq!(&out[..], &expected[..]);
+    }
+
+    #[test]
+    fn loop_tiled_negative_forward_anchor_wraps_to_tail() {
+        // 负锚点 -2 对 5 帧媒体 → floor_mod(-2,5)=3：序列 3,4,0,1,2
+        let pcm = make_pcm(5, 1);
+        let out = build_loop_tiled_segment(&pcm, 1, -2, false, 5);
+        let expected = [3.0f32, 4.0, 0.0, 1.0, 2.0];
+        assert_eq!(&out[..], &expected[..]);
+    }
+
+    #[test]
+    fn loop_tiled_matches_per_frame_floor_mod_reference() {
+        // 与逐帧 floor_mod 参考实现对拍（多周期 + 大锚点偏移）
+        let total = 37i64;
+        let pcm = make_pcm(total as usize, 2);
+        for &anchor in &[-50i64, 0, 1, 19, 36, 1000] {
+            for &reversed in &[false, true] {
+                let n = 100usize;
+                let out = build_loop_tiled_segment(&pcm, 2, anchor, reversed, n);
+                assert_eq!(out.len(), n * 2);
+                for f in 0..n {
+                    let fi = f as i64;
+                    let expect = if reversed {
+                        (anchor - 1 - fi).rem_euclid(total)
+                    } else {
+                        (anchor + fi).rem_euclid(total)
+                    } as usize;
+                    assert_eq!(out[f * 2], expect as f32);
+                    assert_eq!(out[f * 2 + 1], expect as f32 + 0.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loop_tiled_handles_empty_and_degenerate_inputs() {
+        assert!(build_loop_tiled_segment(&[], 2, 0, false, 10).is_empty());
+        let pcm = make_pcm(4, 2);
+        assert_eq!(build_loop_tiled_segment(&pcm, 2, 0, false, 0).len(), 0);
+        // 单帧媒体也能循环铺满
+        let one = vec![0.5f32, 0.25f32];
+        let out = build_loop_tiled_segment(&one, 2, 1234567, false, 3);
+        assert_eq!(out, vec![0.5, 0.25, 0.5, 0.25, 0.5, 0.25]);
+    }
 }

@@ -60,6 +60,20 @@ pub(crate) fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
         .filter(|duration| duration.is_finite() && *duration > 0.0)
 }
 
+/// Loop（循环源）回绕周期的统一取值（秒）：媒体时长已知时取媒体时长，
+/// 否则退化为 `max(source_end, source_start)`（兜底仍为非负、有限的键值）。
+///
+/// 拉伸缓存的**生产者**（schedule_stretch_jobs 的 StretchJob）与**消费者**
+/// （build_snapshot 的换入查找）必须使用同一函数 —— 此前两处回退链不一致
+/// （一边 `duration_sec.unwrap_or(max(end,start))` 且不过滤非有限值，
+/// 另一边 `clip_source_media_duration_sec(...).unwrap_or(source_end)`），
+/// 在元数据缺失/异常时会生成互不匹配的缓存键，导致拉伸结果永远无法命中。
+pub(crate) fn clip_loop_wrap_total_sec(clip: &Clip) -> f64 {
+    clip_source_media_duration_sec(clip)
+        .unwrap_or_else(|| clip.source_end_sec.max(clip.source_start_sec))
+        .max(0.0)
+}
+
 /// 把区间 `[start, end)` 按模 `modulus` 的回绕边界拆分成若干不跨界的子区间，
 /// 每个子区间以"周期内相位"坐标返回（值域 `[0, modulus)`）。
 ///
@@ -549,25 +563,6 @@ impl Clip {
         } else {
             self.fade_out_sec
         }
-    }
-
-    /// Loop（循环源）的循环周期（时间线时间，秒）：
-    /// `|source_end_sec - source_start_sec| / |playback_rate|`。
-    /// 未启用 Loop、速率非法或窗口退化时返回 `None`。
-    #[allow(dead_code)]
-    pub fn loop_cycle_timeline_sec(&self) -> Option<f64> {
-        if !self.loop_enabled {
-            return None;
-        }
-        let span = (self.source_end_sec - self.source_start_sec).abs();
-        if span <= 1e-9 {
-            return None;
-        }
-        let rate = self.playback_rate as f64;
-        if !rate.is_finite() || rate.abs() < 1e-6 {
-            return None;
-        }
-        Some(span / rate.abs())
     }
 }
 

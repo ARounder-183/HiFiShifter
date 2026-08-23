@@ -2,13 +2,18 @@
  * Loop（循环源）渲染共享工具
  *
  * Loop 语义（对齐 REAPER / VEGAS 的 item LOOP）：
- *   - 循环区间 = Clip 的源窗口 [sourceStartSec, sourceEndSec]；
- *   - 播放回绕发生在源窗口**内部**（u = t·rate mod span），因此每个循环
- *     周期显示的都是同一份窗口内容 —— 波形分片渲染时所有瓦片共用同一窗口；
- *   - 循环周期（时间线时间）= |sourceEnd − sourceStart| / |playbackRate| 秒，
- *     倒放同样成立（内容方向镜像，回绕位置相同）；
- *   - 回绕节点出现在 clip 局部时间 t = k·周期（k = 1, 2, …），即波形区域中
- *     需要绘制"倒三角"标记的位置；恰好在 clip 起点 / 终点的回绕点不绘制。
+ *   - 音频 Clip：回绕发生在**整个原始媒体文件**上（floor_mod 映射，
+ *     D = 媒体总时长），与后端引擎 / 离线渲染一致 —— 波形按
+ *     "头部进入段 + 整文件重复段"分片渲染，回绕节点位于头部段结束处
+ *     及此后每个整文件周期边界；
+ *   - MIDI / 音高参考 Clip：没有源媒体可循环，回绕周期即其音符内容
+ *     窗口 [sourceStartSec, sourceEndSec]，每个周期重复同一份内容；
+ *   - 循环周期（时间线时间）= 窗口跨度 / |playbackRate| 秒；
+ *   - 回绕节点在 clip 局部时间 t = k·周期（k = 1, 2, …）处绘制
+ *     "倒三角"标记；恰好在 clip 起点 / 终点的回绕点不绘制。
+ *
+ * 注意：`loopCycleSec` 采用窗口跨度语义，仅供 MIDI / 音高参考画布使用；
+ * 音频波形（WaveformTrackCanvas）的周期按媒体时长计算，勿用本函数。
  */
 
 export const MIN_LOOP_SPAN_SEC = 1e-6;

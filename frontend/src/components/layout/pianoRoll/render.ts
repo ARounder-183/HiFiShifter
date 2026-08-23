@@ -934,10 +934,9 @@ export function drawPianoRoll(args: {
         }
 
         // ── 同窗口切片缓存 ─────────────────────────────────────────────
-        // Loop 的所有"整文件重复段"共享同一源窗口 [0, D]，逐瓦片重复调
-        // getInterleavedSlice 会对同一窗口反复聚合/拷贝。单条目缓存：
-        // 窗口参数不变时复用上一次切片，缓存持有 store buffer 直到换窗
-        // 或本 clip 结束（与 WaveformTrackCanvas 保持一致）。
+        // 单条目切片缓存：窗口参数相同的相邻瓦片（或重绘间未变化的窗口）
+        // 直接复用上一次切片，缓存持有 store buffer 直到换窗或本 clip
+        // 结束（与 WaveformTrackCanvas 保持一致）。
         let fetchCacheKey: string | null = null;
         let fetchCacheResult: {
             interleaved: Float32Array;
@@ -952,23 +951,50 @@ export function drawPianoRoll(args: {
             fetchCacheKey = null;
         };
 
+        // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel
+        // 实现滞后防抖）。级别只依赖 pxPerSec 与采样率，对本 clip 的所有
+        // 瓦片都相同 —— 移到循环外，避免每瓦片重复计算与写回。
+        const sampleRate = entry.sourceSampleRate || 44100;
+        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
+        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
+        const previousLevel = lastLevelByClip[levelKey];
+        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+        lastLevelByClip[levelKey] = stableLevel;
+
+        // 边缘外扩（与 WaveformTrackCanvas 相同的公式）：保证像素列插值
+        // 在瓦片可见边界处不缺数据。
+        const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, pxPerSec)) * pr);
+
         for (const tile of tiles) {
             const tileLocalEndSec = tile.localStartSec + tile.durationSec;
             const visLocalStart = Math.max(tile.localStartSec, visStartSec - clipStartSec);
             const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
             if (visLocalEnd <= visLocalStart) continue;
 
-            // 该分段自己的源窗口（头部进入段 / 整文件重复段）
-            const sourceTimeStart = tile.srcWinStart;
-            const sourceDuration = Math.max(0.001, tile.srcWinEnd - tile.srcWinStart);
-
-            // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
-            const sampleRate = entry.sourceSampleRate || 44100;
-            const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-            const levelKey = `${entry.sourcePath}::${entry.clipId}`;
-            const previousLevel = lastLevelByClip[levelKey];
-            const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
-            lastLevelByClip[levelKey] = stableLevel;
+            // 该分段自己的源窗口（头部进入段 / 整文件重复段）。
+            // 只请求当前可见部分对应的源数据 —— 此前整窗取数（正放/倒放重复
+            // 段即整个媒体 [0, D]），长媒体的每个循环瓦片都要对全量 peaks 跑
+            // applyGains/renderWaveform 的索引换算，开销随媒体时长线性放大；
+            // 与 WaveformTrackCanvas 一致地取"瓦片 ∩ 视口"后，成本只与
+            // 可见像素相关。renderWaveform 依据 dataStartSec/dataDurationSec
+            // 把部分数据映射回正确的屏幕位置，绘制结果不变。
+            const tileSpanStartSec = tile.srcWinStart;
+            const tileSpanEndSec = tile.srcWinEnd;
+            const sourceVisStartSec = entry.reversed
+                ? tileSpanEndSec - (visLocalEnd - tile.localStartSec) * pr
+                : tileSpanStartSec + (visLocalStart - tile.localStartSec) * pr;
+            const sourceVisEndSec = entry.reversed
+                ? tileSpanEndSec - (visLocalStart - tile.localStartSec) * pr
+                : tileSpanStartSec + (visLocalEnd - tile.localStartSec) * pr;
+            const sourceTimeStart = Math.max(
+                tileSpanStartSec,
+                Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSecPiano,
+            );
+            const sourceTimeEnd = Math.min(
+                tileSpanEndSec,
+                Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSecPiano,
+            );
+            const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
 
             // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）
             const fetchKey = `${sourceTimeStart}|${sourceDuration}`;

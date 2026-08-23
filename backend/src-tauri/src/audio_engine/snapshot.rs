@@ -166,20 +166,11 @@ pub(crate) fn schedule_stretch_jobs(
         }
 
         // Loop（循环源）：拉伸对象是**整个文件**（回绕发生在完整媒体的拉伸
-        // 版本上，与 build_snapshot 的换入键保持一致）；非 Loop 拉伸窗口。
+        // 版本上，与 build_snapshot 的换入键保持一致 —— 两处必须使用同一
+        // `clip_loop_wrap_total_sec` 取值，否则键不匹配、拉伸结果永远无法命中）。
+        // 非 Loop 拉伸窗口。
         let (job_start_sec, job_end_sec) = if clip.loop_enabled {
-            let total_sec = if let (Some(frames), Some(sr)) =
-                (clip.duration_frames, clip.source_sample_rate)
-            {
-                if sr > 0 && frames > 0 {
-                    frames as f64 / sr as f64
-                } else {
-                    clip.duration_sec.unwrap_or(clip.source_end_sec.max(clip.source_start_sec))
-                }
-            } else {
-                clip.duration_sec.unwrap_or(clip.source_end_sec.max(clip.source_start_sec))
-            };
-            (0.0f64, total_sec.max(0.0))
+            (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
         } else {
             (clip.source_start_sec.max(0.0), clip.source_end_sec)
         };
@@ -463,6 +454,8 @@ pub(crate) fn build_snapshot(
                     clip.source_end_sec
                 },
                 clip.reversed && !clip.loop_enabled,
+                // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
+                false,
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(
@@ -524,13 +517,11 @@ pub(crate) fn build_snapshot(
             }
         } else if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {
             // Loop（循环源）：拉伸对象是**整个文件**（回绕发生在完整媒体的
-            // 拉伸版本上），缓存键相应取 [0, 文件时长]；非 Loop 维持窗口拉伸。
+            // 拉伸版本上），缓存键相应取 [0, 文件时长]，与 schedule_stretch_jobs
+            // 的任务键共用 `clip_loop_wrap_total_sec`（回退链一致才能命中）；
+            // 非 Loop 维持窗口拉伸。
             let (key_start, key_end) = if clip.loop_enabled {
-                (
-                    0.0f64,
-                    crate::state::clip_source_media_duration_sec(clip)
-                        .unwrap_or(clip.source_end_sec),
-                )
+                (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
             } else {
                 (clip.source_start_sec.max(0.0), clip.source_end_sec)
             };

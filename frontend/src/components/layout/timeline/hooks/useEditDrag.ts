@@ -945,26 +945,16 @@ export function useEditDrag(deps: {
                                 lengthSec: Math.max(0, base.lengthSec - startDelta),
                             };
                             if (base.reversed) {
-                                const raw = base.sourceEndSec - startDelta * rate;
-                                let wrapped = raw;
-                                const dSrc = (() => {
-                                    if (
-                                        base.durationFrames &&
-                                        base.sourceSampleRate &&
-                                        base.sourceSampleRate > 0
-                                    ) {
-                                        return base.durationFrames / base.sourceSampleRate;
-                                    }
-                                    return base.durationSec || 0;
-                                })();
-                                if (dSrc > 1e-9) {
-                                    wrapped = raw % dSrc;
-                                    if (wrapped <= 0) wrapped += dSrc;
-                                }
-                                patch.sourceEndSec = wrapped;
+                                // 倒放锚点(source_end)随左缘延伸向上回退并环绕。
+                                patch.sourceEndSec = wrapIntoMediaDomain(
+                                    base.sourceEndSec - startDelta * rate,
+                                    base,
+                                );
                             } else {
-                                const raw = base.sourceStartSec + startDelta * rate;
-                                patch.sourceStartSec = wrapIntoMediaDomain(raw, base);
+                                patch.sourceStartSec = wrapIntoMediaDomain(
+                                    base.sourceStartSec + startDelta * rate,
+                                    base,
+                                );
                             }
                             updates.push(patch);
                         } else if (base.loopEnabled && base.reversed) {
@@ -1366,16 +1356,6 @@ export function useEditDrag(deps: {
                                 // Loop + 向左延伸：内容保持锚定 —— 锚点沿遍历方向
                                 // 回退 |δ|·rate 并对整个媒体时长取模环绕
                                 //（正放减 source_start，倒放加 source_end）。
-                                const dSrc = (() => {
-                                    if (
-                                        base.durationFrames &&
-                                        base.sourceSampleRate &&
-                                        base.sourceSampleRate > 0
-                                    ) {
-                                        return base.durationFrames / base.sourceSampleRate;
-                                    }
-                                    return base.durationSec || 0;
-                                })();
                                 dispatch(moveClipStart({ clipId: id, startSec: base.startSec + limitedDelta }));
                                 dispatch(
                                     setClipLength({
@@ -1383,28 +1363,28 @@ export function useEditDrag(deps: {
                                         lengthSec: clamp(base.lengthSec - limitedDelta, minLen, 10_000),
                                     }),
                                 );
-                                if (dSrc > 1e-9) {
-                                    if (base.reversed) {
-                                        const raw = base.sourceEndSec - limitedDelta * rate;
-                                        let wrapped = raw % dSrc;
-                                        if (wrapped <= 0) wrapped += dSrc;
-                                        dispatch(
-                                            setClipSourceRange({
-                                                clipId: id,
-                                                sourceEndSec: wrapped,
-                                            }),
-                                        );
-                                    } else {
-                                        const raw = base.sourceStartSec + limitedDelta * rate;
-                                        let wrapped = raw % dSrc;
-                                        if (wrapped < 0) wrapped += dSrc;
-                                        dispatch(
-                                            setClipSourceRange({
-                                                clipId: id,
-                                                sourceStartSec: wrapped,
-                                            }),
-                                        );
-                                    }
+                                if (base.reversed) {
+                                    // 倒放锚点(source_end)向上回退并环绕。
+                                    dispatch(
+                                        setClipSourceRange({
+                                            clipId: id,
+                                            sourceEndSec: wrapIntoMediaDomain(
+                                                base.sourceEndSec - limitedDelta * rate,
+                                                base,
+                                            ),
+                                        }),
+                                    );
+                                } else {
+                                    // 正放锚点(source_start)向下回退并环绕。
+                                    dispatch(
+                                        setClipSourceRange({
+                                            clipId: id,
+                                            sourceStartSec: wrapIntoMediaDomain(
+                                                base.sourceStartSec + limitedDelta * rate,
+                                                base,
+                                            ),
+                                        }),
+                                    );
                                 }
                             } else if (base.loopEnabled && base.reversed) {
                                 // Loop + 倒放 + 裁短：锚点(source_end)向下推进并环绕。

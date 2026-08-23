@@ -244,10 +244,13 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 // Loop（循环源）：对整个媒体文件做模运算回绕
                 // idx(i) = floor_mod(anchor ± i, N)，N = 完整媒体时长对应帧数。
                 let media_total = crate::state::clip_source_media_duration_sec(clip);
+                // 媒体时长未知时回退为"整条缓存曲线即回绕周期"（缓存本身就是
+                // 全量源音频曲线）。此前回退值是 1 —— 所有帧都映射到第 0 帧，
+                // 曲线塌缩成恒定音高；缓存为空时更会直接越界 panic。
                 let n_frames = media_total
                     .map(|total| (((total * 1000.0) / fp).round() as usize).min(cached.midi.len()))
                     .filter(|n| *n > 0)
-                    .unwrap_or(1);
+                    .unwrap_or(cached.midi.len());
                 // 正放锚点用**原始** source_start_sec（可为负，floor_mod 环绕），
                 // 与音频回绕（mix/snapshot/mixdown）保持一致。
                 let anchor_f = ((clip.source_start_sec * 1000.0) / fp).round() as i64;
@@ -256,7 +259,8 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                     .min(media_total.unwrap_or(f64::INFINITY))
                     .max(0.0);
                 let anchor_r = ((end_eff * 1000.0) / fp).round() as i64;
-                if write_len > 0 {
+                if write_len > 0 && !cached.midi.is_empty() {
+                    let n_frames = n_frames.max(1);
                     let dst_slice = &mut out[clip_start_frame..clip_start_frame + write_len];
                     for (i, dst) in dst_slice.iter_mut().enumerate() {
                         let idx_i = if clip.reversed {
