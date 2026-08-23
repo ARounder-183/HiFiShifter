@@ -6,8 +6,9 @@
  *     文件**上（floor_mod 映射，D = 媒体总时长），与后端引擎 / 离线渲染
  *     一致 —— 波形按"头部进入段 + 整文件重复段"分片渲染，回绕节点位于
  *     头部段结束处及此后每个整文件周期边界；
- *   - 纯 MIDI 导入 Clip：没有源媒体可循环，回绕周期退化为音符内容窗口
- *     跨度 [sourceStartSec, sourceEndSec]；
+ *   - 纯音高参考块（Pitch Reference，无源媒体）：与普通媒体 Clip 完全
+ *     一致 —— 回绕周期 D = **音符内容的最大结束时间**（整个内容），
+ *     窗口之外为静音；
  *   - 循环周期（时间线时间）= 周期源秒 / |playbackRate|；
  *   - 回绕节点在 clip 局部时间 t = k·周期（k = 1, 2, …）处绘制
  *     "倒三角"标记；恰好在 clip 起点 / 终点的回绕点不绘制。
@@ -78,6 +79,41 @@ export function resolveLoopMediaDurationSec(args: {
     }
     const fallback = Number(args.durationSec ?? 0);
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
+/**
+ * Clip 的**内容时长**（秒）：循环/边界逻辑的周期 D。
+ *
+ * - 有源媒体的 Clip（含由音频转换来的音高参考块）：源媒体总时长；
+ * - 纯音高参考块（Pitch Reference，无源媒体）：**音符内容的最大结束时间**
+ *   —— 与普通媒体 Clip 完全一致：Loop 回绕整个内容，窗口之外为静音；
+ * - 两者都无法确定时返回 null（调用方自行退化，如窗口跨度）。
+ */
+export function resolveClipContentDurationSec(clip: {
+    sourcePath?: string | null;
+    midiNoteData?: ReadonlyArray<{ endSec: number }> | null;
+    durationFrames?: number | null;
+    sourceSampleRate?: number | null;
+    durationSec?: number | null;
+}): number | null {
+    if (clip.sourcePath) {
+        const d = resolveLoopMediaDurationSec({
+            durationFrames: clip.durationFrames,
+            sourceSampleRate: clip.sourceSampleRate,
+            durationSec: clip.durationSec,
+        });
+        return d > 1e-9 ? d : null;
+    }
+    const notes = clip.midiNoteData;
+    if (notes && notes.length > 0) {
+        let maxEnd = 0;
+        for (const n of notes) {
+            const end = Number(n.endSec);
+            if (Number.isFinite(end) && end > maxEnd) maxEnd = end;
+        }
+        return maxEnd > 1e-9 ? maxEnd : null;
+    }
+    return null;
 }
 
 /**

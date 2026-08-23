@@ -50,14 +50,26 @@ fn is_false(value: &bool) -> bool {
 /// 回退 `duration_sec`；均不可用时返回 None。
 ///
 /// Loop（循环源）模式的回绕周期即该值 —— "循环原始音频文件"。
+///
+/// 纯音高参考块（Pitch Reference Clip，无源媒体）的内容时长 = 音符内容的
+/// 最大结束时间 —— 使其循环逻辑与普通媒体 Clip **完全一致**：Loop 回绕
+/// 整个音符内容（而非窗口跨度），窗口之外的部分为静音/无音高。
 pub(crate) fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
     if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
         if sample_rate > 0 && frames > 0 {
             return Some(frames as f64 / sample_rate as f64);
         }
     }
-    clip.duration_sec
-        .filter(|duration| duration.is_finite() && *duration > 0.0)
+    if let Some(duration) = clip.duration_sec.filter(|d| d.is_finite() && *d > 0.0) {
+        return Some(duration);
+    }
+    if let Some(notes) = clip.midi_note_data.as_ref() {
+        let max_end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
+        if max_end.is_finite() && max_end > 0.0 {
+            return Some(max_end);
+        }
+    }
+    None
 }
 
 /// Loop（循环源）回绕周期的统一取值（秒）：媒体时长已知时取媒体时长，
@@ -95,8 +107,9 @@ pub(crate) fn clip_effective_source_end_sec(clip: &Clip) -> f64 {
 ///
 /// 音频 clip 的实际声音按整个媒体时长 D 回绕（mix / snapshot / mixdown 的
 /// 锚点数学），因此其派生音符（音高编辑回写的 `midi_note_data`）也必须按
-/// D 平铺才能与音频保持同相位；纯 MIDI / 音高参考 clip 没有源媒体，周期
-/// 退化为窗口跨度（与既有行为一致）。
+/// D 平铺才能与音频保持同相位。音高参考块（Pitch Reference，无源媒体）
+/// 与普通媒体 Clip 完全一致：D = 音符内容总时长（最大结束时间），回绕
+/// 整个内容；仅当连音符内容都无法确定时才退化为窗口跨度。
 ///
 /// 返回 `None` 表示未启用 Loop 或周期无效 —— 调用方应走非循环路径。
 pub(crate) fn clip_loop_cycle_span_sec(clip: &Clip) -> Option<f64> {
@@ -2712,6 +2725,47 @@ mod tests {
         assert_eq!(morph.target_f1_hz, 800.0);
         assert_eq!(morph.target_f2_hz, 1400.0);
         assert!((morph.strength - 0.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pitch_reference_content_duration_uses_note_extent() {
+        // 纯音高参考块（无源媒体）的内容时长 = 音符内容最大结束时间，
+        // 使其 Loop 周期与普通媒体 Clip 完全一致（回绕整个内容，
+        // 而非窗口跨度 [source_start, source_end]）。
+        let json = serde_json::json!({
+            "id": "pref-1",
+            "track_id": "track_main",
+            "name": "ref",
+            "start_sec": 0.0,
+            "length_sec": 4.5,
+            "source_start_sec": 1.0,
+            "source_end_sec": 2.0,
+            "playback_rate": 1.0,
+            "gain": 1.0,
+            "muted": false,
+            "fade_in_sec": 0.0,
+            "fade_out_sec": 0.0,
+            "fade_in_curve": "sine",
+            "fade_out_curve": "sine",
+            "midi_note_data": [
+                {"startSec": 1.0, "endSec": 2.0, "note": 60.0, "velocity": 100, "channel": 0},
+                {"startSec": 2.0, "endSec": 4.25, "note": 62.0, "velocity": 100, "channel": 0}
+            ]
+        });
+        let mut clip: Clip = serde_json::from_value(json).expect("clip should deserialize");
+        assert!(clip.source_path.is_none());
+        assert_eq!(
+            clip_source_media_duration_sec(&clip),
+            Some(4.25),
+            "content duration must come from note extent"
+        );
+        assert_ne!(
+            clip_loop_cycle_span_sec(&clip),
+            Some(1.0),
+            "must NOT use the window span as cycle"
+        );
+        clip.loop_enabled = true;
+        assert_eq!(clip_loop_cycle_span_sec(&clip), Some(4.25));
     }
 
     // ── split_clips_at tests ──────────────────────────────────────

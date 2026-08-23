@@ -29,6 +29,7 @@ import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
+import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
 import {
     loopSnapThresholdSec,
     nearestBoundarySnapOffsetSec,
@@ -416,6 +417,8 @@ export type EditDragState = {
             durationFrames: number | null;
             sourceSampleRate: number | null;
             durationSec: number | null;
+            /** 内容时长（媒体总时长 / 音符内容范围），用于循环节吸附。 */
+            contentDurationSec: number | null;
         }
     >;
 };
@@ -706,6 +709,15 @@ export function useEditDrag(deps: {
                             durationFrames: c?.durationFrames ?? null,
                             sourceSampleRate: c?.sourceSampleRate ?? null,
                             durationSec: c?.durationSec ?? null,
+                            contentDurationSec: c
+                                ? resolveClipContentDurationSec({
+                                      sourcePath: c.sourcePath,
+                                      midiNoteData: c.midiNoteData ?? null,
+                                      durationFrames: c.durationFrames,
+                                      sourceSampleRate: c.sourceSampleRate,
+                                      durationSec: c.durationSec,
+                                  })
+                                : null,
                         },
                     ];
                 }),
@@ -802,6 +814,7 @@ export function useEditDrag(deps: {
                                 durationFrames: anchorBase.durationFrames,
                                 sourceSampleRate: anchorBase.sourceSampleRate,
                                 durationSec: anchorBase.durationSec,
+                                contentDurationSec: anchorBase.contentDurationSec,
                             },
                             "edge",
                             rawOffset,

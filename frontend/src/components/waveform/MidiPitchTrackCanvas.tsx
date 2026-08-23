@@ -20,7 +20,12 @@ import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import { useAppSelector } from "../../app/hooks";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
-import { drawLoopMarkers, modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
+import {
+    drawLoopMarkers,
+    modEuclid,
+    resolveClipContentDurationSec,
+    resolveSourceEndSec,
+} from "../../utils/loopRender";
 
 // ========================================
 // 常量
@@ -71,30 +76,20 @@ interface LoopCycleDescriptor {
 /**
  * 解析 Loop 回绕描述。
  *
- * 关键语义：带源媒体的 clip（含由音频转换来的音高参考块）的实际声音按
- * **整个媒体文件** floor_mod 回绕（与 WaveformTrackCanvas / 后端引擎一致），
- * 音高曲线与回绕标记必须使用同一周期，否则相位错位；纯 MIDI 导入 clip
- * （无源媒体）没有可循环的媒体，周期退化为音符窗口跨度。
+ * 关键语义：所有可发声内容（带源媒体的 clip、以及纯音高参考块）的实际
+ * 声音/音高按**整个内容** floor_mod 回绕（与 WaveformTrackCanvas / 后端
+ * 引擎一致），音高曲线与回绕标记必须使用同一周期，否则相位错位；
+ * contentDurationSec 为 null（连音符内容都无法确定）时退化为窗口跨度。
  */
 function resolveLoopCycleDescriptor(args: {
     loopEnabled: boolean;
-    hasSourceMedia: boolean;
-    durationFrames?: number;
-    sourceSampleRate?: number;
-    durationSec?: number;
+    /** 内容时长（秒）：resolveClipContentDurationSec 的结果；null = 退化。 */
+    contentDurationSec: number | null;
     sourceStartSec: number;
     sourceEndSec: number;
 }): LoopCycleDescriptor | null {
     if (!args.loopEnabled) return null;
-    // 媒体时长：frames/sr 优先（精确），durationSec 兜底（共享工具，
-    // 与后端 clip_source_media_duration_sec 同一取值链）。
-    const mediaDur = args.hasSourceMedia
-        ? resolveLoopMediaDurationSec({
-              durationFrames: args.durationFrames,
-              sourceSampleRate: args.sourceSampleRate,
-              durationSec: args.durationSec,
-          })
-        : 0;
+    const mediaDur = args.contentDurationSec ?? 0;
     const windowSpan = Math.abs(
         Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0),
     );
@@ -420,25 +415,32 @@ export const MidiPitchTrackCanvas = React.memo(
                 let framePeriodMs: number;
 
                 if (clip.midiNoteData && clip.midiNoteData.length > 0) {
-                    // 派生窗口：非 Loop 正放的音频源（含音高参考块）终点 =
-                    // 起点+长度×速率（陈旧存储窗口不再冻结静音区）；纯 MIDI
-                    // 与 Loop/倒放保持原字段。
-                    const srcEnd =
-                        clip.sourcePath && !clip.loopEnabled && !clip.reversed
-                            ? (Number(clip.sourceStartSec) || 0) +
-                              Math.max(0, Number(clip.lengthSec) || 0) *
-                                  (Math.abs(Number(clip.playbackRate) || 1) || 1)
-                            : clip.sourceEndSec > 0
-                              ? clip.sourceEndSec
-                              : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
-                    // Loop（循环源）：有源媒体的 clip（含音高参考块）按整个媒体
-                    // 文件回绕，纯 MIDI clip 按音符窗口跨度 —— 与实际播放一致。
-                    const loopCycle = resolveLoopCycleDescriptor({
-                        loopEnabled: Boolean(clip.loopEnabled),
-                        hasSourceMedia: Boolean(clip.sourcePath),
+                    // 内容时长（循环周期 D）：有源媒体 → 媒体总时长；
+                    // 纯音高参考块 → 音符内容最大结束时间 —— 与普通媒体
+                    // Clip 完全一致（回绕整个内容，窗口之外为静音）。
+                    const contentDurSec = resolveClipContentDurationSec({
+                        sourcePath: clip.sourcePath,
+                        midiNoteData: clip.midiNoteData,
                         durationFrames: clip.durationFrames,
                         sourceSampleRate: clip.sourceSampleRate,
                         durationSec: clip.durationSec,
+                    });
+                    // 曲线裁剪窗口：非 Loop 正放按派生窗口（起点+长度×速率），
+                    // 与音频渲染一致；Loop/倒放保持原字段。
+                    const srcEnd = resolveSourceEndSec({
+                        loopEnabled: Boolean(clip.loopEnabled),
+                        reversed: Boolean(clip.reversed),
+                        sourceStartSec: Number(clip.sourceStartSec) || 0,
+                        playbackRate: Math.abs(Number(clip.playbackRate) || 1),
+                        lengthSec: clip.lengthSec,
+                        sourceEndSec:
+                            clip.sourceEndSec > 0
+                                ? clip.sourceEndSec
+                                : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0),
+                    });
+                    const loopCycle = resolveLoopCycleDescriptor({
+                        loopEnabled: Boolean(clip.loopEnabled),
+                        contentDurationSec: contentDurSec,
                         sourceStartSec: clip.sourceStartSec,
                         sourceEndSec: srcEnd,
                     });
@@ -534,27 +536,20 @@ export const MidiPitchTrackCanvas = React.memo(
                 ctx.stroke();
                 ctx.restore();
 
-                // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
-                // 周期与曲线平铺一致：有源媒体 → 媒体时长 D；纯 MIDI → 窗口跨度。
-                const markerSrcEnd =
-                    clip.sourcePath && !clip.loopEnabled && !clip.reversed
-                        ? (Number(clip.sourceStartSec) || 0) +
-                          Math.max(0, Number(clip.lengthSec) || 0) *
-                              (Math.abs(Number(clip.playbackRate) || 1) || 1)
-                        : clip.sourceEndSec > 0
-                          ? clip.sourceEndSec
-                          : (clip.midiNoteData?.reduce(
-                                (max, n) => Math.max(max, n.endSec),
-                                0,
-                            ) ?? 0);
-                const markerCycle = resolveLoopCycleDescriptor({
-                    loopEnabled: Boolean(clip.loopEnabled),
-                    hasSourceMedia: Boolean(clip.sourcePath),
+                // ── 循环节点倒三角标记 ──
+                // 周期与曲线平铺一致：内容时长 D（媒体总时长 / 音符内容范围）。
+                const markerContentDur = resolveClipContentDurationSec({
+                    sourcePath: clip.sourcePath,
+                    midiNoteData: clip.midiNoteData ?? null,
                     durationFrames: clip.durationFrames,
                     sourceSampleRate: clip.sourceSampleRate,
                     durationSec: clip.durationSec,
+                });
+                const markerCycle = resolveLoopCycleDescriptor({
+                    loopEnabled: Boolean(clip.loopEnabled),
+                    contentDurationSec: markerContentDur,
                     sourceStartSec: clip.sourceStartSec,
-                    sourceEndSec: markerSrcEnd,
+                    sourceEndSec: Number(clip.sourceEndSec) || 0,
                 });
                 const markerRate =
                     Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
@@ -611,16 +606,12 @@ export const MidiPitchTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);
                     }
-                } else if (clip.sourcePath && !clip.reversed) {
-                    // ── 非 Loop 音频源：媒体边界标记 ──
-                    // 循环节 = 源媒体在该 Clip 内的真实起始/终止位置
-                    //（音频与静音的分界线），落在 Clip 内部时绘制。
-                    const mediaDur = resolveLoopMediaDurationSec({
-                        durationFrames: clip.durationFrames,
-                        sourceSampleRate: clip.sourceSampleRate,
-                        durationSec: clip.durationSec,
-                    });
-                    if (mediaDur > 1e-6) {
+                } else if (markerContentDur != null && !clip.reversed) {
+                    // ── 非 Loop：媒体/内容边界标记 ──
+                    // 循环节 = 源媒体（或音符内容）在该 Clip 内的真实起始/
+                    // 终止位置（音频与静音的分界线），落在 Clip 内部时绘制。
+                    const mediaDur = markerContentDur;
+                    {
                         const rate =
                             Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
                                 ? 1

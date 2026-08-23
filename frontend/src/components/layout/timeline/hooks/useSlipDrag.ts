@@ -10,8 +10,8 @@ import {
     endInteraction,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
+import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
 import {
-    clipMediaDurationSec,
     loopSnapThresholdSec,
     nearestBoundarySnapOffsetSec,
 } from "../../../../utils/loopSnap";
@@ -30,11 +30,13 @@ export type SlipDragState = {
             playbackRate: number;
             sourceDurationSec: number | null;
             maxSlipSec: number;
-            /** Loop（循环源）：内容按整个媒体时长回绕，Slip 可无限平移。 */
+            /** Loop（循环源）：内容按内容时长回绕，Slip 可无限平移。 */
             loopEnabled: boolean;
             reversed: boolean;
-            /** 有真实音频媒体（非纯 MIDI）：非 Loop 采用派生窗口模型自由平移。 */
-            hasMedia: boolean;
+            /** 有可发声内容（媒体或音符）：非 Loop 采用派生窗口模型自由平移。 */
+            isContentBearing: boolean;
+            /** 内容时长（秒）：媒体总时长 / 音符内容范围；null = 无法确定。 */
+            contentDurSec: number | null;
             lengthSec: number;
             durationFrames: number | null;
             sourceSampleRate: number | null;
@@ -113,6 +115,17 @@ export function useSlipDrag(deps: {
                 sourceDurationSec != null && Number.isFinite(sourceDurationSec)
                     ? Math.max(0, sourceDurationSec)
                     : Math.max(0, Number(c.lengthSec ?? 0) || 0);
+            // 内容时长（媒体总时长 / 音符内容范围）与"可发声内容"判定：
+            // 音高参考块（midiNoteData，无源媒体）与普通媒体 Clip 完全一致。
+            const contentDurSec = resolveClipContentDurationSec({
+                sourcePath: c.sourcePath,
+                midiNoteData: c.midiNoteData ?? null,
+                durationFrames: c.durationFrames,
+                sourceSampleRate: c.sourceSampleRate,
+                durationSec: c.durationSec,
+            });
+            const isContentBearing =
+                !!c.sourcePath || !!(c.midiNoteData && c.midiNoteData.length > 0);
             initialById[id] = {
                 sourceStartSec,
                 sourceEndSec,
@@ -121,7 +134,8 @@ export function useSlipDrag(deps: {
                 maxSlipSec,
                 loopEnabled: !!c.loopEnabled,
                 reversed: !!c.reversed,
-                hasMedia: !!c.sourcePath && !(c.midiNoteData && c.midiNoteData.length > 0),
+                isContentBearing,
+                contentDurSec,
                 lengthSec: Math.max(0, Number(c.lengthSec ?? 0) || 0),
                 durationFrames: c.durationFrames ?? null,
                 sourceSampleRate: c.sourceSampleRate ?? null,
@@ -154,7 +168,7 @@ export function useSlipDrag(deps: {
             //   —— 即让"原始媒体内容在 Clip 内的终止位置"精确落到边缘上。
             {
                 const anchorInitial = drag.initialById[drag.anchorClipId];
-                if (anchorInitial?.hasMedia || anchorInitial?.loopEnabled) {
+                if (anchorInitial?.isContentBearing || anchorInitial?.loopEnabled) {
                     const snappedOffset = nearestBoundarySnapOffsetSec(
                         {
                             loopEnabled: !!anchorInitial.loopEnabled,
@@ -165,6 +179,7 @@ export function useSlipDrag(deps: {
                             lengthSec: anchorInitial.lengthSec,
                             durationFrames: anchorInitial.durationFrames,
                             sourceSampleRate: anchorInitial.sourceSampleRate,
+                            contentDurationSec: anchorInitial.contentDurSec,
                         },
                         "slip",
                         deltaBeat,
@@ -191,27 +206,25 @@ export function useSlipDrag(deps: {
                 let nextSourceEnd = initial.sourceEndSec + deltaSrcSec;
 
                 if (initial.loopEnabled) {
-                    // Loop（循环源）：内容按整个媒体文件回绕，Slip 可无限向左/向右
-                    // 平移 —— 源窗口两端对媒体时长取模环绕（floor_mod），与渲染/
-                    // 引擎的回绕映射一致。窗口跨越边界时 end < start 为合法的
-                    // "环绕窗口"状态（split 等操作已产生同类状态）。
-                    const mediaDur = clipMediaDurationSec(initial);
-                    if (mediaDur != null && mediaDur > 1e-9) {
+                    // Loop（循环源）：内容按整个内容时长回绕，Slip 可无限向左/
+                    // 向右平移 —— 源窗口两端对 D 取模环绕（floor_mod），与渲染/
+                    // 引擎的回绕映射一致。音高参考块的 D = 音符内容范围。
+                    if (initial.contentDurSec != null && initial.contentDurSec > 1e-9) {
+                        const mediaDur = initial.contentDurSec;
                         nextSourceStart = ((nextSourceStart % mediaDur) + mediaDur) % mediaDur;
                         nextSourceEnd = ((nextSourceEnd % mediaDur) + mediaDur) % mediaDur;
                     } else {
-                        // 媒体时长未知：退化为不钳制（保持平移），避免卡死。
+                        // 内容时长未知：退化为不钳制（保持平移），避免卡死。
                     }
-                } else if (initial.hasMedia) {
-                    // 非 Loop 音频 Clip：**派生窗口模型**（REAPER 语义）——
-                    // Clip 消费源区间 [source_start, source_start + len·rate)，
-                    // 区间落在 [0, D) 之外的部分渲染为静音。同时把 source_end
-                    // 归一到派生值，自愈历史数据中 length 与窗口跨度不一致的
-                    // 状态。
-                    // 向左 / 向右延伸**完全对称、均不设限**（产品决策更新）：
-                    // 左延伸产生前导静音（source_start < 0），右延伸产生尾部
-                    // 静音（终点 > D），静音都随内容一起平移。Loop 开关切换
-                    // 或历史数据留下的陈旧窗口由派生值自愈。
+                } else if (initial.isContentBearing) {
+                    // 非 Loop 可发声内容（普通媒体 / 音高参考块）：
+                    // **派生窗口模型**（REAPER 语义）—— Clip 消费源区间
+                    // [source_start, source_start + len·rate)，区间落在
+                    // [0, D) 之外的部分渲染为静音。同时把 source_end 归一到
+                    // 派生值，自愈历史数据中 length 与窗口跨度不一致的状态。
+                    // 向左 / 向右延伸**完全对称、均不设限**：左延伸产生前导
+                    // 静音（source_start < 0），右延伸产生尾部静音（终点 > D），
+                    // 静音都随内容一起平移。
                     nextSourceEnd = nextSourceStart + initial.lengthSec * rate;
                 } else {
                     // 纯 MIDI（无音频媒体）：维持既有音符窗口内钳制。

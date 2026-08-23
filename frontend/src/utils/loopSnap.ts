@@ -52,6 +52,11 @@ export interface BoundarySnapClip {
     durationFrames?: number | null;
     sourceSampleRate?: number | null;
     durationSec?: number | null;
+    /**
+     * 内容时长（秒）覆盖值：音高参考块等无源媒体 Clip 由调用方用
+     * resolveClipContentDurationSec 预解析后传入；优先于下方元数据链。
+     */
+    contentDurationSec?: number | null;
 }
 
 /**
@@ -79,7 +84,10 @@ export function nearestBoundarySnapOffsetSec(
     //   倒放 slip     ：o·rate ≡ −source_end          (mod D)
     // slip 另有"媒体边界对齐到 Clip 终点"的第二相位族（再偏移 ±len）。
     if (clip.loopEnabled) {
-        const d = clipMediaDurationSec(clip);
+        const d =
+            clip.contentDurationSec != null && clip.contentDurationSec > 1e-9
+                ? clip.contentDurationSec
+                : clipMediaDurationSec(clip);
         if (d == null || !(d > 1e-9)) return null;
         let phis: number[];
         if (!clip.reversed) {
@@ -112,7 +120,10 @@ export function nearestBoundarySnapOffsetSec(
     // ── 非 Loop：有限候选（媒体边界的一次性穿越）───────────────
     // 向左/向右延伸均已放开（对称无界），所有候选都可达。
     const bounds: number[] = [0];
-    const d = clipMediaDurationSec(clip);
+    const d =
+        clip.contentDurationSec != null && clip.contentDurationSec > 1e-9
+            ? clip.contentDurationSec
+            : clipMediaDurationSec(clip);
     if (d != null && d > 1e-9) bounds.push(d);
     const cands: number[] = [];
     for (const b of bounds) {
