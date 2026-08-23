@@ -118,7 +118,8 @@ pub(crate) fn schedule_stretch_jobs(
     inflight: &Mutex<HashSet<StretchKey>>,
     stretch_cache: &Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
     app_handle: Option<&tauri::AppHandle>,
-) {    // 计算 track_gain，删除了无用的 bpm 和冗余的 audible_tracks
+) {
+    // 计算 track_gain，删除了无用的 bpm 和冗余的 audible_tracks
     let track_gain = compute_track_gains(&timeline.tracks);
     let stretch_algorithm = crate::time_stretch::resolved_user_external_stretch_algorithm();
     let runtime_stretch_algorithm = stretch_algorithm.to_runtime();
@@ -382,9 +383,14 @@ pub(crate) fn build_snapshot(
         // 拉伸 / Formant 分支换入的缓冲覆盖整个文件（或其拉伸版本），
         // 锚点按缓冲域等比换算后回绕语义不变。
         let decoded_total_frames = src.frames.max(1) as i64;
+        // 媒体总时长（秒）：倒放锚点的 exclusive 末端需 clamp 到该值，
+        // 与离线渲染（mixdown/render_single_clip 的 min(end, D)）保持一致，
+        // 防止异常超界的 source_end 把锚点映射到错误的环绕相位。
+        let decoded_dur_sec = decoded_total_frames as f64 / out_rate.max(1) as f64;
+        let rev_anchor_sec = clip.source_end_sec.min(decoded_dur_sec);
         let mut loop_anchor_frame: Option<i64> = if clip.loop_enabled {
             let raw = if clip.reversed {
-                (clip.source_end_sec * out_rate as f64).round() as i64 - 1
+                (rev_anchor_sec * out_rate as f64).round() as i64 - 1
             } else {
                 (clip.source_start_sec * out_rate as f64).round() as i64
             };
@@ -397,8 +403,13 @@ pub(crate) fn build_snapshot(
         // Loop 模式下换算锚点到指定缓冲长度的辅助闭包（拉伸域按 1/rate 缩放）。
         let rescale_anchor =
             |buf_frames: usize, rate_scale: f64| -> Option<i64> {
+                let rate_scale = if rate_scale.is_finite() && rate_scale > 1e-6 {
+                    rate_scale
+                } else {
+                    1.0
+                };
                 let raw = if clip.reversed {
-                    (clip.source_end_sec * out_rate as f64 / rate_scale).round() as i64 - 1
+                    (rev_anchor_sec * out_rate as f64 / rate_scale).round() as i64 - 1
                 } else {
                     (clip.source_start_sec * out_rate as f64 / rate_scale).round() as i64
                 };

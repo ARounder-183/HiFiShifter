@@ -825,12 +825,55 @@ pub fn trim_and_resample_midi(
     let fp = frame_period_ms.max(0.1);
     let src_start = source_start_sec.max(0.0);
 
+    // 速率净化：非有限 / 过小的速率按 1.0 处理（两条 Loop 路径共用）。
+    let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
+        playback_rate
+    } else {
+        1.0
+    };
+
     // 从全量曲线中截取 source range 区间
     let src_start_frame = ((src_start * 1000.0) / fp).round().max(0.0) as usize;
 
     // 根据 source_end_sec 计算结束帧
     let src_end_frame = ((source_end_sec * 1000.0) / fp).round().max(0.0) as usize;
     let src_end_frame = src_end_frame.min(full_midi.len());
+
+    // ── Loop（循环源）：对整个媒体文件做模运算回绕 ────────────────────────────
+    // idx(i) = floor_mod(anchor ± round(i·rate), N)，N 覆盖完整媒体时长；
+    // 正放锚点 = 原始 source_start（可为负，floor_mod 正确环绕），
+    // 倒放锚点 = min(source_end, D)（向下遍历）。
+    // 该路径不依赖源窗口的先后次序 —— Loop 下 split 等编辑会产生
+    // start > end 的"环绕窗口"（音频只由锚点与 D 决定），必须先于
+    // 窗口空判执行，否则这类 clip 的音高曲线会被误判为空。
+    if loop_enabled {
+        if let Some(total_sec) = media_total_sec.filter(|v| v.is_finite() && *v > 0.0) {
+            if full_midi.is_empty() {
+                return Vec::new();
+            }
+            let n = (((total_sec * 1000.0) / fp).round() as usize)
+                .min(full_midi.len())
+                .max(1);
+            let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
+            let anchor_r =
+                ((source_end_sec.min(total_sec).max(0.0)) * 1000.0 / fp).round() as i64;
+            let target_frames =
+                ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+            let mut out = Vec::with_capacity(target_frames);
+            for i in 0..target_frames {
+                let consumed = (i as f64 * rate).round() as i64;
+                let idx_i = if reversed {
+                    anchor_r - 1 - consumed
+                } else {
+                    anchor_f + consumed
+                };
+                let idx = idx_i.rem_euclid(n as i64) as usize;
+                out.push(full_midi[idx]);
+            }
+            return out;
+        }
+    }
+
     if src_start_frame >= src_end_frame {
         eprintln!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
@@ -849,49 +892,17 @@ pub fn trim_and_resample_midi(
     // 按 1/playback_rate 重采样到 clip timeline 长度
     let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
-    let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
-        playback_rate
-    } else {
-        1.0
-    };
-
-    // ── Loop（循环源）：对整个媒体文件做模运算回绕 ────────────────────────────
-    // idx(i) = floor_mod(anchor ± round(i·rate), N)，N 覆盖完整媒体时长；
-    // 正放锚点 = source_start，倒放锚点 = min(source_end, D)（向下遍历）。
-    // 负锚点（向左延伸过的 Clip）同样正确环绕。
-    if loop_enabled {
-        if let Some(total_sec) = media_total_sec.filter(|v| v.is_finite() && *v > 0.0) {
-            let n = (((total_sec * 1000.0) / fp).round() as usize)
-                .min(full_midi.len())
-                .max(1);
-            let anchor_f = ((src_start * 1000.0) / fp).round() as i64;
-            let anchor_r =
-                ((source_end_sec.min(total_sec).max(0.0)) * 1000.0 / fp).round() as i64;
-            let mut out = Vec::with_capacity(target_frames);
-            for i in 0..target_frames {
-                let consumed = (i as f64 * rate).round() as i64;
-                let idx_i = if reversed {
-                    anchor_r - 1 - consumed
-                } else {
-                    anchor_f + consumed
-                };
-                let idx = idx_i.rem_euclid(n as i64) as usize;
-                out.push(full_midi[idx]);
-            }
-            return out;
+    // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
+    if loop_enabled && target_frames > trimmed.len() {
+        let window_frames = trimmed.len();
+        let mut out = Vec::with_capacity(target_frames);
+        for i in 0..target_frames {
+            let u = i as f64 * rate;
+            let wrapped = u % (window_frames as f64);
+            let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
+            out.push(full_midi[idx]);
         }
-        // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
-        if target_frames > trimmed.len() {
-            let window_frames = trimmed.len();
-            let mut out = Vec::with_capacity(target_frames);
-            for i in 0..target_frames {
-                let u = i as f64 * rate;
-                let wrapped = u % (window_frames as f64);
-                let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
-                out.push(full_midi[idx]);
-            }
-            return out;
-        }
+        return out;
     }
 
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，

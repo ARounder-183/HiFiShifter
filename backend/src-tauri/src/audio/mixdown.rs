@@ -501,12 +501,15 @@ pub fn render_mixdown_interleaved(
         //   倒放 idx(f) = floor_mod(source_end − 1 − f, D_frames)
         // 即"循环原始音频文件"：先消费 source_start → 文件末尾，
         // 之后每个周期都是整个文件（对齐 REAPER Loop source）。
+        // 锚点直接取原始字段：正放可为负（floor_mod 环绕到末尾一侧）；
+        // 倒放只把末端 clamp 到媒体时长 —— 不能用含 `.max(source_start)`
+        // 的 src_end_limit_sec（那是为非 Loop 切片准备的），否则 Loop 下
+        // split 产生的"环绕窗口"会把倒放锚点错误地推回窗口起点。
         // 非 Loop 保持原窗口切片行为。
         let anchor_frame: i64 = if clip.reversed {
-            (src_end_limit_sec * in_rate as f64).round() as i64
+            (source_end_sec_src.min(total_sec) * in_rate as f64).round() as i64
         } else {
-            // 负锚点合法：floor_mod 会环绕到文件末尾一侧。
-            (source_start_sec * in_rate as f64).round() as i64
+            (clip.source_start_sec * in_rate as f64).round() as i64
         };
         let segment: Vec<f32> = if loop_mode {
             let out_source_frames = ((clip_timeline_len_sec.max(0.0)

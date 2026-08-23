@@ -931,9 +931,14 @@ fn render_single_clip(
     }
 
     let anchor_frame: i64 = if clip.reversed {
-        (src_end_limit_sec * in_rate as f64).round() as i64
+        // 倒放末端只 clamp 到媒体时长（不能用含 `.max(source_start)` 的
+        // src_end_limit_sec —— Loop 下 split 的"环绕窗口"会推错锚点）。
+        (source_end_sec.min(total_sec) * in_rate as f64).round() as i64
     } else {
-        (source_start_sec * in_rate as f64).round() as i64
+        // 负锚点合法：floor_mod 会环绕到文件末尾一侧。
+        // 必须用**原始** source_start_sec（可为负），与实时引擎的
+        // rem_euclid 回绕保持一致（clamp 到 0 会导致离线/实时内容错位）。
+        (clip.source_start_sec * in_rate as f64).round() as i64
     };
     let segment: Vec<f32> = if loop_mode {
         let out_source_frames =

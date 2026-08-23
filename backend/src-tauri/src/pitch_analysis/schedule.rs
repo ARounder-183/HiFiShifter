@@ -248,7 +248,9 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                     .map(|total| (((total * 1000.0) / fp).round() as usize).min(cached.midi.len()))
                     .filter(|n| *n > 0)
                     .unwrap_or(1);
-                let anchor_f = ((clip.source_start_sec.max(0.0) * 1000.0) / fp).round() as i64;
+                // 正放锚点用**原始** source_start_sec（可为负，floor_mod 环绕），
+                // 与音频回绕（mix/snapshot/mixdown）保持一致。
+                let anchor_f = ((clip.source_start_sec * 1000.0) / fp).round() as i64;
                 let end_eff = clip
                     .source_end_sec
                     .min(media_total.unwrap_or(f64::INFINITY))
