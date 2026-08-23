@@ -256,84 +256,114 @@ export const WaveformTrackCanvas = React.memo(
 
                 const clipSourceEndSec =
                     Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
-                // Loop（循环源）：源窗口完整参与循环（不受 clip 长度钳制）；
-                // 非 Loop 保持旧行为（窗口被 clip 实际长度截断）。
                 const isLoop = Boolean(clip.loopEnabled);
                 const clipSourceSpanSec = isLoop
-                    ? Math.max(0, clipSourceEndSec - sourceStartSec)
+                    ? Math.max(0, Math.min(clipSourceEndSec, clip.durationSec) - sourceStartSec)
                     : Math.max(
                           0,
                           Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
                       );
                 if (clipSourceSpanSec <= 1e-6) continue;
 
-                const cycleSec = isLoop ? clipSourceSpanSec / pr : 0;
-
-                // ── 循环瓦片划分 ──────────────────────────────────────────────
-                // 关键语义：播放回绕发生在源窗口 [start, end) **内部**
-                //（u = t·rate mod span），因此每个循环周期显示的都是**同一份**
-                // 源窗口内容 —— 瓦片绝不能沿媒体向后"走出"窗口。
+                // ── 循环分段（Loop = 循环原始音频文件）────────────────────────
+                // 语义（对齐 REAPER Loop source / floor_mod 映射）：
+                //   正放 src(t) = mod(sourceStart + t·pr, D)
+                //   倒放 src(t) = mod(sourceEnd   − t·pr, D)
+                // 其中 D = 完整媒体时长。因此波形按"进入段 + 整文件重复段"划分：
+                //   段 0（头部）：源 [sourceStart, D]（正放）/ [0, sourceEnd]（倒放）
+                //   段 1..n：    整个文件 [0, D] 原样重复
+                // 回绕节点（倒三角）位于头部段结束处及此后每个整文件周期边界。
                 //
-                // 瓦片统一取完整周期长度（clipDuration = cycle），
-                // 保证 params.sourceStart + clipDuration·rate === 窗口终点，
-                // 倒放镜像数学在任意瓦片（含末尾被截断显示的瓦片）上都成立；
-                // 超出 clip 长度的部分仅通过绘制矩形裁掉，不参与映射。
+                // 每段的 clipDuration === 该段源跨度/pr，保证
+                // sourceStart + clipDuration·pr === 段窗口终点，
+                // 倒放镜像数学在任意段上成立；超出 clip 长度的部分仅通过
+                // 绘制矩形裁掉。
                 //
-                // 淡入淡出：增益按 clip 局部时间求值（clipTimeOffsetSec = k·cycle，
-                // 淡出锚定整条 clip 终点），因此**每个瓦片都必须携带完整淡化参数**
-                // —— 长于一个周期的淡化会横跨多个瓦片，中间瓦片若不带淡化参数
-                // 就会以全振幅渲染，导致包络"只有一个循环以内"的错误观感。
-                // 非淡化区间的瓦片求值自然为 1，不存在重复施加的问题
-                //（每个像素列仅属于一个瓦片）。
-                interface RenderTile {
-                    /** 瓦片在 clip 内的起始时间（秒），同时是增益求值的 clip 时间偏移 */
+                // 淡入淡出：每个分段都携带完整淡化参数，增益按 clip 局部时间
+                // 求值（clipTimeOffsetSec = 分段起点；淡出锚定整条 clip 终点）
+                // —— 长于一个周期的淡化横跨多段时包络保持连续；
+                // 非淡化区间的分段求值自然为 1，不存在重复施加的问题。
+                interface RenderSegment {
+                    /** 分段在 clip 内的起始时间（秒），同时是增益求值的 clip 时间偏移 */
                     localStartSec: number;
-                    /** 瓦片时长（秒）：Loop 下恒等于完整周期 */
+                    /** 分段时长（秒） */
                     durationSec: number;
+                    /** 该分段覆盖的源窗口起点（源域秒） */
+                    srcWinStart: number;
+                    /** 该分段覆盖的源窗口终点（源域秒） */
+                    srcWinEnd: number;
                 }
-                let tilesToRender: RenderTile[] = [];
+                const mediaDur = Math.max(0, Number(clip.durationSec) || 0);
+                const effSrcEnd = Math.min(clipSourceEndSec, mediaDur || clipSourceEndSec);
+                let segmentsToRender: RenderSegment[] = [];
                 if (!isLoop) {
-                    tilesToRender.push({
+                    segmentsToRender.push({
                         localStartSec: 0,
                         durationSec: clip.lengthSec,
+                        srcWinStart: sourceStartSec,
+                        srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                    });
+                } else if (!(mediaDur > 1e-6)) {
+                    // 无有效媒体时长：退化为单片近似
+                    segmentsToRender.push({
+                        localStartSec: 0,
+                        durationSec: clip.lengthSec,
+                        srcWinStart: sourceStartSec,
+                        srcWinEnd: sourceStartSec + clipSourceSpanSec,
                     });
                 } else {
-                    const rawCount = Math.ceil((clip.lengthSec - 1e-9) / cycleSec);
-                    // 退化保护：周期远小于像素时逐瓦片渲染失去意义，
-                    // 回退到单片近似（包络级别仍然正确）。
-                    if (rawCount <= 4096) {
-                        const visLocalStart = Math.max(0, visStartSec - clipStartSec);
-                        const visLocalEnd = Math.min(clip.lengthSec, visEndSec - clipStartSec);
-                        const firstK = Math.max(
-                            0,
-                            Math.min(rawCount - 1, Math.floor(visLocalStart / cycleSec)),
-                        );
-                        const lastK = Math.max(
-                            firstK,
-                            Math.min(rawCount - 1, Math.ceil(visLocalEnd / cycleSec) - 1),
-                        );
-                        for (let k = firstK; k <= lastK; k += 1) {
-                            tilesToRender.push({
-                                localStartSec: k * cycleSec,
-                                durationSec: cycleSec,
+                    const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDur);
+                    const anchorRev = Math.min(Math.max(effSrcEnd, 0), mediaDur);
+                    const headDur =
+                        (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
+                    const bodyDur = mediaDur / pr;
+                    const visLocalStart = Math.max(0, visStartSec - clipStartSec);
+                    const visLocalEnd = Math.min(clip.lengthSec, visEndSec - clipStartSec);
+                    if (visLocalEnd <= visLocalStart) continue;
+                    // 退化保护：分段数失控时回退单片近似。
+                    const approxCount =
+                        1 + Math.ceil((clip.lengthSec - headDur - 1e-9) / bodyDur);
+                    if (approxCount <= 4096) {
+                        if (headDur > 1e-9 && visLocalStart < headDur) {
+                            segmentsToRender.push({
+                                localStartSec: 0,
+                                durationSec: headDur,
+                                srcWinStart: clip.reversed ? 0 : anchorFwd,
+                                srcWinEnd: clip.reversed ? anchorRev : mediaDur,
                             });
                         }
+                        let segOffset = headDur;
+                        for (
+                            let guard = 0;
+                            segOffset < visLocalEnd - 1e-9 && guard < 4096;
+                            guard += 1
+                        ) {
+                            segmentsToRender.push({
+                                localStartSec: segOffset,
+                                durationSec: bodyDur,
+                                srcWinStart: 0,
+                                srcWinEnd: mediaDur,
+                            });
+                            segOffset += bodyDur;
+                        }
                     } else {
-                        tilesToRender.push({
+                        segmentsToRender.push({
                             localStartSec: 0,
                             durationSec: clip.lengthSec,
+                            srcWinStart: sourceStartSec,
+                            srcWinEnd: sourceStartSec + clipSourceSpanSec,
                         });
                     }
-                    if (tilesToRender.length === 0) continue;
+                    if (segmentsToRender.length === 0) continue;
                 }
 
                 const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
 
-                for (const tile of tilesToRender) {
-                    const tileLocalEndSec = tile.localStartSec + tile.durationSec;
-                    // 该瓦片与可见区间、clip 长度的交集（clip 局部时间）
+                for (const seg of segmentsToRender) {
+                    const tileLocalEndSec = seg.localStartSec + seg.durationSec;
+                    // 该分段与可见区间、clip 长度的交集（clip 局部时间）
                     const visClipStartSec = Math.max(
-                        tile.localStartSec,
+                        seg.localStartSec,
                         visStartSec - clipStartSec,
                     );
                     const visClipEndSec = Math.min(
@@ -342,17 +372,17 @@ export const WaveformTrackCanvas = React.memo(
                     );
                     if (visClipEndSec <= visClipStartSec) continue;
 
-                    // 所有循环瓦片共用同一份源窗口（回绕语义，见上方注释）
-                    const tileSpanStartSec = sourceStartSec;
-                    const tileSpanEndSec = clipSourceEndSec;
+                    // 该分段的源窗口（头部段 / 整文件重复段，见上方划分注释）
+                    const tileSpanStartSec = seg.srcWinStart;
+                    const tileSpanEndSec = seg.srcWinEnd;
 
                     // 仅请求当前可见部分对应的源数据，显著降低每帧处理成本
                     const sourceVisStartSec = clip.reversed
-                        ? tileSpanEndSec - (visClipEndSec - tile.localStartSec) * pr
-                        : tileSpanStartSec + (visClipStartSec - tile.localStartSec) * pr;
+                        ? tileSpanEndSec - (visClipEndSec - seg.localStartSec) * pr
+                        : tileSpanStartSec + (visClipStartSec - seg.localStartSec) * pr;
                     const sourceVisEndSec = clip.reversed
-                        ? tileSpanEndSec - (visClipStartSec - tile.localStartSec) * pr
-                        : tileSpanStartSec + (visClipEndSec - tile.localStartSec) * pr;
+                        ? tileSpanEndSec - (visClipStartSec - seg.localStartSec) * pr
+                        : tileSpanStartSec + (visClipEndSec - seg.localStartSec) * pr;
                     const sourceTimeStart = Math.max(
                         tileSpanStartSec,
                         Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSec,
@@ -435,9 +465,9 @@ export const WaveformTrackCanvas = React.memo(
                         renderInterleaved = downsampled;
                     }
 
-                    // 偏移量改为相对于主屏幕（按瓦片起点校正），而不是裁剪视口；
+                    // 偏移量改为相对于主屏幕（按分段起点校正），而不是裁剪视口；
                     // 量化到半像素粒度，消除大浮点数相减导致的子像素漂移。
-                    const tileStartPx = clipStartPx + tile.localStartSec * currentPxPerSec;
+                    const tileStartPx = clipStartPx + seg.localStartSec * currentPxPerSec;
                     const clipPixelOffset =
                         Math.round((viewportStartPx - tileStartPx) * 2) / 2;
 
@@ -472,25 +502,25 @@ export const WaveformTrackCanvas = React.memo(
                         centerY: displayH / 2,
                         zeroDbHalfHeight: displayH / 2,
                         sourceStartSec: tileSpanStartSec,
-                        clipDuration: tile.durationSec,
+                        clipDuration: seg.durationSec,
                         playbackRate: Number(clip.playbackRate ?? 1) || 1,
                         reversed: Boolean(clip.reversed),
                         sourceDurationSec: clip.durationSec,
                         volumeGain: Number(clip.gain ?? 1) || 1,
                         // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
-                        // 每个瓦片都携带完整淡化参数，增益按 clip 局部时间求值
-                        //（clipTimeOffsetSec = k·cycle；淡出锚定整条 clip 终点）
-                        // —— 长于一个周期的淡化横跨多瓦片时包络保持连续。
+                        // 每个分段都携带完整淡化参数，增益按 clip 局部时间求值
+                        //（clipTimeOffsetSec = 分段起点；淡出锚定整条 clip 终点）
+                        // —— 长于一个周期的淡化横跨多段时包络保持连续。
                         fadeInSec: effectiveFadeInSec,
                         fadeOutSec: effectiveFadeOutSec,
                         fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
                         fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
                         dataStartSec: result.dataStartSec,
                         dataDurationSec: result.dataDurationSec,
-                        clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
+                        clipTimeOffsetSec: isLoop ? seg.localStartSec : 0,
                         clipTotalDurationSec: clip.lengthSec,
-                        clipPixelOffset, // 相对于主 Canvas 的偏移（已按瓦片校正）
-                        clipTotalWidthPx: Math.max(1, tile.durationSec * currentPxPerSec),
+                        clipPixelOffset, // 相对于主 Canvas 的偏移（已按分段校正）
+                        clipTotalWidthPx: Math.max(1, seg.durationSec * currentPxPerSec),
                     };
 
                     // 应用增益（音量 + 淡入淡出）
@@ -507,7 +537,7 @@ export const WaveformTrackCanvas = React.memo(
                     const __tRender0 = __perfDebug ? performance.now() : 0;
 
                     const baseAlpha = clip.muted ? 0.4 : 1.0;
-                    // 前导重叠可视化仅作用于第一个瓦片（重叠区只在 clip 起始处）。
+                    // 前导重叠可视化仅作用于第一个分段（重叠区只在 clip 起始处）。
                     const leadingOverlapSec = Math.max(
                         0,
                         Math.min(
@@ -518,7 +548,7 @@ export const WaveformTrackCanvas = React.memo(
                     const leadingOverlapRightPx =
                         (clipStartSec + leadingOverlapSec) * currentPxPerSec - viewportStartPx;
                     const leadingOverlapVisibleRight =
-                        leadingOverlapSec > 1e-9 && tile.localStartSec <= leadingOverlapSec
+                        leadingOverlapSec > 1e-9 && seg.localStartSec <= leadingOverlapSec
                             ? Math.min(tileVisRightPx, Math.max(tileVisLeftPx, leadingOverlapRightPx))
                             : tileVisLeftPx;
 
@@ -593,17 +623,26 @@ export const WaveformTrackCanvas = React.memo(
                 }
 
                 // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
-                if (isLoop) {
+                // 节点位置：头部段结束处（进入段耗尽、首次环绕）及此后
+                // 每个整文件周期边界 —— 与用户示例 [0,8)=2→10、[8,18)=0→10 一致。
+                if (isLoop && mediaDur > 1e-6) {
+                    const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDur);
+                    const anchorRev = Math.min(Math.max(effSrcEnd, 0), mediaDur);
+                    const headDur = (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
+                    const bodyDur = mediaDur / pr;
                     const markers: number[] = [];
                     for (
-                        let markerT = cycleSec;
-                        markerT < clip.lengthSec - 1e-6;
-                        markerT += cycleSec
+                        let markerT = headDur;
+                        markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
+                        markerT += bodyDur
                     ) {
-                        const mx = (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
-                        if (mx < -8 || mx > displayW + 8) continue;
-                        markers.push(Math.round(mx * 2) / 2);
-                        if (markers.length >= 4096) break;
+                        if (markerT > 1e-6) {
+                            const mx =
+                                (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                            if (mx >= -8 && mx <= displayW + 8) {
+                                markers.push(Math.round(mx * 2) / 2);
+                            }
+                        }
                     }
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);

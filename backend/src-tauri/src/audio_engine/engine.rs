@@ -1643,6 +1643,8 @@ fn emit_clip_pitch_data_for_clip(
         pr,
         clip.length_sec.max(0.0),
         clip.loop_enabled,
+        crate::state::clip_source_media_duration_sec(clip),
+        clip.reversed && clip.loop_enabled,
     );
     let curve_start_sec = compute_pitch_curve_start_sec(clip);
 

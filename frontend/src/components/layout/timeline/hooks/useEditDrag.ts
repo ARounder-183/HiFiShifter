@@ -49,11 +49,31 @@ import {
 const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
 
 /**
- * Loop（循环源）源窗口允许收缩到的最小长度（源域秒）。
- * 裁短左缘推进 source_start/source_end 时保留的最小循环窗口，
- * 防止窗口退化为零导致回绕除零。
+ * Loop（循环源）：把源域数值归一化到 [0, 媒体时长)。
+ *
+ * 裁短/延伸左缘会推进或回退进入锚点；锚点越过文件边界时按
+ * 整个媒体文件取模环绕（floor_mod），与渲染/引擎的回绕映射一致。
+ * 媒体时长未知时原样返回。
  */
-const MIN_LOOP_SPAN_SRC_SEC = 0.005;
+function wrapIntoMediaDomain(
+    valueSec: number,
+    base: {
+        durationFrames: number | null;
+        sourceSampleRate: number | null;
+        durationSec: number | null;
+    },
+): number {
+    const d = (() => {
+        if (base.durationFrames && base.sourceSampleRate && base.sourceSampleRate > 0) {
+            return base.durationFrames / base.sourceSampleRate;
+        }
+        return base.durationSec || 0;
+    })();
+    if (!(d > 1e-9)) return valueSec;
+    let v = valueSec % d;
+    if (v < 0) v += d;
+    return v;
+}
 
 export function resolveStretchParamTypes(
     pitchEditUserModified: boolean | null | undefined,
@@ -907,50 +927,71 @@ export function useEditDrag(deps: {
                         const base = bBase;
                         const rate = bRate;
                         const startDelta = bStartSign * delta;
-                        // Loop：缩短方向（左缘右移）与常规一致地推进源窗口起点；
-                        // 延伸方向（左缘左移）不改源窗口，超出部分由循环回绕内容填充。
+                        // Loop（循环原始文件）：锚点语义 —— 左缘右移（裁短）
+                        // 推进锚点并环绕；左缘左移（延伸）回退锚点并环绕，
+                        // 内容保持锚定。非 Loop 维持既有窗口推进逻辑。
                         const shortensFromLeft = startDelta > 0;
                         if (base.loopEnabled && !shortensFromLeft) {
-                            // Loop + 向左延伸：只改起点/长度。
-                            updates.push({
+                            const nextStart = Math.max(0, base.startSec + startDelta);
+                            const patch: {
+                                clipId: string;
+                                startSec: number;
+                                lengthSec: number;
+                                sourceStartSec?: number;
+                                sourceEndSec?: number;
+                            } = {
                                 clipId: partner,
-                                startSec: Math.max(0, base.startSec + startDelta),
+                                startSec: nextStart,
                                 lengthSec: Math.max(0, base.lengthSec - startDelta),
-                            });
+                            };
+                            if (base.reversed) {
+                                const raw = base.sourceEndSec - startDelta * rate;
+                                let wrapped = raw;
+                                const dSrc = (() => {
+                                    if (
+                                        base.durationFrames &&
+                                        base.sourceSampleRate &&
+                                        base.sourceSampleRate > 0
+                                    ) {
+                                        return base.durationFrames / base.sourceSampleRate;
+                                    }
+                                    return base.durationSec || 0;
+                                })();
+                                if (dSrc > 1e-9) {
+                                    wrapped = raw % dSrc;
+                                    if (wrapped <= 0) wrapped += dSrc;
+                                }
+                                patch.sourceEndSec = wrapped;
+                            } else {
+                                const raw = base.sourceStartSec + startDelta * rate;
+                                patch.sourceStartSec = wrapIntoMediaDomain(raw, base);
+                            }
+                            updates.push(patch);
                         } else if (base.loopEnabled && base.reversed) {
-                            // Loop + 倒放 + 左缘右移（裁短）：收紧 source_end。
-                            let nextTrimEnd = base.sourceEndSec - startDelta * rate;
-                            nextTrimEnd = Math.min(
-                                Math.max(nextTrimEnd, base.sourceStartSec + MIN_LOOP_SPAN_SRC_SEC),
-                                bSourceDuration > 0 ? bSourceDuration : Number.POSITIVE_INFINITY,
+                            // Loop + 倒放 + 左缘右移（裁短）：锚点(source_end)向下环绕推进。
+                            const nextTrimEnd = wrapIntoMediaDomain(
+                                base.sourceEndSec - startDelta * rate,
+                                base,
                             );
-                            const actualDeltaTrim = base.sourceEndSec - nextTrimEnd;
-                            const actualDeltaTimeline = actualDeltaTrim / rate;
                             updates.push({
                                 clipId: partner,
-                                startSec: base.startSec + actualDeltaTimeline,
+                                startSec: base.startSec + startDelta,
                                 lengthSec: Math.max(
                                     0,
-                                    base.lengthSec - actualDeltaTimeline,
+                                    base.lengthSec - startDelta,
                                 ),
                                 sourceEndSec: nextTrimEnd,
                             });
                         } else if (base.loopEnabled) {
-                            // Loop + 正放 + 左缘右移（裁短）：推进 source_start。
-                            let nextTrimStart = base.sourceStartSec + startDelta * rate;
-                            nextTrimStart = Math.min(
-                                Math.max(nextTrimStart, 0),
-                                base.sourceEndSec - MIN_LOOP_SPAN_SRC_SEC,
+                            // Loop + 正放 + 左缘右移（裁短）：锚点(source_start)向上环绕推进。
+                            const nextTrimStart = wrapIntoMediaDomain(
+                                base.sourceStartSec + startDelta * rate,
+                                base,
                             );
-                            const actualDeltaTrim = nextTrimStart - base.sourceStartSec;
-                            const actualDeltaTimeline = actualDeltaTrim / rate;
                             updates.push({
                                 clipId: partner,
-                                startSec: base.startSec + actualDeltaTimeline,
-                                lengthSec: Math.max(
-                                    0,
-                                    base.lengthSec - actualDeltaTimeline,
-                                ),
+                                startSec: base.startSec + startDelta,
+                                lengthSec: Math.max(0, base.lengthSec - startDelta),
                                 sourceStartSec: nextTrimStart,
                             });
                         } else if (base.reversed) {
@@ -1302,25 +1343,10 @@ export function useEditDrag(deps: {
                         if (!base) continue;
                         const rate = base.playbackRate > 0 ? base.playbackRate : 1;
                         if (base.loopEnabled) {
-                            // Loop：向左延伸（delta<0）不受源长度限制（回绕内容填充）；
-                            // 向右裁短（delta>0）受源窗口最小跨度限制。
+                            // Loop（循环原始文件）：锚点可环绕，向左延伸不受
+                            // 源长度限制；向右裁短仅受 clip 长度约束
+                            //（锚点经 floor_mod 归一化，无需窗口跨度上限）。
                             limitedDelta = Math.min(limitedDelta, base.lengthSec - minLen);
-                            if (base.reversed) {
-                                // 倒放裁短收紧 source_end：上限 (sourceEnd - sourceStart - min)/rate
-                                const maxDelta =
-                                    (base.sourceEndSec -
-                                        base.sourceStartSec -
-                                        MIN_LOOP_SPAN_SRC_SEC) /
-                                    rate;
-                                limitedDelta = Math.min(limitedDelta, maxDelta);
-                            } else {
-                                const maxDelta =
-                                    (base.sourceEndSec -
-                                        base.sourceStartSec -
-                                        MIN_LOOP_SPAN_SRC_SEC) /
-                                    rate;
-                                limitedDelta = Math.min(limitedDelta, maxDelta);
-                            }
                         } else if (base.reversed) {
                             const maxDelta = (base.sourceEndSec - base.sourceStartSec) / rate;
                             limitedDelta = Math.min(limitedDelta, maxDelta);
@@ -1337,8 +1363,19 @@ export function useEditDrag(deps: {
                             if (!base) continue;
                             const rate = base.playbackRate > 0 ? base.playbackRate : 1;
                             if (base.loopEnabled && limitedDelta < 0) {
-                                // Loop + 向左延伸：只移动起点/增长长度，
-                                // 源窗口不变，延伸部分由循环回绕内容填充。
+                                // Loop + 向左延伸：内容保持锚定 —— 锚点沿遍历方向
+                                // 回退 |δ|·rate 并对整个媒体时长取模环绕
+                                //（正放减 source_start，倒放加 source_end）。
+                                const dSrc = (() => {
+                                    if (
+                                        base.durationFrames &&
+                                        base.sourceSampleRate &&
+                                        base.sourceSampleRate > 0
+                                    ) {
+                                        return base.durationFrames / base.sourceSampleRate;
+                                    }
+                                    return base.durationSec || 0;
+                                })();
                                 dispatch(moveClipStart({ clipId: id, startSec: base.startSec + limitedDelta }));
                                 dispatch(
                                     setClipLength({
@@ -1346,15 +1383,38 @@ export function useEditDrag(deps: {
                                         lengthSec: clamp(base.lengthSec - limitedDelta, minLen, 10_000),
                                     }),
                                 );
+                                if (dSrc > 1e-9) {
+                                    if (base.reversed) {
+                                        const raw = base.sourceEndSec - limitedDelta * rate;
+                                        let wrapped = raw % dSrc;
+                                        if (wrapped <= 0) wrapped += dSrc;
+                                        dispatch(
+                                            setClipSourceRange({
+                                                clipId: id,
+                                                sourceEndSec: wrapped,
+                                            }),
+                                        );
+                                    } else {
+                                        const raw = base.sourceStartSec + limitedDelta * rate;
+                                        let wrapped = raw % dSrc;
+                                        if (wrapped < 0) wrapped += dSrc;
+                                        dispatch(
+                                            setClipSourceRange({
+                                                clipId: id,
+                                                sourceStartSec: wrapped,
+                                            }),
+                                        );
+                                    }
+                                }
                             } else if (base.loopEnabled && base.reversed) {
-                                // Loop + 倒放 + 裁短：收紧 source_end（保留最小窗口）。
-                                let nextTrimEnd = base.sourceEndSec - limitedDelta * rate;
-                                nextTrimEnd = Math.max(
-                                    base.sourceStartSec + MIN_LOOP_SPAN_SRC_SEC,
+                                // Loop + 倒放 + 裁短：锚点(source_end)向下推进并环绕。
+                                let nextTrimEnd =
+                                    base.sourceEndSec - limitedDelta * rate;
+                                nextTrimEnd = wrapIntoMediaDomain(
                                     nextTrimEnd,
+                                    base,
                                 );
-                                const actualDeltaTrim = base.sourceEndSec - nextTrimEnd;
-                                const actualDeltaTimeline = actualDeltaTrim / rate;
+                                const actualDeltaTimeline = limitedDelta;
                                 const nextStart = base.startSec + actualDeltaTimeline;
                                 const nextLen = clamp(
                                     base.lengthSec - actualDeltaTimeline,
@@ -1367,15 +1427,14 @@ export function useEditDrag(deps: {
                                     setClipSourceRange({ clipId: id, sourceEndSec: nextTrimEnd }),
                                 );
                             } else if (base.loopEnabled) {
-                                // Loop + 正放 + 裁短：推进 source_start（保留最小窗口）。
-                                let nextTrimStart = base.sourceStartSec + limitedDelta * rate;
-                                nextTrimStart = Math.max(0, nextTrimStart);
-                                nextTrimStart = Math.min(
+                                // Loop + 正放 + 裁短：锚点(source_start)向上推进并环绕。
+                                let nextTrimStart =
+                                    base.sourceStartSec + limitedDelta * rate;
+                                nextTrimStart = wrapIntoMediaDomain(
                                     nextTrimStart,
-                                    base.sourceEndSec - MIN_LOOP_SPAN_SRC_SEC,
+                                    base,
                                 );
-                                const actualDeltaTrim = nextTrimStart - base.sourceStartSec;
-                                const actualDeltaTimeline = actualDeltaTrim / rate;
+                                const actualDeltaTimeline = limitedDelta;
                                 const nextStart = base.startSec + actualDeltaTimeline;
                                 const nextLen = clamp(
                                     base.lengthSec - actualDeltaTimeline,

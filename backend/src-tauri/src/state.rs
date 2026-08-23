@@ -46,6 +46,20 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Clip 源媒体的总时长（秒）：优先 `duration_frames / source_sample_rate`，
+/// 回退 `duration_sec`；均不可用时返回 None。
+///
+/// Loop（循环源）模式的回绕周期即该值 —— "循环原始音频文件"。
+pub(crate) fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
+    if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
+        if sample_rate > 0 && frames > 0 {
+            return Some(frames as f64 / sample_rate as f64);
+        }
+    }
+    clip.duration_sec
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+}
+
 /// 把区间 `[start, end)` 按模 `modulus` 的回绕边界拆分成若干不跨界的子区间，
 /// 每个子区间以"周期内相位"坐标返回（值域 `[0, modulus)`）。
 ///
@@ -462,11 +476,13 @@ pub struct Clip {
     pub reversed: bool,
     /// Loop（循环源）属性，对齐 REAPER / VEGAS 的 item LOOP 语义：
     ///
-    /// - 启用后，剪辑在进行延伸/裁短等操作时不受源媒体长度限制：
-    ///   播放位置超出循环区间 `[source_start_sec, source_end_sec)` 时按周期回绕，
-    ///   自由向前/向后产生循环内容；
-    /// - 循环周期 = `(source_end_sec - source_start_sec).abs() / |playback_rate|` 秒
-    ///   （时间线时间），倒放时同样成立（内容反向回绕）；
+    /// 启用后对**整个原始媒体文件**做模运算回绕（"循环原始音频文件"）：
+    ///   正放 src(t) = floor_mod(source_start + t·rate, D)
+    ///   倒放 src(t) = floor_mod(source_end   − t·rate, D)
+    /// 其中 D = 完整媒体时长。例：媒体 10s、锚点 2s 时，clip 的
+    /// [0,8) 对应源 2~10s，[8,18) 对应源 0~10s，以此类推。
+    ///
+    /// - 延伸/裁短等操作不受源媒体长度限制；向左延伸会回退锚点并环绕；
     /// - 该字段随工程文件持久化；旧版本工程缺失时按"为新的音频块启用循环"
     ///   设置迁移（见 open_project 的 v4 迁移逻辑）。
     #[serde(default)]
@@ -2673,8 +2689,10 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 媒体总长 10s；Clip 锚点从 1s 进入，窗口 [1,3]。
             clip.source_start_sec = 1.0;
             clip.source_end_sec = 3.0;
+            clip.duration_sec = Some(10.0);
             clip.playback_rate = 1.0;
             clip.loop_enabled = true;
         }
@@ -2695,18 +2713,18 @@ mod tests {
         let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
 
-        // 左段：保留完整循环窗口，仅缩短长度。
+        // 左段：保持锚点与窗口不变，仅缩短长度。
         assert!((left.length_sec - 2.5).abs() < 1e-9);
         assert!((left.source_start_sec - 1.0).abs() < 1e-9);
         assert!((left.source_end_sec - 3.0).abs() < 1e-9);
         assert!(left.loop_enabled);
 
-        // 右段：从切割点处的回绕位置继续（左段消耗 2.5s → 窗口内偏移 0.5s），
-        // 窗口变为 [1.5, 3.0]，并继承 Loop 属性。
+        // 右段：切割点在整个媒体上的环绕位置 = floor_mod(1 + 2.5, 10) = 3.5
+        // （Loop 模式下音频只依赖锚点与媒体时长，另一端字段保持原值）。
         assert!((right.start_sec - 2.5).abs() < 1e-9);
         assert!((right.length_sec - 3.5).abs() < 1e-9);
         assert!(right.loop_enabled);
-        assert!((right.source_start_sec - 1.5).abs() < 1e-9);
+        assert!((right.source_start_sec - 3.5).abs() < 1e-9);
         assert!((right.source_end_sec - 3.0).abs() < 1e-9);
     }
 
@@ -4618,26 +4636,28 @@ impl TimelineState {
             1.0
         };
         if right.loop_enabled {
-            // Loop（循环源）：右段从"切割点处的回绕源位置"继续播放，
-            // 并以剩余窗口作为自己的循环区间（对齐 REAPER 切割循环项的行为）。
-            let span = (right.source_end_sec - right.source_start_sec).abs();
-            if span > 1e-9 {
-                let mut u = (left_len * rate) % span;
+            // Loop（循环源）：右段锚点推进到切割点在**整个媒体文件**上的环绕
+            // 位置（对齐 REAPER 切割循环项的行为）：
+            //   正放 new_start = floor_mod(start + u, D)
+            //   倒放 new_end   = floor_mod(end − u, D)
+            // 其中 u = left_len·rate，D = 完整媒体时长。Loop 模式下音频只依赖
+            // 锚点与 D，另一端字段保持原值即可；左段窗口不变。
+            if let Some(d) = self
+                .source_file_duration_sec(&right)
+                .or_else(|| crate::state::clip_source_media_duration_sec(&right))
+                .filter(|d| *d > 1e-9)
+            {
+                let mut u = left_len * rate;
+                u %= d;
                 if u < 0.0 {
-                    u += span;
+                    u += d;
                 }
                 if right.reversed {
-                    // 倒放：内容自 source_end 向下回绕，切割点位置 = end - u。
-                    right.source_end_sec = (right.source_end_sec - u).max(right.source_start_sec);
-                    if right.source_end_sec - right.source_start_sec <= 1e-9 {
-                        // 恰好切在回绕点上：恢复完整窗口，避免零宽区间。
-                        right.source_end_sec = right.source_start_sec + span;
-                    }
+                    let wrapped = (right.source_end_sec - u).rem_euclid(d);
+                    right.source_end_sec = if wrapped <= 0.0 { d } else { wrapped };
                 } else {
-                    right.source_start_sec = (right.source_start_sec + u).min(right.source_end_sec);
-                    if right.source_end_sec - right.source_start_sec <= 1e-9 {
-                        right.source_start_sec = right.source_end_sec - span;
-                    }
+                    right.source_start_sec =
+                        (right.source_start_sec + u).rem_euclid(d);
                 }
             }
         } else if right.reversed {

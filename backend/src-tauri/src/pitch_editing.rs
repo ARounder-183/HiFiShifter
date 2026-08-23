@@ -985,6 +985,10 @@ pub(crate) fn build_clip_input_pitch_curve(
             clip_playback_rate,
             clip.length_sec.max(0.0),
             clip.loop_enabled,
+            // Loop 模式的回绕周期 = 完整媒体时长；倒放从 source_end 向下环绕，
+            // 与 build_loop_tiled_segment 生成的 PCM 顺序逐帧对齐。
+            crate::state::clip_source_media_duration_sec(clip),
+            clip.reversed && clip.loop_enabled,
         );
         if tm.is_empty() {
             return None;

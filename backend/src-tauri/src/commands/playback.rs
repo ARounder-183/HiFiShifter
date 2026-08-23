@@ -906,7 +906,6 @@ fn render_single_clip(
     };
     let source_start_sec = clip.source_start_sec.max(0.0);
     let source_end_sec = clip.source_end_sec;
-    let pre_silence_sec = (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6);
 
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
         .ok_or_else(|| "cannot determine clip duration".to_string())?;
@@ -914,26 +913,56 @@ fn render_single_clip(
         return Err("invalid clip duration".to_string());
     }
 
+    // ── 片段构建 ─────────────────────────────────────────────────────────────
+    // Loop（循环源）：从完整媒体按整文件模运算回绕生成片段
+    //   正放 idx(f) = floor_mod(source_start + f, D_frames)
+    //   倒放 idx(f) = floor_mod(source_end − 1 − f, D_frames)
+    // 即"循环原始音频文件"（对齐 REAPER Loop source）。负的 source_start
+    // 是环绕锚点而非 leading silence。非 Loop 保持原窗口切片行为。
+    let loop_mode = clip.loop_enabled;
+    let pre_silence_sec = if loop_mode {
+        0.0
+    } else {
+        (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6)
+    };
     let src_end_limit_sec = source_end_sec.min(total_sec).max(source_start_sec);
-    if src_end_limit_sec - source_start_sec <= 1e-9 {
+    if !loop_mode && src_end_limit_sec - source_start_sec <= 1e-9 {
         return Err("trimmed clip too short".to_string());
     }
 
-    // 3. 切片 + resample
-    let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-    let src_i1 = ((src_end_limit_sec * in_rate as f64)
-        .ceil()
-        .max(src_i0 as f64) as usize)
-        .min(in_frames);
-    if src_i1 <= src_i0 + 1 {
-        return Err("source slice too short".to_string());
-    }
+    let anchor_frame: i64 = if clip.reversed {
+        (src_end_limit_sec * in_rate as f64).round() as i64
+    } else {
+        (source_start_sec * in_rate as f64).round() as i64
+    };
+    let segment: Vec<f32> = if loop_mode {
+        let out_source_frames =
+            ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0)) as usize;
+        crate::mixdown::build_loop_tiled_segment(
+            &pcm,
+            in_channels_usize,
+            anchor_frame,
+            clip.reversed,
+            out_source_frames,
+        )
+    } else {
+        // 3. 切片
+        let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
+        let src_i1 = ((src_end_limit_sec * in_rate as f64)
+            .ceil()
+            .max(src_i0 as f64) as usize)
+            .min(in_frames);
+        if src_i1 <= src_i0 + 1 {
+            return Err("source slice too short".to_string());
+        }
+        pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
+    };
 
-    let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
     let mut segment =
-        crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
+        crate::mixdown::linear_resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
 
-    if clip.reversed {
+    // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
+    if !loop_mode && clip.reversed {
         crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
     }
 
@@ -961,9 +990,9 @@ fn render_single_clip(
             &clip.id,
             std::path::Path::new(source_path),
             out_rate,
-            clip.source_start_sec.max(0.0),
-            clip.source_end_sec,
-            clip.reversed,
+            if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
+            if loop_mode { total_sec } else { clip.source_end_sec },
+            clip.reversed && !loop_mode,
             params,
         );
         match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params) {
@@ -1018,38 +1047,9 @@ fn render_single_clip(
         );
     }
 
-    // ── Loop（循环源）：在参数线（pitch edit）之前平铺单循环周期 ────────────
-    //
-    // 语义：循环重复的是**源素材**，而参数线作用在整条 clip 的绝对时间帧上。
-    // 因此必须先把原始（未加参数线的）单周期内容铺满整个 clip 长度，
-    // 再让 pitch-edit / 合成处理器按绝对帧读取当前参数曲线 ——
-    // 循环节之后的每个周期都是用当前参数线**重新渲染**的新音频内容，
-    // 而不是复用循环节前已处理的旧结果。
-    //
-    // 域约定：处理器内部完成时间拉伸（vslib 等）时，输入保持在源域，
-    // 目标长度 = L·out_rate·rate；否则输入已是时间线域，目标长度 = L·out_rate。
-    if clip.loop_enabled {
-        let cycle_frames = segment.len() / 2;
-        if cycle_frames > 0 {
-            let clip_len_sec = clip.length_sec.max(0.0);
-            let target_frames = if processor_handles_stretch {
-                (clip_len_sec * playback_rate * out_rate as f64).ceil().max(2.0) as usize
-            } else {
-                (clip_len_sec * out_rate as f64).ceil().max(2.0) as usize
-            };
-            if target_frames > cycle_frames {
-                segment.reserve((target_frames - cycle_frames) * 2);
-                for frame in cycle_frames..target_frames {
-                    let src_idx = frame % cycle_frames;
-                    // SAFETY-free 索引：src_idx < cycle_frames，必然在界内。
-                    let l = segment[src_idx * 2];
-                    let r = segment[src_idx * 2 + 1];
-                    segment.push(l);
-                    segment.push(r);
-                }
-            }
-        }
-    }
+    // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方
+    // build_loop_tiled_segment）—— segment 天然覆盖整条 clip 的消费量，
+    // 参数线阶段按绝对帧读取当前曲线即可，无需额外平铺。
 
     let clip_start_sec = clip.start_sec.max(0.0);
     let seg_start_sec = clip_start_sec + pre_silence_sec;

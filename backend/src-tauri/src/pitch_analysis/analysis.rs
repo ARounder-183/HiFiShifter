@@ -585,11 +585,18 @@ fn process_single_clip(
                 playback_rate,
                 clip_timeline_len_sec,
                 clip.loop_enabled,
+                crate::state::clip_source_media_duration_sec(clip),
+                clip.reversed && clip.loop_enabled,
             ));
 
-            // Calculate pre_silence_sec for clip placement
+            // Calculate pre_silence_sec for clip placement.
+            // Loop（循环源）：负 source_start 是环绕锚点，不产生前导静音。
             let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
-            let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
+            let pre_silence_sec = if clip.loop_enabled {
+                0.0
+            } else {
+                pre_silence_sec_src / playback_rate.max(1e-6)
+            };
 
             // Estimate clip_total_frames (from original audio)
             let clip_total_frames = if clip.loop_enabled {
@@ -928,7 +935,12 @@ fn compute_pitch_curve_with_incremental_refresh(
             } else {
                 1.0
             };
-            let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
+            // Loop（循环源）：负 source_start 是环绕锚点，不产生前导静音。
+            let pre_silence_sec = if clip.loop_enabled {
+                0.0
+            } else {
+                pre_silence_sec_src / playback_rate.max(1e-6)
+            };
 
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
             let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
@@ -939,6 +951,8 @@ fn compute_pitch_curve_with_incremental_refresh(
                 playback_rate,
                 clip_timeline_len_sec,
                 clip.loop_enabled,
+                crate::state::clip_source_media_duration_sec(clip),
+                clip.reversed && clip.loop_enabled,
             ));
 
             let clip_total_frames = if clip.loop_enabled {

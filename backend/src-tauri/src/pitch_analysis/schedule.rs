@@ -241,15 +241,28 @@ pub(crate) fn assemble_pitch_orig_from_cache(
             let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
 
             if clip.loop_enabled {
-                // Loop（循环源）：窗口帧区间按周期回绕铺满整个 clip。
-                let src_end_frame =
-                    ((clip.source_end_sec.max(0.0) * 1000.0) / fp).round().max(0.0) as usize;
-                let win_end = src_end_frame.min(cached.midi.len()).max(src_offset + 1);
-                let window_len = win_end - src_offset;
-                if window_len > 0 && write_len > 0 {
+                // Loop（循环源）：对整个媒体文件做模运算回绕
+                // idx(i) = floor_mod(anchor ± i, N)，N = 完整媒体时长对应帧数。
+                let media_total = crate::state::clip_source_media_duration_sec(clip);
+                let n_frames = media_total
+                    .map(|total| (((total * 1000.0) / fp).round() as usize).min(cached.midi.len()))
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1);
+                let anchor_f = ((clip.source_start_sec.max(0.0) * 1000.0) / fp).round() as i64;
+                let end_eff = clip
+                    .source_end_sec
+                    .min(media_total.unwrap_or(f64::INFINITY))
+                    .max(0.0);
+                let anchor_r = ((end_eff * 1000.0) / fp).round() as i64;
+                if write_len > 0 {
                     let dst_slice = &mut out[clip_start_frame..clip_start_frame + write_len];
                     for (i, dst) in dst_slice.iter_mut().enumerate() {
-                        let idx = src_offset + i % window_len;
+                        let idx_i = if clip.reversed {
+                            anchor_r - 1 - i as i64
+                        } else {
+                            anchor_f + i as i64
+                        };
+                        let idx = idx_i.rem_euclid(n_frames as i64) as usize;
                         let pitch = cached.midi[idx];
                         *dst = if pitch.is_finite() && pitch > 0.0 {
                             pitch
@@ -284,6 +297,8 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 pr_valid,
                 clip_len_sec,
                 clip.loop_enabled,
+                crate::state::clip_source_media_duration_sec(clip),
+                clip.reversed && clip.loop_enabled,
             );
 
             // 预计算边界并进行迭代覆盖

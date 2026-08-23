@@ -83,6 +83,18 @@ pub(crate) struct EngineClip {
 
     pub(crate) repeat: bool,
 
+    /// Loop（循环源）模式：对**整个 src 缓冲**（完整媒体文件）做模运算回绕。
+    ///
+    /// `Some(anchor)` 时，消费帧数 `src_frame` 的采样位置为
+    /// `floor_mod(anchor ± src_frame, src.frames)`（正放 +、倒放 −）。
+    /// 锚点是 Clip 进入媒体的起点：正放 = `source_start_sec`，
+    /// 倒放 = `source_end_sec`（与既有非 Loop 倒放"从末端向下播放"的约定一致，
+    /// 使启用 Loop 的瞬间可见内容保持连续）。此时
+    /// `src_start_frame / src_end_frame` 不参与回绕数学。
+    ///
+    /// `None` 保持旧语义：越界静音（`repeat` 仅作为兼容开关保留）。
+    pub(crate) loop_anchor_frame: Option<i64>,
+
     pub(crate) fade_in_frames: u64,
     pub(crate) fade_out_frames: u64,
     pub(crate) gain: f32,

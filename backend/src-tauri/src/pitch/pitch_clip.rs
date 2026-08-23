@@ -806,9 +806,11 @@ pub fn compute_clip_pitch_midi(
 /// - `source_end_sec`：clip 的 source_end_sec（源音频有效区间终点）
 /// - `playback_rate`：clip 的 playback_rate（>1 加速，<1 减速）
 /// - `clip_timeline_len_sec`：clip 在时间线上的可见长度（秒）
-/// - `loop_enabled`：Loop（循环源）属性。启用且 clip 长度超过单个循环周期时，
-///   源帧索引按窗口长度取模回绕，曲线内容循环铺满整个可见区间
-///   （与音频渲染的 repeat 回绕语义一致）。
+/// - `loop_enabled`：Loop（循环源）属性
+/// - `media_total_sec`：源媒体总时长（Loop 模式的回绕周期 D）；非 Loop 或未知传 None
+/// - `reversed`：是否倒放。Loop 模式下倒放从 `source_end` 向下遍历并回绕，
+///   与音频渲染的环绕方向一致；非 Loop 时忽略（保持既有调用方约定）。
+#[allow(clippy::too_many_arguments)]
 pub fn trim_and_resample_midi(
     full_midi: &[f32],
     frame_period_ms: f64,
@@ -817,6 +819,8 @@ pub fn trim_and_resample_midi(
     playback_rate: f64,
     clip_timeline_len_sec: f64,
     loop_enabled: bool,
+    media_total_sec: Option<f64>,
+    reversed: bool,
 ) -> Vec<f32> {
     let fp = frame_period_ms.max(0.1);
     let src_start = source_start_sec.max(0.0);
@@ -845,30 +849,59 @@ pub fn trim_and_resample_midi(
     // 按 1/playback_rate 重采样到 clip timeline 长度
     let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
-    // Loop（循环源）：目标帧数超出单周期时，按窗口周期对源帧索引取模回绕，
-    // 循环铺满整个可见区间（不做防御性截断）。
-    if loop_enabled && target_frames > trimmed.len() {
-        let window_frames = trimmed.len();
-        let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
-            playback_rate
-        } else {
-            1.0
-        };
-        let mut out = Vec::with_capacity(target_frames);
-        for i in 0..target_frames {
-            // 时间线第 i 帧对应窗口内的源帧偏移（按速率折算后取模回绕）
-            let u = i as f64 * rate;
-            let wrapped = u % (window_frames as f64);
-            let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
-            out.push(full_midi[idx]);
+    let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
+        playback_rate
+    } else {
+        1.0
+    };
+
+    // ── Loop（循环源）：对整个媒体文件做模运算回绕 ────────────────────────────
+    // idx(i) = floor_mod(anchor ± round(i·rate), N)，N 覆盖完整媒体时长；
+    // 正放锚点 = source_start，倒放锚点 = min(source_end, D)（向下遍历）。
+    // 负锚点（向左延伸过的 Clip）同样正确环绕。
+    if loop_enabled {
+        if let Some(total_sec) = media_total_sec.filter(|v| v.is_finite() && *v > 0.0) {
+            let n = (((total_sec * 1000.0) / fp).round() as usize)
+                .min(full_midi.len())
+                .max(1);
+            let anchor_f = ((src_start * 1000.0) / fp).round() as i64;
+            let anchor_r =
+                ((source_end_sec.min(total_sec).max(0.0)) * 1000.0 / fp).round() as i64;
+            let mut out = Vec::with_capacity(target_frames);
+            for i in 0..target_frames {
+                let consumed = (i as f64 * rate).round() as i64;
+                let idx_i = if reversed {
+                    anchor_r - 1 - consumed
+                } else {
+                    anchor_f + consumed
+                };
+                let idx = idx_i.rem_euclid(n as i64) as usize;
+                out.push(full_midi[idx]);
+            }
+            return out;
         }
-        return out;
+        // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
+        if target_frames > trimmed.len() {
+            let window_frames = trimmed.len();
+            let mut out = Vec::with_capacity(target_frames);
+            for i in 0..target_frames {
+                let u = i as f64 * rate;
+                let wrapped = u % (window_frames as f64);
+                let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
+                out.push(full_midi[idx]);
+            }
+            return out;
+        }
     }
 
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，
     // 避免前端 sourceEndSec 超出源文件实际时长导致曲线被不合理拉伸。
     let rate_near_one = (playback_rate - 1.0).abs() <= 0.01;
-    let target_frames = if !loop_enabled && rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
+    let target_frames = if !loop_enabled
+        && rate_near_one
+        && target_frames > trimmed.len()
+        && !trimmed.is_empty()
+    {
         eprintln!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
             target_frames,

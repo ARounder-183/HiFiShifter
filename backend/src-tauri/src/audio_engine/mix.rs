@@ -115,45 +115,67 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
         // 若该 clip 需要合成（pitch edit）但尚未渲染完成，按调用约定渲染分支
         // 已经返回；此处仅处理“无需合成，直接采样源 PCM”的路径。
         let src_frame_f = local_adj * clip.playback_rate;
-        let src_frame = src_frame_f.round() as u64;
-        let range = clip.src_end_frame.saturating_sub(clip.src_start_frame);
-        if range == 0 {
-            return None;
-        }
-        let src_abs = if clip.reversed {
-            if src_frame >= range {
-                clip.src_end_frame
+        let src_frame = src_frame_f.round();
+
+        // ── Loop（循环源）：对整个媒体缓冲做模运算回绕 ─────────────────────
+        // 语义：src(t) = floor_mod(anchor ± t·rate, D)。正放从 source_start
+        // 向上、倒放从 source_end 向下；越过文件边界后环绕到另一侧继续 ——
+        // 即"循环原始音频文件"（对齐 REAPER 的 Loop source 行为）。
+        if let Some(anchor) = clip.loop_anchor_frame {
+            let total = clip.src.frames.max(1) as i64;
+            let idx_i = if clip.reversed {
+                anchor - src_frame as i64
             } else {
-                clip.src_end_frame
-                    .saturating_sub(1)
-                    .saturating_sub(src_frame)
+                anchor + src_frame as i64
+            };
+            let idx = idx_i.rem_euclid(total) as usize;
+            let base = idx * 2;
+            if base + 1 < clip.src.pcm.len() {
+                Some((clip.src.pcm[base], clip.src.pcm[base + 1]))
+            } else {
+                None
             }
         } else {
-            src_frame.saturating_add(clip.src_start_frame)
-        };
-        if src_abs >= clip.src_end_frame {
-            if clip.repeat {
-                let src_off = src_frame % range;
-                let looped = if clip.reversed {
-                    clip.src_end_frame.saturating_sub(1).saturating_sub(src_off)
+            let src_frame_u = if src_frame >= 0.0 { src_frame as u64 } else { 0 };
+            let range = clip.src_end_frame.saturating_sub(clip.src_start_frame);
+            if range == 0 {
+                return None;
+            }
+            let src_abs = if clip.reversed {
+                if src_frame_u >= range {
+                    clip.src_end_frame
                 } else {
-                    clip.src_start_frame + src_off
-                };
-                let idx = (looped as usize) * 2;
+                    clip.src_end_frame
+                        .saturating_sub(1)
+                        .saturating_sub(src_frame_u)
+                }
+            } else {
+                src_frame_u.saturating_add(clip.src_start_frame)
+            };
+            if src_abs >= clip.src_end_frame {
+                if clip.repeat {
+                    let src_off = src_frame_u % range;
+                    let looped = if clip.reversed {
+                        clip.src_end_frame.saturating_sub(1).saturating_sub(src_off)
+                    } else {
+                        clip.src_start_frame + src_off
+                    };
+                    let idx = (looped as usize) * 2;
+                    if idx + 1 < clip.src.pcm.len() {
+                        Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                let idx = (src_abs as usize) * 2;
                 if idx + 1 < clip.src.pcm.len() {
                     Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        } else {
-            let idx = (src_abs as usize) * 2;
-            if idx + 1 < clip.src.pcm.len() {
-                Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
-            } else {
-                None
             }
         }
     };

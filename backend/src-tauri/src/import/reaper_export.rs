@@ -186,28 +186,9 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     if clip.reversed {
         // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
         default_take.s_offs = 0.0;
-    } else if clip.loop_enabled {
-        // 正向 + Loop：若循环窗口不是"从 0 到媒体末尾"，必须用 SECTION 表达，
-        // 否则 REAPER 会在媒体末尾回绕而非在窗口末尾。
-        // SECTION MODE 0 + STARTPOS/LENGTH 表达正向区间；SOFFS 归零。
-        let duration = clip.duration_sec.filter(|d| d.is_finite() && *d > 0.0);
-        let window_is_whole_file = match duration {
-            Some(dur) => start <= 1e-6 && end >= dur - 1e-3,
-            // 无时长信息时无法判断，退化为 plain source + SOFFS。
-            None => start <= 1e-6,
-        };
-        if window_is_whole_file {
-            source.section_start_sec = None;
-            source.section_length_sec = None;
-            default_take.s_offs = start;
-        } else {
-            source.source_type = "SECTION".to_string();
-            source.section_mode = 0;
-            source.section_start_sec = Some(start);
-            source.section_length_sec = Some(source_span.max(0.0));
-            default_take.s_offs = 0.0;
-        }
     } else {
+        // 正向：plain SOURCE + SOFFS 承载进入锚点。Loop 的回绕发生在
+        // 整个媒体文件上（REAPER 原生 Loop source 语义），无需 SECTION。
         source.section_start_sec = None;
         source.section_length_sec = None;
         default_take.s_offs = start;
@@ -443,12 +424,12 @@ mod tests {
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
         let source = item.default_take.source.as_ref().unwrap();
-        assert_eq!(source.source_type, "SECTION", "partial window must use SECTION");
-        assert_eq!(source.section_mode, 0);
-        assert!((source.section_start_sec.unwrap() - 1.0).abs() < 1e-9);
-        assert!((source.section_length_sec.unwrap() - 2.0).abs() < 1e-9);
+        // 正向 Loop = plain SOURCE + SOFFS（进入锚点）：
+        // REAPER 原生 Loop source 在整个媒体上回绕，无需 SECTION。
+        assert_eq!(source.source_type, "WAVE");
+        assert!((item.default_take.s_offs - 1.0).abs() < 1e-9);
 
-        // 非 Loop 的同窗口 clip 不应推断出 SECTION / LOOP。
+        // 非 Loop 的同窗口 clip 不应推断出 LOOP。
         {
             let clip = timeline
                 .clips

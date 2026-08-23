@@ -157,6 +157,47 @@ pub(crate) fn reverse_interleaved_frames(samples: &mut [f32], channels: usize) {
     }
 }
 
+/// Loop（循环源）：从完整媒体 PCM 构建按**整个文件**模运算回绕的片段。
+///
+/// 映射（f 为片段内已消费的源帧序号）：
+///   正放 idx(f) = floor_mod(anchor + f, total)
+///   倒放 idx(f) = floor_mod(anchor − 1 − f, total)
+/// 其中正放锚点 = `round(source_start·in_rate)`、倒放锚点 =
+/// `round(source_end·in_rate)`（exclusive 末端）。越过文件边界后环绕到
+/// 另一侧继续 —— 即"循环原始音频文件"，与 REAPER Loop source 一致。
+/// 输出保持自然时间顺序（倒放的方向已体现在索引递减中，
+/// 调用方无需再做整体反转）。
+pub(crate) fn build_loop_tiled_segment(
+    pcm: &[f32],
+    channels: usize,
+    anchor_frame_exclusive: i64,
+    reversed: bool,
+    out_source_frames: usize,
+) -> Vec<f32> {
+    let mut out = Vec::new();
+    if channels == 0 || pcm.is_empty() {
+        return out;
+    }
+    let total = (pcm.len() / channels) as i64;
+    if total <= 0 {
+        return out;
+    }
+    out.reserve(out_source_frames.saturating_mul(channels));
+    for f in 0..out_source_frames {
+        let fi = f as i64;
+        let idx = if reversed {
+            (anchor_frame_exclusive - 1 - fi).rem_euclid(total)
+        } else {
+            (anchor_frame_exclusive + fi).rem_euclid(total)
+        };
+        let base = (idx as usize) * channels;
+        for c in 0..channels {
+            out.push(pcm[base + c]);
+        }
+    }
+    out
+}
+
 fn build_parent_map(tracks: &[Track]) -> HashMap<String, Option<String>> {
     let mut map = HashMap::new();
     for t in tracks {
@@ -429,10 +470,17 @@ pub fn render_mixdown_interleaved(
         let source_start_sec_src = clip.source_start_sec.max(0.0);
         let source_end_sec_src = clip.source_end_sec;
         let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
+        let loop_mode = clip.loop_enabled;
 
         let source_start_sec = source_start_sec_src;
         // pre-silence is in source seconds, so convert to timeline time by dividing by playback_rate.
-        let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
+        // Loop（循环源）：负的 source_start 是"环绕锚点"（floor_mod 回绕），
+        // 不代表 leading silence，因此 Loop 模式不产生前导静音。
+        let pre_silence_sec = if loop_mode {
+            0.0
+        } else {
+            pre_silence_sec_src / playback_rate.max(1e-6)
+        };
 
         let total_sec = match clip_duration_sec_from_wav(in_rate, in_channels, &pcm) {
             Some(v) => v,
@@ -443,25 +491,54 @@ pub fn render_mixdown_interleaved(
         }
 
         let src_end_limit_sec = source_end_sec_src.min(total_sec).max(source_start_sec);
-        if src_end_limit_sec - source_start_sec <= 1e-9 {
+        if !clip.loop_enabled && src_end_limit_sec - source_start_sec <= 1e-9 {
             continue;
         }
 
-        // Slice source by time in its own rate.
-        let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-        let src_i1 = (src_end_limit_sec * in_rate as f64)
-            .ceil()
-            .max(src_i0 as f64) as usize;
-        let src_i1 = src_i1.min(in_frames);
-        if src_i1 <= src_i0 + 1 {
-            continue;
-        }
+        // ── 片段构建 ─────────────────────────────────────────────────────────
+        // Loop（循环源）：从完整媒体按整文件模运算回绕生成片段
+        //   正放 idx(f) = floor_mod(source_start + f, D_frames)
+        //   倒放 idx(f) = floor_mod(source_end − 1 − f, D_frames)
+        // 即"循环原始音频文件"：先消费 source_start → 文件末尾，
+        // 之后每个周期都是整个文件（对齐 REAPER Loop source）。
+        // 非 Loop 保持原窗口切片行为。
+        let anchor_frame: i64 = if clip.reversed {
+            (src_end_limit_sec * in_rate as f64).round() as i64
+        } else {
+            // 负锚点合法：floor_mod 会环绕到文件末尾一侧。
+            (source_start_sec * in_rate as f64).round() as i64
+        };
+        let segment: Vec<f32> = if loop_mode {
+            let out_source_frames = ((clip_timeline_len_sec.max(0.0)
+                * playback_rate
+                * in_rate as f64)
+                .ceil()
+                .max(2.0)) as usize;
+            build_loop_tiled_segment(
+                &pcm,
+                in_channels_usize,
+                anchor_frame,
+                clip.reversed,
+                out_source_frames,
+            )
+        } else {
+            // Slice source by time in its own rate.
+            let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
+            let src_i1 = (src_end_limit_sec * in_rate as f64)
+                .ceil()
+                .max(src_i0 as f64) as usize;
+            let src_i1 = src_i1.min(in_frames);
+            if src_i1 <= src_i0 + 1 {
+                continue;
+            }
+            pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
+        };
 
-        let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
         let mut segment =
-            linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
+            linear_resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
 
-        if clip.reversed {
+        // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
+        if !loop_mode && clip.reversed {
             reverse_interleaved_frames(&mut segment, in_channels_usize);
         }
 
@@ -493,9 +570,9 @@ pub fn render_mixdown_interleaved(
                 &clip.id,
                 Path::new(source_path),
                 out_rate,
-                clip.source_start_sec.max(0.0),
-                clip.source_end_sec,
-                clip.reversed,
+                if loop_mode { 0.0 } else { clip.source_start_sec.max(0.0) },
+                if loop_mode { total_sec } else { clip.source_end_sec },
+                clip.reversed && !loop_mode,
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params)
@@ -538,38 +615,8 @@ pub fn render_mixdown_interleaved(
             segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
         }
 
-        // ── Loop（循环源）：在参数线（pitch edit）之前平铺单循环周期 ──────────
-        //
-        // 语义：循环重复的是**源素材**，参数线作用在整条 clip 的绝对时间帧上。
-        // 必须先把未加参数线的单周期内容铺满整条 clip，再让 pitch-edit /
-        // 合成处理器按绝对帧读取当前曲线 —— 循环节之后的每个周期都是用
-        // 当前参数线重新渲染的新内容，而非复用循环节前已处理的结果。
-        //
-        // 域约定：处理器内部拉伸时输入保持源域（L·out_rate·rate），
-        // 否则输入已是时间线域（L·out_rate）。倒放片段已在上方整体反转，
-        // 平铺同样正确。
-        if clip.loop_enabled {
-            let cycle_frames = segment.len() / 2;
-            if cycle_frames > 0 {
-                let target_frames = if processor_handles_stretch && opts.apply_pitch_edit {
-                    (clip_timeline_len_sec * playback_rate * out_rate as f64)
-                        .ceil()
-                        .max(2.0) as usize
-                } else {
-                    (clip_timeline_len_sec * out_rate as f64).ceil().max(2.0) as usize
-                };
-                if target_frames > cycle_frames {
-                    segment.reserve((target_frames - cycle_frames) * 2);
-                    for frame in cycle_frames..target_frames {
-                        let src_idx = frame % cycle_frames;
-                        let l = segment[src_idx * 2];
-                        let r = segment[src_idx * 2 + 1];
-                        segment.push(l);
-                        segment.push(r);
-                    }
-                }
-            }
-        }
+        // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方 build_loop_tiled_segment），
+        // 此处 segment 天然覆盖整条 clip 的消费量，参数线阶段按绝对帧读取曲线即可。
 
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
@@ -633,9 +680,6 @@ pub fn render_mixdown_interleaved(
         let seg_frames = segment.len() / 2;
         let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
-
-        // Loop（循环源）：平铺已提前到参数线阶段之前完成（见上方），
-        // 此处 segment 已覆盖整条 clip，混合窗口会自然截断到 clip 长度。
 
         // Mix into output, considering overlap window.
         // The audio segment starts after pre_silence_sec and lasts seg_frames/out_rate.

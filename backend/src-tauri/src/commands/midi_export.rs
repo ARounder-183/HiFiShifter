@@ -784,11 +784,14 @@ fn read_pitch_for_clip(
         pr,
         clip_len,
         clip.loop_enabled,
+        crate::state::clip_source_media_duration_sec(clip),
+        clip.reversed && clip.loop_enabled,
     );
 
-    if clip.reversed && !curve.is_empty() {
-        // 倒放：先按循环回绕铺满，再整体反转（与音频渲染的
-        // "反向读取 + 周期回绕"语义一致）。
+    if clip.reversed && !clip.loop_enabled && !curve.is_empty() {
+        // 非 Loop 倒放：曲线整体反转（既有约定）。
+        // Loop 模式的倒放方向已在 trim_and_resample_midi 内部按
+        // "从 source_end 向下环绕"处理，无需再反转。
         curve.reverse();
     }
 

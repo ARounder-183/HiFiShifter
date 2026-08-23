@@ -837,58 +837,83 @@ export function drawPianoRoll(args: {
         const clipStartPx = Math.round(clipStartSec * pxPerSec);
 
         const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
-        // Loop（循环源）：源窗口完整参与循环（不受 clip 长度钳制）。
         const isLoop = Boolean(entry.loopEnabled);
         const clipSourceSpanSec = isLoop
-            ? Math.max(0, clipSourceEndSec - sourceStartSec)
+            ? Math.max(
+                  0,
+                  Math.min(clipSourceEndSec, sourceDurSec || clipSourceEndSec) - sourceStartSec,
+              )
             : Math.max(0, Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec));
         if (clipSourceSpanSec <= 0) continue;
-        const cycleSec = isLoop ? clipSourceSpanSec / pr : 0;
 
-        // ── 循环瓦片划分（与 WaveformTrackCanvas 一致）──────────────────────
-        // 关键语义：播放回绕发生在源窗口 [start, end) **内部**，
-        // 每个循环周期显示的都是同一份窗口内容 —— 瓦片共用同一源窗口。
-        // 瓦片统一取完整周期长度（保证倒放镜像数学在末尾截断瓦片上仍成立），
+        // ── 循环分段（Loop = 循环原始音频文件，与 WaveformTrackCanvas 一致）──
+        // 语义：正放 src(t)=mod(sourceStart+t·pr, D)、倒放 src(t)=mod(sourceEnd−t·pr, D)，
+        // D = 完整媒体时长。分段 = 头部进入段 + 整文件重复段；
+        // 每段携带自己的源窗口，clipDuration === 源跨度/pr（倒放镜像成立），
         // 超出 clip 长度的部分仅通过绘制矩形裁掉。
-        //
-        // 淡入淡出：每个瓦片都携带完整淡化参数，增益按 clip 局部时间求值
-        //（clipTimeOffsetSec = k·cycle；淡出锚定整条 clip 终点）——
-        // 长于一个周期的淡化横跨多瓦片时包络保持连续；
-        // 非淡化区间的瓦片求值自然为 1，不存在重复施加的问题。
+        // 淡入淡出按 clip 局部时间求值（每段携带完整淡化参数）。
         interface PianoRollTile {
             localStartSec: number;
             durationSec: number;
+            srcWinStart: number;
+            srcWinEnd: number;
         }
+        const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
+        const effSrcEndPiano = Math.min(clipSourceEndSec, mediaDurPiano || clipSourceEndSec);
         const tiles: PianoRollTile[] = [];
         if (!isLoop) {
             tiles.push({
                 localStartSec: 0,
                 durationSec: entry.lengthSec,
+                srcWinStart: sourceStartSec,
+                srcWinEnd: sourceStartSec + clipSourceSpanSec,
+            });
+        } else if (!(mediaDurPiano > 1e-6)) {
+            // 无有效媒体时长：退化为单片近似
+            tiles.push({
+                localStartSec: 0,
+                durationSec: entry.lengthSec,
+                srcWinStart: sourceStartSec,
+                srcWinEnd: sourceStartSec + clipSourceSpanSec,
             });
         } else {
-            const rawCount = Math.ceil((entry.lengthSec - 1e-9) / cycleSec);
-            if (rawCount <= 4096) {
-                const visLocalStart0 = Math.max(0, visStartSec - clipStartSec);
-                const visLocalEnd0 = Math.min(entry.lengthSec, visEndSec - clipStartSec);
-                const firstK = Math.max(
-                    0,
-                    Math.min(rawCount - 1, Math.floor(visLocalStart0 / cycleSec)),
-                );
-                const lastK = Math.max(
-                    firstK,
-                    Math.min(rawCount - 1, Math.ceil(visLocalEnd0 / cycleSec) - 1),
-                );
-                for (let k = firstK; k <= lastK; k += 1) {
+            const anchorFwd = Math.min(Math.max(sourceStartSec, 0), mediaDurPiano);
+            const anchorRev = Math.min(Math.max(effSrcEndPiano, 0), mediaDurPiano);
+            const headDur = (entry.reversed ? anchorRev : mediaDurPiano - anchorFwd) / pr;
+            const bodyDur = mediaDurPiano / pr;
+            const visLocalStart = Math.max(0, visStartSec - clipStartSec);
+            const visLocalEnd = Math.min(entry.lengthSec, visEndSec - clipStartSec);
+            const approxCount = 1 + Math.ceil((entry.lengthSec - headDur - 1e-9) / bodyDur);
+            if (visLocalEnd > visLocalStart && approxCount <= 4096) {
+                if (headDur > 1e-9 && visLocalStart < headDur) {
                     tiles.push({
-                        localStartSec: k * cycleSec,
-                        durationSec: cycleSec,
+                        localStartSec: 0,
+                        durationSec: headDur,
+                        srcWinStart: entry.reversed ? 0 : anchorFwd,
+                        srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
                     });
                 }
+                let segOffset = headDur;
+                for (
+                    let guard = 0;
+                    segOffset < visLocalEnd - 1e-9 && guard < 4096;
+                    guard += 1
+                ) {
+                    tiles.push({
+                        localStartSec: segOffset,
+                        durationSec: bodyDur,
+                        srcWinStart: 0,
+                        srcWinEnd: mediaDurPiano,
+                    });
+                    segOffset += bodyDur;
+                }
             } else {
-                // 周期远小于像素：回退单片近似（包络级别仍然正确）
+                // 退化保护：单片近似
                 tiles.push({
                     localStartSec: 0,
                     durationSec: entry.lengthSec,
+                    srcWinStart: sourceStartSec,
+                    srcWinEnd: sourceStartSec + clipSourceSpanSec,
                 });
             }
             if (tiles.length === 0) continue;
@@ -900,9 +925,9 @@ export function drawPianoRoll(args: {
             const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
             if (visLocalEnd <= visLocalStart) continue;
 
-            // 所有循环瓦片共用同一份源窗口
-            const sourceTimeStart = sourceStartSec;
-            const sourceDuration = Math.max(0.001, clipSourceSpanSec);
+            // 该分段自己的源窗口（头部进入段 / 整文件重复段）
+            const sourceTimeStart = tile.srcWinStart;
+            const sourceDuration = Math.max(0.001, tile.srcWinEnd - tile.srcWinStart);
 
             // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
             const sampleRate = entry.sourceSampleRate || 44100;
@@ -947,21 +972,21 @@ export function drawPianoRoll(args: {
                     ? Number(entry.autoFadeOutSec) || 0
                     : Number(entry.fadeOutSec ?? 0) || 0;
 
-            // 构建渲染参数（以单个循环瓦片为坐标系；
-            // sourceStart + clipDuration·rate === 源窗口终点，倒放镜像成立）
+            // 构建渲染参数（以单个循环分段为坐标系；
+            // sourceStart + clipDuration·rate === 该段源窗口终点，倒放镜像成立）
             const params: WaveformRenderParams = {
                 canvasWidth: w,
                 canvasHeight: h,
                 centerY: h / 2,
                 zeroDbHalfHeight: h / 2,
-                sourceStartSec,
+                sourceStartSec: tile.srcWinStart,
                 clipDuration: tile.durationSec,
                 playbackRate: pr,
                 reversed: entry.reversed,
                 sourceDurationSec: sourceDurSec,
                 volumeGain: Number(entry.gain ?? 1) || 1,
-                // 每个瓦片都携带完整淡化参数（增益按 clip 局部时间求值），
-                // 长于一个周期的淡化横跨多瓦片时包络保持连续。
+                // 每个分段都携带完整淡化参数（增益按 clip 局部时间求值），
+                // 长于一个周期的淡化横跨多段时包络保持连续。
                 fadeInSec: effectiveFadeInPiano,
                 fadeOutSec: effectiveFadeOutPiano,
                 fadeInCurve: entry.fadeInCurve ?? "linear",
