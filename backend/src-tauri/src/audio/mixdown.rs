@@ -538,6 +538,39 @@ pub fn render_mixdown_interleaved(
             segment = time_stretch_interleaved(&segment, 2, out_rate, target_frames, opts.stretch);
         }
 
+        // ── Loop（循环源）：在参数线（pitch edit）之前平铺单循环周期 ──────────
+        //
+        // 语义：循环重复的是**源素材**，参数线作用在整条 clip 的绝对时间帧上。
+        // 必须先把未加参数线的单周期内容铺满整条 clip，再让 pitch-edit /
+        // 合成处理器按绝对帧读取当前曲线 —— 循环节之后的每个周期都是用
+        // 当前参数线重新渲染的新内容，而非复用循环节前已处理的结果。
+        //
+        // 域约定：处理器内部拉伸时输入保持源域（L·out_rate·rate），
+        // 否则输入已是时间线域（L·out_rate）。倒放片段已在上方整体反转，
+        // 平铺同样正确。
+        if clip.loop_enabled {
+            let cycle_frames = segment.len() / 2;
+            if cycle_frames > 0 {
+                let target_frames = if processor_handles_stretch && opts.apply_pitch_edit {
+                    (clip_timeline_len_sec * playback_rate * out_rate as f64)
+                        .ceil()
+                        .max(2.0) as usize
+                } else {
+                    (clip_timeline_len_sec * out_rate as f64).ceil().max(2.0) as usize
+                };
+                if target_frames > cycle_frames {
+                    segment.reserve((target_frames - cycle_frames) * 2);
+                    for frame in cycle_frames..target_frames {
+                        let src_idx = frame % cycle_frames;
+                        let l = segment[src_idx * 2];
+                        let r = segment[src_idx * 2 + 1];
+                        segment.push(l);
+                        segment.push(r);
+                    }
+                }
+            }
+        }
+
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
             let seg_start_sec = clip_start_sec + pre_silence_sec;
@@ -600,6 +633,9 @@ pub fn render_mixdown_interleaved(
         let seg_frames = segment.len() / 2;
         let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
         let pre_silence_frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as usize;
+
+        // Loop（循环源）：平铺已提前到参数线阶段之前完成（见上方），
+        // 此处 segment 已覆盖整条 clip，混合窗口会自然截断到 clip 长度。
 
         // Mix into output, considering overlap window.
         // The audio segment starts after pre_silence_sec and lasts seg_frames/out_rate.

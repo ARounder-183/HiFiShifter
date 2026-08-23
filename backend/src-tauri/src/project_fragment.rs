@@ -599,6 +599,7 @@ mod tests {
             source_end_sec: length_sec,
             playback_rate: 1.0,
             reversed: false,
+            loop_enabled: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),

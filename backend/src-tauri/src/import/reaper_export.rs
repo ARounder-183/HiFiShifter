@@ -177,15 +177,40 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     let (start, end) = source_bounds(clip);
     let source_span = (end - start).max(0.0);
     let required_span = clip.length_sec.max(0.0) * rate;
-    item.is_loop = source_span > 1e-9 && required_span > source_span + 1e-9;
+    // Loop（循环源）属性：显式标志优先；未启用时保留旧启发式
+    // （长度超过源窗口时推断为循环，兼容旧版本导出的行为）。
+    item.is_loop =
+        clip.loop_enabled || (source_span > 1e-9 && required_span > source_span + 1e-9);
 
     let mut source = audio_source(clip, rate, source_span);
-    if !clip.reversed {
+    if clip.reversed {
+        // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
+        default_take.s_offs = 0.0;
+    } else if clip.loop_enabled {
+        // 正向 + Loop：若循环窗口不是"从 0 到媒体末尾"，必须用 SECTION 表达，
+        // 否则 REAPER 会在媒体末尾回绕而非在窗口末尾。
+        // SECTION MODE 0 + STARTPOS/LENGTH 表达正向区间；SOFFS 归零。
+        let duration = clip.duration_sec.filter(|d| d.is_finite() && *d > 0.0);
+        let window_is_whole_file = match duration {
+            Some(dur) => start <= 1e-6 && end >= dur - 1e-3,
+            // 无时长信息时无法判断，退化为 plain source + SOFFS。
+            None => start <= 1e-6,
+        };
+        if window_is_whole_file {
+            source.section_start_sec = None;
+            source.section_length_sec = None;
+            default_take.s_offs = start;
+        } else {
+            source.source_type = "SECTION".to_string();
+            source.section_mode = 0;
+            source.section_start_sec = Some(start);
+            source.section_length_sec = Some(source_span.max(0.0));
+            default_take.s_offs = 0.0;
+        }
+    } else {
         source.section_start_sec = None;
         source.section_length_sec = None;
         default_take.s_offs = start;
-    } else {
-        default_take.s_offs = 0.0;
     }
     default_take.source = Some(source);
     Some(item)
@@ -390,5 +415,56 @@ mod tests {
         }
         let result = build_reaper_clipboard(&timeline, &[clip_id]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn looping_clip_roundtrips_loop_flag_and_section_window() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Looped".to_string()),
+            Some(0.0),
+            Some(6.0),
+            Some("C:/audio/loop.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(4.0);
+            // 循环窗口是媒体的一个子区间：导出必须用 SECTION 表达，
+            // 否则 REAPER 会在媒体末尾而不是窗口末尾回绕。
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 3.0;
+            clip.playback_rate = 1.0;
+            clip.loop_enabled = true;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(item.is_loop, "loop flag must be exported");
+        let source = item.default_take.source.as_ref().unwrap();
+        assert_eq!(source.source_type, "SECTION", "partial window must use SECTION");
+        assert_eq!(source.section_mode, 0);
+        assert!((source.section_start_sec.unwrap() - 1.0).abs() < 1e-9);
+        assert!((source.section_length_sec.unwrap() - 2.0).abs() < 1e-9);
+
+        // 非 Loop 的同窗口 clip 不应推断出 SECTION / LOOP。
+        {
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .expect("clip exists");
+            clip.loop_enabled = false;
+            clip.length_sec = 2.0;
+        }
+        let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let parsed2 = parse_for_test(&export2.bytes);
+        let item2 = &parsed2.tracks[0].items[0];
+        assert!(!item2.is_loop, "short non-loop clip must not infer loop");
+        assert_eq!(
+            item2.default_take.source.as_ref().unwrap().source_type,
+            "WAVE"
+        );
     }
 }

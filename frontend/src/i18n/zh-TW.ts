@@ -348,6 +348,10 @@ export const zhTW = {
     ctx_unreverse: "取消倒放",
     ctx_reverse_selected: "倒放選取項目",
     ctx_unreverse_selected: "取消倒放選取項目",
+    ctx_loop: "循環",
+    ctx_unloop: "取消循環",
+    ctx_loop_selected: "循環選取項目",
+    ctx_unloop_selected: "取消循環選取項目",
     clip_replace_same_source_confirm:
         "專案中還有其他媒體片段使用與目前媒體片段相同的來源檔案路徑。是否同時取代這些同來源媒體片段？",
     recapture_missing_media_title: "重新擷取缺失媒體",
@@ -1044,6 +1048,7 @@ export const zhTW = {
     menu_background_prerender_desc:
         "編輯後立即在背景預渲染。播放時優先使用已渲染內容，無需等待全部渲染完成。",
     options_auto_reload_modified_media: "自動重新載入已修改的媒體檔案",
+    options_loop_new_clips: "為新的音訊片段啟用循環",
 
     benchmark_title: "推理裝置基準測試",
     benchmark_desc:

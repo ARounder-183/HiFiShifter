@@ -34,6 +34,7 @@ import {
     renderWaveform,
     type WaveformRenderParams,
 } from "../../utils/waveformRenderer";
+import { drawLoopMarkers } from "../../utils/loopRender";
 import {
     wfDiag_frameStart,
     wfDiag_frameEnd,
@@ -229,7 +230,6 @@ export const WaveformTrackCanvas = React.memo(
 
                 const clipStartSec = clip.startSec;
                 const clipEndSec = clipStartSec + clip.lengthSec;
-                const clipWidthPx = clip.lengthSec * currentPxPerSec;
 
                 // clip 与视口的交集
                 const visStartSec = Math.max(clipStartSec, currentViewportStartSec);
@@ -245,9 +245,6 @@ export const WaveformTrackCanvas = React.memo(
                 if (visRightPx <= visLeftPx) continue;
                 const pr = Math.max(1e-6, clip.playbackRate);
                 const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
-                // 减 epsilon 吸收浮点噪声，防止 Math.ceil 在整数边界振荡导致帧间闪烁
-                // 详见 docs/plans/2026-03-20-waveform-rendering-refactor.md 波形渲染链路分析
-                const visibleWidthPx = Math.max(1, Math.ceil(visRightPx - visLeftPx - 1e-6));
 
                 // 计算源文件时间范围
                 const sampleRate = clip.sourceSampleRate || 44100;
@@ -259,228 +256,358 @@ export const WaveformTrackCanvas = React.memo(
 
                 const clipSourceEndSec =
                     Number(clip.sourceEndSec ?? clip.durationSec) || clip.durationSec;
-                const clipSourceSpanSec = Math.max(
-                    0,
-                    Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-                );
+                // Loop（循环源）：源窗口完整参与循环（不受 clip 长度钳制）；
+                // 非 Loop 保持旧行为（窗口被 clip 实际长度截断）。
+                const isLoop = Boolean(clip.loopEnabled);
+                const clipSourceSpanSec = isLoop
+                    ? Math.max(0, clipSourceEndSec - sourceStartSec)
+                    : Math.max(
+                          0,
+                          Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
+                      );
                 if (clipSourceSpanSec <= 1e-6) continue;
 
-                // 仅请求当前可见窗口对应的源数据，显著降低每帧处理成本
-                const visClipStartSec = Math.max(0, visStartSec - clipStartSec);
-                const visClipEndSec = Math.min(clip.lengthSec, visEndSec - clipStartSec);
-                const clipSourceWindowStartSec = sourceStartSec;
-                const clipSourceWindowEndSec = sourceStartSec + clipSourceSpanSec;
-                const sourceVisStartSec = clip.reversed
-                    ? clipSourceWindowEndSec - visClipEndSec * pr
-                    : clipSourceWindowStartSec + visClipStartSec * pr;
-                const sourceVisEndSec = clip.reversed
-                    ? clipSourceWindowEndSec - visClipStartSec * pr
-                    : clipSourceWindowStartSec + visClipEndSec * pr;
-                const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
-                const sourceTimeStart = Math.max(
-                    clipSourceWindowStartSec,
-                    Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSec,
-                );
-                const sourceTimeEnd = Math.min(
-                    clipSourceWindowEndSec,
-                    Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSec,
-                );
-                const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
+                const cycleSec = isLoop ? clipSourceSpanSec / pr : 0;
 
-                // ========================================
-                // 从 mipmap 缓存获取 interleaved 数据（不 resample，与 PianoRoll 一致）
-                // ========================================
-                const __tSlice0 = __perfDebug ? performance.now() : 0;
-                const result = waveformMipmapStore.getInterleavedSlice(
-                    clip.sourcePath,
-                    stableLevel,
-                    sourceTimeStart,
-                    sourceDuration,
-                );
-                const __tSlice1 = __perfDebug ? performance.now() : 0;
-
-                if (!result || result.interleaved.length < 4) {
-                    if (!result) wfDiag_dataMissNull();
-                    else wfDiag_dataMissShort();
-                    continue;
+                // ── 循环瓦片划分 ──────────────────────────────────────────────
+                // 关键语义：播放回绕发生在源窗口 [start, end) **内部**
+                //（u = t·rate mod span），因此每个循环周期显示的都是**同一份**
+                // 源窗口内容 —— 瓦片绝不能沿媒体向后"走出"窗口。
+                //
+                // 瓦片统一取完整周期长度（clipDuration = cycle），
+                // 保证 params.sourceStart + clipDuration·rate === 窗口终点，
+                // 倒放镜像数学在任意瓦片（含末尾被截断显示的瓦片）上都成立；
+                // 超出 clip 长度的部分仅通过绘制矩形裁掉，不参与映射。
+                //
+                // 淡入淡出：增益按 clip 局部时间求值（clipTimeOffsetSec = k·cycle，
+                // 淡出锚定整条 clip 终点），因此**每个瓦片都必须携带完整淡化参数**
+                // —— 长于一个周期的淡化会横跨多个瓦片，中间瓦片若不带淡化参数
+                // 就会以全振幅渲染，导致包络"只有一个循环以内"的错误观感。
+                // 非淡化区间的瓦片求值自然为 1，不存在重复施加的问题
+                //（每个像素列仅属于一个瓦片）。
+                interface RenderTile {
+                    /** 瓦片在 clip 内的起始时间（秒），同时是增益求值的 clip 时间偏移 */
+                    localStartSec: number;
+                    /** 瓦片时长（秒）：Loop 下恒等于完整周期 */
+                    durationSec: number;
                 }
-                wfDiag_dataHit();
-
-                // ========================================
-                // 方案2：限制数据量 — 当原始数据点数远超可视像素时，快速预降采样
-                // ========================================
-                const __tDs0 = __perfDebug ? performance.now() : 0;
-                const storeInterleaved = result.interleaved;
-                let renderInterleaved: Float32Array = storeInterleaved;
-                let releasedStoreInterleaved = false;
-                const rawSampleCount = storeInterleaved.length / 2;
-                // 使用与 clip 自身宽度绑定的稳定采样目标，避免滚屏时分桶边界漂移导致抖动
-                const stableTargetWidthPx = Math.max(1, Math.ceil(visibleWidthPx * 2));
-                const targetSamples = stableTargetWidthPx * 2;
-
-                if (rawSampleCount > targetSamples && targetSamples >= 2) {
-                    const w = Math.ceil(targetSamples);
-
-                    // 从局部池获取 Buffer
-                    const downsampled = acquireDownsampleBuffer(w * 2);
-
-                    // 提取线性步长常数，将循环内的 4 次浮点乘除降至 1 次加法
-                    const srcStep = rawSampleCount / w;
-
-                    for (let i = 0; i < w; i++) {
-                        const srcStart = i * srcStep;
-                        const srcEnd = srcStart + srcStep;
-
-                        const iStart = Math.max(0, Math.floor(srcStart));
-                        const iEnd = Math.min(rawSampleCount - 1, Math.ceil(srcEnd));
-
-                        let pMin = Infinity;
-                        let pMax = -Infinity;
-                        for (let j = iStart; j <= iEnd; j++) {
-                            const sMin = storeInterleaved[j * 2];
-                            const sMax = storeInterleaved[j * 2 + 1];
-                            if (sMin < pMin) pMin = sMin;
-                            if (sMax > pMax) pMax = sMax;
+                let tilesToRender: RenderTile[] = [];
+                if (!isLoop) {
+                    tilesToRender.push({
+                        localStartSec: 0,
+                        durationSec: clip.lengthSec,
+                    });
+                } else {
+                    const rawCount = Math.ceil((clip.lengthSec - 1e-9) / cycleSec);
+                    // 退化保护：周期远小于像素时逐瓦片渲染失去意义，
+                    // 回退到单片近似（包络级别仍然正确）。
+                    if (rawCount <= 4096) {
+                        const visLocalStart = Math.max(0, visStartSec - clipStartSec);
+                        const visLocalEnd = Math.min(clip.lengthSec, visEndSec - clipStartSec);
+                        const firstK = Math.max(
+                            0,
+                            Math.min(rawCount - 1, Math.floor(visLocalStart / cycleSec)),
+                        );
+                        const lastK = Math.max(
+                            firstK,
+                            Math.min(rawCount - 1, Math.ceil(visLocalEnd / cycleSec) - 1),
+                        );
+                        for (let k = firstK; k <= lastK; k += 1) {
+                            tilesToRender.push({
+                                localStartSec: k * cycleSec,
+                                durationSec: cycleSec,
+                            });
                         }
-                        downsampled[i * 2] = pMin === Infinity ? 0 : pMin;
-                        downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
+                    } else {
+                        tilesToRender.push({
+                            localStartSec: 0,
+                            durationSec: clip.lengthSec,
+                        });
+                    }
+                    if (tilesToRender.length === 0) continue;
+                }
+
+                const sourcePadSec = Math.max(0.005, (2 / Math.max(1, currentPxPerSec)) * pr);
+
+                for (const tile of tilesToRender) {
+                    const tileLocalEndSec = tile.localStartSec + tile.durationSec;
+                    // 该瓦片与可见区间、clip 长度的交集（clip 局部时间）
+                    const visClipStartSec = Math.max(
+                        tile.localStartSec,
+                        visStartSec - clipStartSec,
+                    );
+                    const visClipEndSec = Math.min(
+                        tileLocalEndSec,
+                        visEndSec - clipStartSec,
+                    );
+                    if (visClipEndSec <= visClipStartSec) continue;
+
+                    // 所有循环瓦片共用同一份源窗口（回绕语义，见上方注释）
+                    const tileSpanStartSec = sourceStartSec;
+                    const tileSpanEndSec = clipSourceEndSec;
+
+                    // 仅请求当前可见部分对应的源数据，显著降低每帧处理成本
+                    const sourceVisStartSec = clip.reversed
+                        ? tileSpanEndSec - (visClipEndSec - tile.localStartSec) * pr
+                        : tileSpanStartSec + (visClipStartSec - tile.localStartSec) * pr;
+                    const sourceVisEndSec = clip.reversed
+                        ? tileSpanEndSec - (visClipStartSec - tile.localStartSec) * pr
+                        : tileSpanStartSec + (visClipEndSec - tile.localStartSec) * pr;
+                    const sourceTimeStart = Math.max(
+                        tileSpanStartSec,
+                        Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSec,
+                    );
+                    const sourceTimeEnd = Math.min(
+                        tileSpanEndSec,
+                        Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSec,
+                    );
+                    const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
+
+                    // ========================================
+                    // 从 mipmap 缓存获取 interleaved 数据（不 resample，与 PianoRoll 一致）
+                    // ========================================
+                    const __tSlice0 = __perfDebug ? performance.now() : 0;
+                    const result = waveformMipmapStore.getInterleavedSlice(
+                        clip.sourcePath,
+                        stableLevel,
+                        sourceTimeStart,
+                        sourceDuration,
+                    );
+                    const __tSlice1 = __perfDebug ? performance.now() : 0;
+
+                    if (!result || result.interleaved.length < 4) {
+                        if (!result) wfDiag_dataMissNull();
+                        else wfDiag_dataMissShort();
+                        continue;
+                    }
+                    wfDiag_dataHit();
+
+                    // 该瓦片可见部分的像素宽度（用于稳定的降采样目标）
+                    const tileVisibleWidthPx = Math.max(
+                        1,
+                        Math.ceil(
+                            (visClipEndSec - visClipStartSec) * currentPxPerSec - 1e-6,
+                        ),
+                    );
+
+                    // ========================================
+                    // 方案2：限制数据量 — 当原始数据点数远超可视像素时，快速预降采样
+                    // ========================================
+                    const __tDs0 = __perfDebug ? performance.now() : 0;
+                    const storeInterleaved = result.interleaved;
+                    let renderInterleaved: Float32Array = storeInterleaved;
+                    let releasedStoreInterleaved = false;
+                    const rawSampleCount = storeInterleaved.length / 2;
+                    // 使用与可见宽度绑定的稳定采样目标，避免滚屏时分桶边界漂移导致抖动
+                    const stableTargetWidthPx = Math.max(1, Math.ceil(tileVisibleWidthPx * 2));
+                    const targetSamples = stableTargetWidthPx * 2;
+
+                    if (rawSampleCount > targetSamples && targetSamples >= 2) {
+                        const w = Math.ceil(targetSamples);
+
+                        // 从局部池获取 Buffer
+                        const downsampled = acquireDownsampleBuffer(w * 2);
+
+                        // 提取线性步长常数，将循环内的 4 次浮点乘除降至 1 次加法
+                        const srcStep = rawSampleCount / w;
+
+                        for (let i = 0; i < w; i++) {
+                            const srcStart = i * srcStep;
+                            const srcEnd = srcStart + srcStep;
+
+                            const iStart = Math.max(0, Math.floor(srcStart));
+                            const iEnd = Math.min(rawSampleCount - 1, Math.ceil(srcEnd));
+
+                            let pMin = Infinity;
+                            let pMax = -Infinity;
+                            for (let j = iStart; j <= iEnd; j++) {
+                                const sMin = storeInterleaved[j * 2];
+                                const sMax = storeInterleaved[j * 2 + 1];
+                                if (sMin < pMin) pMin = sMin;
+                                if (sMax > pMax) pMax = sMax;
+                            }
+                            downsampled[i * 2] = pMin === Infinity ? 0 : pMin;
+                            downsampled[i * 2 + 1] = pMax === -Infinity ? 0 : pMax;
+                        }
+
+                        waveformMipmapStore.releaseInterleaved(storeInterleaved);
+                        releasedStoreInterleaved = true;
+                        renderInterleaved = downsampled;
                     }
 
-                    waveformMipmapStore.releaseInterleaved(storeInterleaved);
-                    releasedStoreInterleaved = true;
-                    renderInterleaved = downsampled;
-                }
+                    // 偏移量改为相对于主屏幕（按瓦片起点校正），而不是裁剪视口；
+                    // 量化到半像素粒度，消除大浮点数相减导致的子像素漂移。
+                    const tileStartPx = clipStartPx + tile.localStartSec * currentPxPerSec;
+                    const clipPixelOffset =
+                        Math.round((viewportStartPx - tileStartPx) * 2) / 2;
 
-                // --- 从这里开始替换 ---
+                    // 瓦片在主 Canvas 上的可见像素范围
+                    const tileVisLeftPx = Math.max(
+                        0,
+                        (clipStartSec + visClipStartSec) * currentPxPerSec - viewportStartPx,
+                    );
+                    const tileVisRightPx = Math.min(
+                        displayW,
+                        (clipStartSec + visClipEndSec) * currentPxPerSec - viewportStartPx,
+                    );
+                    if (tileVisRightPx <= tileVisLeftPx) {
+                        if (!releasedStoreInterleaved) {
+                            waveformMipmapStore.releaseInterleaved(storeInterleaved);
+                        }
+                        continue;
+                    }
 
-                // 偏移量改为相对于主屏幕，而不是裁剪视口
-                // 量化到半像素粒度，消除大浮点数相减导致的子像素漂移
-                const clipPixelOffset = Math.round((viewportStartPx - clipStartPx) * 2) / 2;
-
-                // 构建渲染参数
-                const params: WaveformRenderParams = {
-                    canvasWidth: displayW,
-                    canvasHeight: displayH,
-                    centerY: displayH / 2,
-                    zeroDbHalfHeight: displayH / 2,
-                    sourceStartSec,
-                    clipDuration: clip.lengthSec,
-                    playbackRate: Number(clip.playbackRate ?? 1) || 1,
-                    reversed: Boolean(clip.reversed),
-                    sourceDurationSec: clip.durationSec,
-                    volumeGain: Number(clip.gain ?? 1) || 1,
-                    // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
-                    fadeInSec:
+                    // 构建渲染参数（以单个循环瓦片为坐标系）
+                    const effectiveFadeInSec =
                         Number(clip.autoFadeInSec ?? 0) > 0
                             ? Number(clip.autoFadeInSec)
-                            : Number(clip.fadeInSec ?? 0) || 0,
-                    fadeOutSec:
+                            : Number(clip.fadeInSec ?? 0) || 0;
+                    const effectiveFadeOutSec =
                         Number(clip.autoFadeOutSec ?? 0) > 0
                             ? Number(clip.autoFadeOutSec)
-                            : Number(clip.fadeOutSec ?? 0) || 0,
-                    fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
-                    fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
-                    dataStartSec: result.dataStartSec,
-                    dataDurationSec: result.dataDurationSec,
-                    clipPixelOffset, // 相对于主 Canvas 的偏移
-                    clipTotalWidthPx: Math.max(1, clipWidthPx),
-                };
+                            : Number(clip.fadeOutSec ?? 0) || 0;
+                    const params: WaveformRenderParams = {
+                        canvasWidth: displayW,
+                        canvasHeight: displayH,
+                        centerY: displayH / 2,
+                        zeroDbHalfHeight: displayH / 2,
+                        sourceStartSec: tileSpanStartSec,
+                        clipDuration: tile.durationSec,
+                        playbackRate: Number(clip.playbackRate ?? 1) || 1,
+                        reversed: Boolean(clip.reversed),
+                        sourceDurationSec: clip.durationSec,
+                        volumeGain: Number(clip.gain ?? 1) || 1,
+                        // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
+                        // 每个瓦片都携带完整淡化参数，增益按 clip 局部时间求值
+                        //（clipTimeOffsetSec = k·cycle；淡出锚定整条 clip 终点）
+                        // —— 长于一个周期的淡化横跨多瓦片时包络保持连续。
+                        fadeInSec: effectiveFadeInSec,
+                        fadeOutSec: effectiveFadeOutSec,
+                        fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
+                        fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
+                        dataStartSec: result.dataStartSec,
+                        dataDurationSec: result.dataDurationSec,
+                        clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
+                        clipTotalDurationSec: clip.lengthSec,
+                        clipPixelOffset, // 相对于主 Canvas 的偏移（已按瓦片校正）
+                        clipTotalWidthPx: Math.max(1, tile.durationSec * currentPxPerSec),
+                    };
 
-                // 应用增益（音量 + 淡入淡出）
-                const peaksForRender = renderInterleaved;
+                    // 应用增益（音量 + 淡入淡出）
+                    const peaksForRender = renderInterleaved;
 
-                const __tDs1 = __perfDebug ? performance.now() : 0;
-                const __tGain0 = __perfDebug ? performance.now() : 0;
-                const withGains = applyGainsToPeaks(peaksForRender, params);
-                const __tGain1 = __perfDebug ? performance.now() : 0;
+                    const __tDs1 = __perfDebug ? performance.now() : 0;
+                    const __tGain0 = __perfDebug ? performance.now() : 0;
+                    const withGains = applyGainsToPeaks(peaksForRender, params);
+                    const __tGain1 = __perfDebug ? performance.now() : 0;
 
-                // ========================================
-                // 废弃离屏 Canvas
-                // ========================================
-                const __tRender0 = __perfDebug ? performance.now() : 0;
+                    // ========================================
+                    // 废弃离屏 Canvas
+                    // ========================================
+                    const __tRender0 = __perfDebug ? performance.now() : 0;
 
-                const baseAlpha = clip.muted ? 0.4 : 1.0;
-                const leadingOverlapSec = Math.max(
-                    0,
-                    Math.min(
-                        clip.lengthSec,
-                        Number(currentLeadingOverlapSecByClipId[clip.id] ?? 0) || 0,
-                    ),
-                );
-                const leadingOverlapRightPx =
-                    (clipStartSec + leadingOverlapSec) * currentPxPerSec - viewportStartPx;
-                const leadingOverlapVisibleRight =
-                    leadingOverlapSec > 1e-9
-                        ? Math.min(visRightPx, Math.max(visLeftPx, leadingOverlapRightPx))
-                        : visLeftPx;
-
-                const drawSegment = (
-                    segmentLeftPx: number,
-                    segmentRightPx: number,
-                    alpha: number,
-                ) => {
-                    if (segmentRightPx - segmentLeftPx <= 1e-6) return;
-                    ctx.save();
-                    ctx.beginPath();
-                    // 严格裁剪在片段实际可见范围内，防止越界绘制到其他片段上
-                    ctx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, displayH);
-                    ctx.clip();
-                    ctx.globalAlpha = alpha;
-                    renderWaveform(
-                        ctx,
-                        withGains,
-                        params,
-                        currentStrokeColor,
-                        currentStrokeWidth,
-                        "line",
+                    const baseAlpha = clip.muted ? 0.4 : 1.0;
+                    // 前导重叠可视化仅作用于第一个瓦片（重叠区只在 clip 起始处）。
+                    const leadingOverlapSec = Math.max(
+                        0,
+                        Math.min(
+                            clip.lengthSec,
+                            Number(currentLeadingOverlapSecByClipId[clip.id] ?? 0) || 0,
+                        ),
                     );
-                    ctx.restore();
-                };
+                    const leadingOverlapRightPx =
+                        (clipStartSec + leadingOverlapSec) * currentPxPerSec - viewportStartPx;
+                    const leadingOverlapVisibleRight =
+                        leadingOverlapSec > 1e-9 && tile.localStartSec <= leadingOverlapSec
+                            ? Math.min(tileVisRightPx, Math.max(tileVisLeftPx, leadingOverlapRightPx))
+                            : tileVisLeftPx;
 
-                if (leadingOverlapVisibleRight > visLeftPx + 1e-6) {
-                    drawSegment(
-                        visLeftPx,
-                        leadingOverlapVisibleRight,
-                        baseAlpha * LEADING_OVERLAP_ALPHA,
-                    );
-                    drawSegment(leadingOverlapVisibleRight, visRightPx, baseAlpha);
-                } else {
-                    drawSegment(visLeftPx, visRightPx, baseAlpha);
+                    const drawSegment = (
+                        segmentLeftPx: number,
+                        segmentRightPx: number,
+                        alpha: number,
+                    ) => {
+                        if (segmentRightPx - segmentLeftPx <= 1e-6) return;
+                        ctx.save();
+                        ctx.beginPath();
+                        // 严格裁剪在片段实际可见范围内，防止越界绘制到其他片段上
+                        ctx.rect(segmentLeftPx, 0, segmentRightPx - segmentLeftPx, displayH);
+                        ctx.clip();
+                        ctx.globalAlpha = alpha;
+                        renderWaveform(
+                            ctx,
+                            withGains,
+                            params,
+                            currentStrokeColor,
+                            currentStrokeWidth,
+                            "line",
+                        );
+                        ctx.restore();
+                    };
+
+                    if (leadingOverlapVisibleRight > tileVisLeftPx + 1e-6) {
+                        drawSegment(
+                            tileVisLeftPx,
+                            leadingOverlapVisibleRight,
+                            baseAlpha * LEADING_OVERLAP_ALPHA,
+                        );
+                        drawSegment(leadingOverlapVisibleRight, tileVisRightPx, baseAlpha);
+                    } else {
+                        drawSegment(tileVisLeftPx, tileVisRightPx, baseAlpha);
+                    }
+
+                    const __tRender1 = __perfDebug ? performance.now() : 0;
+                    const __tDraw0 = 0; // 已废弃 drawImage
+                    const __tDraw1 = 0;
+
+                    // 1. 归还增益 buffer
+                    if (withGains !== renderInterleaved) {
+                        releaseGainBuffer(withGains);
+                    }
+
+                    // 2. 归还预降采样产生的 buffer（如果有）
+                    if (renderInterleaved !== storeInterleaved) {
+                        releaseDownsampleBuffer(renderInterleaved);
+                    }
+
+                    // 3. 归还 store 复用池 buffer
+                    if (!releasedStoreInterleaved) {
+                        waveformMipmapStore.releaseInterleaved(storeInterleaved);
+                    }
+
+                    // 收集诊断数据
+                    if (__perfDebug) {
+                        const fileName = clip.sourcePath?.split(/[/\\]/).pop() ?? "?";
+                        __clipTimings.push({
+                            name: fileName,
+                            sliceMs: __tSlice1 - __tSlice0,
+                            downsampleMs: __tDs1 - __tDs0,
+                            gainMs: __tGain1 - __tGain0,
+                            renderMs: __tRender1 - __tRender0,
+                            drawImageMs: __tDraw1 - __tDraw0,
+                            interleavedLen: storeInterleaved.length,
+                            visibleWidthPx: tileVisibleWidthPx,
+                            downsampledTo: renderInterleaved.length / 2,
+                        });
+                    }
                 }
 
-                const __tRender1 = __perfDebug ? performance.now() : 0;
-                const __tDraw0 = 0; // 已废弃 drawImage
-                const __tDraw1 = 0;
-
-                // 1. 归还增益 buffer
-                if (withGains !== renderInterleaved) {
-                    releaseGainBuffer(withGains);
-                }
-
-                // 2. 归还预降采样产生的 buffer（如果有）
-                if (renderInterleaved !== storeInterleaved) {
-                    releaseDownsampleBuffer(renderInterleaved);
-                }
-
-                // 3. 归还 store 复用池 buffer
-                if (!releasedStoreInterleaved) {
-                    waveformMipmapStore.releaseInterleaved(storeInterleaved);
-                }
-
-                // 收集诊断数据
-                if (__perfDebug) {
-                    const fileName = clip.sourcePath?.split(/[/\\]/).pop() ?? "?";
-                    __clipTimings.push({
-                        name: fileName,
-                        sliceMs: __tSlice1 - __tSlice0,
-                        downsampleMs: __tDs1 - __tDs0,
-                        gainMs: __tGain1 - __tGain0,
-                        renderMs: __tRender1 - __tRender0,
-                        drawImageMs: __tDraw1 - __tDraw0,
-                        interleavedLen: storeInterleaved.length,
-                        visibleWidthPx,
-                        downsampledTo: renderInterleaved.length / 2,
-                    });
+                // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
+                if (isLoop) {
+                    const markers: number[] = [];
+                    for (
+                        let markerT = cycleSec;
+                        markerT < clip.lengthSec - 1e-6;
+                        markerT += cycleSec
+                    ) {
+                        const mx = (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                        if (mx < -8 || mx > displayW + 8) continue;
+                        markers.push(Math.round(mx * 2) / 2);
+                        if (markers.length >= 4096) break;
+                    }
+                    if (markers.length > 0) {
+                        drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
+                    }
                 }
             }
 

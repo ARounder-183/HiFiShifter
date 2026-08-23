@@ -355,8 +355,10 @@ pub(crate) fn build_snapshot(
             continue;
         }
 
-        // Timeline clips never loop/repeat; out-of-range source time is treated as silence.
-        let mut repeat = false;
+        // Loop（循环源）：超出 [src_start, src_end) 的播放时间按窗口周期回绕
+        // （见 mix.rs sample_clip_pcm 的 repeat 分支）。拉伸 / Formant 分支换入的
+        // 预处理缓冲恰好覆盖一个循环周期，回绕语义不变，因此这里不重置 repeat。
+        let repeat = clip.loop_enabled;
 
         // Negative trimStart means the clip starts before the source: render leading silence.
         // trim_* are expressed in SOURCE seconds (i.e. they already incorporate playbackRate in UI).
@@ -415,7 +417,6 @@ pub(crate) fn build_snapshot(
                     };
                     src_start = 0;
                     src_end = src_render.frames as u64;
-                    repeat = false;
                     if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {
                         let target_frames =
                             ((src_render.frames as f64) / playback_rate).round().max(2.0) as usize;
@@ -457,7 +458,8 @@ pub(crate) fn build_snapshot(
                     src_start = 0;
                     src_end = src_render.frames as u64;
                     playback_rate_render = 1.0;
-                    repeat = false;
+                    // Loop（循环源）：拉伸缓冲恰好覆盖一个循环周期，
+                    // 保留 repeat 让超出部分按缓冲长度回绕。
                 }
             }
         }

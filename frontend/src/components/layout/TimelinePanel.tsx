@@ -2119,6 +2119,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           );
                                       }
                                   }}
+                                  onToggleLoop={(ids, loopEnabled) => {
+                                      for (const id of ids) {
+                                          void dispatch(
+                                              setClipStateRemote({
+                                                  clipId: id,
+                                                  loopEnabled,
+                                              }),
+                                          );
+                                      }
+                                  }}
                               />
                           );
                       })()

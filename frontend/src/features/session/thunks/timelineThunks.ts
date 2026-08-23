@@ -263,6 +263,7 @@ export const setClipStateRemote = createAsyncThunk(
         sourceEndSec?: number;
         playbackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;

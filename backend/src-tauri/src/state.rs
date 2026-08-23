@@ -46,6 +46,34 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// 把区间 `[start, end)` 按模 `modulus` 的回绕边界拆分成若干不跨界的子区间，
+/// 每个子区间以"周期内相位"坐标返回（值域 `[0, modulus)`）。
+///
+/// 用于 Loop（循环源）把超出一个循环周期的内容（如 MIDI 音符时间）
+/// 回绕映射回源窗口，并在回绕边界处拆分跨越边界的音符。
+fn split_range_into_periods(start: f64, end: f64, modulus: f64) -> Vec<(f64, f64)> {
+    let mut segs: Vec<(f64, f64)> = Vec::new();
+    if !(end > start) || !(modulus > 1e-9) || !start.is_finite() || !end.is_finite() {
+        return segs;
+    }
+    let mut cursor = start;
+    let mut guard = 0usize;
+    while cursor < end - 1e-9 && guard < 1_000_000 {
+        guard += 1;
+        let phase = cursor.rem_euclid(modulus);
+        let dist_to_boundary = modulus - phase;
+        let seg_end = (cursor + dist_to_boundary).min(end);
+        if seg_end - cursor > 1e-9 {
+            segs.push((phase, phase + (seg_end - cursor)));
+        }
+        cursor = seg_end;
+        if dist_to_boundary <= 1e-12 {
+            break;
+        }
+    }
+    segs
+}
+
 fn is_default_frame_period(value: &f64) -> bool {
     *value == default_frame_period_ms()
 }
@@ -315,6 +343,8 @@ pub struct CreateClipTemplatePayload {
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    #[serde(default)]
+    pub loop_enabled: Option<bool>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -430,6 +460,17 @@ pub struct Clip {
     pub playback_rate: f32,
     #[serde(default)]
     pub reversed: bool,
+    /// Loop（循环源）属性，对齐 REAPER / VEGAS 的 item LOOP 语义：
+    ///
+    /// - 启用后，剪辑在进行延伸/裁短等操作时不受源媒体长度限制：
+    ///   播放位置超出循环区间 `[source_start_sec, source_end_sec)` 时按周期回绕，
+    ///   自由向前/向后产生循环内容；
+    /// - 循环周期 = `(source_end_sec - source_start_sec).abs() / |playback_rate|` 秒
+    ///   （时间线时间），倒放时同样成立（内容反向回绕）；
+    /// - 该字段随工程文件持久化；旧版本工程缺失时按"为新的音频块启用循环"
+    ///   设置迁移（见 open_project 的 v4 迁移逻辑）。
+    #[serde(default)]
+    pub loop_enabled: bool,
     #[serde(default)]
     pub fade_in_sec: f64,
     #[serde(default)]
@@ -493,6 +534,25 @@ impl Clip {
             self.fade_out_sec
         }
     }
+
+    /// Loop（循环源）的循环周期（时间线时间，秒）：
+    /// `|source_end_sec - source_start_sec| / |playback_rate|`。
+    /// 未启用 Loop、速率非法或窗口退化时返回 `None`。
+    #[allow(dead_code)]
+    pub fn loop_cycle_timeline_sec(&self) -> Option<f64> {
+        if !self.loop_enabled {
+            return None;
+        }
+        let span = (self.source_end_sec - self.source_start_sec).abs();
+        if span <= 1e-9 {
+            return None;
+        }
+        let rate = self.playback_rate as f64;
+        if !rate.is_finite() || rate.abs() < 1e-6 {
+            return None;
+        }
+        Some(span / rate.abs())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -507,6 +567,8 @@ pub struct ClipStatePatch {
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    #[serde(default)]
+    pub loop_enabled: Option<bool>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -2084,6 +2146,7 @@ mod tests {
                     source_end_sec: Some(1.8),
                     playback_rate: Some(0.8),
                     reversed: Some(true),
+                    loop_enabled: None,
                     fade_in_sec: Some(0.15),
                     fade_out_sec: Some(0.25),
                     fade_in_curve: Some("sine".into()),
@@ -2107,6 +2170,7 @@ mod tests {
                     source_end_sec: Some(1.5),
                     playback_rate: Some(1.0),
                     reversed: Some(false),
+                    loop_enabled: None,
                     fade_in_sec: Some(0.05),
                     fade_out_sec: Some(0.1),
                     fade_in_curve: Some("linear".into()),
@@ -2191,6 +2255,7 @@ mod tests {
                 source_end_sec: Some(0.9),
                 playback_rate: Some(0.8),
                 reversed: Some(true),
+                loop_enabled: None,
                 fade_in_sec: Some(0.1),
                 fade_out_sec: Some(0.2),
                 fade_in_curve: Some("linear".into()),
@@ -2596,6 +2661,103 @@ mod tests {
     }
 
     #[test]
+    fn split_clip_loop_keeps_window_and_wraps_right_piece() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("Looped".into()),
+            Some(0.0),
+            Some(6.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 3.0;
+            clip.playback_rate = 1.0;
+            clip.loop_enabled = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: false,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.0,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 2.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 左段：保留完整循环窗口，仅缩短长度。
+        assert!((left.length_sec - 2.5).abs() < 1e-9);
+        assert!((left.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!(left.loop_enabled);
+
+        // 右段：从切割点处的回绕位置继续（左段消耗 2.5s → 窗口内偏移 0.5s），
+        // 窗口变为 [1.5, 3.0]，并继承 Loop 属性。
+        assert!((right.start_sec - 2.5).abs() < 1e-9);
+        assert!((right.length_sec - 3.5).abs() < 1e-9);
+        assert!(right.loop_enabled);
+        assert!((right.source_start_sec - 1.5).abs() < 1e-9);
+        assert!((right.source_end_sec - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_transition_extend_overlap_allows_loop_growth_beyond_media() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 媒体只有 2 秒（duration 未设置时 source_file_duration_sec 回退
+            // 到 source_end），窗口即整个媒体；Loop 下延伸不再受其限制。
+            clip.source_start_sec = 0.0;
+            clip.source_end_sec = 2.0;
+            clip.duration_sec = Some(2.0);
+            clip.loop_enabled = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.5,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 1.0, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        // 左段向右延伸 0.5s：源窗口保持不变（循环回绕填充）。
+        assert!((left.length_sec - 1.5).abs() < 1e-9);
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        // 右段向左延伸 0.5s：同样不修改源窗口。
+        assert!((right.start_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+        assert!((right.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((right.source_end_sec - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn split_clip_with_transition_percent_uses_combined_clip_length() {
         let mut tl = TimelineState::default();
         let track_id = tl.add_track(Some("Track".to_string()), None, None);
@@ -2956,6 +3118,7 @@ impl TimelineState {
                 source_end_sec: Some(c.source_end_sec),
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
+                loop_enabled: c.loop_enabled,
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -3029,6 +3192,7 @@ impl TimelineState {
                 source_end_sec: Some(c.source_end_sec),
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
+                loop_enabled: c.loop_enabled,
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -3733,6 +3897,9 @@ impl TimelineState {
             source_end_sec: computed_duration_sec.unwrap_or(ls),
             playback_rate: 1.0,
             reversed: false,
+            // 新 Clip 的 Loop 属性跟随"为新的音频块启用循环"设置
+            //（导入/录音/MIDI-as-clip/add_clip 等所有创建路径统一生效）。
+            loop_enabled: crate::config::loop_new_clips_default(),
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
@@ -3996,6 +4163,7 @@ impl TimelineState {
                 source_end_sec,
                 playback_rate,
                 reversed,
+                loop_enabled: None,
                 fade_in_sec,
                 fade_out_sec,
                 fade_in_curve: None,
@@ -4041,6 +4209,9 @@ impl TimelineState {
             }
             if let Some(v) = patch.reversed {
                 c.reversed = v;
+            }
+            if let Some(v) = patch.loop_enabled {
+                c.loop_enabled = v;
             }
             if let Some(v) = patch.fade_in_sec {
                 c.fade_in_sec = v.max(0.0);
@@ -4130,6 +4301,7 @@ impl TimelineState {
                     source_end_sec: template.source_end_sec,
                     playback_rate: template.playback_rate,
                     reversed: template.reversed,
+                    loop_enabled: template.loop_enabled,
                     fade_in_sec: template.fade_in_sec,
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
@@ -4399,12 +4571,16 @@ impl TimelineState {
 
         self.clips[idx].length_sec = left_len;
         // 更新左 clip 的源区间：
+        // - Loop（循环源）：左右两段都保留完整循环窗口 —— 左段仅缩短 length，
+        //   内容仍按窗口周期回绕；切割点之后的回绕位置由右段自己的窗口表达。
         // - 正放：左段吃掉前半段，收紧 source_end
         // - 倒放：左段吃掉后半段，收紧 source_start
         {
             let orig_src_start = self.clips[idx].source_start_sec;
             let orig_src_end = self.clips[idx].source_end_sec;
-            if self.clips[idx].reversed {
+            if self.clips[idx].loop_enabled {
+                // 保留窗口不变（见上方注释）。
+            } else if self.clips[idx].reversed {
                 let new_src_start = orig_src_end - left_len * left_rate;
                 self.clips[idx].source_start_sec =
                     new_src_start.clamp(orig_src_start, orig_src_end);
@@ -4441,7 +4617,30 @@ impl TimelineState {
         } else {
             1.0
         };
-        if right.reversed {
+        if right.loop_enabled {
+            // Loop（循环源）：右段从"切割点处的回绕源位置"继续播放，
+            // 并以剩余窗口作为自己的循环区间（对齐 REAPER 切割循环项的行为）。
+            let span = (right.source_end_sec - right.source_start_sec).abs();
+            if span > 1e-9 {
+                let mut u = (left_len * rate) % span;
+                if u < 0.0 {
+                    u += span;
+                }
+                if right.reversed {
+                    // 倒放：内容自 source_end 向下回绕，切割点位置 = end - u。
+                    right.source_end_sec = (right.source_end_sec - u).max(right.source_start_sec);
+                    if right.source_end_sec - right.source_start_sec <= 1e-9 {
+                        // 恰好切在回绕点上：恢复完整窗口，避免零宽区间。
+                        right.source_end_sec = right.source_start_sec + span;
+                    }
+                } else {
+                    right.source_start_sec = (right.source_start_sec + u).min(right.source_end_sec);
+                    if right.source_end_sec - right.source_start_sec <= 1e-9 {
+                        right.source_start_sec = right.source_end_sec - span;
+                    }
+                }
+            }
+        } else if right.reversed {
             if right.source_end_sec.is_finite() {
                 right.source_end_sec =
                     (right.source_end_sec - left_len * rate).max(right.source_start_sec);
@@ -4568,7 +4767,10 @@ impl TimelineState {
                 };
                 let left_source_avail_sec = {
                     let left = &self.clips[left_idx];
-                    if left.reversed {
+                    if left.loop_enabled {
+                        // Loop（循环源）：延长部分由循环内容回绕填充，不受源长度限制。
+                        f64::INFINITY
+                    } else if left.reversed {
                         left.source_start_sec.max(0.0) / left_rate
                     } else {
                         (source_end_limit - left.source_end_sec).max(0.0) / left_rate
@@ -4586,7 +4788,9 @@ impl TimelineState {
                 };
                 let right_source_avail_sec = {
                     let right = &self.clips[right_idx];
-                    if right.reversed {
+                    if right.loop_enabled {
+                        f64::INFINITY
+                    } else if right.reversed {
                         (source_end_limit - right.source_end_sec).max(0.0) / right_rate
                     } else {
                         right.source_start_sec.max(0.0) / right_rate
@@ -4604,15 +4808,18 @@ impl TimelineState {
 
                 // 前 clip 末尾向后延长 left_grow，同时扩展 source 范围，
                 // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
+                // Loop（循环源）clip：延长部分由循环回绕内容填充，不改源窗口。
                 {
                     let left = &mut self.clips[left_idx];
                     left.length_sec += left_grow;
-                    if left.reversed {
-                        left.source_start_sec =
-                            (left.source_start_sec - left_grow * left_rate).max(0.0);
-                    } else {
-                        left.source_end_sec =
-                            (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                    if !left.loop_enabled {
+                        if left.reversed {
+                            left.source_start_sec =
+                                (left.source_start_sec - left_grow * left_rate).max(0.0);
+                        } else {
+                            left.source_end_sec =
+                                (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                        }
                     }
                 }
 
@@ -4621,12 +4828,14 @@ impl TimelineState {
                     let right = &mut self.clips[right_idx];
                     right.start_sec = (right.start_sec - right_grow).max(0.0);
                     right.length_sec += right_grow;
-                    if right.reversed {
-                        right.source_end_sec =
-                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
-                    } else {
-                        right.source_start_sec =
-                            (right.source_start_sec - right_grow * right_rate).max(0.0);
+                    if !right.loop_enabled {
+                        if right.reversed {
+                            right.source_end_sec =
+                                (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
+                        } else {
+                            right.source_start_sec =
+                                (right.source_start_sec - right_grow * right_rate).max(0.0);
+                        }
                     }
                 }
 
@@ -4871,6 +5080,9 @@ impl TimelineState {
                 glued.source_end_sec = rendered_duration_sec;
                 glued.playback_rate = 1.0;
                 glued.reversed = false;
+                // 胶合产物是完整烘焙的独立源文件（覆盖原循环内容），
+                // Loop 属性不再有意义，重置为关闭。
+                glued.loop_enabled = false;
                 glued.gain = 1.0;
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
@@ -5028,6 +5240,7 @@ impl TimelineState {
             length_sec: f64,
             playback_rate: f32,
             reversed: bool,
+            loop_enabled: bool,
             src_start: f64,
             src_end: f64,
             original_midi: Option<Vec<MidiNoteEvent>>,
@@ -5053,6 +5266,7 @@ impl TimelineState {
                     length_sec: clip.length_sec,
                     playback_rate: clip.playback_rate,
                     reversed: clip.reversed,
+                    loop_enabled: clip.loop_enabled,
                     src_start: clip.source_start_sec.max(0.0),
                     src_end,
                     original_midi: clip.midi_note_data.clone(),
@@ -5070,6 +5284,7 @@ impl TimelineState {
                 info.reversed,
                 info.src_start,
                 info.src_end,
+                info.loop_enabled,
             );
 
             // Step 2: 同步 params 并读取 pitch_edit
@@ -5108,25 +5323,25 @@ impl TimelineState {
                 .collect();
 
             // Step 4: 转换为 MIDI 音符事件
-            let mut midi_notes =
-                Self::pitch_curve_to_midi_notes(&merged, fp_sec, info.length_sec);
+            let midi_notes = Self::pitch_curve_to_midi_notes(&merged, fp_sec, info.length_sec);
 
-            // Step 5: 根据 stretch / reverse 重映射音符时间
-            Self::remap_midi_note_times(
-                &mut midi_notes,
+            // Step 5: 根据 stretch / reverse / loop 重映射音符时间
+            let remapped = Self::remap_midi_note_times(
+                midi_notes,
                 info.length_sec,
                 info.src_start,
                 info.src_end,
                 info.playback_rate,
                 info.reversed,
+                info.loop_enabled,
             );
 
             // Step 6: 写回 clip，同时重新计算 pitch_range
             if let Some(clip) = self.clips.iter_mut().find(|c| c.id == info.clip_id) {
-                let min_note = midi_notes
+                let min_note = remapped
                     .iter()
                     .fold(127.0f32, |m, n| m.min(n.note));
-                let max_note = midi_notes
+                let max_note = remapped
                     .iter()
                     .fold(0.0f32, |m, n| m.max(n.note));
                 let padding = 2.0f32;
@@ -5134,7 +5349,7 @@ impl TimelineState {
                     min: (min_note - padding).max(0.0),
                     max: (max_note + padding).min(127.0),
                 });
-                clip.midi_note_data = Some(midi_notes);
+                clip.midi_note_data = Some(remapped);
             }
         }
 
@@ -5164,6 +5379,7 @@ impl TimelineState {
 
     /// 从 midi_note_data 构建一段 clip 时长内的回退音高曲线（单位：MIDI note number）。
     /// 时间映射与 `assemble_pitch_orig_from_cache` 中的 MIDI clip 路径保持一致。
+    /// Loop（循环源）启用时，音符内容按循环周期重复铺满整个 clip 长度。
     fn build_fallback_pitch_from_midi(
         length_sec: f64,
         fp: f64,
@@ -5172,6 +5388,7 @@ impl TimelineState {
         reversed: bool,
         src_start: f64,
         src_end: f64,
+        loop_enabled: bool,
     ) -> Vec<f32> {
         let fp_sec = fp / 1000.0;
         let total_frames = ((length_sec.max(0.0) * 1000.0) / fp).ceil().max(1.0) as usize;
@@ -5182,6 +5399,11 @@ impl TimelineState {
             1.0
         };
         let src_total = src_end - src_start;
+        let loop_cycle_frames: Option<usize> = if loop_enabled && src_total > 1e-9 {
+            Some(((src_total / pr) / fp_sec).round().max(1.0) as usize)
+        } else {
+            None
+        };
 
         for note in midi_notes {
             let rel_start = (note.start_sec - src_start).max(0.0);
@@ -5203,12 +5425,35 @@ impl TimelineState {
             }
 
             let frame_start = ((eff_start / pr) / fp_sec).round() as usize;
-            let frame_end = (((eff_end / pr) / fp_sec).round() as usize).min(total_frames);
-            if frame_start < frame_end {
-                let note_value = note.note as f32;
-                for f in frame_start..frame_end {
-                    if note_value > curve[f] || curve[f] <= 0.0 {
-                        curve[f] = note_value;
+            let frame_end_raw = (eff_end / pr) / fp_sec;
+            let frame_end_raw = frame_end_raw.round() as usize;
+            let note_value = note.note as f32;
+            match loop_cycle_frames {
+                Some(cycle_frames) => {
+                    // Loop：按周期重复写入，铺满整个曲线长度。
+                    let mut cycle_offset = 0usize;
+                    while cycle_offset < total_frames {
+                        let write_start = cycle_offset + frame_start;
+                        let write_end = (cycle_offset + frame_end_raw).min(total_frames);
+                        if write_start >= write_end {
+                            break;
+                        }
+                        for f in write_start..write_end {
+                            if note_value > curve[f] || curve[f] <= 0.0 {
+                                curve[f] = note_value;
+                            }
+                        }
+                        cycle_offset += cycle_frames;
+                    }
+                }
+                None => {
+                    let frame_end = frame_end_raw.min(total_frames);
+                    if frame_start < frame_end {
+                        for f in frame_start..frame_end {
+                            if note_value > curve[f] || curve[f] <= 0.0 {
+                                curve[f] = note_value;
+                            }
+                        }
                     }
                 }
             }
@@ -5219,24 +5464,61 @@ impl TimelineState {
 
     /// 将 pitch_curve_to_midi_notes 输出的"提取时间"坐标重映射为 source-time 坐标，
     /// 以匹配 stretch（playback_rate）和倒放（reversed）参数。
+    ///
+    /// Loop（循环源）启用时，超出单个循环周期的提取时间按窗口长度取模回绕；
+    /// 跨越回绕边界的音符会被拆分为两段，保证存储的 midi_note_data 始终
+    /// 落在源窗口 `[src_start, src_end)` 内。
     fn remap_midi_note_times(
-        notes: &mut [MidiNoteEvent],
+        notes: Vec<MidiNoteEvent>,
         length_sec: f64,
         src_start: f64,
         src_end: f64,
         playback_rate: f32,
         reversed: bool,
-    ) {
+        loop_enabled: bool,
+    ) -> Vec<MidiNoteEvent> {
         let pr = if playback_rate.is_finite() && playback_rate > 0.0 {
             playback_rate as f64
         } else {
             1.0
         };
         let src_total = src_end - src_start;
+        let mut out: Vec<MidiNoteEvent> = Vec::with_capacity(notes.len());
 
-        for note in notes.iter_mut() {
+        for note in notes {
             let proj_start = note.start_sec; // 当前为提取时间（相对 clip 起点的项目时间）
             let proj_end = note.end_sec;
+
+            if loop_enabled && src_total > 1e-9 {
+                // Loop：把提取时间映射到循环周期内的源位置；跨边界的音符拆分。
+                if reversed {
+                    // 倒放：提取时间 t 的内容 = 窗口末端向下 t*pr 秒（镜像坐标取模）。
+                    let eff_start = (length_sec - proj_end) * pr;
+                    let eff_end = (length_sec - proj_start) * pr;
+                    for (s, e) in split_range_into_periods(eff_start, eff_end, src_total) {
+                        let src_note_start = (src_total - e).max(0.0) + src_start;
+                        let src_note_end = (src_total - s).min(src_total) + src_start;
+                        if src_note_end > src_note_start + 1e-9 {
+                            out.push(MidiNoteEvent {
+                                start_sec: src_note_start,
+                                end_sec: src_note_end,
+                                ..note.clone()
+                            });
+                        }
+                    }
+                } else {
+                    let u_start = proj_start * pr;
+                    let u_end = proj_end * pr;
+                    for (s, e) in split_range_into_periods(u_start, u_end, src_total) {
+                        out.push(MidiNoteEvent {
+                            start_sec: s + src_start,
+                            end_sec: e + src_start,
+                            ..note.clone()
+                        });
+                    }
+                }
+                continue;
+            }
 
             let (new_start, new_end) = if reversed {
                 let eff_start = (length_sec - proj_end) * pr;
@@ -5248,9 +5530,14 @@ impl TimelineState {
                 (proj_start * pr + src_start, proj_end * pr + src_start)
             };
 
-            note.start_sec = new_start;
-            note.end_sec = new_end;
+            out.push(MidiNoteEvent {
+                start_sec: new_start,
+                end_sec: new_end,
+                ..note
+            });
         }
+
+        out
     }
 
     /// 将 pitch 曲线（Vec<f32> of MIDI note numbers）转换为 MidiNoteEvent 列表。
@@ -5381,6 +5668,8 @@ impl TimelineState {
         glued.source_end_sec = length;
         glued.playback_rate = 1.0;
         glued.reversed = false;
+        // 音符已铺满整个胶合区间（含 rest），Loop 回绕不再有意义。
+        glued.loop_enabled = false;
         glued.duration_sec = None;
         glued.duration_frames = None;
         glued.waveform_preview = None;

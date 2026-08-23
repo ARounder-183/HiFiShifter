@@ -835,95 +835,162 @@ export function drawPianoRoll(args: {
 
         const viewportStartPx = Math.round(scrollLeft);
         const clipStartPx = Math.round(clipStartSec * pxPerSec);
-        const clipEndPx = Math.round(clipEndSec * pxPerSec);
-        const clipVisLeft = Math.max(0, clipStartPx - viewportStartPx);
-        const clipVisRight = Math.min(w, clipEndPx - viewportStartPx);
-        const visibleClipWidthPx = Math.max(1, clipVisRight - clipVisLeft);
 
         const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
-        const clipSourceSpanSec = Math.max(
-            0,
-            Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-        );
-        const sourceTimeStart = sourceStartSec;
-        const sourceDuration = Math.max(0.001, clipSourceSpanSec);
+        // Loop（循环源）：源窗口完整参与循环（不受 clip 长度钳制）。
+        const isLoop = Boolean(entry.loopEnabled);
+        const clipSourceSpanSec = isLoop
+            ? Math.max(0, clipSourceEndSec - sourceStartSec)
+            : Math.max(0, Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec));
+        if (clipSourceSpanSec <= 0) continue;
+        const cycleSec = isLoop ? clipSourceSpanSec / pr : 0;
 
-        // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
-        const sampleRate = entry.sourceSampleRate || 44100;
-        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
-        const previousLevel = lastLevelByClip[levelKey];
-        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
-        lastLevelByClip[levelKey] = stableLevel;
-
-        // 从 mipmap 缓存获取 interleaved 数据
-        const result = waveformMipmapStore.getInterleavedSlice(
-            entry.sourcePath,
-            stableLevel,
-            sourceTimeStart,
-            sourceDuration,
-        );
-        if (!result || result.interleaved.length < 4) {
-            continue;
+        // ── 循环瓦片划分（与 WaveformTrackCanvas 一致）──────────────────────
+        // 关键语义：播放回绕发生在源窗口 [start, end) **内部**，
+        // 每个循环周期显示的都是同一份窗口内容 —— 瓦片共用同一源窗口。
+        // 瓦片统一取完整周期长度（保证倒放镜像数学在末尾截断瓦片上仍成立），
+        // 超出 clip 长度的部分仅通过绘制矩形裁掉。
+        //
+        // 淡入淡出：每个瓦片都携带完整淡化参数，增益按 clip 局部时间求值
+        //（clipTimeOffsetSec = k·cycle；淡出锚定整条 clip 终点）——
+        // 长于一个周期的淡化横跨多瓦片时包络保持连续；
+        // 非淡化区间的瓦片求值自然为 1，不存在重复施加的问题。
+        interface PianoRollTile {
+            localStartSec: number;
+            durationSec: number;
         }
-        // clip 内的像素偏移（整像素稳定路径）
-        const clipPixelOffset = viewportStartPx + clipVisLeft - clipStartPx;
+        const tiles: PianoRollTile[] = [];
+        if (!isLoop) {
+            tiles.push({
+                localStartSec: 0,
+                durationSec: entry.lengthSec,
+            });
+        } else {
+            const rawCount = Math.ceil((entry.lengthSec - 1e-9) / cycleSec);
+            if (rawCount <= 4096) {
+                const visLocalStart0 = Math.max(0, visStartSec - clipStartSec);
+                const visLocalEnd0 = Math.min(entry.lengthSec, visEndSec - clipStartSec);
+                const firstK = Math.max(
+                    0,
+                    Math.min(rawCount - 1, Math.floor(visLocalStart0 / cycleSec)),
+                );
+                const lastK = Math.max(
+                    firstK,
+                    Math.min(rawCount - 1, Math.ceil(visLocalEnd0 / cycleSec) - 1),
+                );
+                for (let k = firstK; k <= lastK; k += 1) {
+                    tiles.push({
+                        localStartSec: k * cycleSec,
+                        durationSec: cycleSec,
+                    });
+                }
+            } else {
+                // 周期远小于像素：回退单片近似（包络级别仍然正确）
+                tiles.push({
+                    localStartSec: 0,
+                    durationSec: entry.lengthSec,
+                });
+            }
+            if (tiles.length === 0) continue;
+        }
 
-        // 构建渲染参数
-        const params: WaveformRenderParams = {
-            canvasWidth: visibleClipWidthPx,
-            canvasHeight: h, // 直接使用主画布高度
-            centerY: h / 2,
-            zeroDbHalfHeight: h / 2,
-            sourceStartSec,
-            clipDuration: entry.lengthSec,
-            playbackRate: pr,
-            sourceDurationSec: sourceDurSec,
-            volumeGain: Number(entry.gain ?? 1) || 1,
-            fadeInSec:
+        for (const tile of tiles) {
+            const tileLocalEndSec = tile.localStartSec + tile.durationSec;
+            const visLocalStart = Math.max(tile.localStartSec, visStartSec - clipStartSec);
+            const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
+            if (visLocalEnd <= visLocalStart) continue;
+
+            // 所有循环瓦片共用同一份源窗口
+            const sourceTimeStart = sourceStartSec;
+            const sourceDuration = Math.max(0.001, clipSourceSpanSec);
+
+            // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
+            const sampleRate = entry.sourceSampleRate || 44100;
+            const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
+            const levelKey = `${entry.sourcePath}::${entry.clipId}`;
+            const previousLevel = lastLevelByClip[levelKey];
+            const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+            lastLevelByClip[levelKey] = stableLevel;
+
+            // 从 mipmap 缓存获取 interleaved 数据
+            const result = waveformMipmapStore.getInterleavedSlice(
+                entry.sourcePath,
+                stableLevel,
+                sourceTimeStart,
+                sourceDuration,
+            );
+            if (!result || result.interleaved.length < 4) {
+                continue;
+            }
+
+            // 瓦片在画布上的可见像素范围
+            const tileVisLeft =
+                Math.round((clipStartSec + visLocalStart) * pxPerSec) - viewportStartPx;
+            const tileVisRight =
+                Math.round((clipStartSec + visLocalEnd) * pxPerSec) - viewportStartPx;
+            if (tileVisRight <= tileVisLeft) {
+                waveformMipmapStore.releaseInterleaved(result.interleaved);
+                continue;
+            }
+
+            // clipPixelOffset = canvas 左边缘对应的瓦片局部像素：
+            // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
+            const tileStartTimelinePx = clipStartPx + tile.localStartSec * pxPerSec;
+            const clipPixelOffset = viewportStartPx - tileStartTimelinePx;
+
+            const effectiveFadeInPiano =
                 Number(entry.autoFadeInSec ?? 0) > 0
                     ? Number(entry.autoFadeInSec) || 0
-                    : Number(entry.fadeInSec ?? 0) || 0,
-            fadeOutSec:
+                    : Number(entry.fadeInSec ?? 0) || 0;
+            const effectiveFadeOutPiano =
                 Number(entry.autoFadeOutSec ?? 0) > 0
                     ? Number(entry.autoFadeOutSec) || 0
-                    : Number(entry.fadeOutSec ?? 0) || 0,
-            fadeInCurve: entry.fadeInCurve ?? "linear",
-            fadeOutCurve: entry.fadeOutCurve ?? "linear",
-            dataStartSec: result.dataStartSec,
-            dataDurationSec: result.dataDurationSec,
-            clipPixelOffset,
-            clipTotalWidthPx: Math.max(1, clipWidthPx),
-        };
+                    : Number(entry.fadeOutSec ?? 0) || 0;
 
-        // 应用增益（音量 + 淡入淡出）
-        const withGains = applyGainsToPeaks(result.interleaved, params);
-        ctx.save();
+            // 构建渲染参数（以单个循环瓦片为坐标系；
+            // sourceStart + clipDuration·rate === 源窗口终点，倒放镜像成立）
+            const params: WaveformRenderParams = {
+                canvasWidth: w,
+                canvasHeight: h,
+                centerY: h / 2,
+                zeroDbHalfHeight: h / 2,
+                sourceStartSec,
+                clipDuration: tile.durationSec,
+                playbackRate: pr,
+                reversed: entry.reversed,
+                sourceDurationSec: sourceDurSec,
+                volumeGain: Number(entry.gain ?? 1) || 1,
+                // 每个瓦片都携带完整淡化参数（增益按 clip 局部时间求值），
+                // 长于一个周期的淡化横跨多瓦片时包络保持连续。
+                fadeInSec: effectiveFadeInPiano,
+                fadeOutSec: effectiveFadeOutPiano,
+                fadeInCurve: entry.fadeInCurve ?? "linear",
+                fadeOutCurve: entry.fadeOutCurve ?? "linear",
+                dataStartSec: result.dataStartSec,
+                dataDurationSec: result.dataDurationSec,
+                clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
+                clipTotalDurationSec: entry.lengthSec,
+                clipPixelOffset,
+                clipTotalWidthPx: Math.max(1, tile.durationSec * pxPerSec),
+            };
 
-        // 严格裁剪在 clip 实际可见范围内，防止溢出
-        ctx.beginPath();
-        if (clipVisRight <= clipVisLeft) {
-            waveformMipmapStore.releaseInterleaved(result.interleaved);
+            // 应用增益（音量 + 淡入淡出）
+            const withGains = applyGainsToPeaks(result.interleaved, params);
+
+            ctx.save();
+            ctx.rect(tileVisLeft, 0, tileVisRight - tileVisLeft, h);
+            ctx.clip();
+
+            // 静音 clip 半透明
+            ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
+            renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
+
+            ctx.restore();
             if (withGains !== result.interleaved) {
                 releaseGainBuffer(withGains);
             }
-            ctx.restore();
-            continue;
+            waveformMipmapStore.releaseInterleaved(result.interleaved);
         }
-        ctx.rect(clipVisLeft, 0, clipVisRight - clipVisLeft, h);
-        ctx.clip();
-
-        // 静音 clip 半透明
-        ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
-        // 因为 renderWaveform 内部是从 x=0 开始画的，所以我们把画布的原点平移到 Clip 的可视起始点
-        ctx.translate(clipVisLeft, 0);
-        renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
-
-        ctx.restore();
-        if (withGains !== result.interleaved) {
-            releaseGainBuffer(withGains);
-        }
-        waveformMipmapStore.releaseInterleaved(result.interleaved);
     }
 
     // Selection (time band)

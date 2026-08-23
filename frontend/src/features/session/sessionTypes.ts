@@ -152,6 +152,8 @@ export interface ClipInfo {
     sourceEndSec: number;
     playbackRate: number;
     reversed: boolean;
+    /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
+    loopEnabled: boolean;
     fadeInSec: number;
     fadeOutSec: number;
     fadeInCurve: FadeCurveType;

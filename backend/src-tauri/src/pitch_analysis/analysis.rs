@@ -584,6 +584,7 @@ fn process_single_clip(
                 clip.source_end_sec,
                 playback_rate,
                 clip_timeline_len_sec,
+                clip.loop_enabled,
             ));
 
             // Calculate pre_silence_sec for clip placement
@@ -591,7 +592,9 @@ fn process_single_clip(
             let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
 
             // Estimate clip_total_frames (from original audio)
-            let clip_total_frames = if let Some(dur) = clip.duration_sec {
+            let clip_total_frames = if clip.loop_enabled {
+                ((clip_timeline_len_sec) * 44100.0).round().max(0.0) as usize
+            } else if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0; // Assuming standard rate
                 (dur * in_rate).round().max(0.0) as usize
             } else {
@@ -935,9 +938,14 @@ fn compute_pitch_curve_with_incremental_refresh(
                 clip.source_end_sec,
                 playback_rate,
                 clip_timeline_len_sec,
+                clip.loop_enabled,
             ));
 
-            let clip_total_frames = if let Some(dur) = clip.duration_sec {
+            let clip_total_frames = if clip.loop_enabled {
+                // Loop（循环源）：曲线已按循环铺满 clip 时间线长度，
+                // 对应的音频帧数以 clip 长度为准（而非源媒体时长）。
+                ((clip_timeline_len_sec) * 44100.0).round().max(0.0) as usize
+            } else if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0;
                 (dur * in_rate).round().max(0.0) as usize
             } else {

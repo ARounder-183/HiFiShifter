@@ -329,6 +329,8 @@ export interface SessionState {
     paramEditorSyncTimeline: boolean;
 
     autoCrossfadeEnabled: boolean;
+    /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
+    loopNewClipsEnabled: boolean;
     /** 分割过渡 */
     splitTransitionEnabled: boolean;
     splitTransitionMode: "fade" | "overlap";
@@ -796,6 +798,7 @@ function applyOptimisticClipState(
         sourceEndSec?: number;
         playbackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;
@@ -836,6 +839,9 @@ function applyOptimisticClipState(
     }
     if (payload.reversed !== undefined) {
         clip.reversed = Boolean(payload.reversed);
+    }
+    if (payload.loopEnabled !== undefined) {
+        clip.loopEnabled = Boolean(payload.loopEnabled);
     }
     if (payload.fadeInSec !== undefined) {
         clip.fadeInSec = Math.max(0, Number(payload.fadeInSec) || 0);
@@ -966,6 +972,7 @@ function applyTimelineState(
                     ? clamp(Number(clip.playback_rate), 0.1, 10)
                     : (state.clips.find((c) => c.id === clip.id)?.playbackRate ?? 1),
             reversed: Boolean(clip.reversed),
+            loopEnabled: Boolean(clip.loop_enabled),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
@@ -1215,6 +1222,9 @@ function upsertImportedClip(
         sourceEndSec: meta?.durationSec ?? lengthSec,
         playbackRate: 1,
         reversed: false,
+        // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
+        //（默认开启；后端权威载荷返回后会覆盖该值）。
+        loopEnabled: state.loopNewClipsEnabled !== false,
         fadeInSec: 0,
         fadeOutSec: 0,
         fadeInCurve: "sine" as FadeCurveType,
@@ -1252,6 +1262,7 @@ const initialState: SessionState = {
     paramEditorSyncTimeline: false,
 
     autoCrossfadeEnabled: true,
+    loopNewClipsEnabled: true,
     splitTransitionEnabled: true,
     splitTransitionMode: "overlap",
     splitTransitionDurationUnit: "seconds",
@@ -2028,6 +2039,7 @@ const sessionSlice = createSlice({
                 sourceEndSec: 2,
                 playbackRate: 1,
                 reversed: false,
+                loopEnabled: state.loopNewClipsEnabled !== false,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInCurve: "sine" as FadeCurveType,
@@ -2290,6 +2302,7 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
+                state.loopNewClipsEnabled = s.loopNewClips ?? true;
                 state.splitTransitionEnabled = Boolean(
                     s.splitTransitionEnabled ?? true,
                 );

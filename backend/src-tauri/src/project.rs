@@ -82,7 +82,10 @@ impl SynthConfig {
 /// 当前程序读写的最新工程文件版本号。
 ///
 /// 打开工程时若文件版本高于该值，必须先经用户确认后才能尝试加载。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 3;
+///
+/// v4：`Clip.loop_enabled`（Loop / 循环源属性）。v3 及更早的工程不含该字段，
+/// 打开时按"为新的音频块启用循环"设置迁移（见 open_project）。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -512,17 +515,17 @@ mod tests {
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(!text.contains('\n'), "JSON project should be compact");
-        assert!(text.contains("\"version\":3"));
+        assert!(text.contains("\"version\":4"));
     }
 
     #[test]
     fn project_file_version_can_be_read_without_full_timeline_parse() {
         let pf = project_file_with_clip(TimelineState::default());
         let json_bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
-        assert_eq!(read_project_file_version(&json_bytes), Some(3));
+        assert_eq!(read_project_file_version(&json_bytes), Some(4));
 
         let msgpack_bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
-        assert_eq!(read_project_file_version(&msgpack_bytes), Some(3));
+        assert_eq!(read_project_file_version(&msgpack_bytes), Some(4));
     }
 
     #[test]
@@ -589,6 +592,7 @@ mod tests {
             "\"source_end_sec\"",
             "\"playback_rate\"",
             "\"reversed\"",
+            "\"loop_enabled\"",
             "\"fade_in_sec\"",
             "\"fade_out_sec\"",
             "\"fade_in_curve\"",
@@ -688,6 +692,7 @@ mod tests {
             clip.source_start_sec = 0.25;
             clip.playback_rate = 1.5;
             clip.reversed = true;
+            clip.loop_enabled = true;
             clip.fade_in_sec = 0.1;
             clip.fade_out_sec = 0.2;
             clip.fade_in_curve = "logarithmic".to_string();
@@ -742,6 +747,7 @@ mod tests {
         assert!((clip.source_start_sec - 0.25).abs() < 1e-12);
         assert!((clip.playback_rate - 1.5).abs() < f32::EPSILON);
         assert!(clip.reversed);
+        assert!(clip.loop_enabled, "loop flag must roundtrip");
         assert!((clip.fade_in_sec - 0.1).abs() < 1e-12);
         assert!((clip.fade_out_sec - 0.2).abs() < 1e-12);
         assert_eq!(clip.fade_in_curve, "logarithmic");

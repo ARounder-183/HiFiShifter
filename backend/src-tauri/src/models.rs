@@ -78,6 +78,9 @@ pub struct TimelineClip {
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    /// Loop（循环源）属性：超出源媒体区间时按周期回绕产生循环内容。
+    #[serde(default)]
+    pub loop_enabled: bool,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,

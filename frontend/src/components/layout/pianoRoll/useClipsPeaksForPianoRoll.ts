@@ -48,6 +48,10 @@ export interface ClipPeaksEntry {
     sourcePath: string;
     /** clip 是否静音 */
     muted: boolean;
+    /** 是否倒放 */
+    reversed: boolean;
+    /** Loop（循环源）：超出源窗口的内容按周期回绕重复 */
+    loopEnabled: boolean;
 }
 
 /**
@@ -152,6 +156,8 @@ export function useClipsPeaksForPianoRoll(args: {
                 fadeOutCurve: clip.fadeOutCurve ?? "linear",
                 sourcePath: clip.sourcePath ?? "",
                 muted: clip.muted ?? false,
+                reversed: Boolean(clip.reversed),
+                loopEnabled: Boolean(clip.loopEnabled),
             };
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps

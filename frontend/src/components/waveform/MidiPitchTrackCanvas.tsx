@@ -20,6 +20,7 @@ import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import { useAppSelector } from "../../app/hooks";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
+import { drawLoopMarkers, loopCycleSec } from "../../utils/loopRender";
 
 // ========================================
 // 常量
@@ -46,7 +47,8 @@ function strokeColorForClip(clip: { color: string }): string {
 /**
  * 从 MIDI note data 即时生成音高曲线。
  * 逻辑与后端 emit_clip_pitch_data_for_clip 的 MIDI 分支一致，
- * 支持 source range trim、playbackRate 拉伸、reversed 倒放。
+ * 支持 source range trim、playbackRate 拉伸、reversed 倒放，
+ * 以及 Loop（循环源）：超出单个循环周期的内容按周期回绕重复铺满。
  */
 function generateMidiCurveFromNotes(
     notes: Array<{ startSec: number; endSec: number; note: number }>,
@@ -56,6 +58,7 @@ function generateMidiCurveFromNotes(
     playbackRate: number,
     reversed: boolean,
     fillGaps: boolean,
+    loopEnabled: boolean,
 ): number[] {
     const fp = Math.max(FRAME_PERIOD_MS, 0.1);
     const targetFrames = Math.max(1, Math.round((clipLengthSec * 1000) / fp));
@@ -63,6 +66,12 @@ function generateMidiCurveFromNotes(
 
     const pr = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
     const srcTotalLen = sourceEndSec - sourceStartSec;
+
+    // Loop（循环源）：单个循环周期占用的帧数。
+    const loopCycleFrames =
+        loopEnabled && srcTotalLen > 1e-9
+            ? Math.max(1, Math.round((srcTotalLen / pr) * 1000 / fp))
+            : 0;
 
     for (const note of notes) {
         if (note.endSec <= sourceStartSec || note.startSec >= sourceEndSec) continue;
@@ -77,14 +86,23 @@ function generateMidiCurveFromNotes(
 
         const noteStartFrame = Math.round(((effStart / pr) * 1000) / fp);
         const noteEndFrame = Math.round(((effEnd / pr) * 1000) / fp);
-        const writeEnd = Math.min(noteEndFrame, targetFrames);
-        if (noteStartFrame < writeEnd) {
-            const noteValue = note.note;
-            for (let frame = noteStartFrame; frame < writeEnd; frame++) {
+        const noteValue = note.note;
+
+        // Loop：按周期重复写入，铺满整个可见区间；否则只写一次。
+        for (
+            let cycleOffset = 0;
+            cycleOffset < targetFrames;
+            cycleOffset += loopCycleFrames > 0 ? loopCycleFrames : targetFrames
+        ) {
+            const writeStart = cycleOffset + noteStartFrame;
+            const writeEnd = Math.min(cycleOffset + noteEndFrame, targetFrames);
+            if (writeStart >= writeEnd) break;
+            for (let frame = writeStart; frame < writeEnd; frame++) {
                 if (noteValue > curve[frame] || curve[frame] <= 0) {
                     curve[frame] = noteValue;
                 }
             }
+            if (loopCycleFrames <= 0) break;
         }
     }
 
@@ -267,6 +285,7 @@ export const MidiPitchTrackCanvas = React.memo(
                         clip.playbackRate,
                         clip.reversed,
                         clip.midiFillGaps ?? false,
+                        Boolean(clip.loopEnabled),
                     );
                     curveStartSec = clipStartSec;
                     framePeriodMs = FRAME_PERIOD_MS;
@@ -349,6 +368,37 @@ export const MidiPitchTrackCanvas = React.memo(
 
                 ctx.stroke();
                 ctx.restore();
+
+                // ── 循环节点倒三角标记（Loop 启用且存在内部回绕点时）──
+                const cycleSec = loopCycleSec({
+                    loopEnabled: Boolean(clip.loopEnabled),
+                    sourceStartSec: clip.sourceStartSec,
+                    sourceEndSec:
+                        clip.sourceEndSec > 0
+                            ? clip.sourceEndSec
+                            : (clip.midiNoteData?.reduce(
+                                  (max, n) => Math.max(max, n.endSec),
+                                  0,
+                              ) ?? 0),
+                    playbackRate: clip.playbackRate,
+                });
+                if (cycleSec > 0 && clip.lengthSec > cycleSec + 1e-6) {
+                    const markers: number[] = [];
+                    for (
+                        let markerT = cycleSec;
+                        markerT < clip.lengthSec - 1e-6;
+                        markerT += cycleSec
+                    ) {
+                        const mx =
+                            (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                        if (mx < -8 || mx > displayW + 8) continue;
+                        markers.push(Math.round(mx * 2) / 2);
+                        if (markers.length >= 4096) break;
+                    }
+                    if (markers.length > 0) {
+                        drawLoopMarkers(ctx, markers, displayH, clipColor);
+                    }
+                }
             }
 
             if (ctx.globalAlpha !== 1) {

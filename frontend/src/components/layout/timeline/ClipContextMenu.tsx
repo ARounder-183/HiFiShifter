@@ -107,6 +107,7 @@ export const ClipContextMenu: React.FC<{
     onExportMidi?: (ids: string[]) => void;
     onNormalize: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
+    onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
     onFadeCurveChange?: (clipId: string, target: "in" | "out", curve: FadeCurveType) => void;
 }> = ({
     x,
@@ -134,6 +135,7 @@ export const ClipContextMenu: React.FC<{
     onExportMidi,
     onNormalize,
     onToggleReverse,
+    onToggleLoop,
     onFadeCurveChange,
 }) => {
     const { t } = useI18n();
@@ -165,6 +167,8 @@ export const ClipContextMenu: React.FC<{
     // 多选中是否全部静音
     const allMuted = isMulti ? selectedClips.every((c) => c.muted) : clip.muted;
     const allReversed = isMulti ? selectedClips.every((c) => c.reversed) : clip.reversed;
+    // 多选中是否已全部启用 Loop（循环源）
+    const allLooped = isMulti ? selectedClips.every((c) => c.loopEnabled) : clip.loopEnabled;
 
     // 编组 / 解组
     const hasGroup = selectedClips.some((c) => c.groupId != null);
@@ -239,6 +243,23 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
+            {onToggleLoop && (
+                <MenuItem
+                    label={
+                        allLooped
+                            ? isMulti
+                                ? t("ctx_unloop_selected")
+                                : t("ctx_unloop")
+                            : isMulti
+                              ? t("ctx_loop_selected")
+                              : t("ctx_loop")
+                    }
+                    onClick={() => {
+                        onToggleLoop(ids, !allLooped);
+                        close();
+                    }}
+                />
+            )}
             {isSingle && (
                 <MenuItem
                     label={t("ctx_rename")}

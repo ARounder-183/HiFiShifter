@@ -72,6 +72,8 @@ export interface UiSettings {
     autoBackgroundRender?: boolean;
     /** 自动重新加载已修改的媒体文件（默认开启）。 */
     autoReloadModifiedMedia?: boolean;
+    /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
+    loopNewClips?: boolean;
     customScalePresets?: Array<{
         id: string;
         name: string;

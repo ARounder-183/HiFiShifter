@@ -806,6 +806,9 @@ pub fn compute_clip_pitch_midi(
 /// - `source_end_sec`：clip 的 source_end_sec（源音频有效区间终点）
 /// - `playback_rate`：clip 的 playback_rate（>1 加速，<1 减速）
 /// - `clip_timeline_len_sec`：clip 在时间线上的可见长度（秒）
+/// - `loop_enabled`：Loop（循环源）属性。启用且 clip 长度超过单个循环周期时，
+///   源帧索引按窗口长度取模回绕，曲线内容循环铺满整个可见区间
+///   （与音频渲染的 repeat 回绕语义一致）。
 pub fn trim_and_resample_midi(
     full_midi: &[f32],
     frame_period_ms: f64,
@@ -813,6 +816,7 @@ pub fn trim_and_resample_midi(
     source_end_sec: f64,
     playback_rate: f64,
     clip_timeline_len_sec: f64,
+    loop_enabled: bool,
 ) -> Vec<f32> {
     let fp = frame_period_ms.max(0.1);
     let src_start = source_start_sec.max(0.0);
@@ -841,10 +845,30 @@ pub fn trim_and_resample_midi(
     // 按 1/playback_rate 重采样到 clip timeline 长度
     let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
+    // Loop（循环源）：目标帧数超出单周期时，按窗口周期对源帧索引取模回绕，
+    // 循环铺满整个可见区间（不做防御性截断）。
+    if loop_enabled && target_frames > trimmed.len() {
+        let window_frames = trimmed.len();
+        let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
+            playback_rate
+        } else {
+            1.0
+        };
+        let mut out = Vec::with_capacity(target_frames);
+        for i in 0..target_frames {
+            // 时间线第 i 帧对应窗口内的源帧偏移（按速率折算后取模回绕）
+            let u = i as f64 * rate;
+            let wrapped = u % (window_frames as f64);
+            let idx = src_start_frame + (wrapped.round() as usize).min(window_frames - 1);
+            out.push(full_midi[idx]);
+        }
+        return out;
+    }
+
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，
     // 避免前端 sourceEndSec 超出源文件实际时长导致曲线被不合理拉伸。
     let rate_near_one = (playback_rate - 1.0).abs() <= 0.01;
-    let target_frames = if rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
+    let target_frames = if !loop_enabled && rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
         eprintln!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
             target_frames,

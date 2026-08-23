@@ -55,6 +55,13 @@ pub(super) fn import_project(
             clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
         }
     }
+    // v4 迁移：旧工程 Clip 不携带 loop_enabled，按"为新的音频块启用循环"设置补齐。
+    if pf.version < 4 {
+        let default_loop = crate::config::loop_new_clips_default();
+        for clip in &mut timeline.clips {
+            clip.loop_enabled = default_loop;
+        }
+    }
 
     let imported_notes = std::mem::take(&mut pf.notes_markdown);
     let imported_tempo_map = timeline.tempo_map.take();

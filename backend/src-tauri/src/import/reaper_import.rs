@@ -337,6 +337,7 @@ fn compute_item_source_window_sec(
     consumed_sec: f64,
     source_duration_sec: Option<f64>,
     is_reversed: bool,
+    is_loop: bool,
 ) -> (f64, f64) {
     let (min_bound, max_bound, has_section) =
         compute_take_source_bounds_sec(take, source_duration_sec);
@@ -344,6 +345,24 @@ fn compute_item_source_window_sec(
     let consumed = consumed_sec.max(0.0);
     let anchor =
         compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, is_reversed);
+
+    if is_loop {
+        // LOOP=1（循环源，REAPER "Loop source" 语义）：
+        // 源窗口取"锚点 → 可用边界"的完整区间（正向到媒体/SECTION 末尾，
+        // 反向回退到区间起点），不被 ITEM LENGTH 钳制 —— 超出窗口的播放
+        // 时间由引擎/渲染按该窗口周期回绕产生循环内容。
+        if is_reversed {
+            let start = min_bound.min(anchor);
+            return (start, anchor);
+        }
+        let end = if max_bound.is_finite() {
+            max_bound.max(anchor)
+        } else {
+            // 媒体时长未知时退化为按消耗量截取（无回绕素材可用）。
+            anchor + consumed
+        };
+        return (anchor, end);
+    }
 
     if is_reversed {
         let end = anchor;
@@ -956,6 +975,13 @@ fn process_item(
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
     let take_gain = take_linear_gain(item, take);
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
+    // LOOP 标记：REAPER 显式写出时以其为准；缺失（极老工程/第三方生成器）
+    // 时回退到"为新的音频块启用循环"设置。
+    let item_loop = if item.has_loop_token {
+        item.is_loop
+    } else {
+        crate::config::loop_new_clips_default()
+    };
     let s_offs = take.s_offs; // source offset (seconds)
     let item_pos = item.position; // timeline position (seconds)
     let item_length = item.length; // visible length (seconds)
@@ -1082,6 +1108,7 @@ fn process_item(
                 source_end_sec: clip_src_end,
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
                 reversed: item_reversed,
+                loop_enabled: item_loop,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: "sine".to_string(),
@@ -1171,6 +1198,7 @@ fn process_item(
             item_length * effective_rate,
             duration_sec,
             item_reversed,
+            item_loop,
         );
 
         // 兜底：若窗口被裁成零长度，回退到基于 SOFFS 的正向区间，避免导入后静音。
@@ -1230,6 +1258,7 @@ fn process_item(
             source_end_sec: source_end,
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             reversed: item_reversed,
+            loop_enabled: item_loop,
             // 手动淡化长度写入 fade_*（REAPER 索引 1），自动交叉淡化长度写入
             // auto_fade_*（REAPER 索引 2）。分开后自动值归零、手动值正确恢复。
             fade_in_sec: manual_fade_in_sec,
@@ -1626,6 +1655,8 @@ fn process_midi_item(
         source_end_sec: item_length * play_rate,
         playback_rate: play_rate as f32,
         reversed: false,
+        // MIDI item 没有源媒体可循环；Loop 属性保持关闭。
+        loop_enabled: false,
         fade_in_sec: 0.0,
         fade_out_sec: 0.0,
         fade_in_curve: "sine".to_string(),
@@ -1641,5 +1672,43 @@ fn process_midi_item(
 
     if let Some(gid) = item.group_id {
         reaper_group_map.entry(gid).or_default().push(clip_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_source_window_extends_to_media_end() {
+        // 正向 LOOP：窗口 = [SOFFS, 媒体末尾]，不被 LENGTH 钳制。
+        let take = ReaperTake {
+            s_offs: 1.0,
+            ..ReaperTake::default()
+        };
+        let (start, end) = compute_item_source_window_sec(&take, 10.0, Some(4.0), false, true);
+        assert!((start - 1.0).abs() < 1e-9);
+        assert!((end - 4.0).abs() < 1e-9);
+
+        // 非 LOOP：窗口被消耗量钳制。
+        let (start2, end2) =
+            compute_item_source_window_sec(&take, 1.5, Some(4.0), false, false);
+        assert!((end2 - start2 - 1.5).abs() < 1e-9);
+
+        // 反向 LOOP：窗口 = [区间起点, 锚点]，锚点 = max_bound − SOFFS。
+        let (start3, end3) = compute_item_source_window_sec(&take, 10.0, Some(4.0), true, true);
+        assert!(start3.abs() < 1e-9);
+        assert!((end3 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loop_window_falls_back_to_consumed_when_duration_unknown() {
+        let take = ReaperTake {
+            s_offs: 2.0,
+            ..ReaperTake::default()
+        };
+        let (start, end) = compute_item_source_window_sec(&take, 3.0, None, false, true);
+        assert!((start - 2.0).abs() < 1e-9);
+        assert!((end - 5.0).abs() < 1e-9);
     }
 }

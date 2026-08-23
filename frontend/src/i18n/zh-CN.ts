@@ -347,6 +347,10 @@ export const zhCN = {
     ctx_unreverse: "取消倒放",
     ctx_reverse_selected: "倒放选中项",
     ctx_unreverse_selected: "取消倒放选中项",
+    ctx_loop: "循环",
+    ctx_unloop: "取消循环",
+    ctx_loop_selected: "循环选中项",
+    ctx_unloop_selected: "取消循环选中项",
     clip_replace_same_source_confirm:
         "工程中还有其他媒体块使用与当前媒体块相同的源文件路径。是否同时替换这些同源媒体块？",
     recapture_missing_media_title: "重新捕获缺失媒体",
@@ -1043,6 +1047,7 @@ export const zhCN = {
     menu_background_prerender_desc:
         "编辑后立即在后台预渲染。播放时优先使用已渲染内容，无需等待全部渲染完成。",
     options_auto_reload_modified_media: "自动重新加载已修改的媒体文件",
+    options_loop_new_clips: "为新的音频块启用循环",
 
     benchmark_title: "推理设备基准测试",
     benchmark_desc:

@@ -829,6 +829,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6
                         || (old.playback_rate - clip.playback_rate).abs() > 1e-6
                         || old.reversed != clip.reversed
+                        || old.loop_enabled != clip.loop_enabled
                         || (old.length_sec - clip.length_sec).abs() > 1e-6
                         // 检测同路径文件替换：
                         // - duration_frames / source_sample_rate：文件长度或采样率变化
@@ -988,7 +989,10 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         > 1e-6
                         || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6;
                     let rate_changed = (old.playback_rate - clip.playback_rate).abs() > 1e-6;
-                    pos_changed || source_range_changed || rate_changed
+                    // Loop 开关会改变 pitch 曲线的目标长度（回绕铺满），
+                    // 需要重新截取 + resample 推送。
+                    let loop_changed = old.loop_enabled != clip.loop_enabled;
+                    pos_changed || source_range_changed || rate_changed || loop_changed
                 })
                 .unwrap_or(false)
         })
@@ -1069,6 +1073,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     || (old.source_end_sec - c.source_end_sec).abs() > 1e-6
                     || (old.playback_rate - c.playback_rate).abs() > 1e-6
                     || old.reversed != c.reversed
+                    || old.loop_enabled != c.loop_enabled
                     || old.midi_fill_gaps != c.midi_fill_gaps
                     || old.muted != c.muted
                     || old.midi_note_data != c.midi_note_data
@@ -1511,6 +1516,14 @@ fn emit_clip_pitch_data_for_clip(
         };
         let src_total_len = src_end - src_start;
 
+        // Loop（循环源）：单个循环周期的帧数；音符内容按周期重复铺满 clip。
+        let loop_cycle_frames: Option<usize> = if clip.loop_enabled && src_total_len > 1e-9 {
+            Some(((src_total_len / pr_valid * 1000.0) / fp).round().max(1.0) as usize)
+        } else {
+            None
+        };
+        let clip_visible_frames = target_frames;
+
         for note in notes {
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
@@ -1534,13 +1547,35 @@ fn emit_clip_pitch_data_for_clip(
             }
             let note_start_frame = ((eff_start / pr_valid * 1000.0) / fp).round() as usize;
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
-            let write_end = note_end_frame.min(target_frames);
-            if note_start_frame < write_end {
-                let note_value = note.note as f32;
-                for frame in note_start_frame..write_end {
-                    let current = midi_curve[frame];
-                    if note_value > current || current <= 0.0 {
-                        midi_curve[frame] = note_value;
+            let note_value = note.note as f32;
+            match loop_cycle_frames {
+                Some(cycle_frames) => {
+                    let mut cycle_offset = 0usize;
+                    while cycle_offset < clip_visible_frames {
+                        let write_start = cycle_offset + note_start_frame;
+                        let write_end =
+                            (cycle_offset + note_end_frame).min(clip_visible_frames);
+                        if write_start >= write_end {
+                            break;
+                        }
+                        for frame in write_start..write_end {
+                            let current = midi_curve[frame];
+                            if note_value > current || current <= 0.0 {
+                                midi_curve[frame] = note_value;
+                            }
+                        }
+                        cycle_offset += cycle_frames;
+                    }
+                }
+                None => {
+                    let write_end = note_end_frame.min(target_frames);
+                    if note_start_frame < write_end {
+                        for frame in note_start_frame..write_end {
+                            let current = midi_curve[frame];
+                            if note_value > current || current <= 0.0 {
+                                midi_curve[frame] = note_value;
+                            }
+                        }
                     }
                 }
             }
@@ -1607,6 +1642,7 @@ fn emit_clip_pitch_data_for_clip(
         clip.source_end_sec,
         pr,
         clip.length_sec.max(0.0),
+        clip.loop_enabled,
     );
     let curve_start_sec = compute_pitch_curve_start_sec(clip);
 
@@ -1677,6 +1713,7 @@ mod tests {
             source_end_sec: 1.0,
             playback_rate: 0.75,
             reversed: false,
+            loop_enabled: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),

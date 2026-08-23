@@ -783,9 +783,12 @@ fn read_pitch_for_clip(
         clip.source_end_sec,
         pr,
         clip_len,
+        clip.loop_enabled,
     );
 
     if clip.reversed && !curve.is_empty() {
+        // 倒放：先按循环回绕铺满，再整体反转（与音频渲染的
+        // "反向读取 + 周期回绕"语义一致）。
         curve.reverse();
     }
 

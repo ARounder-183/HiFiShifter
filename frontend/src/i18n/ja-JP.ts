@@ -363,6 +363,10 @@ export const jaJP = {
     ctx_unreverse: "逆再生を解除",
     ctx_reverse_selected: "選択項目を逆再生",
     ctx_unreverse_selected: "選択項目の逆再生を解除",
+    ctx_loop: "ループ",
+    ctx_unloop: "ループを解除",
+    ctx_loop_selected: "選択項目をループ",
+    ctx_unloop_selected: "選択項目のループを解除",
     clip_replace_same_source_confirm:
         "プロジェクト内に、選択したクリップと同じソースファイルパスを使う他のクリップがあります。これらの同一ソースクリップもまとめて置換しますか？",
     recapture_missing_media_title: "欠落メディアを再取得",
@@ -1071,6 +1075,7 @@ export const jaJP = {
     menu_background_prerender_desc:
         "編集後にすぐバックグラウンドでレンダリングを開始。再生時は既にレンダリングされた部分をすぐに使用できます。",
     options_auto_reload_modified_media: "変更されたメディアファイルを自動で再読み込み",
+    options_loop_new_clips: "新しいクリップのループを有効にする",
 
     benchmark_title: "推論デバイスベンチマーク",
     benchmark_desc:

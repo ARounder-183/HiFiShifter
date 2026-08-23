@@ -62,6 +62,11 @@ pub struct ReaperItem {
     pub snap_offs: f64,
     pub length: f64,
     pub is_loop: bool,
+    /// ITEM 块是否显式写出 `LOOP n` 行。
+    ///
+    /// REAPER 保存的 ITEM 几乎总是携带 LOOP 行；缺失时（极老版本/第三方生成器）
+    /// 导入方应以"为新的音频块启用循环"设置作为默认值，而不是硬编码 false。
+    pub has_loop_token: bool,
     pub all_takes: bool,
     pub fade_in: Vec<f64>,
     pub fade_out: Vec<f64>,
@@ -82,6 +87,7 @@ impl Default for ReaperItem {
             snap_offs: 0.0,
             length: 0.0,
             is_loop: false,
+            has_loop_token: false,
             all_takes: false,
             fade_in: vec![0.0; 7],
             fade_out: vec![0.0; 7],
@@ -890,7 +896,10 @@ fn parse_item_block(block: &Block) -> ReaperItem {
             "POSITION" if tokens.len() >= 2 => item.position = parse_double(&tokens[1]),
             "SNAPOFFS" if tokens.len() >= 2 => item.snap_offs = parse_double(&tokens[1]),
             "LENGTH" if tokens.len() >= 2 => item.length = parse_double(&tokens[1]),
-            "LOOP" if tokens.len() >= 2 => item.is_loop = parse_bool(&tokens[1]),
+            "LOOP" if tokens.len() >= 2 => {
+                item.is_loop = parse_bool(&tokens[1]);
+                item.has_loop_token = true;
+            }
             "ALLTAKES" if tokens.len() >= 2 => item.all_takes = parse_bool(&tokens[1]),
             "FADEIN" => item.fade_in = parse_fade_array(&tokens),
             "FADEOUT" => item.fade_out = parse_fade_array(&tokens),

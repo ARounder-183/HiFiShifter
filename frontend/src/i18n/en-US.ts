@@ -443,6 +443,10 @@ export const enUS = {
     ctx_unreverse: "Unreverse",
     ctx_reverse_selected: "Reverse Selected",
     ctx_unreverse_selected: "Unreverse Selected",
+    ctx_loop: "Loop",
+    ctx_unloop: "Unloop",
+    ctx_loop_selected: "Loop Selected",
+    ctx_unloop_selected: "Unloop Selected",
     clip_replace_same_source_confirm:
         "Other clips in this project use the same source file path as the selected clip(s). Replace those same-source clips as well?",
     recapture_missing_media_title: "Recapture Missing Media",
@@ -1147,6 +1151,7 @@ export const enUS = {
     menu_background_prerender_desc:
         "Immediately start pre-rendering after edits. Playback uses already-rendered content without waiting for full render.",
     options_auto_reload_modified_media: "Automatically reload modified media files",
+    options_loop_new_clips: "Enable loop for new clips",
 
     // ── Benchmark ────────────────────────────────────────────────────────
     benchmark_title: "Inference Device Benchmark",

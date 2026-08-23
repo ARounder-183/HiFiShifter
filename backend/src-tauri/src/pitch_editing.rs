@@ -401,6 +401,7 @@ mod tests {
             source_end_sec: 2.0,
             playback_rate: 1.0,
             reversed: false,
+            loop_enabled: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
@@ -983,6 +984,7 @@ pub(crate) fn build_clip_input_pitch_curve(
             clip.source_end_sec,
             clip_playback_rate,
             clip.length_sec.max(0.0),
+            clip.loop_enabled,
         );
         if tm.is_empty() {
             return None;

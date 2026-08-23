@@ -126,6 +126,9 @@ pub(crate) fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> S
         hasher.update(&quantize_u32(c.source_end_sec, 1000.0).to_le_bytes());
         hasher.update(&[if c.muted { 1 } else { 0 }]);
         hasher.update(&[if c.midi_fill_gaps { 1 } else { 0 }]);
+        // Loop（循环源）会改变 pitch_orig 的组装内容（回绕铺满），
+        // 必须参与缓存 key，否则切换 Loop 后旧曲线不会失效。
+        hasher.update(&[if c.loop_enabled { 1 } else { 0 }]);
         if let Some(notes) = c.midi_note_data.as_ref() {
             for note in notes {
                 hasher.update(&quantize_u32(note.start_sec, 1000.0).to_le_bytes());

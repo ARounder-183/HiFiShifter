@@ -102,6 +102,17 @@ pub(crate) fn assemble_pitch_orig_from_cache(
             };
             let src_total_len = src_end - src_start;
 
+            // Loop（循环源）：单个循环周期占用的帧数。
+            // 启用时音符内容按该周期重复铺满整个 clip 可见区间
+            //（音高参考块被延伸后循环 ori pitch）。
+            let loop_cycle_frames: Option<usize> = if clip.loop_enabled && src_total_len > 1e-9 {
+                Some(((src_total_len / pr_valid * 1000.0) / fp).round().max(1.0) as usize)
+            } else {
+                None
+            };
+            let clip_visible_frames =
+                clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
+
             // 收集已写入音符的帧范围（用于后续填补空隙）和音高值
             let mut note_ranges: Vec<(usize, usize, f32)> = Vec::new();
 
@@ -131,19 +142,44 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                     ((effective_rel_start / pr_valid * 1000.0) / fp).round() as usize;
                 let note_end_frame =
                     ((effective_rel_end / pr_valid * 1000.0) / fp).round() as usize;
-                let write_start = clip_start_frame.saturating_add(note_start_frame);
-                let write_end = clip_start_frame
-                    .saturating_add(note_end_frame)
-                    .min(target_frames);
-                if write_start < write_end {
-                    let note_value = note.note as f32;
-                    for frame in write_start..write_end {
-                        let current = out[frame];
-                        if note_value > current || current <= 0.0 {
-                            out[frame] = note_value;
+                let note_value = note.note as f32;
+                match loop_cycle_frames {
+                    Some(cycle_frames) => {
+                        // Loop：按周期重复写入，直到铺满 clip 可见区间。
+                        let mut cycle_offset = 0usize;
+                        while cycle_offset < clip_visible_frames {
+                            let write_start =
+                                clip_start_frame + cycle_offset + note_start_frame;
+                            let write_end = (clip_start_frame + cycle_offset + note_end_frame)
+                                .min(clip_start_frame + clip_visible_frames);
+                            if write_start >= write_end {
+                                break;
+                            }
+                            for frame in write_start..write_end {
+                                let current = out[frame];
+                                if note_value > current || current <= 0.0 {
+                                    out[frame] = note_value;
+                                }
+                            }
+                            note_ranges.push((write_start, write_end, note_value));
+                            cycle_offset += cycle_frames;
                         }
                     }
-                    note_ranges.push((write_start, write_end, note_value));
+                    None => {
+                        let write_start = clip_start_frame.saturating_add(note_start_frame);
+                        let write_end = clip_start_frame
+                            .saturating_add(note_end_frame)
+                            .min(target_frames);
+                        if write_start < write_end {
+                            for frame in write_start..write_end {
+                                let current = out[frame];
+                                if note_value > current || current <= 0.0 {
+                                    out[frame] = note_value;
+                                }
+                            }
+                            note_ranges.push((write_start, write_end, note_value));
+                        }
+                    }
                 }
             }
 
@@ -203,18 +239,39 @@ pub(crate) fn assemble_pitch_orig_from_cache(
 
             // 预计算切片安全边界，消除内部循环的所有越界检查、if 判断和解包
             let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
-            let read_len = write_len.min(cached.midi.len().saturating_sub(src_offset));
 
-            if read_len > 0 {
-                let dst_slice = &mut out[clip_start_frame..clip_start_frame + read_len];
-                let src_slice = &cached.midi[src_offset..src_offset + read_len];
+            if clip.loop_enabled {
+                // Loop（循环源）：窗口帧区间按周期回绕铺满整个 clip。
+                let src_end_frame =
+                    ((clip.source_end_sec.max(0.0) * 1000.0) / fp).round().max(0.0) as usize;
+                let win_end = src_end_frame.min(cached.midi.len()).max(src_offset + 1);
+                let window_len = win_end - src_offset;
+                if window_len > 0 && write_len > 0 {
+                    let dst_slice = &mut out[clip_start_frame..clip_start_frame + write_len];
+                    for (i, dst) in dst_slice.iter_mut().enumerate() {
+                        let idx = src_offset + i % window_len;
+                        let pitch = cached.midi[idx];
+                        *dst = if pitch.is_finite() && pitch > 0.0 {
+                            pitch
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            } else {
+                let read_len =
+                    write_len.min(cached.midi.len().saturating_sub(src_offset));
+                if read_len > 0 {
+                    let dst_slice = &mut out[clip_start_frame..clip_start_frame + read_len];
+                    let src_slice = &cached.midi[src_offset..src_offset + read_len];
 
-                for (dst, &pitch) in dst_slice.iter_mut().zip(src_slice.iter()) {
-                    *dst = if pitch.is_finite() && pitch > 0.0 {
-                        pitch
-                    } else {
-                        0.0
-                    };
+                    for (dst, &pitch) in dst_slice.iter_mut().zip(src_slice.iter()) {
+                        *dst = if pitch.is_finite() && pitch > 0.0 {
+                            pitch
+                        } else {
+                            0.0
+                        };
+                    }
                 }
             }
         } else {
@@ -226,6 +283,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 clip.source_end_sec,
                 pr_valid,
                 clip_len_sec,
+                clip.loop_enabled,
             );
 
             // 预计算边界并进行迭代覆盖

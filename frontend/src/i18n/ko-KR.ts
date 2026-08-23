@@ -438,6 +438,10 @@ export const koKR = {
     ctx_unreverse: "역재생 해제",
     ctx_reverse_selected: "선택 항목 역재생",
     ctx_unreverse_selected: "선택 항목 역재생 해제",
+    ctx_loop: "루프",
+    ctx_unloop: "루프 해제",
+    ctx_loop_selected: "선택 항목 루프",
+    ctx_unloop_selected: "선택 항목 루프 해제",
     clip_replace_same_source_confirm:
         "프로젝트 안에 선택한 클립과 같은 원본 파일 경로를 사용하는 다른 클립이 있습니다. 같은 원본 경로를 사용하는 클립도 함께 교체할까요?",
     recapture_missing_media_title: "누락 미디어 다시 가져오기",
@@ -1087,6 +1091,7 @@ export const koKR = {
     menu_background_prerender_desc:
         "편집 후 즉시 백그라운드에서 사전 렌더링을 시작합니다. 재생 시 이미 렌더링된 부분을 바로 사용할 수 있습니다.",
     options_auto_reload_modified_media: "수정된 미디어 파일 자동 다시 로드",
+    options_loop_new_clips: "새 클립에 루프 사용",
 
     benchmark_title: "추론 장치 벤치마크",
     benchmark_desc:
