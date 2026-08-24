@@ -361,33 +361,62 @@ pub fn pick_midi_output_path() -> serde_json::Value {
 }
 
 // ===================== waveform =====================
+//
+// 波形命令涉及重计算（mixdown 渲染 / 音频解码 + 峰值统计）。
+// 同步命令会在主线程上执行并阻塞整个 UI（窗口事件 + 其余 IPC），
+// 因此这里一律改为 async + spawn_blocking，把重活卸载到阻塞线程池，
+// 前端在分析期间保持可交互。
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_root_mix_waveform_peaks_segment(
-    state: State<'_, AppState>,
+pub async fn get_root_mix_waveform_peaks_segment(
+    app: tauri::AppHandle,
     track_id: String,
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
 ) -> self::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_root_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_root_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
+            ok: false,
+            min: vec![],
+            max: vec![],
+        },
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_track_mix_waveform_peaks_segment(
-    state: State<'_, AppState>,
+pub async fn get_track_mix_waveform_peaks_segment(
+    app: tauri::AppHandle,
     track_id: String,
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
 ) -> self::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_track_mix_waveform_peaks_segment(
-        state,
-        track_id,
-        start_sec,
-        duration_sec,
-        columns,
-    )
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_track_mix_waveform_peaks_segment(
+            state,
+            track_id,
+            start_sec,
+            duration_sec,
+            columns,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
+            ok: false,
+            min: vec![],
+            max: vec![],
+        },
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -398,57 +427,123 @@ pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
 // ===================== waveform v2 (二进制 mipmap) =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_waveform_mipmap_binary(
-    state: State<'_, AppState>,
+pub async fn get_waveform_mipmap_binary(
+    app: tauri::AppHandle,
     source_path: String,
     level: u8,
 ) -> String {
-    waveform::get_waveform_mipmap_binary(state, source_path, level)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_waveform_mipmap_binary(state, source_path, level)
+    })
+    .await
+    {
+        Ok(result) => result,
+        // 与同步实现的 Err 分支一致：失败返回空字符串。
+        Err(_) => String::new(),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn preload_waveform_mipmap(
-    state: State<'_, AppState>,
-    source_path: String,
-) -> serde_json::Value {
-    waveform::preload_waveform_mipmap(state, source_path)
+pub async fn preload_waveform_mipmap(app: tauri::AppHandle, source_path: String) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::preload_waveform_mipmap(state, source_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn batch_get_waveform_mipmap(
-    state: State<'_, AppState>,
+pub async fn batch_get_waveform_mipmap(
+    app: tauri::AppHandle,
     source_paths: Vec<String>,
 ) -> std::collections::HashMap<String, [String; 3]> {
-    waveform::batch_get_waveform_mipmap(state, source_paths)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::batch_get_waveform_mipmap(state, source_paths)
+    })
+    .await
+    {
+        Ok(result) => result,
+        // 与同步实现一致：失败时对应文件返回 3 个空字符串。
+        Err(_) => std::collections::HashMap::new(),
+    }
 }
 
 // ===================== timeline =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_audio_item(
-    state: State<'_, AppState>,
+pub async fn import_audio_item(
+    app: tauri::AppHandle,
     audio_path: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
     media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_item(
-        state,
-        audio_path,
-        track_id,
-        start_sec,
-        media_audio_stream_index,
-    )
+    // 导入大文件（大视频抽轨 / 大音频全量解码预览）耗时明显，
+    // 卸载到阻塞线程池执行，避免同步命令在主线程上冻结前端。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_audio_item(
+            state,
+            audio_path,
+            track_id,
+            start_sec,
+            media_audio_stream_index,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("import task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+    })
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_audio_bytes(
-    state: State<'_, AppState>,
+pub async fn import_audio_bytes(
+    app: tauri::AppHandle,
     file_name: String,
     base64_data: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
+    // base64 解码 + 落盘 + 导入解析都可能较慢，同样放到阻塞线程池。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("import task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+    })
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_track(
@@ -472,8 +567,10 @@ pub fn remove_track(
 pub fn duplicate_track(
     state: State<'_, AppState>,
     track_id: String,
+    parent_track_id: Option<String>,
+    target_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::duplicate_track(state, track_id)
+    timeline::duplicate_track(state, track_id, parent_track_id, target_index)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1105,10 +1202,14 @@ pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileI
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_media_audio_streams(
+pub async fn get_media_audio_streams(
     file_path: String,
 ) -> Result<Vec<crate::media::MediaAudioStream>, String> {
-    file_browser::list_media_audio_streams(file_path)
+    // 缺少时长元数据的大视频需要遍历整个 packet 流来测量时长，
+    // 卸载到阻塞线程池，避免主线程卡顿。
+    tauri::async_runtime::spawn_blocking(move || file_browser::list_media_audio_streams(file_path))
+        .await
+        .map_err(|e| format!("media stream task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

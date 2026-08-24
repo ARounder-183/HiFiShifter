@@ -86,7 +86,16 @@ export const timelineApi = {
 
     removeTrack: (trackId: string) => invoke<TimelineResult>("remove_track", trackId),
 
-    duplicateTrack: (trackId: string) => invoke<TimelineResult>("duplicate_track", trackId),
+    duplicateTrack: (
+        trackId: string,
+        placement?: { parentTrackId?: string | null; targetIndex?: number },
+    ) =>
+        invoke<TimelineResult>(
+            "duplicate_track",
+            trackId,
+            placement?.parentTrackId ?? null,
+            placement?.targetIndex,
+        ),
 
     moveTrack: (payload: { trackId: string; targetIndex: number; parentTrackId?: string | null }) =>
         invoke<TimelineResult>(

@@ -64,6 +64,7 @@ type TimelineSessionSlice = Pick<
     | "paramEditorSyncTimeline"
     | "paramEditorTimelineClickSelectTrackEnabled"
     | "playheadSec"
+    | "pendingPlayheadRevealSec"
     | "primaryTimeUnit"
     | "project"
     | "secondaryTimeUnit"
@@ -231,6 +232,7 @@ export function useTimelineState(): TimelineStateResult {
             snapEnabled: state.session.snapEnabled,
             timelineSnap: state.session.timelineSnap,
             playheadSec: state.session.playheadSec,
+            pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
             paramEditorTimelineClickSelectTrackEnabled:

@@ -160,6 +160,10 @@ fn import_finished_recording(
         timeline.select_track(&target_track_id);
     }
 
+    // 录音完成后把播放光标定位到录音末尾：随 payload 返回给前端，
+    // 前端再通过 pendingPlayheadRevealSec 机制在超出画面时滚动视图。
+    timeline.playhead_sec = end_sec.max(0.0);
+
     state.audio_engine.update_timeline(timeline.clone());
 
     let mut payload = timeline.to_payload();

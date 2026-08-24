@@ -17,7 +17,6 @@ import {
     pasteTimelineClipboardRemote,
     removeClipsRemote,
     removeTrackRemote,
-    seekPlayhead,
     selectClipRemote,
     setClipAutoFades,
     setClipGain,
@@ -25,7 +24,6 @@ import {
     setClipStateRemote,
     setClipsStateBulkRemote,
     setMultiSelectedClipIds as setMultiSelectedClipIdsAction,
-    setplayheadSec,
     setSelectedClip,
     setSelectedClipPreservingTrack,
     replaceClipSourceRemote,
@@ -601,51 +599,77 @@ export function useTimelineClipActions(
     );
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
+    // 粘贴链状态：idle=空闲；busy=一次粘贴在途；queued=在途期间又收到新的
+    // 粘贴请求（如长按 Ctrl+V 的连续重复粘贴），当前粘贴完成后立即接续，
+    // 避免并发粘贴在后端产生竞态。
+    const pasteChainStateRef = React.useRef<"idle" | "busy" | "queued">("idle");
     const pasteClipsAtPlayhead = React.useCallback(
         (mode?: "selected" | "new_tracks") => {
+            if (pasteChainStateRef.current !== "idle") {
+                pasteChainStateRef.current = "queued";
+                return;
+            }
+            pasteChainStateRef.current = "busy";
             void (async () => {
                 try {
-                    const result = await dispatch(pasteTimelineClipboardRemote(mode)).unwrap();
-                    setClipboardAvailable(true);
-                    const created = result.newClipIds ?? [];
-                    if (created.length === 0) return;
+                    for (;;) {
+                        try {
+                            const result = await dispatch(
+                                pasteTimelineClipboardRemote(mode),
+                            ).unwrap();
+                            setClipboardAvailable(true);
+                            const created = result.newClipIds ?? [];
+                            if (created.length > 0) {
+                                setMultiSelectedClipIds(created);
+                                void dispatch(selectClipRemote(created[0]));
+                                // 播放光标已由 paste thunk 同步到"新 Clip 最靠右结束位置"
+                                // （transport + 本地状态），此处无需再设置。
 
-                    setMultiSelectedClipIds(created);
-                    void dispatch(selectClipRemote(created[0]));
-                    dispatch(setplayheadSec(result.timeline?.playhead_sec ?? 0));
-                    void dispatch(seekPlayhead(result.timeline?.playhead_sec ?? 0));
-
-                    if (sessionRef.current.autoCrossfadeEnabled) {
-                        const allClips = (result.timeline?.clips ?? []) as Array<{
-                            id?: string;
-                            track_id?: string;
-                            start_sec?: number;
-                            length_sec?: number;
-                            auto_fade_in_sec?: number;
-                            auto_fade_out_sec?: number;
-                        }>;
-                        const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
-                        if (fadeUpdates.length > 0) {
-                            // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
-                            for (const u of fadeUpdates) {
-                                dispatch(
-                                    setClipAutoFades({
-                                        clipId: u.clipId,
-                                        autoFadeInSec: u.autoFadeInSec,
-                                        autoFadeOutSec: u.autoFadeOutSec,
-                                    }),
-                                );
-                                await webApi.setClipState({
-                                    clipId: u.clipId,
-                                    autoFadeInSec: u.autoFadeInSec,
-                                    autoFadeOutSec: u.autoFadeOutSec,
-                                    checkpoint: false,
-                                });
+                                if (sessionRef.current.autoCrossfadeEnabled) {
+                                    const allClips = (result.timeline?.clips ?? []) as Array<{
+                                        id?: string;
+                                        track_id?: string;
+                                        start_sec?: number;
+                                        length_sec?: number;
+                                        auto_fade_in_sec?: number;
+                                        auto_fade_out_sec?: number;
+                                    }>;
+                                    const fadeUpdates = computeAutoCrossfadeFromPayload(
+                                        allClips,
+                                        created,
+                                    );
+                                    if (fadeUpdates.length > 0) {
+                                        // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
+                                        for (const u of fadeUpdates) {
+                                            dispatch(
+                                                setClipAutoFades({
+                                                    clipId: u.clipId,
+                                                    autoFadeInSec: u.autoFadeInSec,
+                                                    autoFadeOutSec: u.autoFadeOutSec,
+                                                }),
+                                            );
+                                            await webApi.setClipState({
+                                                clipId: u.clipId,
+                                                autoFadeInSec: u.autoFadeInSec,
+                                                autoFadeOutSec: u.autoFadeOutSec,
+                                                checkpoint: false,
+                                            });
+                                        }
+                                    }
+                                }
                             }
+                        } catch {
+                            // 粘贴失败（如剪贴板为空）时终止粘贴链，避免长按期间
+                            // 以固定节奏反复触发必然失败的请求。
+                            setClipboardAvailable(false);
+                            break;
                         }
+                        // 没有排队中的粘贴请求则结束；有则立即接续下一次。
+                        if (pasteChainStateRef.current !== "queued") break;
+                        pasteChainStateRef.current = "busy";
                     }
-                } catch {
-                    setClipboardAvailable(false);
+                } finally {
+                    pasteChainStateRef.current = "idle";
                 }
             })();
         },

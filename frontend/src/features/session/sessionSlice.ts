@@ -416,6 +416,16 @@ export interface SessionState {
     playbackRateVersion: number;
 
     playheadSec: number;
+    /**
+     * 待执行的“聚焦播放光标”请求（粘贴后跳转光标时设置）。
+     *
+     * 粘贴可能显著扩充工程全长（水平可滚动范围随之扩大）。若在 fulfilled
+     * reducer 提交之前就尝试滚动，dynamicProjectSec / DOM 内容宽度都还是
+     * 旧值，滚动会被旧上限钳制，导致光标无法进入画面。因此这里只记录
+     * 目标位置，由 TimelinePanel 的 useLayoutEffect 在新状态与 DOM 均提交
+     * 后再执行滚动并回写 null。
+     */
+    pendingPlayheadRevealSec: number | null;
     tracks: TrackInfo[];
     trackMeters: Record<string, TrackMeterInfo>;
     clips: ClipInfo[];
@@ -1334,6 +1344,7 @@ const initialState: SessionState = {
     playbackRateVersion: 0,
 
     playheadSec: 0,
+    pendingPlayheadRevealSec: null,
     tracks: [
         {
             id: "track_main",
@@ -1868,6 +1879,10 @@ const sessionSlice = createSlice({
         },
         setplayheadSec(state, action: PayloadAction<number>) {
             state.playheadSec = Math.max(0, action.payload);
+        },
+        /** 设置/清除待执行的“聚焦播放光标”请求（见 pendingPlayheadRevealSec 注释）。 */
+        setPendingPlayheadReveal(state, action: PayloadAction<number | null>) {
+            state.pendingPlayheadRevealSec = action.payload;
         },
         setModelDir(state, action: PayloadAction<string>) {
             state.modelDir = action.payload;
@@ -2860,12 +2875,27 @@ const sessionSlice = createSlice({
             )
             .addCase(pasteVocalShifterClipboard.fulfilled, (state, action) => {
                 state.busy = false;
-                const payload = action.payload as any;
+                const payload = action.payload as {
+                    tracks?: unknown;
+                    newClipIds?: string[];
+                    pasteEndSec?: number | null;
+                };
                 if (payload?.tracks) {
-                    applyTimelineState(state, payload, { force: true });
+                    applyTimelineState(state, payload as any, { force: true });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
+                    }
+                    // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
+                    // （transport 已由 thunk 同步，这里对齐本地状态）。
+                    // 视图聚焦延迟到提交后由 TimelinePanel 的
+                    // useLayoutEffect 依据 pendingPlayheadRevealSec 执行。
+                    if (
+                        typeof payload.pasteEndSec === "number" &&
+                        Number.isFinite(payload.pasteEndSec)
+                    ) {
+                        state.playheadSec = Math.max(0, payload.pasteEndSec);
+                        state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
                     }
                 }
                 state.lastResult = payload;
@@ -2884,12 +2914,28 @@ const sessionSlice = createSlice({
             )
             .addCase(pasteReaperClipboard.fulfilled, (state, action) => {
                 state.busy = false;
-                const payload = action.payload as any;
+                const payload = action.payload as {
+                    timeline?: TimelineState;
+                    newClipIds?: string[];
+                    pasteEndSec?: number | null;
+                    skippedFiles?: string[];
+                };
                 if (payload?.timeline) {
                     applyTimelineState(state, payload.timeline, { force: true });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
+                    }
+                    // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
+                    // （transport 已由 thunk 同步，这里对齐本地状态）。
+                    // 视图聚焦延迟到提交后由 TimelinePanel 的
+                    // useLayoutEffect 依据 pendingPlayheadRevealSec 执行。
+                    if (
+                        typeof payload.pasteEndSec === "number" &&
+                        Number.isFinite(payload.pasteEndSec)
+                    ) {
+                        state.playheadSec = Math.max(0, payload.pasteEndSec);
+                        state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
                     }
                 }
                 const skippedFiles = payload?.skippedFiles;
@@ -3756,6 +3802,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     timeline?: TimelineState;
                     newClipIds?: string[];
+                    pasteEndSec?: number | null;
                 };
                 if (!payload?.ok || !payload.timeline?.tracks) {
                     state.status = "Paste timeline clipboard failed";
@@ -3765,6 +3812,18 @@ const sessionSlice = createSlice({
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     state.multiSelectedClipIds = payload.newClipIds;
                     state.selectedClipId = payload.newClipIds[0] ?? null;
+                }
+                // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
+                // （transport 已由 thunk 同步，这里对齐本地状态）。
+                // 视图聚焦延迟到提交后由 TimelinePanel 的
+                // useLayoutEffect 依据 pendingPlayheadRevealSec 执行，
+                // 避免在工程全长扩充前被旧滚动上限钳制。
+                if (
+                    typeof payload.pasteEndSec === "number" &&
+                    Number.isFinite(payload.pasteEndSec)
+                ) {
+                    state.playheadSec = Math.max(0, payload.pasteEndSec);
+                    state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
                 }
                 state.status = "Timeline clipboard pasted";
             })
@@ -4215,6 +4274,7 @@ export const {
     setDragDirection,
     setEdgeSmoothnessPercent,
     setplayheadSec,
+    setPendingPlayheadReveal,
     setModelDir,
     setAudioPath,
     setOutputPath,

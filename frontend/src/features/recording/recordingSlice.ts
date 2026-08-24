@@ -13,7 +13,7 @@ import {
     playOriginal,
     stopAudioPlayback,
 } from "../session/thunks/transportThunks";
-import { applyTimelinePayload } from "../session/sessionSlice";
+import { applyTimelinePayload, setPendingPlayheadReveal } from "../session/sessionSlice";
 
 const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
@@ -84,9 +84,11 @@ export const saveRecordingSettings = createAsyncThunk(
 
 export const loadRecordingDevices = createAsyncThunk(
     "recording/loadDevices",
-    async (_, { dispatch, getState }) => {
+    async (arg: { force?: boolean } | undefined, { dispatch, getState }) => {
         const current = (getState() as RootState).recording;
-        if (current.devicesLoaded && current.devices.length > 0) {
+        // 默认走一次性缓存；force = true 时跳过缓存强制重新枚举
+        // （如右键菜单每次打开都需要最新的设备列表）。
+        if (!arg?.force && current.devicesLoaded && current.devices.length > 0) {
             return current.devices;
         }
         const result = await webApi.getRecordingDevices();
@@ -98,9 +100,10 @@ export const loadRecordingDevices = createAsyncThunk(
 
 export const loadRecordingApps = createAsyncThunk(
     "recording/loadApps",
-    async (_, { dispatch, getState }) => {
+    async (arg: { force?: boolean } | undefined, { dispatch, getState }) => {
         const current = (getState() as RootState).recording;
-        if (current.appsLoaded && current.apps.length > 0) {
+        // 与设备列表一致：force = true 跳过缓存强制刷新。
+        if (!arg?.force && current.appsLoaded && current.apps.length > 0) {
             return current.apps;
         }
         const result = await webApi.getRecordingApps();
@@ -182,6 +185,22 @@ export const stopRecordingFlow = createAsyncThunk(
             }
             if (result.timeline) {
                 dispatch(applyTimelinePayload(result.timeline));
+            }
+            // 录音完毕后光标跳转到录音末尾：后端已在 timeline payload 中
+            // 携带新的 playhead_sec，这里再同步 transport 并登记
+            // pendingPlayheadRevealSec——超出画面时由 TimelinePanel 的
+            // useLayoutEffect 滚动视图回显（与粘贴共用同一机制）。
+            const finishedInfo = result.recording ?? null;
+            if (finishedInfo) {
+                const recordingEndSec =
+                    Math.max(0, Number(finishedInfo.startSec ?? 0)) +
+                    Math.max(0, Number(finishedInfo.durationSec ?? 0));
+                try {
+                    await webApi.setTransport({ playheadSec: recordingEndSec });
+                } catch {
+                    // transport 同步失败不影响录音结果。
+                }
+                dispatch(setPendingPlayheadReveal(recordingEndSec));
             }
             dispatch(recordingSlice.actions.recordingStopped(result.recording ?? null));
             // 录音结束后时间轴播放已停止，同步前端播放状态。

@@ -4062,6 +4062,10 @@ impl TimelineState {
 
         let is_root = source.parent_id.is_none();
 
+        // 显示顺序由树形 DFS 决定（每层按 order 排序），因此“紧贴源轨道
+        // 之后”= 同级（同 parent）中把源轨道之后的 order 整体后移一位，
+        // 克隆占据 source.order + 1。不跨父级重编号，避免影响其他分组。
+
         if is_root {
             // ── 根轨道：收集整棵子树 ──
             let mut all_ids = vec![track_id.to_string()];
@@ -4083,6 +4087,14 @@ impl TimelineState {
                 }
             }
 
+            // 根层级：位于源根之后的根轨道整体后移一位，为克隆子树腾位。
+            let src_root_order = source.order;
+            for t in self.tracks.iter_mut() {
+                if t.parent_id.is_none() && t.id != track_id && t.order > src_root_order {
+                    t.order += 1;
+                }
+            }
+
             // old_id → new_id 映射
             let id_map: HashMap<String, String> = all_ids
                 .iter()
@@ -4091,7 +4103,8 @@ impl TimelineState {
 
             let mut new_track_ids = Vec::new();
 
-            // 克隆轨道
+            // 克隆轨道。子树内部保持原有相对顺序：
+            // 克隆根 = 源根 order + 1，后代 = 源对应轨道 order + 1。
             for old_id in &all_ids {
                 let src_track = match self.tracks.iter().find(|t| &t.id == old_id) {
                     Some(t) => t,
@@ -4104,8 +4117,7 @@ impl TimelineState {
                     .and_then(|pid| id_map.get(pid))
                     .cloned();
 
-                let order = self.next_track_order;
-                self.next_track_order += 1;
+                let order = src_track.order + 1;
 
                 let mut cloned = src_track.clone();
                 cloned.id = new_tid.clone();
@@ -4146,14 +4158,23 @@ impl TimelineState {
             new_track_ids
         } else {
             // ── 普通子轨道：只克隆单个轨道 + 其 clip ──
-            let order = self.next_track_order;
-            self.next_track_order += 1;
+            // 同级中位于源轨道之后的全部后移一位，克隆紧贴源轨道之后。
+            let src_order = source.order;
+            for t in self.tracks.iter_mut() {
+                if t.parent_id == source.parent_id
+                    && t.id != track_id
+                    && t.order > src_order
+                {
+                    t.order += 1;
+                }
+            }
+
             let new_tid = new_id("track");
 
             let mut cloned = source.clone();
             cloned.id = new_tid.clone();
             cloned.name = format!("{} (Copy)", cloned.name);
-            cloned.order = order;
+            cloned.order = src_order + 1;
             self.tracks.push(cloned);
 
             // 克隆 clip
@@ -4174,6 +4195,25 @@ impl TimelineState {
             self.selected_track_id = Some(new_tid.clone());
             vec![new_tid]
         }
+    }
+
+    /// 克隆轨道并把克隆子树放置到指定位置（目标父级 + 同级 index）。
+    ///
+    /// 用于“复制拖动”修饰键下的轨道头拖拽：克隆内容与 `duplicate_track`
+    /// 一致（根轨道含整棵子树），随后把克隆子树移动到用户拖放的位置。
+    /// 目标位置以“不含被拖拽源轨道”的当前树为基准计算（前端
+    /// `computeDropSpec` 的语义），因此不存在自嵌套环。
+    pub fn duplicate_track_to(
+        &mut self,
+        track_id: &str,
+        parent_track_id: Option<String>,
+        target_index: usize,
+    ) -> Vec<String> {
+        let new_ids = self.duplicate_track(track_id);
+        if let Some(new_root) = new_ids.first().cloned() {
+            self.move_track(&new_root, target_index, parent_track_id);
+        }
+        new_ids
     }
 
     fn reorder_siblings(&mut self, track_id: &str, target_index: usize) {
@@ -4438,7 +4478,16 @@ impl TimelineState {
                             .map(|d| d.as_secs());
                     }
                     computed_fp = crate::audio_utils::compute_file_fingerprint(p);
-                    if let Some(info) = crate::audio_utils::try_read_wav_info(p, 4096) {
+                    // 视频文件只做 O(1) header 探测：try_read_wav_info 会为生成
+                    // preview 全量解码整条音轨，大视频导入时会造成长时间阻塞，
+                    // 且该结果随后会被 import_audio_item 的元数据覆盖（纯浪费）。
+                    // 波形由前端按需异步请求峰值缓存生成。
+                    let info = if crate::media::is_video_extension(p) {
+                        crate::audio_utils::try_read_audio_header_only(p)
+                    } else {
+                        crate::audio_utils::try_read_wav_info(p, 4096)
+                    };
+                    if let Some(info) = info {
                         computed_duration_sec = Some(info.duration_sec);
                         computed_duration_frames = Some(info.total_frames);
                         computed_source_sr = Some(info.sample_rate);

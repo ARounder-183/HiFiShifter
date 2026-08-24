@@ -370,6 +370,13 @@ type TrackListProps = {
         targetIndex: number;
         parentTrackId: string | null;
     }) => void;
+    /** “复制拖动”修饰键：按住时拖拽轨道头 = 在放置位置克隆轨道。 */
+    copyDragKb?: Keybinding;
+    onDuplicateTrackTo?: (payload: {
+        trackId: string;
+        targetIndex: number;
+        parentTrackId: string | null;
+    }) => void;
     onToggleMute: (trackId: string, nextMuted: boolean) => void;
     onToggleSolo: (trackId: string, nextSolo: boolean) => void;
     onToggleCompose: (trackId: string, nextComposeEnabled: boolean) => void;
@@ -403,6 +410,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onSelectTrack,
     onRemoveTrack,
     onMoveTrack,
+    copyDragKb,
+    onDuplicateTrackTo,
     onToggleMute,
     onToggleSolo,
     onToggleCompose,
@@ -508,6 +517,25 @@ const TrackListInner: React.FC<TrackListProps> = ({
         }
         setEditingTrackId(null);
     }
+
+    // 名称编辑中：点击输入框以外的任意位置都视为确认并退出编辑。
+    // 时间轴画布等区域会在自身的 pointerdown 处理里 preventDefault，
+    // 导致输入框收不到 blur 事件；因此这里用 window 捕获阶段的全局
+    // 监听兜底，保证点击界面任何其他位置都能确认并退出编辑框。
+    const commitTrackNameRef = useRef(commitTrackName);
+    useEffect(() => {
+        commitTrackNameRef.current = commitTrackName;
+    });
+    useEffect(() => {
+        if (!editingTrackId) return;
+        const handler = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (target && nameInputRef.current?.contains(target)) return;
+            commitTrackNameRef.current();
+        };
+        window.addEventListener("pointerdown", handler, true);
+        return () => window.removeEventListener("pointerdown", handler, true);
+    }, [editingTrackId]);
 
     // 点击其他区域关闭颜色选择�?
     useEffect(() => {
@@ -1022,6 +1050,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         draggingTrackId: string,
         clientX: number,
         clientY: number,
+        copyMode = false,
     ): {
         parentTrackId: string | null;
         targetIndex: number;
@@ -1029,6 +1058,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
     } {
         const el = listRef.current;
         const bounds = el?.getBoundingClientRect();
+
+        // 复制模式下源轨道原地不动、仍在列表中，因此同级列表不做剔除，
+        // 插入索引直接对应可见行缝；后端“先克隆（紧贴源）再移动到
+        // target_index”的组合会把它映射到完全相同的位置。
 
         // 当鼠标在列表容器上方时，直接插入到顶层第一个位�?
         if (bounds && clientY < bounds.top && tracks.length > 0) {
@@ -1043,7 +1076,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         // Dropping outside -> append as root.
         if (!over) {
-            const roots = siblingsOf(null).filter((id) => id !== draggingTrackId);
+            const roots = copyMode
+                ? siblingsOf(null)
+                : siblingsOf(null).filter((id) => id !== draggingTrackId);
             return {
                 parentTrackId: null,
                 targetIndex: roots.length,
@@ -1057,7 +1092,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         if (nest) {
             const parentTrackId = over.id;
-            if (wouldCreateCycle(draggingTrackId, parentTrackId)) {
+            // 复制模式不存在自嵌套环（克隆尚未入树），无需环检测。
+            if (!copyMode && wouldCreateCycle(draggingTrackId, parentTrackId)) {
                 const roots = siblingsOf(null).filter((id) => id !== draggingTrackId);
                 return {
                     parentTrackId: null,
@@ -1065,7 +1101,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     mode: "reorder",
                 };
             }
-            const children = siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
+            const children = copyMode
+                ? siblingsOf(parentTrackId)
+                : siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
             return {
                 parentTrackId,
                 targetIndex: children.length,
@@ -1074,22 +1112,35 @@ const TrackListInner: React.FC<TrackListProps> = ({
         }
 
         let parentTrackId = over.parentId ?? null;
-        if (wouldCreateCycle(draggingTrackId, parentTrackId)) {
+        if (!copyMode && wouldCreateCycle(draggingTrackId, parentTrackId)) {
             parentTrackId = null;
         }
 
-        if (over.id === draggingTrackId) {
+        if (over.id === draggingTrackId && !copyMode) {
             const siblingsIncl = siblingsOf(parentTrackId);
             const indexSelf = Math.max(0, siblingsIncl.indexOf(draggingTrackId));
             return { parentTrackId, targetIndex: indexSelf, mode: "reorder" };
         }
 
-        const siblings = siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
+        const siblings = copyMode
+            ? siblingsOf(parentTrackId)
+            : siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
         const baseIndex = Math.max(0, siblings.indexOf(over.id));
         // 使用 35% 边缘区域：上 35% 插入到上方，�?35% 插入到下方，中间 30% 保持不动
         const edgeZone = rowHeight * 0.35;
         const insertAfter = yInRow > rowHeight - edgeZone;
         const insertBefore = yInRow < edgeZone;
+
+        if (copyMode) {
+            // 复制模式：每次放置都产生一个克隆。落在目标行上缘 → 插到它前面；
+            // 中间与下缘 → 插到它后面（含源轨道自身行，即“复制到源下方”）。
+            return {
+                parentTrackId,
+                targetIndex: Math.min(siblings.length, baseIndex + (insertBefore ? 0 : 1)),
+                mode: "reorder",
+            };
+        }
+
         // 如果鼠标在中间区域，保持原位不触发重�?
         if (!insertAfter && !insertBefore) {
             const siblingsIncl = siblingsOf(parentTrackId);
@@ -1306,10 +1357,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 document.body.style.userSelect = "none";
                                             }
 
+                                            // 复制拖动修饰键按住时：预览与放置都按
+                                            // “源轨道不剔除”的复制索引计算。
+                                            const copyMode = Boolean(
+                                                copyDragKb &&
+                                                    isModifierActive(copyDragKb, ev) &&
+                                                    onDuplicateTrackTo,
+                                            );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
                                                 ev.clientX,
                                                 ev.clientY,
+                                                copyMode,
                                             );
                                             const overInfo = trackAtClientY(ev.clientY);
                                             const over = overInfo.track;
@@ -1373,11 +1432,29 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 return;
                                             }
 
+                                            // 与预览一致：按复制/移动语义计算放置位置。
+                                            const copyActive = Boolean(
+                                                copyDragKb && isModifierActive(copyDragKb, ev),
+                                            );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
                                                 ev.clientX,
                                                 ev.clientY,
+                                                copyActive && onDuplicateTrackTo != null,
                                             );
+
+                                            // “复制拖动”修饰键按住时：在放置位置克隆轨道
+                                            // （克隆子树移动到拖放位置），源轨道保持原位。
+                                            // 与移动不同，克隆到“与源相同的位置”同样有意义，
+                                            // 因此跳过同位 no-op 判断。
+                                            if (copyActive && onDuplicateTrackTo) {
+                                                onDuplicateTrackTo({
+                                                    trackId: drag.trackId,
+                                                    targetIndex: spec.targetIndex,
+                                                    parentTrackId: spec.parentTrackId,
+                                                });
+                                                return;
+                                            }
 
                                             if (
                                                 spec.parentTrackId === drag.originalParentId &&

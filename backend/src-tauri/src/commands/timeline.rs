@@ -349,12 +349,24 @@ pub(super) fn remove_track(
 pub(super) fn duplicate_track(
     state: State<'_, AppState>,
     track_id: String,
+    parent_track_id: Option<String>,
+    target_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
-    tl.duplicate_track(&track_id);
+    // 以 targetIndex 是否存在作为“复制拖动”放置语义的开关：
+    // - Some(index)：克隆子树移动到指定位置。注意 parentTrackId 为 null
+    //   （serde 反序列化为 None）代表根层级，是完全合法的放置目标，
+    //   绝不能作为回退到默认行为的条件——否则所有根级拖放都会退化成
+    //   “紧贴源轨道克隆”。
+    // - None：未提供位置（右键菜单“克隆轨道”），保持紧贴源轨道。
+    let new_track_ids = match target_index {
+        Some(index) => tl.duplicate_track_to(&track_id, parent_track_id, index),
+        None => tl.duplicate_track(&track_id),
+    };
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
+    payload.created_track_ids = Some(new_track_ids);
     payload.project = Some(state.project_meta_payload());
     payload
 }

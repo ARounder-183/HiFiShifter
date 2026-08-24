@@ -156,13 +156,20 @@ export function ActionBar() {
     const recordingDeviceLabel = (() => {
         const { captureMode } = recording.settings;
         if (captureMode === "device") {
+            // "default" 是后端枚举出的合成项（未本地化），始终显示本地化文案。
+            if (recording.settings.sourceDevice === "default") {
+                return tAny("recording_device_default");
+            }
             const device = recording.devices.find(
                 (item) => !item.isLoopback && item.id === recording.settings.sourceDevice,
             );
             return device?.name ?? tAny("recording_device_default");
         }
         if (captureMode === "loopback") {
-            if (recording.settings.loopbackDevice === "default") {
+            if (
+                recording.settings.loopbackDevice === "default" ||
+                recording.settings.loopbackDevice === "loopback:default"
+            ) {
                 return tAny("recording_loopback_default");
             }
             const device = recording.devices.find(
@@ -837,8 +844,10 @@ export function ActionBar() {
                             event.preventDefault();
                             setRecordingMenuPos({ x: event.clientX, y: event.clientY });
                             void dispatch(loadRecordingSettings());
-                            void dispatch(loadRecordingDevices());
-                            void dispatch(loadRecordingApps());
+                            // 每次打开菜单都强制重新枚举设备/应用，
+                            // 避免展示上次加载的过时列表（设备热插拔、应用退出等）。
+                            void dispatch(loadRecordingDevices({ force: true }));
+                            void dispatch(loadRecordingApps({ force: true }));
                         }}
                     >
                         {recording.active ? (
@@ -918,7 +927,10 @@ export function ActionBar() {
                                         ) : null}
                                     </button>
                                     {recording.devices
-                                        .filter((device) => !device.isLoopback)
+                                        .filter(
+                                            (device) =>
+                                                !device.isLoopback && device.id !== "default",
+                                        )
                                         .map((device) => (
                                             <button
                                                 key={device.id}
@@ -954,7 +966,11 @@ export function ActionBar() {
                                         ) : null}
                                     </button>
                                     {recording.devices
-                                        .filter((device) => device.isLoopback)
+                                        .filter(
+                                            (device) =>
+                                                device.isLoopback &&
+                                                device.id !== "loopback:default",
+                                        )
                                         .map((device) => (
                                             <button
                                                 key={device.id}

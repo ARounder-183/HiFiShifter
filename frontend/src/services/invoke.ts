@@ -151,7 +151,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { trackId: args[0] };
 
         case "duplicate_track":
-            return { trackId: args[0] };
+            return {
+                trackId: args[0],
+                ...(args[1] !== undefined ? { parentTrackId: args[1] } : {}),
+                ...(args[2] !== undefined ? { targetIndex: args[2] } : {}),
+            };
 
         case "move_track":
             return {

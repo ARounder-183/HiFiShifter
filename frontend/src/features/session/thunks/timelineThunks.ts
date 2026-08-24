@@ -3,6 +3,7 @@ import { webApi } from "../../../services/webviewApi";
 import type { TimelineState } from "../../../types/api";
 import type { ClipTemplate } from "../sessionTypes";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 
 // 注意：这�?thunk 依赖 SessionState（目前仍�?sessionSlice.ts 内部定义）�?
 // 我们在此处用 type-only import，避免运行时循环依赖�?
@@ -24,8 +25,23 @@ export const removeTrackRemote = createAsyncThunk(
 
 export const duplicateTrackRemote = createAsyncThunk(
     "session/duplicateTrackRemote",
-    async (trackId: string) => {
-        return webApi.duplicateTrack(trackId);
+    async (
+        payload:
+            | string
+            | {
+                  trackId: string;
+                  /** “复制拖动”放置语义：克隆子树的目标父级与同级 index。 */
+                  parentTrackId?: string | null;
+                  targetIndex?: number;
+              },
+    ) => {
+        if (typeof payload === "string") {
+            return webApi.duplicateTrack(payload);
+        }
+        return webApi.duplicateTrack(payload.trackId, {
+            parentTrackId: payload.parentTrackId,
+            targetIndex: payload.targetIndex,
+        });
     },
 );
 
@@ -312,10 +328,30 @@ export const pasteTimelineClipboardRemote = createAsyncThunk(
             : Array.isArray((result as { createdClipIds?: string[] }).createdClipIds)
               ? ((result as { createdClipIds?: string[] }).createdClipIds as string[])
               : [];
+        // 粘贴产生 Clip 后，把播放光标跳到所有新 Clip 中最靠右的结束位置，
+        // 并同步后端 transport，保证前后端一致。
+        let pasteEndSec: number | null = null;
+        if (createdClipIds.length > 0) {
+            pasteEndSec = computePasteEndSec(
+                (result as { clips?: PasteEndClipLike[] }).clips,
+                createdClipIds,
+            );
+            if (pasteEndSec !== null) {
+                try {
+                    await webApi.setTransport({ playheadSec: pasteEndSec });
+                } catch {
+                    // transport 同步失败不应让粘贴本身报错。
+                }
+            }
+        }
+        // 视图聚焦（若新光标在画面外则水平滚动）由 reducer 记录的
+        // pendingPlayheadRevealSec 驱动，在状态与 DOM 提交后执行，
+        // 避免被旧的工程全长上限钳制。
         return {
             ok: true,
             timeline: result,
             newClipIds: createdClipIds,
+            pasteEndSec,
             sourceProject: (result as { sourceProject?: string }).sourceProject,
             importedTrackCount: (result as { importedTrackCount?: number }).importedTrackCount,
             importedClipCount: (result as { importedClipCount?: number }).importedClipCount,

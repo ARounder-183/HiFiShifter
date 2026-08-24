@@ -42,6 +42,7 @@ import {
     setTempoMap,
     setTrackName,
     setTrackVolume,
+    setPendingPlayheadReveal,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
@@ -88,7 +89,7 @@ import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions"
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
-import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
+import { computeAutoFollowScrollLeft, computeFocusCursorScrollLeft } from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
@@ -345,6 +346,40 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
+
+    // ── 粘贴后“聚焦播放光标”（提交后执行）────────────────────
+    // 粘贴可能大幅扩充工程全长（dynamicProjectSec / 水平可滚动范围随之
+    // 扩大）。滚动必须在本状态与对应 DOM（paddedContentWidth）都提交后
+    // 执行，否则会被旧的滚动上限钳制，导致光标无法进入画面。
+    // pendingPlayheadRevealSec 由粘贴 fulfilled reducer 记录，这里在
+    // useLayoutEffect 中消费并立即清除。
+    const pendingPlayheadRevealSec = s.pendingPlayheadRevealSec;
+    React.useLayoutEffect(() => {
+        if (pendingPlayheadRevealSec == null) return;
+        const scroller = scrollRef.current;
+        if (!scroller) {
+            dispatch(setPendingPlayheadReveal(null));
+            return;
+        }
+        // 仅当新光标位置不在可视范围内时才滚动（需求语义：画面内不扰动视图）。
+        const x = Math.max(0, pendingPlayheadRevealSec) * pxPerSec;
+        const left = scroller.scrollLeft;
+        const right = left + scroller.clientWidth;
+        if (x >= left && x <= right) {
+            dispatch(setPendingPlayheadReveal(null));
+            return;
+        }
+        const next = computeFocusCursorScrollLeft({
+            playheadSec: pendingPlayheadRevealSec,
+            pxPerSec,
+            contentWidth: dynamicProjectSec * pxPerSec,
+        });
+        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
+            scroller.scrollLeft = next;
+            syncScrollLeft(next);
+        }
+        dispatch(setPendingPlayheadReveal(null));
+    }, [pendingPlayheadRevealSec, pxPerSec, dynamicProjectSec, scrollRef, syncScrollLeft, dispatch]);
 
     const timeContext = React.useMemo<TimeFormatContext>(
         () => ({
@@ -937,6 +972,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         },
         [dispatch],
     );
+    // “复制拖动”修饰键 + 轨道头拖拽：在拖放位置克隆轨道（含子树）。
+    const handleDuplicateTrackTo = React.useCallback(
+        (payload: { trackId: string; targetIndex: number; parentTrackId: string | null }) => {
+            dispatch(
+                duplicateTrackRemote({
+                    trackId: payload.trackId,
+                    parentTrackId: payload.parentTrackId,
+                    targetIndex: payload.targetIndex,
+                }),
+            );
+        },
+        [dispatch],
+    );
     const handleCreateTrackBelow = React.useCallback(
         (trackId: string) => {
             void (async () => {
@@ -1106,6 +1154,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onSelectTrack={handleSelectTrack}
                 onRemoveTrack={handleRemoveTrack}
                 onMoveTrack={handleMoveTrack}
+                copyDragKb={copyDragKb}
+                onDuplicateTrackTo={handleDuplicateTrackTo}
                 onToggleMute={handleToggleTrackMute}
                 onToggleSolo={handleToggleTrackSolo}
                 onToggleCompose={handleToggleTrackCompose}

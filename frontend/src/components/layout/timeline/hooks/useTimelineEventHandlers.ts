@@ -7,7 +7,8 @@
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
  * - auto-scroll（播放时保持播放头可见）
- * - hifi:focusCursor（滚动到播放头中心）
+ * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
+ *   pendingPlayheadRevealSec + TimelinePanel useLayoutEffect 驱动）
  * - useKeyboardShortcuts 桥接
  */
 import { useEffect } from "react";
@@ -22,7 +23,7 @@ import {
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
-import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
+import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
@@ -401,15 +402,20 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         return () => window.removeEventListener("pointerdown", onAnyPointerDown, true);
     }, [contextMenu, trackAreaMenu]);
 
-    // ── hifi:focusCursor ─────────────────────────────────────
+    // ── hifi:focusCursor（快捷键"聚焦播放光标"）──────────────
+    // 粘贴后的视图聚焦不再走事件：由 reducer 记录的 pendingPlayheadRevealSec
+    // 驱动，在 TimelinePanel 的 useLayoutEffect 中于状态与 DOM 均提交后执行。
+    // （旧的事件方案会在工程全长扩充前触发，滚动被旧上限钳制导致聚焦失败。）
     useEffect(() => {
+        // 无条件把当前播放光标滚到视口内固定偏移处。滚动上限使用“新滚动
+        // 模型”（= 工程宽度）：光标接近工程末尾时也必须能正确进入画面，
+        // 而不是被“工程宽 − 视口宽”的旧上限卡在画面右缘。
         function handler() {
             const scroller = scrollRef.current;
             if (!scroller) return;
-            const next = computeAutoFollowScrollLeft({
+            const next = computeFocusCursorScrollLeft({
                 playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
-                viewportWidth: scroller.clientWidth,
                 contentWidth: dynamicProjectSec * pxPerSec,
             });
             scroller.scrollLeft = next;
@@ -417,5 +423,5 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [pxPerSec, sessionRef, syncScrollLeft]);
+    }, [pxPerSec, sessionRef, syncScrollLeft, dynamicProjectSec, scrollRef]);
 }
