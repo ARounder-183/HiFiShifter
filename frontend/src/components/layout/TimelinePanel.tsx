@@ -744,6 +744,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         ignoreGrouping,
         timelineSnap: s.timelineSnap,
         pxPerSec,
+        noSnapKb,
     });
 
     const {

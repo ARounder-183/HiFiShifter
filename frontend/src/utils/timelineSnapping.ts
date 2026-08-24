@@ -19,12 +19,13 @@ import {
     snapSecToTempoGrid,
 } from "./tempoMap";
 import { gridStepBeats } from "../components/layout/timeline/grid";
+import { resolvePlaybackWindowSec } from "./loopRender";
 
-export type SnapObjectKind = "mediaItem" | "selection" | "cursor";
+export type SnapObjectKind = "clip" | "selection" | "cursor";
 export type SnapCandidateKind =
     | "grid"
-    | "mediaStart"
-    | "mediaEnd"
+    | "clipStart"
+    | "clipEnd"
     | "snapOffset"
     | "sourceStart"
     | "sourceEnd"
@@ -268,42 +269,62 @@ function clipTrackDistance(ctx: TimelineSnapContext, clip: ClipInfo): number {
     return Math.abs(a - b);
 }
 
-function addClipCandidates(
-    ctx: TimelineSnapContext,
-    out: SnapCandidate[],
-    opts: {
-        includeSelection?: boolean;
-        excludeSelected?: boolean;
-    },
-) {
-    const { settings } = ctx;
+/** 轨道距离过滤后的可见 clip 列表（供各候选组共用）。 */
+function visibleClipsForSnap(ctx: TimelineSnapContext): ClipInfo[] {
     const excluded = ctx.excludeClipIds ?? new Set<string>();
-    const selectedSet = new Set(ctx.selectedClipIds);
+    const out: ClipInfo[] = [];
     for (const clip of ctx.clips) {
         if (excluded.has(clip.id)) continue;
-        if (!settings.snapAcrossTracks && clip.trackId !== (ctx.anchorTrackId ?? clip.trackId)) {
-            continue;
-        }
-        if (settings.snapAcrossTracks) {
-            const distance = clipTrackDistance(ctx, clip);
-            if (distance > settings.snapTrackDistance) continue;
-        }
+        if (!settings_gateAcrossTracks(ctx, clip)) continue;
+        out.push(clip);
+    }
+    return out;
+}
+
+function settings_gateAcrossTracks(ctx: TimelineSnapContext, clip: ClipInfo): boolean {
+    if (ctx.settings.snapAcrossTracks) {
+        const distance = clipTrackDistance(ctx, clip);
+        return distance <= ctx.settings.snapTrackDistance;
+    }
+    return clip.trackId === (ctx.anchorTrackId ?? clip.trackId);
+}
+
+/** "吸附到选择/标记/光标"族：其他（或已选）Clip 的起点候选。 */
+function addSelectionCandidates(
+    ctx: TimelineSnapContext,
+    out: SnapCandidate[],
+    opts: { includeSelection?: boolean; excludeSelected?: boolean },
+) {
+    const selectedSet = new Set(ctx.selectedClipIds);
+    for (const clip of visibleClipsForSnap(ctx)) {
         const isSelected = selectedSet.has(clip.id);
         if (opts.excludeSelected && isSelected) continue;
         if (opts.includeSelection && !isSelected) {
             out.push({ sec: clampSec(clip.startSec), kind: "selection", priority: 30, clipId: clip.id, trackId: clip.trackId });
         }
-        if (settings.snapItemStart) {
-            out.push({ sec: clampSec(clip.startSec), kind: "mediaStart", priority: 20, clipId: clip.id, trackId: clip.trackId });
+    }
+}
+
+/**
+ * "Clip 边缘 / 内容起点 / 源素材首尾"三组独立目标候选。
+ *
+ * 源素材首尾的投影公式（对任意方向 / 窗口形态成立）：
+ *   t(source=s) = startSec + (s − winStart) / rate
+ */
+function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
+    const { settings } = ctx;
+    for (const clip of visibleClipsForSnap(ctx)) {
+        if (settings.snapClipEdges) {
+            out.push({ sec: clampSec(clip.startSec), kind: "clipStart", priority: 20, clipId: clip.id, trackId: clip.trackId });
             out.push({
                 sec: clampSec(clip.startSec + Math.max(0, clip.lengthSec)),
-                kind: "mediaEnd",
+                kind: "clipEnd",
                 priority: 21,
                 clipId: clip.id,
                 trackId: clip.trackId,
             });
         }
-        if (settings.snapItemSnapOffset) {
+        if (settings.snapClipSnapOffset) {
             out.push({
                 sec: clipSnapOffsetSec(clip),
                 kind: "snapOffset",
@@ -312,25 +333,28 @@ function addClipCandidates(
                 trackId: clip.trackId,
             });
         }
-        if (settings.snapMediaEdgesToSource) {
+        if (settings.snapClipsToSourceMedia) {
             const rate = Math.max(1e-6, Number(clip.playbackRate) || 1);
-            const sourceStartSec = Number(clip.sourceStartSec) || 0;
-            const sourceEndSec = Number(clip.sourceEndSec);
-            const durationSec = Number(clip.durationSec);
-            const sourceDuration = Number.isFinite(durationSec) && durationSec != null && durationSec > 0
-                ? durationSec
-                : Number.isFinite(sourceEndSec) && sourceEndSec > sourceStartSec
-                  ? sourceEndSec - sourceStartSec
-                  : Number(clip.lengthSec) || 0;
+            const { winStartSec } = resolvePlaybackWindowSec({
+                loopEnabled: Boolean(clip.loopEnabled),
+                reversed: Boolean(clip.reversed),
+                sourceStartSec: Number(clip.sourceStartSec) || 0,
+                playbackRate: rate,
+                lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
+                sourceEndSec: Number(clip.sourceEndSec ?? clip.durationSec ?? 0) || 0,
+            });
+            const mediaDur =
+                Number(clip.durationSec) ||
+                Math.max(0, Number(clip.sourceEndSec) - Number(clip.sourceStartSec) || 0);
             out.push({
-                sec: clampSec(Number(clip.startSec) - sourceStartSec / rate),
+                sec: clampSec(Number(clip.startSec) - winStartSec / rate),
                 kind: "sourceStart",
                 priority: 24,
                 clipId: clip.id,
                 trackId: clip.trackId,
             });
             out.push({
-                sec: clampSec(Number(clip.startSec) + (sourceDuration - sourceStartSec) / rate),
+                sec: clampSec(Number(clip.startSec) + (mediaDur - winStartSec) / rate),
                 kind: "sourceEnd",
                 priority: 24,
                 clipId: clip.id,
@@ -366,7 +390,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
 
     // ── 网格候选 ──
     const wantsGrid =
-        (ctx.object === "mediaItem" && settings.snapMediaItemsToGrid) ||
+        (ctx.object === "clip" && settings.snapClipsToGrid) ||
         (ctx.object === "selection" && settings.snapSelectionToGrid) ||
         (ctx.object === "cursor" && settings.snapCursorToGrid);
     const gridCandidates = wantsGrid ? collectGridCandidates(ctx, safeRaw) : [];
@@ -374,11 +398,11 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
 
     // ── 选择 / 标记 / 光标 ──
     const wantsSelMarkerCursor =
-        (ctx.object === "mediaItem" && settings.snapMediaItemsToSelectionMarkersCursor) ||
+        (ctx.object === "clip" && settings.snapClipsToSelectionMarkersCursor) ||
         (ctx.object === "selection" && settings.snapSelectionToSelectionMarkersCursor) ||
         (ctx.object === "cursor" && settings.snapCursorToSelectionMarkersCursor);
     if (wantsSelMarkerCursor) {
-        addClipCandidates(ctx, candidates, {
+        addSelectionCandidates(ctx, candidates, {
             includeSelection: ctx.object !== "selection",
             excludeSelected: ctx.object === "selection",
         });
@@ -386,6 +410,11 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
             candidates.push({ sec: clampSec(ctx.playheadSec), kind: "cursor", priority: 5 });
         }
     }
+
+    // ── Clip 边缘 / 内容起点 / 源素材首尾 ──
+    // 三组各自独立的目标开关，不隶属于"选择/标记/光标"族：
+    // 任意拖动对象在对应开关开启时都可吸附到这些候选。
+    addClipEdgeCandidates(ctx, candidates);
 
     candidates.push(...collectSampleRateCandidates(ctx, safeRaw));
 
@@ -469,4 +498,51 @@ export function alignClipsToSwingGrid(args: {
         }
     }
     return updates;
+}
+
+// ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────────
+
+/**
+ * "拖动时切换吸附"语义：修饰键按住时把吸附总开关临时取反。
+ *   总开关开 + 修饰键 → 不吸附；总开关关 + 修饰键 → 吸附。
+ */
+export function computeEffectiveSnap(
+    snapEnabled: boolean,
+    toggleModifierActive: boolean,
+): boolean {
+    return toggleModifierActive ? !snapEnabled : snapEnabled;
+}
+
+// ── 吸附手势登记 ──
+// 拖拽期间工具栏"吸附"按钮需要临时视觉切换。通过轻量发布/订阅解耦：
+// 各拖拽 hook 在手势起止处登记深度，ActionBar 订阅后计算有效视觉状态。
+
+let snapGestureDepth = 0;
+const snapGestureListeners = new Set<() => void>();
+
+function emitSnapGestureChange(): void {
+    for (const listener of snapGestureListeners) listener();
+}
+
+export function beginSnapGesture(): void {
+    snapGestureDepth += 1;
+    emitSnapGestureChange();
+}
+
+export function endSnapGesture(): void {
+    snapGestureDepth = Math.max(0, snapGestureDepth - 1);
+    emitSnapGestureChange();
+}
+
+/** 当前是否有吸附感知的拖拽手势进行中。 */
+export function isSnapGestureActive(): boolean {
+    return snapGestureDepth > 0;
+}
+
+/** 订阅手势状态变化；返回取消订阅函数。 */
+export function subscribeSnapGesture(listener: () => void): () => void {
+    snapGestureListeners.add(listener);
+    return () => {
+        snapGestureListeners.delete(listener);
+    };
 }

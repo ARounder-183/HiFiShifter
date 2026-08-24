@@ -34,6 +34,11 @@ import {
     loopSnapThresholdSec,
     nearestBoundarySnapOffsetSec,
 } from "../../../../utils/loopSnap";
+import {
+    beginSnapGesture,
+    computeEffectiveSnap,
+    endSnapGesture,
+} from "../../../../utils/timelineSnapping";
 import { paramsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import {
@@ -460,7 +465,7 @@ export function useEditDrag(deps: {
     multiSelectedSet: Set<string>;
     snapTimeline: (
         sec: number,
-        object: "mediaItem",
+        object: "clip",
         opts?: {
             originSec?: number;
             anchorTrackId?: string | null;
@@ -568,6 +573,9 @@ export function useEditDrag(deps: {
 
         dispatch(checkpointHistory());
         dispatch(beginInteraction());
+        if (type === "trim_left" || type === "trim_right" || type === "crossfade_edges") {
+            beginSnapGesture();
+        }
 
         // Gain drag sends throttled backend preview updates while dragging. Open the
         // backend undo group up front so the single checkpoint is the pre-drag value;
@@ -776,10 +784,11 @@ export function useEditDrag(deps: {
                     drag.type === "stretch_left" ||
                     drag.type === "stretch_right";
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
-                const effectiveSnap = snapEnabled && !noSnapActive;
+                // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
+                const effectiveSnap = computeEffectiveSnap(snapEnabled, noSnapActive);
                 if (shouldSnap && effectiveSnap) {
                     const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
-                    beat = snapTimeline(beat, "mediaItem", {
+                    beat = snapTimeline(beat, "clip", {
                         originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
                         anchorTrackId: sessionRef.current.clips.find((c) => c.id === drag.clipId)
                             ?.trackId,
@@ -787,18 +796,20 @@ export function useEditDrag(deps: {
                     });
                 }
                 // ── 循环节 / 内容边界吸附 ───────────────────────────────
-                // 无论"吸附"功能是否启用都生效；吸附距离读自吸附设置的
-                // snapDistancePx。目标：媒体边界（s=0 与 s=D）在时间线上的
-                // 投影位置 —— Loop Clip 呈 mod-D 等差族；未循环 Clip 的
-                // "循环节"即原始媒体内容在 Clip 内的终止位置（s=D 投影），
-                // 以及内容起始位置（s=0 投影，覆盖前导静音场景）。
-                // 命中时优先于普通网格吸附（语义更具体）。trim_left /
-                // trim_right 的边界同余式都只依赖"移动边缘相对 Clip 基准
-                // 起点的时间线偏移"，故统一处理。
+                // 属于常规吸附体系：受"吸附"总开关与"拖动时切换吸附"修饰键
+                // （XOR）控制，且需在吸附设置中启用"Clip 边缘吸附到源素材
+                // 首尾"。目标：媒体边界（s=0 与 s=D）在时间线上的投影位置
+                // —— Loop Clip 呈 mod-D 等差族；未循环 Clip 的"循环节"即
+                // 原始媒体内容在 Clip 内的终止/起始位置。命中时优先于普通
+                // 网格吸附（语义更具体）。trim_left / trim_right 的边界
+                // 同余式都只依赖"移动边缘相对 Clip 基准起点的时间线偏移"，
+                // 故统一处理。
                 if (
                     shouldSnap &&
+                    effectiveSnap &&
                     (drag.type === "trim_left" || drag.type === "trim_right") &&
-                    timelineSnap.snapDistancePx > 0
+                    timelineSnap.snapDistancePx > 0 &&
+                    timelineSnap.snapClipsToSourceMedia
                 ) {
                     const anchorBase = drag.baseByClipId[drag.clipId];
                     if (anchorBase) {
@@ -1668,6 +1679,13 @@ export function useEditDrag(deps: {
             const drag = editDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             editDragRef.current = null;
+            if (
+                drag.type === "trim_left" ||
+                drag.type === "trim_right" ||
+                drag.type === "crossfade_edges"
+            ) {
+                endSnapGesture();
+            }
 
             const isGroupStretch =
                 drag.stretchGroup != null &&

@@ -28,7 +28,7 @@ export interface UseTimelineDragDropArgs {
     /** 吸附引擎入口（媒体项目对象）。 */
     snapTimeline?: (
         sec: number,
-        object: "mediaItem",
+        object: "clip",
         opts?: {
             originSec?: number;
             anchorTrackId?: string | null;
@@ -154,7 +154,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             : fallbackBeat;
                     const beat =
                         snapTimeline && sessionRef.current.timelineSnap.enabled
-                            ? snapTimeline(rawBeat, "mediaItem", {
+                            ? snapTimeline(rawBeat, "clip", {
                                   anchorTrackId: trackId,
                                   originSec: rawBeat,
                               })
@@ -323,7 +323,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
     // ── 文件浏览器面板的自定义拖拽事件 ───────────────────────
     const snapDropBeat = (rawBeat: number, trackId: string | null) =>
         snapTimeline && sessionRef.current.timelineSnap.enabled
-            ? snapTimeline(rawBeat, "mediaItem", {
+            ? snapTimeline(rawBeat, "clip", {
                   anchorTrackId: trackId,
                   originSec: rawBeat,
               })

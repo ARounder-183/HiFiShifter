@@ -15,6 +15,13 @@ import {
     loopSnapThresholdSec,
     nearestBoundarySnapOffsetSec,
 } from "../../../../utils/loopSnap";
+import {
+    beginSnapGesture,
+    computeEffectiveSnap,
+    endSnapGesture,
+} from "../../../../utils/timelineSnapping";
+import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import type { Keybinding } from "../../../../features/keybindings/types";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 /**
@@ -112,6 +119,8 @@ export function useSlipDrag(deps: {
     timelineSnap: TimelineSnapSettings;
     /** 当前缩放（像素/秒）：用于把吸附距离换算成秒。 */
     pxPerSec: number;
+    /** "拖动时切换吸附"修饰键绑定（XOR 取反吸附总开关）。 */
+    noSnapKb: Keybinding;
 }) {
     const {
         scrollRef,
@@ -123,6 +132,7 @@ export function useSlipDrag(deps: {
         ignoreGrouping,
         timelineSnap,
         pxPerSec,
+        noSnapKb,
     } = deps;
 
     const slipDragRef = useRef<SlipDragState | null>(null);
@@ -224,6 +234,8 @@ export function useSlipDrag(deps: {
             lastById: {},
         };
 
+        beginSnapGesture();
+
         (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
 
         function onMove(ev: PointerEvent) {
@@ -235,17 +247,26 @@ export function useSlipDrag(deps: {
             drag.prevPointerBeat = beatNow;
 
             // ── 实时循环节/内容边界吸附（拖拽全程生效）────────────────
-            // 无论"吸附"总开关是否启用都生效；吸附距离读自吸附设置的
-            // snapDistancePx。候选族只依赖锚 clip 的**初始**几何：
-            // - Loop：媒体边界相位对齐 Clip 起点/终点的 mod-D 等差族；
-            // - 非 Loop：媒体边界（s=0 与 s=D）对齐 Clip 起点/终点的有限候选
-            //   （即"原始媒体内容在 Clip 内的开始/结束位置"落到边缘上）。
-            // 命中时把累计位移替换为吸附值，再以"目标累计 − 已应用累计"
-            // 驱动各 clip 的增量分发。
+            // 属于常规吸附体系：受"吸附"总开关与"拖动时切换吸附"修饰键
+            // （XOR）控制，且需在吸附设置中启用"Clip 边缘吸附到源素材首尾"。
+            // 吸附距离读自 snapDistancePx。候选族只依赖锚 clip 的**初始**
+            // 几何（平移不变）：Loop 为媒体边界相位对齐 Clip 边缘的 mod-D
+            // 等差族；非 Loop 为媒体边界对齐 Clip 边缘的有限候选。命中时把
+            // 累计位移替换为吸附值，再以"目标累计 − 已应用累计"驱动增量。
             let desiredTotal = drag.startPointerBeat - beatNow;
             {
                 const a = drag.anchorSnapshot;
-                if ((a.isContentBearing || a.loopEnabled) && timelineSnap.snapDistancePx > 0) {
+                const noSnapActive = isModifierActive(noSnapKb, ev);
+                const effectiveSnap = computeEffectiveSnap(
+                    timelineSnap.enabled,
+                    noSnapActive,
+                );
+                if (
+                    (a.isContentBearing || a.loopEnabled) &&
+                    timelineSnap.snapClipsToSourceMedia &&
+                    effectiveSnap &&
+                    timelineSnap.snapDistancePx > 0
+                ) {
                     const dir = a.reversed ? -1 : 1;
                     const rawWindowShift = desiredTotal * dir;
                     const snappedW = nearestBoundarySnapOffsetSec(
@@ -295,6 +316,7 @@ export function useSlipDrag(deps: {
             const drag = slipDragRef.current;
             if (!drag || drag.pointerId !== ev.pointerId) return;
             slipDragRef.current = null;
+            endSnapGesture();
 
             // 持久化交互数学的最终值（不回读 Redux）。实时吸附已在 move 中
             // 把累计位移收敛到循环节候选上，无需松手二次修正。

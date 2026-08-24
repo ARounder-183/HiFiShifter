@@ -49,8 +49,8 @@ export interface TimelineSnapSettings {
     swingEnabled: boolean;
     /** Swing 强度（0-100）。 */
     swingPercent: number;
-    /** 调整 Swing 时自动按新 Swing 网格重新对齐现有媒体项。 */
-    adjustItemsOnSwingChange: boolean;
+    /** 调整 Swing 时自动按新 Swing 网格重新对齐现有 Clip。 */
+    adjustClipsOnSwingChange: boolean;
 
     // ── Snap master ──
     /** 吸附总开关（工具栏按钮同步该值）。 */
@@ -61,10 +61,10 @@ export interface TimelineSnapSettings {
     snapRelativeToGrid: boolean;
 
     // ── Snap targets / objects matrix ──
-    /** 媒体项吸附到 选择/标记/光标。 */
-    snapMediaItemsToSelectionMarkersCursor: boolean;
-    /** 媒体项吸附到网格。 */
-    snapMediaItemsToGrid: boolean;
+    /** Clip 吸附到 选择/标记/光标。 */
+    snapClipsToSelectionMarkersCursor: boolean;
+    /** Clip 吸附到网格。 */
+    snapClipsToGrid: boolean;
     /** 选区吸附到 选择/标记/光标。 */
     snapSelectionToSelectionMarkersCursor: boolean;
     /** 选区吸附到网格。 */
@@ -86,11 +86,11 @@ export interface TimelineSnapSettings {
     /** 独立吸附间距的最小像素值。 */
     snapSpacingMinPx: number;
 
-    // ── Item & special interactions ──
-    /** 项目起点参与吸附。 */
-    snapItemStart: boolean;
-    /** 项目 snap offset（内容起始点）参与吸附。 */
-    snapItemSnapOffset: boolean;
+    // ── Clip & special interactions ──
+    /** 其他 Clip 的起点/终点参与吸附。 */
+    snapClipEdges: boolean;
+    /** Clip 内容起始点（snap offset）参与吸附。 */
+    snapClipSnapOffset: boolean;
     /** 允许吸附到其他轨道的媒体项。 */
     snapAcrossTracks: boolean;
     /** 允许跨多少条轨道吸附（0 = 仅本轨）。 */
@@ -101,8 +101,8 @@ export interface TimelineSnapSettings {
     // ── Advanced ──
     /** 吸附到工程采样率（sample accurate）。 */
     snapToProjectSampleRate: boolean;
-    /** 媒体项边缘吸附到源媒体 start/end。 */
-    snapMediaEdgesToSource: boolean;
+    /** Clip 边缘吸附到源素材首尾（循环节吸附）。 */
+    snapClipsToSourceMedia: boolean;
     /** 强制选区为网格倍数。 */
     forceSelectionsToMultiples: boolean;
     /** 强制选区倍数网格。 */

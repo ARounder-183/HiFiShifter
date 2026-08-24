@@ -95,7 +95,7 @@ function context(
         tracks: [track],
         selectedClipIds: [],
         playheadSec: 1.5,
-        object: "mediaItem" as const,
+        object: "clip" as const,
         ...ctxOverrides,
     };
 }
@@ -121,25 +121,25 @@ assertNear(
 );
 // 像素距离阈值。
 {
-    const ctx = context({ snapMediaItemsToGrid: true, snapDistancePx: 4 });
+    const ctx = context({ snapClipsToGrid: true, snapDistancePx: 4 });
     const result = snapTimelinePosition(ctx, 0.53);
     assertNear(result.sec, 0.5, "snap within pixel threshold");
 }
 {
-    const ctx = context({ snapMediaItemsToGrid: true, snapDistancePx: 0 });
+    const ctx = context({ snapClipsToGrid: true, snapDistancePx: 0 });
     const result = snapTimelinePosition(ctx, 0.53);
     assertNear(result.sec, 0.53, "no snap outside threshold");
 }
 // 任意距离吸附到网格。
 {
-    const ctx = context({ snapMediaItemsToGrid: true, snapToGridAnyDistance: true });
+    const ctx = context({ snapClipsToGrid: true, snapToGridAnyDistance: true });
     assertNear(snapTimelinePosition(ctx, 0.49).sec, 0.5, "any-distance grid snap");
 }
 // 媒体项边缘候选（排除自身后仍能吸附另一 clip）。
 {
     const ctx = context({
-        snapMediaItemsToGrid: false,
-        snapMediaItemsToSelectionMarkersCursor: true,
+        snapClipsToGrid: false,
+        snapClipsToSelectionMarkersCursor: true,
         excludeClipIds: new Set(["c1"]),
         snapDistancePx: 40,
     });
@@ -149,8 +149,8 @@ assertNear(
 // 光标候选。
 {
     const ctx = context({
-        snapMediaItemsToGrid: false,
-        snapMediaItemsToSelectionMarkersCursor: true,
+        snapClipsToGrid: false,
+        snapClipsToSelectionMarkersCursor: true,
         snapDistancePx: 40,
         excludeClipIds: new Set(["c0", "c1"]),
     });
@@ -160,8 +160,8 @@ assertNear(
 // 网格显示关闭且联动时不再吸网格。
 {
     const ctx = context({
-        snapMediaItemsToGrid: true,
-        snapMediaItemsToSelectionMarkersCursor: false,
+        snapClipsToGrid: true,
+        snapClipsToSelectionMarkersCursor: false,
         gridVisible: false,
         snapFollowsGridVisibility: true,
         snapDistancePx: 40,

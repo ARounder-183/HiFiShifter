@@ -27,7 +27,7 @@ import {
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatCursorTime } from "./timeFormat";
-import { snapTimelinePosition } from "../../../utils/timelineSnapping";
+import { snapTimelinePosition, computeEffectiveSnap, beginSnapGesture, endSnapGesture } from "../../../utils/timelineSnapping";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
@@ -592,8 +592,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     /** 使用与 Clip 完全相同的吸附引擎对 Tempo Map 位置进行吸附。 */
     const snapTempoPosition = useCallback(
-        (sec: number, base: TempoMap | null, baseBpm: number, originSec?: number) => {
-            if (!snapEnabled || !snapSettings?.enabled) return sec;
+        (
+            sec: number,
+            enabled: boolean,
+            base: TempoMap | null,
+            baseBpm: number,
+            originSec?: number,
+        ) => {
+            if (!enabled || !snapSettings?.enabled) return sec;
             const beatsPerBar =
                 base && base.points.length > 0
                     ? (base.points[0].timeSignature?.numerator ?? fallbackBeatsPerBar)
@@ -610,7 +616,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     tracks: timelineTracks,
                     selectedClipIds,
                     playheadSec,
-                    object: "mediaItem",
+                    object: "clip",
                     originSec,
                     anchorTrackId: null,
                 },
@@ -618,7 +624,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             ).sec;
         },
         [
-            snapEnabled,
             snapSettings,
             grid,
             fallbackBeatsPerBar,
@@ -673,10 +678,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 新建变化点（暂存，不提交）。
         const base = tempoMap ?? null;
         const mapFallback = baseFallbackOf(base);
-        // 与双击新增一致：吸附开启时使用 Clip 吸附规则。
+        // 与双击新增一致：跟随吸附总开关（菜单/对话框创建无拖拽修饰键语境）。
         let sec = positionSec;
         if (snapEnabled && base) {
-            sec = snapTempoPosition(positionSec, base, mapFallback.bpm);
+            sec = snapTempoPosition(positionSec, snapEnabled, base, mapFallback.bpm);
         }
         const { map, point } = createTempoPointAt(base, sec, mapFallback, {
             projectScale: projectScale ?? undefined,
@@ -957,8 +962,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             let sec = Math.max(0, (e.clientX - bounds.left) / Math.max(1e-9, pxPerSec));
             const base = tempoMap ?? null;
             const mapFallback = baseFallbackOf(base);
-            if (snapEnabled) {
-                sec = snapTempoPosition(sec, base, mapFallback.bpm);
+            // "拖动时切换吸附"同样作用于双击创建：修饰键取反吸附总开关。
+            const effSnap = computeEffectiveSnap(
+                snapEnabled,
+                isModifierActive(noSnapKb, e),
+            );
+            if (effSnap) {
+                sec = snapTempoPosition(sec, effSnap, base, mapFallback.bpm);
             }
             const { map, point } = createTempoPointAt(base, sec, mapFallback, {
                 projectScale: projectScale ?? undefined,
@@ -1011,6 +1021,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 startSec: point.positionSec,
                 baseTempoMap: tempoMap ?? { points: [point] },
             };
+            beginSnapGesture();
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
@@ -1029,9 +1040,15 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 造成“刚脱离吸附又被自己拉回”的一顿一顿效果。
             const mapFallback = baseFallbackOf(drag.baseTempoMap);
             let sec = rawSec;
-            if (snapEnabled && !isModifierActive(noSnapKb, e)) {
+            // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
+            const effectiveSnap = computeEffectiveSnap(
+                snapEnabled,
+                isModifierActive(noSnapKb, e),
+            );
+            if (effectiveSnap) {
                 sec = snapTempoPosition(
                     rawSec,
+                    effectiveSnap,
                     drag.baseTempoMap,
                     mapFallback.bpm,
                     drag.startSec,
@@ -1061,6 +1078,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const draft = dragDraftRef.current;
             dragRef.current = null;
             dragDraftRef.current = null;
+            endSnapGesture();
             setDraggingId(null);
             if (draft) commitMap(draft);
         };
@@ -1071,6 +1089,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointermove", handleMove);
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
+            // effect 因依赖变化中途卸载时补齐手势深度（正常路径已在
+            // handleUp 中结束；dragRef 仍非空说明是异常卸载路径）。
+            if (dragRef.current) {
+                dragRef.current = null;
+                endSnapGesture();
+            }
         };
     }, [
         draggingId,

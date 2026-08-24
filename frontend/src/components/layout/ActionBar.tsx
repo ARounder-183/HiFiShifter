@@ -38,6 +38,11 @@ import {
     setTempoMap,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import {
+    computeEffectiveSnap,
+    isSnapGestureActive,
+    subscribeSnapGesture,
+} from "../../utils/timelineSnapping";
 import type { TempoMapScaleData, TempoTimeSignature } from "../../utils/tempoMap";
 import {
     clampBpm,
@@ -84,6 +89,40 @@ export function ActionBar() {
     const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
     const [recordingMenuPos, setRecordingMenuPos] = useState<{ x: number; y: number } | null>(null);
     const recordingMenuRef = useRef<HTMLDivElement | null>(null);
+
+    // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
+    // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
+    // 取反后的状态（与参数编辑器音高吸附按钮的做法一致）。
+    const noSnapKb = useAppSelector((state: RootState) =>
+        selectKeybinding(state, "modifier.clipNoSnap"),
+    );
+    const [snapToggleHeld, setSnapToggleHeld] = useState(false);
+    const [snapGestureActive, setSnapGestureActive] = useState(isSnapGestureActive());
+
+    useEffect(() => {
+        const kb = noSnapKb;
+        const sync = (e: KeyboardEvent | null) => {
+            setSnapToggleHeld(e ? isModifierActive(kb, e) : false);
+        };
+        const onKey = (e: KeyboardEvent) => sync(e);
+        const onBlur = () => sync(null);
+        window.addEventListener("keydown", onKey as EventListener);
+        window.addEventListener("keyup", onKey as EventListener);
+        window.addEventListener("blur", onBlur);
+        return () => {
+            window.removeEventListener("keydown", onKey as EventListener);
+            window.removeEventListener("keyup", onKey as EventListener);
+            window.removeEventListener("blur", onBlur);
+        };
+    }, [noSnapKb]);
+
+    useEffect(() => subscribeSnapGesture(() => setSnapGestureActive(isSnapGestureActive())), []);
+
+    // 拖拽手势期间按住修饰键 → 吸附按钮临时显示取反后的状态。
+    const effectiveSnapVisual = computeEffectiveSnap(
+        s.snapEnabled,
+        snapGestureActive && snapToggleHeld,
+    );
 
     useEffect(() => {
         if (!recordingMenuPos) return;
@@ -1159,9 +1198,13 @@ export function ActionBar() {
                 {/* Snap */}
                 <IconButton
                     size="1"
-                    variant={s.snapEnabled ? "solid" : "ghost"}
+                    variant={effectiveSnapVisual ? "solid" : "ghost"}
                     color="gray"
-                    data-tooltip={tAny("snap")}
+                    data-tooltip={`${tAny("snap")}${
+                        snapGestureActive && snapToggleHeld
+                            ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
+                            : ""
+                    }`}
                     tabIndex={-1}
                     onClick={() => {
                         dispatch(toggleSnap());
