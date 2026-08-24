@@ -2142,12 +2142,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           // 回绕/窗口被保持，直接关掉会把陈旧
                                           // 窗口带入非 Loop 状态 —— 静音区冻结、
                                           // 音频错位都源于此。
-                                          // 关闭循环的瞬间：非 Loop 正放 Clip 按
-                                          // 派生窗口模型归一 source_end
-                                          //（= 起点+长度×速率）。循环期间锚点被
-                                          // 回绕/窗口被保持，直接关掉会把陈旧
-                                          // 窗口带入非 Loop 状态 —— 静音区冻结、
-                                          // 音频错位都源于此。
                                           // 与后端 clip_effective_source_end_sec
                                           // 一致：不按 midiNoteData 排除 —— 音高
                                           // 参考块等无源媒体 Clip 的音高曲线

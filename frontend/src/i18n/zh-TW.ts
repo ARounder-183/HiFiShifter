@@ -679,7 +679,7 @@ export const zhTW = {
     snap_razor_edits: "剃刀編輯吸附",
     snap_section_advanced: "進階",
     snap_project_sample_rate: "吸附到工程取樣率",
-    snap_source_edges: "Clip 邊緣吸附到來源素材首尾（循節）",
+    snap_source_edges: "Clip 邊緣吸附到來源素材首尾（循環節）",
     snap_toggle_inverted: "（已由修飾鍵臨時反轉）",
     snap_force_selection_multiples: "強制選區為網格倍數",
     snap_selection_multiple: "選區倍數",

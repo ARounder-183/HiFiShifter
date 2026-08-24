@@ -11,10 +11,7 @@ import {
 import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
-import {
-    loopSnapThresholdSec,
-    nearestBoundarySnapOffsetSec,
-} from "../../../../utils/loopSnap";
+import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec } from "../../../../utils/loopSnap";
 import {
     beginSnapGesture,
     computeEffectiveSnap,
@@ -43,8 +40,6 @@ export type SlipDragState = {
     clipIds: string[];
     /** 拖拽起点指针位置（秒）：累计吸附的原始位移基准。 */
     startPointerBeat: number;
-    /** 上一个事件的指针位置（秒）：事件增量计算的基准。 */
-    prevPointerBeat: number;
     /**
      * 已应用于 clip 的**累计**指针位移（含吸附修正，指针空间秒）。
      * 实时吸附以"目标累计值 − 已应用累计值"的差值驱动增量分发。
@@ -75,8 +70,7 @@ function readClip(c: SessionState["clips"][number]) {
     const playbackRate = Number(c.playbackRate ?? 1) || 1;
     const sourceStartSec = Number(c.sourceStartSec ?? 0) || 0;
     const sourceEndSec = Number(c.sourceEndSec ?? 0) || 0;
-    const isContentBearing =
-        !!c.sourcePath || !!(c.midiNoteData && c.midiNoteData.length > 0);
+    const isContentBearing = !!c.sourcePath || !!(c.midiNoteData && c.midiNoteData.length > 0);
     const contentDurSec = resolveClipContentDurationSec({
         sourcePath: c.sourcePath,
         midiNoteData: c.midiNoteData ?? null,
@@ -85,8 +79,7 @@ function readClip(c: SessionState["clips"][number]) {
         durationSec: c.durationSec,
     });
     return {
-        playbackRate:
-            playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1,
+        playbackRate: playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1,
         sourceStartSec,
         sourceEndSec,
         lengthSec: Math.max(0, Number(c.lengthSec ?? 0) || 0),
@@ -94,16 +87,6 @@ function readClip(c: SessionState["clips"][number]) {
         loopEnabled: !!c.loopEnabled,
         isContentBearing,
         contentDurSec,
-        midiOnly: !isContentBearing,
-        maxSlipSec:
-            c.midiNoteData && c.midiNoteData.length > 0
-                ? Math.max(
-                      0,
-                      c.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0),
-                  )
-                : Number.isFinite(Number(c.durationSec))
-                  ? Math.max(0, Number(c.durationSec ?? 0) || 0)
-                  : Math.max(0, Number(c.lengthSec ?? 0) || 0),
     };
 }
 
@@ -164,22 +147,9 @@ export function useSlipDrag(deps: {
             // 非 Loop 正放：派生窗口模型 —— 终点 = 起点 + len·rate；
             // 越出媒体的部分渲染静音（前导/尾部对称无界）。
             nextSourceEnd = nextSourceStart + v.lengthSec * v.playbackRate;
-        } else if (v.isContentBearing) {
-            // 非 Loop 倒放：source_end 是反向锚点，跨度可合法大于 len·rate
-            // （延伸产生的静音区）。只做整体平移，保持跨度不变。
         } else {
-            // 纯 MIDI：维持既有音符窗口内钳制。
-            const maxSlipSec = v.maxSlipSec;
-            if (Number.isFinite(maxSlipSec) && maxSlipSec > 1e-6) {
-                if (nextSourceStart < 0) {
-                    nextSourceEnd -= nextSourceStart;
-                    nextSourceStart = 0;
-                }
-                if (nextSourceEnd > maxSlipSec) {
-                    nextSourceStart -= nextSourceEnd - maxSlipSec;
-                    nextSourceEnd = maxSlipSec;
-                }
-            }
+            // 非 Loop 倒放：source_end 是反向锚点，跨度可合法大于 len·rate
+            //（延伸产生的静音区）。只做整体平移，保持跨度不变。
         }
         return { sourceStartSec: nextSourceStart, sourceEndSec: nextSourceEnd };
     }
@@ -217,7 +187,6 @@ export function useSlipDrag(deps: {
             anchorClipId: clipId,
             clipIds,
             startPointerBeat: beatAtPointer,
-            prevPointerBeat: beatAtPointer,
             appliedTotal: 0,
             anchorSnapshot: {
                 loopEnabled: anchorRead.loopEnabled,
@@ -244,7 +213,6 @@ export function useSlipDrag(deps: {
             if (!drag || drag.pointerId !== e.pointerId || !el) return;
             const b = el.getBoundingClientRect();
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
-            drag.prevPointerBeat = beatNow;
 
             // ── 实时循环节/内容边界吸附（拖拽全程生效）────────────────
             // 属于常规吸附体系：受"吸附"总开关与"拖动时切换吸附"修饰键
@@ -257,10 +225,7 @@ export function useSlipDrag(deps: {
             {
                 const a = drag.anchorSnapshot;
                 const noSnapActive = isModifierActive(noSnapKb, ev);
-                const effectiveSnap = computeEffectiveSnap(
-                    timelineSnap.enabled,
-                    noSnapActive,
-                );
+                const effectiveSnap = computeEffectiveSnap(timelineSnap.enabled, noSnapActive);
                 if (
                     (a.isContentBearing || a.loopEnabled) &&
                     timelineSnap.snapClipsToSourceMedia &&

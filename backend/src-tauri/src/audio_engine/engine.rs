@@ -1649,7 +1649,7 @@ fn emit_clip_pitch_data_for_clip(
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
     // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
     let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
-    let midi_curve = crate::pitch_clip::trim_and_resample_midi(
+    let mut midi_curve = crate::pitch_clip::trim_and_resample_midi(
         &cached.midi,
         frame_period_ms,
         trim_src_start,
@@ -1660,6 +1660,13 @@ fn emit_clip_pitch_data_for_clip(
         crate::state::clip_source_media_duration_sec(clip),
         clip.reversed && clip.loop_enabled,
     );
+    // 非 Loop 倒放：trim_and_resample_midi 按升序窗口映射（文档契约
+    // "调用方在输出后整体翻转"）。前端按时间线顺序直接绘制本曲线，
+    // 必须在此翻转 —— 否则倒放 Clip 的音高曲线相对音频整体镜像
+    // （与 midi_export / assemble_pitch_orig 的处理保持一致）。
+    if clip.reversed && !clip.loop_enabled {
+        midi_curve.reverse();
+    }
     let curve_start_sec = compute_pitch_curve_start_sec(clip);
 
     eprintln!(

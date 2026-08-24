@@ -2307,6 +2307,11 @@ mod tests {
             c.source_end_sec = 6.0;
             c.duration_sec = Some(10.0);
             c.playback_rate = 1.0;
+            // add_clip 按进程级默认（loop_new_clips_default）开启 Loop；
+            // 本测试考察的是**非 Loop** 消费窗口/前导静音模型，须显式关闭
+            // （末尾 Loop 分支会再显式置 true）。否则前导静音恒为 0、
+            // 倒放窗口断言走锚点分支 —— 与被测语义无关地失败。
+            c.loop_enabled = false;
         }
         fn read<'a>(tl: &'a TimelineState, cid: &str) -> &'a super::Clip {
             tl.clips.iter().find(|c| c.id == cid).unwrap()

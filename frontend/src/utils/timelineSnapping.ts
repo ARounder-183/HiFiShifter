@@ -19,7 +19,12 @@ import {
     snapSecToTempoGrid,
 } from "./tempoMap";
 import { gridStepBeats } from "../components/layout/timeline/grid";
-import { resolvePlaybackWindowSec } from "./loopRender";
+import {
+    modEuclid,
+    resolveClipContentDurationSec,
+    resolveLeadingSilenceSec,
+    resolvePlaybackWindowSec,
+} from "./loopRender";
 
 export type SnapObjectKind = "clip" | "selection" | "cursor";
 export type SnapCandidateKind =
@@ -253,11 +258,38 @@ function collectGridCandidates(ctx: TimelineSnapContext, rawSec: number): SnapCa
     return out;
 }
 
-/** clip 内容起点（近似 REAPER snap offset）。 */
+/**
+ * clip 内容起点（首个可听采样）的投影（近似 REAPER snap offset）。
+ *
+ * 与后端 clip_leading_silence_sec / 前端 resolveLeadingSilenceSec 同一模型：
+ * 正放看窗口起点越过媒体起点、倒放看窗口终点越过媒体末端 —— 越过部分为
+ * 静音，内容真正开始于前导静音之后。Loop 的负锚点是环绕相位（无静音），
+ * 恒返回 clip 起点。
+ */
 export function clipSnapOffsetSec(clip: ClipInfo): number {
-    const rate = Math.max(1e-6, Number(clip.playbackRate) || 1);
-    const offset = Math.max(0, Number(clip.sourceStartSec) || 0) / rate;
-    return clampSec(Number(clip.startSec) + offset);
+    const rate = Number(clip.playbackRate);
+    const safeRate = Number.isFinite(rate) && rate > 1e-6 ? rate : 1;
+    // 内容时长与后端 clip_source_media_duration_sec 同一取值链
+    //（frames/采样率 → durationSec → 音符内容最大结束）。
+    const contentDurSec = resolveClipContentDurationSec({
+        sourcePath: clip.sourcePath,
+        midiNoteData: clip.midiNoteData ?? null,
+        durationFrames: clip.durationFrames,
+        sourceSampleRate: clip.sourceSampleRate,
+        durationSec: clip.durationSec,
+    });
+    const leadingSilenceSec = resolveLeadingSilenceSec(
+        {
+            loopEnabled: Boolean(clip.loopEnabled),
+            reversed: Boolean(clip.reversed),
+            sourceStartSec: Number(clip.sourceStartSec) || 0,
+            playbackRate: safeRate,
+            lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
+            sourceEndSec: Number(clip.sourceEndSec) || 0,
+        },
+        contentDurSec,
+    );
+    return clampSec(Number(clip.startSec) + leadingSilenceSec);
 }
 
 function clipTrackDistance(ctx: TimelineSnapContext, clip: ClipInfo): number {
@@ -308,8 +340,12 @@ function addSelectionCandidates(
 /**
  * "Clip 边缘 / 内容起点 / 源素材首尾"三组独立目标候选。
  *
- * 源素材首尾的投影公式（对任意方向 / 窗口形态成立）：
- *   t(source=s) = startSec + (s − winStart) / rate
+ * 源素材首尾的投影按**消费方向**取窗口模型（与 loopRender /
+ * WaveformTrackCanvas 的边界标记同一套公式）：
+ *   正放 t(source=b) = startSec + (b − winStart) / rate
+ *   倒放 t(source=b) = startSec + (winEnd  − b) / rate
+ * Loop Clip 的媒体边界呈 mod-D 等差回绕族 —— 取 clip 内的前两个回绕点。
+ * 投影落在 clip 可见范围之外的候选不生成（避免幻影目标）。
  */
 function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
     const { settings } = ctx;
@@ -333,33 +369,60 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
                 trackId: clip.trackId,
             });
         }
-        if (settings.snapClipsToSourceMedia) {
-            const rate = Math.max(1e-6, Number(clip.playbackRate) || 1);
-            const { winStartSec } = resolvePlaybackWindowSec({
-                loopEnabled: Boolean(clip.loopEnabled),
-                reversed: Boolean(clip.reversed),
-                sourceStartSec: Number(clip.sourceStartSec) || 0,
-                playbackRate: rate,
-                lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
-                sourceEndSec: Number(clip.sourceEndSec ?? clip.durationSec ?? 0) || 0,
-            });
-            const mediaDur =
-                Number(clip.durationSec) ||
-                Math.max(0, Number(clip.sourceEndSec) - Number(clip.sourceStartSec) || 0);
-            out.push({
-                sec: clampSec(Number(clip.startSec) - winStartSec / rate),
-                kind: "sourceStart",
-                priority: 24,
-                clipId: clip.id,
-                trackId: clip.trackId,
-            });
-            out.push({
-                sec: clampSec(Number(clip.startSec) + (mediaDur - winStartSec) / rate),
-                kind: "sourceEnd",
-                priority: 24,
-                clipId: clip.id,
-                trackId: clip.trackId,
-            });
+        if (!settings.snapClipsToSourceMedia) continue;
+
+        const rateRaw = Number(clip.playbackRate);
+        const rate = Number.isFinite(rateRaw) && rateRaw > 1e-6 ? rateRaw : 1;
+        const startSec = Number(clip.startSec) || 0;
+        const lengthSec = Math.max(0, Number(clip.lengthSec) || 0);
+        const windowArgs = {
+            loopEnabled: Boolean(clip.loopEnabled),
+            reversed: Boolean(clip.reversed),
+            sourceStartSec: Number(clip.sourceStartSec) || 0,
+            playbackRate: rate,
+            lengthSec,
+            sourceEndSec: Number(clip.sourceEndSec ?? clip.durationSec ?? 0) || 0,
+        };
+        const { winStartSec, winEndSec } = resolvePlaybackWindowSec(windowArgs);
+        // 内容时长：frames/采样率精确链优先，durationSec 兜底，纯 MIDI
+        // 回退音符内容范围（与后端 clip_source_media_duration_sec 一致）。
+        // 未知时正放/倒放只保留 s=0 候选，Loop 无法确定周期则整体跳过。
+        const mediaDur = resolveClipContentDurationSec({
+            sourcePath: clip.sourcePath,
+            midiNoteData: clip.midiNoteData ?? null,
+            durationFrames: clip.durationFrames,
+            sourceSampleRate: clip.sourceSampleRate,
+            durationSec: clip.durationSec,
+        });
+
+        /** 把源坐标 b 投影为时间线秒；仅保留落在 clip 范围内的目标。 */
+        const pushProjected = (b: number, kind: SnapCandidateKind) => {
+            const sec = clip.reversed
+                ? startSec + (winEndSec - b) / rate
+                : startSec + (b - winStartSec) / rate;
+            if (!Number.isFinite(sec)) return;
+            if (sec < startSec - 1e-6 || sec > startSec + lengthSec + 1e-6) return;
+            out.push({ sec: clampSec(sec), kind, priority: 24, clipId: clip.id, trackId: clip.trackId });
+        };
+
+        if (!clip.loopEnabled) {
+            pushProjected(0, "sourceStart");
+            if (mediaDur != null && mediaDur > 1e-9) pushProjected(mediaDur, "sourceEnd");
+        } else {
+            if (mediaDur == null || !(mediaDur > 1e-9)) continue;
+            // 回绕点相位：正放锚点 ss（t·r ≡ −ss mod D）、倒放锚点
+            // min(se, D)（t·r ≡ +φ mod D，与引擎/波形标记的锚点约定一致）；
+            // b∈{0,D} 两边界投影到同一 mod-D 相位族。
+            const anchorSrc = clip.reversed ? Math.min(winEndSec, mediaDur) : winStartSec;
+            const firstWrapLocal =
+                (clip.reversed
+                    ? modEuclid(anchorSrc, mediaDur)
+                    : modEuclid(-anchorSrc, mediaDur)) / rate;
+            for (let k = 0; k <= 1; k += 1) {
+                const sec = startSec + firstWrapLocal + k * (mediaDur / rate);
+                if (sec < startSec - 1e-6 || sec > startSec + lengthSec + 1e-6) continue;
+                out.push({ sec, kind: k === 0 ? "sourceStart" : "sourceEnd", priority: 24, clipId: clip.id, trackId: clip.trackId });
+            }
         }
     }
 }

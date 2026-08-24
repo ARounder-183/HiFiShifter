@@ -581,7 +581,7 @@ fn process_single_clip(
             // 处理、调用方约定翻转输出）—— 陈旧/延伸过的存储窗口不再把曲线
             // 拉伸到错误区域。
             let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
-            let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
+            let mut midi_vec = crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
                 frame_period_ms,
                 trim_src_start,
@@ -591,7 +591,13 @@ fn process_single_clip(
                 clip.loop_enabled,
                 crate::state::clip_source_media_duration_sec(clip),
                 clip.reversed && clip.loop_enabled,
-            ));
+            );
+            // 非 Loop 倒放：升序窗口映射 → 时间线序翻转（文档契约；下游
+            // fuse 按 clip 局部时间线帧读取，不翻转会相对音频镜像）。
+            if clip.reversed && !clip.loop_enabled {
+                midi_vec.reverse();
+            }
+            let midi = std::sync::Arc::new(midi_vec);
 
             // Calculate pre_silence_sec for clip placement.
             // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
@@ -944,7 +950,7 @@ fn compute_pitch_curve_with_incremental_refresh(
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
             // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
             let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
-            let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
+            let mut midi_vec = crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
                 frame_period_ms,
                 trim_src_start,
@@ -954,7 +960,13 @@ fn compute_pitch_curve_with_incremental_refresh(
                 clip.loop_enabled,
                 crate::state::clip_source_media_duration_sec(clip),
                 clip.reversed && clip.loop_enabled,
-            ));
+            );
+            // 非 Loop 倒放：升序窗口映射 → 时间线序翻转（文档契约；下游
+            // fuse 按 clip 局部时间线帧读取，不翻转会相对音频镜像）。
+            if clip.reversed && !clip.loop_enabled {
+                midi_vec.reverse();
+            }
+            let midi = std::sync::Arc::new(midi_vec);
 
             let clip_total_frames = if clip.loop_enabled {
                 // Loop（循环源）：曲线已按循环铺满 clip 时间线长度，

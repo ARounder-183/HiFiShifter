@@ -271,7 +271,12 @@ export const WaveformTrackCanvas = React.memo(
                 const visLeftPx = Math.max(0, clipStartPx - viewportStartPx);
                 const visRightPx = Math.min(displayW, clipEndPx - viewportStartPx);
                 if (visRightPx <= visLeftPx) continue;
-                const pr = Math.max(1e-6, clip.playbackRate);
+                // 速率净化：NaN/非正值按 1.0（Math.max(1e-6, NaN) === NaN，
+                // 会沿 headDur/bodyDur/取窗链传播成整条 clip 不渲染）。
+                const pr =
+                    Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
+                        ? clip.playbackRate
+                        : 1;
                 const sourceStartSec = Number(clip.sourceStartSec ?? 0) || 0;
 
                 // 计算源文件时间范围
@@ -461,6 +466,44 @@ export const WaveformTrackCanvas = React.memo(
                     derivedDownsampleCache.clear();
                 };
 
+                // 渲染参数模板：clip 级恒定字段只填一次，瓦片级字段在循环内
+                // 就地修补 —— 缩小时一帧可达数千瓦片，逐瓦片新建 28 字段对象
+                // 是纯粹的分配 churn（对象仅被同步消费，复用安全）。
+                const effectiveFadeInSec =
+                    Number(clip.autoFadeInSec ?? 0) > 0
+                        ? Number(clip.autoFadeInSec)
+                        : Number(clip.fadeInSec ?? 0) || 0;
+                const effectiveFadeOutSec =
+                    Number(clip.autoFadeOutSec ?? 0) > 0
+                        ? Number(clip.autoFadeOutSec)
+                        : Number(clip.fadeOutSec ?? 0) || 0;
+                const renderParams: WaveformRenderParams = {
+                    canvasWidth: displayW,
+                    canvasHeight: displayH,
+                    centerY: displayH / 2,
+                    zeroDbHalfHeight: displayH / 2,
+                    sourceStartSec: 0,
+                    clipDuration: 0,
+                    playbackRate: pr,
+                    reversed: Boolean(clip.reversed),
+                    sourceDurationSec: mediaDur,
+                    volumeGain: Number(clip.gain ?? 1) || 1,
+                    // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
+                    // 每个分段都携带完整淡化参数，增益按 clip 局部时间求值
+                    //（clipTimeOffsetSec = 分段起点；淡出锚定整条 clip 终点）
+                    // —— 长于一个周期的淡化横跨多段时包络保持连续。
+                    fadeInSec: effectiveFadeInSec,
+                    fadeOutSec: effectiveFadeOutSec,
+                    fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
+                    fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
+                    dataStartSec: 0,
+                    dataDurationSec: 0,
+                    clipTimeOffsetSec: 0,
+                    clipTotalDurationSec: clip.lengthSec,
+                    clipPixelOffset: 0,
+                    clipTotalWidthPx: 1,
+                };
+
                 for (const seg of segmentsToRender) {
                     const tileLocalEndSec = seg.localStartSec + seg.durationSec;
                     // 该分段与可见区间、clip 长度的交集（clip 局部时间）
@@ -606,47 +649,23 @@ export const WaveformTrackCanvas = React.memo(
                         renderInterleaved = downsampled;
                     }
 
-                    // 偏移量改为相对于主屏幕（按分段起点校正），而不是裁剪视口；
-                    // 量化到半像素粒度，消除大浮点数相减导致的子像素漂移。
+                    // 修补瓦片级渲染参数（模板见瓦片循环前）。偏移量相对于
+                    // 主屏幕（按分段起点校正），量化到半像素粒度，
+                    // 消除大浮点数相减导致的子像素漂移。
                     const tileStartPx = clipStartPx + seg.localStartSec * currentPxPerSec;
-                    const clipPixelOffset =
+                    renderParams.sourceStartSec = tileSpanStartSec;
+                    renderParams.clipDuration = seg.durationSec;
+                    // 增益按 clip 局部时间求值（clipTimeOffsetSec = 分段起点）。
+                    renderParams.clipTimeOffsetSec = isLoop ? seg.localStartSec : 0;
+                    renderParams.dataStartSec = result.dataStartSec;
+                    renderParams.dataDurationSec = result.dataDurationSec;
+                    renderParams.clipPixelOffset =
                         Math.round((viewportStartPx - tileStartPx) * 2) / 2;
-
-                    // 构建渲染参数（以单个循环瓦片为坐标系）
-                    const effectiveFadeInSec =
-                        Number(clip.autoFadeInSec ?? 0) > 0
-                            ? Number(clip.autoFadeInSec)
-                            : Number(clip.fadeInSec ?? 0) || 0;
-                    const effectiveFadeOutSec =
-                        Number(clip.autoFadeOutSec ?? 0) > 0
-                            ? Number(clip.autoFadeOutSec)
-                            : Number(clip.fadeOutSec ?? 0) || 0;
-                    const params: WaveformRenderParams = {
-                        canvasWidth: displayW,
-                        canvasHeight: displayH,
-                        centerY: displayH / 2,
-                        zeroDbHalfHeight: displayH / 2,
-                        sourceStartSec: tileSpanStartSec,
-                        clipDuration: seg.durationSec,
-                        playbackRate: Number(clip.playbackRate ?? 1) || 1,
-                        reversed: Boolean(clip.reversed),
-                        sourceDurationSec: mediaDur,
-                        volumeGain: Number(clip.gain ?? 1) || 1,
-                        // 有效 fade：自动交叉淡化（>0 时覆盖）否则手动 fade。
-                        // 每个分段都携带完整淡化参数，增益按 clip 局部时间求值
-                        //（clipTimeOffsetSec = 分段起点；淡出锚定整条 clip 终点）
-                        // —— 长于一个周期的淡化横跨多段时包络保持连续。
-                        fadeInSec: effectiveFadeInSec,
-                        fadeOutSec: effectiveFadeOutSec,
-                        fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
-                        fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
-                        dataStartSec: result.dataStartSec,
-                        dataDurationSec: result.dataDurationSec,
-                        clipTimeOffsetSec: isLoop ? seg.localStartSec : 0,
-                        clipTotalDurationSec: clip.lengthSec,
-                        clipPixelOffset, // 相对于主 Canvas 的偏移（已按分段校正）
-                        clipTotalWidthPx: Math.max(1, seg.durationSec * currentPxPerSec),
-                    };
+                    renderParams.clipTotalWidthPx = Math.max(
+                        1,
+                        seg.durationSec * currentPxPerSec,
+                    );
+                    const params = renderParams;
 
                     // 应用增益（音量 + 淡入淡出）
                     const peaksForRender = renderInterleaved;

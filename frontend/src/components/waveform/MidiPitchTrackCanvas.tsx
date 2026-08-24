@@ -416,31 +416,36 @@ export const MidiPitchTrackCanvas = React.memo(
                 let curveStartSec: number;
                 let framePeriodMs: number;
 
+                // 内容时长（循环周期 D）：有源媒体 → 媒体总时长；
+                // 纯音高参考块 → 音符内容最大结束时间 —— 与普通媒体
+                // Clip 完全一致（回绕整个内容，窗口之外为静音）。
+                // 每 clip 只计算一次（曲线与回绕标记共用；无元数据时
+                // 该调用会遍历全部音符，逐帧重复计算纯属浪费）。
+                const contentDurSec = resolveClipContentDurationSec({
+                    sourcePath: clip.sourcePath,
+                    midiNoteData: clip.midiNoteData ?? null,
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
+                });
+
                 if (clip.midiNoteData && clip.midiNoteData.length > 0) {
-                    // 内容时长（循环周期 D）：有源媒体 → 媒体总时长；
-                    // 纯音高参考块 → 音符内容最大结束时间 —— 与普通媒体
-                    // Clip 完全一致（回绕整个内容，窗口之外为静音）。
-                    const contentDurSec = resolveClipContentDurationSec({
-                        sourcePath: clip.sourcePath,
-                        midiNoteData: clip.midiNoteData,
-                        durationFrames: clip.durationFrames,
-                        sourceSampleRate: clip.sourceSampleRate,
-                        durationSec: clip.durationSec,
-                    });
                     // 曲线消费窗口：非 Loop 正放 = 起点+长度×速率（派生），
                     // 倒放 = [se−len·r, se]（锚定 se，sourceStart 不参与）；
                     // 与音频渲染的窗口模型一致 —— 否则延伸过的倒放 Clip 曲线
                     // 整体错位（该有声处显示为空）。
+                    // se 仅在**缺失/非法**时回退音符范围估计 —— 合法的 0/负值
+                    // （倒放静音段锚点）不得被改写，否则派生链整体错位。
+                    const seRaw = Number.isFinite(clip.sourceEndSec)
+                        ? clip.sourceEndSec
+                        : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
                     const srcEnd = resolveSourceEndSec({
                         loopEnabled: Boolean(clip.loopEnabled),
                         reversed: Boolean(clip.reversed),
                         sourceStartSec: Number(clip.sourceStartSec) || 0,
                         playbackRate: Math.abs(Number(clip.playbackRate) || 1),
                         lengthSec: clip.lengthSec,
-                        sourceEndSec:
-                            clip.sourceEndSec > 0
-                                ? clip.sourceEndSec
-                                : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0),
+                        sourceEndSec: seRaw,
                     });
                     const curveWinStart =
                         !clip.loopEnabled && clip.reversed
@@ -545,17 +550,11 @@ export const MidiPitchTrackCanvas = React.memo(
                 ctx.restore();
 
                 // ── 循环节点倒三角标记 ──
-                // 周期与曲线平铺一致：内容时长 D（媒体总时长 / 音符内容范围）。
-                const markerContentDur = resolveClipContentDurationSec({
-                    sourcePath: clip.sourcePath,
-                    midiNoteData: clip.midiNoteData ?? null,
-                    durationFrames: clip.durationFrames,
-                    sourceSampleRate: clip.sourceSampleRate,
-                    durationSec: clip.durationSec,
-                });
+                // 周期与曲线平铺一致：内容时长 D（复用上方已计算的
+                // contentDurSec，避免每帧重复遍历音符）。
                 const markerCycle = resolveLoopCycleDescriptor({
                     loopEnabled: Boolean(clip.loopEnabled),
-                    contentDurationSec: markerContentDur,
+                    contentDurationSec: contentDurSec,
                     sourceStartSec: clip.sourceStartSec,
                     sourceEndSec: Number(clip.sourceEndSec) || 0,
                 });
@@ -614,13 +613,13 @@ export const MidiPitchTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);
                     }
-                } else if (markerContentDur != null) {
+                } else if (contentDurSec != null) {
                     // ── 非 Loop：媒体/内容边界标记 ──
                     // 循环节 = 源媒体（或音符内容）在该 Clip 内的真实起始/
                     // 终止位置（音频与静音的分界线），落在 Clip 内部时绘制。
                     // 投影按**消费方向**：正放 t=(b−ss)/r；倒放 t=(se−b)/r
                     // （倒放锚定窗口终点，与 WaveformTrackCanvas 一致）。
-                    const mediaDur = markerContentDur;
+                    const mediaDur = contentDurSec;
                     {
                         const rate =
                             Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6

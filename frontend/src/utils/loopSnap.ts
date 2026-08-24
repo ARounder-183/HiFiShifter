@@ -89,15 +89,19 @@ export function nearestBoundarySnapOffsetSec(
                 ? clip.contentDurationSec
                 : clipMediaDurationSec(clip);
         if (d == null || !(d > 1e-9)) return null;
+        // 倒放锚点与引擎/渲染同约定：clamp 到媒体时长 min(se, D) ——
+        // 超界的 se（split 环绕窗口/历史数据可达）若不 clamp，相位族会
+        // 与波形/音频的实际回绕位置错开 se mod D。
+        const seEff = Math.min(se, d);
         let phis: number[];
         if (!clip.reversed) {
             const p0 = floorMod(-ss, d);
             // 终点对齐：δr ≡ −ss − len·r (mod D)
             phis = mode === "slip" ? [p0, floorMod(p0 - len * rate, d)] : [p0];
         } else if (mode === "edge") {
-            phis = [floorMod(se, d)];
+            phis = [floorMod(seEff, d)];
         } else {
-            const p0 = floorMod(-se, d);
+            const p0 = floorMod(-seEff, d);
             // 终点对齐：δr ≡ −se + len·r (mod D)
             phis = [p0, floorMod(p0 + len * rate, d)];
         }

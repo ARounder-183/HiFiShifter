@@ -321,7 +321,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
             let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
             // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
             let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
-            let resampled = crate::pitch_clip::trim_and_resample_midi(
+            let mut resampled = crate::pitch_clip::trim_and_resample_midi(
                 &cached.midi,
                 fp,
                 trim_src_start,
@@ -332,6 +332,13 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 crate::state::clip_source_media_duration_sec(clip),
                 clip.reversed && clip.loop_enabled,
             );
+            // 非 Loop 倒放：trim_and_resample_midi 按升序窗口映射（文档契约
+            // "调用方在输出后整体翻转"），此处消费按**时间线帧**写入 out，
+            // 必须先翻转（与 rate≈1 分支、midi_export 的处理一致）—— 否则
+            // 倒放 Clip 的根曲线相对音频整体镜像。
+            if clip.reversed && !clip.loop_enabled {
+                resampled.reverse();
+            }
 
             // 预计算边界并进行迭代覆盖
             let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
