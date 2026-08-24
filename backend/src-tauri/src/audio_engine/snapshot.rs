@@ -84,9 +84,15 @@ pub(crate) fn source_bounds_frames(
 }
 
 fn clip_source_bounds_frames(clip: &Clip, src_total_frames: usize, sr: u32) -> (u64, u64) {
+    // 消费窗口模型（与离线渲染一致）：
+    // - 非 Loop：正放 [ss, ss+len·r)、倒放 [se−len·r, se)，clamp 到媒体内；
+    //   域外部分由 local_src_offset_frames 的方向性前导静音表达。
+    // - Loop：窗口字段只承载锚点相位，边界值不参与回绕数学（此处取值
+    //   仅供"窗口退化跳过"守卫之外的通用路径，Loop 分支不会被其截断）。
+    let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
     source_bounds_frames(
-        clip.source_start_sec.max(0.0),
-        clip.source_end_sec,
+        win_start.max(0.0),
+        win_end,
         src_total_frames,
         sr,
     )
@@ -165,12 +171,27 @@ pub(crate) fn schedule_stretch_jobs(
             continue;
         }
 
+        // Loop（循环源）：拉伸对象是**整个文件**（回绕发生在完整媒体的拉伸
+        // 版本上，与 build_snapshot 的换入键保持一致 —— 两处必须使用同一
+        // `clip_loop_wrap_total_sec` 取值，否则键不匹配、拉伸结果永远无法命中）。
+        // 非 Loop 拉伸窗口。
+        let (job_start_sec, job_end_sec) = if clip.loop_enabled {
+            (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
+        } else {
+            // 派生窗口：与 build_snapshot 换入键（下方 clip_source_bounds_frames
+            // / 同一 effective 端点）保持成对，否则键不匹配永远无法命中。
+            (
+                clip.source_start_sec.max(0.0),
+                crate::state::clip_effective_source_end_sec(clip),
+            )
+        };
+
         let key = make_stretch_key(
             path,
             out_rate,
             stretch_algorithm,
-            clip.source_start_sec.max(0.0),
-            clip.source_end_sec,
+            job_start_sec,
+            job_end_sec,
             playback_rate,
         );
         if let Ok(m) = stretch_cache.lock() {
@@ -203,8 +224,8 @@ pub(crate) fn schedule_stretch_jobs(
         let _ = stretch_tx.send(StretchJob {
             key,
             algorithm: runtime_stretch_algorithm,
-            source_start_sec: clip.source_start_sec.max(0.0),
-            source_end_sec: clip.source_end_sec,
+            source_start_sec: job_start_sec,
+            source_end_sec: job_end_sec,
             playback_rate,
             clip_name,
             app_handle: app_handle.map(|h| std::sync::Arc::new(h.clone())),
@@ -351,25 +372,91 @@ pub(crate) fn build_snapshot(
 
         let (mut src_start, mut src_end) = clip_source_bounds_frames(clip, src.frames, out_rate);
         // Keep 1-frame slices audible; only drop truly empty source ranges.
-        if src_end.saturating_sub(src_start) == 0 {
+        // Loop（循环源）只依赖锚点 + 完整媒体缓冲（窗口字段仅承载锚点相位，
+        // 甚至可能是 split 产生的环绕窗口），不能因窗口退化被跳过 ——
+        // 否则实时渲染静音而离线导出有声。
+        if !clip.loop_enabled && src_end.saturating_sub(src_start) == 0 {
             continue;
         }
 
-        // Timeline clips never loop/repeat; out-of-range source time is treated as silence.
-        let mut repeat = false;
+        // ── Loop（循环源）────────────────────────────────────────────────────
+        // 语义：对**完整媒体文件**做模运算回绕（对齐 REAPER Loop source）：
+        //   正放 src(t) = floor_mod(source_start + t·rate, D)
+        //   倒放 src(t) = floor_mod(source_end   − t·rate, D)
+        // 锚点取进入媒体的一侧，使"启用 Loop 的瞬间可见内容保持连续"；
+        // 负/超界锚点（向左延伸过的 Clip）经 floor_mod 正确环绕。
+        // 拉伸 / Formant 分支换入的缓冲覆盖整个文件（或其拉伸版本），
+        // 锚点按缓冲域等比换算后回绕语义不变。
+        let decoded_total_frames = src.frames.max(1) as i64;
+        // 媒体总时长（秒）：倒放锚点的 exclusive 末端需 clamp 到该值，
+        // 与离线渲染（mixdown/render_single_clip 的 min(end, D)）保持一致，
+        // 防止异常超界的 source_end 把锚点映射到错误的环绕相位。
+        let decoded_dur_sec = decoded_total_frames as f64 / out_rate.max(1) as f64;
 
-        // Negative trimStart means the clip starts before the source: render leading silence.
-        // trim_* are expressed in SOURCE seconds (i.e. they already incorporate playbackRate in UI).
-        // Therefore leading silence in timeline time scales by 1 / playback_rate.
-        let local_src_offset_frames: i64 =
-            if clip.source_start_sec.is_finite() && clip.source_start_sec < 0.0 {
-                let pr = playback_rate.max(1e-6);
-                let pre_silence_sec = (-clip.source_start_sec) / pr;
-                let frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as i64;
-                -frames
+        // 非 Loop：消费窗口与媒体域完全无交集（整窗在媒体下方 / 上方）
+        // → 纯静音，直接跳过。边界函数会把空窗口强造成 1 帧"可听"切片，
+        // 不显式跳过会让全静音 Clip 产生幻影采样。
+        if !clip.loop_enabled {
+            let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
+            if win_end <= 1e-9 || win_start >= decoded_dur_sec - 1e-9 {
+                continue;
+            }
+        }
+
+        let rev_anchor_sec = clip.source_end_sec.min(decoded_dur_sec);
+        let mut loop_anchor_frame: Option<i64> = if clip.loop_enabled {
+            let raw = if clip.reversed {
+                (rev_anchor_sec * out_rate as f64).round() as i64 - 1
+            } else {
+                (clip.source_start_sec * out_rate as f64).round() as i64
+            };
+            Some(raw.rem_euclid(decoded_total_frames))
+        } else {
+            None
+        };
+        let repeat = clip.loop_enabled;
+
+        // Loop 模式下换算锚点到指定缓冲长度的辅助闭包（拉伸域按 1/rate 缩放）。
+        let rescale_anchor =
+            |buf_frames: usize, rate_scale: f64| -> Option<i64> {
+                let rate_scale = if rate_scale.is_finite() && rate_scale > 1e-6 {
+                    rate_scale
+                } else {
+                    1.0
+                };
+                let raw = if clip.reversed {
+                    (rev_anchor_sec * out_rate as f64 / rate_scale).round() as i64 - 1
+                } else {
+                    (clip.source_start_sec * out_rate as f64 / rate_scale).round() as i64
+                };
+                Some(raw.rem_euclid(buf_frames.max(1) as i64))
+            };
+
+        // Leading silence（前导静音）按**消费方向**取值（与离线渲染一致）：
+        // - 正放：窗口起点越过媒体起点（ss<0）→ 前导静音；
+        // - 倒放：窗口终点越过媒体末端（se>D）→ 前导静音；
+        // - Loop：负 source_start 是环绕锚点，无前导静音。
+        // 既有约定：负的 local offset = 先静音后内容。
+        let local_src_offset_frames: i64 = if clip.loop_enabled {
+            0
+        } else if clip.reversed {
+            let pr = playback_rate.max(1e-6);
+            let decoded_dur_sec = decoded_total_frames as f64 / out_rate.max(1) as f64;
+            // 用**原始** source_end（未 clamp）与媒体末端比较 —— 超出部分即前导静音。
+            let pre_silence_sec = (clip.source_end_sec - decoded_dur_sec).max(0.0) / pr;
+            if pre_silence_sec > 0.0 {
+                -((pre_silence_sec * out_rate as f64).round().max(0.0) as i64)
             } else {
                 0
-            };
+            }
+        } else if clip.source_start_sec.is_finite() && clip.source_start_sec < 0.0 {
+            let pr = playback_rate.max(1e-6);
+            let pre_silence_sec = (-clip.source_start_sec) / pr;
+            let frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as i64;
+            -frames
+        } else {
+            0
+        };
 
         // If the clip has formant morph enabled, build/use a clip-local preprocessed buffer first,
         // then feed that buffer into later stretch / processor stages.
@@ -377,10 +464,20 @@ pub(crate) fn build_snapshot(
         let mut src_render = src;
         let mut playback_rate_render = playback_rate;
         if let Some(params) = formant_params {
-            let slice_start = (src_start as usize).saturating_mul(2);
-            let slice_end = (src_end as usize).saturating_mul(2).min(src_render.pcm.len());
+            // Loop：对整个文件做 Formant（自然顺序，方向由 mix 的锚点回绕处理，
+            // 不再预反转）；非 Loop 保持原窗口切片 + 预反转行为。
+            let slice_start = if clip.loop_enabled {
+                0usize
+            } else {
+                (src_start as usize).saturating_mul(2)
+            };
+            let slice_end = if clip.loop_enabled {
+                src_render.pcm.len()
+            } else {
+                (src_end as usize).saturating_mul(2).min(src_render.pcm.len())
+            };
             let mut clip_pcm = src_render.pcm[slice_start..slice_end].to_vec();
-            if clip.reversed {
+            if clip.reversed && !clip.loop_enabled {
                 crate::mixdown::reverse_interleaved_frames(&mut clip_pcm, 2);
             }
 
@@ -388,9 +485,26 @@ pub(crate) fn build_snapshot(
                 &clip.id,
                 path,
                 out_rate,
-                clip.source_start_sec.max(0.0),
-                clip.source_end_sec,
-                clip.reversed,
+                if clip.loop_enabled {
+                    0.0
+                } else {
+                    // 非 Loop：消费窗口起点（正放=ss、倒放=se−len·r，clamp ≥0）
+                    // —— 与离线渲染（mixdown / render_single_clip）的键成对。
+                    crate::state::clip_playback_window_sec(clip).0.max(0.0)
+                },
+                if clip.loop_enabled {
+                    // 与预计算（compute_formant_cache_entry_for_clip）使用同一
+                    // 来源（优先 clip 元数据）—— 避免 wav 头时长与解码帧时长在
+                    // 1ms 量化边界处错开键值，导致预计算永不命中、状态闪烁。
+                    crate::state::clip_source_media_duration_sec(clip)
+                        .unwrap_or_else(|| src_render.frames as f64 / out_rate as f64)
+                } else {
+                    // 消费窗口终点：正放派生（起点+长度×速率）、倒放为存储 se。
+                    crate::state::clip_playback_window_sec(clip).1
+                },
+                clip.reversed && !clip.loop_enabled,
+                // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
+                false,
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(
@@ -415,7 +529,10 @@ pub(crate) fn build_snapshot(
                     };
                     src_start = 0;
                     src_end = src_render.frames as u64;
-                    repeat = false;
+                    if clip.loop_enabled {
+                        // Formant 不改变时长：锚点换算到同长缓冲。
+                        loop_anchor_frame = rescale_anchor(src_render.frames, 1.0);
+                    }
                     if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {
                         let target_frames =
                             ((src_render.frames as f64) / playback_rate).round().max(2.0) as usize;
@@ -433,6 +550,11 @@ pub(crate) fn build_snapshot(
                         };
                         src_end = src_render.frames as u64;
                         playback_rate_render = 1.0;
+                        if clip.loop_enabled {
+                            // 拉伸后的缓冲覆盖 D/rate 秒：锚点按 1/rate 缩放。
+                            loop_anchor_frame =
+                                rescale_anchor(src_render.frames, playback_rate);
+                        }
                     }
                 }
                 Err(error) => {
@@ -443,21 +565,30 @@ pub(crate) fn build_snapshot(
                 }
             }
         } else if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {
-            let key = make_stretch_key(
-                path,
-                out_rate,
-                stretch_algorithm,
-                clip.source_start_sec.max(0.0),
-                clip.source_end_sec,
-                playback_rate,
-            );
+            // Loop（循环源）：拉伸对象是**整个文件**（回绕发生在完整媒体的
+            // 拉伸版本上），缓存键相应取 [0, 文件时长]，与 schedule_stretch_jobs
+            // 的任务键共用 `clip_loop_wrap_total_sec`（回退链一致才能命中）；
+            // 非 Loop 维持窗口拉伸。
+            let (key_start, key_end) = if clip.loop_enabled {
+                (0.0f64, crate::state::clip_loop_wrap_total_sec(clip))
+            } else {
+                // 派生窗口：与上方 schedule_stretch_jobs 的生产者键成对。
+                (
+                    clip.source_start_sec.max(0.0),
+                    crate::state::clip_effective_source_end_sec(clip),
+                )
+            };
+            let key = make_stretch_key(path, out_rate, stretch_algorithm, key_start, key_end, playback_rate);
             if let Ok(m) = stretch_cache.lock() {
                 if let Some(stretched) = m.get(&key) {
                     src_render = stretched.clone();
                     src_start = 0;
                     src_end = src_render.frames as u64;
                     playback_rate_render = 1.0;
-                    repeat = false;
+                    if clip.loop_enabled {
+                        // 拉伸后的缓冲覆盖 D/rate 秒；锚点按 1/rate 缩放到缓冲域。
+                        loop_anchor_frame = rescale_anchor(src_render.frames, playback_rate);
+                    }
                 }
             }
         }
@@ -573,6 +704,11 @@ pub(crate) fn build_snapshot(
                             clip.formant_morph.as_ref().filter(|params| params.enabled),
                             None,
                             clip.source_file_mtime,
+                            clip.loop_enabled,
+                            (
+                                (clip.source_start_sec * 1000.0).round() as i64,
+                                (clip.source_end_sec * 1000.0).round() as i64,
+                            ),
                         );
                         if debug {
                             eprintln!(
@@ -778,10 +914,18 @@ pub(crate) fn build_snapshot(
             src: src_render,
             src_start_frame: src_start,
             src_end_frame: src_end,
-            reversed: formant_params.is_some().then_some(false).unwrap_or(clip.reversed),
+            // 非 Loop：Formant 缓冲已预反转，方向归零交给正向遍历；
+            // Loop：缓冲保持自然顺序，倒放方向由 mix 的锚点回绕（anchor − f）
+            // 体现 —— 此处若清零会把"倒放循环"错放成"从文件末端正向循环"。
+            reversed: if clip.loop_enabled {
+                clip.reversed
+            } else {
+                formant_params.is_some().then_some(false).unwrap_or(clip.reversed)
+            },
             playback_rate: playback_rate_render,
             local_src_offset_frames,
             repeat,
+            loop_anchor_frame,
             fade_in_frames,
             fade_out_frames,
             gain,
@@ -899,6 +1043,7 @@ pub(crate) fn build_snapshot_for_file(
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,
+            loop_anchor_frame: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
             gain: 1.0,

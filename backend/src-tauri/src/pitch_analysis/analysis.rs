@@ -577,21 +577,39 @@ fn process_single_clip(
                 1.0
             };
 
-            let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
+            // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]（函数内部按升序
+            // 处理、调用方约定翻转输出）—— 陈旧/延伸过的存储窗口不再把曲线
+            // 拉伸到错误区域。
+            let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
+            let mut midi_vec = crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
                 frame_period_ms,
-                clip.source_start_sec,
-                clip.source_end_sec,
+                trim_src_start,
+                trim_src_end,
                 playback_rate,
                 clip_timeline_len_sec,
-            ));
+                clip.loop_enabled,
+                crate::state::clip_source_media_duration_sec(clip),
+                clip.reversed && clip.loop_enabled,
+            );
+            // 非 Loop 倒放：升序窗口映射 → 时间线序翻转（文档契约；下游
+            // fuse 按 clip 局部时间线帧读取，不翻转会相对音频镜像）。
+            if clip.reversed && !clip.loop_enabled {
+                midi_vec.reverse();
+            }
+            let midi = std::sync::Arc::new(midi_vec);
 
-            // Calculate pre_silence_sec for clip placement
-            let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
-            let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
+            // Calculate pre_silence_sec for clip placement.
+            // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
+            // 末端）；Loop 的负 source_start 是环绕锚点，不产生前导静音。
+            let pre_silence_sec =
+                crate::state::clip_leading_silence_sec(clip, crate::state::clip_source_media_duration_sec(clip))
+                    / playback_rate.max(1e-6);
 
             // Estimate clip_total_frames (from original audio)
-            let clip_total_frames = if let Some(dur) = clip.duration_sec {
+            let clip_total_frames = if clip.loop_enabled {
+                ((clip_timeline_len_sec) * 44100.0).round().max(0.0) as usize
+            } else if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0; // Assuming standard rate
                 (dur * in_rate).round().max(0.0) as usize
             } else {
@@ -919,25 +937,42 @@ fn compute_pitch_curve_with_incremental_refresh(
 
             let track_gain_value = tracks_gain.get(&clip.track_id).copied().unwrap_or(1.0);
 
-            let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
             let playback_rate = if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
                 clip.playback_rate as f64
             } else {
                 1.0
             };
-            let pre_silence_sec = pre_silence_sec_src / playback_rate.max(1e-6);
+            // 前导静音按消费方向取值（同 process_single_clip；Loop 恒为 0）。
+            let pre_silence_sec =
+                crate::state::clip_leading_silence_sec(clip, crate::state::clip_source_media_duration_sec(clip))
+                    / playback_rate.max(1e-6);
 
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
-            let midi = std::sync::Arc::new(crate::pitch_clip::trim_and_resample_midi(
+            // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+            let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
+            let mut midi_vec = crate::pitch_clip::trim_and_resample_midi(
                 &full_midi,
                 frame_period_ms,
-                clip.source_start_sec,
-                clip.source_end_sec,
+                trim_src_start,
+                trim_src_end,
                 playback_rate,
                 clip_timeline_len_sec,
-            ));
+                clip.loop_enabled,
+                crate::state::clip_source_media_duration_sec(clip),
+                clip.reversed && clip.loop_enabled,
+            );
+            // 非 Loop 倒放：升序窗口映射 → 时间线序翻转（文档契约；下游
+            // fuse 按 clip 局部时间线帧读取，不翻转会相对音频镜像）。
+            if clip.reversed && !clip.loop_enabled {
+                midi_vec.reverse();
+            }
+            let midi = std::sync::Arc::new(midi_vec);
 
-            let clip_total_frames = if let Some(dur) = clip.duration_sec {
+            let clip_total_frames = if clip.loop_enabled {
+                // Loop（循环源）：曲线已按循环铺满 clip 时间线长度，
+                // 对应的音频帧数以 clip 长度为准（而非源媒体时长）。
+                ((clip_timeline_len_sec) * 44100.0).round().max(0.0) as usize
+            } else if let Some(dur) = clip.duration_sec {
                 let in_rate = 44100.0;
                 (dur * in_rate).round().max(0.0) as usize
             } else {
@@ -1345,35 +1380,71 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         };
 
         // Source range (already in sec).
-        let source_start_sec = clip.source_start_sec.max(0.0);
-        let source_end_sec = clip.source_end_sec;
-        let pre_silence_sec = (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6);
-
         let total_sec = (in_frames as f64) / (in_rate.max(1) as f64);
         if !(total_sec.is_finite() && total_sec > 0.0) {
             continue;
         }
 
-        let src_end_limit_sec = source_end_sec.min(total_sec).max(source_start_sec);
-        if src_end_limit_sec - source_start_sec <= 1e-9 {
-            continue;
-        }
+        // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
+        // 末端）；Loop 的负 source_start 是环绕锚点，不产生前导静音。
+        let pre_silence_sec =
+            crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
 
-        let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-        let src_i1 = (src_end_limit_sec * in_rate as f64)
-            .ceil()
-            .max(src_i0 as f64) as usize;
-        let src_i1 = src_i1.min(in_frames);
-        if src_i1 <= src_i0 + 1 {
-            continue;
-        }
+        // ── 分析片段构建 ────────────────────────────────────────────────
+        // Loop（循环源）：分析对象必须是**整段消费量**的回绕平铺（锚点 +
+        // floor_mod，与 mixdown/render_single_clip/实时引擎同一套数学）。
+        // 此前只切入口窗口 [source_start, effective_end]：长循环 clip 的
+        // 音高会被"几秒素材拉伸到整条 clip"严重拖慢，且 split 的环绕窗口
+        // （start > end）会命中空窗口守卫被整体跳过。
+        let segment: Vec<f32> = if clip.loop_enabled {
+            let anchor_frame: i64 = if clip.reversed {
+                (clip.source_end_sec.min(total_sec) * in_rate as f64).round() as i64
+            } else {
+                (clip.source_start_sec * in_rate as f64).round() as i64
+            };
+            let out_source_frames = ((clip_timeline_len_sec.max(0.0)
+                * playback_rate
+                * in_rate as f64)
+                .ceil()
+                .max(2.0)) as usize;
+            let tiled = crate::mixdown::build_loop_tiled_segment(
+                &pcm,
+                in_channels_usize,
+                anchor_frame,
+                clip.reversed,
+                out_source_frames,
+            );
+            if tiled.len() < 2 * in_channels_usize {
+                continue;
+            }
+            tiled
+        } else {
+            // 非 Loop：消费窗口（正放 [ss, ss+len·r)、倒放 [se−len·r, se)）
+            // clamp 到媒体内；域外由前导/尾部静音表达。
+            let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
+            let slice_lo = win_start.max(0.0);
+            let slice_hi = win_end.min(total_sec).max(slice_lo);
+            if slice_hi - slice_lo <= 1e-9 {
+                continue;
+            }
 
-        let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
+            let src_i0 = (slice_lo * in_rate as f64).floor().max(0.0) as usize;
+            let src_i1 = (slice_hi * in_rate as f64)
+                .ceil()
+                .max(src_i0 as f64) as usize;
+            let src_i1 = src_i1.min(in_frames);
+            if src_i1 <= src_i0 + 1 {
+                continue;
+            }
+
+            pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
+        };
 
         // Resample to analysis rate (44100) and convert to mono.
+        // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
         let mut segment =
-            crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, 44100);
-        if clip.reversed {
+            crate::mixdown::linear_resample_interleaved(&segment, in_channels_usize, in_rate, 44100);
+        if clip.reversed && !clip.loop_enabled {
             crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
         }
 

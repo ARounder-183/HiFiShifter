@@ -91,6 +91,9 @@ interface MenuBarProps {
     onAutoBackupSettingsSaved: (settings: AutoBackupSettings) => void;
     autoReloadModifiedMedia: boolean;
     onAutoReloadModifiedMediaChange: (value: boolean) => void;
+    /** 为新的音频块启用循环（Loop / 循环源，默认开启）。 */
+    loopNewClips: boolean;
+    onLoopNewClipsChange: (value: boolean) => void;
 }
 
 function timeUnitLabelKey(unit: TimeUnit): string {
@@ -118,6 +121,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     onAutoBackupSettingsSaved,
     autoReloadModifiedMedia,
     onAutoReloadModifiedMediaChange,
+    loopNewClips,
+    onLoopNewClipsChange,
 }) => {
     const { t, setLocale } = useI18n();
     const tAny = t as (key: string) => string;
@@ -998,6 +1003,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             autoReloadModifiedMedia,
                             tAny("options_auto_reload_modified_media"),
                         )}
+                    </DropdownMenu.Item>
+
+                    {/* Loop for new clips — 为新的音频块启用循环（默认开启） */}
+                    <DropdownMenu.Item onSelect={() => onLoopNewClipsChange(!loopNewClips)}>
+                        {withCheck(loopNewClips, tAny("options_loop_new_clips"))}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />

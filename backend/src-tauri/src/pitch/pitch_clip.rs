@@ -806,6 +806,14 @@ pub fn compute_clip_pitch_midi(
 /// - `source_end_sec`：clip 的 source_end_sec（源音频有效区间终点）
 /// - `playback_rate`：clip 的 playback_rate（>1 加速，<1 减速）
 /// - `clip_timeline_len_sec`：clip 在时间线上的可见长度（秒）
+/// - `loop_enabled`：Loop（循环源）属性
+/// - `media_total_sec`：源媒体总时长（Loop 模式的回绕周期 D）；非 Loop 或未知传 None
+/// - `reversed`：是否倒放。Loop 模式下倒放从 `source_end` 向下遍历并回绕，
+///   与音频渲染的环绕方向一致；非 Loop 时函数内部按升序窗口处理，
+///   调用方须传入重定向窗口 `[se−len·r, se]`（见
+///   `clip_pitch_trim_window_sec`）并在输出后整体翻转 —— 翻转使前导/
+///   尾部静音自动落到正确一侧。
+#[allow(clippy::too_many_arguments)]
 pub fn trim_and_resample_midi(
     full_midi: &[f32],
     frame_period_ms: f64,
@@ -813,9 +821,30 @@ pub fn trim_and_resample_midi(
     source_end_sec: f64,
     playback_rate: f64,
     clip_timeline_len_sec: f64,
+    loop_enabled: bool,
+    media_total_sec: Option<f64>,
+    reversed: bool,
 ) -> Vec<f32> {
     let fp = frame_period_ms.max(0.1);
     let src_start = source_start_sec.max(0.0);
+
+    // 速率净化：非有限 / 过小的速率按 1.0 处理（两条 Loop 路径共用）。
+    let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
+        playback_rate
+    } else {
+        1.0
+    };
+
+    // 派生窗口（非 Loop 正放）：终点 = 起点 + 时间线长度×速率，与音频渲染、
+    // 前端编辑模型一致。循环开关反复切换或历史数据可能留下与长度脱钩的
+    // 陈旧 source_end —— 在此统一派生，避免曲线窗口被冻结在错误位置。
+    // 注意用**原始** source_start（可为负，前导静音场景），不是上面的
+    // clamp 值；Loop / 倒放保持调用方传入的锚点字段。
+    let source_end_sec = if !loop_enabled && !reversed {
+        source_start_sec + clip_timeline_len_sec.max(0.0) * rate
+    } else {
+        source_end_sec
+    };
 
     // 从全量曲线中截取 source range 区间
     let src_start_frame = ((src_start * 1000.0) / fp).round().max(0.0) as usize;
@@ -823,6 +852,95 @@ pub fn trim_and_resample_midi(
     // 根据 source_end_sec 计算结束帧
     let src_end_frame = ((source_end_sec * 1000.0) / fp).round().max(0.0) as usize;
     let src_end_frame = src_end_frame.min(full_midi.len());
+
+    // ── Loop（循环源）：对整个媒体文件做模运算回绕 ────────────────────────────
+    // idx(i) = floor_mod(anchor ± round(i·rate), N)，N 覆盖完整媒体时长；
+    // 正放锚点 = 原始 source_start（可为负，floor_mod 正确环绕），
+    // 倒放锚点 = min(source_end, D)（向下遍历）。
+    // 该路径不依赖源窗口的先后次序 —— Loop 下 split 等编辑会产生
+    // start > end 的"环绕窗口"（音频只由锚点与 D 决定），必须先于
+    // 窗口空判执行，否则这类 clip 的音高曲线会被误判为空。
+    if loop_enabled {
+        if let Some(total_sec) = media_total_sec.filter(|v| v.is_finite() && *v > 0.0) {
+            if full_midi.is_empty() {
+                return Vec::new();
+            }
+            let n = (((total_sec * 1000.0) / fp).round() as usize)
+                .min(full_midi.len())
+                .max(1);
+            let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
+            // 倒放锚点与音频路径同约定：min(source_end, D) 后不做 max(0)，
+            // 负 source_end 由 rem_euclid 统一环绕。
+            let anchor_r =
+                ((source_end_sec.min(total_sec)) * 1000.0 / fp).round() as i64;
+            let target_frames =
+                ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+            let mut out = Vec::with_capacity(target_frames);
+            for i in 0..target_frames {
+                let consumed = (i as f64 * rate).round() as i64;
+                let idx_i = if reversed {
+                    anchor_r - 1 - consumed
+                } else {
+                    anchor_f + consumed
+                };
+                let idx = idx_i.rem_euclid(n as i64) as usize;
+                out.push(full_midi[idx]);
+            }
+            return out;
+        }
+    }
+
+    // Loop（循环源）+ 媒体时长未知 + 环绕窗口（split 产生 start > end）：
+    // 若落到下方 `src_start_frame >= src_end_frame` 的空判会把曲线整体清空。
+    // 退化为"整条缓存曲线即回绕周期"（与 assemble_pitch_orig_from_cache 的
+    // 回退一致），保证仍有内容可显示/编辑。
+    if loop_enabled && src_start_frame >= src_end_frame {
+        if full_midi.is_empty() {
+            return Vec::new();
+        }
+        let n = full_midi.len();
+        let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
+        let anchor_r = src_end_frame as i64;
+        let target_frames =
+            ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+        let mut out = Vec::with_capacity(target_frames);
+        for i in 0..target_frames {
+            let consumed = (i as f64 * rate).round() as i64;
+            let idx_i = if reversed {
+                anchor_r - 1 - consumed
+            } else {
+                anchor_f + consumed
+            };
+            let idx = idx_i.rem_euclid(n as i64) as usize;
+            out.push(full_midi[idx]);
+        }
+        return out;
+    }
+
+    // 非 Loop：窗口越出媒体域（负起点的前导静音 / 终点越过缓存末端甚至
+    // 整窗在媒体外的尾部静音 —— 编辑器无界延伸可达）时，走**带静音的
+    // 窗口映射**：输出帧 i ↔ 源坐标 win_start + (i−lead)·rate，域外为静音。
+    // 完全在媒体域内的窗口保持既有"截取 + 线性重采样"路径不变（含下方
+    // Loop 回退与 rate≈1 防御性 clamp）。
+    if !loop_enabled {
+        let raw_end_frame_i64 = ((source_end_sec * 1000.0) / fp).round() as i64;
+        let window_crosses_media = source_start_sec < 0.0
+            || source_end_sec < 0.0
+            || raw_end_frame_i64 > full_midi.len() as i64;
+        if window_crosses_media {
+            let target_frames =
+                ((clip_timeline_len_sec.max(0.0) * 1000.0) / fp).round().max(1.0) as usize;
+            return assemble_nonloop_pitch_from_window(
+                full_midi,
+                fp,
+                source_start_sec,
+                source_end_sec,
+                rate,
+                target_frames,
+            );
+        }
+    }
+
     if src_start_frame >= src_end_frame {
         eprintln!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
@@ -841,10 +959,32 @@ pub fn trim_and_resample_midi(
     // 按 1/playback_rate 重采样到 clip timeline 长度
     let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
 
+    // 媒体时长未知：退化为窗口回绕，保证仍有内容可显示。
+    // 倒放从窗口末端向下遍历（与音频方向一致），不能忽略 reversed。
+    if loop_enabled && target_frames > trimmed.len() {
+        let window_frames = trimmed.len();
+        let mut out = Vec::with_capacity(target_frames);
+        for i in 0..target_frames {
+            let u = i as f64 * rate;
+            let wrapped = (u % (window_frames as f64)).round() as usize;
+            let idx = if reversed {
+                (src_end_frame - 1).saturating_sub(wrapped.min(window_frames - 1))
+            } else {
+                src_start_frame + wrapped.min(window_frames - 1)
+            };
+            out.push(full_midi[idx]);
+        }
+        return out;
+    }
+
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，
     // 避免前端 sourceEndSec 超出源文件实际时长导致曲线被不合理拉伸。
     let rate_near_one = (playback_rate - 1.0).abs() <= 0.01;
-    let target_frames = if rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
+    let target_frames = if !loop_enabled
+        && rate_near_one
+        && target_frames > trimmed.len()
+        && !trimmed.is_empty()
+    {
         eprintln!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
             target_frames,
@@ -870,6 +1010,43 @@ pub fn trim_and_resample_midi(
     );
 
     resample_curve_linear(trimmed, target_frames)
+}
+
+/// 非 Loop **消费窗口 → clip 时间线帧曲线**（带静音的窗口映射）。
+///
+/// 输出长度恒为 `target_frames`；输出帧 `i` 对应源坐标
+/// `win_start_sec + i·rate`（消费自窗口起点开始），源坐标落在
+/// `[0, win_end_frame)` 之外（媒体前导/尾部越界区）输出 0 —— 与音频
+/// 渲染的静音表达逐帧一致。
+///
+/// 窗口完全在媒体域内时无需走此路径（保留既有线性重采样管线）；
+/// 倒放由调用方先以重定向窗口 `[se−len·r, se]` 调用、再整体翻转输出
+/// （翻转后前导/尾部静音自动互换到正确一侧）。
+pub(crate) fn assemble_nonloop_pitch_from_window(
+    full_midi: &[f32],
+    fp: f64,
+    win_start_sec: f64,
+    win_end_sec: f64,
+    rate: f64,
+    target_frames: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; target_frames];
+    if target_frames == 0 {
+        return out;
+    }
+    let win_start_frame_f = (win_start_sec * 1000.0) / fp;
+    let win_end_frame = ((win_end_sec * 1000.0) / fp).round() as i64;
+    // 消费方向：时间线帧 i 直接对应源坐标 win_start + i·rate（消费自窗口
+    // 起点开始）；窗口起点在媒体起点之前的部分自然落为前导静音。
+    for (i, slot) in out.iter_mut().enumerate() {
+        let src_f = win_start_frame_f + i as f64 * rate;
+        let idx = src_f.round() as i64;
+        if idx < 0 || idx >= win_end_frame {
+            continue; // 媒体域外 → 静音
+        }
+        *slot = full_midi[idx as usize];
+    }
+    out
 }
 
 /// 使指定 clip 的 pitch MIDI 缓存失效（例如源文件变化后调用）。
@@ -900,11 +1077,70 @@ pub fn clear_clip_inflight(tl: &TimelineState, clip: &Clip) {
 
 #[allow(dead_code)]
 pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec<&'a Clip> {
-    let mut out: Vec<&Clip> = tl
+    let mut out: Vec<&'a Clip> = tl
         .clips
         .iter()
         .filter(|c| tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_and_resample_midi;
+
+    /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
+    /// 不得落入"空窗口"提前返回 —— 退化为整条缓存曲线回绕，输出非空
+    /// 且相位与逐帧 floor_mod 参考一致。
+    #[test]
+    fn loop_wrapped_window_without_media_duration_does_not_collapse_to_empty() {
+        // 环绕窗口 [3.5, 3.0)（start > end），缓存曲线 100 帧（1s @10ms）。
+        let full: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let out = trim_and_resample_midi(
+            &full,
+            10.0,
+            3.5, // source_start_sec（> end）
+            3.0, // source_end_sec
+            1.0, // playback_rate
+            2.0, // clip_timeline_len_sec → target = 200 帧
+            true, // loop_enabled
+            None, // 媒体时长未知
+            false,
+        );
+        assert_eq!(out.len(), 200, "curve must cover the clip length");
+        assert!(out.iter().any(|&v| v > 0.0), "curve must not be empty");
+
+        // 与逐帧 floor_mod 参考对拍：idx = floor_mod(anchor + i, N)。
+        let anchor = ((3.5f64 * 1000.0) / 10.0).round() as i64; // 350
+        for (i, v) in out.iter().enumerate() {
+            let expect = full[(anchor + i as i64).rem_euclid(100) as usize];
+            assert!((v - expect).abs() < 1e-6, "frame {i}: {v} != {expect}");
+        }
+    }
+
+    /// Loop + 已知媒体时长：逐帧 floor_mod(anchor ± round(i·rate), N)
+    /// 映射正确（正放），且长度等于 clip 时间线帧数。
+    #[test]
+    fn loop_with_media_duration_maps_per_frame_floor_mod() {
+        // 媒体 1s（100 帧 @10ms），锚点 -0.25s（负值环绕到尾部一侧）。
+        let full: Vec<f32> = (0..100).map(|i| (i * 7) as f32 % 13.0).collect();
+        let out = trim_and_resample_midi(
+            &full,
+            10.0,
+            -0.25,
+            1.0,
+            1.0,
+            1.5,
+            true,
+            Some(1.0),
+            false,
+        );
+        assert_eq!(out.len(), 150);
+        let anchor = ((-0.25f64 * 1000.0) / 10.0).round() as i64; // -25
+        for (i, v) in out.iter().enumerate() {
+            let idx = (anchor + i as i64).rem_euclid(100);
+            assert!((v - full[idx as usize]).abs() < 1e-6, "frame {i}");
+        }
+    }
 }

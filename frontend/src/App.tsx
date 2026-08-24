@@ -464,6 +464,8 @@ function AppInner() {
     const [midiImportTargetDragDrop, setMidiImportTargetDragDrop] = useState<string>("pitchRef");
     const [midiDialogSource, setMidiDialogSource] = useState<"menu" | "dragDrop">("menu");
     const [autoReloadModifiedMedia, setAutoReloadModifiedMedia] = useState(true);
+    // 为新的音频块启用循环（Loop / 循环源，默认开启）
+    const [loopNewClips, setLoopNewClips] = useState(true);
 
     // 加载 MIDI 相关设置
     useEffect(() => {
@@ -519,6 +521,9 @@ function AppInner() {
                 if (typeof s?.autoReloadModifiedMedia === "boolean") {
                     setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
                 }
+                if (typeof s?.loopNewClips === "boolean") {
+                    setLoopNewClips(s.loopNewClips);
+                }
             });
         });
     }, []);
@@ -543,6 +548,13 @@ function AppInner() {
         setAutoReloadModifiedMedia(v);
         void import("./services/api/settings").then(({ settingsApi }) =>
             settingsApi.saveUiSettings({ autoReloadModifiedMedia: v }),
+        );
+    }, []);
+
+    const handleLoopNewClipsChange = useCallback((v: boolean) => {
+        setLoopNewClips(v);
+        void import("./services/api/settings").then(({ settingsApi }) =>
+            settingsApi.saveUiSettings({ loopNewClips: v }),
         );
     }, []);
 
@@ -3268,6 +3280,8 @@ function AppInner() {
                 onAutoBackupSettingsSaved={handleAutoBackupSettingsSaved}
                 autoReloadModifiedMedia={autoReloadModifiedMedia}
                 onAutoReloadModifiedMediaChange={handleAutoReloadModifiedMediaChange}
+                loopNewClips={loopNewClips}
+                onLoopNewClipsChange={handleLoopNewClipsChange}
             />
             <ActionBar />
 

@@ -50,10 +50,28 @@ pub(super) fn import_project(
 
     let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
     let mut timeline = resolved_timeline;
-    for clip in &mut timeline.clips {
-        if clip.source_end_sec == 0.0 {
-            clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+    // 旧项目兼容迁移（仅 v3 及更早，同 open_project）：se==0 哨兵展开。
+    if pf.version < 4 {
+        for clip in &mut timeline.clips {
+            if clip.source_end_sec == 0.0 {
+                clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+            }
         }
+    }
+    // v4 迁移：旧工程 Clip 不携带 loop_enabled，按"为新的音频块启用循环"设置
+    // 补齐 —— 仅限有源媒体的音频 Clip（纯 MIDI 块保持关闭，与导入器约定一致，
+    // 见 open_project 的同名迁移注释）。
+    if pf.version < 4 {
+        let default_loop = crate::config::loop_new_clips_default();
+        for clip in &mut timeline.clips {
+            if clip.source_path.is_some() {
+                clip.loop_enabled = default_loop;
+            }
+        }
+    }
+    // 非 Loop 存储窗口规范化（同 open_project，见其注释）。
+    for clip in &mut timeline.clips {
+        crate::state::normalize_nonloop_source_window(clip);
     }
 
     let imported_notes = std::mem::take(&mut pf.notes_markdown);

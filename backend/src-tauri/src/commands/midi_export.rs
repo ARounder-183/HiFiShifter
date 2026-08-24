@@ -701,7 +701,8 @@ fn read_pitch_for_clip(
 
         let pr = clip.playback_rate as f64;
         let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-        let src_start = clip.source_start_sec.max(0.0);
+        // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]）——
+        // 与引擎 emit / assemble 的窗口模型一致。
         let src_end = if clip.source_end_sec > 0.0 {
             clip.source_end_sec
         } else {
@@ -712,9 +713,45 @@ fn read_pitch_for_clip(
                 .unwrap_or(clip_len)
                 .max(clip_len)
         };
+        let src_start = if !clip.loop_enabled && clip.reversed {
+            src_end - clip_len * pr_valid
+        } else {
+            clip.source_start_sec
+        };
         let src_total_len = src_end - src_start;
 
         for note in notes {
+            // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与实时引擎 /
+            // assemble 的放置算法一致）。不能用窗口比较过滤可见性 —— split
+            // 产生的"环绕窗口"（start > end）会把所有音符误判为越界。
+            if let Some(placement) = crate::state::place_note_occurrence_in_loop(
+                clip,
+                note.start_sec,
+                note.end_sec,
+                fp,
+            ) {
+                let note_value = note.note as f32;
+                let mut cycle_offset = 0usize;
+                while cycle_offset < target_frames {
+                    let write_start = cycle_offset + placement.first_start_frame;
+                    let write_end = (cycle_offset
+                        + placement.first_start_frame
+                        + placement.len_frames)
+                        .min(target_frames);
+                    if write_start >= write_end {
+                        break;
+                    }
+                    for frame in write_start..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
+                    }
+                    cycle_offset += placement.cycle_frames;
+                }
+                continue;
+            }
+
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
             }
@@ -776,16 +813,24 @@ fn read_pitch_for_clip(
     let pr = clip.playback_rate as f64;
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
 
+    // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]（输出在下方整体反转）。
+    let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
     let mut curve = pitch_clip::trim_and_resample_midi(
         &full_midi,
         fp,
-        clip.source_start_sec,
-        clip.source_end_sec,
+        trim_src_start,
+        trim_src_end,
         pr,
         clip_len,
+        clip.loop_enabled,
+        crate::state::clip_source_media_duration_sec(clip),
+        clip.reversed && clip.loop_enabled,
     );
 
-    if clip.reversed && !curve.is_empty() {
+    if clip.reversed && !clip.loop_enabled && !curve.is_empty() {
+        // 非 Loop 倒放：曲线整体反转（既有约定）。
+        // Loop 模式的倒放方向已在 trim_and_resample_midi 内部按
+        // "从 source_end 向下环绕"处理，无需再反转。
         curve.reverse();
     }
 

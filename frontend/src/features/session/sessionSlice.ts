@@ -167,12 +167,12 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         gridMinSpacingPx: 8,
         swingEnabled: false,
         swingPercent: 0,
-        adjustItemsOnSwingChange: true,
+        adjustClipsOnSwingChange: true,
         enabled: true,
         snapDistancePx: 4,
         snapRelativeToGrid: false,
-        snapMediaItemsToSelectionMarkersCursor: true,
-        snapMediaItemsToGrid: true,
+        snapClipsToSelectionMarkersCursor: true,
+        snapClipsToGrid: true,
         snapSelectionToSelectionMarkersCursor: true,
         snapSelectionToGrid: true,
         snapCursorToSelectionMarkersCursor: true,
@@ -182,13 +182,13 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         useIndependentSnapSpacing: false,
         snapSpacing: "1/4",
         snapSpacingMinPx: 8,
-        snapItemStart: true,
-        snapItemSnapOffset: true,
+        snapClipEdges: true,
+        snapClipSnapOffset: true,
         snapAcrossTracks: true,
         snapTrackDistance: 0,
         snapRazorEdits: true,
         snapToProjectSampleRate: false,
-        snapMediaEdgesToSource: true,
+        snapClipsToSourceMedia: true,
         forceSelectionsToMultiples: false,
         selectionMultiple: "1/4",
         syncArrangeAndMidiGrid: true,
@@ -216,18 +216,18 @@ function normalizeTimelineSnapSettings(
         gridMinSpacingPx: clampedPx(patch.gridMinSpacingPx, base.gridMinSpacingPx, 2, 200),
         swingEnabled: bool(patch.swingEnabled, base.swingEnabled),
         swingPercent: clampedNum(patch.swingPercent, base.swingPercent, 0, 100),
-        adjustItemsOnSwingChange: bool(
-            patch.adjustItemsOnSwingChange,
-            base.adjustItemsOnSwingChange,
+        adjustClipsOnSwingChange: bool(
+            patch.adjustClipsOnSwingChange,
+            base.adjustClipsOnSwingChange,
         ),
         enabled: bool(patch.enabled, base.enabled),
         snapDistancePx: clampedPx(patch.snapDistancePx, base.snapDistancePx, 0, 200),
         snapRelativeToGrid: bool(patch.snapRelativeToGrid, base.snapRelativeToGrid),
-        snapMediaItemsToSelectionMarkersCursor: bool(
-            patch.snapMediaItemsToSelectionMarkersCursor,
-            base.snapMediaItemsToSelectionMarkersCursor,
+        snapClipsToSelectionMarkersCursor: bool(
+            patch.snapClipsToSelectionMarkersCursor,
+            base.snapClipsToSelectionMarkersCursor,
         ),
-        snapMediaItemsToGrid: bool(patch.snapMediaItemsToGrid, base.snapMediaItemsToGrid),
+        snapClipsToGrid: bool(patch.snapClipsToGrid, base.snapClipsToGrid),
         snapSelectionToSelectionMarkersCursor: bool(
             patch.snapSelectionToSelectionMarkersCursor,
             base.snapSelectionToSelectionMarkersCursor,
@@ -257,8 +257,8 @@ function normalizeTimelineSnapSettings(
             2,
             200,
         ),
-        snapItemStart: bool(patch.snapItemStart, base.snapItemStart),
-        snapItemSnapOffset: bool(patch.snapItemSnapOffset, base.snapItemSnapOffset),
+        snapClipEdges: bool(patch.snapClipEdges, base.snapClipEdges),
+        snapClipSnapOffset: bool(patch.snapClipSnapOffset, base.snapClipSnapOffset),
         snapAcrossTracks: bool(patch.snapAcrossTracks, base.snapAcrossTracks),
         snapTrackDistance: clampedNum(
             patch.snapTrackDistance,
@@ -271,9 +271,9 @@ function normalizeTimelineSnapSettings(
             patch.snapToProjectSampleRate,
             base.snapToProjectSampleRate,
         ),
-        snapMediaEdgesToSource: bool(
-            patch.snapMediaEdgesToSource,
-            base.snapMediaEdgesToSource,
+        snapClipsToSourceMedia: bool(
+            patch.snapClipsToSourceMedia,
+            base.snapClipsToSourceMedia,
         ),
         forceSelectionsToMultiples: bool(
             patch.forceSelectionsToMultiples,
@@ -329,6 +329,8 @@ export interface SessionState {
     paramEditorSyncTimeline: boolean;
 
     autoCrossfadeEnabled: boolean;
+    /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
+    loopNewClipsEnabled: boolean;
     /** 分割过渡 */
     splitTransitionEnabled: boolean;
     splitTransitionMode: "fade" | "overlap";
@@ -796,6 +798,7 @@ function applyOptimisticClipState(
         sourceEndSec?: number;
         playbackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;
@@ -829,13 +832,19 @@ function applyOptimisticClipState(
         clip.sourceStartSec = Number(payload.sourceStartSec) || 0;
     }
     if (payload.sourceEndSec !== undefined) {
-        clip.sourceEndSec = Math.max(0, Number(payload.sourceEndSec) || 0);
+        // 不得钳制到 ≥0：倒放 Clip 的消费窗口锚定 se，se<0（整窗在媒体
+        // 下方的静音段）与 se>D（前导静音）都是合法状态。
+        const value = Number(payload.sourceEndSec);
+        clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
     }
     if (payload.playbackRate !== undefined) {
         clip.playbackRate = clamp(Number(payload.playbackRate), 0.1, 10);
     }
     if (payload.reversed !== undefined) {
         clip.reversed = Boolean(payload.reversed);
+    }
+    if (payload.loopEnabled !== undefined) {
+        clip.loopEnabled = Boolean(payload.loopEnabled);
     }
     if (payload.fadeInSec !== undefined) {
         clip.fadeInSec = Math.max(0, Number(payload.fadeInSec) || 0);
@@ -873,6 +882,10 @@ function applyOptimisticBulkClipState(
         muted?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
+        reversed?: boolean;
+        loopEnabled?: boolean;
+        sourceStartSec?: number;
+        sourceEndSec?: number;
     }>,
 ) {
     for (const update of updates) {
@@ -884,11 +897,25 @@ function applyOptimisticBulkClipState(
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);
         }
+        if (update.sourceStartSec !== undefined) {
+            clip.sourceStartSec = Number(update.sourceStartSec) || 0;
+        }
+        if (update.sourceEndSec !== undefined) {
+            // 同 setClipSourceRange：不得钳制到 ≥0（倒放窗口合法含负值）。
+            const value = Number(update.sourceEndSec);
+            clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
+        }
         if (update.fadeInSec !== undefined) {
             clip.fadeInSec = Math.max(0, Number(update.fadeInSec) || 0);
         }
         if (update.fadeOutSec !== undefined) {
             clip.fadeOutSec = Math.max(0, Number(update.fadeOutSec) || 0);
+        }
+        if (update.reversed !== undefined) {
+            clip.reversed = Boolean(update.reversed);
+        }
+        if (update.loopEnabled !== undefined) {
+            clip.loopEnabled = Boolean(update.loopEnabled);
         }
     }
 }
@@ -952,9 +979,16 @@ function applyTimelineState(
             // Allow negative sourceStartSec to represent leading silence (slip-edit past source start).
             sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
             sourceEndSec: (() => {
-                const raw = Math.max(0, Number(clip.source_end_sec ?? 0));
-                // 旧项目兼容：source_end_sec == 0 曾表示"到源文件末尾"，修正为实际时长
-                if (raw === 0) {
+                const raw = Number(clip.source_end_sec);
+                // 仅当字段**缺失/非法**时才回退默认值。
+                // 注意两点：
+                // 1. 不得 Math.max(0, …)：倒放 Clip 的消费窗口锚定 se，
+                //    se<0（整窗在媒体下方的静音段）是合法状态 —— 钳零会把
+                //    分割出的静音段凭空拉回媒体域；
+                // 2. 不得把 se==0 当作"到媒体末尾"的旧哨兵改写为 duration：
+                //    该哨兵语义已在后端 open_project 迁移中展开为真实时长，
+                //    此处的二次改写会摧毁合法的 0/负值窗口。
+                if (!Number.isFinite(raw)) {
                     return (
                         Number(clip.duration_sec ?? 0) || Math.max(0, Number(clip.length_sec ?? 1))
                     );
@@ -966,6 +1000,7 @@ function applyTimelineState(
                     ? clamp(Number(clip.playback_rate), 0.1, 10)
                     : (state.clips.find((c) => c.id === clip.id)?.playbackRate ?? 1),
             reversed: Boolean(clip.reversed),
+            loopEnabled: Boolean(clip.loop_enabled),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
@@ -1215,6 +1250,9 @@ function upsertImportedClip(
         sourceEndSec: meta?.durationSec ?? lengthSec,
         playbackRate: 1,
         reversed: false,
+        // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
+        //（默认开启；后端权威载荷返回后会覆盖该值）。
+        loopEnabled: state.loopNewClipsEnabled !== false,
         fadeInSec: 0,
         fadeOutSec: 0,
         fadeInCurve: "sine" as FadeCurveType,
@@ -1252,6 +1290,7 @@ const initialState: SessionState = {
     paramEditorSyncTimeline: false,
 
     autoCrossfadeEnabled: true,
+    loopNewClipsEnabled: true,
     splitTransitionEnabled: true,
     splitTransitionMode: "overlap",
     splitTransitionDurationUnit: "seconds",
@@ -1930,7 +1969,12 @@ const sessionSlice = createSlice({
                 clip.sourceStartSec = Number(action.payload.sourceStartSec) || 0;
             }
             if (action.payload.sourceEndSec !== undefined) {
-                clip.sourceEndSec = Math.max(0, action.payload.sourceEndSec);
+                // 注意：**不得钳制到 ≥0**。倒放 Clip 的消费窗口锚定 se，
+                // 合法状态包含 se<0（整窗在媒体下方的纯静音段）与 se>D
+                // （前导静音）；此处一旦拍扁，渲染/音频/后续编辑全部基于
+                // 被摧毁的窗口工作。
+                const value = Number(action.payload.sourceEndSec);
+                clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
             }
         },
         setClipFades(
@@ -2028,6 +2072,7 @@ const sessionSlice = createSlice({
                 sourceEndSec: 2,
                 playbackRate: 1,
                 reversed: false,
+                loopEnabled: state.loopNewClipsEnabled !== false,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInCurve: "sine" as FadeCurveType,
@@ -2290,6 +2335,7 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
+                state.loopNewClipsEnabled = s.loopNewClips ?? true;
                 state.splitTransitionEnabled = Boolean(
                     s.splitTransitionEnabled ?? true,
                 );

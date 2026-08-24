@@ -115,6 +115,36 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
+/// 仅供集成测试（tests/）使用的内部函数导出。
+///
+/// lib 的单元测试 harness 在 Windows 上因缺少内嵌清单无法启动（tauri_build
+/// 只给 bin 目标嵌清单，见 build.rs / tests/smoke.rs 说明），因此需要真正
+/// 运行纯函数回归测试时，通过 `--features __test-internals` 走集成测试
+/// 目标执行。
+#[cfg(feature = "__test-internals")]
+pub mod __test_internals {
+    pub use crate::pitch_clip::trim_and_resample_midi;
+    pub use crate::state::{
+        Clip, SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions,
+        TimelineState,
+    };
+
+    /// 消费窗口模型（正放 [ss, ss+len·r) / 倒放 [se−len·r, se)）。
+    pub fn playback_window_sec(c: &Clip) -> (f64, f64) {
+        crate::state::clip_playback_window_sec(c)
+    }
+
+    /// 方向性前导静音（正放看窗口起点、倒放看窗口终点越过媒体末端）。
+    pub fn leading_silence_sec(c: &Clip, media_total_sec: Option<f64>) -> f64 {
+        crate::state::clip_leading_silence_sec(c, media_total_sec)
+    }
+
+    /// trim_and_resample_midi 的窗口实参（非 Loop 倒放重定向到 [se−len·r, se]）。
+    pub fn pitch_trim_window_sec(c: &Clip) -> (f64, f64) {
+        crate::state::clip_pitch_trim_window_sec(c)
+    }
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;
@@ -243,6 +273,14 @@ pub fn run() {
                     p.recent = recent;
                 }
                 let _ = state.config_dir.set(cfg_dir);
+            }
+
+            // 启动即同步"为新的音频块启用循环"的进程级默认值：拖放导入、
+            // 打开 v<4 工程的迁移等都可能在 get_ui_settings 之前发生，
+            // 不能假设前端已先拉取过设置。
+            if let Some(cfg_dir) = state.config_dir.get() {
+                let ui = crate::config::load_ui_settings(cfg_dir);
+                crate::config::set_loop_new_clips_default(ui.loop_new_clips);
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）

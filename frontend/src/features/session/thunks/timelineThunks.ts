@@ -263,6 +263,7 @@ export const setClipStateRemote = createAsyncThunk(
         sourceEndSec?: number;
         playbackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;
@@ -290,6 +291,8 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             muted?: boolean;
             fadeInSec?: number;
             fadeOutSec?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
         }>;
         checkpoint?: boolean;
     }) => {

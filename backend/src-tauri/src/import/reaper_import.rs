@@ -271,10 +271,22 @@ fn compute_take_source_anchor_sec(
             take.s_offs
         }
     } else {
-        take.s_offs
+        // 兼容 REAPER 左延伸 item（负 SOFFS = 前导静音）：正放无 SECTION 时
+        // 保留原始符号，仅在媒体时长已知时对上界钳制。引擎侧以
+        // pre-silence / Loop 回绕锚点两种方式都原生支持负 source_start。
+        take.s_offs.clamp(-1_000_000.0, max_bound)
     };
 
-    let mut anchor = primary_anchor.clamp(min_bound, max_bound);
+    let mut anchor = if has_section || is_reversed {
+        primary_anchor.clamp(min_bound, max_bound)
+    } else {
+        // 正放无 SECTION：下界允许为负（前导静音），只做有限性兜底。
+        if primary_anchor.is_finite() {
+            primary_anchor
+        } else {
+            0.0
+        }
+    };
 
     if has_section {
         // 兼容部分工程里 SOFFS 已经是绝对源坐标的写法。
@@ -337,6 +349,7 @@ fn compute_item_source_window_sec(
     consumed_sec: f64,
     source_duration_sec: Option<f64>,
     is_reversed: bool,
+    is_loop: bool,
 ) -> (f64, f64) {
     let (min_bound, max_bound, has_section) =
         compute_take_source_bounds_sec(take, source_duration_sec);
@@ -345,13 +358,35 @@ fn compute_item_source_window_sec(
     let anchor =
         compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, is_reversed);
 
+    if is_loop {
+        // LOOP=1（循环源，REAPER "Loop source" 语义）：
+        // 源窗口取"锚点 → 可用边界"的完整区间（正向到媒体/SECTION 末尾，
+        // 反向回退到区间起点），不被 ITEM LENGTH 钳制 —— 超出窗口的播放
+        // 时间由引擎/渲染按该窗口周期回绕产生循环内容。
+        if is_reversed {
+            let start = min_bound.min(anchor);
+            return (start, anchor);
+        }
+        let end = if max_bound.is_finite() {
+            max_bound.max(anchor)
+        } else {
+            // 媒体时长未知时退化为按消耗量截取（无回绕素材可用）。
+            anchor + consumed
+        };
+        return (anchor, end);
+    }
+
     if is_reversed {
         let end = anchor;
         let start = (end - consumed).max(min_bound).min(end);
         (start, end)
     } else {
+        // 非 Loop 正放：派生窗口 —— 终点 = 起点 + 消耗量，**不**按媒体时长
+        // 钳制。REAPER 中 LENGTH 大于可用源的 item 其超出部分为静音尾巴，
+        // 导入必须保真（渲染管线自行把越界区间处理为静音；派生模型下
+        // source_end 与 length 保持一致，Slip/拖边的语义才成立）。
         let start = anchor;
-        let end = (start + consumed).min(max_bound).max(start);
+        let end = start + consumed;
         (start, end)
     }
 }
@@ -956,6 +991,13 @@ fn process_item(
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
     let take_gain = take_linear_gain(item, take);
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
+    // LOOP 标记：REAPER 显式写出时以其为准；缺失（极老工程/第三方生成器）
+    // 时回退到"为新的音频块启用循环"设置。
+    let item_loop = if item.has_loop_token {
+        item.is_loop
+    } else {
+        crate::config::loop_new_clips_default()
+    };
     let s_offs = take.s_offs; // source offset (seconds)
     let item_pos = item.position; // timeline position (seconds)
     let item_length = item.length; // visible length (seconds)
@@ -1036,13 +1078,24 @@ fn process_item(
                 let end = raw_end.max(start).min(source_max_bound);
                 (start, end)
             } else {
-                let start = (s_offs + cumulative_source_pos - actual_pre_src)
-                    .max(source_min_bound)
+                // 正放：允许段起点为负（REAPER 左延伸 item = 前导静音），
+                // 仅对上界与有限性做钳制；下界不再强制 ≥0。
+                let raw_start = (s_offs + cumulative_source_pos - actual_pre_src)
                     .min(source_max_bound);
+                let start = if raw_start.is_finite() { raw_start } else { 0.0 };
                 let raw_end =
                     s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
-                let end = raw_end.max(start).min(source_max_bound);
-                (start, end)
+                // 派生窗口：终点不按媒体时长钳制（超出部分 = 静音尾巴）。
+                let clamped_end = if raw_end.is_finite() { raw_end } else { start };
+                let end = clamped_end.max(start);
+                // 整段完全落在媒体起点之前的病态 item：回退为非负窗口，
+                // 避免零长度/全负窗口。
+                if end - start <= 1e-9 {
+                    let fallback_start = start.max(0.0);
+                    (fallback_start, end.max(fallback_start))
+                } else {
+                    (start, end)
+                }
             };
             let clip_start = current_timeline_pos - actual_pre_tl;
             let clip_length = (seg_timeline_duration + actual_pre_tl + actual_post_tl).max(0.001);
@@ -1078,10 +1131,13 @@ fn process_item(
                 }),
                 gain: convert_volume(take_gain),
                 muted: item_muted,
-                source_start_sec: clip_src_start.max(0.0),
+                // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
+                // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
+                source_start_sec: clip_src_start,
                 source_end_sec: clip_src_end,
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
                 reversed: item_reversed,
+                loop_enabled: item_loop,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: "sine".to_string(),
@@ -1171,6 +1227,7 @@ fn process_item(
             item_length * effective_rate,
             duration_sec,
             item_reversed,
+            item_loop,
         );
 
         // 兜底：若窗口被裁成零长度，回退到基于 SOFFS 的正向区间，避免导入后静音。
@@ -1226,10 +1283,13 @@ fn process_item(
             }),
             gain: convert_volume(take_gain),
             muted: item_muted,
-            source_start_sec: source_start.max(0.0),
+            // 兼容 REAPER 左延伸 item：负 SOFFS 保留为前导静音
+            // （引擎/离线渲染/音高分析均原生支持负 source_start_sec）。
+            source_start_sec: source_start,
             source_end_sec: source_end,
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             reversed: item_reversed,
+            loop_enabled: item_loop,
             // 手动淡化长度写入 fade_*（REAPER 索引 1），自动交叉淡化长度写入
             // auto_fade_*（REAPER 索引 2）。分开后自动值归零、手动值正确恢复。
             fade_in_sec: manual_fade_in_sec,
@@ -1626,6 +1686,8 @@ fn process_midi_item(
         source_end_sec: item_length * play_rate,
         playback_rate: play_rate as f32,
         reversed: false,
+        // MIDI item 没有源媒体可循环；Loop 属性保持关闭。
+        loop_enabled: false,
         fade_in_sec: 0.0,
         fade_out_sec: 0.0,
         fade_in_curve: "sine".to_string(),
@@ -1641,5 +1703,43 @@ fn process_midi_item(
 
     if let Some(gid) = item.group_id {
         reaper_group_map.entry(gid).or_default().push(clip_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_source_window_extends_to_media_end() {
+        // 正向 LOOP：窗口 = [SOFFS, 媒体末尾]，不被 LENGTH 钳制。
+        let take = ReaperTake {
+            s_offs: 1.0,
+            ..ReaperTake::default()
+        };
+        let (start, end) = compute_item_source_window_sec(&take, 10.0, Some(4.0), false, true);
+        assert!((start - 1.0).abs() < 1e-9);
+        assert!((end - 4.0).abs() < 1e-9);
+
+        // 非 LOOP：窗口被消耗量钳制。
+        let (start2, end2) =
+            compute_item_source_window_sec(&take, 1.5, Some(4.0), false, false);
+        assert!((end2 - start2 - 1.5).abs() < 1e-9);
+
+        // 反向 LOOP：窗口 = [区间起点, 锚点]，锚点 = max_bound − SOFFS。
+        let (start3, end3) = compute_item_source_window_sec(&take, 10.0, Some(4.0), true, true);
+        assert!(start3.abs() < 1e-9);
+        assert!((end3 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loop_window_falls_back_to_consumed_when_duration_unknown() {
+        let take = ReaperTake {
+            s_offs: 2.0,
+            ..ReaperTake::default()
+        };
+        let (start, end) = compute_item_source_window_sec(&take, 3.0, None, false, true);
+        assert!((start - 2.0).abs() < 1e-9);
+        assert!((end - 5.0).abs() < 1e-9);
     }
 }

@@ -23,6 +23,8 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.auto_background_render,
         std::sync::atomic::Ordering::Relaxed,
     );
+    // Sync "loop for new clips" default (used by importers / legacy project migration)
+    crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     settings
 }
 
@@ -86,6 +88,7 @@ pub(super) fn save_ui_settings(
         settings.auto_background_render,
         std::sync::atomic::Ordering::Relaxed,
     );
+    crate::config::set_loop_new_clips_default(settings.loop_new_clips);
 
     let ep_changed = prev_ep != settings.ort_ep;
 

@@ -28,6 +28,11 @@ import {
     computeInitialCrossfadeSides,
     previewAutoCrossfade,
 } from "./autoCrossfade";
+import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
+import {
+    beginSnapGesture,
+    endSnapGesture,
+} from "../../../../utils/timelineSnapping";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import { buildDuplicateClipsBulkPayload } from "./bulkClipRemotePayloads";
 import {
@@ -137,7 +142,7 @@ export function useClipDrag(deps: {
     dispatch: AppDispatch;
     snapTimeline: (
         sec: number,
-        object: "mediaItem",
+        object: "clip",
         opts?: {
             originSec?: number;
             anchorTrackId?: string | null;
@@ -387,6 +392,7 @@ export function useClipDrag(deps: {
                 if (!drag.copyMode) {
                     dispatch(checkpointHistory());
                     dispatch(beginInteraction());
+                    beginSnapGesture();
                     // Begin backend undo group so that move_clip + auto-crossfade
                     // share a single backend undo entry.
                     void webApi.beginUndoGroup();
@@ -406,9 +412,10 @@ export function useClipDrag(deps: {
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
             const noSnapActive = isModifierActive(noSnapKb, ev);
-            const effectiveSnap = snapEnabled && !noSnapActive;
+            // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
+            const effectiveSnap = computeEffectiveSnap(snapEnabled, noSnapActive);
             if (effectiveSnap) {
-                nextStart = snapTimeline(nextStart, "mediaItem", {
+                nextStart = snapTimeline(nextStart, "clip", {
                     originSec: drag.initialAnchorstartSec,
                     anchorTrackId: drag.initialAnchorTrackId,
                     excludeClipIds: new Set(drag.clipIds),
@@ -914,6 +921,7 @@ export function useClipDrag(deps: {
                             });
                         } finally {
                             void webApi.endUndoGroup();
+                            endSnapGesture();
                             dispatch(endInteraction());
                         }
                     })();
@@ -991,6 +999,7 @@ export function useClipDrag(deps: {
                                 );
                             }
                             await webApi.endUndoGroup();
+                            endSnapGesture();
                             dispatch(endInteraction());
                         }
                     })().catch(() => undefined);

@@ -1,32 +1,94 @@
 import { useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
+import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
 import {
     checkpointHistory,
-    setClipStateRemote,
     setClipSourceRange,
     beginInteraction,
     endInteraction,
 } from "../../../../features/session/sessionSlice";
+import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
+import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
+import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec } from "../../../../utils/loopSnap";
+import {
+    beginSnapGesture,
+    computeEffectiveSnap,
+    endSnapGesture,
+} from "../../../../utils/timelineSnapping";
+import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import type { Keybinding } from "../../../../features/keybindings/types";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
+
+/**
+ * Slip（内容平移）拖拽 —— **增量式实时状态驱动**。
+ *
+ * 设计要点（吸取历史缺陷教训）：
+ * - 不在拖拽开始时冻结任何几何基线。每个指针事件都从 Redux 的**当前**
+ *   Clip 状态出发，只应用本事件的增量 —— 权威载荷（split/paste 等）
+ *   无论何时落地，后续事件都自动基于最新真实值，不存在"过期基线"。
+ * - 倒放方向：可闻事件位于 t=(se−p)/r（镜像时间轴）。源窗口若随指针
+ *   同向平移会让事件反向移动（拖左反而更晚），因此倒放取 dir=−1，
+ *   保证"内容跟随拖动方向"与正放手感一致。
+ * - 持久化使用交互数学的最终值（lastById），不回读 Redux。
+ */
 
 export type SlipDragState = {
     pointerId: number;
     anchorClipId: string;
     clipIds: string[];
-    initialPointerBeat: number;
-    initialById: Record<
-        string,
-        {
-            sourceStartSec: number;
-            sourceEndSec: number;
-            playbackRate: number;
-            sourceDurationSec: number | null;
-            maxSlipSec: number;
-        }
-    >;
+    /** 拖拽起点指针位置（秒）：累计吸附的原始位移基准。 */
+    startPointerBeat: number;
+    /**
+     * 已应用于 clip 的**累计**指针位移（含吸附修正，指针空间秒）。
+     * 实时吸附以"目标累计值 − 已应用累计值"的差值驱动增量分发。
+     */
+    appliedTotal: number;
+    /** 锚 clip 启动时快照：循环节候选族只依赖初始几何（平移不变）。 */
+    anchorSnapshot: {
+        loopEnabled: boolean;
+        reversed: boolean;
+        sourceStartSec: number;
+        sourceEndSec: number;
+        playbackRate: number;
+        lengthSec: number;
+        durationFrames: number | null;
+        sourceSampleRate: number | null;
+        contentDurationSec: number | null;
+        isContentBearing: boolean;
+    };
+    /**
+     * 每个 clip 最近一次分发的源窗口值。持久化必须使用这里记录的
+     * 交互数学结果，不回读 Redux（防并发更新/历史归一化污染）。
+     */
+    lastById: Record<string, { sourceStartSec: number; sourceEndSec: number }>;
 };
+
+/** 从 SessionState 的 ClipInfo 提取 Slip 所需字段。 */
+function readClip(c: SessionState["clips"][number]) {
+    const playbackRate = Number(c.playbackRate ?? 1) || 1;
+    const sourceStartSec = Number(c.sourceStartSec ?? 0) || 0;
+    const sourceEndSec = Number(c.sourceEndSec ?? 0) || 0;
+    const isContentBearing = !!c.sourcePath || !!(c.midiNoteData && c.midiNoteData.length > 0);
+    const contentDurSec = resolveClipContentDurationSec({
+        sourcePath: c.sourcePath,
+        midiNoteData: c.midiNoteData ?? null,
+        durationFrames: c.durationFrames,
+        sourceSampleRate: c.sourceSampleRate,
+        durationSec: c.durationSec,
+    });
+    return {
+        playbackRate: playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1,
+        sourceStartSec,
+        sourceEndSec,
+        lengthSec: Math.max(0, Number(c.lengthSec ?? 0) || 0),
+        reversed: !!c.reversed,
+        loopEnabled: !!c.loopEnabled,
+        isContentBearing,
+        contentDurSec,
+    };
+}
 
 export function useSlipDrag(deps: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -36,6 +98,12 @@ export function useSlipDrag(deps: {
     multiSelectedSet: Set<string>;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     ignoreGrouping: boolean;
+    /** 完整吸附设置：循环节吸附距离从 snapDistancePx 读取（无论 enabled 与否都生效）。 */
+    timelineSnap: TimelineSnapSettings;
+    /** 当前缩放（像素/秒）：用于把吸附距离换算成秒。 */
+    pxPerSec: number;
+    /** "拖动时切换吸附"修饰键绑定（XOR 取反吸附总开关）。 */
+    noSnapKb: Keybinding;
 }) {
     const {
         scrollRef,
@@ -45,9 +113,46 @@ export function useSlipDrag(deps: {
         multiSelectedSet,
         beatFromClientX,
         ignoreGrouping,
+        timelineSnap,
+        pxPerSec,
+        noSnapKb,
     } = deps;
 
     const slipDragRef = useRef<SlipDragState | null>(null);
+
+    /** 对单个 clip 应用窗口平移增量（读取当前真实状态，返回结果窗口）。 */
+    function computeShiftedWindow(
+        id: string,
+        deltaBeat: number,
+    ): { sourceStartSec: number; sourceEndSec: number } | null {
+        const c = sessionRef.current.clips.find((x) => x.id === id);
+        if (!c) return null;
+        const v = readClip(c);
+        // 方向语义：倒放的播放时间轴是镜像的，源窗口必须沿指针反方向平移。
+        const dir = v.reversed ? -1 : 1;
+        const deltaSrcSec = deltaBeat * v.playbackRate * dir;
+        let nextSourceStart = v.sourceStartSec + deltaSrcSec;
+        let nextSourceEnd = v.sourceEndSec + deltaSrcSec;
+
+        if (v.loopEnabled) {
+            // Loop（循环源）：窗口两端对内容时长取模环绕（floor_mod），与
+            // 渲染/引擎的回绕映射一致；音高参考块的 D = 音符内容范围。
+            if (v.contentDurSec != null && v.contentDurSec > 1e-9) {
+                const mediaDur = v.contentDurSec;
+                nextSourceStart = ((nextSourceStart % mediaDur) + mediaDur) % mediaDur;
+                nextSourceEnd = ((nextSourceEnd % mediaDur) + mediaDur) % mediaDur;
+            }
+            // 内容时长未知：保持平移，避免卡死。
+        } else if (v.isContentBearing && !v.reversed) {
+            // 非 Loop 正放：派生窗口模型 —— 终点 = 起点 + len·rate；
+            // 越出媒体的部分渲染静音（前导/尾部对称无界）。
+            nextSourceEnd = nextSourceStart + v.lengthSec * v.playbackRate;
+        } else {
+            // 非 Loop 倒放：source_end 是反向锚点，跨度可合法大于 len·rate
+            //（延伸产生的静音区）。只做整体平移，保持跨度不变。
+        }
+        return { sourceStartSec: nextSourceStart, sourceEndSec: nextSourceEnd };
+    }
 
     function startSlipDrag(e: React.PointerEvent<HTMLDivElement>, clipId: string) {
         if (e.button !== 0) return;
@@ -76,39 +181,29 @@ export function useSlipDrag(deps: {
                   sessionRef.current.disabledGroupIds,
               );
 
-        const initialById: SlipDragState["initialById"] = {};
-        for (const id of clipIds) {
-            const c = sessionRef.current.clips.find((x) => x.id === id);
-            if (!c) continue;
-            // MIDI clip：从 midiNoteData 计算源时长；音频 clip：使用 durationSec
-            let sourceDurationSec: number | null;
-            if (c.midiNoteData && c.midiNoteData.length > 0) {
-                sourceDurationSec = c.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
-            } else {
-                sourceDurationSec = Number(c.durationSec ?? 0) || null;
-            }
-            const sourceStartSec = Number(c.sourceStartSec ?? 0) || 0;
-            const sourceEndSec = Math.max(0, Number(c.sourceEndSec ?? 0) || 0);
-            const maxSlipSec =
-                sourceDurationSec != null && Number.isFinite(sourceDurationSec)
-                    ? Math.max(0, sourceDurationSec)
-                    : Math.max(0, Number(c.lengthSec ?? 0) || 0);
-            initialById[id] = {
-                sourceStartSec,
-                sourceEndSec,
-                playbackRate: Number(c.playbackRate ?? 1) || 1,
-                sourceDurationSec,
-                maxSlipSec,
-            };
-        }
-
+        const anchorRead = readClip(anchor);
         slipDragRef.current = {
             pointerId: e.pointerId,
             anchorClipId: clipId,
             clipIds,
-            initialPointerBeat: beatAtPointer,
-            initialById,
+            startPointerBeat: beatAtPointer,
+            appliedTotal: 0,
+            anchorSnapshot: {
+                loopEnabled: anchorRead.loopEnabled,
+                reversed: anchorRead.reversed,
+                sourceStartSec: anchorRead.sourceStartSec,
+                sourceEndSec: anchorRead.sourceEndSec,
+                playbackRate: anchorRead.playbackRate,
+                lengthSec: anchorRead.lengthSec,
+                durationFrames: anchor.durationFrames ?? null,
+                sourceSampleRate: anchor.sourceSampleRate ?? null,
+                contentDurationSec: anchorRead.contentDurSec,
+                isContentBearing: anchorRead.isContentBearing,
+            },
+            lastById: {},
         };
+
+        beginSnapGesture();
 
         (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
 
@@ -118,58 +213,86 @@ export function useSlipDrag(deps: {
             if (!drag || drag.pointerId !== e.pointerId || !el) return;
             const b = el.getBoundingClientRect();
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
-            let deltaBeat = drag.initialPointerBeat - beatNow;
 
-            for (const id of drag.clipIds) {
-                const initial = drag.initialById[id];
-                if (!initial) continue;
-                const rate =
-                    initial.playbackRate > 0 && Number.isFinite(initial.playbackRate)
-                        ? initial.playbackRate
-                        : 1;
-                const deltaSrcSec = deltaBeat * rate;
-                let nextSourceStart = initial.sourceStartSec + deltaSrcSec;
-                let nextSourceEnd = initial.sourceEndSec + deltaSrcSec;
-
-                // clamp: sourceStart 不能小于 0，sourceEnd 不能超过源文件时长
-                if (Number.isFinite(initial.maxSlipSec) && initial.maxSlipSec > 1e-6) {
-                    if (nextSourceStart < 0) {
-                        nextSourceEnd -= nextSourceStart;
-                        nextSourceStart = 0;
-                    }
-                    if (nextSourceEnd > initial.maxSlipSec) {
-                        nextSourceStart -= nextSourceEnd - initial.maxSlipSec;
-                        nextSourceEnd = initial.maxSlipSec;
+            // ── 实时循环节/内容边界吸附（拖拽全程生效）────────────────
+            // 属于常规吸附体系：受"吸附"总开关与"拖动时切换吸附"修饰键
+            // （XOR）控制，且需在吸附设置中启用"Clip 边缘吸附到源素材首尾"。
+            // 吸附距离读自 snapDistancePx。候选族只依赖锚 clip 的**初始**
+            // 几何（平移不变）：Loop 为媒体边界相位对齐 Clip 边缘的 mod-D
+            // 等差族；非 Loop 为媒体边界对齐 Clip 边缘的有限候选。命中时把
+            // 累计位移替换为吸附值，再以"目标累计 − 已应用累计"驱动增量。
+            let desiredTotal = drag.startPointerBeat - beatNow;
+            {
+                const a = drag.anchorSnapshot;
+                const noSnapActive = isModifierActive(noSnapKb, ev);
+                const effectiveSnap = computeEffectiveSnap(timelineSnap.enabled, noSnapActive);
+                if (
+                    (a.isContentBearing || a.loopEnabled) &&
+                    timelineSnap.snapClipsToSourceMedia &&
+                    effectiveSnap &&
+                    timelineSnap.snapDistancePx > 0
+                ) {
+                    const dir = a.reversed ? -1 : 1;
+                    const rawWindowShift = desiredTotal * dir;
+                    const snappedW = nearestBoundarySnapOffsetSec(
+                        {
+                            loopEnabled: a.loopEnabled,
+                            reversed: a.reversed,
+                            sourceStartSec: a.sourceStartSec,
+                            sourceEndSec: a.sourceEndSec,
+                            playbackRate: a.playbackRate,
+                            lengthSec: a.lengthSec,
+                            durationFrames: a.durationFrames,
+                            sourceSampleRate: a.sourceSampleRate,
+                            contentDurationSec: a.contentDurationSec,
+                        },
+                        "slip",
+                        rawWindowShift,
+                    );
+                    if (
+                        snappedW != null &&
+                        Math.abs(snappedW - rawWindowShift) <=
+                            loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                    ) {
+                        desiredTotal = snappedW * dir;
                     }
                 }
+            }
+
+            const dApplied = desiredTotal - drag.appliedTotal;
+            if (Math.abs(dApplied) < 1e-12) return;
+            drag.appliedTotal = desiredTotal;
+
+            for (const id of drag.clipIds) {
+                const next = computeShiftedWindow(id, dApplied);
+                if (!next) continue;
+                drag.lastById[id] = next;
                 dispatch(
                     setClipSourceRange({
                         clipId: id,
-                        sourceStartSec: nextSourceStart,
-                        sourceEndSec: nextSourceEnd,
+                        sourceStartSec: next.sourceStartSec,
+                        sourceEndSec: next.sourceEndSec,
                     }),
                 );
             }
         }
 
-        function end() {
+        function end(ev: PointerEvent) {
             const drag = slipDragRef.current;
-            if (!drag || drag.pointerId !== e.pointerId) return;
+            if (!drag || drag.pointerId !== ev.pointerId) return;
             slipDragRef.current = null;
+            endSnapGesture();
 
-            // 交互锁在最终持久化请求完成后才释放，
-            // 避免 endInteraction() 到 fulfilled 之间的窗口内，
-            // 其他 in-flight thunk 的旧快照覆盖前端乐观更新导致闪烁。
-
-            const session = sessionRef.current;
+            // 持久化交互数学的最终值（不回读 Redux）。实时吸附已在 move 中
+            // 把累计位移收敛到循环节候选上，无需松手二次修正。
             const patches = drag.clipIds
                 .map((id) => {
-                    const now = session.clips.find((c) => c.id === id);
-                    if (!now) return null;
+                    const last = drag.lastById[id];
+                    if (!last) return null;
                     return {
                         clipId: id,
-                        sourceStartSec: Number(now.sourceStartSec ?? 0) || 0,
-                        sourceEndSec: Number(now.sourceEndSec ?? 0) || 0,
+                        sourceStartSec: last.sourceStartSec,
+                        sourceEndSec: last.sourceEndSec,
                     };
                 })
                 .filter(
@@ -229,5 +352,5 @@ export function useSlipDrag(deps: {
         window.addEventListener("pointercancel", end);
     }
 
-    return { slipDragRef, startSlipDrag };
+    return startSlipDrag;
 }

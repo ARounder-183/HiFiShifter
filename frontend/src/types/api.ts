@@ -57,6 +57,8 @@ export interface TimelineClip {
     source_end_sec?: number;
     playback_rate?: number;
     reversed?: boolean;
+    /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
+    loop_enabled?: boolean;
     fade_in_sec?: number;
     fade_out_sec?: number;
     fade_in_curve?: string;

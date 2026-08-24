@@ -401,6 +401,7 @@ mod tests {
             source_end_sec: 2.0,
             playback_rate: 1.0,
             reversed: false,
+            loop_enabled: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
@@ -976,14 +977,29 @@ pub(crate) fn build_clip_input_pitch_curve(
             frame_period_ms,
         )?;
 
-        let tm = crate::pitch_clip::trim_and_resample_midi(
+        // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+        let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
+        let mut tm = crate::pitch_clip::trim_and_resample_midi(
             &clip_pitch.midi,
             frame_period_ms,
-            clip.source_start_sec,
-            clip.source_end_sec,
+            trim_src_start,
+            trim_src_end,
             clip_playback_rate,
             clip.length_sec.max(0.0),
+            clip.loop_enabled,
+            // Loop 模式的回绕周期 = 完整媒体时长；倒放从 source_end 向下环绕，
+            // 与 build_loop_tiled_segment 生成的 PCM 顺序逐帧对齐。
+            crate::state::clip_source_media_duration_sec(clip),
+            clip.reversed && clip.loop_enabled,
         );
+        // 非 Loop 倒放：trim_and_resample_midi 按升序窗口映射（文档契约
+        // "调用方在输出后整体翻转"）。本曲线的下游全部按**时间线帧**消费
+        // （pitch_edit 覆盖、子轨偏移、处理器输入），必须先翻转 —— 否则
+        // 倒放 Clip 的输入音高相对音频整体镜像（与 midi_export / schedule
+        // 的 rate≈1 分支一致）。
+        if clip.reversed && !clip.loop_enabled {
+            tm.reverse();
+        }
         if tm.is_empty() {
             return None;
         }

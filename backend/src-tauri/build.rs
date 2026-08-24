@@ -54,6 +54,48 @@ fn main() {
     // and copies bundle.macOS.frameworks for darwin targets. All referenced
     // files must exist before this call.
     tauri_build::build();
+
+    // ── Windows：为【测试二进制】嵌入 ComCtl32 v6 应用清单 ─────────────────
+    // tauri_build 只通过 `cargo:rustc-link-arg-bins` 给 bin 目标嵌清单；
+    // cargo test 的测试 harness exe 不在其中。而依赖树（winit/tauri dialog）
+    // 静态导入了 comctl32.dll!TaskDialogIndirect —— 该函数只存在于 v6
+    // side-by-side 程序集，无清单时 loader 绑定到 System32 的 v5 副本，
+    // 进程初始化阶段直接 STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) 失败，
+    // 所有 cargo test 在 Windows 上都无法启动。
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    {
+        let manifest_out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default())
+            .join("hifishifter_tests.manifest");
+        let manifest_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+        let _ = std::fs::write(&manifest_out, manifest_xml);
+        // 注意：只能用 `-tests`（作用于 tests/ 下的集成测试目标）。
+        // 通用的 `rustc-link-arg` 会同时打到主 bin —— 主程序已由 tauri_build
+        // 通过 resource.lib 内嵌了清单，再来一份 /MANIFEST:EMBED 会触发
+        // CVT1100 duplicate resource。而 lib 单元测试 harness 没有对应的
+        // link-arg 通道（cargo 限制），其在 Windows 上无法启动的问题见
+        // tests/smoke.rs 的说明。
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
+            manifest_out.display()
+        );
+        println!("cargo:rustc-link-arg-tests=/MANIFESTUAC:NO");
+    }
 }
 
 /// 在编译时自动构建前端静态资源。

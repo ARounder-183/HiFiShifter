@@ -14,6 +14,8 @@ export async function buildCopyDragTemplates(args: {
             sourceStartSec?: number;
             sourceEndSec?: number;
             playbackRate?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
             fadeInSec?: number;
             fadeOutSec?: number;
             fadeInCurve?: string;
@@ -36,6 +38,8 @@ export async function buildCopyDragTemplates(args: {
         sourceStartSec: Number(input.now.sourceStartSec ?? 0) || 0,
         sourceEndSec: Number(input.now.sourceEndSec ?? 0) || 0,
         playbackRate: Number(input.now.playbackRate ?? 1) || 1,
+        reversed: Boolean(input.now.reversed),
+        loopEnabled: Boolean(input.now.loopEnabled),
         fadeInSec: Number(input.now.fadeInSec ?? 0) || 0,
         fadeOutSec: Number(input.now.fadeOutSec ?? 0) || 0,
         fadeInCurve: input.now.fadeInCurve as ClipTemplate["fadeInCurve"],

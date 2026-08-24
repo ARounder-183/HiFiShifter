@@ -16,7 +16,7 @@ pub struct TimelineSnapSettings {
     #[serde(default)]
     pub swing_percent: u32,
     #[serde(default = "default_true")]
-    pub adjust_items_on_swing_change: bool,
+    pub adjust_clips_on_swing_change: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_snap_distance_px")]
@@ -24,9 +24,9 @@ pub struct TimelineSnapSettings {
     #[serde(default)]
     pub snap_relative_to_grid: bool,
     #[serde(default = "default_true")]
-    pub snap_media_items_to_selection_markers_cursor: bool,
+    pub snap_clips_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
-    pub snap_media_items_to_grid: bool,
+    pub snap_clips_to_grid: bool,
     #[serde(default = "default_true")]
     pub snap_selection_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
@@ -46,9 +46,9 @@ pub struct TimelineSnapSettings {
     #[serde(default = "default_grid_min_spacing_px")]
     pub snap_spacing_min_px: u32,
     #[serde(default = "default_true")]
-    pub snap_item_start: bool,
+    pub snap_clip_edges: bool,
     #[serde(default = "default_true")]
-    pub snap_item_snap_offset: bool,
+    pub snap_clip_snap_offset: bool,
     #[serde(default = "default_true")]
     pub snap_across_tracks: bool,
     #[serde(default)]
@@ -58,7 +58,7 @@ pub struct TimelineSnapSettings {
     #[serde(default)]
     pub snap_to_project_sample_rate: bool,
     #[serde(default = "default_true")]
-    pub snap_media_edges_to_source: bool,
+    pub snap_clips_to_source_media: bool,
     #[serde(default)]
     pub force_selections_to_multiples: bool,
     #[serde(default = "default_grid_size")]
@@ -82,12 +82,12 @@ impl Default for TimelineSnapSettings {
             grid_min_spacing_px: default_grid_min_spacing_px(),
             swing_enabled: false,
             swing_percent: 0,
-            adjust_items_on_swing_change: true,
+            adjust_clips_on_swing_change: true,
             enabled: true,
             snap_distance_px: default_snap_distance_px(),
             snap_relative_to_grid: false,
-            snap_media_items_to_selection_markers_cursor: true,
-            snap_media_items_to_grid: true,
+            snap_clips_to_selection_markers_cursor: true,
+            snap_clips_to_grid: true,
             snap_selection_to_selection_markers_cursor: true,
             snap_selection_to_grid: true,
             snap_cursor_to_selection_markers_cursor: true,
@@ -97,13 +97,13 @@ impl Default for TimelineSnapSettings {
             use_independent_snap_spacing: false,
             snap_spacing: default_grid_size(),
             snap_spacing_min_px: default_grid_min_spacing_px(),
-            snap_item_start: true,
-            snap_item_snap_offset: true,
+            snap_clip_edges: true,
+            snap_clip_snap_offset: true,
             snap_across_tracks: true,
             snap_track_distance: 0,
             snap_razor_edits: true,
             snap_to_project_sample_rate: false,
-            snap_media_edges_to_source: true,
+            snap_clips_to_source_media: true,
             force_selections_to_multiples: false,
             selection_multiple: default_grid_size(),
             sync_arrange_and_midi_grid: true,
@@ -308,6 +308,33 @@ pub struct UiSettings {
     /// 后端会在后台直接重新加载原路径，无需弹出确认窗口。
     #[serde(default)]
     pub auto_reload_modified_media: bool,
+    /// 为新的音频块启用循环（Loop / 循环源，默认开启）。
+    ///
+    /// 作用范围（仅影响"新 Clip"，绝不自动修改时间轴上已有 Clip）：
+    /// - 导入新媒体作为 Clip（文件导入/拖放/录音等）时的初始 Loop 属性；
+    /// - 打开旧版本工程（v3 及更早，Clip 不携带 loop_enabled 字段）时的迁移默认值；
+    /// - REAPER 工程导入 / REAPER 剪贴板粘贴中未显式写出 LOOP 标记的 ITEM 的默认值；
+    /// - VocalShifter 等其他格式导入生成的音频 Clip 的默认值。
+    #[serde(default = "default_true")]
+    pub loop_new_clips: bool,
+}
+
+/// "为新的音频块启用循环"的进程级生效值（默认 true）。
+///
+/// 由 `commands::ui_settings::get_ui_settings` / `save_ui_settings` 在加载与
+/// 保存设置时同步；供 `TimelineState::add_clip`、各格式 importer、旧工程
+/// 迁移等无法访问 AppState 的创建点读取。
+pub static LOOP_NEW_CLIPS_DEFAULT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// 读取当前生效的"新 Clip 默认 Loop 属性"。
+pub fn loop_new_clips_default() -> bool {
+    LOOP_NEW_CLIPS_DEFAULT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 同步"新 Clip 默认 Loop 属性"的进程级生效值。
+pub fn set_loop_new_clips_default(enabled: bool) {
+    LOOP_NEW_CLIPS_DEFAULT.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn default_ort_ep() -> String {
@@ -727,6 +754,7 @@ impl Default for UiSettings {
             ort_device_id: None,
             auto_background_render: true,
             auto_reload_modified_media: true,
+            loop_new_clips: true,
         }
     }
 }

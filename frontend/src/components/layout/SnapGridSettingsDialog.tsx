@@ -121,7 +121,7 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                 swingEnabled: nextSettings.swingEnabled,
             }),
         );
-        if (nextSettings.adjustItemsOnSwingChange && (prev.swingEnabled || forceAlign)) {
+        if (nextSettings.adjustClipsOnSwingChange && (prev.swingEnabled || forceAlign)) {
             const updates = alignClipsToSwingGrid({
                 clips: session.clips,
                 settings: nextSettings,
@@ -251,13 +251,13 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                         </Flex>
                         <Flex align="center" gap="2">
                             <Checkbox
-                                checked={snap.adjustItemsOnSwingChange}
+                                checked={snap.adjustClipsOnSwingChange}
                                 onCheckedChange={(v) => {
-                                    patch({ adjustItemsOnSwingChange: Boolean(v) });
+                                    patch({ adjustClipsOnSwingChange: Boolean(v) });
                                     persist();
                                 }}
                             />
-                            <Text size="2">{tAny("snap_grid_adjust_items_on_swing")}</Text>
+                            <Text size="2">{tAny("snap_grid_adjust_clips_on_swing")}</Text>
                         </Flex>
 
                         <Separator size="4" />
@@ -321,21 +321,21 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                         </Flex>
                         <Flex align="center" gap="2">
                             <Text size="2" style={{ width: 130 }}>
-                                {tAny("snap_media_items")}
+                                {tAny("snap_clips")}
                             </Text>
                             <Checkbox
                                 style={{ flex: 1 }}
-                                checked={snap.snapMediaItemsToSelectionMarkersCursor}
+                                checked={snap.snapClipsToSelectionMarkersCursor}
                                 onCheckedChange={(v) => {
-                                    patch({ snapMediaItemsToSelectionMarkersCursor: Boolean(v) });
+                                    patch({ snapClipsToSelectionMarkersCursor: Boolean(v) });
                                     persist();
                                 }}
                             />
                             <Checkbox
                                 style={{ width: 90 }}
-                                checked={snap.snapMediaItemsToGrid}
+                                checked={snap.snapClipsToGrid}
                                 onCheckedChange={(v) => {
-                                    patch({ snapMediaItemsToGrid: Boolean(v) });
+                                    patch({ snapClipsToGrid: Boolean(v) });
                                     persist();
                                 }}
                             />
@@ -467,23 +467,23 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                         </Text>
                         <Flex align="center" gap="2">
                             <Checkbox
-                                checked={snap.snapItemStart}
+                                checked={snap.snapClipEdges}
                                 onCheckedChange={(v) => {
-                                    patch({ snapItemStart: Boolean(v) });
+                                    patch({ snapClipEdges: Boolean(v) });
                                     persist();
                                 }}
                             />
-                            <Text size="2">{tAny("snap_item_start")}</Text>
+                            <Text size="2">{tAny("snap_clip_edges")}</Text>
                         </Flex>
                         <Flex align="center" gap="2">
                             <Checkbox
-                                checked={snap.snapItemSnapOffset}
+                                checked={snap.snapClipSnapOffset}
                                 onCheckedChange={(v) => {
-                                    patch({ snapItemSnapOffset: Boolean(v) });
+                                    patch({ snapClipSnapOffset: Boolean(v) });
                                     persist();
                                 }}
                             />
-                            <Text size="2">{tAny("snap_item_snap_offset")}</Text>
+                            <Text size="2">{tAny("snap_clip_snap_offset")}</Text>
                         </Flex>
                         <Flex align="center" gap="2">
                             <Checkbox
@@ -538,9 +538,9 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                         </Flex>
                         <Flex align="center" gap="2">
                             <Checkbox
-                                checked={snap.snapMediaEdgesToSource}
+                                checked={snap.snapClipsToSourceMedia}
                                 onCheckedChange={(v) => {
-                                    patch({ snapMediaEdgesToSource: Boolean(v) });
+                                    patch({ snapClipsToSourceMedia: Boolean(v) });
                                     persist();
                                 }}
                             />

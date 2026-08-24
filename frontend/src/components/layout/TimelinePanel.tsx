@@ -30,6 +30,7 @@ import {
     replaceMidiClipDataRemote,
     importMultipleAudioAtPosition,
     setClipStateRemote,
+    setClipsStateBulkRemote,
     setClipFades,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
@@ -726,12 +727,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         beatFromClientX,
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
+        timelineSnap: s.timelineSnap,
+        pxPerSec,
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
     });
 
-    const { slipDragRef: _slipDragRef, startSlipDrag } = useSlipDrag({
+    const startSlipDrag = useSlipDrag({
         scrollRef,
         sessionRef,
         dispatch,
@@ -739,6 +742,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedSet,
         beatFromClientX,
         ignoreGrouping,
+        timelineSnap: s.timelineSnap,
+        pxPerSec,
+        noSnapKb,
     });
 
     const {
@@ -2110,14 +2116,54 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   }}
                                   onNormalize={normalizeClips}
                                   onToggleReverse={(ids, reversed) => {
-                                      for (const id of ids) {
-                                          void dispatch(
-                                              setClipStateRemote({
-                                                  clipId: id,
-                                                  reversed,
-                                              }),
+                                      // 批量走 bulk 通道：单次 IPC + 单个撤销步
+                                      //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。
+                                      void dispatch(
+                                          setClipsStateBulkRemote({
+                                              updates: ids.map((id) => ({ clipId: id, reversed })),
+                                              checkpoint: true,
+                                          }),
+                                      );
+                                  }}
+                                  onToggleLoop={(ids, loopEnabled) => {
+                                      const session = sessionRef.current;
+                                      const updates = ids.map((id) => {
+                                          const clip = session.clips.find(
+                                              (entry) => entry.id === id,
                                           );
-                                      }
+                                          const update: {
+                                              clipId: string;
+                                              loopEnabled: boolean;
+                                              sourceEndSec?: number;
+                                          } = { clipId: id, loopEnabled };
+                                          // 关闭循环的瞬间：非 Loop 正放 Clip 按
+                                          // 派生窗口模型归一 source_end
+                                          //（= 起点+长度×速率）。循环期间锚点被
+                                          // 回绕/窗口被保持，直接关掉会把陈旧
+                                          // 窗口带入非 Loop 状态 —— 静音区冻结、
+                                          // 音频错位都源于此。
+                                          // 与后端 clip_effective_source_end_sec
+                                          // 一致：不按 midiNoteData 排除 —— 音高
+                                          // 参考块等无源媒体 Clip 的音高曲线
+                                          //（trim_and_resample_midi）同样使用派生
+                                          // 窗口，存储值也必须一并归一。
+                                          if (!loopEnabled && clip && !clip.reversed) {
+                                              const rate =
+                                                  Number(clip.playbackRate) > 0
+                                                      ? Number(clip.playbackRate)
+                                                      : 1;
+                                              update.sourceEndSec =
+                                                  (Number(clip.sourceStartSec) || 0) +
+                                                  Math.max(0, clip.lengthSec) * rate;
+                                          }
+                                          return update;
+                                      });
+                                      void dispatch(
+                                          setClipsStateBulkRemote({
+                                              updates,
+                                              checkpoint: true,
+                                          }),
+                                      );
                                   }}
                               />
                           );

@@ -76,6 +76,23 @@ export interface WaveformRenderParams {
     clipPixelOffset?: number;
     /** clip 完整像素宽度（用于将像素位置映射到 timeline 时间） */
     clipTotalWidthPx?: number;
+
+    /**
+     * Loop（循环源）分片在 clip 内的时间偏移（秒，= 瓦片序号 × 循环周期）。
+     *
+     * 波形按循环周期分片渲染时，每片的数据坐标系是"片内局部时间"；
+     * 淡入淡出必须按 **clip 局部时间** 求值，因此增益阶段需要加上该偏移。
+     * 单片渲染（非 Loop 或单片回退）保持 0 / 未定义。
+     */
+    clipTimeOffsetSec?: number;
+
+    /**
+     * 整条 clip 的真实时长（秒）。Loop 分片渲染时末尾瓦片的
+     * 片内时长（clipDuration）可能超出 clip 剩余长度，
+     * 淡出锚点必须按整条 clip 的终点计算，传入该值以保证相位正确。
+     * 未传时回退为 clipTimeOffsetSec + clipDuration。
+     */
+    clipTotalDurationSec?: number;
 }
 
 // ============================================================================
@@ -140,6 +157,8 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
         fadeOutCurve,
         dataStartSec,
         dataDurationSec,
+        clipTimeOffsetSec = 0,
+        clipTotalDurationSec,
     } = params;
 
     const totalSamples = peaks.length / 2;
@@ -168,14 +187,20 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
     const invTotalSamplesM1 = totalSamples > 1 ? 1 / (totalSamples - 1) : 0;
     const invPlaybackRate = 1 / playbackRate;
     const clipSourceEndSec = sourceStartSec + clipDuration * playbackRate;
-    const fadeOutStart = clipDuration - fadeOutSec;
+    // fadeOutStart 以 clip 局部时间计，锚定整条 clip 的真实终点
+    //（Loop 分片的片内时长可能超出 clip 剩余长度）。
+    const clipTotalLenSec = clipTotalDurationSec ?? clipTimeOffsetSec + clipDuration;
+    const fadeOutStart = clipTotalLenSec - fadeOutSec;
     const invFadeInSec = fadeInSec > 0 ? 1 / fadeInSec : 0;
     const invFadeOutSec = fadeOutSec > 0 ? 1 / fadeOutSec : 0;
 
-    // 提取时间映射的线性步长与基准值
-    const baseTime = reversed
-        ? (clipSourceEndSec - effectiveDataStartSec) * invPlaybackRate
-        : (effectiveDataStartSec - sourceStartSec) * invPlaybackRate;
+    // 提取时间映射的线性步长与基准值（time 为 clip 局部时间：
+    // Loop 分片通过 clipTimeOffsetSec 平移到正确的相位）。
+    const baseTime =
+        clipTimeOffsetSec +
+        (reversed
+            ? (clipSourceEndSec - effectiveDataStartSec) * invPlaybackRate
+            : (effectiveDataStartSec - sourceStartSec) * invPlaybackRate);
     const timeStep =
         totalSamples > 1
             ? reversed

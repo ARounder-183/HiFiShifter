@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
+import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 /** 单个 clip 的波形数据条目（v2：interleaved 格式，与 WaveformTrackCanvas 一致） */
@@ -48,6 +49,10 @@ export interface ClipPeaksEntry {
     sourcePath: string;
     /** clip 是否静音 */
     muted: boolean;
+    /** 是否倒放 */
+    reversed: boolean;
+    /** Loop（循环源）：超出源窗口的内容按周期回绕重复 */
+    loopEnabled: boolean;
 }
 
 /**
@@ -130,15 +135,27 @@ export function useClipsPeaksForPianoRoll(args: {
             const playbackRate = Number(clip.playbackRate ?? 1);
             const pr = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
 
-            // sourceEndSec：与 WaveformTrackCanvas 一致，优先使用 clip.sourceEndSec
-            const clipSourceEndSec =
-                Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec;
+            // sourceEndSec：派生窗口（REAPER 语义）—— 非 Loop 正放取
+            // 起点+长度×速率，与 WaveformTrackCanvas 一致；陈旧存储窗口
+            // 不再冻结静音区。Loop/倒放保持原字段。
+            const clipSourceEndSec = resolveSourceEndSec({
+                loopEnabled: Boolean(clip.loopEnabled),
+                reversed: Boolean(clip.reversed),
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
+                playbackRate: pr,
+                lengthSec: clip.lengthSec,
+                sourceEndSec:
+                    Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec,
+            });
 
             return {
                 clipId: clip.id,
                 startSec: clip.startSec,
                 lengthSec: clip.lengthSec,
-                sourceStartSec: Math.max(0, Number(clip.sourceStartSec ?? 0) || 0),
+                // 保留原始值（可为负 / 超界）：渲染端按 loopRender 约定用
+                // floor_mod（modEuclid）归一化，不能在此处 clamp —— 否则
+                // slip/左延伸产生的域外锚点会与 arrange 画布相位错位。
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
                 sourceDurationSec: sourceDurationSec > 0 ? sourceDurationSec : 0,
                 sourceEndSec: clipSourceEndSec,
                 sourceSampleRate,
@@ -152,6 +169,8 @@ export function useClipsPeaksForPianoRoll(args: {
                 fadeOutCurve: clip.fadeOutCurve ?? "linear",
                 sourcePath: clip.sourcePath ?? "",
                 muted: clip.muted ?? false,
+                reversed: Boolean(clip.reversed),
+                loopEnabled: Boolean(clip.loopEnabled),
             };
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps

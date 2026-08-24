@@ -76,6 +76,9 @@ wl-clipboard-rs = "0.9"
 default = ["onnx", "vslib"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
+# 仅供 tests/ 集成测试使用：导出 lib 内部纯函数（见 src/lib.rs __test_internals）。
+# 用法：cargo test --features __test-internals --test loop_semantics
+__test-internals = []
 
 # GPU providers are baked into the platform-specific ort dependency below.
 # `cargo tauri build` produces GPU-accelerated binaries without extra --features.

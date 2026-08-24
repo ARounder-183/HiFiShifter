@@ -849,6 +849,11 @@ fn collect_clips_needing_render(
             clip.formant_morph.as_ref().filter(|params| params.enabled),
             None,
             clip.source_file_mtime,
+            clip.loop_enabled,
+            (
+                (clip.source_start_sec * 1000.0).round() as i64,
+                (clip.source_end_sec * 1000.0).round() as i64,
+            ),
         );
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
@@ -904,9 +909,7 @@ fn render_single_clip(
             1.0
         }
     };
-    let source_start_sec = clip.source_start_sec.max(0.0);
     let source_end_sec = clip.source_end_sec;
-    let pre_silence_sec = (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6);
 
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
         .ok_or_else(|| "cannot determine clip duration".to_string())?;
@@ -914,26 +917,64 @@ fn render_single_clip(
         return Err("invalid clip duration".to_string());
     }
 
-    let src_end_limit_sec = source_end_sec.min(total_sec).max(source_start_sec);
-    if src_end_limit_sec - source_start_sec <= 1e-9 {
+    // ── 片段构建 ─────────────────────────────────────────────────────────────
+    // 非 Loop 统一使用**消费窗口模型**（clip_playback_window_sec，与 mixdown /
+    // 实时 snapshot 一致）：
+    //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+    // win ∉ [0, D) 的部分渲染静音；前导静音按消费方向取值（正放看窗口起点、
+    // 倒放看窗口终点越过媒体末端），绝不能把倒放的负窗口下沿误当前导静音。
+    // Loop（循环源）：从完整媒体按整文件模运算回绕生成片段
+    //   正放 idx(f) = floor_mod(source_start + f, D_frames)
+    //   倒放 idx(f) = floor_mod(source_end − 1 − f, D_frames)
+    // 负的 source_start 是环绕锚点而非 leading silence。
+    let loop_mode = clip.loop_enabled;
+    let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
+    let pre_silence_sec =
+        crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+    let slice_start_sec = win_start_sec.max(0.0);
+    let src_end_limit_sec = win_end_sec.min(total_sec).max(slice_start_sec);
+    if !loop_mode && src_end_limit_sec - slice_start_sec <= 1e-9 {
         return Err("trimmed clip too short".to_string());
     }
 
-    // 3. 切片 + resample
-    let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-    let src_i1 = ((src_end_limit_sec * in_rate as f64)
-        .ceil()
-        .max(src_i0 as f64) as usize)
-        .min(in_frames);
-    if src_i1 <= src_i0 + 1 {
-        return Err("source slice too short".to_string());
-    }
+    let anchor_frame: i64 = if clip.reversed {
+        // 倒放末端只 clamp 到媒体时长（不能用含 `.max(source_start)` 的
+        // src_end_limit_sec —— Loop 下 split 的"环绕窗口"会推错锚点）。
+        (source_end_sec.min(total_sec) * in_rate as f64).round() as i64
+    } else {
+        // 负锚点合法：floor_mod 会环绕到文件末尾一侧。
+        // 必须用**原始** source_start_sec（可为负），与实时引擎的
+        // rem_euclid 回绕保持一致（clamp 到 0 会导致离线/实时内容错位）。
+        (clip.source_start_sec * in_rate as f64).round() as i64
+    };
+    let segment: Vec<f32> = if loop_mode {
+        let out_source_frames =
+            ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0)) as usize;
+        crate::mixdown::build_loop_tiled_segment(
+            &pcm,
+            in_channels_usize,
+            anchor_frame,
+            clip.reversed,
+            out_source_frames,
+        )
+    } else {
+        // 3. 切片（非 Loop：消费窗口 clamp 到媒体内）
+        let src_i0 = (slice_start_sec * in_rate as f64).floor().max(0.0) as usize;
+        let src_i1 = ((src_end_limit_sec * in_rate as f64)
+            .ceil()
+            .max(src_i0 as f64) as usize)
+            .min(in_frames);
+        if src_i1 <= src_i0 + 1 {
+            return Err("source slice too short".to_string());
+        }
+        pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
+    };
 
-    let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
     let mut segment =
-        crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
+        crate::mixdown::linear_resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
 
-    if clip.reversed {
+    // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
+    if !loop_mode && clip.reversed {
         crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
     }
 
@@ -957,13 +998,34 @@ fn render_single_clip(
     let mut segment = segment;
 
     if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
+        // Loop（循环源）键必须编码**实际消费的平铺区间**（与 mixdown 的键公式
+        // 完全一致 —— 本函数无导出窗口，skip=0、consumed=整条 clip 消费量）。
+        // 若固定取 [0, total_sec]，本函数与 mixdown 各导出窗口的内容会共享
+        // 同一条目互相投毒（get_or_compute 不校验长度/内容）。
+        let (key_start_sec, key_end_sec) = if loop_mode {
+            let total_frames = ((total_sec * in_rate as f64).round() as i64).max(1);
+            let consumed_frames =
+                ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0))
+                    as i64;
+            let start_frame = anchor_frame.rem_euclid(total_frames);
+            (
+                start_frame as f64 / in_rate as f64,
+                (start_frame + consumed_frames) as f64 / in_rate as f64,
+            )
+        } else {
+            // 非 Loop：键编码实际消费窗口（与 mixdown / snapshot 成对）。
+            (slice_start_sec, win_end_sec)
+        };
         let key = crate::formant_cache::make_formant_cache_key(
             &clip.id,
             std::path::Path::new(source_path),
             out_rate,
-            clip.source_start_sec.max(0.0),
-            clip.source_end_sec,
-            clip.reversed,
+            key_start_sec,
+            key_end_sec,
+            clip.reversed && !loop_mode,
+            // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
+            // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
+            loop_mode,
             params,
         );
         match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params) {
@@ -1017,6 +1079,10 @@ fn render_single_clip(
             crate::time_stretch::resolved_external_stretch_algorithm(),
         );
     }
+
+    // Loop（循环源）：整文件回绕已在片段构建阶段完成（见上方
+    // build_loop_tiled_segment）—— segment 天然覆盖整条 clip 的消费量，
+    // 参数线阶段按绝对帧读取当前曲线即可，无需额外平铺。
 
     let clip_start_sec = clip.start_sec.max(0.0);
     let seg_start_sec = clip_start_sec + pre_silence_sec;
@@ -1073,6 +1139,9 @@ fn render_single_clip(
             with_silence.extend_from_slice(&rendered);
             rendered = with_silence;
         }
+
+        // Loop（循环源）：平铺已提前到参数线阶段之前完成（见上方），
+        // 此处的输入已经覆盖整条 clip，只需截断/补零对齐长度。
 
         if rendered.len() > clip_stereo_len {
             rendered.truncate(clip_stereo_len);
@@ -1139,6 +1208,11 @@ fn render_single_clip(
                     &entry.extra_params,
                     clip.formant_morph.as_ref().filter(|params| params.enabled),
                     clip.source_file_mtime,
+                    clip.loop_enabled,
+                    (
+                        (clip.source_start_sec * 1000.0).round() as i64,
+                        (clip.source_end_sec * 1000.0).round() as i64,
+                    ),
                 );
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),

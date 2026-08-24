@@ -39,13 +39,19 @@ fn fade_values(curve: &str, length_sec: f64) -> Vec<f64> {
 }
 
 fn source_bounds(clip: &Clip) -> (f64, f64) {
-    let start = clip.source_start_sec.max(0.0);
+    // 正放：保留负 source_start（导出为负 SOFFS = REAPER 左延伸 item 的前导静音）。
+    // 倒放走 SECTION 域（RPP 的 SECTION STARTPOS 不能为负），钳制到 ≥0。
+    let start = if clip.reversed {
+        clip.source_start_sec.max(0.0)
+    } else {
+        clip.source_start_sec
+    };
     let mut end = clip.source_end_sec.max(start);
     if end <= start {
         end = clip
             .duration_sec
             .filter(|duration| *duration > start)
-            .unwrap_or(start + clip.length_sec * clip.playback_rate.max(0.01) as f64);
+            .unwrap_or_else(|| start + clip.length_sec * clip.playback_rate.max(0.01) as f64);
     }
     (start, end.max(start))
 }
@@ -174,18 +180,53 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
         return None;
     }
 
+    // Loop（循环源）属性：以显式标志为准。未启用 Loop 时长度超过源窗口的
+    // 部分（右缘延伸产生的静音尾巴）是合法状态 —— 导出为更长的 LENGTH，
+    // REAPER 对 LOOP 0 item 的超出部分渲染静音，与 HiFiShifter 渲染一致；
+    // 不再按"长度>源窗口"推断 LOOP。
+    item.is_loop = clip.loop_enabled;
+
+    if clip.reversed && clip.loop_enabled {
+        // 倒放 + Loop：回绕发生在整个媒体文件上（与引擎及正放 Loop 的
+        // "循环原始音频文件"语义一致）。用覆盖全媒体的 SECTION 承载回绕域
+        //（SECTION 域不能取负起点），SOFFS 承载倒放相位锚点：
+        //   导入端倒放锚点 = 区间末端 − SOFFS；
+        //   引擎倒放锚点 φ = floor_mod(min(source_end, D), D)；
+        // ⇒ SOFFS = D − φ，往返后锚点保持一致。
+        let media_dur = crate::state::clip_source_media_duration_sec(clip)
+            .filter(|d| d.is_finite() && *d > 1e-9);
+        if let Some(d) = media_dur {
+            let anchor = clip.source_end_sec.min(d).rem_euclid(d);
+            // 注意：必须用 SECTION 类型 —— 序列化器只对 SECTION 源写
+            // LENGTH/STARTPOS/MODE 行（push_reaper_source），其它类型会
+            // 静默丢失反向与窗口信息。
+            let mut source = ReaperSource::new();
+            source.source_type = "SECTION".to_string();
+            source.file_path = source_path.to_string();
+            source.section_mode = 1;
+            source.section_start_sec = Some(0.0);
+            source.section_length_sec = Some(d);
+            default_take.s_offs = (d - anchor).rem_euclid(d);
+            default_take.source = Some(source);
+            return Some(item);
+        }
+        // 媒体时长未知：退化为下方通用反向路径（尽力而为）。
+    }
+
     let (start, end) = source_bounds(clip);
     let source_span = (end - start).max(0.0);
-    let required_span = clip.length_sec.max(0.0) * rate;
-    item.is_loop = source_span > 1e-9 && required_span > source_span + 1e-9;
 
     let mut source = audio_source(clip, rate, source_span);
-    if !clip.reversed {
+    if clip.reversed {
+        // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
+        default_take.s_offs = 0.0;
+    } else {
+        // 正向：plain SOURCE + SOFFS 承载进入锚点（可为负 = 前导静音）。
+        // Loop 的回绕发生在整个媒体文件上（REAPER 原生 Loop source 语义），
+        // 无需 SECTION；非 Loop 超出媒体的 LENGTH 部分由 REAPER 渲染静音。
         source.section_start_sec = None;
         source.section_length_sec = None;
         default_take.s_offs = start;
-    } else {
-        default_take.s_offs = 0.0;
     }
     default_take.source = Some(source);
     Some(item)
@@ -268,6 +309,18 @@ pub fn build_reaper_clipboard(
 #[cfg(test)]
 pub(crate) fn parse_for_test(bytes: &[u8]) -> crate::reaper_parser::ReaperData {
     crate::reaper_parser::parse_clipboard_bytes(bytes).expect("parse exported REAPER clipboard")
+}
+
+/// 测试辅助：按导入端约定从 SECTION take 还原倒放锚点（区间末端 − SOFFS）。
+#[cfg(test)]
+fn compute_anchor_from_section_for_test(take: &crate::reaper_parser::ReaperTake) -> f64 {
+    let src = take.source.as_ref().expect("source present");
+    let end = src.section_start_sec.unwrap_or(0.0)
+        + src
+            .section_length_sec
+            .filter(|len| len.is_finite() && *len > 0.0)
+            .unwrap_or(0.0);
+    end - take.s_offs.max(0.0)
 }
 
 #[cfg(test)]
@@ -390,5 +443,139 @@ mod tests {
         }
         let result = build_reaper_clipboard(&timeline, &[clip_id]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn looping_clip_roundtrips_loop_flag_and_section_window() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Looped".to_string()),
+            Some(0.0),
+            Some(6.0),
+            Some("C:/audio/loop.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(4.0);
+            // 循环窗口是媒体的一个子区间：导出必须用 SECTION 表达，
+            // 否则 REAPER 会在媒体末尾而不是窗口末尾回绕。
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 3.0;
+            clip.playback_rate = 1.0;
+            clip.loop_enabled = true;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(item.is_loop, "loop flag must be exported");
+        let source = item.default_take.source.as_ref().unwrap();
+        // 正向 Loop = plain SOURCE + SOFFS（进入锚点）：
+        // REAPER 原生 Loop source 在整个媒体上回绕，无需 SECTION。
+        assert_eq!(source.source_type, "WAVE");
+        assert!((item.default_take.s_offs - 1.0).abs() < 1e-9);
+
+        // 非 Loop 的同窗口 clip 不应推断出 LOOP。
+        {
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .expect("clip exists");
+            clip.loop_enabled = false;
+            clip.length_sec = 2.0;
+        }
+        let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let parsed2 = parse_for_test(&export2.bytes);
+        let item2 = &parsed2.tracks[0].items[0];
+        assert!(!item2.is_loop, "short non-loop clip must not infer loop");
+        assert_eq!(
+            item2.default_take.source.as_ref().unwrap().source_type,
+            "WAVE"
+        );
+    }
+
+    #[test]
+    fn negative_soffs_silence_tail_roundtrips() {
+        // REAPER 左延伸 item（test_2.rpp 语义）：LOOP 0 + 负 SOFFS（前导静音），
+        // LENGTH 覆盖整个可见区间。导出必须逐字保留负 SOFFS 与 LOOP 0 ——
+        // 不得把静音尾巴推断成 LOOP，也不得把 SOFFS 钳到 0。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Left Extended".to_string()),
+            Some(20.0),
+            Some(16.81342267992402),
+            Some("C:/audio/Vocal-1-3.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(15.25232042998004);
+            clip.source_start_sec = -1.56110224994398;
+            clip.source_end_sec = 15.25232042998004;
+            clip.playback_rate = 1.0;
+            clip.loop_enabled = false;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(
+            (item.default_take.s_offs - (-1.56110224994398)).abs() < 1e-9,
+            "negative SOFFS must survive export verbatim, got {}",
+            item.default_take.s_offs
+        );
+        assert!(!item.is_loop, "silence-tail non-loop clip must stay LOOP 0");
+        assert!((item.length - 16.81342267992402).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reversed_loop_clip_exports_whole_file_section_with_anchor() {
+        // 倒放 + Loop：SECTION 必须覆盖整个媒体文件（回绕域），
+        // SOFFS 承载倒放相位锚点：SOFFS = D − floor_mod(min(source_end, D), D)。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Reversed Loop".to_string()),
+            Some(0.0),
+            Some(6.0),
+            Some("C:/audio/loop.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.duration_sec = Some(4.0);
+            clip.reversed = true;
+            clip.loop_enabled = true;
+            // split 可能产生的环绕窗口（start > end）：引擎只按
+            // floor_mod(min(source_end, D), D) 取倒放锚点。
+            clip.source_start_sec = 3.0;
+            clip.source_end_sec = 1.0;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!(item.is_loop, "loop flag must be exported");
+        let source = item.default_take.source.as_ref().unwrap();
+        assert_eq!(source.section_mode, 1, "reversal must be expressed via SECTION MODE");
+        assert!(
+            source.section_start_sec == Some(0.0)
+                && source.section_length_sec == Some(4.0),
+            "SECTION must cover the whole media file, got {:?}..{:?}",
+            source.section_start_sec,
+            source.section_length_sec
+        );
+        // φ = mod(min(1, 4), 4) = 1 ⇒ SOFFS = 4 − 1 = 3。
+        assert!(
+            (item.default_take.s_offs - 3.0).abs() < 1e-9,
+            "reverse anchor phase must round-trip, got {}",
+            item.default_take.s_offs
+        );
+
+        // 导入端按同一约定还原倒放锚点：anchor = 区间末端 − SOFFS = 4 − 3 = 1 = φ。
+        let take = &item.default_take;
+        let anchor = super::compute_anchor_from_section_for_test(take);
+        assert!((anchor - 1.0).abs() < 1e-9);
     }
 }

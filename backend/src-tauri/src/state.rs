@@ -46,6 +46,311 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Clip 源媒体的总时长（秒）：优先 `duration_frames / source_sample_rate`，
+/// 回退 `duration_sec`；均不可用时返回 None。
+///
+/// Loop（循环源）模式的回绕周期即该值 —— "循环原始音频文件"。
+///
+/// 纯音高参考块（Pitch Reference Clip，无源媒体）的内容时长 = 音符内容的
+/// 最大结束时间 —— 使其循环逻辑与普通媒体 Clip **完全一致**：Loop 回绕
+/// 整个音符内容（而非窗口跨度），窗口之外的部分为静音/无音高。
+pub(crate) fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
+    if let (Some(frames), Some(sample_rate)) = (clip.duration_frames, clip.source_sample_rate) {
+        if sample_rate > 0 && frames > 0 {
+            return Some(frames as f64 / sample_rate as f64);
+        }
+    }
+    if let Some(duration) = clip.duration_sec.filter(|d| d.is_finite() && *d > 0.0) {
+        return Some(duration);
+    }
+    if let Some(notes) = clip.midi_note_data.as_ref() {
+        let max_end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
+        if max_end.is_finite() && max_end > 0.0 {
+            return Some(max_end);
+        }
+    }
+    None
+}
+
+/// Loop（循环源）回绕周期的统一取值（秒）：媒体时长已知时取媒体时长，
+/// 否则退化为 `max(source_end, source_start)`（兜底仍为非负、有限的键值）。
+///
+/// 拉伸缓存的**生产者**（schedule_stretch_jobs 的 StretchJob）与**消费者**
+/// （build_snapshot 的换入查找）必须使用同一函数 —— 此前两处回退链不一致
+/// （一边 `duration_sec.unwrap_or(max(end,start))` 且不过滤非有限值，
+/// 另一边 `clip_source_media_duration_sec(...).unwrap_or(source_end)`），
+/// 在元数据缺失/异常时会生成互不匹配的缓存键，导致拉伸结果永远无法命中。
+pub(crate) fn clip_loop_wrap_total_sec(clip: &Clip) -> f64 {
+    clip_source_media_duration_sec(clip)
+        .unwrap_or_else(|| clip.source_end_sec.max(clip.source_start_sec))
+        .max(0.0)
+}
+
+/// 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
+/// se' = source_start + length×rate。
+///
+/// 消费区间为 [source_start, se')，落在媒体之外的部分渲染为静音
+/// （右缘延伸的尾部静音 / REAPER 左延伸的前导静音）。存储的
+/// `source_end_sec` 在循环开关、历史数据等场景下可能与长度脱钩 ——
+/// 所有切片/窗口消费点都应使用本函数取**有效**终点，避免陈旧窗口
+/// 冻结静音区或截断音频。Loop（回绕锚点语义）与倒放（反向锚点）
+/// 保持存储字段不变。
+pub(crate) fn clip_effective_source_end_sec(clip: &Clip) -> f64 {
+    if !clip.loop_enabled && !clip.reversed {
+        clip.source_start_sec + clip.length_sec.max(0.0) * clip.playback_rate as f64
+    } else {
+        clip.source_end_sec
+    }
+}
+
+/// 非 Loop Clip 的**实际消费窗口**（源域秒，方向无关的统一模型）：
+///
+///   正放 win = [source_start, source_start + length×rate)
+///   倒放 win = [source_end − length×rate, source_end)
+///
+/// 消费方向：正放自 win 起点升、倒放自 win 终点降；win 落在媒体
+/// [0, D) 之外的部分渲染为静音 —— 倒放的 `source_end > D` 产生前导
+/// 静音、窗口下探 <0 产生尾部静音（与正放 `source_start < 0` 的前导
+/// 静音对称）。倒放的 `source_start` 只是历史/编辑字段，**不参与**
+/// 消费数学 —— 音频切片、波形取窗、音高曲线必须全部使用本函数，
+/// 否则编辑器写入的域外锚点会让内容错位（波形与音频对不上、该有声
+/// 处被静音吞掉）。
+///
+/// Loop（回绕锚点语义）不适用本模型 —— 返回原始存储窗口，调用方须
+/// 自行走锚点回绕分支。
+#[allow(clippy::needless_return)]
+pub(crate) fn clip_playback_window_sec(clip: &Clip) -> (f64, f64) {
+    let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+        clip.playback_rate as f64
+    } else {
+        1.0
+    };
+    let span = clip.length_sec.max(0.0) * rate;
+    if clip.loop_enabled {
+        return (clip.source_start_sec, clip.source_end_sec);
+    }
+    if clip.reversed {
+        let end = clip.source_end_sec;
+        (end - span, end)
+    } else {
+        let start = clip.source_start_sec;
+        (start, start + span)
+    }
+}
+
+/// 非 Loop Clip 消费方向的**前导静音**（时间线秒）：
+///   正放：窗口起点越过媒体起点（source_start < 0）→ 前导静音；
+///   倒放：窗口终点越过媒体末端（source_end > D）→ 前导静音。
+/// `media_total_sec` = 解码媒体总时长（秒）；未知时传 None（按无前导
+/// 静音处理）。尾部静音无需显式表达 —— 切片自然短于 clip 长度。
+/// Loop 的负 source_start 是环绕锚点，不产生前导静音（返回 0）。
+pub(crate) fn clip_leading_silence_sec(clip: &Clip, media_total_sec: Option<f64>) -> f64 {
+    if clip.loop_enabled {
+        return 0.0;
+    }
+    let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+        clip.playback_rate as f64
+    } else {
+        1.0
+    };
+    if clip.reversed {
+        let d = media_total_sec.filter(|v| v.is_finite() && *v > 0.0);
+        match d {
+            Some(d) => (clip.source_end_sec - d).max(0.0) / rate,
+            None => 0.0,
+        }
+    } else {
+        (-clip_playback_window_sec(clip).0).max(0.0) / rate
+    }
+}
+
+/// `trim_and_resample_midi` 的源窗口实参（非 Loop 倒放专用重定向）：
+///
+/// 该函数内部始终按"升序窗口 → 输出再由调用方翻转"的方式处理非 Loop
+/// 曲线，因此倒放 Clip 必须传入真实消费窗口 `[se−len·r, se]`（而非存储
+/// 的 `[ss, se]`），否则陈旧/延伸过的窗口会把曲线拉伸到错误区域。其余
+/// 模式原样透传 `(source_start, source_end)`。
+pub(crate) fn clip_pitch_trim_window_sec(clip: &Clip) -> (f64, f64) {
+    if !clip.loop_enabled && clip.reversed {
+        let (win_start, win_end) = clip_playback_window_sec(clip);
+        (win_start, win_end)
+    } else {
+        (clip.source_start_sec, clip.source_end_sec)
+    }
+}
+
+/// 非 Loop Clip 存储字段的**加载期规范化**：使存储窗口 == 消费窗口。
+///
+///   正放：source_end := source_start + len·r
+///   倒放：source_start := source_end − len·r
+///
+/// 与所有消费端的派生值逐字段一致，功能零变化；作用是让历史版本写入的
+/// 陈旧/发散字段不再保留在工程数据里（避免误导任何直接读原始字段的
+/// 路径，如 REAPER 导出、上下文菜单显示等）。Loop 的字段承载锚点相位，
+/// 不适用本规范化。
+pub(crate) fn normalize_nonloop_source_window(clip: &mut Clip) {
+    if clip.loop_enabled {
+        return;
+    }
+    let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+        clip.playback_rate as f64
+    } else {
+        1.0
+    };
+    let span = clip.length_sec.max(0.0) * rate;
+    if clip.reversed {
+        clip.source_start_sec = clip.source_end_sec - span;
+    } else {
+        clip.source_end_sec = clip.source_start_sec + span;
+    }
+}
+
+/// Loop（循环源）下**音符内容**的回绕周期（源域秒）。
+///
+/// 音频 clip 的实际声音按整个媒体时长 D 回绕（mix / snapshot / mixdown 的
+/// 锚点数学），因此其派生音符（音高编辑回写的 `midi_note_data`）也必须按
+/// D 平铺才能与音频保持同相位。音高参考块（Pitch Reference，无源媒体）
+/// 与普通媒体 Clip 完全一致：D = 音符内容总时长（最大结束时间），回绕
+/// 整个内容；仅当连音符内容都无法确定时才退化为窗口跨度。
+///
+/// 返回 `None` 表示未启用 Loop 或周期无效 —— 调用方应走非循环路径。
+pub(crate) fn clip_loop_cycle_span_sec(clip: &Clip) -> Option<f64> {
+    if !clip.loop_enabled {
+        return None;
+    }
+    let span = clip_source_media_duration_sec(clip)
+        .unwrap_or_else(|| (clip.source_end_sec - clip.source_start_sec).abs());
+    if span.is_finite() && span > 1e-9 {
+        Some(span)
+    } else {
+        None
+    }
+}
+
+/// Loop（循环源）下单个音符事件映射到时间线帧坐标的出现位置。
+///
+/// 与音频渲染的 floor_mod 锚点回绕逐帧一致：
+///   正放 s(u) = floor_mod(source_start + u, D)，u 为已消费源秒；
+///   倒放 s(u) = floor_mod(min(source_end, D) − u, D)。
+/// 音符 [n0, n1) 在每个周期内恰好占据一段连续区间：
+///   正放首现于 u₀ = (n0 − source_start) mod D；
+///   倒放首现于 u₀ = (min(source_end,D) − n1) mod D。
+/// 当 D 等于窗口跨度且音符落在窗口内时，本函数与既有的"窗口内相对偏移 +
+/// 镜像"算法完全等价（严格泛化，不改变既有用例）。
+///
+/// 返回 `(首个出现的起始帧, 单次出现长度帧, 重复周期帧)`；`None` 表示
+/// 未启用 Loop、周期无效或音符为空 —— 调用方走非循环路径。
+pub(crate) struct LoopNotePlacement {
+    pub first_start_frame: usize,
+    pub len_frames: usize,
+    pub cycle_frames: usize,
+}
+
+/// `place_note_occurrence_in_loop` 的原始参数核心：供无法直接持有 `&Clip`
+/// 的调用方（如 `build_fallback_pitch_from_midi`）复用同一套锚点数学。
+/// 返回 `(首个出现的起始帧, 单次出现长度帧, 重复周期帧)`。
+pub(crate) fn place_note_occurrence_frames(
+    reversed: bool,
+    playback_rate: f64,
+    frame_period_ms: f64,
+    fwd_anchor_sec: f64,
+    rev_anchor_end_sec: f64,
+    cycle_src_sec: f64,
+    note_start_sec: f64,
+    note_end_sec: f64,
+) -> Option<LoopNotePlacement> {
+    if !(cycle_src_sec.is_finite() && cycle_src_sec > 1e-9) {
+        return None;
+    }
+    let len_sec = note_end_sec - note_start_sec;
+    if !(len_sec > 1e-9) {
+        return None;
+    }
+    let rate = if playback_rate.is_finite() && playback_rate > 1e-6 {
+        playback_rate
+    } else {
+        1.0
+    };
+    let fp = frame_period_ms.max(0.1);
+    // 源域秒 → 时间线帧：sec / rate 秒的时间线时长 → ×1000/fp 帧。
+    let to_frames = |source_sec: f64| -> usize {
+        (((source_sec / rate) * 1000.0 / fp).round().max(0.0)) as usize
+    };
+    let u0 = if reversed {
+        (rev_anchor_end_sec - note_end_sec).rem_euclid(cycle_src_sec)
+    } else {
+        // 正放锚点取**原始** source_start（可为负），与音频回绕保持一致。
+        (note_start_sec - fwd_anchor_sec).rem_euclid(cycle_src_sec)
+    };
+    Some(LoopNotePlacement {
+        first_start_frame: to_frames(u0),
+        len_frames: to_frames(len_sec),
+        cycle_frames: to_frames(cycle_src_sec).max(1),
+    })
+}
+
+pub(crate) fn place_note_occurrence_in_loop(
+    clip: &Clip,
+    note_start_sec: f64,
+    note_end_sec: f64,
+    frame_period_ms: f64,
+) -> Option<LoopNotePlacement> {
+    // 周期来源决定倒放锚点的 clamp 规则：
+    // - 周期 = 媒体时长（已知元数据）：锚点 clamp 到媒体时长（与音频渲染的
+    //   min(source_end, D) 一致，防止异常超界 source_end 错相位）；
+    // - 周期退化为窗口跨度（纯 MIDI / 无元数据）：**不能**用跨度 clamp ——
+    //   窗口 [2,7] 的跨度 5 < end=7 会把倒放锚点从 7 改写成 5，使所有音符
+    //   相位平移 ss=2s。此时保持原始 source_end（窗口 exclusive 末端）。
+    let media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
+    let cycle_src_sec = clip_loop_cycle_span_sec(clip)?;
+    // 倒放锚点与音频路径（mix/snapshot/mixdown）同约定：min(source_end, D)
+    // 后**不做** max(0) —— 负 source_end（slip/split + Loop 组合可达）由
+    // rem_euclid 统一环绕，避免音符域与音频域出现恒定相位差。
+    let rev_anchor_end = match media_total {
+        Some(d) => clip.source_end_sec.min(d),
+        None => clip.source_end_sec,
+    };
+    place_note_occurrence_frames(
+        clip.reversed,
+        clip.playback_rate as f64,
+        frame_period_ms,
+        // 正放锚点：原始 source_start（可为负，floor_mod 环绕）。
+        clip.source_start_sec,
+        rev_anchor_end,
+        cycle_src_sec,
+        note_start_sec,
+        note_end_sec,
+    )
+}
+
+/// 把区间 `[start, end)` 按模 `modulus` 的回绕边界拆分成若干不跨界的子区间，
+/// 每个子区间以"周期内相位"坐标返回（值域 `[0, modulus)`）。
+///
+/// 用于 Loop（循环源）把超出一个循环周期的内容（如 MIDI 音符时间）
+/// 回绕映射回源窗口，并在回绕边界处拆分跨越边界的音符。
+fn split_range_into_periods(start: f64, end: f64, modulus: f64) -> Vec<(f64, f64)> {
+    let mut segs: Vec<(f64, f64)> = Vec::new();
+    if !(end > start) || !(modulus > 1e-9) || !start.is_finite() || !end.is_finite() {
+        return segs;
+    }
+    let mut cursor = start;
+    let mut guard = 0usize;
+    while cursor < end - 1e-9 && guard < 1_000_000 {
+        guard += 1;
+        let phase = cursor.rem_euclid(modulus);
+        let dist_to_boundary = modulus - phase;
+        let seg_end = (cursor + dist_to_boundary).min(end);
+        if seg_end - cursor > 1e-9 {
+            segs.push((phase, phase + (seg_end - cursor)));
+        }
+        cursor = seg_end;
+        if dist_to_boundary <= 1e-12 {
+            break;
+        }
+    }
+    segs
+}
+
 fn is_default_frame_period(value: &f64) -> bool {
     *value == default_frame_period_ms()
 }
@@ -315,6 +620,8 @@ pub struct CreateClipTemplatePayload {
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    #[serde(default)]
+    pub loop_enabled: Option<bool>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -430,6 +737,19 @@ pub struct Clip {
     pub playback_rate: f32,
     #[serde(default)]
     pub reversed: bool,
+    /// Loop（循环源）属性，对齐 REAPER / VEGAS 的 item LOOP 语义：
+    ///
+    /// 启用后对**整个原始媒体文件**做模运算回绕（"循环原始音频文件"）：
+    ///   正放 src(t) = floor_mod(source_start + t·rate, D)
+    ///   倒放 src(t) = floor_mod(source_end   − t·rate, D)
+    /// 其中 D = 完整媒体时长。例：媒体 10s、锚点 2s 时，clip 的
+    /// [0,8) 对应源 2~10s，[8,18) 对应源 0~10s，以此类推。
+    ///
+    /// - 延伸/裁短等操作不受源媒体长度限制；向左延伸会回退锚点并环绕；
+    /// - 该字段随工程文件持久化；旧版本工程缺失时按"为新的音频块启用循环"
+    ///   设置迁移（见 open_project 的 v4 迁移逻辑）。
+    #[serde(default)]
+    pub loop_enabled: bool,
     #[serde(default)]
     pub fade_in_sec: f64,
     #[serde(default)]
@@ -507,6 +827,8 @@ pub struct ClipStatePatch {
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    #[serde(default)]
+    pub loop_enabled: Option<bool>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -1845,6 +2167,264 @@ mod tests {
             .unwrap_or(f64::NAN)
     }
 
+    /// Loop 音符放置：D == 窗口时与"窗口内相对偏移 + 镜像 + 周期平铺"的
+    /// 既有约定等价（fp=10ms、rate=1）。
+    #[test]
+    fn loop_note_placement_matches_window_semantics_when_cycle_equals_window() {
+        // 窗口 [2, 6)，D = 窗口跨度 4s（纯 MIDI clip 场景）。
+        let cycle = 4.0f64;
+        let fwd_anchor = 2.0f64;
+        // 倒放锚点传**原始** source_end（函数内部用 rem_euclid 归一），
+        // 与音频路径约定一致 —— 不得在调用方预 clamp。
+        let rev_anchor_end = 6.0f64;
+        let fp = 10.0f64;
+
+        // 正放：音符源位置 3.0~4.5 → 首现于消费 1.0s（= 帧 100）。
+        let p = place_note_occurrence_frames(false, 1.0, fp, fwd_anchor, rev_anchor_end, cycle, 3.0, 4.5)
+            .expect("valid placement");
+        assert_eq!(p.first_start_frame, 100);
+        assert_eq!(p.len_frames, 150);
+        assert_eq!(p.cycle_frames, 400);
+
+        // 倒放：(6−4.5) mod 4 = 1.5s（= 帧 150）—— 与窗口镜像语义等价。
+        let p_rev =
+            place_note_occurrence_frames(true, 1.0, fp, fwd_anchor, rev_anchor_end, cycle, 3.0, 4.5)
+                .expect("valid placement");
+        assert_eq!(p_rev.first_start_frame, 150);
+
+        // 负锚点环绕：anchor=-1 对 D=4 → 首现于消费 1.0s（floor_mod(-1+u)）。
+        let p_neg = place_note_occurrence_frames(false, 1.0, fp, -1.0, rev_anchor_end, cycle, -0.5, 0.5)
+            .expect("valid placement");
+        assert_eq!(p_neg.first_start_frame, 50);
+    }
+
+    /// 纯 MIDI（无媒体元数据）slip 窗口的倒放锚点不得被跨度 clamp 改写：
+    /// 窗口 [2,7] 的跨度是 5，若把 rev 锚点 clamp 成 min(7,5)=5，
+    /// 结束于 7s 的音符首现于 (5−7) mod 5 = 3s；正确行为是保持锚点 7 →
+    /// 首现于 0s（窗口 exclusive 末端即入口）。
+    #[test]
+    fn loop_placement_reversed_window_span_keeps_raw_source_end_anchor() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(Some(track_id), Some("M".into()), Some(0.0), Some(10.0), None)
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.reversed = true;
+            clip.source_start_sec = 2.0;
+            clip.source_end_sec = 7.0;
+            // 无 duration_sec / duration_frames 元数据 → 周期退化为窗口跨度。
+        }
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let p = place_note_occurrence_in_loop(clip, 6.0, 7.0, 10.0).expect("valid placement");
+        assert_eq!(p.first_start_frame, 0, "note ending at window end is heard first");
+        assert_eq!(p.cycle_frames, 500);
+    }
+
+    /// Loop 音符放置：裁剪窗口（窗口 ≠ 媒体时长）时按媒体 D 的锚点回绕 ——
+    /// 与音频渲染 floor_mod(anchor ± u, D) 同相位。
+    #[test]
+    fn loop_note_placement_uses_media_cycle_for_trimmed_windows() {
+        // 媒体 10s，窗口 [1, 3]；split 右段 start=3.5 > end=3.0（环绕窗口）。
+        // 音频在消费 u 秒处播放 floor_mod(3.5 + u, 10)：
+        //   u ∈ [0, 6.5) → 源 3.5~10；u ∈ [6.5, 10) → 源 0~3.5。
+        let cycle = 10.0f64;
+        let fwd_anchor = 3.5f64;
+        let fp = 10.0f64;
+
+        // 音符源 8.0~9.5：出现在 u = 4.5s（帧 450），每 10s 重复一次。
+        let p = place_note_occurrence_frames(false, 1.0, fp, fwd_anchor, 9.9, cycle, 8.0, 9.5)
+            .expect("valid placement");
+        assert_eq!(p.first_start_frame, 450);
+        assert_eq!(p.cycle_frames, 1000);
+
+        // 音符源 1.0~2.0：环绕后首现于 u = floor_mod(1−3.5, 10) = 7.5s（帧 750）。
+        let p2 = place_note_occurrence_frames(false, 1.0, fp, fwd_anchor, 9.9, cycle, 1.0, 2.0)
+            .expect("valid placement");
+        assert_eq!(p2.first_start_frame, 750);
+
+        // 倒放锚点末端 min(source_end=3.0, D)：音符源 1.0~2.0 首现于
+        // w = 3.0 − 2.0 = 1.0s（帧 100）。
+        let pr = place_note_occurrence_frames(true, 1.0, fp, fwd_anchor, 3.0, cycle, 1.0, 2.0)
+            .expect("valid placement");
+        assert_eq!(pr.first_start_frame, 100);
+    }
+
+    #[test]
+    fn clip_loop_cycle_span_prefers_media_duration_and_falls_back_to_window() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(Some(track_id), Some("L".into()), Some(0.0), Some(12.0), None)
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            // 无媒体元数据：退化为窗口跨度。
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 5.0;
+        }
+        let span_window = {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            clip_loop_cycle_span_sec(clip)
+        };
+        assert!((span_window.unwrap() - 4.0).abs() < 1e-9);
+
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 有媒体元数据：取媒体总时长（与音频整文件回绕一致）。
+            clip.duration_sec = Some(10.0);
+        }
+        let span_media = {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            clip_loop_cycle_span_sec(clip)
+        };
+        assert!((span_media.unwrap() - 10.0).abs() < 1e-9);
+
+        // 未启用 Loop：None。
+        let span_off = {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip_loop_cycle_span_sec(clip)
+        };
+        assert!(span_off.is_none());
+    }
+
+    /// 消费窗口模型：正放锚定 ss、倒放锚定 se —— 倒放的 ss 不参与消费数学，
+    /// 域外窗口（se>D / 窗口下探 <0）由方向性前导静音表达。
+    #[test]
+    fn playback_window_and_leading_silence_directional() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(Some(track_id), Some("W".into()), Some(0.0), Some(4.0), None)
+            .clone();
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.source_start_sec = 2.0;
+            c.source_end_sec = 6.0;
+            c.duration_sec = Some(10.0);
+            c.playback_rate = 1.0;
+            // add_clip 按进程级默认（loop_new_clips_default）开启 Loop；
+            // 本测试考察的是**非 Loop** 消费窗口/前导静音模型，须显式关闭
+            // （末尾 Loop 分支会再显式置 true）。否则前导静音恒为 0、
+            // 倒放窗口断言走锚点分支 —— 与被测语义无关地失败。
+            c.loop_enabled = false;
+        }
+        fn read<'a>(tl: &'a TimelineState, cid: &str) -> &'a super::Clip {
+            tl.clips.iter().find(|c| c.id == cid).unwrap()
+        }
+
+        /// 加载期规范化：存储字段 == 消费窗口（正放派生终点、倒放派生起点、
+        /// Loop 不触碰）。
+        #[test]
+        fn normalize_nonloop_source_window_matches_consumed_window() {
+            let mut tl = TimelineState::default();
+            let track_id = tl.tracks[0].id.clone();
+            fn mk(tl: &mut TimelineState, track_id: &str, rev: bool) -> String {
+                let id = tl.add_clip(
+                    Some(track_id.to_string()),
+                    Some("N".into()),
+                    Some(0.0),
+                    Some(3.0),
+                    None,
+                );
+                {
+                    let c = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
+                    c.reversed = rev;
+                    c.loop_enabled = false;
+                    c.playback_rate = 1.0;
+                }
+                id
+            }
+            let fwd_id = mk(&mut tl, &track_id, false);
+            let rev_id = mk(&mut tl, &track_id, true);
+            {
+                let c = tl.clips.iter_mut().find(|c| c.id == fwd_id).unwrap();
+                c.source_start_sec = 2.0;
+                c.source_end_sec = 99.0; // 陈旧值
+            }
+            {
+                let c = tl.clips.iter_mut().find(|c| c.id == rev_id).unwrap();
+                c.source_start_sec = 99.0; // 陈旧值
+                c.source_end_sec = -1.5; // 媒体下方静音段（合法）
+            }
+            let mut fwd = tl.clips.iter().find(|c| c.id == fwd_id).unwrap().clone();
+            normalize_nonloop_source_window(&mut fwd);
+            assert!((fwd.source_end_sec - 5.0).abs() < 1e-9, "forward end derives from start+len");
+            assert!((fwd.source_start_sec - 2.0).abs() < 1e-9);
+
+            let mut rev = tl.clips.iter().find(|c| c.id == rev_id).unwrap().clone();
+            normalize_nonloop_source_window(&mut rev);
+            assert!((rev.source_start_sec - (-4.5)).abs() < 1e-9, "reversed start derives from end−len");
+            assert!((rev.source_end_sec - (-1.5)).abs() < 1e-9, "negative anchor preserved");
+
+            // Loop：字段承载锚点相位，规范化不得触碰。
+            let mut lp = rev.clone();
+            lp.loop_enabled = true;
+            lp.source_start_sec = -77.0;
+            normalize_nonloop_source_window(&mut lp);
+            assert!((lp.source_start_sec - (-77.0)).abs() < 1e-12);
+        }
+
+        // 正放：win=[ss, ss+len·r)。
+        let (ws, we) = clip_playback_window_sec(read(&tl, &clip_id));
+        assert!((ws - 2.0).abs() < 1e-9 && (we - 6.0).abs() < 1e-9);
+        // 正放 ss<0 → 前导静音。
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.source_start_sec = -1.0;
+        }
+        assert!((clip_leading_silence_sec(read(&tl, &clip_id), Some(10.0)) - 1.0).abs() < 1e-9);
+
+        // 倒放：win=[se−len·r, se)，ss 完全不参与（即使为负/陈旧）。
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.reversed = true;
+            c.source_start_sec = -99.0; // 历史字段：不得影响窗口
+            c.source_end_sec = 6.0;
+        }
+        let (ws, we) = clip_playback_window_sec(read(&tl, &clip_id));
+        assert!((ws - 2.0).abs() < 1e-9 && (we - 6.0).abs() < 1e-9);
+        // 倒放窗口在媒体内 → 无前导静音；ss<0 是尾部静音，不产生前导静音。
+        assert!(clip_leading_silence_sec(read(&tl, &clip_id), Some(10.0)).abs() < 1e-12);
+
+        // 倒放 se 越过媒体末端（trim_left 延伸/split 过渡可达）→ 前导静音。
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.source_end_sec = 12.0;
+        }
+        let (ws, we) = clip_playback_window_sec(read(&tl, &clip_id));
+        assert!((ws - 8.0).abs() < 1e-9 && (we - 12.0).abs() < 1e-9);
+        assert!((clip_leading_silence_sec(read(&tl, &clip_id), Some(10.0)) - 2.0).abs() < 1e-9);
+
+        // Loop：恒无前导静音；窗口原样返回（调用方走锚点回绕分支）。
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.loop_enabled = true;
+            c.source_start_sec = -5.0;
+        }
+        assert!(clip_leading_silence_sec(read(&tl, &clip_id), Some(10.0)).abs() < 1e-12);
+
+        // trim 窗口重定向：非 Loop 倒放传 [se−len·r, se]，其余透传。
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.loop_enabled = false;
+        }
+        let (ts, te) = clip_pitch_trim_window_sec(read(&tl, &clip_id));
+        assert!((ts - 8.0).abs() < 1e-9 && (te - 12.0).abs() < 1e-9);
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            c.reversed = false;
+            c.source_start_sec = 3.0;
+            c.source_end_sec = 7.0;
+        }
+        let (ts, te) = clip_pitch_trim_window_sec(read(&tl, &clip_id));
+        assert!((ts - 3.0).abs() < 1e-9 && (te - 7.0).abs() < 1e-9);
+    }
+
     #[test]
     fn render_scale_signature_ignores_non_scale_tempo_map_changes() {
         let base = TimelineState::default();
@@ -2084,6 +2664,7 @@ mod tests {
                     source_end_sec: Some(1.8),
                     playback_rate: Some(0.8),
                     reversed: Some(true),
+                    loop_enabled: None,
                     fade_in_sec: Some(0.15),
                     fade_out_sec: Some(0.25),
                     fade_in_curve: Some("sine".into()),
@@ -2107,6 +2688,7 @@ mod tests {
                     source_end_sec: Some(1.5),
                     playback_rate: Some(1.0),
                     reversed: Some(false),
+                    loop_enabled: None,
                     fade_in_sec: Some(0.05),
                     fade_out_sec: Some(0.1),
                     fade_in_curve: Some("linear".into()),
@@ -2191,6 +2773,7 @@ mod tests {
                 source_end_sec: Some(0.9),
                 playback_rate: Some(0.8),
                 reversed: Some(true),
+                loop_enabled: None,
                 fade_in_sec: Some(0.1),
                 fade_out_sec: Some(0.2),
                 fade_in_curve: Some("linear".into()),
@@ -2350,23 +2933,25 @@ mod tests {
 
     #[test]
     fn clip_formant_morph_defaults_to_disabled_when_missing() {
+        // Clip 的持久化格式是 snake_case（无 rename_all）；
+        // formant_morph 缺失时必须反序列化为 None → 默认禁用。
         let json = serde_json::json!({
             "id": "clip-1",
-            "trackId": "track_main",
+            "track_id": "track_main",
             "name": "clip",
-            "startSec": 0.0,
-            "lengthSec": 1.0,
+            "start_sec": 0.0,
+            "length_sec": 1.0,
             "color": "#fff",
-            "sourcePath": "demo.wav",
-            "sourceStartSec": 0.0,
-            "sourceEndSec": 1.0,
-            "playbackRate": 1.0,
+            "source_path": "demo.wav",
+            "source_start_sec": 0.0,
+            "source_end_sec": 1.0,
+            "playback_rate": 1.0,
             "gain": 1.0,
             "muted": false,
-            "fadeInSec": 0.0,
-            "fadeOutSec": 0.0,
-            "fadeInCurve": "sine",
-            "fadeOutCurve": "sine"
+            "fade_in_sec": 0.0,
+            "fade_out_sec": 0.0,
+            "fade_in_curve": "sine",
+            "fade_out_curve": "sine"
         });
 
         let clip: Clip = serde_json::from_value(json).expect("clip should deserialize");
@@ -2375,6 +2960,47 @@ mod tests {
         assert_eq!(morph.target_f1_hz, 800.0);
         assert_eq!(morph.target_f2_hz, 1400.0);
         assert!((morph.strength - 0.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pitch_reference_content_duration_uses_note_extent() {
+        // 纯音高参考块（无源媒体）的内容时长 = 音符内容最大结束时间，
+        // 使其 Loop 周期与普通媒体 Clip 完全一致（回绕整个内容，
+        // 而非窗口跨度 [source_start, source_end]）。
+        let json = serde_json::json!({
+            "id": "pref-1",
+            "track_id": "track_main",
+            "name": "ref",
+            "start_sec": 0.0,
+            "length_sec": 4.5,
+            "source_start_sec": 1.0,
+            "source_end_sec": 2.0,
+            "playback_rate": 1.0,
+            "gain": 1.0,
+            "muted": false,
+            "fade_in_sec": 0.0,
+            "fade_out_sec": 0.0,
+            "fade_in_curve": "sine",
+            "fade_out_curve": "sine",
+            "midi_note_data": [
+                {"startSec": 1.0, "endSec": 2.0, "note": 60.0, "velocity": 100, "channel": 0},
+                {"startSec": 2.0, "endSec": 4.25, "note": 62.0, "velocity": 100, "channel": 0}
+            ]
+        });
+        let mut clip: Clip = serde_json::from_value(json).expect("clip should deserialize");
+        assert!(clip.source_path.is_none());
+        assert_eq!(
+            clip_source_media_duration_sec(&clip),
+            Some(4.25),
+            "content duration must come from note extent"
+        );
+        assert_ne!(
+            clip_loop_cycle_span_sec(&clip),
+            Some(1.0),
+            "must NOT use the window span as cycle"
+        );
+        clip.loop_enabled = true;
+        assert_eq!(clip_loop_cycle_span_sec(&clip), Some(4.25));
     }
 
     // ── split_clips_at tests ──────────────────────────────────────
@@ -2486,8 +3112,10 @@ mod tests {
 
         assert_ne!(group_a, group_b);
 
-        // Split one clip from each group
-        tl.split_clips_at(&[a1.clone(), b1.clone()], 1.0);
+        // Split one clip from each group（切割点必须落在对应 clip 范围内，
+        // 否则 split 是无操作、不会产生右组 —— 见 split_clips_at 的 clamp 规则）
+        tl.split_clips_at(&[a1.clone()], 1.0);
+        tl.split_clips_at(&[b1.clone()], 6.0);
 
         // Each group should have at least 2 distinct group_ids after split (original + new)
         let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2513,6 +3141,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 本用例验证**非 Loop** 的分割窗口推进语义（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 1.0;
             clip.source_end_sec = 5.0;
             clip.playback_rate = 2.0;
@@ -2557,6 +3187,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 1.0;
             clip.source_end_sec = 5.0;
             clip.playback_rate = 2.0;
@@ -2593,6 +3225,108 @@ mod tests {
             right.source_start_sec + (0.5 - right.start_sec) * 2.0;
         assert!((left_source_at_split - 2.0).abs() < 1e-9);
         assert!((right_source_at_split - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_clip_loop_keeps_window_and_wraps_right_piece() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("Looped".into()),
+            Some(0.0),
+            Some(6.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 媒体总长 10s；Clip 锚点从 1s 进入，窗口 [1,3]。
+            clip.source_start_sec = 1.0;
+            clip.source_end_sec = 3.0;
+            clip.duration_sec = Some(10.0);
+            clip.playback_rate = 1.0;
+            clip.loop_enabled = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: false,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.0,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 2.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+
+        // 左段：保持锚点与窗口不变，仅缩短长度。
+        assert!((left.length_sec - 2.5).abs() < 1e-9);
+        assert!((left.source_start_sec - 1.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!(left.loop_enabled);
+
+        // 右段：切割点在整个媒体上的环绕位置 = floor_mod(1 + 2.5, 10) = 3.5
+        // （Loop 模式下音频只依赖锚点与媒体时长，另一端字段保持原值）。
+        assert!((right.start_sec - 2.5).abs() < 1e-9);
+        assert!((right.length_sec - 3.5).abs() < 1e-9);
+        assert!(right.loop_enabled);
+        assert!((right.source_start_sec - 3.5).abs() < 1e-9);
+        assert!((right.source_end_sec - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_transition_extend_overlap_allows_loop_growth_beyond_media() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("A".into()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 媒体只有 2 秒（duration 未设置时 source_file_duration_sec 回退
+            // 到 source_end），窗口即整个媒体；Loop 下延伸不再受其限制。
+            clip.source_start_sec = 0.0;
+            clip.source_end_sec = 2.0;
+            clip.duration_sec = Some(2.0);
+            clip.loop_enabled = true;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::ExtendOverlap,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.5,
+            duration_percent: 1.0,
+            curve: None,
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 1.0, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        // 左段向右延伸 0.5s：源窗口保持不变（循环回绕填充）。
+        assert!((left.length_sec - 1.5).abs() < 1e-9);
+        assert!((left.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((left.source_end_sec - 2.0).abs() < 1e-9);
+        // 右段向左延伸 0.5s：锚点沿消费方向**等价回退并环绕**
+        // （floor_mod(1.0 − 0.5, 2) = 0.5），保持原有内容的绝对时间线位置
+        // —— 与非 Loop 分支"扩展窗口保内容位置"的语义一致；否则重叠区内
+        // 左尾与右头会播放错相的内容。另一端字段在 Loop 下不参与渲染。
+        assert!((right.start_sec - 0.5).abs() < 1e-9);
+        assert!((right.length_sec - 1.5).abs() < 1e-9);
+        assert!((right.source_start_sec - 0.5).abs() < 1e-9);
+        assert!((right.source_end_sec - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2677,6 +3411,8 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop 语义用例（新建 Clip 默认 Loop 开启）。
+            clip.loop_enabled = false;
             clip.source_start_sec = 3.0;
             clip.source_end_sec = 7.0;
             clip.playback_rate = 2.0;
@@ -2747,7 +3483,7 @@ mod tests {
     }
 
     #[test]
-    fn split_clip_with_transition_overlap_clamps_to_source_material_end() {
+    fn split_clip_with_transition_overlap_grows_into_silence_beyond_material() {
         let mut tl = TimelineState::default();
         let track_id = tl.add_track(Some("Track".to_string()), None, None);
         let clip_id = tl.add_clip(
@@ -2759,6 +3495,9 @@ mod tests {
         );
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            // 非 Loop：向左/向右延伸均无界 —— 左段尾部越过素材末尾(3.0)的
+            // 部分渲染为静音；不再按素材可用量钳制。
+            clip.loop_enabled = false;
             clip.source_start_sec = 2.0;
             clip.source_end_sec = 3.0;
             clip.duration_sec = Some(3.0);
@@ -2780,12 +3519,16 @@ mod tests {
 
         let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
         let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
-        assert!((left.length_sec - 1.0).abs() < 1e-9);
-        assert!((left.source_end_sec - 3.0).abs() < 1e-9);
+        assert!((left.length_sec - 1.05).abs() < 1e-9);
+        assert!((left.source_end_sec - 3.05).abs() < 1e-9);
         assert!((right.start_sec - 0.85).abs() < 1e-9);
-        assert!((right.length_sec - 1.05).abs() < 1e-9);
+        // 右段原长 0.05 + 头部延伸 0.1 = 0.15（尾部保持在原 clip 末端 1.0，
+        // 延伸只向外侧扩展）。
+        assert!((right.length_sec - 0.15).abs() < 1e-9);
         assert!((right.source_start_sec - 2.85).abs() < 1e-9);
-        assert!((left.auto_fade_out_sec - 0.15).abs() < 1e-9);
+        // 重叠 = 左尾增长 + 右头增长 = 0.2；写入时按各自长度钳制
+        //（右段长 0.15 < 重叠 0.2）。
+        assert!((left.auto_fade_out_sec - 0.2).abs() < 1e-9);
         assert!((right.auto_fade_in_sec - 0.15).abs() < 1e-9);
     }
 
@@ -2956,6 +3699,7 @@ impl TimelineState {
                 source_end_sec: Some(c.source_end_sec),
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
+                loop_enabled: c.loop_enabled,
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -3029,6 +3773,7 @@ impl TimelineState {
                 source_end_sec: Some(c.source_end_sec),
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
+                loop_enabled: c.loop_enabled,
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -3733,6 +4478,9 @@ impl TimelineState {
             source_end_sec: computed_duration_sec.unwrap_or(ls),
             playback_rate: 1.0,
             reversed: false,
+            // 新 Clip 的 Loop 属性跟随"为新的音频块启用循环"设置
+            //（导入/录音/MIDI-as-clip/add_clip 等所有创建路径统一生效）。
+            loop_enabled: crate::config::loop_new_clips_default(),
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
@@ -3996,6 +4744,7 @@ impl TimelineState {
                 source_end_sec,
                 playback_rate,
                 reversed,
+                loop_enabled: None,
                 fade_in_sec,
                 fade_out_sec,
                 fade_in_curve: None,
@@ -4041,6 +4790,9 @@ impl TimelineState {
             }
             if let Some(v) = patch.reversed {
                 c.reversed = v;
+            }
+            if let Some(v) = patch.loop_enabled {
+                c.loop_enabled = v;
             }
             if let Some(v) = patch.fade_in_sec {
                 c.fade_in_sec = v.max(0.0);
@@ -4130,6 +4882,7 @@ impl TimelineState {
                     source_end_sec: template.source_end_sec,
                     playback_rate: template.playback_rate,
                     reversed: template.reversed,
+                    loop_enabled: template.loop_enabled,
                     fade_in_sec: template.fade_in_sec,
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
@@ -4398,19 +5151,27 @@ impl TimelineState {
         };
 
         self.clips[idx].length_sec = left_len;
-        // 更新左 clip 的源区间：
-        // - 正放：左段吃掉前半段，收紧 source_end
-        // - 倒放：左段吃掉后半段，收紧 source_start
+        // 更新左 clip 的源区间（**消费窗口模型**，两方向严格镜像）：
+        // - Loop（循环源）：左右两段都保留完整循环窗口 —— 左段仅缩短 length，
+        //   内容仍按窗口周期回绕；切割点之后的回绕位置由右段自己的窗口表达。
+        // - 正放：消费 [ss, ss+S·r) —— 左段终点派生为 ss+S·r。
+        //   **不得按旧存储 se 钳制**：延伸/陈旧工程的 se 与长度脱钩，
+        //   钳制会把左段窗口错误截短（该有声处变静音）。
+        // - 倒放：消费 [se−S·r, se)，锚定 se —— 左段锚点保持不变；
+        //   ss 卫生化为派生窗口起点 se−S·r。
+        //   **不得按旧 ss 钳制**（同理）。
         {
             let orig_src_start = self.clips[idx].source_start_sec;
             let orig_src_end = self.clips[idx].source_end_sec;
-            if self.clips[idx].reversed {
-                let new_src_start = orig_src_end - left_len * left_rate;
-                self.clips[idx].source_start_sec =
-                    new_src_start.clamp(orig_src_start, orig_src_end);
+            if self.clips[idx].loop_enabled {
+                // 保留窗口不变（见上方注释）。
+            } else if self.clips[idx].reversed {
+                let new_win_start = orig_src_end - left_len * left_rate;
+                self.clips[idx].source_start_sec = new_win_start;
+                self.clips[idx].source_end_sec = orig_src_end;
             } else {
-                let new_src_end = orig_src_start + left_len * left_rate;
-                self.clips[idx].source_end_sec = new_src_end.clamp(orig_src_start, orig_src_end);
+                self.clips[idx].source_start_sec = orig_src_start;
+                self.clips[idx].source_end_sec = orig_src_start + left_len * left_rate;
             }
         }
         // Fade semantics on split:
@@ -4441,14 +5202,52 @@ impl TimelineState {
         } else {
             1.0
         };
-        if right.reversed {
-            if right.source_end_sec.is_finite() {
-                right.source_end_sec =
-                    (right.source_end_sec - left_len * rate).max(right.source_start_sec);
+        if right.loop_enabled {
+            // Loop（循环源）：右段锚点推进到切割点在**整个媒体文件**上的环绕
+            // 位置（对齐 REAPER 切割循环项的行为）：
+            //   正放 new_start = floor_mod(start + u, D)
+            //   倒放 new_end   = floor_mod(end − u, D)
+            // 其中 u = left_len·rate，D = 完整媒体时长。Loop 模式下音频只依赖
+            // 锚点与 D，另一端字段保持原值即可；左段窗口不变。
+            // 周期 D：优先媒体元数据；缺失（纯 MIDI/音高参考块、无元数据音频）
+            // 时兜底 clip_loop_wrap_total_sec（回退 max(end,start)）——
+            // 新建 clip 默认 loop=true，若因缺元数据整段跳过推进，右段会从
+            // 窗口相位 0 重新开始而非从切割点继续。
+            let wrap_total = crate::state::clip_source_media_duration_sec(&right)
+                .unwrap_or_else(|| right.source_end_sec.max(right.source_start_sec));
+            if let Some(d) = self
+                .source_file_duration_sec(&right)
+                .or(Some(wrap_total))
+                .filter(|d| *d > 1e-9 && d.is_finite())
+            {
+                let mut u = left_len * rate;
+                u %= d;
+                if u < 0.0 {
+                    u += d;
+                }
+                if right.reversed {
+                    let wrapped = (right.source_end_sec - u).rem_euclid(d);
+                    right.source_end_sec = if wrapped <= 0.0 { d } else { wrapped };
+                } else {
+                    right.source_start_sec =
+                        (right.source_start_sec + u).rem_euclid(d);
+                }
             }
+        } else if right.reversed {
+            // 倒放（锚定 source_end）：右段消费窗口为 [ss₀, se−S·r) ——
+            // 锚点沿消费方向下移 S·r。**绝不能按旧 ss 上钳**：延伸/陈旧
+            // 工程的 ss 可能大于新锚点（用户工程实测：钳制把 1.15 抬回
+            // 5.53，右段窗口几乎全落在媒体外 → 偏移彻底错乱）。
+            // ss 卫生化为新窗口起点（se'−R·r，恰等于原真实窗口起点），
+            // 使存储字段 == 消费窗口，工程数据自洽。
+            let new_end = right.source_end_sec - left_len * rate;
+            right.source_start_sec = new_end - right_len * rate;
+            right.source_end_sec = new_end;
         } else if right.source_start_sec.is_finite() {
+            // 正放（派生窗口）：右段消费区间为 [ss+S·r, ss+S·r+R·r)。
             right.source_start_sec =
                 (right.source_start_sec + left_len * rate).clamp(-1_000_000.0, 1_000_000.0);
+            right.source_end_sec = right.source_start_sec + right_len * rate;
         }
         // Propagate group_id to the split-off right clip
         right.group_id = self.clips[idx].group_id.clone();
@@ -4464,12 +5263,6 @@ impl TimelineState {
         split_sec: f64,
         opts: &SplitTransitionOptions,
     ) -> Option<String> {
-        let orig_source_end = self
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
-            .map(|c| c.source_end_sec)
-            .unwrap_or(0.0);
         let right_id = self.split_clip(clip_id, split_sec)?;
         let effective_duration_sec = match opts.duration_unit {
             SplitTransitionDurationUnit::Seconds => opts.duration_sec,
@@ -4490,13 +5283,7 @@ impl TimelineState {
             }
         };
         if opts.enabled && effective_duration_sec.is_finite() && effective_duration_sec > 0.0 {
-            self.apply_split_transition(
-                clip_id,
-                &right_id,
-                opts,
-                effective_duration_sec,
-                orig_source_end,
-            );
+            self.apply_split_transition(clip_id, &right_id, opts, effective_duration_sec);
         }
         Some(right_id)
     }
@@ -4507,7 +5294,6 @@ impl TimelineState {
         right_id: &str,
         opts: &SplitTransitionOptions,
         duration_sec: f64,
-        orig_source_end: f64,
     ) {
         let Some(left_idx) = self.clips.iter().position(|c| c.id == left_id) else {
             return;
@@ -4552,12 +5338,9 @@ impl TimelineState {
             }
             SplitTransitionMode::ExtendOverlap => {
                 // 前 clip 与后 clip 各向外延长 X，形成 2X 秒的重叠区域。
-                // 两侧都会钳制在 Clip 原素材的实际长度范围内（source 0 .. 文件时长），
-                // 后 clip 同时不能越过时间轴起点 0。
-                let source_end_limit = self
-                    .source_file_duration_sec(&self.clips[left_idx])
-                    .unwrap_or(orig_source_end.max(0.0));
-
+                // 源媒体可用量不再设限（产品决策：向左/向右延伸均无界）——
+                // 越出源素材的部分由渲染管线按静音填充；仅保留时间轴约束
+                //（后 clip 不能越过时间轴起点 0）。
                 let left_rate = {
                     let left = &self.clips[left_idx];
                     if left.playback_rate.is_finite() && left.playback_rate > 0.0 {
@@ -4566,15 +5349,7 @@ impl TimelineState {
                         1.0
                     }
                 };
-                let left_source_avail_sec = {
-                    let left = &self.clips[left_idx];
-                    if left.reversed {
-                        left.source_start_sec.max(0.0) / left_rate
-                    } else {
-                        (source_end_limit - left.source_end_sec).max(0.0) / left_rate
-                    }
-                };
-                let left_grow = duration.min(left_source_avail_sec).max(0.0);
+                let left_grow = duration.max(0.0);
 
                 let right_rate = {
                     let right = &self.clips[right_idx];
@@ -4584,17 +5359,8 @@ impl TimelineState {
                         1.0
                     }
                 };
-                let right_source_avail_sec = {
-                    let right = &self.clips[right_idx];
-                    if right.reversed {
-                        (source_end_limit - right.source_end_sec).max(0.0) / right_rate
-                    } else {
-                        right.source_start_sec.max(0.0) / right_rate
-                    }
-                };
                 let right_grow = duration
                     .min(self.clips[right_idx].start_sec)
-                    .min(right_source_avail_sec)
                     .max(0.0);
 
                 let overlap_sec = left_grow + right_grow;
@@ -4604,29 +5370,66 @@ impl TimelineState {
 
                 // 前 clip 末尾向后延长 left_grow，同时扩展 source 范围，
                 // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
+                // Loop（循环源）clip：延长部分由循环回绕内容填充，不改源窗口。
+                // 非 Loop：正放终点/倒放起点随增长派生，越出媒体的部分为静音。
                 {
                     let left = &mut self.clips[left_idx];
                     left.length_sec += left_grow;
-                    if left.reversed {
-                        left.source_start_sec =
-                            (left.source_start_sec - left_grow * left_rate).max(0.0);
-                    } else {
-                        left.source_end_sec =
-                            (left.source_end_sec + left_grow * left_rate).min(source_end_limit);
+                    if !left.loop_enabled {
+                        if left.reversed {
+                            left.source_start_sec =
+                                left.source_start_sec - left_grow * left_rate;
+                        } else {
+                            left.source_end_sec =
+                                left.source_end_sec + left_grow * left_rate;
+                        }
                     }
                 }
 
                 // 后 clip 起始位置向前延长 right_grow，同时扩展 source 范围。
                 {
+                    let media_dur = self.source_file_duration_sec(&self.clips[right_idx]);
+                    // Loop（循环源）锚点环绕：媒体时长未知时原样保留。
+                    let wrap_anchor = |value: f64| -> f64 {
+                        match media_dur.filter(|d| d.is_finite() && *d > 1e-9) {
+                            Some(d) => {
+                                let m = value % d;
+                                if m < 0.0 { m + d } else { m }
+                            }
+                            None => value,
+                        }
+                    };
                     let right = &mut self.clips[right_idx];
                     right.start_sec = (right.start_sec - right_grow).max(0.0);
                     right.length_sec += right_grow;
-                    if right.reversed {
+                    if right.loop_enabled {
+                        // Loop：头部增长若不动源窗口，新起点会从旧相位重新消费，
+                        // 内容整体后移并与左尾交叉淡化错相。锚点须按增长量沿
+                        // 消费方向回退并环绕（正放减 / 倒放加），保持内容的
+                        // 绝对时间线位置不变 —— 与非 Loop 分支的语义一致。
+                        if right.reversed {
+                            right.source_end_sec =
+                                wrap_anchor(right.source_end_sec + right_grow * right_rate);
+                        } else {
+                            right.source_start_sec =
+                                wrap_anchor(right.source_start_sec - right_grow * right_rate);
+                        }
+                    } else if right.reversed {
+                        // 倒放非 Loop：头部延伸使锚点(source_end)越过媒体时长
+                        // → 前导静音，不再按媒体时长钳制。窗口起点随新锚点/
+                        // 长度同步派生，保持存储字段 == 消费窗口。
                         right.source_end_sec =
-                            (right.source_end_sec + right_grow * right_rate).min(source_end_limit);
-                    } else {
+                            right.source_end_sec + right_grow * right_rate;
                         right.source_start_sec =
-                            (right.source_start_sec - right_grow * right_rate).max(0.0);
+                            right.source_end_sec - right.length_sec * right_rate;
+                    } else {
+                        // 正放非 Loop：头部延伸使起点向下穿越媒体起点 → 前导
+                        // 静音（派生窗口），不再钳制到 0。终点同步派生，
+                        // 保持存储字段 == 消费窗口。
+                        right.source_start_sec =
+                            right.source_start_sec - right_grow * right_rate;
+                        right.source_end_sec =
+                            right.source_start_sec + right.length_sec * right_rate;
                     }
                 }
 
@@ -4719,41 +5522,51 @@ impl TimelineState {
             return;
         }
 
-        // 5. For each affected group, generate a new group UUID for right-side clips
-        let mut right_group_map: HashMap<Option<String>, Option<String>> = HashMap::new();
+        // 5. 仅对**确实发生了分割**的组生成右组 UUID。
+        //    输入 clip 的切割点可能被 clamp 在其范围外（返回 None、无新 clip），
+        //    这类组不得发生右侧迁移 —— 否则整个组会被错误地搬进一个空降的新组。
+        //    判定依据：该组内出现了本次新增的 clip（右半继承原组 id，见 split_clip）。
+        let mut right_group_map: HashMap<String, Option<String>> = HashMap::new();
         for gid_opt in &affected_groups {
-            let new_gid = gid_opt
-                .as_ref()
-                .map(|_| Some(new_id("group")))
-                .unwrap_or(None);
-            right_group_map.insert(gid_opt.clone(), new_gid);
+            let Some(ref gid) = gid_opt else { continue };
+            let has_actual_split = self.clips.iter().any(|clip| {
+                new_ids.contains(&clip.id) && clip.group_id.as_ref() == Some(gid)
+            });
+            if has_actual_split {
+                right_group_map.insert(gid.clone(), Some(new_id("group")));
+            }
         }
 
-        // 6. Assign new group_id to right-side clips (new clips and unsplit clips to the right)
-        for gid_opt in affected_groups.iter().filter(|g| g.is_some()) {
-            let Some(ref gid) = gid_opt else {
-                continue;
-            };
-            let new_gid = right_group_map
-                .get(gid_opt)
-                .and_then(|g| g.clone());
-
+        // 6. 右侧成员迁移（仅限实际发生分割的组）：新右半必然进入新组；
+        //    未被切开但完全位于切割点右侧的同组成员也迁入新组；
+        //    位于左侧的成员保留原组。
+        for (gid, new_gid) in &right_group_map {
+            let Some(ref migrated_gid) = new_gid else { continue };
             for clip in self.clips.iter_mut() {
                 if clip.group_id.as_ref() != Some(gid) {
                     continue;
                 }
                 if new_ids.contains(&clip.id) {
-                    // Newly created right-half clip → assign new group
-                    clip.group_id = new_gid.clone();
+                    clip.group_id = Some(migrated_gid.clone());
                 } else if clip.start_sec >= split_sec - 1e-6 {
-                    // Unsplit clip entirely to the right → move to new group
-                    clip.group_id = new_gid.clone();
+                    clip.group_id = Some(migrated_gid.clone());
                 }
-                // else: unsplit clip to the left → keep original group
             }
         }
 
-        // 7. Dissolve single-member groups
+        // 7. Dissolve single-member groups（仅限本次操作涉及的组）
+        // 只溶解"本次分割新建"的单成员组；用户原有的编组即使因成员迁移到
+        // 右组而暂时只剩 1 个成员也不得拆散。此外必须**只扫描本次涉及**的组：
+        // 连续多次 split 时，前一次调用合法保留下来的单成员原组，
+        // 不能被后一次调用的全局溶解误伤。
+        let protected_original_groups: HashSet<&String> = affected_groups
+            .iter()
+            .filter_map(|gid_opt| gid_opt.as_ref())
+            .collect();
+        let mut involved_groups: HashSet<&String> = protected_original_groups.clone();
+        for gid in right_group_map.values().flatten() {
+            involved_groups.insert(gid);
+        }
         let mut group_counts: HashMap<String, usize> = HashMap::new();
         for clip in &self.clips {
             if let Some(ref gid) = clip.group_id {
@@ -4763,6 +5576,12 @@ impl TimelineState {
 
         for clip in &mut self.clips {
             if let Some(ref gid) = clip.group_id {
+                if !involved_groups.contains(gid) {
+                    continue;
+                }
+                if protected_original_groups.contains(gid) {
+                    continue;
+                }
                 if group_counts.get(gid).copied().unwrap_or(0) < 2 {
                     clip.group_id = None;
                 }
@@ -4814,6 +5633,11 @@ impl TimelineState {
         glued.name = "Glued".to_string();
         glued.start_sec = start;
         glued.length_sec = (end - start).max(0.01);
+        // Loop（循环源）：无论烘焙成功与否，胶合产物都不应再按首个片段的
+        // 窗口回绕 —— 失败兜底路径会保留 first 的源窗口铺满合并跨度，
+        // 若保留 loop=true 会把首段内容循环成整段（凭空捏造内容）。
+        // 成功路径下方也会重置；此处提前统一关闭。
+        glued.loop_enabled = false;
 
         // Render selected clips into one baked audio file so glue includes all selected data,
         // not only the first clip's source payload.
@@ -4871,6 +5695,9 @@ impl TimelineState {
                 glued.source_end_sec = rendered_duration_sec;
                 glued.playback_rate = 1.0;
                 glued.reversed = false;
+                // 胶合产物是完整烘焙的独立源文件（覆盖原循环内容），
+                // Loop 属性不再有意义，重置为关闭。
+                glued.loop_enabled = false;
                 glued.gain = 1.0;
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
@@ -5028,6 +5855,8 @@ impl TimelineState {
             length_sec: f64,
             playback_rate: f32,
             reversed: bool,
+            /// Loop（循环源）回绕描述：(周期D, 正放锚点, 倒放锚点末端)；None = 非 Loop。
+            loop_cycle: Option<(f64, f64, f64)>,
             src_start: f64,
             src_end: f64,
             original_midi: Option<Vec<MidiNoteEvent>>,
@@ -5046,6 +5875,33 @@ impl TimelineState {
                 } else {
                     clip.length_sec
                 };
+                // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负，
+                // 域外为静音）—— fallback 曲线与 remap 写回共用同一坐标系。
+                let src_start = if !clip.loop_enabled && clip.reversed {
+                    let r = if clip.playback_rate.is_finite() && clip.playback_rate > 1e-6 {
+                        clip.playback_rate as f64
+                    } else {
+                        1.0
+                    };
+                    src_end - clip.length_sec.max(0.0) * r
+                } else {
+                    clip.source_start_sec
+                };
+                // 倒放锚点 clamp 规则与 place_note_occurrence_in_loop 一致：
+                // 周期来自媒体时长时 clamp 到媒体时长；周期退化为窗口跨度时
+                // 保持原始 source_end（否则 slip 窗口的倒放相位被错误平移）。
+                let clip_media_total = clip_source_media_duration_sec(clip).filter(|d| *d > 1e-9);
+                let loop_cycle = clip_loop_cycle_span_sec(clip).map(|cycle| {
+                    (
+                        cycle,
+                        clip.source_start_sec,
+                        match clip_media_total {
+                            Some(d) => clip.source_end_sec.min(d),
+                            None => clip.source_end_sec,
+                        }
+                        .max(0.0),
+                    )
+                });
                 Some(ClipMeta {
                     clip_id: clip_id.clone(),
                     root,
@@ -5053,7 +5909,8 @@ impl TimelineState {
                     length_sec: clip.length_sec,
                     playback_rate: clip.playback_rate,
                     reversed: clip.reversed,
-                    src_start: clip.source_start_sec.max(0.0),
+                    loop_cycle,
+                    src_start,
                     src_end,
                     original_midi: clip.midi_note_data.clone(),
                 })
@@ -5070,6 +5927,7 @@ impl TimelineState {
                 info.reversed,
                 info.src_start,
                 info.src_end,
+                info.loop_cycle,
             );
 
             // Step 2: 同步 params 并读取 pitch_edit
@@ -5108,25 +5966,25 @@ impl TimelineState {
                 .collect();
 
             // Step 4: 转换为 MIDI 音符事件
-            let mut midi_notes =
-                Self::pitch_curve_to_midi_notes(&merged, fp_sec, info.length_sec);
+            let midi_notes = Self::pitch_curve_to_midi_notes(&merged, fp_sec, info.length_sec);
 
-            // Step 5: 根据 stretch / reverse 重映射音符时间
-            Self::remap_midi_note_times(
-                &mut midi_notes,
+            // Step 5: 根据 stretch / reverse / loop 重映射音符时间
+            let remapped = Self::remap_midi_note_times(
+                midi_notes,
                 info.length_sec,
                 info.src_start,
                 info.src_end,
                 info.playback_rate,
                 info.reversed,
+                info.loop_cycle,
             );
 
             // Step 6: 写回 clip，同时重新计算 pitch_range
             if let Some(clip) = self.clips.iter_mut().find(|c| c.id == info.clip_id) {
-                let min_note = midi_notes
+                let min_note = remapped
                     .iter()
                     .fold(127.0f32, |m, n| m.min(n.note));
-                let max_note = midi_notes
+                let max_note = remapped
                     .iter()
                     .fold(0.0f32, |m, n| m.max(n.note));
                 let padding = 2.0f32;
@@ -5134,7 +5992,7 @@ impl TimelineState {
                     min: (min_note - padding).max(0.0),
                     max: (max_note + padding).min(127.0),
                 });
-                clip.midi_note_data = Some(midi_notes);
+                clip.midi_note_data = Some(remapped);
             }
         }
 
@@ -5164,6 +6022,9 @@ impl TimelineState {
 
     /// 从 midi_note_data 构建一段 clip 时长内的回退音高曲线（单位：MIDI note number）。
     /// 时间映射与 `assemble_pitch_orig_from_cache` 中的 MIDI clip 路径保持一致。
+    /// Loop（循环源）启用时，音符按媒体时长 D 的锚点回绕重复铺满整个 clip 长度
+    /// （与音频渲染的 floor_mod 映射一致；纯 MIDI clip 无媒体 → D 退化为窗口跨度）。
+    /// `loop_cycle = Some((周期D, 正放锚点, 倒放锚点末端))`；None 为非循环路径。
     fn build_fallback_pitch_from_midi(
         length_sec: f64,
         fp: f64,
@@ -5172,6 +6033,7 @@ impl TimelineState {
         reversed: bool,
         src_start: f64,
         src_end: f64,
+        loop_cycle: Option<(f64, f64, f64)>,
     ) -> Vec<f32> {
         let fp_sec = fp / 1000.0;
         let total_frames = ((length_sec.max(0.0) * 1000.0) / fp).ceil().max(1.0) as usize;
@@ -5184,6 +6046,41 @@ impl TimelineState {
         let src_total = src_end - src_start;
 
         for note in midi_notes {
+            let note_value = note.note as f32;
+
+            // Loop（循环源）：媒体时长锚点回绕放置（不能用窗口比较过滤可见性 ——
+            // split 的环绕窗口 start > end 会把音符全部误判为越界）。
+            if let Some((cycle_src_sec, fwd_anchor, rev_anchor_end)) = loop_cycle {
+                if let Some(placement) = crate::state::place_note_occurrence_frames(
+                    reversed,
+                    playback_rate as f64,
+                    fp,
+                    fwd_anchor,
+                    rev_anchor_end,
+                    cycle_src_sec,
+                    note.start_sec,
+                    note.end_sec,
+                ) {
+                    let mut cycle_offset = 0usize;
+                    while cycle_offset < total_frames {
+                        let write_start = cycle_offset + placement.first_start_frame;
+                        let write_end =
+                            (cycle_offset + placement.first_start_frame + placement.len_frames)
+                                .min(total_frames);
+                        if write_start >= write_end {
+                            break;
+                        }
+                        for f in write_start..write_end {
+                            if note_value > curve[f] || curve[f] <= 0.0 {
+                                curve[f] = note_value;
+                            }
+                        }
+                        cycle_offset += placement.cycle_frames;
+                    }
+                    continue;
+                }
+            }
+
             let rel_start = (note.start_sec - src_start).max(0.0);
             let rel_end = (note.end_sec - src_start).min(src_total);
             if rel_end <= rel_start {
@@ -5203,12 +6100,16 @@ impl TimelineState {
             }
 
             let frame_start = ((eff_start / pr) / fp_sec).round() as usize;
-            let frame_end = (((eff_end / pr) / fp_sec).round() as usize).min(total_frames);
-            if frame_start < frame_end {
-                let note_value = note.note as f32;
-                for f in frame_start..frame_end {
-                    if note_value > curve[f] || curve[f] <= 0.0 {
-                        curve[f] = note_value;
+            let frame_end_raw = (eff_end / pr) / fp_sec;
+            let frame_end_raw = frame_end_raw.round() as usize;
+            {
+                // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
+                let frame_end = frame_end_raw.min(total_frames);
+                if frame_start < frame_end {
+                    for f in frame_start..frame_end {
+                        if note_value > curve[f] || curve[f] <= 0.0 {
+                            curve[f] = note_value;
+                        }
                     }
                 }
             }
@@ -5219,24 +6120,64 @@ impl TimelineState {
 
     /// 将 pitch_curve_to_midi_notes 输出的"提取时间"坐标重映射为 source-time 坐标，
     /// 以匹配 stretch（playback_rate）和倒放（reversed）参数。
+    ///
+    /// Loop（循环源）启用时（`loop_cycle = Some((周期D, 正放锚点, 倒放锚点末端))`），
+    /// 提取时间按音频渲染的 floor_mod 锚点映射回**媒体文件域** `[0, D)`：
+    ///   正放 s(proj) = floor_mod(source_start + proj·rate, D)
+    ///   倒放 s(proj) = floor_mod(min(source_end, D) − proj·rate, D)
+    /// 跨越回绕边界的音符会被拆分，保证存储坐标始终落在 [0, D) 内 —— 与
+    /// assemble / emit / build_fallback 的音符放置算法使用同一坐标系。
+    /// 非 Loop 保持既有窗口映射约定不变。
     fn remap_midi_note_times(
-        notes: &mut [MidiNoteEvent],
+        notes: Vec<MidiNoteEvent>,
         length_sec: f64,
         src_start: f64,
         src_end: f64,
         playback_rate: f32,
         reversed: bool,
-    ) {
+        loop_cycle: Option<(f64, f64, f64)>,
+    ) -> Vec<MidiNoteEvent> {
+        let mut out: Vec<MidiNoteEvent> = Vec::with_capacity(notes.len());
+        // 速率净化提前：Loop 分支同样使用净化后的速率（非有限/过小的速率按
+        // 1.0 处理），避免 NaN/负值把音符映射成垃圾坐标后被静默丢弃。
         let pr = if playback_rate.is_finite() && playback_rate > 0.0 {
             playback_rate as f64
         } else {
             1.0
         };
-        let src_total = src_end - src_start;
 
-        for note in notes.iter_mut() {
+        for note in notes {
             let proj_start = note.start_sec; // 当前为提取时间（相对 clip 起点的项目时间）
             let proj_end = note.end_sec;
+
+            if let Some((cycle, fwd_anchor, rev_anchor_end)) = loop_cycle {
+                if !reversed {
+                    // 正放：v = 锚点 + 消费量，直接对 D 取模得文件域坐标。
+                    let v_start = proj_start * pr + fwd_anchor;
+                    let v_end = proj_end * pr + fwd_anchor;
+                    for (s, e) in split_range_into_periods(v_start, v_end, cycle) {
+                        out.push(MidiNoteEvent {
+                            start_sec: s,
+                            end_sec: e,
+                            ..note.clone()
+                        });
+                    }
+                } else {
+                    // 倒放：w = 倒放锚点 − 消费量，对 D 取模得文件域坐标。
+                    let w_lo = rev_anchor_end - proj_end * pr;
+                    let w_hi = rev_anchor_end - proj_start * pr;
+                    for (s, e) in split_range_into_periods(w_lo, w_hi, cycle) {
+                        out.push(MidiNoteEvent {
+                            start_sec: s,
+                            end_sec: e,
+                            ..note.clone()
+                        });
+                    }
+                }
+                continue;
+            }
+
+            let src_total = src_end - src_start;
 
             let (new_start, new_end) = if reversed {
                 let eff_start = (length_sec - proj_end) * pr;
@@ -5248,9 +6189,14 @@ impl TimelineState {
                 (proj_start * pr + src_start, proj_end * pr + src_start)
             };
 
-            note.start_sec = new_start;
-            note.end_sec = new_end;
+            out.push(MidiNoteEvent {
+                start_sec: new_start,
+                end_sec: new_end,
+                ..note
+            });
         }
+
+        out
     }
 
     /// 将 pitch 曲线（Vec<f32> of MIDI note numbers）转换为 MidiNoteEvent 列表。
@@ -5381,6 +6327,8 @@ impl TimelineState {
         glued.source_end_sec = length;
         glued.playback_rate = 1.0;
         glued.reversed = false;
+        // 音符已铺满整个胶合区间（含 rest），Loop 回绕不再有意义。
+        glued.loop_enabled = false;
         glued.duration_sec = None;
         glued.duration_frames = None;
         glued.waveform_preview = None;
