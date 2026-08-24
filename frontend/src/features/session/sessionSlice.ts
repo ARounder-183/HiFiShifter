@@ -832,7 +832,10 @@ function applyOptimisticClipState(
         clip.sourceStartSec = Number(payload.sourceStartSec) || 0;
     }
     if (payload.sourceEndSec !== undefined) {
-        clip.sourceEndSec = Math.max(0, Number(payload.sourceEndSec) || 0);
+        // 不得钳制到 ≥0：倒放 Clip 的消费窗口锚定 se，se<0（整窗在媒体
+        // 下方的静音段）与 se>D（前导静音）都是合法状态。
+        const value = Number(payload.sourceEndSec);
+        clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
     }
     if (payload.playbackRate !== undefined) {
         clip.playbackRate = clamp(Number(payload.playbackRate), 0.1, 10);
@@ -898,7 +901,9 @@ function applyOptimisticBulkClipState(
             clip.sourceStartSec = Number(update.sourceStartSec) || 0;
         }
         if (update.sourceEndSec !== undefined) {
-            clip.sourceEndSec = Math.max(0, Number(update.sourceEndSec) || 0);
+            // 同 setClipSourceRange：不得钳制到 ≥0（倒放窗口合法含负值）。
+            const value = Number(update.sourceEndSec);
+            clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
         }
         if (update.fadeInSec !== undefined) {
             clip.fadeInSec = Math.max(0, Number(update.fadeInSec) || 0);
@@ -974,9 +979,16 @@ function applyTimelineState(
             // Allow negative sourceStartSec to represent leading silence (slip-edit past source start).
             sourceStartSec: Number(clip.source_start_sec ?? 0) || 0,
             sourceEndSec: (() => {
-                const raw = Math.max(0, Number(clip.source_end_sec ?? 0));
-                // 旧项目兼容：source_end_sec == 0 曾表示"到源文件末尾"，修正为实际时长
-                if (raw === 0) {
+                const raw = Number(clip.source_end_sec);
+                // 仅当字段**缺失/非法**时才回退默认值。
+                // 注意两点：
+                // 1. 不得 Math.max(0, …)：倒放 Clip 的消费窗口锚定 se，
+                //    se<0（整窗在媒体下方的静音段）是合法状态 —— 钳零会把
+                //    分割出的静音段凭空拉回媒体域；
+                // 2. 不得把 se==0 当作"到媒体末尾"的旧哨兵改写为 duration：
+                //    该哨兵语义已在后端 open_project 迁移中展开为真实时长，
+                //    此处的二次改写会摧毁合法的 0/负值窗口。
+                if (!Number.isFinite(raw)) {
                     return (
                         Number(clip.duration_sec ?? 0) || Math.max(0, Number(clip.length_sec ?? 1))
                     );
@@ -1957,7 +1969,12 @@ const sessionSlice = createSlice({
                 clip.sourceStartSec = Number(action.payload.sourceStartSec) || 0;
             }
             if (action.payload.sourceEndSec !== undefined) {
-                clip.sourceEndSec = Math.max(0, action.payload.sourceEndSec);
+                // 注意：**不得钳制到 ≥0**。倒放 Clip 的消费窗口锚定 se，
+                // 合法状态包含 se<0（整窗在媒体下方的纯静音段）与 se>D
+                // （前导静音）；此处一旦拍扁，渲染/音频/后续编辑全部基于
+                // 被摧毁的窗口工作。
+                const value = Number(action.payload.sourceEndSec);
+                clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
             }
         },
         setClipFades(

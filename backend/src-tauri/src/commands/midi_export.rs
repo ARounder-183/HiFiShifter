@@ -701,7 +701,8 @@ fn read_pitch_for_clip(
 
         let pr = clip.playback_rate as f64;
         let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-        let src_start = clip.source_start_sec.max(0.0);
+        // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]）——
+        // 与引擎 emit / assemble 的窗口模型一致。
         let src_end = if clip.source_end_sec > 0.0 {
             clip.source_end_sec
         } else {
@@ -711,6 +712,11 @@ fn read_pitch_for_clip(
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(clip_len)
                 .max(clip_len)
+        };
+        let src_start = if !clip.loop_enabled && clip.reversed {
+            src_end - clip_len * pr_valid
+        } else {
+            clip.source_start_sec
         };
         let src_total_len = src_end - src_start;
 
@@ -807,11 +813,13 @@ fn read_pitch_for_clip(
     let pr = clip.playback_rate as f64;
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
 
+    // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]（输出在下方整体反转）。
+    let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
     let mut curve = pitch_clip::trim_and_resample_midi(
         &full_midi,
         fp,
-        clip.source_start_sec,
-        clip.source_end_sec,
+        trim_src_start,
+        trim_src_end,
         pr,
         clip_len,
         clip.loop_enabled,

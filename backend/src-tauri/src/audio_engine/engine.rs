@@ -1502,7 +1502,9 @@ fn emit_clip_pitch_data_for_clip(
 
         let pr = clip.playback_rate as f64;
         let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-        let src_start = clip.source_start_sec.max(0.0);
+        // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负/超界，
+        // 域外为静音；正放/Loop 保持原字段）。音符可见性与镜像全部以该窗口
+        // 为基准 —— 否则延伸过的倒放 Clip 曲线整体错位。
         let src_end = if clip.source_end_sec > 0.0 {
             clip.source_end_sec
         } else {
@@ -1513,6 +1515,11 @@ fn emit_clip_pitch_data_for_clip(
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(clip_len_sec)
                 .max(clip_len_sec)
+        };
+        let src_start = if !clip.loop_enabled && clip.reversed {
+            src_end - clip_len_sec * pr_valid
+        } else {
+            clip.source_start_sec
         };
         let src_total_len = src_end - src_start;
 
@@ -1640,11 +1647,13 @@ fn emit_clip_pitch_data_for_clip(
     // 统一截取 + resample（rate==1 时 resample 实际为无损复制）
     let pr = clip.playback_rate as f64;
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
+    // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+    let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
     let midi_curve = crate::pitch_clip::trim_and_resample_midi(
         &cached.midi,
         frame_period_ms,
-        clip.source_start_sec,
-        clip.source_end_sec,
+        trim_src_start,
+        trim_src_end,
         pr,
         clip.length_sec.max(0.0),
         clip.loop_enabled,

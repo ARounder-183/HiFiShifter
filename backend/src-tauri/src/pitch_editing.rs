@@ -977,11 +977,13 @@ pub(crate) fn build_clip_input_pitch_curve(
             frame_period_ms,
         )?;
 
+        // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+        let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
         let tm = crate::pitch_clip::trim_and_resample_midi(
             &clip_pitch.midi,
             frame_period_ms,
-            clip.source_start_sec,
-            clip.source_end_sec,
+            trim_src_start,
+            trim_src_end,
             clip_playback_rate,
             clip.length_sec.max(0.0),
             clip.loop_enabled,

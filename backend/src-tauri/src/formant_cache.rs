@@ -224,12 +224,14 @@ pub fn compute_formant_cache_entry_for_clip(
 
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
         .ok_or_else(|| "cannot_determine_clip_duration".to_string())?;
-    let source_start_sec = clip.source_start_sec.max(0.0);
-    // 派生窗口：与 build_snapshot 实时分支一致，非 Loop 正放取
-    // 起点+长度×速率（陈旧存储窗口不再冻结静音区/截断音频）。
-    let source_end_sec = crate::state::clip_effective_source_end_sec(clip)
-        .min(total_sec)
-        .max(source_start_sec);
+    // 消费窗口模型（与 build_snapshot 实时分支及离线渲染完全一致）：
+    //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+    // 切片 clamp 到媒体内；缓存键使用**未 clamp** 的窗口值，与 snapshot
+    // 的查找键逐字节成对（此前预计算键尾取原始 se、快照键尾取派生值，
+    // 陈旧窗口的正放 clip 两键永不匹配 → 预计算白算且状态闪烁）。
+    let (raw_win_start_sec, raw_win_end_sec) = crate::state::clip_playback_window_sec(clip);
+    let source_start_sec = raw_win_start_sec.max(0.0);
+    let source_end_sec = raw_win_end_sec.min(total_sec).max(source_start_sec);
 
     // Loop（循环源）：与 build_snapshot 的实时 Formant 分支保持一致 ——
     // 处理对象是**完整文件的自然顺序** PCM（方向由 mix 阶段的锚点回绕体现，
@@ -285,13 +287,14 @@ pub fn compute_formant_cache_entry_for_clip(
         &clip.id,
         Path::new(source_path),
         out_rate,
-        if loop_mode { 0.0 } else { source_start_sec },
+        if loop_mode { 0.0 } else { raw_win_start_sec.max(0.0) },
         if loop_mode {
             // 与 snapshot 的查找键使用同一来源（优先 clip 元数据）——
             // 避免 wav 头时长与解码帧时长在 1ms 量化边界处错开键值。
             crate::state::clip_source_media_duration_sec(clip).unwrap_or(total_sec)
         } else {
-            clip.source_end_sec
+            // 未 clamp 的消费窗口终点 —— 与 snapshot 查找键成对。
+            raw_win_end_sec
         },
         clip.reversed && !loop_mode,
         false,

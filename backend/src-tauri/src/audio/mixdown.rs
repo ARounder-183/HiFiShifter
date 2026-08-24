@@ -502,21 +502,12 @@ pub fn render_mixdown_interleaved(
         }
 
         // Source trimming is expressed in source-domain absolute seconds.
-        // Negative source_start_sec means leading silence in the clip (slip-edit past source start).
-        let source_start_sec_src = clip.source_start_sec.max(0.0);
-        let source_end_sec_src = clip.source_end_sec;
-        let pre_silence_sec_src = (-clip.source_start_sec).max(0.0);
+        // 非 Loop 统一使用**消费窗口模型**（clip_playback_window_sec）：
+        //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+        // win ∉ [0, D) 的部分渲染静音：正放 ss<0 / 倒放 se>D → 前导静音
+        //（方向不同！倒放的 ss<0 是尾部静音，切片自然变短即可，绝不能
+        // 再触发前导静音 —— 否则内容整体后移、该有声处被静音吞掉）。
         let loop_mode = clip.loop_enabled;
-
-        let source_start_sec = source_start_sec_src;
-        // pre-silence is in source seconds, so convert to timeline time by dividing by playback_rate.
-        // Loop（循环源）：负的 source_start 是"环绕锚点"（floor_mod 回绕），
-        // 不代表 leading silence，因此 Loop 模式不产生前导静音。
-        let pre_silence_sec = if loop_mode {
-            0.0
-        } else {
-            pre_silence_sec_src / playback_rate.max(1e-6)
-        };
 
         let total_sec = match clip_duration_sec_from_wav(in_rate, in_channels, &pcm) {
             Some(v) => v,
@@ -526,10 +517,13 @@ pub fn render_mixdown_interleaved(
             continue;
         }
 
-        let src_end_limit_sec = crate::state::clip_effective_source_end_sec(clip)
-            .min(total_sec)
-            .max(source_start_sec);
-        if !clip.loop_enabled && src_end_limit_sec - source_start_sec <= 1e-9 {
+        let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
+        let pre_silence_sec =
+            crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+
+        let src_end_limit_sec = win_end_sec.min(total_sec).max(win_start_sec.max(0.0));
+        let slice_start_sec = win_start_sec.max(0.0);
+        if !loop_mode && src_end_limit_sec - slice_start_sec <= 1e-9 {
             continue;
         }
 
@@ -545,7 +539,7 @@ pub fn render_mixdown_interleaved(
         // split 产生的"环绕窗口"会把倒放锚点错误地推回窗口起点。
         // 非 Loop 保持原窗口切片行为。
         let anchor_frame: i64 = if clip.reversed {
-            (source_end_sec_src.min(total_sec) * in_rate as f64).round() as i64
+            (clip.source_end_sec.min(total_sec) * in_rate as f64).round() as i64
         } else {
             (clip.source_start_sec * in_rate as f64).round() as i64
         };
@@ -571,7 +565,10 @@ pub fn render_mixdown_interleaved(
         } else {
             (0.0, clip_timeline_len_sec)
         };
-        let segment: Vec<f32> = if loop_mode {
+        // Loop（循环源）平铺段几何 —— 只计算一次，片段构建与 Formant 缓存键
+        // 必须共享同一组数值（此前两处各算一遍，一旦某处改动就会静默漂移：
+        // 键与内容不再对应，缓存互相投毒/永不命中）。
+        let (loop_advanced_anchor, loop_out_source_frames) = if loop_mode {
             let skip_src_frames =
                 (loop_seg_local_start_sec * playback_rate * in_rate as f64).round() as i64;
             let advanced_anchor = if clip.reversed {
@@ -584,16 +581,22 @@ pub fn render_mixdown_interleaved(
                 * in_rate as f64)
                 .ceil()
                 .max(2.0)) as usize;
+            (advanced_anchor, out_source_frames)
+        } else {
+            (anchor_frame, 0usize)
+        };
+        let segment: Vec<f32> = if loop_mode {
             build_loop_tiled_segment(
                 &pcm,
                 in_channels_usize,
-                advanced_anchor,
+                loop_advanced_anchor,
                 clip.reversed,
-                out_source_frames,
+                loop_out_source_frames,
             )
         } else {
-            // Slice source by time in its own rate.
-            let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
+            // 非 Loop：按消费窗口切片（正放 [ss, ss+len·r)、倒放
+            // [se−len·r, se)，均 clamp 到媒体内；域外部分由前导/尾部静音表达）。
+            let src_i0 = (slice_start_sec * in_rate as f64).floor().max(0.0) as usize;
             let src_i1 = (src_end_limit_sec * in_rate as f64)
                 .ceil()
                 .max(src_i0 as f64) as usize;
@@ -642,28 +645,19 @@ pub fn render_mixdown_interleaved(
             // 长度/内容的结果投毒给另一方（get_or_compute 不做长度校验）。
             // 用"归一化锚点帧 + 消费帧数"（换算为秒）唯一确定 segment 内容。
             let (key_start_sec, key_end_sec) = if loop_mode {
-                let skip_src_frames =
-                    (loop_seg_local_start_sec * playback_rate * in_rate as f64).round() as i64;
-                let advanced_anchor = if clip.reversed {
-                    anchor_frame - skip_src_frames
-                } else {
-                    anchor_frame + skip_src_frames
-                };
-                let consumed_frames = ((loop_seg_len_sec.max(0.0)
-                    * playback_rate
-                    * in_rate as f64)
-                    .ceil()
-                    .max(2.0)) as i64;
-                let start_frame = advanced_anchor.rem_euclid(
+                // 与上方片段构建共享同一组几何数值（loop_advanced_anchor /
+                // loop_out_source_frames），键与 segment 内容严格对应。
+                let start_frame = loop_advanced_anchor.rem_euclid(
                     ((total_sec * in_rate as f64).round() as i64).max(1),
                 );
                 (
                     start_frame as f64 / in_rate as f64,
-                    (start_frame + consumed_frames) as f64 / in_rate as f64,
+                    (start_frame + loop_out_source_frames as i64) as f64 / in_rate as f64,
                 )
             } else {
-                // 派生窗口：非 Loop 正放的实际消费终点（已按媒体时长钳制）。
-                (clip.source_start_sec.max(0.0), src_end_limit_sec)
+                // 非 Loop：键编码实际消费窗口（正放/倒放统一取自
+                // clip_playback_window_sec，与 snapshot 实时域查找键成对）。
+                (slice_start_sec, win_end_sec)
             };
             let key = crate::formant_cache::make_formant_cache_key(
                 &clip.id,

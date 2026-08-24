@@ -885,11 +885,15 @@ pub(super) fn open_project(
 
     let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
     pf.timeline = resolved_timeline;
-    // 旧项目兼容迁移：source_end_sec == 0.0 曾表示"到源文件末尾"，
-    // 新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或 length_sec。
-    for clip in &mut pf.timeline.clips {
-        if clip.source_end_sec == 0.0 {
-            clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+    // 旧项目兼容迁移（仅 v3 及更早）：source_end_sec == 0.0 曾表示"到源文件
+    // 末尾"，新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或
+    // length_sec。v4+ 工程的 se 恒为真实坐标（可为 0/负值，如倒放静音段），
+    // 不得改写。
+    if pf.version < 4 {
+        for clip in &mut pf.timeline.clips {
+            if clip.source_end_sec == 0.0 {
+                clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+            }
         }
     }
     // v4 迁移：v3 及更早的工程 Clip 不携带 loop_enabled（Loop / 循环源）字段，
@@ -905,6 +909,12 @@ pub(super) fn open_project(
                 clip.loop_enabled = default_loop;
             }
         }
+    }
+    // 非 Loop 存储窗口规范化（对**所有版本**生效）：使存储字段 == 消费
+    // 窗口（正放 se:=ss+len·r；倒放 ss:=se−len·r），与消费端派生值一致、
+    // 功能零变化 —— 用于自愈历史版本写入的陈旧/发散源窗口。
+    for clip in &mut pf.timeline.clips {
+        crate::state::normalize_nonloop_source_window(clip);
     }
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。

@@ -124,6 +124,25 @@ mod world_vocoder;
 #[cfg(feature = "__test-internals")]
 pub mod __test_internals {
     pub use crate::pitch_clip::trim_and_resample_midi;
+    pub use crate::state::{
+        Clip, SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions,
+        TimelineState,
+    };
+
+    /// 消费窗口模型（正放 [ss, ss+len·r) / 倒放 [se−len·r, se)）。
+    pub fn playback_window_sec(c: &Clip) -> (f64, f64) {
+        crate::state::clip_playback_window_sec(c)
+    }
+
+    /// 方向性前导静音（正放看窗口起点、倒放看窗口终点越过媒体末端）。
+    pub fn leading_silence_sec(c: &Clip, media_total_sec: Option<f64>) -> f64 {
+        crate::state::clip_leading_silence_sec(c, media_total_sec)
+    }
+
+    /// trim_and_resample_midi 的窗口实参（非 Loop 倒放重定向到 [se−len·r, se]）。
+    pub fn pitch_trim_window_sec(c: &Clip) -> (f64, f64) {
+        crate::state::clip_pitch_trim_window_sec(c)
+    }
 }
 
 use std::path::{Path, PathBuf};

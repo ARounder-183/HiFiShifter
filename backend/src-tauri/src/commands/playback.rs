@@ -909,7 +909,6 @@ fn render_single_clip(
             1.0
         }
     };
-    let source_start_sec = clip.source_start_sec.max(0.0);
     let source_end_sec = clip.source_end_sec;
 
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
@@ -919,21 +918,22 @@ fn render_single_clip(
     }
 
     // ── 片段构建 ─────────────────────────────────────────────────────────────
+    // 非 Loop 统一使用**消费窗口模型**（clip_playback_window_sec，与 mixdown /
+    // 实时 snapshot 一致）：
+    //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+    // win ∉ [0, D) 的部分渲染静音；前导静音按消费方向取值（正放看窗口起点、
+    // 倒放看窗口终点越过媒体末端），绝不能把倒放的负窗口下沿误当前导静音。
     // Loop（循环源）：从完整媒体按整文件模运算回绕生成片段
     //   正放 idx(f) = floor_mod(source_start + f, D_frames)
     //   倒放 idx(f) = floor_mod(source_end − 1 − f, D_frames)
-    // 即"循环原始音频文件"（对齐 REAPER Loop source）。负的 source_start
-    // 是环绕锚点而非 leading silence。非 Loop 保持原窗口切片行为。
+    // 负的 source_start 是环绕锚点而非 leading silence。
     let loop_mode = clip.loop_enabled;
-    let pre_silence_sec = if loop_mode {
-        0.0
-    } else {
-        (-clip.source_start_sec).max(0.0) / playback_rate.max(1e-6)
-    };
-    let src_end_limit_sec = crate::state::clip_effective_source_end_sec(clip)
-        .min(total_sec)
-        .max(source_start_sec);
-    if !loop_mode && src_end_limit_sec - source_start_sec <= 1e-9 {
+    let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
+    let pre_silence_sec =
+        crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+    let slice_start_sec = win_start_sec.max(0.0);
+    let src_end_limit_sec = win_end_sec.min(total_sec).max(slice_start_sec);
+    if !loop_mode && src_end_limit_sec - slice_start_sec <= 1e-9 {
         return Err("trimmed clip too short".to_string());
     }
 
@@ -958,8 +958,8 @@ fn render_single_clip(
             out_source_frames,
         )
     } else {
-        // 3. 切片
-        let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
+        // 3. 切片（非 Loop：消费窗口 clamp 到媒体内）
+        let src_i0 = (slice_start_sec * in_rate as f64).floor().max(0.0) as usize;
         let src_i1 = ((src_end_limit_sec * in_rate as f64)
             .ceil()
             .max(src_i0 as f64) as usize)
@@ -1013,7 +1013,8 @@ fn render_single_clip(
                 (start_frame + consumed_frames) as f64 / in_rate as f64,
             )
         } else {
-            (clip.source_start_sec.max(0.0), clip.source_end_sec)
+            // 非 Loop：键编码实际消费窗口（与 mixdown / snapshot 成对）。
+            (slice_start_sec, win_end_sec)
         };
         let key = crate::formant_cache::make_formant_cache_key(
             &clip.id,

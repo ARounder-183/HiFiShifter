@@ -809,7 +809,10 @@ pub fn compute_clip_pitch_midi(
 /// - `loop_enabled`：Loop（循环源）属性
 /// - `media_total_sec`：源媒体总时长（Loop 模式的回绕周期 D）；非 Loop 或未知传 None
 /// - `reversed`：是否倒放。Loop 模式下倒放从 `source_end` 向下遍历并回绕，
-///   与音频渲染的环绕方向一致；非 Loop 时忽略（保持既有调用方约定）。
+///   与音频渲染的环绕方向一致；非 Loop 时函数内部按升序窗口处理，
+///   调用方须传入重定向窗口 `[se−len·r, se]`（见
+///   `clip_pitch_trim_window_sec`）并在输出后整体翻转 —— 翻转使前导/
+///   尾部静音自动落到正确一侧。
 #[allow(clippy::too_many_arguments)]
 pub fn trim_and_resample_midi(
     full_midi: &[f32],
@@ -914,6 +917,30 @@ pub fn trim_and_resample_midi(
         return out;
     }
 
+    // 非 Loop：窗口越出媒体域（负起点的前导静音 / 终点越过缓存末端甚至
+    // 整窗在媒体外的尾部静音 —— 编辑器无界延伸可达）时，走**带静音的
+    // 窗口映射**：输出帧 i ↔ 源坐标 win_start + (i−lead)·rate，域外为静音。
+    // 完全在媒体域内的窗口保持既有"截取 + 线性重采样"路径不变（含下方
+    // Loop 回退与 rate≈1 防御性 clamp）。
+    if !loop_enabled {
+        let raw_end_frame_i64 = ((source_end_sec * 1000.0) / fp).round() as i64;
+        let window_crosses_media = source_start_sec < 0.0
+            || source_end_sec < 0.0
+            || raw_end_frame_i64 > full_midi.len() as i64;
+        if window_crosses_media {
+            let target_frames =
+                ((clip_timeline_len_sec.max(0.0) * 1000.0) / fp).round().max(1.0) as usize;
+            return assemble_nonloop_pitch_from_window(
+                full_midi,
+                fp,
+                source_start_sec,
+                source_end_sec,
+                rate,
+                target_frames,
+            );
+        }
+    }
+
     if src_start_frame >= src_end_frame {
         eprintln!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
@@ -983,6 +1010,43 @@ pub fn trim_and_resample_midi(
     );
 
     resample_curve_linear(trimmed, target_frames)
+}
+
+/// 非 Loop **消费窗口 → clip 时间线帧曲线**（带静音的窗口映射）。
+///
+/// 输出长度恒为 `target_frames`；输出帧 `i` 对应源坐标
+/// `win_start_sec + i·rate`（消费自窗口起点开始），源坐标落在
+/// `[0, win_end_frame)` 之外（媒体前导/尾部越界区）输出 0 —— 与音频
+/// 渲染的静音表达逐帧一致。
+///
+/// 窗口完全在媒体域内时无需走此路径（保留既有线性重采样管线）；
+/// 倒放由调用方先以重定向窗口 `[se−len·r, se]` 调用、再整体翻转输出
+/// （翻转后前导/尾部静音自动互换到正确一侧）。
+pub(crate) fn assemble_nonloop_pitch_from_window(
+    full_midi: &[f32],
+    fp: f64,
+    win_start_sec: f64,
+    win_end_sec: f64,
+    rate: f64,
+    target_frames: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; target_frames];
+    if target_frames == 0 {
+        return out;
+    }
+    let win_start_frame_f = (win_start_sec * 1000.0) / fp;
+    let win_end_frame = ((win_end_sec * 1000.0) / fp).round() as i64;
+    // 消费方向：时间线帧 i 直接对应源坐标 win_start + i·rate（消费自窗口
+    // 起点开始）；窗口起点在媒体起点之前的部分自然落为前导静音。
+    for (i, slot) in out.iter_mut().enumerate() {
+        let src_f = win_start_frame_f + i as f64 * rate;
+        let idx = src_f.round() as i64;
+        if idx < 0 || idx >= win_end_frame {
+            continue; // 媒体域外 → 静音
+        }
+        *slot = full_midi[idx as usize];
+    }
+    out
 }
 
 /// 使指定 clip 的 pitch MIDI 缓存失效（例如源文件变化后调用）。

@@ -84,12 +84,15 @@ pub(crate) fn source_bounds_frames(
 }
 
 fn clip_source_bounds_frames(clip: &Clip, src_total_frames: usize, sr: u32) -> (u64, u64) {
-    // 派生窗口：非 Loop 正放取 起点+长度×速率（与离线渲染一致），
-    // 陈旧/被循环开关扰动的存储窗口不再冻结静音区或截断音频。
-    let source_end = crate::state::clip_effective_source_end_sec(clip);
+    // 消费窗口模型（与离线渲染一致）：
+    // - 非 Loop：正放 [ss, ss+len·r)、倒放 [se−len·r, se)，clamp 到媒体内；
+    //   域外部分由 local_src_offset_frames 的方向性前导静音表达。
+    // - Loop：窗口字段只承载锚点相位，边界值不参与回绕数学（此处取值
+    //   仅供"窗口退化跳过"守卫之外的通用路径，Loop 分支不会被其截断）。
+    let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
     source_bounds_frames(
-        clip.source_start_sec.max(0.0),
-        source_end,
+        win_start.max(0.0),
+        win_end,
         src_total_frames,
         sr,
     )
@@ -389,6 +392,17 @@ pub(crate) fn build_snapshot(
         // 与离线渲染（mixdown/render_single_clip 的 min(end, D)）保持一致，
         // 防止异常超界的 source_end 把锚点映射到错误的环绕相位。
         let decoded_dur_sec = decoded_total_frames as f64 / out_rate.max(1) as f64;
+
+        // 非 Loop：消费窗口与媒体域完全无交集（整窗在媒体下方 / 上方）
+        // → 纯静音，直接跳过。边界函数会把空窗口强造成 1 帧"可听"切片，
+        // 不显式跳过会让全静音 Clip 产生幻影采样。
+        if !clip.loop_enabled {
+            let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
+            if win_end <= 1e-9 || win_start >= decoded_dur_sec - 1e-9 {
+                continue;
+            }
+        }
+
         let rev_anchor_sec = clip.source_end_sec.min(decoded_dur_sec);
         let mut loop_anchor_frame: Option<i64> = if clip.loop_enabled {
             let raw = if clip.reversed {
@@ -418,18 +432,31 @@ pub(crate) fn build_snapshot(
                 Some(raw.rem_euclid(buf_frames.max(1) as i64))
             };
 
-        // Negative trimStart means the clip starts before the source: render leading silence.
-        // trim_* are expressed in SOURCE seconds (i.e. they already incorporate playbackRate in UI).
-        // Therefore leading silence in timeline time scales by 1 / playback_rate.
-        let local_src_offset_frames: i64 =
-            if clip.source_start_sec.is_finite() && clip.source_start_sec < 0.0 && !clip.loop_enabled {
-                let pr = playback_rate.max(1e-6);
-                let pre_silence_sec = (-clip.source_start_sec) / pr;
-                let frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as i64;
-                -frames
+        // Leading silence（前导静音）按**消费方向**取值（与离线渲染一致）：
+        // - 正放：窗口起点越过媒体起点（ss<0）→ 前导静音；
+        // - 倒放：窗口终点越过媒体末端（se>D）→ 前导静音；
+        // - Loop：负 source_start 是环绕锚点，无前导静音。
+        // 既有约定：负的 local offset = 先静音后内容。
+        let local_src_offset_frames: i64 = if clip.loop_enabled {
+            0
+        } else if clip.reversed {
+            let pr = playback_rate.max(1e-6);
+            let decoded_dur_sec = decoded_total_frames as f64 / out_rate.max(1) as f64;
+            // 用**原始** source_end（未 clamp）与媒体末端比较 —— 超出部分即前导静音。
+            let pre_silence_sec = (clip.source_end_sec - decoded_dur_sec).max(0.0) / pr;
+            if pre_silence_sec > 0.0 {
+                -((pre_silence_sec * out_rate as f64).round().max(0.0) as i64)
             } else {
                 0
-            };
+            }
+        } else if clip.source_start_sec.is_finite() && clip.source_start_sec < 0.0 {
+            let pr = playback_rate.max(1e-6);
+            let pre_silence_sec = (-clip.source_start_sec) / pr;
+            let frames = (pre_silence_sec * out_rate as f64).round().max(0.0) as i64;
+            -frames
+        } else {
+            0
+        };
 
         // If the clip has formant morph enabled, build/use a clip-local preprocessed buffer first,
         // then feed that buffer into later stretch / processor stages.
@@ -458,7 +485,13 @@ pub(crate) fn build_snapshot(
                 &clip.id,
                 path,
                 out_rate,
-                if clip.loop_enabled { 0.0 } else { clip.source_start_sec.max(0.0) },
+                if clip.loop_enabled {
+                    0.0
+                } else {
+                    // 非 Loop：消费窗口起点（正放=ss、倒放=se−len·r，clamp ≥0）
+                    // —— 与离线渲染（mixdown / render_single_clip）的键成对。
+                    crate::state::clip_playback_window_sec(clip).0.max(0.0)
+                },
                 if clip.loop_enabled {
                     // 与预计算（compute_formant_cache_entry_for_clip）使用同一
                     // 来源（优先 clip 元数据）—— 避免 wav 头时长与解码帧时长在
@@ -466,8 +499,8 @@ pub(crate) fn build_snapshot(
                     crate::state::clip_source_media_duration_sec(clip)
                         .unwrap_or_else(|| src_render.frames as f64 / out_rate as f64)
                 } else {
-                    // 派生窗口：非 Loop 正放取 起点+长度×速率。
-                    crate::state::clip_effective_source_end_sec(clip)
+                    // 消费窗口终点：正放派生（起点+长度×速率）、倒放为存储 se。
+                    crate::state::clip_playback_window_sec(clip).1
                 },
                 clip.reversed && !clip.loop_enabled,
                 // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。

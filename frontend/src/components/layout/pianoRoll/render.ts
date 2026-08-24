@@ -23,7 +23,7 @@ import {
     type WaveformRenderParams,
 } from "../../../utils/waveformRenderer";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
-import { modEuclid } from "../../../utils/loopRender";
+import { modEuclid, resolvePlaybackWindowSec } from "../../../utils/loopRender";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
@@ -849,16 +849,27 @@ export function drawPianoRoll(args: {
         const viewportStartPx = Math.round(scrollLeft);
         const clipStartPx = Math.round(clipStartSec * pxPerSec);
 
-        const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
         const isLoop = Boolean(entry.loopEnabled);
         const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
-        const effSrcEndPiano = Math.min(clipSourceEndSec, mediaDurPiano || clipSourceEndSec);
+        const storedSourceEndSec =
+            Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
+        // 消费窗口模型（与后端 clip_playback_window_sec / WaveformTrackCanvas
+        // 一致）：正放 win=[ss, ss+len·r)、倒放 win=[se−len·r, se)。倒放的
+        // sourceStartSec 不参与取窗 —— 否则延伸/trim 写入的域外锚点会让波形
+        // 与音频错位。
+        const { winStartSec, winEndSec } = resolvePlaybackWindowSec({
+            loopEnabled: isLoop,
+            reversed: Boolean(entry.reversed),
+            sourceStartSec,
+            playbackRate: pr,
+            lengthSec: entry.lengthSec,
+            sourceEndSec: storedSourceEndSec,
+        });
+        const effSrcEndPiano = Math.min(winEndSec, mediaDurPiano || winEndSec);
         let clipSourceSpanSec: number;
         if (!isLoop) {
-            clipSourceSpanSec = Math.max(
-                0,
-                Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-            );
+            // 非 Loop：窗口宽度恒为 len·r（域外为静音，无数据 → 空白）。
+            clipSourceSpanSec = Math.max(0, winEndSec - winStartSec);
         } else if (mediaDurPiano > 1e-6) {
             // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与媒体
             // 时长决定 —— split 等编辑会产生 sourceStart > sourceEnd 的"环绕
@@ -868,7 +879,7 @@ export function drawPianoRoll(args: {
             // 无有效媒体时长：退化为窗口跨度
             clipSourceSpanSec = Math.max(
                 0,
-                Math.min(clipSourceEndSec, sourceDurSec || clipSourceEndSec) - sourceStartSec,
+                Math.min(winEndSec, sourceDurSec || winEndSec) - winStartSec,
             );
         }
         if (clipSourceSpanSec <= 0) continue;
@@ -890,16 +901,16 @@ export function drawPianoRoll(args: {
             tiles.push({
                 localStartSec: 0,
                 durationSec: entry.lengthSec,
-                srcWinStart: sourceStartSec,
-                srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                srcWinStart: winStartSec,
+                srcWinEnd: winEndSec,
             });
         } else if (!(mediaDurPiano > 1e-6)) {
             // 无有效媒体时长：退化为单片近似
             tiles.push({
                 localStartSec: 0,
                 durationSec: entry.lengthSec,
-                srcWinStart: sourceStartSec,
-                srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                srcWinStart: winStartSec,
+                srcWinEnd: winEndSec,
             });
         } else {
             // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D) 一致，
@@ -1013,14 +1024,25 @@ export function drawPianoRoll(args: {
             const sourceVisEndSec = entry.reversed
                 ? tileSpanEndSec - (visLocalStart - tile.localStartSec) * pr
                 : tileSpanStartSec + (visLocalEnd - tile.localStartSec) * pr;
+            // 取数范围 clamp 到媒体 [0, mediaDurPiano]：消费窗口（尤其倒放
+            // 延伸后的 [se−len·r, se]）可越出媒体域，缺失区间无数据、自然
+            // 渲染为空白 —— 与音频的静音表达一致。
             const sourceTimeStart = Math.max(
+                0,
                 tileSpanStartSec,
                 Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSecPiano,
             );
             const sourceTimeEnd = Math.min(
+                mediaDurPiano,
                 tileSpanEndSec,
                 Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSecPiano,
             );
+            // 可见区与媒体域无交集（纯静音段）：跳过取数与绘制，防止退化
+            // 请求把媒体开头的 1ms 数据错误映射进静音区。
+            if (!(sourceTimeEnd > sourceTimeStart + 1e-9)) {
+                releaseFetchCache();
+                continue;
+            }
             const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
 
             // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）

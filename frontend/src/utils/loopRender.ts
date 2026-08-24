@@ -47,17 +47,67 @@ export function resolveSourceEndSec(clip: {
     lengthSec: number;
     sourceEndSec: number;
 }): number {
-    if (!clip.loopEnabled && !clip.reversed) {
-        const rate =
-            Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
-                ? clip.playbackRate
-                : 1;
-        return (
-            (Number(clip.sourceStartSec) || 0) +
-            Math.max(0, Number(clip.lengthSec) || 0) * rate
-        );
+    return resolvePlaybackWindowSec(clip).winEndSec;
+}
+
+/**
+ * 非 Loop Clip 的**实际消费窗口**（源域秒，方向无关的统一模型，与后端
+ * clip_playback_window_sec 逐字段一致）：
+ *
+ *   正放 win = [sourceStart, sourceStart + length×rate)
+ *   倒放 win = [sourceEnd − length×rate, sourceEnd)
+ *
+ * 消费方向：正放自 win 起点升、倒放自 win 终点降；win 落在媒体
+ * [0, D) 之外的部分渲染静音 —— 倒放 `sourceEnd > D` 是前导静音、窗口
+ * 下探 <0 是尾部静音。倒放的 `sourceStart` 只是历史/编辑字段，**不参与**
+ * 消费数学 —— 波形取窗、边界标记、音高曲线必须全部使用本函数，否则
+ * 编辑器写入的域外锚点会让波形与音频错位（该有声处被画成空白）。
+ *
+ * Loop（回绕锚点语义）不适用本模型 —— 返回原始存储窗口（调用方须自行
+ * 走瓦片回绕逻辑）。
+ */
+export function resolvePlaybackWindowSec(clip: {
+    loopEnabled: boolean;
+    reversed: boolean;
+    sourceStartSec: number;
+    playbackRate: number;
+    lengthSec: number;
+    sourceEndSec: number;
+}): { winStartSec: number; winEndSec: number } {
+    const rate =
+        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
+            ? clip.playbackRate
+            : 1;
+    const span = Math.max(0, Number(clip.lengthSec) || 0) * rate;
+    if (clip.loopEnabled) {
+        return {
+            winStartSec: Number(clip.sourceStartSec) || 0,
+            winEndSec: Number(clip.sourceEndSec) || 0,
+        };
     }
-    return Number(clip.sourceEndSec) || 0;
+    if (clip.reversed) {
+        const end = Number(clip.sourceEndSec) || 0;
+        return { winStartSec: end - span, winEndSec: end };
+    }
+    const start = Number(clip.sourceStartSec) || 0;
+    return { winStartSec: start, winEndSec: start + span };
+}
+
+/**
+ * 非 Loop Clip 消费方向的**前导静音**（时间线秒）：正放看窗口起点越过
+ * 媒体起点；倒放看窗口终点越过媒体末端。Loop 恒为 0。
+ */
+export function resolveLeadingSilenceSec(
+    clip: Parameters<typeof resolvePlaybackWindowSec>[0],
+    mediaTotalSec: number | null,
+): number {
+    if (clip.loopEnabled) return 0;
+    if (clip.reversed) {
+        if (!(mediaTotalSec != null && mediaTotalSec > 0)) return 0;
+        const end = Number(clip.sourceEndSec) || 0;
+        return Math.max(0, end - mediaTotalSec);
+    }
+    return Math.max(0, -resolvePlaybackWindowSec(clip).winStartSec);
 }
 
 /**
@@ -85,8 +135,10 @@ export function resolveLoopMediaDurationSec(args: {
  * Clip 的**内容时长**（秒）：循环/边界逻辑的周期 D。
  *
  * - 有源媒体的 Clip（含由音频转换来的音高参考块）：源媒体总时长；
- * - 纯音高参考块（Pitch Reference，无源媒体）：**音符内容的最大结束时间**
- *   —— 与普通媒体 Clip 完全一致：Loop 回绕整个内容，窗口之外为静音；
+ * - 纯音高参考块（Pitch Reference，无源媒体）：与后端
+ *   clip_source_media_duration_sec 完全同一取值链
+ *   （durationFrames/sourceSampleRate → durationSec → 音符内容最大结束时间）
+ *   —— Loop 回绕整个内容，窗口之外为静音；
  * - 两者都无法确定时返回 null（调用方自行退化，如窗口跨度）。
  */
 export function resolveClipContentDurationSec(clip: {
@@ -104,6 +156,16 @@ export function resolveClipContentDurationSec(clip: {
         });
         return d > 1e-9 ? d : null;
     }
+    // 无源媒体（纯 MIDI / 音高参考块）：与后端 clip_source_media_duration_sec
+    // 保持**同一取值链** —— durationFrames/sourceSampleRate 优先，durationSec
+    // 次之，最后才是音符内容最大结束时间。取值链不一致会让前端曲线/标记的
+    // 回绕周期与引擎音频/音符放置（emit / assemble / fallback）错相。
+    const metadataDur = resolveLoopMediaDurationSec({
+        durationFrames: clip.durationFrames,
+        sourceSampleRate: clip.sourceSampleRate,
+        durationSec: clip.durationSec,
+    });
+    if (metadataDur > 1e-9) return metadataDur;
     const notes = clip.midiNoteData;
     if (notes && notes.length > 0) {
         let maxEnd = 0;

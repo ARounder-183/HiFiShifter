@@ -100,10 +100,12 @@ function resolveLoopCycleDescriptor(args: {
     return {
         cycleSec,
         fwdAnchorSec: srcStart,
+        // 与后端 place_note_occurrence_in_loop / trim_and_resample_midi 同约定：
+        // 倒放锚点只 clamp 到媒体时长上界、**不做 max(0)** —— 负 source_end
+        // （slip/左延伸可达）由消费端的 modEuclid（floor_mod）统一环绕；
+        // 此处若钳到 0 会让曲线/标记与音频出现恒定相位差。
         revAnchorEndSec:
-            mediaDur > 1e-9
-                ? Math.min(Math.max(srcEnd, 0), mediaDur)
-                : Math.max(srcEnd, 0),
+            mediaDur > 1e-9 ? Math.min(srcEnd, mediaDur) : srcEnd,
         cycleFromMedia: mediaDur > 1e-9,
     };
 }
@@ -425,8 +427,10 @@ export const MidiPitchTrackCanvas = React.memo(
                         sourceSampleRate: clip.sourceSampleRate,
                         durationSec: clip.durationSec,
                     });
-                    // 曲线裁剪窗口：非 Loop 正放按派生窗口（起点+长度×速率），
-                    // 与音频渲染一致；Loop/倒放保持原字段。
+                    // 曲线消费窗口：非 Loop 正放 = 起点+长度×速率（派生），
+                    // 倒放 = [se−len·r, se]（锚定 se，sourceStart 不参与）；
+                    // 与音频渲染的窗口模型一致 —— 否则延伸过的倒放 Clip 曲线
+                    // 整体错位（该有声处显示为空）。
                     const srcEnd = resolveSourceEndSec({
                         loopEnabled: Boolean(clip.loopEnabled),
                         reversed: Boolean(clip.reversed),
@@ -438,6 +442,10 @@ export const MidiPitchTrackCanvas = React.memo(
                                 ? clip.sourceEndSec
                                 : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0),
                     });
+                    const curveWinStart =
+                        !clip.loopEnabled && clip.reversed
+                            ? srcEnd - Math.max(0, clip.lengthSec) * Math.abs(Number(clip.playbackRate) || 1)
+                            : Number(clip.sourceStartSec) || 0;
                     const loopCycle = resolveLoopCycleDescriptor({
                         loopEnabled: Boolean(clip.loopEnabled),
                         contentDurationSec: contentDurSec,
@@ -447,7 +455,7 @@ export const MidiPitchTrackCanvas = React.memo(
                     midiCurve = getCachedMidiCurve(
                         clip.midiNoteData,
                         clip.lengthSec,
-                        clip.sourceStartSec,
+                        curveWinStart,
                         srcEnd,
                         clip.playbackRate,
                         clip.reversed,
@@ -606,19 +614,24 @@ export const MidiPitchTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, clipColor);
                     }
-                } else if (markerContentDur != null && !clip.reversed) {
+                } else if (markerContentDur != null) {
                     // ── 非 Loop：媒体/内容边界标记 ──
                     // 循环节 = 源媒体（或音符内容）在该 Clip 内的真实起始/
                     // 终止位置（音频与静音的分界线），落在 Clip 内部时绘制。
+                    // 投影按**消费方向**：正放 t=(b−ss)/r；倒放 t=(se−b)/r
+                    // （倒放锚定窗口终点，与 WaveformTrackCanvas 一致）。
                     const mediaDur = markerContentDur;
                     {
                         const rate =
                             Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
                                 ? 1
                                 : Math.abs(Number(clip.playbackRate ?? 1) || 1);
+                        const srcEndResolved = Number(clip.sourceEndSec) || 0;
                         const markers: number[] = [];
                         for (const b of [0, mediaDur]) {
-                            const tLocal = (b - (Number(clip.sourceStartSec) || 0)) / rate;
+                            const tLocal = clip.reversed
+                                ? (srcEndResolved - b) / rate
+                                : (b - (Number(clip.sourceStartSec) || 0)) / rate;
                             if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
                             const mx =
                                 (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;

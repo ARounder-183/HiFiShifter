@@ -94,11 +94,17 @@ pub(crate) fn assemble_pitch_orig_from_cache(
         if let Some(ref notes) = clip.midi_note_data {
             let pr = clip.playback_rate as f64;
             let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-            let src_start = clip.source_start_sec.max(0.0);
+            // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]）——
+            // 与引擎 emit / 音频渲染的窗口模型一致。
             let src_end = if clip.source_end_sec > 0.0 {
                 clip.source_end_sec
             } else {
                 clip_len_sec
+            };
+            let src_start = if !clip.loop_enabled && clip.reversed {
+                src_end - clip_len_sec * pr_valid
+            } else {
+                clip.source_start_sec
             };
             let src_total_len = src_end - src_start;
 
@@ -232,14 +238,10 @@ pub(crate) fn assemble_pitch_orig_from_cache(
         let pr = clip.playback_rate as f64;
         let is_full_source = pr.is_finite() && pr > 0.0 && (pr - 1.0).abs() <= 1e-6;
 
-        // is_full_source (rate==1)：从 source_start_sec 处偏移截取，直接写入 out
-        // !is_full_source (rate!=1)：从全量曲线中截取 source range 区间并 resample 到 clip timeline 长度再写入 out
+        // is_full_source (rate==1)：消费窗口直接映射写入 out
+        // !is_full_source (rate!=1)：窗口重定向 + trim/resample 后写入 out
 
         if is_full_source {
-            let src_offset = ((clip.source_start_sec.max(0.0) * 1000.0) / fp)
-                .round()
-                .max(0.0) as usize;
-
             // 预计算切片安全边界，消除内部循环的所有越界检查、if 判断和解包
             let write_len = clip_len_frames.min(target_frames.saturating_sub(clip_start_frame));
 
@@ -282,11 +284,29 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                     }
                 }
             } else {
-                let read_len =
-                    write_len.min(cached.midi.len().saturating_sub(src_offset));
+                // 非 Loop（rate≈1）：消费窗口模型（与音频/引擎一致）——
+                // 正放 win=[ss, ss+len)；倒放 win=[se−len, se)，域外静音；
+                // 倒放在映射后整体翻转（前导/尾部静音自动落到正确一侧）。
+                // 此前此分支既不感知倒放方向、也不感知域外静音：slip 左移
+                // /trim 延伸过的 Clip 根曲线会整体错位。
+                let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
+                let (win_start_sec, win_end_sec) =
+                    crate::state::clip_pitch_trim_window_sec(clip);
+                let mut mapped = crate::pitch_clip::assemble_nonloop_pitch_from_window(
+                    &cached.midi,
+                    fp,
+                    win_start_sec,
+                    win_end_sec,
+                    pr_valid,
+                    clip_len_frames,
+                );
+                if clip.reversed {
+                    mapped.reverse();
+                }
+                let read_len = write_len.min(mapped.len());
                 if read_len > 0 {
                     let dst_slice = &mut out[clip_start_frame..clip_start_frame + read_len];
-                    let src_slice = &cached.midi[src_offset..src_offset + read_len];
+                    let src_slice = &mapped[..read_len];
 
                     for (dst, &pitch) in dst_slice.iter_mut().zip(src_slice.iter()) {
                         *dst = if pitch.is_finite() && pitch > 0.0 {
@@ -299,11 +319,13 @@ pub(crate) fn assemble_pitch_orig_from_cache(
             }
         } else {
             let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
+            // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+            let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
             let resampled = crate::pitch_clip::trim_and_resample_midi(
                 &cached.midi,
                 fp,
-                clip.source_start_sec,
-                clip.source_end_sec,
+                trim_src_start,
+                trim_src_end,
                 pr_valid,
                 clip_len_sec,
                 clip.loop_enabled,

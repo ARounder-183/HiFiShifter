@@ -38,7 +38,7 @@ import {
     drawLoopMarkers,
     modEuclid,
     resolveLoopMediaDurationSec,
-    resolveSourceEndSec,
+    resolvePlaybackWindowSec,
 } from "../../utils/loopRender";
 import {
     wfDiag_frameStart,
@@ -282,25 +282,28 @@ export const WaveformTrackCanvas = React.memo(
                 const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
                 lastLevelByClipRef.current[levelKey] = stableLevel;
 
-                // 派生窗口（REAPER 语义）：非 Loop 正放的消费终点 = 起点+长度×速率。
-                // 存储的 sourceEndSec 在循环开关切换/历史工程下可能陈旧，
-                // 直接信任会把"需要有音频的地方"冻结成空白。
-                const clipSourceEndSec = resolveSourceEndSec({
-                    loopEnabled: Boolean(clip.loopEnabled),
+                // 消费窗口模型（与后端 clip_playback_window_sec 一致）：
+                //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+                // 倒放的 sourceStartSec 只是历史/编辑字段，不参与取窗 ——
+                // 否则 trim/延伸写入的域外锚点会让波形与音频错位
+                //（该有声处被画成空白 / 空白处画满波形）。
+                const isLoop = Boolean(clip.loopEnabled);
+                const { winStartSec, winEndSec } = resolvePlaybackWindowSec({
+                    loopEnabled: isLoop,
                     reversed: Boolean(clip.reversed),
                     sourceStartSec,
                     playbackRate: pr,
                     lengthSec: clip.lengthSec,
                     sourceEndSec: Number(clip.sourceEndSec ?? mediaDur) || mediaDur,
                 });
-                const isLoop = Boolean(clip.loopEnabled);
+                // Loop 锚点域仍需有效终点（倒放锚点 clamp 到媒体末端）。
+                const clipSourceEndSec = winEndSec;
                 const effSrcEnd = Math.min(clipSourceEndSec, mediaDur);
                 let clipSourceSpanSec: number;
                 if (!isLoop) {
-                    clipSourceSpanSec = Math.max(
-                        0,
-                        Math.min(clip.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-                    );
+                    // 非 Loop：窗口宽度恒为 len·r（域外部分为静音，无数据可取，
+                    // 取数时 clamp 到媒体内即可 —— 缺失区间自然渲染为空白）。
+                    clipSourceSpanSec = Math.max(0, winEndSec - winStartSec);
                 } else {
                     // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与
                     // 媒体时长决定 —— split 等编辑会产生 sourceStart > sourceEnd
@@ -343,16 +346,16 @@ export const WaveformTrackCanvas = React.memo(
                     segmentsToRender.push({
                         localStartSec: 0,
                         durationSec: clip.lengthSec,
-                        srcWinStart: sourceStartSec,
-                        srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                        srcWinStart: winStartSec,
+                        srcWinEnd: winEndSec,
                     });
                 } else if (!(mediaDur > 1e-6)) {
                     // 无有效媒体时长：退化为单片近似
                     segmentsToRender.push({
                         localStartSec: 0,
                         durationSec: clip.lengthSec,
-                        srcWinStart: sourceStartSec,
-                        srcWinEnd: sourceStartSec + clipSourceSpanSec,
+                        srcWinStart: winStartSec,
+                        srcWinEnd: winEndSec,
                     });
                 } else {
                     // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D)
@@ -490,7 +493,11 @@ export const WaveformTrackCanvas = React.memo(
                     const tileSpanStartSec = seg.srcWinStart;
                     const tileSpanEndSec = seg.srcWinEnd;
 
-                    // 仅请求当前可见部分对应的源数据，显著降低每帧处理成本
+                    // 仅请求当前可见部分对应的源数据，显著降低每帧处理成本。
+                    // 取数范围 clamp 到媒体 [0, mediaDur]：消费窗口（尤其倒放
+                    // 延伸后的 [se−len·r, se]）可越出媒体域，缺失区间无数据、
+                    // 自然渲染为空白 —— 与音频的静音表达一致；像素映射由
+                    // dataStartSec/dataDurationSec 回到窗口坐标系，不受影响。
                     const sourceVisStartSec = clip.reversed
                         ? tileSpanEndSec - (visClipEndSec - seg.localStartSec) * pr
                         : tileSpanStartSec + (visClipStartSec - seg.localStartSec) * pr;
@@ -498,13 +505,21 @@ export const WaveformTrackCanvas = React.memo(
                         ? tileSpanEndSec - (visClipStartSec - seg.localStartSec) * pr
                         : tileSpanStartSec + (visClipEndSec - seg.localStartSec) * pr;
                     const sourceTimeStart = Math.max(
+                        0,
                         tileSpanStartSec,
                         Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSec,
                     );
                     const sourceTimeEnd = Math.min(
+                        mediaDur,
                         tileSpanEndSec,
                         Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSec,
                     );
+                    // 可见区与媒体域无交集（纯静音段）：跳过取数与绘制，
+                    // 防止退化请求把媒体开头的 1ms 数据错误映射进静音区。
+                    if (!(sourceTimeEnd > sourceTimeStart + 1e-9)) {
+                        releaseFetchCache();
+                        continue;
+                    }
                     const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
 
                     // ========================================
@@ -769,15 +784,20 @@ export const WaveformTrackCanvas = React.memo(
                     if (markers.length > 0) {
                         drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
                     }
-                } else if (!clip.reversed && mediaDur > 1e-6) {
+                } else if (mediaDur > 1e-6) {
                     // ── 非 Loop：媒体边界标记（"循环节"的退化形式）──────
                     // 未循环 Clip 的循环节 = 源媒体在该 Clip 内的真实起始
                     // 位置（s=0）与真实终止位置（s=D）。它们是音频与静音的
                     // 分界线，落在 Clip 内部时绘制倒三角（前导/尾部静音、
                     // 左右延伸的视觉锚点）。
+                    // 投影按**消费方向**：正放 t=(b−ss)/r；倒放 t=(se−b)/r
+                    // （倒放锚定窗口终点 —— 此前用 (b−ss)/r 会把标记放到
+                    // 与音频静音分界错位的位置）。
                     const markers: number[] = [];
                     for (const b of [0, mediaDur]) {
-                        const tLocal = (b - sourceStartSec) / pr;
+                        const tLocal = clip.reversed
+                            ? (winEndSec - b) / pr
+                            : (b - winStartSec) / pr;
                         if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
                         const mx =
                             (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
