@@ -541,8 +541,7 @@ export const jaJP = {
     kb_modifier_stretch: "タイムストレッチ（エッジドラッグ中に押す）",
     kb_modifier_no_snap: "ドラッグ中にスナップを切り替えます（押すと現在のスナップを反転）",
     kb_modifier_copy_drag: "コピードラッグ（クリップドラッグ中に押す）",
-    kb_modifier_crossfade_grip:
-        "クロスフェードハンドル（クロスフェード交点ドラッグ中に押す）",
+    kb_modifier_crossfade_grip: "クロスフェードハンドル（クロスフェード交点ドラッグ中に押す）",
     kb_modifier_horizontal_zoom: "水平ズーム（押しながらスクロール）",
     kb_modifier_pr_vzoom: "垂直ズーム（押しながらスクロール）",
     kb_modifier_param_morph: "パラメータ形状変形（選択範囲内で押す）",
@@ -682,12 +681,13 @@ export const jaJP = {
     snap_grid_adjust_clips_on_swing: "スウィング変更時に全クリップを再整列",
     snap_section_master: "スナップマスター",
     snap_enable_snapping: "スナップを有効化",
+    snap_show_highlight: "ドラッグ中にスナップ強調線を表示",
     snap_distance_px: "スナップ距離",
     snap_relative_to_grid: "グリッド相対スナップ",
     snap_section_targets: "スナップ対象と目標",
     snap_to_selection_markers_cursor: "選択 / マーカー / カーソルへ",
     snap_to_grid: "グリッドへ",
-    snap_media_items: "クリップ",
+    snap_clips: "クリップ",
     snap_selection: "選択範囲",
     snap_cursor: "カーソル",
     snap_section_grid_behavior: "スナップ動作",
@@ -698,6 +698,7 @@ export const jaJP = {
     snap_section_interactions: "クリップと特殊要素の連携",
     snap_clip_edges: "クリップ先頭/末尾にスナップ",
     snap_clip_snap_offset: "クリップのスナップオフセットにスナップ",
+    clip_snap_offset: "スナップオフセット（ドラッグで調整）",
     snap_across_tracks: "他トラックのクリップへスナップ",
     snap_track_distance: "離れたトラック数",
     snap_razor_edits: "レザー編集をスナップ",
@@ -1126,9 +1127,9 @@ export const jaJP = {
     recording_toggle_title: "録音の開始/停止（右クリックで設定）",
     recording_tooltip_start: "録音を開始（右クリックでクイック設定）",
     recording_tooltip_stop: "録音を停止（右クリックでクイック設定）",
-    recording_tooltip_cancel_countdown: "録音カウントダウンをキャンセル（右クリックでクイック設定）",
+    recording_tooltip_cancel_countdown:
+        "録音カウントダウンをキャンセル（右クリックでクイック設定）",
     recording_context_settings: "録音設定...",
-
 
     kb_recording_toggle: "録音の開始/停止",
     recording_error_save_settings: "録音設定の保存に失敗しました。",
@@ -1139,8 +1140,10 @@ export const jaJP = {
     recording_error_not_active: "進行中の録音はありません。",
     recording_error_no_default_input: "システムデフォルトの録音デバイスが見つかりません。",
     recording_error_device_not_found: "選択した録音デバイスを利用できません。",
-    recording_error_loopback_not_found: "システムサウンド（ループバック）デバイスを利用できません。",
-    recording_error_no_supported_config: "選択したデバイスは指定のサンプルレートまたはチャンネル設定に対応していません。",
+    recording_error_loopback_not_found:
+        "システムサウンド（ループバック）デバイスを利用できません。",
+    recording_error_no_supported_config:
+        "選択したデバイスは指定のサンプルレートまたはチャンネル設定に対応していません。",
     recording_error_build_input: "選択した録音デバイスを開けませんでした。",
     recording_error_start_timeout: "録音の開始がタイムアウトしました。",
     recording_error_output_missing: "録音ファイルを正しく生成できませんでした。",
@@ -1166,7 +1169,8 @@ export const jaJP = {
     recording_error_pipewire_dump: "PipeWire のオーディオノードを確認できませんでした。",
     recording_error_pipewire_cat: "PipeWire レコーダーを起動できませんでした。",
     recording_error_pipewire_read: "PipeWire から音声を読み取れませんでした。",
-    recording_error_wasapi_init: "Windows オーディオキャプチャクライアントを初期化できませんでした。",
+    recording_error_wasapi_init:
+        "Windows オーディオキャプチャクライアントを初期化できませんでした。",
     recording_error_wasapi_read: "Windows オーディオエンジンから音声を読み取れませんでした。",
     recording_error_com_init: "音声キャプチャ用に COM を初期化できませんでした。",
     recording_error_resampler: "オーディオリサンプラーを初期化できませんでした。",

@@ -111,7 +111,8 @@ function getTauriInvoke(): (<T>(cmd: string, args?: Record<string, unknown>) => 
 
 type BuildArgsResult = Record<string, unknown> | undefined | { __unwired: true };
 
-function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
+/** 位置参数 → Tauri 命名参数（按各命令的手写映射表）。导出供回归测试锁定。 */
+export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     // 注意：Tauri invoke uses a named-argument object; pywebview uses positional args.
     switch (method) {
         case "set_transport": {
@@ -239,15 +240,16 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 playbackRate: args[8],
                 reversed: args[9],
                 loopEnabled: args[10],
-                fadeInSec: args[11],
-                fadeOutSec: args[12],
-                fadeInCurve: args[13],
-                fadeOutCurve: args[14],
-                autoFadeInSec: args[15],
-                autoFadeOutSec: args[16],
-                color: args[17],
-                formantMorph: args[18],
-                checkpoint: args[19],
+                snapOffsetSec: args[11],
+                fadeInSec: args[12],
+                fadeOutSec: args[13],
+                fadeInCurve: args[14],
+                fadeOutCurve: args[15],
+                autoFadeInSec: args[16],
+                autoFadeOutSec: args[17],
+                color: args[18],
+                formantMorph: args[19],
+                checkpoint: args[20],
             };
 
         case "set_clips_state_bulk":

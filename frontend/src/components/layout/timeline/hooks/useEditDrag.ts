@@ -12,6 +12,7 @@ import {
     setClipGain,
     setClipLength,
     setClipPlaybackRate,
+    setClipSnapOffset,
     setClipStateRemote,
     setClipsStateBulkRemote,
     setClipSourceRange,
@@ -39,6 +40,14 @@ import {
     computeEffectiveSnap,
     endSnapGesture,
 } from "../../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildLoopBoundaryHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+} from "../../../../utils/snapHighlight";
+import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
+import type { SnapTimelineOpts } from "./useTimelineState";
 import { paramsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import {
@@ -58,6 +67,23 @@ import {
 } from "../../../../features/session/ripplePreview";
 
 const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
+
+/**
+ * 拉伸同步 SnapOffset：偏移点标记 Clip 内容中的位置，随长度按**总比例**
+ *（nextLen / baseLen）线性缩放，并钳制到新长度内。必须使用拖拽起始的
+ * 基准偏移 —— 逐帧读实时值再乘本帧比例会跨帧复合，呈超线性增长。
+ * offset=0 时保持 0。
+ */
+function scaleSnapOffsetForStretch(
+    baseOffsetSec: number | undefined,
+    totalRatio: number,
+    nextLengthSec: number,
+): number {
+    const base = Number(baseOffsetSec) || 0;
+    if (!(base > 0)) return 0;
+    const safeRatio = Number.isFinite(totalRatio) && totalRatio > 0 ? totalRatio : 1;
+    return clamp(base * safeRatio, 0, Math.max(0, nextLengthSec));
+}
 
 /**
  * Loop（循环源）：把源域数值归一化到 [0, 媒体时长)。
@@ -419,6 +445,8 @@ export type EditDragState = {
             reversed: boolean;
             /** Loop（循环源）：延伸/裁短不受源媒体长度限制。 */
             loopEnabled: boolean;
+            /** 拖拽起始基准 SnapOffset：拉伸按"总比例×基准"线性缩放。 */
+            snapOffsetSec: number;
             durationFrames: number | null;
             sourceSampleRate: number | null;
             durationSec: number | null;
@@ -463,15 +491,12 @@ export function useEditDrag(deps: {
     dispatch: AppDispatch;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
-    snapTimeline: (
+    /** 完整吸附结果入口（返回 SnapResult；负责发布吸附竖线高亮）。 */
+    snapTimelineDetailed: (
         sec: number,
-        object: "clip",
-        opts?: {
-            originSec?: number;
-            anchorTrackId?: string | null;
-            excludeClipIds?: ReadonlySet<string>;
-        },
-    ) => number;
+        object: SnapObjectKind,
+        opts?: SnapTimelineOpts,
+    ) => SnapResult;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** modifier.clipNoSnap 绑定 */
     noSnapKb: Keybinding;
@@ -494,7 +519,7 @@ export function useEditDrag(deps: {
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapTimeline,
+        snapTimelineDetailed,
         beatFromClientX,
         noSnapKb,
         snapEnabled,
@@ -573,7 +598,15 @@ export function useEditDrag(deps: {
 
         dispatch(checkpointHistory());
         dispatch(beginInteraction());
-        if (type === "trim_left" || type === "trim_right" || type === "crossfade_edges") {
+        // 参与吸附的编辑类型登记吸附手势（stretch 此前漏登记，
+        // 会导致工具栏吸附状态与竖线高亮在拉伸拖拽中不生效）。
+        const beginsSnapGesture =
+            type === "trim_left" ||
+            type === "trim_right" ||
+            type === "stretch_left" ||
+            type === "stretch_right" ||
+            type === "crossfade_edges";
+        if (beginsSnapGesture) {
             beginSnapGesture();
         }
 
@@ -714,6 +747,9 @@ export function useEditDrag(deps: {
                             sourceEndSec: c?.sourceEndSec ?? 0,
                             reversed: !!c?.reversed,
                             loopEnabled: !!c?.loopEnabled,
+                            /** 拖拽起始基准 SnapOffset：拉伸按 总比例×基准 缩放，
+                             *  禁止逐帧读实时值复合放大。 */
+                            snapOffsetSec: Math.max(0, Number(c?.snapOffsetSec) || 0),
                             durationFrames: c?.durationFrames ?? null,
                             sourceSampleRate: c?.sourceSampleRate ?? null,
                             durationSec: c?.durationSec ?? null,
@@ -786,14 +822,32 @@ export function useEditDrag(deps: {
                 const noSnapActive = isModifierActive(noSnapKb, currentEv);
                 // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
                 const effectiveSnap = computeEffectiveSnap(snapEnabled, noSnapActive);
+                /** 被编辑 clip 的轨道（编辑类拖拽不跨轨，行固定）。 */
+                const anchorTrackId =
+                    sessionRef.current.clips.find((c) => c.id === drag.clipId)?.trackId ?? null;
                 if (shouldSnap && effectiveSnap) {
-                    const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
-                    beat = snapTimeline(beat, "clip", {
+                    // 吸附 + 竖线高亮发布：
+                    // - trim_left / stretch_left → 被吸附对象是 Clip 的前缘；
+                    // - trim_right / stretch_right → 后缘。
+                    // 目标侧（网格线/对方 Clip 边缘等）与被吸附边标记都由
+                    // snapTimelineDetailed 的 highlight 通道统一发布。
+                    const leftEdge =
+                        drag.type === "trim_right" || drag.type === "stretch_right";
+                    beat = snapTimelineDetailed(beat, "clip", {
                         originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
-                        anchorTrackId: sessionRef.current.clips.find((c) => c.id === drag.clipId)
-                            ?.trackId,
+                        anchorTrackId,
                         excludeClipIds: new Set(drag.selectedClipIds),
-                    });
+                        highlight: {
+                            sources: [
+                                {
+                                    trackId: anchorTrackId,
+                                    clipId: drag.clipId,
+                                },
+                            ],
+                        },
+                    }).sec;
+                } else if (shouldSnap) {
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 }
                 // ── 循环节 / 内容边界吸附 ───────────────────────────────
                 // 属于常规吸附体系：受"吸附"总开关与"拖动时切换吸附"修饰键
@@ -836,6 +890,16 @@ export function useEditDrag(deps: {
                                 loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
                         ) {
                             beat = anchorBase.startSec + snappedOffset;
+                            // 循环节命中：以“循环节”专用高亮覆盖常规吸附高亮
+                            //（同组发布即整组替换）。目标（源媒体边界投影）与
+                            // 被吸附边重合于同一 x，行内双亮条强调。
+                            publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                                buildLoopBoundaryHighlightEntry({
+                                    secs: [beat],
+                                    trackId: anchorTrackId,
+                                    clipId: drag.clipId,
+                                }),
+                            ]);
                         }
                     }
                 }
@@ -1292,6 +1356,25 @@ export function useEditDrag(deps: {
                                     lengthSec: next.lengthSec,
                                 }),
                             );
+                            // SnapOffset 随编组拉伸按"总比例×基准偏移"线性缩放
+                            //（基准 = 拖拽起始快照，禁止逐帧复合）。
+                            {
+                                const base = drag.baseByClipId[clipId];
+                                if (base) {
+                                    const ratio =
+                                        next.lengthSec / Math.max(1e-6, base.lengthSec);
+                                    dispatch(
+                                        setClipSnapOffset({
+                                            clipId,
+                                            snapOffsetSec: scaleSnapOffsetForStretch(
+                                                base.snapOffsetSec,
+                                                ratio,
+                                                next.lengthSec,
+                                            ),
+                                        }),
+                                    );
+                                }
+                            }
                             dispatch(
                                 setClipPlaybackRate({
                                     clipId,
@@ -1507,6 +1590,17 @@ export function useEditDrag(deps: {
                     dispatch(moveClipStart({ clipId: drag.clipId, startSec: nextStart }));
                     dispatch(setClipLength({ clipId: drag.clipId, lengthSec: correctedLen }));
                     dispatch(setClipPlaybackRate({ clipId: drag.clipId, playbackRate: nextRate }));
+                    // SnapOffset 随拉伸同步缩放：总比例 × 拖拽起始基准偏移。
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: drag.clipId,
+                            snapOffsetSec: scaleSnapOffsetForStretch(
+                                drag.baseByClipId[drag.clipId]?.snapOffsetSec,
+                                correctedLen / baseLen,
+                                correctedLen,
+                            ),
+                        }),
+                    );
                     dispatch(
                         setClipFades({
                             clipId: drag.clipId,
@@ -1647,6 +1741,17 @@ export function useEditDrag(deps: {
                     });
                     dispatch(setClipLength({ clipId: drag.clipId, lengthSec: correctedLen }));
                     dispatch(setClipPlaybackRate({ clipId: drag.clipId, playbackRate: nextRate }));
+                    // SnapOffset 随拉伸同步缩放：总比例 × 拖拽起始基准偏移。
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: drag.clipId,
+                            snapOffsetSec: scaleSnapOffsetForStretch(
+                                drag.baseByClipId[drag.clipId]?.snapOffsetSec,
+                                correctedLen / baseLen,
+                                correctedLen,
+                            ),
+                        }),
+                    );
                     dispatch(
                         setClipFades({
                             clipId: drag.clipId,
@@ -1682,9 +1787,13 @@ export function useEditDrag(deps: {
             if (
                 drag.type === "trim_left" ||
                 drag.type === "trim_right" ||
+                drag.type === "stretch_left" ||
+                drag.type === "stretch_right" ||
                 drag.type === "crossfade_edges"
             ) {
                 endSnapGesture();
+                // 拖拽结束即时清除吸附竖线（endSnapGesture 深度归零也会兜底清理）。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             }
 
             const isGroupStretch =
@@ -1762,6 +1871,7 @@ export function useEditDrag(deps: {
                             startSec: now.startSec,
                             lengthSec: now.lengthSec,
                             playbackRate: now.playbackRate,
+                            snapOffsetSec: now.snapOffsetSec,
                             fadeInSec: now.fadeInSec,
                             fadeOutSec: now.fadeOutSec,
                         };
@@ -1774,6 +1884,7 @@ export function useEditDrag(deps: {
                             startSec: number;
                             lengthSec: number;
                             playbackRate: number;
+                            snapOffsetSec: number;
                             fadeInSec: number;
                             fadeOutSec: number;
                         } => patch != null,
@@ -1791,6 +1902,7 @@ export function useEditDrag(deps: {
                                     startSec: patch.startSec,
                                     lengthSec: patch.lengthSec,
                                     playbackRate: patch.playbackRate,
+                                    snapOffsetSec: patch.snapOffsetSec,
                                     fadeInSec: patch.fadeInSec,
                                     fadeOutSec: patch.fadeOutSec,
                                     checkpoint: false,
@@ -1963,6 +2075,7 @@ export function useEditDrag(deps: {
                                 startSec: singleClipNow.startSec,
                                 lengthSec: singleClipNow.lengthSec,
                                 playbackRate: singleClipNow.playbackRate,
+                                snapOffsetSec: singleClipNow.snapOffsetSec,
                                 fadeInSec: singleClipNow.fadeInSec,
                                 fadeOutSec: singleClipNow.fadeOutSec,
                                 checkpoint: false,
@@ -1976,6 +2089,7 @@ export function useEditDrag(deps: {
                             startSec: singleClipNow.startSec,
                             lengthSec: singleClipNow.lengthSec,
                             playbackRate: singleClipNow.playbackRate,
+                            snapOffsetSec: singleClipNow.snapOffsetSec,
                             fadeInSec: singleClipNow.fadeInSec,
                             fadeOutSec: singleClipNow.fadeOutSec,
                         }),
@@ -1992,6 +2106,7 @@ export function useEditDrag(deps: {
                                 clipId: drag.clipId,
                                 lengthSec: singleClipNow.lengthSec,
                                 playbackRate: singleClipNow.playbackRate,
+                                snapOffsetSec: singleClipNow.snapOffsetSec,
                                 fadeInSec: singleClipNow.fadeInSec,
                                 fadeOutSec: singleClipNow.fadeOutSec,
                                 checkpoint: false,
@@ -2004,6 +2119,7 @@ export function useEditDrag(deps: {
                             clipId: drag.clipId,
                             lengthSec: singleClipNow.lengthSec,
                             playbackRate: singleClipNow.playbackRate,
+                            snapOffsetSec: singleClipNow.snapOffsetSec,
                             fadeInSec: singleClipNow.fadeInSec,
                             fadeOutSec: singleClipNow.fadeOutSec,
                         }),

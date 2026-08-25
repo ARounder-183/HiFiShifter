@@ -77,6 +77,15 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    clearSnapHighlights,
+} from "../../utils/snapHighlight";
+import {
+    beginSnapGesture,
+    endSnapGesture,
+} from "../../utils/timelineSnapping";
 import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
@@ -87,6 +96,7 @@ import { useTimelineState } from "./timeline/hooks/useTimelineState";
 import { useTimelineDragDrop } from "./timeline/hooks/useTimelineDragDrop";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
+import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { computeAutoFollowScrollLeft, computeFocusCursorScrollLeft } from "../../utils/autoFollowScroll";
@@ -282,6 +292,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
+    // 面板卸载时清空吸附竖线高亮（拖拽手势异常中断的兜底）。
+    React.useEffect(() => {
+        return () => {
+            clearSnapHighlights();
+        };
+    }, []);
     const {
         dispatch,
         s,
@@ -758,7 +774,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapTimeline,
+        snapTimelineDetailed: state.snapTimelineDetailed,
         beatFromClientX,
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
@@ -782,6 +798,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
     });
 
+    // SnapOffset 三角手柄拖拽（走完整吸附引擎与竖线高亮）。
+    const startSnapOffsetDrag = useSnapOffsetDrag({
+        scrollRef,
+        sessionRef,
+        dispatch,
+        snapTimelineDetailed: state.snapTimelineDetailed,
+        beatFromClientX,
+        noSnapKb,
+        snapEnabled: s.timelineSnap.enabled,
+    });
+
     const {
         clipDragRef: _clipDragRef,
         startClipDrag: _startClipDragInner,
@@ -795,7 +822,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedClipIds,
         multiSelectedSet,
         dispatch,
-        snapTimeline,
+        snapTimelineDetailed: state.snapTimelineDetailed,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
@@ -1708,6 +1735,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             allClips={s.clips}
                                             startClipDrag={startClipDrag}
                                             startEditDrag={startEditDrag}
+                                            startSnapOffsetDrag={startSnapOffsetDrag}
                                             toggleClipMuted={toggleTrackLaneClipMuted}
                                             onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
                                             clearContextMenu={clearContextMenu}
@@ -1751,6 +1779,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     strongLineXs={tempoGridLineXs?.strong ?? null}
                                 />
                             </div>
+
+                            {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
+                            <SnapHighlightLayer
+                                pxPerSec={pxPerSec}
+                                rowHeight={rowHeight}
+                                tracks={s.tracks}
+                                contentHeight={contentHeight}
+                            />
 
                             <div
                                 className="absolute left-0 right-0 pointer-events-none z-10"
@@ -1853,6 +1889,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         pointerId: e.pointerId,
                                         lastBeat: initialSec,
                                     };
+                                    // 拖拽播放头同样登记吸附手势：拖动中高亮吸附目标
+                                    //（光标自身不重复高亮），工具栏吸附状态同步。
+                                    beginSnapGesture();
                                     (e.currentTarget as HTMLDivElement).setPointerCapture(
                                         e.pointerId,
                                     );
@@ -1896,6 +1935,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             );
                                         }
                                         void dispatch(seekPlayhead(drag.lastBeat));
+                                        // 拖拽结束：解除手势并清除吸附竖线高亮。
+                                        endSnapGesture();
+                                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                                         window.removeEventListener("pointermove", onPointerMove);
                                         window.removeEventListener("pointerup", endDrag);
                                         window.removeEventListener("pointercancel", endDrag);

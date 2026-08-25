@@ -3,6 +3,7 @@ import {
     computeTimelineFadeShadeRange,
     resolveFontFamily,
 } from "./timelineCanvasStyle.js";
+import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
 import { fadeCurveGain } from "../paths.js";
 
 function drawFadeCurveStroke(
@@ -60,6 +61,8 @@ export function drawTimelineCanvas(
             isMidiClip?: boolean;
             trackColor?: string;
             isRenaming?: boolean;
+            /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
+            snapOffsetPx?: number;
         }>;
         fontFamily?: string;
         activeGroupIds?: Set<string>;
@@ -326,6 +329,34 @@ export function drawTimelineCanvas(
                 curve: clip.fadeOutCurve,
                 mode: "out",
             });
+        }
+
+        // ── SnapOffset（吸附偏移）三角标记 ────────────────────────
+        // 左下角等腰直角三角形（直角在左下，◣）。**左侧竖直边严格对齐
+        // 偏移位置**（与波形内橙色竖虚线同 x）—— 不做宽度回退钳制；
+        // 三角靠近/越过 Clip 末尾的部分按 Clip 矩形裁剪。offset=0 时
+        // 半透明贴在起点作为可发现性提示。
+        if (clipWidth >= 12 && clipHeight >= 14) {
+            const offsetPx = Math.max(0, Number(clip.snapOffsetPx) || 0);
+            const triX = clipLeft + offsetPx;
+            const triYBottom = clipTop + clipHeight;
+            const size = SNAP_OFFSET_HANDLE_SIZE_PX;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(clipLeft, clipTop, clipWidth, clipHeight);
+            ctx.clip();
+            ctx.globalAlpha *= offsetPx > 1e-9 ? 0.95 : 0.55;
+            ctx.beginPath();
+            ctx.moveTo(triX, triYBottom - size);
+            ctx.lineTo(triX, triYBottom);
+            ctx.lineTo(triX + size, triYBottom);
+            ctx.closePath();
+            ctx.fillStyle = "#fac03d";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
         }
 
         ctx.restore();

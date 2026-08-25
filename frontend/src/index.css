@@ -44,6 +44,15 @@
     --qt-subtle-hover: rgba(255, 255, 255, 0.04);
     --qt-meter-rail: #2a2a2a;
     --qt-meter-well: #1d1d1d;
+    /* 吸附竖线高亮：按吸附目标类型区分颜色 */
+    --qt-snap-grid: #3b82f6;
+    --qt-snap-clip: #f59e0b;
+    --qt-snap-offset: #ec4899;
+    --qt-snap-source: #a855f7;
+    --qt-snap-selection: #22d3ee;
+    --qt-snap-cursor: #f05a5a;
+    --qt-snap-sample: #94a3b8;
+    --qt-snap-loop: #22c55e;
 }
 
 .qt-theme.light,
@@ -82,6 +91,15 @@
     --qt-subtle-hover: rgba(28, 36, 52, 0.04);
     --qt-meter-rail: #d6dbe5;
     --qt-meter-well: #c8ceda;
+    /* 吸附竖线高亮：按吸附目标类型区分颜色（浅色主题取更深的可读色） */
+    --qt-snap-grid: #2563eb;
+    --qt-snap-clip: #d97706;
+    --qt-snap-offset: #db2777;
+    --qt-snap-source: #9333ea;
+    --qt-snap-selection: #0891b2;
+    --qt-snap-cursor: #de4f5d;
+    --qt-snap-sample: #64748b;
+    --qt-snap-loop: #16a34a;
 }
 
 :root {

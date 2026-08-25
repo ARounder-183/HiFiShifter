@@ -158,3 +158,79 @@ export function nearestBoundarySnapOffsetSec(
 export function loopSnapThresholdSec(snapDistancePx: number, pxPerSec: number): number {
     return Math.max(0, Number(snapDistancePx) || 0) / Math.max(1e-9, pxPerSec);
 }
+
+/** Slip 平移量下媒体边界与 Clip 边缘的对齐情况。 */
+export interface SlipAlignedSides {
+    /** 某媒体边界恰好落在 Clip 起点（T=0）。 */
+    start: boolean;
+    /** 某媒体边界恰好落在 Clip 终点（T=len）。 */
+    end: boolean;
+}
+
+/**
+ * 判定 Slip 窗口平移量 `windowShiftSec`（与 nearestBoundarySnapOffsetSec
+ * 的 rawOffsetSec 同一 X 域：指针位移 × dir）下，媒体边界与 Clip 的哪些
+ * 边缘重合。
+ *
+ * 与 nearestBoundarySnapOffsetSec("slip") 的候选族**同一套**相位/等式：
+ * - Loop：正放起点 φ=floor_mod(−ss,D)、终点 φ=floor_mod(−ss−len·r,D)；
+ *   倒放起点 φ=floor_mod(−se_eff,D)、终点 φ=floor_mod(−se_eff+len·r,D)
+ *   （se_eff = min(se, D)，与引擎锚点约定一致）；
+ * - 非 Loop：有限等式候选，b ∈ {0, D}。
+ *
+ * 用于吸附竖线高亮只标记真正对齐的一侧 —— 两侧同时对齐（如 len·r 恰为
+ * 整周期）才两侧都标。
+ */
+export function slipBoundaryAlignedSides(
+    clip: BoundarySnapClip,
+    windowShiftSec: number,
+    eps = 1e-6,
+): SlipAlignedSides {
+    const rate =
+        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6 ? clip.playbackRate : 1;
+    const raw = Number(windowShiftSec);
+    if (!Number.isFinite(raw)) return { start: false, end: false };
+    const ss = Number(clip.sourceStartSec) || 0;
+    const se = Number(clip.sourceEndSec) || 0;
+    const len = Math.max(0, Number(clip.lengthSec) || 0);
+
+    const d =
+        clip.contentDurationSec != null && clip.contentDurationSec > 1e-9
+            ? clip.contentDurationSec
+            : clipMediaDurationSec(clip);
+
+    // ── Loop：mod-D 相位族（环绕距离比较）─────────────────────
+    if (clip.loopEnabled) {
+        if (d == null || !(d > 1e-9)) return { start: false, end: false };
+        const seEff = Math.min(se, d);
+        let startPhi: number;
+        let endPhi: number;
+        if (!clip.reversed) {
+            const p0 = floorMod(-ss, d);
+            startPhi = p0;
+            endPhi = floorMod(p0 - len * rate, d);
+        } else {
+            const p0 = floorMod(-seEff, d);
+            startPhi = p0;
+            endPhi = floorMod(p0 + len * rate, d);
+        }
+        const phase = raw * rate;
+        const tol = eps * rate;
+        // 环绕距离：|floor_mod(phase − phi + d/2, d) − d/2|
+        const near = (phi: number) =>
+            Math.abs(floorMod(phase - phi + d / 2, d) - d / 2) <= tol;
+        return { start: near(startPhi), end: near(endPhi) };
+    }
+
+    // ── 非 Loop：有限等式候选（b ∈ {0, D}）──────────────────
+    const bounds = d != null && d > 1e-9 ? [0, d] : [0];
+    let start = false;
+    let end = false;
+    for (const b of bounds) {
+        const base = clip.reversed ? (b - se) / rate : (b - ss) / rate;
+        if (Math.abs(raw - base) <= eps) start = true;
+        const endCand = clip.reversed ? base + len : base - len;
+        if (Math.abs(raw - endCand) <= eps) end = true;
+    }
+    return { start, end };
+}

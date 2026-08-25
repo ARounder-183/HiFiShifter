@@ -33,6 +33,12 @@ import {
     beginSnapGesture,
     endSnapGesture,
 } from "../../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    clearSnapHighlights,
+} from "../../../../utils/snapHighlight";
+import type { SnapTimelineOpts } from "./useTimelineState";
+import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import { buildDuplicateClipsBulkPayload } from "./bulkClipRemotePayloads";
 import {
@@ -46,6 +52,7 @@ import {
 } from "../runtime/timelineTrackDragLock";
 import { webApi } from "../../../../services/webviewApi";
 import { resolveClipDragCopyMode } from "./clipDragCopyMode";
+import { NEW_TRACK_SENTINEL as NEW_TRACK_SENTINEL_CONST } from "../constants";
 import {
     applyRippleFollowerShift,
     buildRippleFollowers,
@@ -53,7 +60,8 @@ import {
     type RippleMode,
 } from "../../../../features/session/ripplePreview";
 
-export const NEW_TRACK_SENTINEL = "__hs_new_track__";
+/** 兼容导出：哨兵常量已迁移到 timeline/constants。 */
+export const NEW_TRACK_SENTINEL = NEW_TRACK_SENTINEL_CONST;
 
 /** 把自动交叉淡化实时预览改动过的**自动** fade 恢复为拖拽初始值（取消/复制时调用）。 */
 export function restoreInitialAutoFades(
@@ -97,6 +105,10 @@ export type ClipDragState = {
     allowTrackMove: boolean;
     initialAnchorstartSec: number;
     initialAnchorTrackId: string;
+    /** 锚 Clip 长度（秒）：多源吸附需要后缘位置（起点 + 长度）。 */
+    anchorLengthSec: number;
+    /** 锚 Clip 吸附偏移（秒）：多源吸附把偏移点也作为被吸附对象。 */
+    anchorSnapOffsetSec: number;
     initialTrackOrder: string[];
     initialTrackIndexById: Record<string, number>;
     minTrackOffset: number;
@@ -140,15 +152,12 @@ export function useClipDrag(deps: {
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
     dispatch: AppDispatch;
-    snapTimeline: (
+    /** 完整吸附结果入口（返回 SnapResult；负责发布吸附竖线高亮）。 */
+    snapTimelineDetailed: (
         sec: number,
-        object: "clip",
-        opts?: {
-            originSec?: number;
-            anchorTrackId?: string | null;
-            excludeClipIds?: ReadonlySet<string>;
-        },
-    ) => number;
+        object: SnapObjectKind,
+        opts?: SnapTimelineOpts,
+    ) => SnapResult;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
@@ -175,7 +184,7 @@ export function useClipDrag(deps: {
         multiSelectedSet,
         dispatch,
         pxPerSec,
-        snapTimeline,
+        snapTimelineDetailed,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
@@ -347,6 +356,8 @@ export function useClipDrag(deps: {
             allowTrackMove,
             initialAnchorstartSec: clipstartSec,
             initialAnchorTrackId: initialTrackId,
+            anchorLengthSec: Math.max(0, Number(anchor.lengthSec) || 0),
+            anchorSnapOffsetSec: Math.max(0, Number(anchor.snapOffsetSec) || 0),
             initialTrackOrder: trackOrder,
             initialTrackIndexById: trackIndexById,
             minTrackOffset,
@@ -392,11 +403,12 @@ export function useClipDrag(deps: {
                 if (!drag.copyMode) {
                     dispatch(checkpointHistory());
                     dispatch(beginInteraction());
-                    beginSnapGesture();
                     // Begin backend undo group so that move_clip + auto-crossfade
                     // share a single backend undo entry.
                     void webApi.beginUndoGroup();
                 }
+                // 吸附手势登记（复制拖动同样参与吸附与竖线高亮）。
+                beginSnapGesture();
             }
 
             // 拖动过程中允许 copyMode 随按键变化（但不会从 true 变回 false）
@@ -411,21 +423,8 @@ export function useClipDrag(deps: {
             const b = el.getBoundingClientRect();
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
             let nextStart = Math.max(0, beatNow - drag.offsetBeat);
-            const noSnapActive = isModifierActive(noSnapKb, ev);
-            // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
-            const effectiveSnap = computeEffectiveSnap(snapEnabled, noSnapActive);
-            if (effectiveSnap) {
-                nextStart = snapTimeline(nextStart, "clip", {
-                    originSec: drag.initialAnchorstartSec,
-                    anchorTrackId: drag.initialAnchorTrackId,
-                    excludeClipIds: new Set(drag.clipIds),
-                });
-            }
 
-            let deltaBeat = nextStart - drag.initialAnchorstartSec;
-            deltaBeat = Math.max(deltaBeat, -drag.minstartSec);
-            drag.lastDeltaBeat = deltaBeat;
-
+            // ── 目标轨道解析（先于吸附：高亮需要知道被拖拽 Clip 的当前行）──
             const hoveredTrackId = trackIdFromClientY(ev.clientY);
             const hoveredTrackIndex =
                 hoveredTrackId != null ? drag.initialTrackIndexById[hoveredTrackId] : undefined;
@@ -458,6 +457,38 @@ export function useClipDrag(deps: {
                 setClipDropNewTrack(false);
             }
 
+            const noSnapActive = isModifierActive(noSnapKb, ev);
+            // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
+            const effectiveSnap = computeEffectiveSnap(snapEnabled, noSnapActive);
+            if (effectiveSnap) {
+                // 吸附 + 竖线高亮发布（多源：前缘/后缘/自身吸附偏移点同时
+                // 参与匹配，取更近者）：
+                // - 目标侧由候选决定（网格线通栏 / 对方 Clip 边缘行级）；
+                // - 被吸附对象侧 = 锚 Clip 的命中位置，行随跨轨拖动实时更新；
+                //   落新轨时用哨兵行。
+                nextStart = snapTimelineDetailed(nextStart, "clip", {
+                    originSec: drag.initialAnchorstartSec,
+                    anchorTrackId: drag.initialAnchorTrackId,
+                    excludeClipIds: new Set(drag.clipIds),
+                    moveLengthSec: drag.anchorLengthSec,
+                    moveSnapOffsetSec: drag.anchorSnapOffsetSec,
+                    highlight: {
+                        sources: [
+                            {
+                                trackId: nextTrackId ?? NEW_TRACK_SENTINEL_CONST,
+                                clipId: drag.anchorClipId,
+                            },
+                        ],
+                    },
+                }).sec;
+            } else {
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            }
+
+            let deltaBeat = nextStart - drag.initialAnchorstartSec;
+            deltaBeat = Math.max(deltaBeat, -drag.minstartSec);
+            drag.lastDeltaBeat = deltaBeat;
+
             const horizontalPx = Math.abs(ev.clientX - drag.startClientX);
             const trackLock = computeTimelineTrackDragLock({
                 initialTrackId: drag.initialAnchorTrackId,
@@ -469,6 +500,8 @@ export function useClipDrag(deps: {
             if (trackLock.locked) {
                 deltaBeat = 0;
                 drag.lastDeltaBeat = 0;
+                // 垂直锁定时水平位移被钳零：吸附结果不再生效，清除高亮。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             }
 
             // copyMode 时不移动原 clip，只更新 ghost 预览位置
@@ -647,6 +680,7 @@ export function useClipDrag(deps: {
                 // copyMode 下原 clip 未被移动，直接根据 ghost 偏移量计算副本位置
                 // copyMode 不使用交互锁（原 clip 未被拖动改变位置）
                 // 复制不产生波纹，松手前把跟随集恢复原位（覆盖预览残留）。
+                endSnapGesture();
                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
                 restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
                 void (async () => {
@@ -1018,6 +1052,9 @@ export function useClipDrag(deps: {
                             );
                         }
                         await webApi.endUndoGroup();
+                        // 位移为零（拖回原位）：没有 move thunk 的 finally 路径，
+                        // 这里补齐吸附手势深度（与 beginSnapGesture 配对）。
+                        endSnapGesture();
                         dispatch(endInteraction());
                     })().catch(() => undefined);
                 }

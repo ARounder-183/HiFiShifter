@@ -622,6 +622,8 @@ pub struct CreateClipTemplatePayload {
     pub reversed: Option<bool>,
     #[serde(default)]
     pub loop_enabled: Option<bool>,
+    #[serde(default)]
+    pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -750,6 +752,11 @@ pub struct Clip {
     ///   设置迁移（见 open_project 的 v4 迁移逻辑）。
     #[serde(default)]
     pub loop_enabled: bool,
+    /// 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
+    /// 倒放时它依然表示"距 Clip 起点偏移 X"的位置。
+    /// 对标 REAPER / VEGAS 的 item snap offset；旧工程缺失时按 0 补齐。
+    #[serde(default)]
+    pub snap_offset_sec: f64,
     #[serde(default)]
     pub fade_in_sec: f64,
     #[serde(default)]
@@ -829,6 +836,7 @@ pub struct ClipStatePatch {
     pub reversed: Option<bool>,
     #[serde(default)]
     pub loop_enabled: Option<bool>,
+    pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,
@@ -2665,6 +2673,7 @@ mod tests {
                     playback_rate: Some(0.8),
                     reversed: Some(true),
                     loop_enabled: None,
+                    snap_offset_sec: None,
                     fade_in_sec: Some(0.15),
                     fade_out_sec: Some(0.25),
                     fade_in_curve: Some("sine".into()),
@@ -2689,6 +2698,7 @@ mod tests {
                     playback_rate: Some(1.0),
                     reversed: Some(false),
                     loop_enabled: None,
+                    snap_offset_sec: None,
                     fade_in_sec: Some(0.05),
                     fade_out_sec: Some(0.1),
                     fade_in_curve: Some("linear".into()),
@@ -2774,6 +2784,7 @@ mod tests {
                 playback_rate: Some(0.8),
                 reversed: Some(true),
                 loop_enabled: None,
+                snap_offset_sec: None,
                 fade_in_sec: Some(0.1),
                 fade_out_sec: Some(0.2),
                 fade_in_curve: Some("linear".into()),
@@ -3700,6 +3711,7 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
                 loop_enabled: c.loop_enabled,
+                snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -3774,6 +3786,7 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 reversed: Some(c.reversed),
                 loop_enabled: c.loop_enabled,
+                snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
                 fade_in_curve: Some(c.fade_in_curve.clone()),
@@ -4530,6 +4543,7 @@ impl TimelineState {
             // 新 Clip 的 Loop 属性跟随"为新的音频块启用循环"设置
             //（导入/录音/MIDI-as-clip/add_clip 等所有创建路径统一生效）。
             loop_enabled: crate::config::loop_new_clips_default(),
+            snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: default_fade_curve(),
@@ -4794,6 +4808,7 @@ impl TimelineState {
                 playback_rate,
                 reversed,
                 loop_enabled: None,
+                snap_offset_sec: None,
                 fade_in_sec,
                 fade_out_sec,
                 fade_in_curve: None,
@@ -4842,6 +4857,13 @@ impl TimelineState {
             }
             if let Some(v) = patch.loop_enabled {
                 c.loop_enabled = v;
+            }
+            if let Some(v) = patch.snap_offset_sec {
+                if v.is_finite() {
+                    // SnapOffset 必须落在 [0, length] 内：负值无意义，
+                    // 超出 Clip 长度的偏移点不可见也不可吸附。
+                    c.snap_offset_sec = v.clamp(0.0, c.length_sec.max(0.0));
+                }
             }
             if let Some(v) = patch.fade_in_sec {
                 c.fade_in_sec = v.max(0.0);
@@ -4932,6 +4954,7 @@ impl TimelineState {
                     playback_rate: template.playback_rate,
                     reversed: template.reversed,
                     loop_enabled: template.loop_enabled,
+                    snap_offset_sec: template.snap_offset_sec,
                     fade_in_sec: template.fade_in_sec,
                     fade_out_sec: template.fade_out_sec,
                     fade_in_curve: template.fade_in_curve.clone(),
@@ -5172,6 +5195,44 @@ impl TimelineState {
         created_clip_ids
     }
 
+    /// 把 SnapOffset 按标记点的**时间线绝对位置**归属到分割后的两段之一：
+    /// 包含标记点的那段继承"标记位置 − 该段起点"（重新以段起点为基准），
+    /// 另一段为 0。右段优先（延伸重叠可能使右段起点越过标记点）。
+    ///
+    /// 调用方必须在两段的**最终几何**确定之后调用：
+    /// - 普通 `split_clip`：切割边界即最终边界；
+    /// - `split_clip_with_transition`："延伸重叠"会平移右段起点/延伸左段
+    ///   终点，须在过渡应用后再调用。
+    fn assign_snap_offset_to_split(
+        &mut self,
+        left_id: &str,
+        right_id: &str,
+        marker_pos_sec: f64,
+    ) {
+        let Some(l_idx) = self.clips.iter().position(|c| c.id == left_id) else {
+            return;
+        };
+        let Some(r_idx) = self.clips.iter().position(|c| c.id == right_id) else {
+            return;
+        };
+        let m = marker_pos_sec.max(0.0);
+        let (r_start, r_len) = {
+            let r = &self.clips[r_idx];
+            (r.start_sec, r.length_sec)
+        };
+        let (l_start, l_len) = {
+            let l = &self.clips[l_idx];
+            (l.start_sec, l.length_sec)
+        };
+        if m >= r_start - 1e-9 {
+            self.clips[r_idx].snap_offset_sec = (m - r_start).min(r_len.max(0.0));
+            self.clips[l_idx].snap_offset_sec = 0.0;
+        } else {
+            self.clips[l_idx].snap_offset_sec = (m - l_start).clamp(0.0, l_len.max(0.0));
+            self.clips[r_idx].snap_offset_sec = 0.0;
+        }
+    }
+
     pub fn split_clip(&mut self, clip_id: &str, split_sec: f64) -> Option<String> {
         let Some(idx) = self.clips.iter().position(|c| c.id == clip_id) else {
             return None;
@@ -5233,6 +5294,9 @@ impl TimelineState {
         self.clips[idx].fade_out_sec = 0.0;
         self.clips[idx].auto_fade_out_sec = 0.0;
         self.clips[idx].auto_fade_in_sec = self.clips[idx].auto_fade_in_sec.min(left_len.max(0.0));
+        // SnapOffset 归属在两段最终几何确定后统一处理
+        //（见 assign_snap_offset_to_split）：标记点时间线位置 = 起点 + O。
+        let marker_pos_sec = start + clip.snap_offset_sec;
 
         let mut right = clip;
         right.id = new_id("clip");
@@ -5242,6 +5306,7 @@ impl TimelineState {
         right.fade_out_sec = right.fade_out_sec.min(right_len.max(0.0));
         right.auto_fade_in_sec = 0.0;
         right.auto_fade_out_sec = right.auto_fade_out_sec.min(right_len.max(0.0));
+        // SnapOffset 先归零，归属由 assign_snap_offset_to_split 统一处理。
 
         // Preserve the original audio offset: the right clip should continue from where the left ended.
         // trim_* are in sec (source time), while playback_rate scales source progress per timeline time.
@@ -5302,6 +5367,7 @@ impl TimelineState {
         right.group_id = self.clips[idx].group_id.clone();
         let right_id = right.id.clone();
         self.clips.push(right);
+        self.assign_snap_offset_to_split(clip_id, &right_id, marker_pos_sec);
         Some(right_id)
     }
 
@@ -5312,6 +5378,13 @@ impl TimelineState {
         split_sec: f64,
         opts: &SplitTransitionOptions,
     ) -> Option<String> {
+        // 快照分割前的几何与 SnapOffset："延伸重叠"过渡会平移右段起点、
+        // 延伸左段终点 —— SnapOffset 的归属必须以**过渡后的最终几何**
+        // 重新计算（split_clip 内部按切割边界做的预分配会被此处覆盖）。
+        let (orig_start_sec, orig_snap_offset_sec) = {
+            let c = self.clips.iter().find(|c| c.id == clip_id)?;
+            (c.start_sec, c.snap_offset_sec)
+        };
         let right_id = self.split_clip(clip_id, split_sec)?;
         let effective_duration_sec = match opts.duration_unit {
             SplitTransitionDurationUnit::Seconds => opts.duration_sec,
@@ -5334,6 +5407,11 @@ impl TimelineState {
         if opts.enabled && effective_duration_sec.is_finite() && effective_duration_sec > 0.0 {
             self.apply_split_transition(clip_id, &right_id, opts, effective_duration_sec);
         }
+
+        // SnapOffset 重算："延伸重叠"已平移右段起点/延伸左段终点 ——
+        // 以最终几何按同一归属规则重新分配（覆盖 split_clip 的预分配）。
+        let marker_pos_sec = orig_start_sec + orig_snap_offset_sec;
+        self.assign_snap_offset_to_split(clip_id, &right_id, marker_pos_sec);
         Some(right_id)
     }
 

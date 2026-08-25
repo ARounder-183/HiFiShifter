@@ -110,6 +110,8 @@ type TrackLaneProps = {
             | "gain"
             | "crossfade_edges",
     ) => void;
+    /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
+    startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
     onCtrlToggleSelect: (clipId: string) => void;
@@ -171,6 +173,7 @@ export const TrackLane = React.memo(
             seekFromClientX,
             startClipDrag,
             startEditDrag,
+            startSnapOffsetDrag,
             toggleClipMuted,
             onCtrlToggleSelect,
             toggleMultiSelect,
@@ -254,6 +257,7 @@ export const TrackLane = React.memo(
                         trackId: clip.trackId,
                         startSec: clip.startSec,
                         lengthSec: clip.lengthSec,
+                        snapOffsetSec: clip.snapOffsetSec,
                     })),
                 }),
             [pxPerSec, rowHeight, track.id, trackClips],
@@ -481,6 +485,29 @@ export const TrackLane = React.memo(
                 startEditDrag,
             ],
         );
+        // SnapOffset（吸附偏移）角部手势：左下角 ◣ 处按下即进入偏移拖拽
+        // （内部走完整吸附引擎与竖线高亮）。选择预备语义与边缘交互一致。
+        const beginSnapOffsetInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>, clip: ClipInfo) => {
+                if (event.button !== 0) return;
+                const altKeyDown = Boolean(
+                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
+                );
+                const primaryModifierDown = isPrimaryModifierDown(event);
+                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
+                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
+
+                event.preventDefault();
+                event.stopPropagation();
+                clearContextMenu();
+
+                if (!doShiftRangeSelect && !doCtrlToggleOnly) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
+                startSnapOffsetDrag?.(event, clip.id);
+            },
+            [clearContextMenu, primeSelection, startSnapOffsetDrag],
+        );
 
         return (
             <div
@@ -536,6 +563,10 @@ export const TrackLane = React.memo(
                     }
                     const clip = trackClips.find((candidate) => candidate.id === hit.clipId);
                     if (!clip) {
+                        return;
+                    }
+                    if (hit.zone === "snap_offset") {
+                        beginSnapOffsetInteraction(event, clip);
                         return;
                     }
                     if (hit.zone === "trim_left" || hit.zone === "trim_right") {
@@ -612,6 +643,7 @@ export const TrackLane = React.memo(
                             seekFromClientX={seekFromClientX}
                             startClipDrag={startClipDrag}
                             startEditDrag={startEditDrag}
+                            startSnapOffsetDrag={startSnapOffsetDrag}
                             toggleClipMuted={toggleClipMuted}
                             onCtrlToggleSelect={onCtrlToggleSelect}
                             toggleMultiSelect={toggleMultiSelect}
@@ -650,6 +682,7 @@ export const TrackLane = React.memo(
                         clipId: string,
                         type: Parameters<typeof startEditDrag>[2],
                     ) => void}
+                    startSnapOffsetDrag={startSnapOffsetDrag}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
@@ -712,6 +745,7 @@ export const TrackLane = React.memo(
             prev.seekFromClientX === next.seekFromClientX &&
             prev.startClipDrag === next.startClipDrag &&
             prev.startEditDrag === next.startEditDrag &&
+            prev.startSnapOffsetDrag === next.startSnapOffsetDrag &&
             prev.toggleClipMuted === next.toggleClipMuted &&
             prev.onCtrlToggleSelect === next.onCtrlToggleSelect &&
             prev.toggleMultiSelect === next.toggleMultiSelect &&

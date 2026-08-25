@@ -50,9 +50,9 @@ export const enUS = {
     recording_toggle_title: "Start / Stop Recording (right-click for settings)",
     recording_tooltip_start: "Start Recording (right-click for quick settings)",
     recording_tooltip_stop: "Stop Recording (right-click for quick settings)",
-    recording_tooltip_cancel_countdown: "Cancel Recording Countdown (right-click for quick settings)",
+    recording_tooltip_cancel_countdown:
+        "Cancel Recording Countdown (right-click for quick settings)",
     recording_context_settings: "Recording Settings...",
-
 
     kb_recording_toggle: "Start / Stop Recording",
     recording_error_save_settings: "Failed to save recording settings.",
@@ -64,7 +64,8 @@ export const enUS = {
     recording_error_no_default_input: "No system default recording device was found.",
     recording_error_device_not_found: "The selected recording device is unavailable.",
     recording_error_loopback_not_found: "The system sound (loopback) device is unavailable.",
-    recording_error_no_supported_config: "The selected device does not support the requested sample rate or channel settings.",
+    recording_error_no_supported_config:
+        "The selected device does not support the requested sample rate or channel settings.",
     recording_error_build_input: "Could not open the selected recording device.",
     recording_error_start_timeout: "Timed out while starting recording.",
     recording_error_output_missing: "The recorded file could not be finalized.",
@@ -83,8 +84,7 @@ export const enUS = {
         "Application audio capture is not supported on this platform.",
     recording_error_app_not_found: "The selected application is no longer producing audio.",
     recording_error_app_activation: "Failed to activate application audio capture.",
-    recording_error_app_activation_timeout:
-        "Timed out while activating application audio capture.",
+    recording_error_app_activation_timeout: "Timed out while activating application audio capture.",
     recording_error_pipewire_missing:
         "Application capture on Linux requires the PipeWire tools (pw-dump / pw-cat).",
     recording_error_pipewire_dump: "Could not inspect PipeWire audio nodes.",
@@ -616,8 +616,7 @@ export const enUS = {
     kb_modifier_stretch: "Time Stretch (hold while dragging edge)",
     kb_modifier_no_snap: "Toggle snap while dragging (hold to invert current snap)",
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip)",
-    kb_modifier_crossfade_grip:
-        "Crossfade Grip (hold while dragging the crossfade crossing point)",
+    kb_modifier_crossfade_grip: "Crossfade Grip (hold while dragging the crossfade crossing point)",
     kb_modifier_horizontal_zoom: "Horizontal Zoom (hold + scroll)",
     kb_modifier_pr_vzoom: "Vertical Zoom (hold + scroll)",
     kb_modifier_param_morph: "Param Morph (hold inside param selection)",
@@ -755,12 +754,13 @@ export const enUS = {
     snap_grid_adjust_clips_on_swing: "Adjust all clips when changing swing",
     snap_section_master: "Snap Master",
     snap_enable_snapping: "Enable snapping",
+    snap_show_highlight: "Show snap highlight lines while dragging",
     snap_distance_px: "Snap distance",
     snap_relative_to_grid: "Snap relative to grid",
     snap_section_targets: "Snap Targets / Objects",
     snap_to_selection_markers_cursor: "To selection / markers / cursor",
     snap_to_grid: "To grid",
-    snap_media_items: "Clips",
+    snap_clips: "Clips",
     snap_selection: "Selection",
     snap_cursor: "Cursor",
     snap_section_grid_behavior: "Snap Behavior",
@@ -771,6 +771,7 @@ export const enUS = {
     snap_section_interactions: "Clip & Special Interactions",
     snap_clip_edges: "Snap clip start/end",
     snap_clip_snap_offset: "Snap clip snap offset (content start)",
+    clip_snap_offset: "Snap offset (drag to adjust)",
     snap_across_tracks: "Snap clips across tracks",
     snap_track_distance: "Tracks away",
     snap_razor_edits: "Snap razor edits",

@@ -615,8 +615,7 @@ export const koKR = {
     kb_modifier_stretch: "타임 스트레치 (엣지 드래그 중 누르기)",
     kb_modifier_no_snap: "드래그 중 스냅을 전환합니다 (누르면 현재 스냅을 반전)",
     kb_modifier_copy_drag: "복사 드래그 (클립 드래그 중 누르기)",
-    kb_modifier_crossfade_grip:
-        "크로스페이드 핸들 (크로스페이드 교차점 드래그 중 누르기)",
+    kb_modifier_crossfade_grip: "크로스페이드 핸들 (크로스페이드 교차점 드래그 중 누르기)",
     kb_modifier_horizontal_zoom: "수평 줌 (누른 채 스크롤)",
     kb_modifier_pr_vzoom: "수직 줌 (누른 채 스크롤)",
     kb_modifier_param_morph: "파라미터 형태 변형 (선택 영역에서 누르기)",
@@ -754,12 +753,13 @@ export const koKR = {
     snap_grid_adjust_clips_on_swing: "스윙 변경 시 모든 클립 재정렬",
     snap_section_master: "스냅 마스터",
     snap_enable_snapping: "스냅 사용",
+    snap_show_highlight: "드래그 중에 스냅 강조 선 표시",
     snap_distance_px: "스냅 거리",
     snap_relative_to_grid: "그리드 상대 스냅",
     snap_section_targets: "스냅 대상 및 목표",
     snap_to_selection_markers_cursor: "선택 / 마커 / 커서로",
     snap_to_grid: "그리드로",
-    snap_media_items: "클립",
+    snap_clips: "클립",
     snap_selection: "선택 영역",
     snap_cursor: "커서",
     snap_section_grid_behavior: "스냅 동작",
@@ -770,6 +770,7 @@ export const koKR = {
     snap_section_interactions: "클립 및 특수 요소 상호작용",
     snap_clip_edges: "클립 시작/끝 스냅",
     snap_clip_snap_offset: "클립 스냅 오프셋 스냅",
+    clip_snap_offset: "스냅 오프셋 (드래그로 조정)",
     snap_across_tracks: "다른 트랙의 클립으로 스냅",
     snap_track_distance: "트랙 거리",
     snap_razor_edits: "레이저 편집 스냅",
@@ -1144,7 +1145,6 @@ export const koKR = {
     recording_tooltip_cancel_countdown: "녹음 카운트다운 취소(마우스 오른쪽 클릭으로 빠른 설정)",
     recording_context_settings: "녹음 설정...",
 
-
     kb_recording_toggle: "녹음 시작/중지",
     recording_error_save_settings: "녹음 설정 저장에 실패했습니다.",
     recording_error_load_devices: "오디오 장치를 열거하지 못했습니다.",
@@ -1155,7 +1155,8 @@ export const koKR = {
     recording_error_no_default_input: "시스템 기본 녹음 장치를 찾을 수 없습니다.",
     recording_error_device_not_found: "선택한 녹음 장치를 사용할 수 없습니다.",
     recording_error_loopback_not_found: "시스템 사운드(루프백) 장치를 사용할 수 없습니다.",
-    recording_error_no_supported_config: "선택한 장치가 요청한 샘플 레이트 또는 채널 설정을 지원하지 않습니다.",
+    recording_error_no_supported_config:
+        "선택한 장치가 요청한 샘플 레이트 또는 채널 설정을 지원하지 않습니다.",
     recording_error_build_input: "선택한 녹음 장치를 열 수 없습니다.",
     recording_error_start_timeout: "녹음 시작 시간이 초과되었습니다.",
     recording_error_output_missing: "녹음 파일을 올바르게 생성하지 못했습니다.",
@@ -1167,7 +1168,8 @@ export const koKR = {
     recording_loopback_default: "시스템 기본 출력",
     recording_application: "애플리케이션",
     recording_refresh_apps: "새로고침",
-    recording_application_hint: "선택한 애플리케이션의 오디오만 캡처합니다(macOS에서는 지원되지 않음).",
+    recording_application_hint:
+        "선택한 애플리케이션의 오디오만 캡처합니다(macOS에서는 지원되지 않음).",
     recording_error_load_apps: "오디오 애플리케이션을 열거할 수 없습니다.",
     recording_error_app_capture_unsupported:
         "이 플랫폼에서는 애플리케이션 오디오 캡처가 지원되지 않습니다.",

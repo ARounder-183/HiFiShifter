@@ -14,7 +14,13 @@ import React from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
-import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
+import {
+    CLIP_BODY_PADDING_Y,
+    CLIP_HEADER_HEIGHT,
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+    SNAP_OFFSET_HIT_HEIGHT_PX,
+    snapOffsetHandleXPx,
+} from "./constants";
 import { FadeHitLayer } from "./FadeHitLayer";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import {
@@ -43,6 +49,7 @@ export const ClipItem = React.memo(function ClipItem({
     seekFromClientX,
     startClipDrag,
     startEditDrag,
+    startSnapOffsetDrag,
     toggleClipMuted,
     onCtrlToggleSelect,
     toggleMultiSelect: _toggleMultiSelect,
@@ -102,6 +109,8 @@ export const ClipItem = React.memo(function ClipItem({
             | "gain"
             | "crossfade_edges",
     ) => void;
+    /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
+    startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
     onCtrlToggleSelect: (clipId: string) => void;
@@ -415,6 +424,28 @@ export const ClipItem = React.memo(function ClipItem({
                     recordLastClickPosition={recordLastClickPosition}
                     seekFromClientX={seekFromClientX}
                     startEditDrag={startEditDrag}
+                />
+
+                {/* SnapOffset 命中握把（透明）：**跟随 ◣ 三角位置**（三角
+                    视觉由轨道级 Canvas 绘制），z 高于左缘 trim/stretch 条
+                    （z-60，全高、始终可命中）——否则三角所在处会被边缘
+                    拖拽抢走。此处只负责把按下事件路由给吸附偏移拖拽。 */}
+                <div
+                    className="absolute bottom-0 z-[70]"
+                    style={{
+                        left:
+                            snapOffsetHandleXPx(clip.snapOffsetSec, pxPerSec) - 1,
+                        width: SNAP_OFFSET_HANDLE_SIZE_PX + 3,
+                        height: SNAP_OFFSET_HIT_HEIGHT_PX,
+                        cursor: "ew-resize",
+                    }}
+                    onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        startSnapOffsetDrag?.(e, clip.id);
+                    }}
+                    data-tooltip={t("clip_snap_offset")}
                 />
 
                 <ClipHeader

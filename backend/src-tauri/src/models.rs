@@ -81,6 +81,8 @@ pub struct TimelineClip {
     /// Loop（循环源）属性：超出源媒体区间时按周期回绕产生循环内容。
     #[serde(default)]
     pub loop_enabled: bool,
+    /// 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失补齐为 0。
+    pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
     pub fade_in_curve: Option<String>,

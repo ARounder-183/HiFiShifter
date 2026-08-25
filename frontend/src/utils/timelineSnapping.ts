@@ -22,9 +22,9 @@ import { gridStepBeats } from "../components/layout/timeline/grid";
 import {
     modEuclid,
     resolveClipContentDurationSec,
-    resolveLeadingSilenceSec,
     resolvePlaybackWindowSec,
 } from "./loopRender";
+import { clearSnapHighlights } from "./snapHighlight";
 
 export type SnapObjectKind = "clip" | "selection" | "cursor";
 export type SnapCandidateKind =
@@ -76,6 +76,73 @@ export interface SnapResult {
     candidate: SnapCandidate | null;
     distancePx: number;
     snapped: boolean;
+}
+
+/** 拖拽移动 Clip 的多源吸附结果。 */
+export interface SnapClipMoveResult extends SnapResult {
+    /**
+     * 命中吸附的被吸附位置：
+     * - start = 前缘对齐；
+     * - end = 后缘（结束位置）对齐；
+     * - snap_offset = Clip 自身吸附偏移点（起点 + snapOffset）对齐。
+     */
+    edgeSide: "start" | "end" | "snap_offset";
+}
+
+/**
+ * 拖拽移动 Clip 的吸附：前缘、后缘与**自身吸附偏移点**同时作为被吸附
+ * 对象参与候选匹配（对标 REAPER —— 移动 item 时 item 的起点/终点/
+ * snap offset 都可吸附），取像素距离更近者；完全平手时按
+ * start → snap_offset → end 优先。
+ *
+ * 返回的 `sec` 恒为调整后的 Clip 起点；`edgeSide` 标识哪个位置命中，
+ * 供竖线高亮把被吸附边标记放到正确位置。
+ */
+export function snapTimelineClipMove(
+    ctx: TimelineSnapContext,
+    rawStartSec: number,
+    clipLengthSec: number,
+    clipSnapOffsetSec = 0,
+): SnapClipMoveResult {
+    const safeLen = Number.isFinite(clipLengthSec) ? Math.max(0, clipLengthSec) : 0;
+    const safeOffset = Number.isFinite(clipSnapOffsetSec)
+        ? Math.min(Math.max(0, clipSnapOffsetSec), safeLen)
+        : 0;
+
+    const candidates: Array<{
+        result: SnapResult;
+        side: SnapClipMoveResult["edgeSide"];
+        shift: number;
+    }> = [];
+    const startResult = snapTimelinePosition(ctx, rawStartSec);
+    candidates.push({ result: startResult, side: "start", shift: 0 });
+    if (safeOffset > 1e-9 && Math.abs(safeOffset - safeLen) > 1e-9) {
+        const offsetResult = snapTimelinePosition(ctx, rawStartSec + safeOffset);
+        candidates.push({ result: offsetResult, side: "snap_offset", shift: safeOffset });
+    }
+    if (safeLen > 1e-9) {
+        // 后缘；偏移恰等于长度（两位置重合）时跳过，避免重复候选。
+        if (!(safeOffset > 1e-9 && Math.abs(safeOffset - safeLen) <= 1e-9)) {
+            const endResult = snapTimelinePosition(ctx, rawStartSec + safeLen);
+            candidates.push({ result: endResult, side: "end", shift: safeLen });
+        }
+    }
+
+    let best = candidates[0];
+    for (const candidate of candidates.slice(1)) {
+        const a = candidate.result;
+        const b = best.result;
+        // 更近者胜出；严格相等保持先入（start > snap_offset > end）。
+        if (a.snapped && (!b.snapped || a.distancePx < b.distancePx - 1e-9)) {
+            best = candidate;
+        }
+    }
+
+    return {
+        ...best.result,
+        sec: best.result.sec - best.shift,
+        edgeSide: best.side,
+    };
 }
 
 export const DEFAULT_PROJECT_SAMPLE_RATE = 48000;
@@ -259,37 +326,15 @@ function collectGridCandidates(ctx: TimelineSnapContext, rawSec: number): SnapCa
 }
 
 /**
- * clip 内容起点（首个可听采样）的投影（近似 REAPER snap offset）。
+ * Clip 吸附偏移（snap offset）在时间线上的绝对位置。
  *
- * 与后端 clip_leading_silence_sec / 前端 resolveLeadingSilenceSec 同一模型：
- * 正放看窗口起点越过媒体起点、倒放看窗口终点越过媒体末端 —— 越过部分为
- * 静音，内容真正开始于前导静音之后。Loop 的负锚点是环绕相位（无静音），
- * 恒返回 clip 起点。
+ * SnapOffset 是 Clip 自身的显式属性：相对 Clip 起点的偏移（秒），
+ * 默认 0（= 与 Clip 起点重合）；与倒放无关 —— 倒放时它依然标记
+ * "距 Clip 起点偏移 X" 的位置。对标 REAPER / VEGAS 的 item snap offset。
  */
-export function clipSnapOffsetSec(clip: ClipInfo): number {
-    const rate = Number(clip.playbackRate);
-    const safeRate = Number.isFinite(rate) && rate > 1e-6 ? rate : 1;
-    // 内容时长与后端 clip_source_media_duration_sec 同一取值链
-    //（frames/采样率 → durationSec → 音符内容最大结束）。
-    const contentDurSec = resolveClipContentDurationSec({
-        sourcePath: clip.sourcePath,
-        midiNoteData: clip.midiNoteData ?? null,
-        durationFrames: clip.durationFrames,
-        sourceSampleRate: clip.sourceSampleRate,
-        durationSec: clip.durationSec,
-    });
-    const leadingSilenceSec = resolveLeadingSilenceSec(
-        {
-            loopEnabled: Boolean(clip.loopEnabled),
-            reversed: Boolean(clip.reversed),
-            sourceStartSec: Number(clip.sourceStartSec) || 0,
-            playbackRate: safeRate,
-            lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
-            sourceEndSec: Number(clip.sourceEndSec) || 0,
-        },
-        contentDurSec,
-    );
-    return clampSec(Number(clip.startSec) + leadingSilenceSec);
+export function clipSnapOffsetSec(clip: Pick<ClipInfo, "startSec" | "snapOffsetSec">): number {
+    const offset = Number(clip.snapOffsetSec);
+    return clampSec(Number(clip.startSec) + (Number.isFinite(offset) ? Math.max(0, offset) : 0));
 }
 
 function clipTrackDistance(ctx: TimelineSnapContext, clip: ClipInfo): number {
@@ -361,13 +406,18 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
             });
         }
         if (settings.snapClipSnapOffset) {
-            out.push({
-                sec: clipSnapOffsetSec(clip),
-                kind: "snapOffset",
-                priority: 22,
-                clipId: clip.id,
-                trackId: clip.trackId,
-            });
+            // 显式 SnapOffset（相对 Clip 起点的偏移）。为 0 时与 clipStart
+            // 候选完全重合，跳过以免冗余；非 0 时是独立吸附目标。
+            const offset = Number(clip.snapOffsetSec);
+            if (Number.isFinite(offset) && offset > 1e-9) {
+                out.push({
+                    sec: clipSnapOffsetSec(clip),
+                    kind: "snapOffset",
+                    priority: 22,
+                    clipId: clip.id,
+                    trackId: clip.trackId,
+                });
+            }
         }
         if (!settings.snapClipsToSourceMedia) continue;
 
@@ -594,6 +644,11 @@ export function beginSnapGesture(): void {
 
 export function endSnapGesture(): void {
     snapGestureDepth = Math.max(0, snapGestureDepth - 1);
+    // 手势深度归零 = 所有吸附感知的拖拽都已结束：清空吸附竖线高亮，
+    // 保证任何路径（含异常卸载）都不会残留上一手势的高亮。
+    if (snapGestureDepth === 0) {
+        clearSnapHighlights();
+    }
     emitSnapGestureChange();
 }
 

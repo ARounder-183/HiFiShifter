@@ -44,8 +44,52 @@ import {
 } from "../../../../utils/tempoMap.js";
 import {
     snapTimelinePosition,
+    snapTimelineClipMove,
     type SnapObjectKind,
+    type SnapResult,
 } from "../../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildCandidateHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+    snapHighlightKindFromCandidate,
+    type SnapHighlightSourceSpec,
+} from "../../../../utils/snapHighlight";
+
+// ── 吸附入口类型 ─────────────────────────────────────────────────
+/** snapTimeline 附加选项。 */
+export interface SnapTimelineOpts {
+    originSec?: number;
+    anchorTrackId?: string | null;
+    excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 拖拽移动 Clip 的长度：提供时启用**多源吸附** —— 前缘、后缘（结束
+     * 位置）与自身吸附偏移点（moveSnapOffsetSec）同时作为被吸附对象参与
+     * 匹配，取更近者。返回 sec 为调整后的起点，竖线高亮的被吸附标记自动
+     * 落在命中位置。
+     */
+    moveLengthSec?: number;
+    /** 拖拽锚 Clip 的吸附偏移（秒）：与 moveLengthSec 搭配使用。 */
+    moveSnapOffsetSec?: number;
+    /**
+     * 吸附竖线高亮管理：
+     * - 字段存在（含 null）→ 本次调用负责高亮：命中吸附则发布目标+被吸附
+     *   对象的高亮条目，未命中/未吸附则清除该组；
+     * - 字段缺省 → 不触碰高亮状态（供无拖拽语境的调用复用）。
+     */
+    highlight?: {
+        /** 被吸附对象（正在操作的对象）的对齐边标记；播放光标等自明显对象可省略。 */
+        sources?: readonly SnapHighlightSourceSpec[];
+    } | null;
+}
+
+/** 吸附入口函数签名（各拖拽 hook 的 props 类型共用）。 */
+export type SnapTimelineFn = (
+    sec: number,
+    object: SnapObjectKind,
+    opts?: SnapTimelineOpts,
+) => number;
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -178,16 +222,13 @@ export interface TimelineStateResult {
     rowTopForTrackId: (trackId: string | null) => number;
     ensureDropPreviewDuration: (path: string) => void;
     getDropPreviewWidthPx: (durationSec: number) => number;
-    /** 完整吸附引擎入口。 */
-    snapTimeline: (
+    /** 完整吸附引擎入口（返回完整结果，含候选信息；负责发布吸附竖线高亮）。 */
+    snapTimelineDetailed: (
         sec: number,
         object: SnapObjectKind,
-        opts?: {
-            originSec?: number;
-            anchorTrackId?: string | null;
-            excludeClipIds?: ReadonlySet<string>;
-        },
-    ) => number;
+        opts?: SnapTimelineOpts,
+    ) => SnapResult;
+    snapTimeline: SnapTimelineFn;
     isEditableTarget: (target: EventTarget | null) => boolean;
     isPointerOnNativeScrollbar: (
         scroller: HTMLDivElement,
@@ -708,51 +749,96 @@ export function useTimelineState(): TimelineStateResult {
     }
 
     // ── snapTimeline ─────────────────────────────────────────
-    const snapTimeline = React.useCallback(
+    // snapTimelineDetailed 返回完整吸附结果；当调用方传入 highlight 选项时，
+    // 由这里统一发布/清除“吸附竖线高亮”（目标 + 被吸附对象），保证所有
+    // 拖拽路径共用同一套高亮语义。
+    const snapTimelineDetailed = React.useCallback(
         (
             sec: number,
             object: SnapObjectKind,
-            opts?: {
-                originSec?: number;
-                anchorTrackId?: string | null;
-                excludeClipIds?: ReadonlySet<string>;
-            },
-        ) => {
+            opts?: SnapTimelineOpts,
+        ): SnapResult => {
             const session = sessionRef.current;
-            const result = snapTimelinePosition(
-                {
-                    settings: session.timelineSnap,
-                    grid: session.grid,
-                    bpm: session.bpm,
-                    beatsPerBar: session.beats,
-                    tempoMap: session.tempoMap,
-                    pxPerSec: pxPerSecRef.current,
-                    clips: session.clips,
-                    tracks: session.tracks,
-                    selectedClipIds:
-                        session.multiSelectedClipIds.length > 0
-                            ? session.multiSelectedClipIds
-                            : session.selectedClipId
-                              ? [session.selectedClipId]
-                              : [],
-                    playheadSec: session.playheadSec,
-                    object,
-                    originSec: opts?.originSec,
-                    anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
-                    excludeClipIds: opts?.excludeClipIds,
-                },
-                sec,
-            );
-            return result.sec;
+            const snapCtx = {
+                settings: session.timelineSnap,
+                grid: session.grid,
+                bpm: session.bpm,
+                beatsPerBar: session.beats,
+                tempoMap: session.tempoMap,
+                pxPerSec: pxPerSecRef.current,
+                clips: session.clips,
+                tracks: session.tracks,
+                selectedClipIds:
+                    session.multiSelectedClipIds.length > 0
+                        ? session.multiSelectedClipIds
+                        : session.selectedClipId
+                          ? [session.selectedClipId]
+                          : [],
+                playheadSec: session.playheadSec,
+                object,
+                originSec: opts?.originSec,
+                anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
+                excludeClipIds: opts?.excludeClipIds,
+            };
+            // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
+            // 被吸附对象。
+            const moveLen = opts?.moveLengthSec;
+            const moveOffset = opts?.moveSnapOffsetSec ?? 0;
+            const result =
+                moveLen != null && moveLen >= 0 && object === "clip"
+                    ? snapTimelineClipMove(snapCtx, sec, moveLen, moveOffset)
+                    : snapTimelinePosition(snapCtx, sec);
+            if (opts && "highlight" in opts) {
+                if (result.snapped && result.candidate) {
+                    // 命中侧 → 实际对齐位置的位移：
+                    // start=0；end=长度；snap_offset=偏移。
+                    // ⚠️ 目标线必须画在实际对齐位置（alignedSec）——此前用
+                    // result.sec（新起点）导致后缘/偏移命中时目标线与被吸附
+                    // 标记分裂成两条，看起来像"两边同时高亮"。
+                    let alignedShift = 0;
+                    if ("edgeSide" in result) {
+                        if (result.edgeSide === "end") alignedShift = moveLen ?? 0;
+                        else if (result.edgeSide === "snap_offset") alignedShift = moveOffset;
+                    }
+                    const alignedSec = result.sec + alignedShift;
+                    publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                        buildCandidateHighlightEntry({
+                            kind: snapHighlightKindFromCandidate(result.candidate.kind),
+                            sec: alignedSec,
+                            targetTrackId: result.candidate.trackId ?? null,
+                            targetClipId: result.candidate.clipId ?? null,
+                            sources: (opts.highlight?.sources ?? []).map((source) => ({
+                                ...source,
+                                sec: source.sec ?? alignedSec,
+                            })),
+                        }),
+                    ]);
+                } else {
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                }
+            }
+            return result;
         },
         [],
+    );
+
+    const snapTimeline = React.useCallback<SnapTimelineFn>(
+        (sec, object, opts) => snapTimelineDetailed(sec, object, opts).sec,
+        [snapTimelineDetailed],
     );
 
     // ── Playhead helpers ─────────────────────────────────────
     const setPlayheadFromClientX = React.useCallback(
         (clientX: number, bounds: DOMRect, xScroll: number, commit: boolean) => {
             const rawBeat = beatFromClientX(clientX, bounds, xScroll);
-            const beat = snapTimeline(rawBeat, "cursor");
+            // 播放光标自身已足够醒目，不发布被吸附对象侧高亮；
+            // 但吸附到网格线/Clip 边缘等处时，仍高亮对应目标（仅拖拽期间，
+            // 即 commit=false；单击跳转完全不走高亮通道）。
+            const beat = snapTimelineDetailed(
+                rawBeat,
+                "cursor",
+                commit ? undefined : { highlight: { sources: [] } },
+            ).sec;
 
             if (commit) {
                 dispatch(setplayheadSec(beat));
@@ -767,7 +853,7 @@ export function useTimelineState(): TimelineStateResult {
             }
             return beat;
         },
-        [beatFromClientX, dispatch, snapTimeline],
+        [beatFromClientX, dispatch, snapTimelineDetailed],
     );
 
     const startDeferredPlayheadSeek = React.useCallback(
@@ -806,12 +892,16 @@ export function useTimelineState(): TimelineStateResult {
 
                 if (!moved) {
                     updateAt(ev.clientX, true);
+                    // 单击跳转不走高亮通道；兜底清理一次。
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                     return;
                 }
 
                 const sec = updateAt(ev.clientX, false);
                 const finalSec = sec == null ? lastSec : sec;
                 void dispatch(seekPlayhead(finalSec));
+                // 拖拽结束：最后一次 update 会发布高亮，必须在其后清除。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             };
 
             window.addEventListener("mousemove", onMove, true);
@@ -978,6 +1068,7 @@ export function useTimelineState(): TimelineStateResult {
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
+        snapTimelineDetailed,
         snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,

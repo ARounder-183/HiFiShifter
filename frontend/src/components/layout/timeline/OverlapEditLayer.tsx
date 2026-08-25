@@ -20,7 +20,13 @@
  */
 import React from "react";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
-import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
+import {
+    CLIP_BODY_PADDING_Y,
+    CLIP_HEADER_HEIGHT,
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+    SNAP_OFFSET_HIT_HEIGHT_PX,
+    snapOffsetHandleXPx,
+} from "./constants";
 import { buildFadeHitTargets } from "./fadeHitTargets";
 import { fadeCurveGain, type FadeCurveType } from "./paths";
 
@@ -31,7 +37,8 @@ export type OverlapEditType =
     | "stretch_right"
     | "fade_in"
     | "fade_out"
-    | "crossfade_edges";
+    | "crossfade_edges"
+    | "snap_offset";
 
 function overlapLengthSec(
     a: { startSec: number; lengthSec: number },
@@ -161,6 +168,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     selectClipRemote,
     recordLastClickPosition,
     startEditDrag,
+    startSnapOffsetDrag,
 }: {
     trackClips: ClipInfo[];
     pxPerSec: number;
@@ -175,8 +183,10 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     startEditDrag: (
         e: React.PointerEvent,
         clipId: string,
-        type: OverlapEditType,
+        type: Exclude<OverlapEditType, "snap_offset">,
     ) => void;
+    /** SnapOffset 角部拖拽入口（重叠区左下角仍可调整吸附偏移）。 */
+    startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
 }) {
     const zones: EditZone[] = [];
 
@@ -292,6 +302,24 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 cursor: altPressed ? "col-resize" : "ew-resize",
             });
 
+            // ── SnapOffset 命中区：**跟随后一个 clip 的 ◣ 三角位置**（偏移
+            // 换算同渲染，左竖边严格对齐偏移值），zIndex 高于边缘/淡化控件；
+            // 保证重叠区的吸附偏移仍可调整、与淡入淡出无关）。──────────
+            zones.push({
+                key: `${earlier.id}:${later.id}:later-snap-offset`,
+                clipId: later.id,
+                type: "snap_offset",
+                leftPx:
+                    laterStartPx +
+                    snapOffsetHandleXPx(later.snapOffsetSec, pxPerSec) -
+                    4,
+                widthPx: SNAP_OFFSET_HANDLE_SIZE_PX + 5,
+                topPx: rowHeight - SNAP_OFFSET_HIT_HEIGHT_PX,
+                heightPx: SNAP_OFFSET_HIT_HEIGHT_PX,
+                cursor: "ew-resize",
+                zIndex: 320,
+            });
+
             // ── 4) 交叉点手柄：两条淡入淡出包络线（按实际曲线）的交点 ─────────────
             // 拖动它 = 同时移动前 clip 的右缘（结束位置）与后 clip 的左缘（起始位置），
             // 相对偏移方式，保持两个 clip 的重叠长度不变（因此手动/自动淡化长度都不变）。
@@ -329,10 +357,34 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
 
     if (zones.length === 0) return null;
 
+    // SnapOffset 角区处理：立即进入偏移拖拽（无位移阈值），选择预备语义
+    // 与其他区域一致。
+    const startSnapOffsetEdit = (event: React.PointerEvent, clipId: string) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+
+        const isInMultiSelect =
+            multiSelectedClipIds.length > 0 && multiSelectedSet.has(clipId);
+        const clipIsSelected =
+            multiSelectedClipIds.length > 0
+                ? isInMultiSelect
+                : selectedClipId === clipId;
+        if (!clipIsSelected) {
+            if (!isInMultiSelect || multiSelectedClipIds.length > 1) {
+                ensureSelected(clipId);
+            }
+            selectClipRemote(clipId);
+            recordLastClickPosition?.(event.clientX);
+        }
+
+        startSnapOffsetDrag?.(event, clipId);
+    };
+
     const startDeferredEdit = (
         event: React.PointerEvent,
         clipId: string,
-        type: OverlapEditType,
+        type: Exclude<OverlapEditType, "snap_offset">,
         partnerClipId?: string,
     ) => {
         if (event.button !== 0) return;
@@ -415,9 +467,13 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         cursor: zone.cursor,
                         zIndex: zone.zIndex,
                     }}
-                    onPointerDown={(e) =>
-                        startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId)
-                    }
+                    onPointerDown={(e) => {
+                        if (zone.type === "snap_offset") {
+                            startSnapOffsetEdit(e, zone.clipId);
+                            return;
+                        }
+                        startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId);
+                    }}
                 />
             ))}
         </div>

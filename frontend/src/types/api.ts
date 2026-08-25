@@ -59,6 +59,8 @@ export interface TimelineClip {
     reversed?: boolean;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;
+    /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
+    snap_offset_sec?: number;
     fade_in_sec?: number;
     fade_out_sec?: number;
     fade_in_curve?: string;

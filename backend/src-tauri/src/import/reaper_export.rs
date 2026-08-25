@@ -150,7 +150,8 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     let mut item = ReaperItem::default();
     item.position = clip.start_sec.max(0.0);
     item.length = clip.length_sec.max(0.001);
-    item.snap_offs = 0.0;
+    // SnapOffset：相对 Clip 起点的偏移，与 REAPER SNAPOFFS 同语义直传。
+    item.snap_offs = clip.snap_offset_sec.max(0.0);
     item.is_loop = false;
     item.all_takes = false;
     // 导出“有效 fade”（自动交叉淡化覆盖手动 fade），与渲染一致。

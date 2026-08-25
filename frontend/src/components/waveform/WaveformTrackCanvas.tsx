@@ -827,6 +827,30 @@ export const WaveformTrackCanvas = React.memo(
                         drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
                     }
                 }
+
+                // ── SnapOffset（吸附偏移）竖线 ─────────────────────
+                // SnapOffset 是 Clip 自身属性：相对 Clip 起点的偏移（秒，
+                // 与倒放无关）。非 0 时以黄色竖虚线标记其位置，x 与左下角
+                // ◣ 三角的左侧竖直边严格一致（含贴着 Clip 末端的情形）。
+                {
+                    const snapOffsetLocal = Math.max(0, Number(clip.snapOffsetSec) || 0);
+                    if (snapOffsetLocal > 1e-6 && snapOffsetLocal <= clip.lengthSec + 1e-6) {
+                        const mx =
+                            Math.round((clipStartSec + snapOffsetLocal) * currentPxPerSec * 2) / 2 -
+                            viewportStartPx;
+                        if (mx >= -1 && mx <= displayW + 1) {
+                            ctx.save();
+                            ctx.strokeStyle = "rgba(255, 214, 102, 0.9)";
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([4, 3]);
+                            ctx.beginPath();
+                            ctx.moveTo(mx, 1);
+                            ctx.lineTo(mx, displayH - 1);
+                            ctx.stroke();
+                            ctx.restore();
+                        }
+                    }
+                }
             }
 
             if (ctx.globalAlpha !== 1) {

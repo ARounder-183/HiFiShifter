@@ -171,6 +171,7 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         enabled: true,
         snapDistancePx: 4,
         snapRelativeToGrid: false,
+        snapHighlightEnabled: true,
         snapClipsToSelectionMarkersCursor: true,
         snapClipsToGrid: true,
         snapSelectionToSelectionMarkersCursor: true,
@@ -223,6 +224,7 @@ function normalizeTimelineSnapSettings(
         enabled: bool(patch.enabled, base.enabled),
         snapDistancePx: clampedPx(patch.snapDistancePx, base.snapDistancePx, 0, 200),
         snapRelativeToGrid: bool(patch.snapRelativeToGrid, base.snapRelativeToGrid),
+        snapHighlightEnabled: bool(patch.snapHighlightEnabled, base.snapHighlightEnabled),
         snapClipsToSelectionMarkersCursor: bool(
             patch.snapClipsToSelectionMarkersCursor,
             base.snapClipsToSelectionMarkersCursor,
@@ -809,6 +811,7 @@ function applyOptimisticClipState(
         playbackRate?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
         fadeInCurve?: string;
@@ -855,6 +858,9 @@ function applyOptimisticClipState(
     }
     if (payload.loopEnabled !== undefined) {
         clip.loopEnabled = Boolean(payload.loopEnabled);
+    }
+    if (payload.snapOffsetSec !== undefined) {
+        clip.snapOffsetSec = Math.max(0, Number(payload.snapOffsetSec) || 0);
     }
     if (payload.fadeInSec !== undefined) {
         clip.fadeInSec = Math.max(0, Number(payload.fadeInSec) || 0);
@@ -1011,6 +1017,8 @@ function applyTimelineState(
                     : (state.clips.find((c) => c.id === clip.id)?.playbackRate ?? 1),
             reversed: Boolean(clip.reversed),
             loopEnabled: Boolean(clip.loop_enabled),
+            // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
+            snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
             fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
@@ -1263,6 +1271,7 @@ function upsertImportedClip(
         // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
         //（默认开启；后端权威载荷返回后会覆盖该值）。
         loopEnabled: state.loopNewClipsEnabled !== false,
+        snapOffsetSec: 0,
         fadeInSec: 0,
         fadeOutSec: 0,
         fadeInCurve: "sine" as FadeCurveType,
@@ -1961,6 +1970,15 @@ const sessionSlice = createSlice({
                 clip.lengthSec = Math.max(0.0, action.payload.lengthSec);
             }
         },
+        /** SnapOffset（吸附偏移）乐观更新：拖拽三角手柄实时预览。 */
+        setClipSnapOffset(
+            state,
+            action: PayloadAction<{ clipId: string; snapOffsetSec: number }>,
+        ) {
+            const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
+            if (!clip) return;
+            clip.snapOffsetSec = Math.max(0, Number(action.payload.snapOffsetSec) || 0);
+        },
         setClipPlaybackRate(
             state,
             action: PayloadAction<{ clipId: string; playbackRate: number }>,
@@ -2088,6 +2106,7 @@ const sessionSlice = createSlice({
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: state.loopNewClipsEnabled !== false,
+                snapOffsetSec: 0,
                 fadeInSec: 0,
                 fadeOutSec: 0,
                 fadeInCurve: "sine" as FadeCurveType,
@@ -4303,6 +4322,7 @@ export const {
     moveClipStart,
     moveClipTrack,
     setClipLength,
+    setClipSnapOffset,
     setClipPlaybackRate,
     setClipSourceRange,
     setClipFades,

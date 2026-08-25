@@ -59,6 +59,11 @@ export interface TimelineSnapSettings {
     snapDistancePx: number;
     /** 吸附位置相对网格保留原偏移。 */
     snapRelativeToGrid: boolean;
+    /**
+     * 拖拽时显示吸附竖线高亮（同时标记吸附对象与被吸附对象的吸附处）。
+     * 纯视觉开关，不影响吸附行为本身；默认开启。
+     */
+    snapHighlightEnabled: boolean;
 
     // ── Snap targets / objects matrix ──
     /** Clip 吸附到 选择/标记/光标。 */
@@ -154,6 +159,13 @@ export interface ClipInfo {
     reversed: boolean;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
+    /**
+     * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
+     * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
+     * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；
+     * Clip 被拉伸时按长度比例同步缩放。
+     */
+    snapOffsetSec: number;
     fadeInSec: number;
     fadeOutSec: number;
     fadeInCurve: FadeCurveType;

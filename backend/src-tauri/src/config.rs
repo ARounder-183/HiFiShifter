@@ -23,6 +23,9 @@ pub struct TimelineSnapSettings {
     pub snap_distance_px: u32,
     #[serde(default)]
     pub snap_relative_to_grid: bool,
+    /// 拖拽时显示吸附竖线高亮（纯视觉开关，不影响吸附行为）。
+    #[serde(default = "default_true")]
+    pub snap_highlight_enabled: bool,
     #[serde(default = "default_true")]
     pub snap_clips_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
@@ -86,6 +89,7 @@ impl Default for TimelineSnapSettings {
             enabled: true,
             snap_distance_px: default_snap_distance_px(),
             snap_relative_to_grid: false,
+            snap_highlight_enabled: true,
             snap_clips_to_selection_markers_cursor: true,
             snap_clips_to_grid: true,
             snap_selection_to_selection_markers_cursor: true,

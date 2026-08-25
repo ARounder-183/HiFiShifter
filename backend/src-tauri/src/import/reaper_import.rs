@@ -1138,6 +1138,13 @@ fn process_item(
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
                 reversed: item_reversed,
                 loop_enabled: item_loop,
+                // REAPER SNAPOFFS = 相对 item 起点的偏移（项目时间轴秒）。
+                // 拉伸分段只落在第一段；越界钳制到段长。
+                snap_offset_sec: if seg_idx == 0 {
+                    item.snap_offs.max(0.0).min(clip_length.max(0.0))
+                } else {
+                    0.0
+                },
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: "sine".to_string(),
@@ -1290,6 +1297,8 @@ fn process_item(
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             reversed: item_reversed,
             loop_enabled: item_loop,
+            // REAPER SNAPOFFS：相对 item 起点的偏移，钳制到 Clip 长度。
+            snap_offset_sec: item.snap_offs.max(0.0).min(item_length.max(0.0)),
             // 手动淡化长度写入 fade_*（REAPER 索引 1），自动交叉淡化长度写入
             // auto_fade_*（REAPER 索引 2）。分开后自动值归零、手动值正确恢复。
             fade_in_sec: manual_fade_in_sec,
@@ -1688,6 +1697,8 @@ fn process_midi_item(
         reversed: false,
         // MIDI item 没有源媒体可循环；Loop 属性保持关闭。
         loop_enabled: false,
+        // REAPER SNAPOFFS：相对 item 起点的偏移，钳制到 Clip 长度。
+        snap_offset_sec: item.snap_offs.max(0.0).min(item_length.max(0.0)),
         fade_in_sec: 0.0,
         fade_out_sec: 0.0,
         fade_in_curve: "sine".to_string(),

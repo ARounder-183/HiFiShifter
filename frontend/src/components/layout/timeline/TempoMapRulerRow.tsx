@@ -28,6 +28,13 @@ import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tem
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatCursorTime } from "./timeFormat";
 import { snapTimelinePosition, computeEffectiveSnap, beginSnapGesture, endSnapGesture } from "../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildCandidateHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+    snapHighlightKindFromCandidate,
+} from "../../../utils/snapHighlight";
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
@@ -590,7 +597,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [fallback],
     );
 
-    /** 使用与 Clip 完全相同的吸附引擎对 Tempo Map 位置进行吸附。 */
+    /** 使用与 Clip 完全相同的吸附引擎对 Tempo Map 位置进行吸附。
+     *
+     *  manageHighlight = true（拖拽路径）时同时管理吸附竖线高亮：
+     *  变化点位于标尺行，其自身位置已可见（被拖拽的旗帜），因此只发布
+     *  目标侧高亮 —— 命中的网格线/Clip 边缘等在轨道区以通栏线呈现。
+     */
     const snapTempoPosition = useCallback(
         (
             sec: number,
@@ -598,13 +610,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             base: TempoMap | null,
             baseBpm: number,
             originSec?: number,
+            manageHighlight?: boolean,
         ) => {
-            if (!enabled || !snapSettings?.enabled) return sec;
+            if (!enabled || !snapSettings?.enabled) {
+                if (manageHighlight) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                return sec;
+            }
             const beatsPerBar =
                 base && base.points.length > 0
                     ? (base.points[0].timeSignature?.numerator ?? fallbackBeatsPerBar)
                     : fallbackBeatsPerBar;
-            return snapTimelinePosition(
+            const result = snapTimelinePosition(
                 {
                     settings: snapSettings,
                     grid,
@@ -621,7 +637,23 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     anchorTrackId: null,
                 },
                 sec,
-            ).sec;
+            );
+            if (manageHighlight) {
+                if (result.snapped && result.candidate) {
+                    publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                        buildCandidateHighlightEntry({
+                            kind: snapHighlightKindFromCandidate(result.candidate.kind),
+                            sec: result.sec,
+                            targetTrackId: result.candidate.trackId ?? null,
+                            targetClipId: result.candidate.clipId ?? null,
+                            sources: [],
+                        }),
+                    ]);
+                } else {
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                }
+            }
+            return result.sec;
         },
         [
             snapSettings,
@@ -1052,6 +1084,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     drag.baseTempoMap,
                     mapFallback.bpm,
                     drag.startSec,
+                    true,
                 );
             }
             // 不与其它点重叠、不越过相邻点、不越过工程末尾：
@@ -1079,6 +1112,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             dragRef.current = null;
             dragDraftRef.current = null;
             endSnapGesture();
+            // 拖拽结束：清除吸附竖线高亮（endSnapGesture 深度归零亦会兜底）。
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             setDraggingId(null);
             if (draft) commitMap(draft);
         };

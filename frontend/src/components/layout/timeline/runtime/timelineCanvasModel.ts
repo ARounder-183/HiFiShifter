@@ -18,8 +18,9 @@ type SparseRenderClip = {
     /** 自动交叉淡化长度（可选；缺省 0），用于“有效 fade”显示。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
+    /** 吸附偏移（秒，相对 Clip 起点；缺省 0）—— 左下角 ◣ 标记。 */
+    snapOffsetSec?: number;
 };
-
 export type TimelineCanvasClipModel = {
     id: string;
     trackId: string;
@@ -41,6 +42,8 @@ export type TimelineCanvasClipModel = {
     isMidiClip: boolean;
     trackColor?: string;
     isRenaming: boolean;
+    /** 吸附偏移（已换算为像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
+    snapOffsetPx: number;
 };
 
 export function buildSparseClipRenderModel(args: {
@@ -156,6 +159,7 @@ export function buildSparseClipRenderModel(args: {
             isMidiClip: clip.midiNoteCount != null,
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
+            snapOffsetPx: Math.max(0, Number(clip.snapOffsetSec) || 0) * args.pxPerSec,
         })),
     );
 
