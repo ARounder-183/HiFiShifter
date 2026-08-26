@@ -47,6 +47,8 @@ pub fn ep_choice() -> String {
     "disabled".to_string()
 }
 
+/// 与 onnx 变体同名；无 onnx 构建下无调用方，保留以维持接口一致。
+#[allow(dead_code)]
 pub fn active_ep() -> String {
     "none".to_string()
 }
@@ -81,6 +83,9 @@ pub fn set_chunk_progress_callback(_cb: Option<Box<dyn Fn(f64) + Send + Sync>>) 
 pub fn reset_chunk_progress(_total: usize) {}
 
 // ─── 分块推理 stub（与 nsf_hifigan_onnx.rs 接口保持一致）──────────────────────
+// 注：df4e17b4 已从真实现删除无调用方的 `infer_pitch_edit_chunked`
+// （被 infer_pitch_edit_chunked_optimized / _mel_stretch 取代），stub 同步移除，
+// 两个特性变体的公共面保持一致。
 
 pub fn env_chunk_sec() -> f64 {
     10.0
@@ -88,19 +93,6 @@ pub fn env_chunk_sec() -> f64 {
 
 pub fn env_overlap_sec() -> f64 {
     0.1
-}
-
-pub fn infer_pitch_edit_chunked(
-    mono: &[f32],
-    _sample_rate: u32,
-    _start_sec: f64,
-    _midi_at_time: impl Fn(f64) -> f64 + Clone,
-    _formant_shift_fn: impl Fn(f64) -> f32 + Clone,
-    _chunk_sec: f64,
-    _overlap_sec: f64,
-) -> Result<Vec<f32>, String> {
-    // ONNX feature disabled: bypass.
-    Ok(mono.to_vec())
 }
 
 /// Mel-stretch variant used when caller performs time-stretch in mel-domain

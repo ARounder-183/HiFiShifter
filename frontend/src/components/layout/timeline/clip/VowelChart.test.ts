@@ -15,5 +15,4 @@ test("components/layout/timeline/clip/VowelChart.test.ts scripted checks", async
     assert(Math.abs(roundTrip.f1 - 800) < 5, `expected f1≈800, got ${roundTrip.f1}`);
     assert(Math.abs(roundTrip.f2 - 1400) < 5, `expected f2≈1400, got ${roundTrip.f2}`);
 
-    console.log("VowelChart helpers round-trip checks passed");
 });

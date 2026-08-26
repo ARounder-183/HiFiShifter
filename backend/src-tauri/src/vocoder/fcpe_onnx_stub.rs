@@ -1,5 +1,9 @@
 // FCPE ONNX pitch detector stub (used when `onnx` feature is disabled).
 
+/// 与 onnx 变体保持同一模型域常数，供分析窗口数学离线使用。
+pub const FCPE_F0_MIN_HZ: f64 = 32.7;
+pub const FCPE_F0_MAX_HZ: f64 = 1975.5;
+
 pub fn is_available() -> bool {
     false
 }

@@ -70,5 +70,4 @@ test("features/session/sessionSlice.formantToolWindow.test.ts scripted checks", 
     assertEqual(closed.clipFormantToolWindow.x, 420, "close preserves shared x");
     assertEqual(closed.clipFormantToolWindow.y, 260, "close preserves shared y");
 
-    console.log("sessionSlice formant tool window checks passed");
 });

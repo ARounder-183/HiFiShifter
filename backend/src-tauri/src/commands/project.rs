@@ -925,8 +925,11 @@ pub(super) fn open_project(
     // 非 Loop 存储窗口规范化（对**所有版本**生效）：使存储字段 == 消费
     // 窗口（正放 se:=ss+len·r；倒放 ss:=se−len·r），与消费端派生值一致、
     // 功能零变化 —— 用于自愈历史版本写入的陈旧/发散源窗口。
+    // 同一不变式也应用到全部 take（组合速率口径），避免 inactive take 的
+    // 陈旧窗口流向前端 take-lane 显示与 REAPER 导出。
     for clip in &mut pf.timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
     }
     // 迁移/规范化都发生在 active take 内存投影上，写回 Take 权威数据。
     pf.timeline.sync_clip_takes_from_flat();
@@ -934,6 +937,9 @@ pub(super) fn open_project(
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
     eprintln!("[open_project] Clearing all render caches before loading project...");
+    // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
+    // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
+    crate::hnsep_onnx::clear_separation_cache();
     for clip in &pf.timeline.clips {
         synth_clip_cache::invalidate_clip_all_caches(&clip.id);
     }

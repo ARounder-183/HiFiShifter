@@ -59,5 +59,4 @@ test("components/layout/pianoRoll/referenceRootTracks.test.ts scripted checks", 
         "highlighted reference pitch stroke color uses full alpha",
     );
 
-    console.log("reference root track helpers passed");
 });

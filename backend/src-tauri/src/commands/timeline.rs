@@ -1147,6 +1147,9 @@ pub(super) fn explode_clip_takes(
     let created = tl.explode_clip_takes(&clip_id);
     for id in &created {
         invalidate_take_related_caches(id);
+        // 新 clip 继承了源 clip 的 formant_morph：内容已随 take 物化，
+        // 预重建可避免首播在渲染线程内同步计算共振峰（一次性卡顿）。
+        maybe_schedule_formant_rebuild(&state, &tl, id);
     }
     // 展开产生的每个新 clip 都需要各自的音高分析调度。
     let mut roots: HashSet<String> = HashSet::new();
@@ -1253,6 +1256,9 @@ pub(super) fn remove_clip_take(
     // 删除 active take 会切换到首个 take：内容实际变化，需要重调度分析；
     // 删除 inactive take 不改变可听内容，跳过以免无谓重算。
     let schedule_pitch = removing_active;
+    if removing_active {
+        maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -1452,6 +1458,9 @@ pub(super) fn import_media_files_as_takes(
         .or_else(|| tl.selected_track_id.clone())
         .or_else(|| tl.tracks.first().map(|t| t.id.clone()))
         .unwrap_or_else(|| tl.add_track(Some("Track".to_string()), None, None));
+    // 新导入的 take 需要音高分析（与其它导入路径一致），锁外调度；
+    // target_track_id 随后移入 Clip，先解析根轨道。
+    let root_for_pitch = tl.resolve_root_track_id(&target_track_id);
     let start = start_sec.unwrap_or(tl.playhead_sec).max(0.0);
 
     let length = takes
@@ -1517,6 +1526,10 @@ pub(super) fn import_media_files_as_takes(
     } else {
         Some(missing)
     };
+    drop(tl);
+    if let Some(root) = root_for_pitch {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+    }
     payload
 }
 
@@ -1896,6 +1909,11 @@ pub(super) fn glue_clips(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
+    // 已知债务：glue_clips / convert_clips_to_pitch_reference 内部做整段
+    // 离线混音 / 音高分析，当前在全局 timeline 锁内执行 —— 长选区会阻塞
+    // 所有命令与 UI 轮询数秒。改进方向与 import_media_files_as_takes 的
+    // 两阶段模式一致（锁内克隆子时间线 → 锁外渲染 → 短锁写回），属
+    // 结构性重构，未随本次 take 层加固一并处理。
     tl.glue_clips(&clip_ids);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();

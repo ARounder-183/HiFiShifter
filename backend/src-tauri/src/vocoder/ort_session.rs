@@ -897,7 +897,7 @@ fn build_dml_session_inner(
     choice: &str,
     strict: bool,
 ) -> Result<(Session, String), String> {
-    let mut builder =
+    let builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
     let (builder, selected) = try_register_directml_ep(builder, role)?;

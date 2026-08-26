@@ -101,5 +101,4 @@ test("components/layout/timeline/runtime/timelineClipHeaderVisibility.test.ts sc
         "pitch-adjustment clips hide formant badge and gain knob",
     );
 
-    console.log("timelineClipHeaderVisibility checks passed");
 });

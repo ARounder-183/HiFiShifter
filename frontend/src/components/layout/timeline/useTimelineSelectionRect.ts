@@ -75,6 +75,13 @@ export function useTimelineSelectionRect(params: {
 
     const selectionDragRef = useRef<{
         pointerId: number;
+        /** 指针按下时的客户端坐标：仅用于位移阈值判定（纯指针位移，
+         * 不受拖拽期间滚动/缩放影响 —— 否则按住右键后滚动容器也会
+         * 误触发框选、吞掉右键菜单）。 */
+        startClientX: number;
+        startClientY: number;
+        /** 世界（内容像素）坐标锚点：矩形与命中测试使用。
+         * 已知限制：拖拽期间变焦会使锚点的像素刻度失效（极低频）。 */
         startX: number;
         startY: number;
         curX: number;
@@ -113,6 +120,8 @@ export function useTimelineSelectionRect(params: {
                   : [];
         selectionDragRef.current = {
             pointerId: e.pointerId,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
             startX: x,
             startY: y,
             curX: x,
@@ -153,7 +162,14 @@ export function useTimelineSelectionRect(params: {
 
             if (
                 !drag.hasSelectionDrag &&
-                isTimelineSelectionDrag(drag.startX, drag.startY, drag.curX, drag.curY)
+                // 阈值按指针的客户端位移判定：与内容坐标系解耦，滚动/变焦
+                // 本身不会把"普通右键"误升级为框选手势。
+                isTimelineSelectionDrag(
+                    drag.startClientX,
+                    drag.startClientY,
+                    ev.clientX,
+                    ev.clientY,
+                )
             ) {
                 drag.hasSelectionDrag = true;
                 clearContextMenu();

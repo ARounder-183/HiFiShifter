@@ -119,9 +119,10 @@ export function hitTestTimeline(
 
     const localLeftSec = worldSec - clip.startSec;
 
-    // SnapOffset 命中区：跟随 ◣ 三角位置（三角 x 由 snapOffsetSec 换算并
-    // 钳制到 Clip 内），横向取三角 ± 少量余量，纵向限行底部条带。优先于
-    // trim/body：三角所在处归吸附偏移手势（对齐 REAPER 布局）。
+    // SnapOffset 命中区：跟随 ◣ 三角位置（三角 x 由 snapOffsetSec 直接换算，
+    // **刻意不做宽度回退钳制** —— 越界由绘制端裁剪，见 constants.ts），横向
+    // 取三角 ± 少量余量，纵向限行底部条带。优先于 trim/body：三角所在处归
+    // 吸附偏移手势（对齐 REAPER 布局）。
     {
         const triX = snapOffsetHandleXPx(clip.snapOffsetSec, index.pxPerSec);
         const localXpx = localLeftSec * index.pxPerSec;

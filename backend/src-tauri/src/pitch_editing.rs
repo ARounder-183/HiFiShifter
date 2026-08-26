@@ -279,7 +279,8 @@ fn track_requests_extra_processing(
     algo: PitchEditAlgorithm,
     entry: &crate::state::TrackParamsState,
     clip: &crate::state::Clip,
-    clip_start_sec: f64,
+    // 仅 vslib 分支消费；无 vslib 构建下保留参数以维持统一调用面。
+    _clip_start_sec: f64,
 ) -> bool {
     match algo {
         PitchEditAlgorithm::NsfHifiganOnnx => {
@@ -288,7 +289,7 @@ fn track_requests_extra_processing(
         }
         #[cfg(feature = "vslib")]
         PitchEditAlgorithm::VocalShifterVslib => {
-            vslib_curve_active_for_clip(entry, clip, clip_start_sec)
+            vslib_curve_active_for_clip(entry, clip, _clip_start_sec)
         }
         _ => false,
     }

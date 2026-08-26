@@ -42,5 +42,4 @@ test("components/layout/timeline/hooks/copyDragTemplates.test.ts scripted checks
         "linked params kept",
     );
 
-    console.log("copy drag template helper checks passed");
 });

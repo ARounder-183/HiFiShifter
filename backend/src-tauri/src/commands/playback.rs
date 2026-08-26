@@ -416,6 +416,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                         .map(std::sync::Arc::new),
                                     frames,
                                     sample_rate: clip_render_info.sr,
+                                    rendered_take_id: clip_render_info.clip.active_take_id.clone(),
                                 };
 
                                 // 现在存入缓存
@@ -758,6 +759,7 @@ fn ensure_hifigan_tension_cache(
         pcm_stereo: std::sync::Arc::new(tensioned),
         frames,
         sample_rate: out_rate,
+        rendered_take_id: clip.active_take_id.clone(),
     };
     let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
         .lock()
@@ -1668,6 +1670,7 @@ fn render_background_pass(
                                 .map(std::sync::Arc::new),
                             frames,
                             sample_rate: clip_render_info.sr,
+                            rendered_take_id: clip_render_info.clip.active_take_id.clone(),
                         };
 
                         let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()

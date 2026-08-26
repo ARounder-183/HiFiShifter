@@ -72,5 +72,4 @@ test("features/session/sessionSlice.formantMorph.test.ts scripted checks", async
     assertEqual(next.clips[0]?.formantMorph?.targetF2Hz, 1700, "formantMorph targetF2Hz");
     assertEqual(next.clips[0]?.formantMorph?.strength, 0.6, "formantMorph strength");
 
-    console.log("sessionSlice formant morph checks passed");
 });

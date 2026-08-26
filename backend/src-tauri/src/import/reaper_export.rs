@@ -242,6 +242,9 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     item.length = working.length_sec.max(0.001);
     // SnapOffset：相对 Clip 起点的偏移，与 REAPER SNAPOFFS 同语义直传。
     item.snap_offs = working.snap_offset_sec.max(0.0);
+    // LOOP 是 REAPER 的 Item 级标志：多 take Clip 各 take 的 loop_enabled
+    // 不同时，往返只能保留 active take 的值（导入端也按 item 级读取并共享
+    // 给全部 take）。这是 RPP 格式的表达力边界，非实现遗漏。
     item.is_loop = working.takes[active_idx].loop_enabled;
     item.all_takes = false;
     // 导出“有效 fade”（自动交叉淡化覆盖手动 fade），与渲染一致。
@@ -406,12 +409,15 @@ mod tests {
             Some("C:/audio/a.wav".to_string()),
         );
         if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
-            clip.gain = 0.75;
+            // 直接写投影字段后必须 sync：takes 是磁盘/导出权威，
+            // 否则 normalize_takes 会用陈旧 Take 覆盖这些值。
             let mut second = clip.active_take().clone();
             second.id = crate::state::new_id("take");
             second.name = "Second".to_string();
             second.source_path = Some("C:/audio/b.wav".to_string());
             clip.add_take(second);
+            clip.gain = 0.75;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -489,6 +495,10 @@ mod tests {
             clip.gain = 0.8;
             clip.fade_in_sec = 0.01;
             clip.fade_out_sec = 0.02;
+            // 本测试考察普通裁剪 Clip 的往返，须显式关闭 add_clip 的
+            // 进程级默认 Loop；写完投影统一 sync 回 Take 权威数据。
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -560,6 +570,8 @@ mod tests {
                 channel: 0,
             }]);
             clip.source_path = None;
+            // MIDI 内容写在投影上，须 sync 回 Take 权威数据供导出读取。
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -609,6 +621,7 @@ mod tests {
             clip.source_end_sec = 3.0;
             clip.playback_rate = 1.0;
             clip.loop_enabled = true;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
@@ -630,6 +643,8 @@ mod tests {
                 .expect("clip exists");
             clip.loop_enabled = false;
             clip.length_sec = 2.0;
+            // 同步纪律：改写投影后必须写回 Take 权威数据。
+            clip.sync_take_from_flat();
         }
         let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
         let parsed2 = parse_for_test(&export2.bytes);
@@ -661,6 +676,7 @@ mod tests {
             clip.source_end_sec = 15.25232042998004;
             clip.playback_rate = 1.0;
             clip.loop_enabled = false;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -696,6 +712,7 @@ mod tests {
             // floor_mod(min(source_end, D), D) 取倒放锚点。
             clip.source_start_sec = 3.0;
             clip.source_end_sec = 1.0;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();

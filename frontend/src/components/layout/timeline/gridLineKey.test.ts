@@ -144,5 +144,4 @@ test("components/layout/timeline/gridLineKey.test.ts scripted checks", async () 
         "length change changes the key",
     );
 
-    console.log(`gridLineKey checks passed (${checks})`);
 });

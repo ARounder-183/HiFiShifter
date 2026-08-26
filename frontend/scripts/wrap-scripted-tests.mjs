@@ -94,11 +94,6 @@ for (const file of listTestFiles(root)) {
     }
 
     const rel = relative(root, file).split(sep).join("/");
-    const headerComment =
-        bodyLines[0] !== undefined && bodyLines[0].trim().startsWith("/*")
-            ? null // 头注释已随 body 进入包装内，保持简单
-            : null;
-    void headerComment;
 
     const next = [
         `import { test } from "vitest";`,

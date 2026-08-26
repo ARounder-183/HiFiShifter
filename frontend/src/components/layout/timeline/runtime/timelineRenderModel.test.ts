@@ -40,5 +40,4 @@ test("components/layout/timeline/runtime/timelineRenderModel.test.ts scripted ch
     assertEqual(virtualizedModel.startIndex, 1, "virtual window start");
     assertEqual(virtualizedModel.endIndex, 7, "virtual window end");
 
-    console.log("timelineRenderModel checks passed");
 });

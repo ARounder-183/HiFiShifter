@@ -5,8 +5,12 @@
 //! `TaskDialogIndirect` 而在进程初始化阶段 STATUS_ENTRYPOINT_NOT_FOUND 的
 //! 问题）。该 link-arg 指令要求项目至少存在一个测试目标 —— 此文件即该目标。
 //!
-//! 真正的单元测试位于各源码模块的 `#[cfg(test)] mod tests` 中
-//! （`cargo test --lib` 运行，同样受益于清单嵌入）。
+//! 注意：`rustc-link-arg-tests` 只作用于 tests/ 下的集成测试目标；
+//! **lib 单元测试 harness 在 Windows 上无法直接启动**（cargo 无对应通道）。
+//! 本地如需运行 `cargo test --lib`，可在构建后用 Win32 `UpdateResource`
+//! 向 `target/debug/deps/backend_lib-*.exe` 注入 RT_MANIFEST(24) 资源，
+//! 并把 `target/debug` 加入 PATH（vslib/SoundTouch DLL 所在），然后直接
+//! 运行该 exe；CI 上则由 Linux 的 backend-test job 覆盖 lib 单测。
 
 #[test]
 fn smoke_test_target_exists() {

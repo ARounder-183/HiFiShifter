@@ -139,5 +139,4 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted ch
         "sparse overlay ids",
     );
 
-    console.log("timelineCanvasModel checks passed");
 });

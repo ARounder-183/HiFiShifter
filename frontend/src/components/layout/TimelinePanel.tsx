@@ -2010,7 +2010,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     }
                                 }}
                             >
-                                {t("import_across_time" as any) ||
+                                {t("import_across_time") ||
                                     "Import across time (same track)"}
                             </button>
                             <button
@@ -2399,7 +2399,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <Dialog.Content maxWidth="480px">
                         <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
                         <Dialog.Description>
-                            <Text size="2">{t("clip_replace_same_source_confirm" as any)}</Text>
+                            <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
                         </Dialog.Description>
                         <Flex justify="end" gap="2" mt="4">
                             <Button

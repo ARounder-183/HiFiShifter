@@ -1,3 +1,5 @@
+import type { SnapCandidateKind } from "./timelineSnapping";
+
 /**
  * 吸附竖线高亮总线（轨道视图）。
  *
@@ -176,9 +178,10 @@ export function buildLoopBoundaryHighlightEntry(args: {
     return { id: args.id ?? "primary", kind: "loopBoundary", markers };
 }
 
-/** SnapCandidateKind → 高亮 kind（恒等映射，显式写出便于未来分化）。 */
+/** SnapCandidateKind → 高亮 kind（恒等映射，显式写出便于未来分化）。
+ * 参数直接复用 SnapCandidateKind，避免手抄联合类型随源类型漂移。 */
 export function snapHighlightKindFromCandidate(
-    kind: "grid" | "clipStart" | "clipEnd" | "snapOffset" | "sourceStart" | "sourceEnd" | "selection" | "cursor" | "sampleRate",
+    kind: SnapCandidateKind,
 ): Exclude<SnapHighlightKind, "loopBoundary"> {
     return kind;
 }

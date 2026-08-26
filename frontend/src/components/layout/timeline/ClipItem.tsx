@@ -469,7 +469,13 @@ export const ClipItem = React.memo(function ClipItem({
                 <div
                     className="absolute bottom-0 z-[70]"
                     style={{
-                        left: snapOffsetHandleXPx(clip.snapOffsetSec, pxPerSec) - 1,
+                        // 收敛在 Clip 宽度内：offset≈length 时握把若按三角 x
+                        // 原样放置会伸出右缘约 11px，以 z-70 吞掉相邻 Clip 左下
+                        // 条带的 trim_left 手势（z-60）。
+                        left: Math.min(
+                            Math.max(-4, snapOffsetHandleXPx(clip.snapOffsetSec, pxPerSec) - 1),
+                            Math.max(-4, width - SNAP_OFFSET_HANDLE_SIZE_PX),
+                        ),
                         width: SNAP_OFFSET_HANDLE_SIZE_PX + 3,
                         height: SNAP_OFFSET_HIT_HEIGHT_PX,
                         cursor: "ew-resize",

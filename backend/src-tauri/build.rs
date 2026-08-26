@@ -234,9 +234,9 @@ fn build_world_static() {
     println!("cargo:rerun-if-changed={}", world_src_dir);
 
     // Compile WORLD as static library
-    cc::Build::new()
+    let mut world = cc::Build::new();
+    world
         .cpp(true)
-        .std("c++11")
         .include(world_src_dir)
         .file(format!("{}/cheaptrick.cpp", world_src_dir))
         .file(format!("{}/codec.cpp", world_src_dir))
@@ -248,8 +248,19 @@ fn build_world_static() {
         .file(format!("{}/matlabfunctions.cpp", world_src_dir))
         .file(format!("{}/stonemask.cpp", world_src_dir))
         .file(format!("{}/synthesis.cpp", world_src_dir))
-        .file(format!("{}/synthesisrealtime.cpp", world_src_dir))
-        .compile("world");
+        .file(format!("{}/synthesisrealtime.cpp", world_src_dir));
+
+    // C++ 标准旗标按编译器家族分发（与下方 sstretch 构建同一模式）：
+    // MSVC 的 cl 不认识 GCC 风格的 `-std:c++11`，传入只会得到 D9002
+    // "ignoring unknown option" 警告并被忽略 —— cl 默认即 ≥C++14，
+    // 显式给 /std:c++14 行为不变、警告消失。
+    if world.get_compiler().is_like_msvc() {
+        world.flag("/std:c++14");
+    } else {
+        world.flag("-std=c++11");
+    }
+
+    world.compile("world");
 
     println!("cargo:rustc-link-lib=static=world");
 }

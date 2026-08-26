@@ -390,5 +390,4 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
         assertTrue(zeroOffset.edgeSide === "start", "zero offset keeps dual-edge behavior");
     }
 
-    console.log(`timelineSnapping checks passed (${checks})`);
 });

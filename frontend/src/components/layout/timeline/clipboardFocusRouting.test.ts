@@ -27,5 +27,4 @@ test("components/layout/timeline/clipboardFocusRouting.test.ts scripted checks",
         "track header should not swallow clip paste",
     );
 
-    console.log("clipboard focus routing checks passed");
 });

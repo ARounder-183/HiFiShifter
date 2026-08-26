@@ -40,5 +40,4 @@ test("components/layout/timeline/clip/clipFormantInteractionGuards.test.ts scrip
         "disabled vowel chart should not claim drag prevention",
     );
 
-    console.log("clip formant interaction guard checks passed");
 });

@@ -35,5 +35,4 @@ test("components/layout/timeline/runtime/timelineWindowing.test.ts scripted chec
 
     assertDeepEqual(clipIds, ["b", "c"], "visible clip ids");
 
-    console.log("timelineWindowing checks passed");
 });

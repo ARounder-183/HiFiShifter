@@ -94,5 +94,4 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
         );
     }
 
-    console.log(`timelineViewportSync checks passed (${checks})`);
 });

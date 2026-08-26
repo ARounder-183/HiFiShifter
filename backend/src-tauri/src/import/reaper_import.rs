@@ -167,7 +167,7 @@ fn effective_item_fades(
 
     // 淡化的存在性与“来源选择”（take 优先，其次 item）按“有效长度”判定
     // （自动交叉淡化生效时用自动长度，否则用手动长度）。
-    let (mut fade_in_manual, mut fade_in_auto);
+    let (mut fade_in_manual, fade_in_auto);
     if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
         fade_in_manual = reaper_fade_manual_length_sec(&take.fade_in);
         fade_in_auto = reaper_fade_auto_length_sec(&take.fade_in);
@@ -175,7 +175,7 @@ fn effective_item_fades(
         fade_in_manual = reaper_fade_manual_length_sec(&item.fade_in);
         fade_in_auto = reaper_fade_auto_length_sec(&item.fade_in);
     }
-    let (mut fade_out_manual, mut fade_out_auto);
+    let (mut fade_out_manual, fade_out_auto);
     if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9 {
         fade_out_manual = reaper_fade_manual_length_sec(&take.fade_out);
         fade_out_auto = reaper_fade_auto_length_sec(&take.fade_out);
@@ -1182,6 +1182,14 @@ fn process_item(
 
     if !segments.is_empty() {
         // 有 stretch markers：拆分为多段
+        // v4 边界：拆段路径按 active take 展开成多个单 take 段 Clip，
+        // 其余 take 无法随之拆分、被静默丢弃 —— 显式告警避免无人察觉。
+        if !item.takes.is_empty() {
+            eprintln!(
+                "reaper_import: item at {} has {} non-active take(s) dropped (stretch-marker items import the active take only)",
+                item.position, item.takes.len()
+            );
+        }
         // effective rate = segment_avg_rate * item_play_rate（源消耗速率）
         let seg_count = segments.len();
         let mut segment_clip_indices: Vec<usize> = Vec::with_capacity(seg_count);
@@ -1905,6 +1913,7 @@ fn process_midi_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reaper_parser::ReaperSource;
 
     #[test]
     fn loop_source_window_extends_to_media_end() {

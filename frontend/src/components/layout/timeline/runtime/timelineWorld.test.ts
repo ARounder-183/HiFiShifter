@@ -63,5 +63,4 @@ test("components/layout/timeline/runtime/timelineWorld.test.ts scripted checks",
     assertNear(drag.deltaSec, 0.8, "drag delta sec");
     assertNear(drag.deltaTrackUnits, 2, "drag delta tracks");
 
-    console.log("timelineWorld checks passed");
 });

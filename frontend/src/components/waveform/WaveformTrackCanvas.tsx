@@ -176,15 +176,17 @@ function expandClipsForTakeLanes(
                 Number.isFinite(clip.clipPlaybackRate) && (clip.clipPlaybackRate ?? 0) > 0
                     ? Number(clip.clipPlaybackRate)
                     : 1;
-            // Slip / trim 的乐观更新写在 Clip 的 active-take 投影上；
+            // Slip / trim / gain 的乐观更新写在 Clip 的 active-take 投影上；
             // 渲染 expanded lane 时必须让 active take 消费这份最新投影，
-            // 否则多 Take 展示下拖拽预览会停留在旧窗口。
+            // 否则多 Take 展示下拖拽预览会停留在旧窗口/旧增益
+            // （增益拖拽逐帧只更新 flat clip.gain，不写 take.gain）。
             const isActiveTake = take.id === clip.activeTakeId;
             const effectiveTake = isActiveTake
                 ? {
                       ...take,
                       sourceStartSec: clip.sourceStartSec,
                       sourceEndSec: clip.sourceEndSec,
+                      gain: clip.gain,
                   }
                 : take;
             output.push({
@@ -1061,6 +1063,11 @@ export const WaveformTrackCanvas = React.memo(
             const neededPaths = new Set<string>();
             for (const clip of clips) {
                 if (clip.sourcePath) neededPaths.add(clip.sourcePath);
+                // 多 Take 泳道：inactive take 的源也要监听 —— 否则其 mipmap
+                // 异步加载完成后不触发重绘，泳道在界面静止时无限期空白。
+                for (const take of clip.takes ?? []) {
+                    if (take.sourcePath) neededPaths.add(take.sourcePath);
+                }
             }
 
             const unsub = waveformMipmapStore.addListener((sourcePath, status) => {

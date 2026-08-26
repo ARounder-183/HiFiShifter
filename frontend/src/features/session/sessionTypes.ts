@@ -233,13 +233,19 @@ export function clipDisplayName(clip: {
     return `${takeName} (${index + 1} / ${takes.length})`;
 }
 
-/** 当前可编辑的 Take 名称；单 Take 时也编辑 Take 名称而非容器名。 */
+/** 当前可编辑的名称（改名输入框的预填值）。
+ *
+ * 路由规则与 commitTrackLaneRename 一致：多 Take（>1）时编辑 active take
+ * 名；单 Take / 无 takes 时展示名与提交目标都是容器 name —— 预填必须跟随
+ * 提交目标，否则"多 take 删到剩 1 个"后预填残留 take 名、提交却写容器名，
+ * 用户会看到"名字没变"。 */
 export function activeClipTakeName(clip: {
     name: string;
     takes?: Array<{ id: string; name: string }>;
     activeTakeId?: string;
 }): string {
     const takes = clip.takes ?? [];
+    if (takes.length <= 1) return clip.name;
     const activeTake = takes.find((take) => take.id === clip.activeTakeId) ?? takes[0];
     return activeTake?.name || clip.name;
 }

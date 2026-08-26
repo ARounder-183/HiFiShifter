@@ -131,5 +131,4 @@ test("services/invoke.test.ts scripted checks", async () => {
         "import_media_files_as_takes mapping",
     );
 
-    console.log(`invoke mapping checks passed (${checks})`);
 });

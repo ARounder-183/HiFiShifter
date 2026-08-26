@@ -408,8 +408,15 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
         if (settings.snapClipSnapOffset) {
             // 显式 SnapOffset（相对 Clip 起点的偏移）。为 0 时与 clipStart
             // 候选完全重合，跳过以免冗余；非 0 时是独立吸附目标。
+            // 越界偏移（offset > length）不生成候选：该点在屏幕上不可见，
+            // 吸附到它会表现为"吸向空处"（幻影目标）。
             const offset = Number(clip.snapOffsetSec);
-            if (Number.isFinite(offset) && offset > 1e-9) {
+            const lengthSecRaw = Math.max(0, Number(clip.lengthSec) || 0);
+            if (
+                Number.isFinite(offset) &&
+                offset > 1e-9 &&
+                offset <= lengthSecRaw + 1e-6
+            ) {
                 out.push({
                     sec: clipSnapOffsetSec(clip),
                     kind: "snapOffset",

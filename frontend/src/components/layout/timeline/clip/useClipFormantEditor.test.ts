@@ -6,5 +6,4 @@ test("components/layout/timeline/clip/useClipFormantEditor.test.ts scripted chec
     if (debounceMs() !== 180) {
         throw new Error(`expected debounceMs() to equal 180, got ${debounceMs()}`);
     }
-    console.log("useClipFormantEditor debounce checks passed");
 });

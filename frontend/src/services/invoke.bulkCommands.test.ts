@@ -110,5 +110,4 @@ test("services/invoke.bulkCommands.test.ts scripted checks", async () => {
 
     await expectTauriPayload("start_recording", 12.5, { startSec: 12.5 });
 
-    console.log("invoke bulk command wiring checks passed");
 });

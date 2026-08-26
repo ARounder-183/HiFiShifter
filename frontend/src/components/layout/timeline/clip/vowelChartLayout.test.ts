@@ -22,5 +22,4 @@ test("components/layout/timeline/clip/vowelChartLayout.test.ts scripted checks",
         }
     }
 
-    console.log("vowelChartLayout checks passed");
 });

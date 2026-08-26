@@ -33,5 +33,4 @@ test("components/layout/timeline/runtime/timelineFadeDisplay.test.ts scripted ch
         "hover only increases fade emphasis",
     );
 
-    console.log("timelineFadeDisplay checks passed");
 });

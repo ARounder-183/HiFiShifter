@@ -20,5 +20,4 @@ test("components/layout/timeline/runtime/timelinePerfProbe.test.ts scripted chec
     assertNear(snapshot.avgDrawMs, 10, "draw average");
     assertNear(snapshot.avgHitTestMs, 3, "hit-test average");
 
-    console.log("timelinePerfProbe checks passed");
 });

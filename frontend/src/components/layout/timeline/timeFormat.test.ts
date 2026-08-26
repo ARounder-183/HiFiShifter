@@ -483,5 +483,4 @@ test("components/layout/timeline/timeFormat.test.ts scripted checks", async () =
         );
     }
 
-    console.log(`timeFormat checks passed (${checks})`);
 });

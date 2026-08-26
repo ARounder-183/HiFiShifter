@@ -83,5 +83,4 @@ test("components/layout/timeline/gridLineSampling.test.ts scripted checks", asyn
         );
     }
 
-    console.log(`gridLineSampling checks passed (${checks})`);
 });

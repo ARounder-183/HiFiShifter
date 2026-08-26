@@ -45,5 +45,4 @@ test("components/layout/pianoRoll/paramShiftStep.test.ts scripted checks", async
 
     assertEqual(getParamShiftStep("unknown_param"), 0.05);
 
-    console.log("param shift step checks passed");
 });

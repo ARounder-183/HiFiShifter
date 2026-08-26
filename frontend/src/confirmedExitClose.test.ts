@@ -42,7 +42,6 @@ test("confirmedExitClose.test.ts scripted checks", async () => {
         });
 
         assertEqual(fallbackCalls.join(","), "allow,destroy,allow,close");
-        console.log("confirmed exit close checks passed");
     }
 
     void main();

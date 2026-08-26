@@ -136,5 +136,4 @@ test("components/layout/timeline/runtime/timelineHitTest.test.ts scripted checks
         "top-most overlapping clip wins",
     );
 
-    console.log("timelineHitTest checks passed");
 });

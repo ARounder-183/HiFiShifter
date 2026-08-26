@@ -365,5 +365,4 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         }
     }
 
-    console.log(`timelineScrollRange checks passed (${checks})`);
 });

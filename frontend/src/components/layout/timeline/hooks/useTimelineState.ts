@@ -680,6 +680,14 @@ export function useTimelineState(): TimelineStateResult {
                 preloadedPathsRef.current.add(sp);
                 newPaths.push(sp);
             }
+            // inactive take 的波形同样预热，避免展开泳道后逐个懒加载闪烁。
+            for (const take of clip.takes ?? []) {
+                const tp = take.sourcePath;
+                if (tp && !preloadedPathsRef.current.has(tp)) {
+                    preloadedPathsRef.current.add(tp);
+                    newPaths.push(tp);
+                }
+            }
         }
         if (newPaths.length > 0) {
             void waveformMipmapStore.batchPreload(newPaths);

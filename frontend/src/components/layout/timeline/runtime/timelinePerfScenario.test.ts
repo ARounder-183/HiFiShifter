@@ -20,5 +20,4 @@ test("components/layout/timeline/runtime/timelinePerfScenario.test.ts scripted c
     assertEqual(scenario.clips.length, 4960, "clip count");
     assertEqual(scenario.clips[0]?.trackId, "track-0", "first clip track");
 
-    console.log("timelinePerfScenario checks passed");
 });

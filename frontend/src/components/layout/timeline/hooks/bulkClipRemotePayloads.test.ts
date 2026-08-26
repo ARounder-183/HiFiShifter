@@ -88,5 +88,4 @@ test("components/layout/timeline/hooks/bulkClipRemotePayloads.test.ts scripted c
         "duplicate payload can preserve source names",
     );
 
-    console.log("bulk remote payload helper checks passed");
 });

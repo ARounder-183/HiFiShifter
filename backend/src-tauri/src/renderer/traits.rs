@@ -115,6 +115,8 @@ pub struct ClipProcessContext<'a> {
     /// 回放速率（时间拉伸比例）；1.0 = 不拉伸。
     pub playback_rate: f64,
     /// 输出帧数（应用 playback_rate 后）。
+    /// 仅 vslib 处理器消费；无 vslib 构建下保留以维持上下文契约完整。
+    #[allow(dead_code)]
     pub out_frames: usize,
     /// 用于缓存 key 的 Clip 唯一 ID。
     pub clip_id: &'a str,

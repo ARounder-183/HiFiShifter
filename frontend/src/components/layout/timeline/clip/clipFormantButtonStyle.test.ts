@@ -50,5 +50,4 @@ test("components/layout/timeline/clip/clipFormantButtonStyle.test.ts scripted ch
         "failed state should use danger palette",
     );
 
-    console.log("clipFormantButtonStyle checks passed");
 });

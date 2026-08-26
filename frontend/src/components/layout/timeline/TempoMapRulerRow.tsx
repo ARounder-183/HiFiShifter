@@ -1086,6 +1086,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     drag.startSec,
                     true,
                 );
+            } else {
+                // 修饰键临时关闭吸附时必须显式清除高亮：否则此前帧发布的
+                // 吸附竖线会冻结在画面上，直到 mouseup 才消失。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             }
             // 不与其它点重叠、不越过相邻点、不越过工程末尾：
             // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。

@@ -137,7 +137,7 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 # macOS Intel — CPU only via ort-tract (no GPU acceleration available)
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "ndarray", "alternative-backend"] }
-ort-tract = { version = "0.4.0+0.23", optional = true }
+ort-tract = { version = "0.4.0", optional = true }
 
 [profile.release]
 lto = false

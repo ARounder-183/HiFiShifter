@@ -141,5 +141,4 @@ test("components/layout/timeline/hooks/clipDropMoveUtils.test.ts scripted checks
         "invalid source track disables track movement",
     );
 
-    console.log("clip drop move utils checks passed");
 });

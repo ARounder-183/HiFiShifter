@@ -39,5 +39,4 @@ const x = 1;
         "raw html is escaped",
     );
 
-    console.log("markdown preview renderer checks passed");
 });

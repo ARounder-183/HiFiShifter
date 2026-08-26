@@ -673,7 +673,7 @@ export const zhTW = {
     snap_grid_adjust_clips_on_swing: "調整 Swing 時自動重新對齊所有 Clip",
     snap_section_master: "吸附總開關",
     snap_enable_snapping: "啟用吸附",
-    snap_show_highlight: "拖拽時顯示吸附簳線高亮",
+    snap_show_highlight: "拖拽時顯示吸附豎線高亮",
     snap_distance_px: "吸附距離",
     snap_relative_to_grid: "相對網格吸附",
     snap_section_targets: "吸附物件與目標",

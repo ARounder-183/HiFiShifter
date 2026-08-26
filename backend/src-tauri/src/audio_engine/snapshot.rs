@@ -829,14 +829,17 @@ pub(crate) fn build_snapshot(
                         );
 
                         if needs_tension {
-                            fallback_pcm =
-                                crate::synth_clip_cache::get_latest_tension_rendered_pcm(&clip.id);
+                            fallback_pcm = crate::synth_clip_cache::get_latest_tension_rendered_pcm(
+                                &clip.id,
+                                clip.active_take_id.as_deref(),
+                            );
                         }
 
                         if fallback_pcm.is_none() {
-                            if let Some((p, b)) =
-                                crate::synth_clip_cache::get_latest_rendered_pcm(&clip.id)
-                            {
+                            if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
+                                &clip.id,
+                                clip.active_take_id.as_deref(),
+                            ) {
                                 fallback_pcm = Some(p);
                                 fallback_breath = b;
                             }

@@ -381,6 +381,12 @@ export const ClipContextMenu: React.FC<{
                                 } ${take.name || take.id}`}
                                 disabled={takes.length <= 1}
                                 onClick={() => {
+                                    // 点击已激活的 take 是 no-op：跳过 dispatch，
+                                    // 避免无谓的乐观切换+回滚快照+全量快照刷新。
+                                    if (take.id === clip.activeTakeId) {
+                                        close();
+                                        return;
+                                    }
                                     void dispatch(
                                         setClipActiveTakeRemote({
                                             clipId: clip.id,

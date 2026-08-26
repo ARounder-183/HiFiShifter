@@ -27,5 +27,4 @@ test("components/layout/quickSearchPosition.test.ts scripted checks", async () =
     assertEqual(pointer.x, 660, "pointer x clamped");
     assertEqual(pointer.y, 400, "pointer y clamped");
 
-    console.log("quick search position checks passed");
 });

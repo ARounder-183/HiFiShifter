@@ -824,6 +824,11 @@ function applyOptimisticClipState(
     }
     if (payload.lengthSec !== undefined) {
         clip.lengthSec = Math.max(0, Number(payload.lengthSec) || 0);
+        // trim 改写长度而未携带 snapOffset 时同步下钳（与后端 patch_clip_state
+        // 口径一致），避免残留 offset > length 的"幻影吸附目标"。
+        if (payload.snapOffsetSec === undefined) {
+            clip.snapOffsetSec = Math.min(Math.max(0, clip.snapOffsetSec), clip.lengthSec);
+        }
     }
     if (payload.gain !== undefined) {
         clip.gain = clamp(Number(payload.gain), 0, 4);
@@ -860,7 +865,9 @@ function applyOptimisticClipState(
         clip.loopEnabled = Boolean(payload.loopEnabled);
     }
     if (payload.snapOffsetSec !== undefined) {
-        clip.snapOffsetSec = Math.max(0, Number(payload.snapOffsetSec) || 0);
+        const offset = Math.max(0, Number(payload.snapOffsetSec) || 0);
+        // 与后端一致：偏移点必须落在 [0, length] 内才可见、可吸附。
+        clip.snapOffsetSec = Math.min(offset, clip.lengthSec);
     }
     if (payload.fadeInSec !== undefined) {
         clip.fadeInSec = Math.max(0, Number(payload.fadeInSec) || 0);
@@ -1142,6 +1149,9 @@ function captureTakeRollback(state: SessionState, clipIds: readonly string[]): v
     for (const clipId of clipIds) {
         const clip = state.clips.find((entry) => entry.id === clipId);
         if (!clip) continue;
+        // 同一 clip 已有待回滚快照时保留**最早**的那份：快速连续切换两次且
+        // 都失败时，第二次失败后仍能回到最初的 take，而不是中间态。
+        if (pendingTakeRollbacks.has(clipId)) continue;
         const flat = {} as TakeOptimisticFlat;
         for (const key of TAKE_FLAT_KEYS) {
             // @ts-expect-error -- 按同构键组浅拷贝，字段集合由类型约束保证一致
@@ -2178,7 +2188,9 @@ const sessionSlice = createSlice({
         setClipSnapOffset(state, action: PayloadAction<{ clipId: string; snapOffsetSec: number }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
-            clip.snapOffsetSec = Math.max(0, Number(action.payload.snapOffsetSec) || 0);
+            // 与后端一致：偏移必须落在 [0, length] 内。
+            const offset = Math.max(0, Number(action.payload.snapOffsetSec) || 0);
+            clip.snapOffsetSec = Math.min(offset, clip.lengthSec);
         },
         setClipPlaybackRate(
             state,
@@ -2193,6 +2205,19 @@ const sessionSlice = createSlice({
                 : clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
             clip.clipPlaybackRate = clamp(action.payload.clipPlaybackRate, 0.1, 10);
             clip.playbackRate = clamp(clip.clipPlaybackRate * takeRate, 0.1, 10);
+            // "同步编辑所有 Take"开启时，后端会把全部 take 的速率统一为
+            // 有效速率 ÷ 倍率；乐观阶段同步镜像，否则拖拽期间 inactive lane
+            // 按旧速率渲染、persist+fulfilled 才收敛（视觉瞬态失真）。
+            if (state.syncEditsAcrossTakes && takes.length > 1) {
+                const mirrored = clamp(
+                    clip.playbackRate / getClipRateMultiplier(clip),
+                    0.1,
+                    10,
+                );
+                for (const take of takes) {
+                    take.playbackRate = mirrored;
+                }
+            }
             state.playbackRateVersion = (Number(state.playbackRateVersion) || 0) + 1;
         },
         setClipSourceRange(

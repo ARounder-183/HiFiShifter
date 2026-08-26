@@ -110,5 +110,4 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
 
     unsubscribe();
 
-    console.log(`snapHighlight checks passed (${checks})`);
 });

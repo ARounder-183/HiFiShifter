@@ -90,7 +90,8 @@ fn split_reversed_nonloop_is_contiguous_and_anchor_correct() {
         9.253863715024345,
         true,
     );
-    let (orig_ss, orig_se, orig_len) = (
+    // orig_ss 仅记录用户工程原始值；倒放窗口不消费 ss，故不参与断言。
+    let (_orig_ss, orig_se, orig_len) = (
         5.526592881691009f64,
         9.253863715024345f64,
         10.40917863594724f64,

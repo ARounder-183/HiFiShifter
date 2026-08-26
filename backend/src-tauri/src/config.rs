@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn ui_settings_normalizes_ripple_mode() {
-        let mut settings = UiSettings::default();
+        let settings = UiSettings::default();
         assert_eq!(settings.ripple_mode, "off");
 
         let mut bogus = UiSettings {

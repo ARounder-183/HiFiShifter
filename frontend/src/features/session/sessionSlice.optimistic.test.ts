@@ -234,5 +234,4 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         assertEqual(next.clips[0].startSec, 1, "undo pending applies local snapshot immediately");
     }
 
-    console.log("sessionSlice optimistic checks passed");
 });

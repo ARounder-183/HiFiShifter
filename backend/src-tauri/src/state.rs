@@ -205,6 +205,38 @@ pub(crate) fn normalize_nonloop_source_window(clip: &mut Clip) {
     }
 }
 
+/// 对 Clip 的**全部 Take** 应用非 Loop 存储窗口规范化。
+///
+/// 与 `normalize_nonloop_source_window` 同一不变式（存储窗口 == 消费窗口），
+/// 但每个 Take 的消费速率是组合速率（clip 倍率 × take 速率）。作用：打开
+/// 工程时自愈 inactive take 的陈旧/发散源窗口 —— 消费端虽按派生模型不受
+/// 影响，但原始字段会流向前端 take-lane 显示与 REAPER 导出的 SECTION 计算，
+/// 保留陈旧值会造成显示/导出与实际可听内容脱节。Loop take 的字段承载锚点
+/// 相位，不触碰。
+pub(crate) fn normalize_nonloop_all_take_windows(clip: &mut Clip) {
+    let clip_rate = if clip.clip_playback_rate.is_finite() && clip.clip_playback_rate > 1e-6 {
+        clip.clip_playback_rate as f64
+    } else {
+        1.0
+    };
+    for take in &mut clip.takes {
+        if take.loop_enabled {
+            continue;
+        }
+        let take_rate = if take.playback_rate.is_finite() && take.playback_rate > 1e-6 {
+            take.playback_rate as f64
+        } else {
+            1.0
+        };
+        let span = clip.length_sec.max(0.0) * clip_rate * take_rate;
+        if take.reversed {
+            take.source_start_sec = take.source_end_sec - span;
+        } else {
+            take.source_end_sec = take.source_start_sec + span;
+        }
+    }
+}
+
 /// Loop（循环源）下**音符内容**的回绕周期（源域秒）。
 ///
 /// 音频 clip 的实际声音按整个媒体时长 D 回绕（mix / snapshot / mixdown 的
@@ -2463,6 +2495,11 @@ impl AppState {
         h.redo.push(current);
         drop(h);
         self.bump_timeline_version();
+        // 恢复的快照可能改变 clip 的 active take：hnsep 分离缓存键只含
+        // clip_id+采样率+样本数，等长 Take 会命中彼此的 harmonic/noise
+        // stem（气声路径串音）。撤销/重做属低频操作，整体清空与
+        // set_clip_active_take 命令路径的失效策略一致。
+        crate::hnsep_onnx::clear_separation_cache();
         // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
         // 同步工程 BPM/拍号/音阶，避免撤销后工程记录与 Tempo Map 分叉。
         {
@@ -2492,6 +2529,8 @@ impl AppState {
         h.undo.push_back(current);
         drop(h);
         self.bump_timeline_version();
+        // 与 undo_timeline 一致：active take 可能随快照回退，须清分离缓存。
+        crate::hnsep_onnx::clear_separation_cache();
         // 与 undo_timeline 一致：重做后同步工程基准记录。
         {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -2630,7 +2669,7 @@ mod tests {
             )
             .clone();
 
-        let mut second = {
+        let second = {
             let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
             let mut take = clip.active_take().clone();
             take.id = new_id("take");
@@ -2691,7 +2730,14 @@ mod tests {
             second.source_sample_rate = None;
             second.source_start_sec = 20.0;
             second.source_end_sec = 30.0;
+            // 本测试考察非 Loop 分割：克隆自默认 Loop 的 active take 会带上
+            // loop=true，必须显式关闭。
+            second.loop_enabled = false;
             clip.add_take(second);
+            // 本测试考察非 Loop 分割的窗口数学：add_clip 按进程级默认开启
+            // Loop，须显式关闭并 sync 回全部 Take 后再分割。
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
             vec![first_id, clip.takes[1].id.clone()]
         };
 
@@ -2709,10 +2755,27 @@ mod tests {
         assert!((right.takes[0].source_start_sec - 2.0).abs() < 1e-9);
         assert!((right.takes[0].source_end_sec - 4.0).abs() < 1e-9);
 
-        assert!((left.takes[1].source_start_sec - 20.0).abs() < 1e-9);
-        assert!((left.takes[1].source_end_sec - 22.0).abs() < 1e-9);
-        assert!((right.takes[1].source_start_sec - 22.0).abs() < 1e-9);
-        assert!((right.takes[1].source_end_sec - 24.0).abs() < 1e-9);
+        assert!(
+            (left.takes[1].source_start_sec - 20.0).abs() < 1e-9,
+            "left.take1 ss = {}",
+            left.takes[1].source_start_sec
+        );
+        assert!(
+            (left.takes[1].source_end_sec - 22.0).abs() < 1e-9,
+            "left.take1 se = {} (loop={})",
+            left.takes[1].source_end_sec,
+            left.takes[1].loop_enabled
+        );
+        assert!(
+            (right.takes[1].source_start_sec - 22.0).abs() < 1e-9,
+            "right.take1 ss = {}",
+            right.takes[1].source_start_sec
+        );
+        assert!(
+            (right.takes[1].source_end_sec - 24.0).abs() < 1e-9,
+            "right.take1 se = {}",
+            right.takes[1].source_end_sec
+        );
 
         assert_eq!(
             take_ids.len(),
@@ -2745,9 +2808,12 @@ mod tests {
             )
             .clone();
         // Clip 级拉伸速率应并入聚合后的 Take 自身速率，新 Clip 级速率为 1。
+        // 平铺 playback_rate 是组合有效速率（权威）：倍率与有效速率须一致地
+        // 设为 2，sync 后 Take 自身速率保持 1，pack 才能把组合速率 2 并入。
         {
             let clip = tl.clips.iter_mut().find(|c| c.id == a).unwrap();
             clip.clip_playback_rate = 2.0;
+            clip.playback_rate = 2.0;
             clip.sync_take_from_flat();
         }
 
@@ -2755,11 +2821,13 @@ mod tests {
         let clip = tl.clips.iter().find(|c| c.id == packed).unwrap();
         assert_eq!(clip.takes.len(), 2);
         assert!((clip.start_sec - 0.0).abs() < 1e-9);
-        assert!((clip.length_sec - 2.5).abs() < 1e-9);
+        // 打包容器覆盖源 Clip 的并集区间：A [1,3] ∪ B [0,2.5] → [0,3]。
+        assert!((clip.length_sec - 3.0).abs() < 1e-9);
         assert!((clip.clip_playback_rate - 1.0).abs() < f32::EPSILON);
         assert!(
             (clip.takes[0].playback_rate - 2.0).abs() < f32::EPSILON,
-            "A 的 Clip×Take 速率应并入第一个 Take"
+            "A 的 Clip×Take 速率应并入第一个 Take，实际 = {}",
+            clip.takes[0].playback_rate
         );
         assert_eq!(
             tl.clips.iter().filter(|c| c.id == a || c.id == b).count(),
@@ -2984,67 +3052,6 @@ mod tests {
             tl.clips.iter().find(|c| c.id == cid).unwrap()
         }
 
-        /// 加载期规范化：存储字段 == 消费窗口（正放派生终点、倒放派生起点、
-        /// Loop 不触碰）。
-        #[test]
-        fn normalize_nonloop_source_window_matches_consumed_window() {
-            let mut tl = TimelineState::default();
-            let track_id = tl.tracks[0].id.clone();
-            fn mk(tl: &mut TimelineState, track_id: &str, rev: bool) -> String {
-                let id = tl.add_clip(
-                    Some(track_id.to_string()),
-                    Some("N".into()),
-                    Some(0.0),
-                    Some(3.0),
-                    None,
-                );
-                {
-                    let c = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
-                    c.reversed = rev;
-                    c.loop_enabled = false;
-                    c.playback_rate = 1.0;
-                }
-                id
-            }
-            let fwd_id = mk(&mut tl, &track_id, false);
-            let rev_id = mk(&mut tl, &track_id, true);
-            {
-                let c = tl.clips.iter_mut().find(|c| c.id == fwd_id).unwrap();
-                c.source_start_sec = 2.0;
-                c.source_end_sec = 99.0; // 陈旧值
-            }
-            {
-                let c = tl.clips.iter_mut().find(|c| c.id == rev_id).unwrap();
-                c.source_start_sec = 99.0; // 陈旧值
-                c.source_end_sec = -1.5; // 媒体下方静音段（合法）
-            }
-            let mut fwd = tl.clips.iter().find(|c| c.id == fwd_id).unwrap().clone();
-            normalize_nonloop_source_window(&mut fwd);
-            assert!(
-                (fwd.source_end_sec - 5.0).abs() < 1e-9,
-                "forward end derives from start+len"
-            );
-            assert!((fwd.source_start_sec - 2.0).abs() < 1e-9);
-
-            let mut rev = tl.clips.iter().find(|c| c.id == rev_id).unwrap().clone();
-            normalize_nonloop_source_window(&mut rev);
-            assert!(
-                (rev.source_start_sec - (-4.5)).abs() < 1e-9,
-                "reversed start derives from end−len"
-            );
-            assert!(
-                (rev.source_end_sec - (-1.5)).abs() < 1e-9,
-                "negative anchor preserved"
-            );
-
-            // Loop：字段承载锚点相位，规范化不得触碰。
-            let mut lp = rev.clone();
-            lp.loop_enabled = true;
-            lp.source_start_sec = -77.0;
-            normalize_nonloop_source_window(&mut lp);
-            assert!((lp.source_start_sec - (-77.0)).abs() < 1e-12);
-        }
-
         // 正放：win=[ss, ss+len·r)。
         let (ws, we) = clip_playback_window_sec(read(&tl, &clip_id));
         assert!((ws - 2.0).abs() < 1e-9 && (we - 6.0).abs() < 1e-9);
@@ -3099,6 +3106,67 @@ mod tests {
         }
         let (ts, te) = clip_pitch_trim_window_sec(read(&tl, &clip_id));
         assert!((ts - 3.0).abs() < 1e-9 && (te - 7.0).abs() < 1e-9);
+    }
+
+    /// 加载期规范化：存储字段 == 消费窗口（正放派生终点、倒放派生起点、
+    /// Loop 不触碰）。
+    #[test]
+    fn normalize_nonloop_source_window_matches_consumed_window() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        fn mk(tl: &mut TimelineState, track_id: &str, rev: bool) -> String {
+            let id = tl.add_clip(
+                Some(track_id.to_string()),
+                Some("N".into()),
+                Some(0.0),
+                Some(3.0),
+                None,
+            );
+            {
+                let c = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
+                c.reversed = rev;
+                c.loop_enabled = false;
+                c.playback_rate = 1.0;
+            }
+            id
+        }
+        let fwd_id = mk(&mut tl, &track_id, false);
+        let rev_id = mk(&mut tl, &track_id, true);
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == fwd_id).unwrap();
+            c.source_start_sec = 2.0;
+            c.source_end_sec = 99.0; // 陈旧值
+        }
+        {
+            let c = tl.clips.iter_mut().find(|c| c.id == rev_id).unwrap();
+            c.source_start_sec = 99.0; // 陈旧值
+            c.source_end_sec = -1.5; // 媒体下方静音段（合法）
+        }
+        let mut fwd = tl.clips.iter().find(|c| c.id == fwd_id).unwrap().clone();
+        normalize_nonloop_source_window(&mut fwd);
+        assert!(
+            (fwd.source_end_sec - 5.0).abs() < 1e-9,
+            "forward end derives from start+len"
+        );
+        assert!((fwd.source_start_sec - 2.0).abs() < 1e-9);
+
+        let mut rev = tl.clips.iter().find(|c| c.id == rev_id).unwrap().clone();
+        normalize_nonloop_source_window(&mut rev);
+        assert!(
+            (rev.source_start_sec - (-4.5)).abs() < 1e-9,
+            "reversed start derives from end−len"
+        );
+        assert!(
+            (rev.source_end_sec - (-1.5)).abs() < 1e-9,
+            "negative anchor preserved"
+        );
+
+        // Loop：字段承载锚点相位，规范化不得触碰。
+        let mut lp = rev.clone();
+        lp.loop_enabled = true;
+        lp.source_start_sec = -77.0;
+        normalize_nonloop_source_window(&mut lp);
+        assert!((lp.source_start_sec - (-77.0)).abs() < 1e-12);
     }
 
     #[test]
@@ -5645,12 +5713,18 @@ impl TimelineState {
             if let Some(v) = patch.loop_enabled {
                 c.loop_enabled = v;
             }
-            if let Some(v) = patch.snap_offset_sec {
-                if v.is_finite() {
-                    // SnapOffset 必须落在 [0, length] 内：负值无意义，
-                    // 超出 Clip 长度的偏移点不可见也不可吸附。
+            // SnapOffset 必须落在 [0, length] 内：负值无意义，超出 Clip
+            // 长度的偏移点不可见也不可吸附。trim/拉伸改写长度而未携带
+            // snap_offset 时，同步下钳已有偏移 —— 否则残留 offset > length
+            // 的"幻影吸附目标"（屏幕上不可见，但其它 Clip 仍会吸附到该位置）。
+            match patch.snap_offset_sec {
+                Some(v) if v.is_finite() => {
                     c.snap_offset_sec = v.clamp(0.0, c.length_sec.max(0.0));
                 }
+                _ if patch.length_sec.is_some() => {
+                    c.snap_offset_sec = c.snap_offset_sec.clamp(0.0, c.length_sec.max(0.0));
+                }
+                _ => {}
             }
             if let Some(v) = patch.fade_in_sec {
                 c.fade_in_sec = v.max(0.0);
@@ -6492,13 +6566,38 @@ impl TimelineState {
                 // 保证素材内容在时间轴上的位置不变（等价于拖拽 clip 末尾）。
                 // Loop（循环源）clip：延长部分由循环回绕内容填充，不改源窗口。
                 // 非 Loop：正放终点/倒放起点随增长派生，越出媒体的部分为静音。
+                //
+                // 与 split 相同的纪律：分割过渡是 Clip 容器级操作，必须把每个
+                // Take 的窗口按其自身组合速率（clip 倍率 × take 速率）做同一
+                // 变换；否则切换到 inactive 倒放/Loop take 时内容会错位
+                // grow×rate 秒。
                 {
                     let left = &mut self.clips[left_idx];
+                    let clip_rate =
+                        if left.clip_playback_rate.is_finite() && left.clip_playback_rate > 1e-6 {
+                            left.clip_playback_rate as f64
+                        } else {
+                            1.0
+                        };
+                    let combined = |take_rate: f32| -> f64 {
+                        let tr = if take_rate.is_finite() && take_rate > 1e-6 {
+                            take_rate as f64
+                        } else {
+                            1.0
+                        };
+                        clip_rate * tr
+                    };
                     left.length_sec += left_grow;
                     if !left.loop_enabled {
                         if left.reversed {
+                            for take in &mut left.takes {
+                                take.source_start_sec -= left_grow * combined(take.playback_rate);
+                            }
                             left.source_start_sec = left.source_start_sec - left_grow * left_rate;
                         } else {
+                            for take in &mut left.takes {
+                                take.source_end_sec += left_grow * combined(take.playback_rate);
+                            }
                             left.source_end_sec = left.source_end_sec + left_grow * left_rate;
                         }
                     }
@@ -6526,6 +6625,21 @@ impl TimelineState {
                         }
                     };
                     let right = &mut self.clips[right_idx];
+                    let clip_rate = if right.clip_playback_rate.is_finite()
+                        && right.clip_playback_rate > 1e-6
+                    {
+                        right.clip_playback_rate as f64
+                    } else {
+                        1.0
+                    };
+                    let combined = |take_rate: f32| -> f64 {
+                        let tr = if take_rate.is_finite() && take_rate > 1e-6 {
+                            take_rate as f64
+                        } else {
+                            1.0
+                        };
+                        clip_rate * tr
+                    };
                     right.start_sec = (right.start_sec - right_grow).max(0.0);
                     right.length_sec += right_grow;
                     if right.loop_enabled {
@@ -6540,10 +6654,41 @@ impl TimelineState {
                             right.source_start_sec =
                                 wrap_anchor(right.source_start_sec - right_grow * right_rate);
                         }
+                        // 每个 Take 的回绕周期是它自己的媒体时长。
+                        for take in &mut right.takes {
+                            let r = combined(take.playback_rate);
+                            let take_media = clip_take_media_duration_sec(take)
+                                .filter(|d| d.is_finite() && *d > 1e-9);
+                            let take_wrap = |value: f64| -> f64 {
+                                match take_media {
+                                    Some(d) => {
+                                        let m = value % d;
+                                        if m < 0.0 {
+                                            m + d
+                                        } else {
+                                            m
+                                        }
+                                    }
+                                    None => value,
+                                }
+                            };
+                            if right.reversed {
+                                take.source_end_sec =
+                                    take_wrap(take.source_end_sec + right_grow * r);
+                            } else {
+                                take.source_start_sec =
+                                    take_wrap(take.source_start_sec - right_grow * r);
+                            }
+                        }
                     } else if right.reversed {
                         // 倒放非 Loop：头部延伸使锚点(source_end)越过媒体时长
                         // → 前导静音，不再按媒体时长钳制。窗口起点随新锚点/
                         // 长度同步派生，保持存储字段 == 消费窗口。
+                        for take in &mut right.takes {
+                            let r = combined(take.playback_rate);
+                            take.source_end_sec += right_grow * r;
+                            take.source_start_sec = take.source_end_sec - right.length_sec * r;
+                        }
                         right.source_end_sec = right.source_end_sec + right_grow * right_rate;
                         right.source_start_sec =
                             right.source_end_sec - right.length_sec * right_rate;
@@ -6551,6 +6696,11 @@ impl TimelineState {
                         // 正放非 Loop：头部延伸使起点向下穿越媒体起点 → 前导
                         // 静音（派生窗口），不再钳制到 0。终点同步派生，
                         // 保持存储字段 == 消费窗口。
+                        for take in &mut right.takes {
+                            let r = combined(take.playback_rate);
+                            take.source_start_sec -= right_grow * r;
+                            take.source_end_sec = take.source_start_sec + right.length_sec * r;
+                        }
                         right.source_start_sec = right.source_start_sec - right_grow * right_rate;
                         right.source_end_sec =
                             right.source_start_sec + right.length_sec * right_rate;
@@ -6969,6 +7119,13 @@ impl TimelineState {
                 });
                 // 音频 → MIDI 的内容替换写在投影上；必须写回 Take 权威数据，
                 // 否则 Take 里残留的旧音频 source_path 会在克隆/切换时"复活"。
+                clip.sync_take_from_flat();
+                // 转换产物是"由当前可听内容派生的单 Take 音高参考块"
+                // （与 glue 的单 Take 语义对齐）：清空源 takes 集合后由投影
+                // 重建唯一 active Take。若保留继承来的 inactive 音频 take，
+                // 用户切一下 take 就会把旧音频内容整体物化回来，转换静默丢失。
+                clip.takes.clear();
+                clip.active_take_id = None;
                 clip.sync_take_from_flat();
             }
         }
@@ -7596,9 +7753,19 @@ impl TimelineState {
             c.waveform_preview = waveform_preview;
             // 文件元数据 + 内容指纹已由 add_clip → populate_clip_file_metadata 填充，
             // 此处只需确保 waveform_preview 等音频信息正确落盘即可。
+            // 投影字段被直接覆盖，必须写回 Take 权威数据 —— 否则 take 里的
+            // 旧元数据会在下次 normalize/sync 时回流覆盖这里的值（例如视频
+            // header-only 探测与 add_clip 内完整解码结果存在差异时）。
+            c.sync_take_from_flat();
         }
     }
 
+    /// 将目标 Clip 的源媒体替换为新文件。
+    ///
+    /// 语义边界：只替换 **active take** 的媒体（经投影写入后 sync 回该 Take）；
+    /// inactive takes 保留各自的旧源文件。这与"切换 take 对比不同素材"的
+    /// 多 take 用法一致 —— 整体替换全部 take 属于破坏性操作，如需提供应
+    /// 作为独立命令并向前端明示。
     pub fn replace_clip_sources(
         &mut self,
         clip_ids: &[String],

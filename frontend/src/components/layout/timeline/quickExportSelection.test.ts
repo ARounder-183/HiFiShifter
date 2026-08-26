@@ -47,5 +47,4 @@ test("components/layout/timeline/quickExportSelection.test.ts scripted checks", 
         "quick export file name falls back for empty project names",
     );
 
-    console.log("quick export selection helpers passed");
 });

@@ -39,5 +39,4 @@ test("components/layout/timeline/hooks/clipDragCopyMode.test.ts scripted checks"
         "plain drag stays move drag",
     );
 
-    console.log("clip drag copy mode checks passed");
 });

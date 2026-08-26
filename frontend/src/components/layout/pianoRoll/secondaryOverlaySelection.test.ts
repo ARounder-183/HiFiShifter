@@ -89,5 +89,4 @@ test("components/layout/pianoRoll/secondaryOverlaySelection.test.ts scripted che
         [7, 5, 6],
     );
 
-    console.log("secondary overlay selection checks passed");
 });

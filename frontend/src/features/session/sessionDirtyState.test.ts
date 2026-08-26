@@ -15,5 +15,4 @@ test("features/session/sessionDirtyState.test.ts scripted checks", async () => {
 
     assertEqual(project.dirty, true);
 
-    console.log("session dirty state checks passed");
 });

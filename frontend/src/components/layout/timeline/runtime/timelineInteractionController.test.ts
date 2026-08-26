@@ -35,5 +35,4 @@ test("components/layout/timeline/runtime/timelineInteractionController.test.ts s
     assertNear(moved.deltaSec, 1.25, "drag delta sec");
     assertNear(moved.deltaTrackIndex, 2, "drag delta track index");
 
-    console.log("timelineInteractionController checks passed");
 });

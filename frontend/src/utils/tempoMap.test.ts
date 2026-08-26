@@ -823,5 +823,4 @@ test("utils/tempoMap.test.ts scripted checks", async () => {
         }
     }
 
-    console.log(`tempoMap.test.ts: all ${checks} checks passed.`);
 });

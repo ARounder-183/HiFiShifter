@@ -24,5 +24,4 @@ test("components/layout/timeline/trackContextMenuPlacement.test.ts scripted chec
         "fallback appends when anchor missing",
     );
 
-    console.log("track placement helper checks passed");
 });

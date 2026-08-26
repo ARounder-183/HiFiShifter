@@ -61,7 +61,12 @@ export function useSnapOffsetDrag(deps: {
         snapEnabled,
     } = deps;
 
-    const dragRef = useRef<{ pointerId: number } | null>(null);
+    const dragRef = useRef<{
+        pointerId: number;
+        startClientX: number;
+        /** 越过位移阈值后才创建 undo 检查点：单击（零位移）不产生空 undo 步。 */
+        checkpointed: boolean;
+    } | null>(null);
 
     function startSnapOffsetDrag(e: React.PointerEvent, clipId: string) {
         if (e.button !== 0) return;
@@ -72,7 +77,7 @@ export function useSnapOffsetDrag(deps: {
 
         e.preventDefault();
         e.stopPropagation();
-        dispatch(checkpointHistory());
+        // checkpoint 推迟到首次真实移动（与 useClipDrag 一致）。
         dispatch(beginInteraction());
 
         const bounds = scroller.getBoundingClientRect();
@@ -82,7 +87,11 @@ export function useSnapOffsetDrag(deps: {
         const clipLen = Math.max(0, Number(clip.lengthSec) || 0);
         const anchorTrackId = clip.trackId;
 
-        dragRef.current = { pointerId: e.pointerId };
+        dragRef.current = {
+            pointerId: e.pointerId,
+            startClientX: e.clientX,
+            checkpointed: false,
+        };
         try {
             (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
         } catch {
@@ -103,6 +112,12 @@ export function useSnapOffsetDrag(deps: {
             const drag = dragRef.current;
             const el = scrollRef.current;
             if (!drag || drag.pointerId !== ev.pointerId || !el) return;
+            // 位移阈值内不视为拖拽：不建检查点、不改状态。
+            if (!drag.checkpointed) {
+                if (Math.abs(ev.clientX - drag.startClientX) < 2) return;
+                drag.checkpointed = true;
+                dispatch(checkpointHistory());
+            }
             const b = el.getBoundingClientRect();
             const pointerSec = beatFromClientX(ev.clientX, b, el.scrollLeft);
             const rawAbs = clipStart + baseOffset + (pointerSec - startPointerSec);
@@ -136,8 +151,13 @@ export function useSnapOffsetDrag(deps: {
             window.removeEventListener("pointercancel", onEnd);
             endSnapGesture();
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            // 零位移单击：无任何变更，直接释放交互锁，不做远端持久化。
+            if (!drag.checkpointed) {
+                dispatch(endInteraction());
+                return;
+            }
             // 松手持久化最终值（读取当前乐观状态，拖拽期间已收敛）。
-            // checkpoint:false：undo 检查点已在拖拽开始时创建（第 74 行），
+            // checkpoint:false：undo 检查点已在首次移动时创建，
             // 远端默认再建一个会把"无变化的拖前状态"多压一层。
             const finalClip = sessionRef.current.clips.find((c) => c.id === clipId);
             void dispatch(

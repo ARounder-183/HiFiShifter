@@ -20,5 +20,4 @@ test("components/layout/pianoRoll/referenceRootTrackTrigger.test.ts scripted che
         "reference root track trigger should keep label text",
     );
 
-    console.log("reference root track trigger helper passed");
 });
