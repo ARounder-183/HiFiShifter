@@ -141,6 +141,10 @@ fn import_finished_recording(
         {
             if finished.peak.is_finite() && finished.peak > 0.0001 {
                 clip.gain = (1.0 / finished.peak).clamp(1.0, 4.0);
+                // 自动增益写在 active-take 内存投影上，必须同步写回 Take 权威
+                // 数据；否则后续任何 normalize_takes()（复制/粘贴/合并等克隆
+                // 路径）都会用 Take 里的旧 gain=1.0 覆盖投影，归一化静默丢失。
+                clip.sync_take_from_flat();
             }
         }
     }

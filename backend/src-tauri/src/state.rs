@@ -1102,26 +1102,16 @@ impl Clip {
     /// 当前活跃 take。调用前必须保证 takes 非空（反序列化/构造边界统一调用
     /// `normalize_takes()`）。
     pub fn active_take(&self) -> &ClipTake {
-        let idx = self
-            .active_take_index()
-            .min(self.takes.len().saturating_sub(1));
+        assert!(
+            !self.takes.is_empty(),
+            "active_take() on empty takes — normalize_takes() must run at load/construct boundaries"
+        );
+        let idx = self.active_take_index().min(self.takes.len() - 1);
         &self.takes[idx]
-    }
-
-    /// 当前活跃 take（可变）。
-    pub fn active_take_mut(&mut self) -> &mut ClipTake {
-        let idx = self
-            .active_take_index()
-            .min(self.takes.len().saturating_sub(1));
-        &mut self.takes[idx]
     }
 
     pub fn take(&self, take_id: &str) -> Option<&ClipTake> {
         self.takes.iter().find(|t| t.id == take_id)
-    }
-
-    pub fn is_multi_take(&self) -> bool {
-        self.takes.len() > 1
     }
 
     /// 把 active-take 内存投影写回 `takes` 中的对应条目；takes 为空时
@@ -1163,6 +1153,18 @@ impl Clip {
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
+    }
+
+    /// 清空波形预览缓存（active 投影 + 全部 Take）。
+    ///
+    /// 片段导出/跨进程剪贴板在序列化前调用：只清投影不够 —— `takes` 是
+    /// 磁盘权威，残留的 Take 预览会在下一次 normalize/sync 时回流，
+    /// 且会随片段载荷一起序列化（体积膨胀）。
+    pub fn clear_waveform_preview_caches(&mut self) {
+        self.waveform_preview = None;
+        for take in &mut self.takes {
+            take.waveform_preview = None;
+        }
     }
 
     /// 切换 active take，并把选中 take 物化到内存投影。
@@ -1253,23 +1255,13 @@ impl Clip {
 
     /// 重命名 Take。
     pub fn rename_take(&mut self, take_id: &str, name: &str) -> Result<(), String> {
-        let is_active = self.active_take_id.as_deref() == Some(take_id);
         let found = self
             .takes
             .iter_mut()
             .find(|t| t.id == take_id)
             .ok_or_else(|| format!("take not found: {}", take_id))?;
         found.name = name.trim().to_string();
-        if is_active {
-            let take: ClipTake = self.active_take().clone();
-            take.apply_to_clip(self);
-        }
         Ok(())
-    }
-
-    /// 从媒体路径创建一个单 Take 的音频 Clip 内容。
-    pub fn ensure_flat_projection_from_takes(&mut self) {
-        self.normalize_takes();
     }
 }
 
@@ -4585,10 +4577,12 @@ impl TimelineState {
                 start_sec: c.start_sec,
                 length_sec: c.length_sec,
                 color: c.color.clone(),
+                // lite 轮询同样剥离 take 级 midi_note_data（顶层已剥离，
+                // 每个 take 再带一份完整音符数组会让轮询载荷随 take 数膨胀）。
                 takes: c
                     .takes
                     .iter()
-                    .map(crate::models::TimelineClipTake::from)
+                    .map(|t| crate::models::TimelineClipTake::from_take(t, false))
                     .collect(),
                 active_take_id: c.active_take_id.clone(),
                 source_path: c.source_path.clone(),
@@ -5681,14 +5675,34 @@ impl TimelineState {
                 c.playback_rate = v.clamp(0.1, 10.0);
             }
             if let Some(v) = patch.clip_playback_rate {
-                c.clip_playback_rate = v.clamp(0.1, 10.0);
-                // Clip 级速率变化只改乘数，不改动 active Take 的自身速率。
+                let next_clip_rate = v.clamp(0.1, 10.0);
+                // Clip 级倍率变化只改乘数：以 active Take 的自身速率重算
+                // 有效速率（不污染 Take 速率本身）。takes 为空（旧扁平数据）
+                // 时按“有效速率 ÷ 旧倍率”还原 Take 速率。
+                let old_clip_rate =
+                    if c.clip_playback_rate.is_finite() && c.clip_playback_rate > 1e-6 {
+                        c.clip_playback_rate
+                    } else {
+                        1.0
+                    };
                 let take_rate = if c.takes.is_empty() {
-                    c.playback_rate
+                    c.playback_rate / old_clip_rate
                 } else {
                     c.active_take().playback_rate
                 };
-                c.playback_rate = c.clip_playback_rate * take_rate.max(0.1);
+                let take_rate = if take_rate.is_finite() && take_rate > 1e-6 {
+                    take_rate
+                } else {
+                    1.0
+                };
+                c.clip_playback_rate = next_clip_rate;
+                c.playback_rate = next_clip_rate * take_rate;
+                // 同一请求同时携带目标有效速率时以其为准 —— Take 自身速率
+                // 在下方“同步编辑所有 Take”阶段按新倍率统一反推，保证
+                // active / inactive take 口径一致。
+                if let Some(v) = patch.playback_rate {
+                    c.playback_rate = v.clamp(0.1, 10.0);
+                }
             }
             if let Some(v) = patch.reversed {
                 c.reversed = v;
@@ -5731,6 +5745,16 @@ impl TimelineState {
             // 同步到该 Clip 的全部 Take；容器级属性（位置/长度/fade/颜色等）保持
             // Clip 级语义，不参与同步。
             if crate::config::sync_edits_across_takes() {
+                // playback_rate 请求的是“组合有效速率”（clip 倍率 × take 速率），
+                // 写入各 Take 自身速率前必须按当前倍率反推 —— 否则 inactive take
+                // 在切换后有效速率会被放大 clip_rate 倍（与 from_clip 对 active
+                // take 的口径不一致）。
+                let clip_rate_for_sync =
+                    if c.clip_playback_rate.is_finite() && c.clip_playback_rate > 1e-6 {
+                        c.clip_playback_rate
+                    } else {
+                        1.0
+                    };
                 for take in &mut c.takes {
                     if let Some(v) = content_sync_patch.gain {
                         take.gain = v.clamp(0.0, 4.0);
@@ -5744,7 +5768,8 @@ impl TimelineState {
                         take.source_end_sec = v.max(0.0);
                     }
                     if let Some(v) = content_sync_patch.playback_rate {
-                        take.playback_rate = v.clamp(0.1, 10.0);
+                        take.playback_rate =
+                            (v.clamp(0.1, 10.0) / clip_rate_for_sync).clamp(0.1, 10.0);
                     }
                     if let Some(v) = content_sync_patch.reversed {
                         take.reversed = v;
@@ -5780,7 +5805,10 @@ impl TimelineState {
                 {
                     let mut duplicated = source_clip.clone();
                     duplicated.id = new_id("clip");
-                    duplicated.normalize_takes();
+                    // 克隆后以投影为准写回 Take：运行时编辑全部发生在投影上，
+                    // 若存在尚未 sync 的最新修改，normalize_takes() 会用旧 Take
+                    // 数据覆盖它（如录音自动增益被回退）。
+                    duplicated.sync_take_from_flat();
                     duplicated.remap_take_ids();
                     duplicated.group_id = None;
                     duplicated.track_id = template.track_id.clone();
@@ -5855,6 +5883,8 @@ impl TimelineState {
                     if let Some(fill_gaps) = template.midi_fill_gaps {
                         clip.midi_fill_gaps = fill_gaps;
                     }
+                    // MIDI 内容写在投影上，写回 Take 权威数据。
+                    clip.sync_take_from_flat();
                 }
             }
 
@@ -5911,7 +5941,19 @@ impl TimelineState {
         let mut packed_takes: Vec<ClipTake> = Vec::new();
         for source in &mut sources {
             source.normalize_takes();
-            let delta = (start - source.start_sec).max(0.0);
+            // 源 Clip 在合并区间内的本地偏移（start 为全部源的最小起点，
+            // 故 delta ≥ 0）。打包后每个 Take 的内容必须仍在自己原本的
+            // 时间位置出声：
+            // - 非 Loop 正放：窗口 [ss,se) 整体前移 δ·rate —— 新起点
+            //   ss−δ·r 使内容在 t=δ 处开始播放（负起点 = 前导静音），
+            //   窗口长度保持源自身的裁剪长度，其余区段渲染静音；
+            // - 非 Loop 倒放：消费锚点是 source_end，整体后移 δ·rate；
+            // - Loop：回绕发生在整个媒体文件上，按锚点在 mod-D 域内
+            //   平移（正放减、倒放加），容器全长由回绕铺满。
+            // 注意：与 split 不同，这里**有意**不继承源 Clip 的 fade/
+            // muted/snap_offset/formant 覆盖 —— 打包产物是全新的多 Take
+            // 容器，这些 Item 级属性以第一个源之外的默认值起步。
+            let delta = (source.start_sec - start).max(0.0);
             for take in &source.takes {
                 let source_clip_rate =
                     if source.clip_playback_rate.is_finite() && source.clip_playback_rate > 1e-6 {
@@ -5936,17 +5978,39 @@ impl TimelineState {
                 }
                 packed.playback_rate = (rate as f32).clamp(0.1, 10.0);
                 if take.loop_enabled {
-                    if take.reversed {
-                        packed.source_end_sec = take.source_end_sec - delta * rate;
-                    } else {
-                        packed.source_start_sec = take.source_start_sec + delta * rate;
+                    match clip_take_media_duration_sec(take).filter(|d| d.is_finite() && *d > 1e-9)
+                    {
+                        Some(media_total) => {
+                            let wrap = |value: f64| -> f64 {
+                                let m = value % media_total;
+                                if m < 0.0 {
+                                    m + media_total
+                                } else {
+                                    m
+                                }
+                            };
+                            if take.reversed {
+                                packed.source_end_sec = wrap(take.source_end_sec + delta * rate);
+                            } else {
+                                packed.source_start_sec =
+                                    wrap(take.source_start_sec - delta * rate);
+                            }
+                        }
+                        None => {
+                            // 媒体时长未知：退化为不回绕的相位平移（尽力而为）。
+                            if take.reversed {
+                                packed.source_end_sec = take.source_end_sec + delta * rate;
+                            } else {
+                                packed.source_start_sec = take.source_start_sec - delta * rate;
+                            }
+                        }
                     }
                 } else if take.reversed {
-                    packed.source_end_sec = take.source_end_sec - delta * rate;
-                    packed.source_start_sec = packed.source_end_sec - length * rate;
-                } else {
+                    packed.source_end_sec = take.source_end_sec + delta * rate;
                     packed.source_start_sec = take.source_start_sec + delta * rate;
-                    packed.source_end_sec = packed.source_start_sec + length * rate;
+                } else {
+                    packed.source_start_sec = take.source_start_sec - delta * rate;
+                    packed.source_end_sec = take.source_end_sec - delta * rate;
                 }
                 if let Some(notes) = packed.midi_note_data.as_mut() {
                     for note in notes {
@@ -6196,7 +6260,9 @@ impl TimelineState {
 
             let mut duplicated = source.clone();
             duplicated.id = new_id("clip");
-            duplicated.normalize_takes();
+            // 同 create_clips_bulk：克隆后以 active 投影写回 Take，
+            // 避免未同步的最新投影修改被旧 Take 数据覆盖。
+            duplicated.sync_take_from_flat();
             duplicated.remap_take_ids();
             duplicated.track_id = target_track_id;
             duplicated.start_sec = (duplicated.start_sec + payload.delta_sec).max(0.0);
@@ -6501,6 +6567,10 @@ impl TimelineState {
                             left.source_end_sec = left.source_end_sec + left_grow * left_rate;
                         }
                     }
+                    // 源窗口写在 active 投影上，立即写回 Take 权威数据；
+                    // 否则后续克隆路径（复制/粘贴/合并）会用旧 Take 窗口
+                    // 覆盖这次延伸。
+                    left.sync_take_from_flat();
                 }
 
                 // 后 clip 起始位置向前延长 right_grow，同时扩展 source 范围。
@@ -6550,6 +6620,8 @@ impl TimelineState {
                         right.source_end_sec =
                             right.source_start_sec + right.length_sec * right_rate;
                     }
+                    // 与左侧同理：源窗口修改必须写回 Take 权威数据。
+                    right.sync_take_from_flat();
                 }
 
                 if opts.overlap_fades {
@@ -6833,6 +6905,12 @@ impl TimelineState {
             }
         }
 
+        // 胶合产物是"烘焙出的单 Take 新 Clip"（对齐 REAPER glue 语义）：
+        // 清空源 takes 集合，由当前投影重建唯一 active Take。若保留继承来的
+        // inactive takes，它们会带着旧源文件的旧窗口套在合并后的新几何上，
+        // 用户切一下 take 就会听到与胶合结果完全错位的原始内容。
+        glued.takes.clear();
+        glued.active_take_id = None;
         glued.sync_take_from_flat();
         self.clips.retain(|c| !clip_ids.contains(&c.id));
         self.clips.push(glued.clone());
@@ -6954,6 +7032,9 @@ impl TimelineState {
                     min: 0.0,
                     max: 127.0,
                 });
+                // 音频 → MIDI 的内容替换写在投影上；必须写回 Take 权威数据，
+                // 否则 Take 里残留的旧音频 source_path 会在克隆/切换时"复活"。
+                clip.sync_take_from_flat();
             }
         }
     }
@@ -7107,6 +7188,8 @@ impl TimelineState {
                     max: (max_note + padding).min(127.0),
                 });
                 clip.midi_note_data = Some(remapped);
+                // midi_note_data 是 active-take 投影字段，写回 Take 权威数据。
+                clip.sync_take_from_flat();
             }
         }
 
@@ -7451,6 +7534,9 @@ impl TimelineState {
             max: 127.0,
         });
 
+        // 与音频 glue 一致：胶合产物是单 Take 新 Clip，清空继承的 takes 集合。
+        glued.takes.clear();
+        glued.active_take_id = None;
         glued.sync_take_from_flat();
         self.clips.retain(|c| !original_clip_ids.contains(&c.id));
         self.clips.push(glued.clone());

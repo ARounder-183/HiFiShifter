@@ -939,6 +939,61 @@ fn invalidate_take_related_caches(clip_id: &str) {
     if let Ok(mut mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
         mgr.remove_state(clip_id);
     }
+    // HNSEP 分离缓存按 clip_id+长度哈希，无法感知 Take 切换（等长 Take 会
+    // 命中旧 Take 的 harmonic/noise stem）。Take 级操作低频，整体清空重建。
+    crate::hnsep_onnx::clear_separation_cache();
+}
+
+/// take 命令的统一错误载荷（可附带真实缺失文件列表）。
+fn take_error_payload(
+    state: &AppState,
+    message: impl Into<String>,
+) -> crate::models::TimelineStatePayload {
+    take_error_payload_with_missing(state, message, Vec::new())
+}
+
+fn take_error_payload_with_missing(
+    state: &AppState,
+    message: impl Into<String>,
+    missing_files: Vec<String>,
+) -> crate::models::TimelineStatePayload {
+    let mut payload = crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: vec![],
+        clips: vec![],
+        created_clip_ids: None,
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: {
+            let mut files = vec![message.into()];
+            files.extend(missing_files);
+            Some(files)
+        },
+        disabled_group_ids: vec![],
+        tempo_map: None,
+    };
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+/// 若 clip 启用了 formant morph，则在其内容变化（如切换 Take）后调度后台
+/// 预重建 —— 否则下一次 snapshot 构建会在渲染线程内同步执行整段 formant
+/// 计算，表现为切 take 后首次播放卡顿。
+fn maybe_schedule_formant_rebuild(
+    state: &AppState,
+    tl: &crate::state::TimelineState,
+    clip_id: &str,
+) {
+    if let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) {
+        if clip.formant_morph.as_ref().is_some_and(|f| f.enabled) && clip.source_path.is_some() {
+            schedule_clip_formant_rebuild(state, clip.clone());
+        }
+    }
 }
 
 pub(super) fn set_clip_active_take(
@@ -948,58 +1003,38 @@ pub(super) fn set_clip_active_take(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验、后 checkpoint：失败路径不留“空 undo 步”。
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if !clip.takes.iter().any(|t| t.id == take_id) {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
-    let (track_id, switch_result) = {
-        let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) else {
-            drop(tl);
-            let mut payload = crate::models::TimelineStatePayload {
-                ok: false,
-                tracks: vec![],
-                clips: vec![],
-                created_clip_ids: None,
-                created_track_ids: None,
-                selected_track_id: None,
-                selected_clip_id: None,
-                bpm: 120.0,
-                playhead_sec: 0.0,
-                project_sec: None,
-                project: None,
-                missing_files: None,
-                disabled_group_ids: vec![],
-                tempo_map: None,
-            };
-            payload.project = Some(state.project_meta_payload());
-            return payload;
-        };
+    let track_id = {
+        let clip = tl
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_id)
+            .expect("clip existence verified above");
         let track_id = clip.track_id.clone();
-        (track_id, clip.switch_active_take(&take_id))
+        let switch_result = clip.switch_active_take(&take_id);
+        if let Err(err) = switch_result {
+            drop(tl);
+            return take_error_payload(&state, err);
+        }
+        track_id
     };
-    if let Err(err) = switch_result {
-        drop(tl);
-        let mut payload = crate::models::TimelineStatePayload {
-            ok: false,
-            tracks: vec![],
-            clips: vec![],
-            created_clip_ids: None,
-            created_track_ids: None,
-            selected_track_id: None,
-            selected_clip_id: None,
-            bpm: 120.0,
-            playhead_sec: 0.0,
-            project_sec: None,
-            project: None,
-            missing_files: Some(vec![err]),
-            disabled_group_ids: vec![],
-            tempo_map: None,
-        };
-        payload.project = Some(state.project_meta_payload());
-        return payload;
-    }
     let root_track_id = tl.resolve_root_track_id(&track_id);
 
     invalidate_take_related_caches(&clip_id);
+    maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -1018,20 +1053,34 @@ pub(super) fn cycle_clip_takes(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    if checkpoint.unwrap_or(true) {
+    let target_ids: HashSet<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
+    let will_change = tl
+        .clips
+        .iter()
+        .any(|c| target_ids.contains(c.id.as_str()) && c.takes.len() > 1);
+    // 全部目标都是单 take 时为 no-op：不写 checkpoint、不刷引擎。
+    if will_change && checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
     let mut changed: Vec<(String, String)> = Vec::new();
     for clip in &mut tl.clips {
-        if !clip_ids.contains(&clip.id) {
+        if !target_ids.contains(clip.id.as_str()) {
             continue;
         }
         if clip.cycle_active_take(direction) {
             changed.push((clip.id.clone(), clip.track_id.clone()));
         }
     }
+    if changed.is_empty() {
+        // 纯 no-op（选区全是单 take）：保持既有“静默无操作”语义，
+        // 不写 checkpoint、不刷新引擎，返回当前状态即可。
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        drop(tl);
+        return payload;
+    }
     let mut roots: HashSet<String> = HashSet::new();
-    for (clip_id, track_id) in &changed {
+    for (_, track_id) in &changed {
         if let Some(root) = tl.resolve_root_track_id(track_id) {
             roots.insert(root);
         }
@@ -1039,6 +1088,7 @@ pub(super) fn cycle_clip_takes(
     let changed_ids: Vec<String> = changed.into_iter().map(|(id, _)| id).collect();
     for clip_id in &changed_ids {
         invalidate_take_related_caches(clip_id);
+        maybe_schedule_formant_rebuild(&state, &tl, clip_id);
     }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -1060,13 +1110,28 @@ pub(super) fn pack_clips_into_takes(
         state.checkpoint_timeline(&tl);
     }
     let created = tl.pack_clips_into_takes(&clip_ids);
-    if let Some(clip_id) = created.as_ref() {
-        invalidate_take_related_caches(clip_id);
-    }
+    let Some(clip_id) = created else {
+        drop(tl);
+        return take_error_payload(&state, "pack clips into takes failed");
+    };
+    invalidate_take_related_caches(&clip_id);
+    // 打包产生全新 clip id：为所在 root track 重新调度音高分析，
+    // 并在启用 formant morph 时预重建缓存。
+    let root_track_id = tl
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .map(|c| c.track_id.clone())
+        .and_then(|t| tl.resolve_root_track_id(&t));
+    maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
-    payload.created_clip_ids = created.map(|id| vec![id]);
+    payload.created_clip_ids = Some(vec![clip_id]);
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(root) = root_track_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+    }
     payload
 }
 
@@ -1083,12 +1148,25 @@ pub(super) fn explode_clip_takes(
     for id in &created {
         invalidate_take_related_caches(id);
     }
+    // 展开产生的每个新 clip 都需要各自的音高分析调度。
+    let mut roots: HashSet<String> = HashSet::new();
+    for id in &created {
+        if let Some(clip) = tl.clips.iter().find(|c| c.id == *id) {
+            if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
+                roots.insert(root);
+            }
+        }
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     if !created.is_empty() {
         payload.created_clip_ids = Some(created);
     }
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    for root in roots {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+    }
     payload
 }
 
@@ -1099,55 +1177,38 @@ pub(super) fn duplicate_clip_take(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验再 checkpoint。
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if clip.take(&take_id).is_none() {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
-    let result = if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-        if let Some(source) = clip.take(&take_id).cloned() {
-            let mut copy = source;
-            copy.id = crate::state::new_id("take");
-            copy.name = if copy.name.trim().is_empty() {
-                "Take Copy".to_string()
-            } else {
-                format!("{} Copy", copy.name)
-            };
-            let copy_id = clip.add_take(copy);
-            Ok(copy_id)
+    if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+        let source = clip
+            .take(&take_id)
+            .cloned()
+            .expect("take existence verified above");
+        let mut copy = source;
+        copy.id = crate::state::new_id("take");
+        copy.name = if copy.name.trim().is_empty() {
+            "Take Copy".to_string()
         } else {
-            Err("take not found".to_string())
-        }
-    } else {
-        Err("clip not found".to_string())
-    };
-    match result {
-        Ok(_) => {
-            state.audio_engine.update_timeline(tl.clone());
-            let mut payload = tl.to_payload();
-            payload.project = Some(state.project_meta_payload());
-            payload
-        }
-        Err(err) => {
-            drop(tl);
-            let mut payload = crate::models::TimelineStatePayload {
-                ok: false,
-                tracks: vec![],
-                clips: vec![],
-                created_clip_ids: None,
-                created_track_ids: None,
-                selected_track_id: None,
-                selected_clip_id: None,
-                bpm: 120.0,
-                playhead_sec: 0.0,
-                project_sec: None,
-                project: None,
-                missing_files: Some(vec![err]),
-                disabled_group_ids: vec![],
-                tempo_map: None,
-            };
-            payload.project = Some(state.project_meta_payload());
-            payload
-        }
+            format!("{} Copy", copy.name)
+        };
+        clip.add_take(copy);
     }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
 }
 
 pub(super) fn remove_clip_take(
@@ -1157,21 +1218,50 @@ pub(super) fn remove_clip_take(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验再 checkpoint；失败必须显式反馈而不是返回 ok:true 的空操作。
+    let removing_active = match tl.clips.iter().find(|c| c.id == clip_id) {
+        Some(clip) => {
+            if clip.takes.len() <= 1 {
+                drop(tl);
+                return take_error_payload(&state, "cannot remove the last take");
+            }
+            if !clip.takes.iter().any(|t| t.id == take_id) {
+                drop(tl);
+                return take_error_payload(&state, format!("take not found: {take_id}"));
+            }
+            clip.active_take_id.as_deref() == Some(take_id.as_str())
+        }
+        None => {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        }
+    };
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
-    let mut changed = false;
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-        if clip.remove_take(&take_id).is_ok() {
-            changed = true;
-        }
+        // 校验已通过，唯一可能失败的是并发竞争；忽略其返回值安全。
+        let _ = clip.remove_take(&take_id);
     }
-    if changed {
-        invalidate_take_related_caches(&clip_id);
-    }
+    invalidate_take_related_caches(&clip_id);
+    let root_track_id = tl
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .map(|c| c.track_id.clone())
+        .and_then(|t| tl.resolve_root_track_id(&t));
+    // 删除 active take 会切换到首个 take：内容实际变化，需要重调度分析；
+    // 删除 inactive take 不改变可听内容，跳过以免无谓重算。
+    let schedule_pitch = removing_active;
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if schedule_pitch {
+        if let Some(root) = root_track_id {
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        }
+    }
     payload
 }
 
@@ -1183,6 +1273,16 @@ pub(super) fn rename_clip_take(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if clip.take(&take_id).is_none() {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
@@ -1202,58 +1302,74 @@ pub(super) fn add_clip_take_from_media(
     name: Option<String>,
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
+    // 文件探测在锁外完成（与 import_audio_item 同模式）：header 解码在慢盘 /
+    // 网络盘上会阻塞全局 timeline 锁，卡住所有命令与 UI 轮询。
+    let trimmed_path = source_path.trim().to_string();
+    let info = if trimmed_path.is_empty() {
+        None
+    } else {
+        crate::audio_utils::try_read_audio_header_only(Path::new(&trimmed_path))
+    };
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(_) = tl.clips.iter().find(|c| c.id == clip_id) else {
+        drop(tl);
+        return take_error_payload(&state, format!("clip not found: {clip_id}"));
+    };
+    // 读不出 header（文件缺失/不支持）时不再静默加入“死 take”：
+    // 走 missing_files 反馈并放弃本次添加。
+    let Some(info) = info else {
+        drop(tl);
+        return take_error_payload(
+            &state,
+            format!("unreadable or unsupported media: {trimmed_path}"),
+        );
+    };
     if checkpoint.unwrap_or(true) {
         state.checkpoint_timeline(&tl);
     }
-    let mut missing: Option<String> = None;
+
+    let duration_sec = info.duration_sec;
+    let duration_frames = info.total_frames;
+    let source_sample_rate = info.sample_rate;
+    let file_name = Path::new(&trimmed_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Take".to_string());
+    let take = crate::state::ClipTake {
+        id: crate::state::new_id("take"),
+        name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
+        gain: 1.0,
+        source_path: Some(trimmed_path),
+        source_path_relative: None,
+        duration_sec: Some(duration_sec),
+        duration_frames: Some(duration_frames),
+        source_sample_rate: Some(source_sample_rate),
+        source_file_fingerprint: None,
+        source_file_mtime: None,
+        source_file_size: None,
+        waveform_preview: Some(info.waveform_preview.clone()),
+        pitch_range: Some(crate::models::PitchRange {
+            min: -24.0,
+            max: 24.0,
+        }),
+        source_start_sec: 0.0,
+        source_end_sec: duration_sec,
+        playback_rate: 1.0,
+        reversed: false,
+        loop_enabled: crate::config::loop_new_clips_default(),
+        midi_note_data: None,
+        midi_fill_gaps: false,
+        stretch_markers: Vec::new(),
+        envelopes: None,
+    };
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-        let info = crate::audio_utils::try_read_audio_header_only(Path::new(&source_path));
-        let duration_sec = info.as_ref().map(|i| i.duration_sec);
-        let duration_frames = info.as_ref().map(|i| i.total_frames);
-        let source_sample_rate = info.as_ref().map(|i| i.sample_rate);
-        let file_name = Path::new(&source_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Take".to_string());
-        let take = crate::state::ClipTake {
-            id: crate::state::new_id("take"),
-            name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
-            gain: 1.0,
-            source_path: Some(source_path),
-            source_path_relative: None,
-            duration_sec,
-            duration_frames,
-            source_sample_rate,
-            source_file_fingerprint: None,
-            source_file_mtime: None,
-            source_file_size: None,
-            waveform_preview: info.as_ref().map(|i| i.waveform_preview.clone()),
-            pitch_range: Some(crate::models::PitchRange {
-                min: -24.0,
-                max: 24.0,
-            }),
-            source_start_sec: 0.0,
-            source_end_sec: duration_sec.unwrap_or(clip.length_sec),
-            playback_rate: 1.0,
-            reversed: false,
-            loop_enabled: crate::config::loop_new_clips_default(),
-            midi_note_data: None,
-            midi_fill_gaps: false,
-            stretch_markers: Vec::new(),
-            envelopes: None,
-        };
         clip.add_take(take);
-    } else {
-        missing = Some("clip not found".to_string());
     }
-    if missing.is_none() {
-        invalidate_take_related_caches(&clip_id);
-    }
+    invalidate_take_related_caches(&clip_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
-    payload.missing_files = missing.map(|m| vec![m]);
     payload
 }
 
@@ -1263,16 +1379,10 @@ pub(super) fn import_media_files_as_takes(
     track_id: Option<String>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
-
-    let target_track_id = track_id
-        .filter(|id| tl.tracks.iter().any(|t| t.id == *id))
-        .or_else(|| tl.selected_track_id.clone())
-        .or_else(|| tl.tracks.first().map(|t| t.id.clone()))
-        .unwrap_or_else(|| tl.add_track(Some("Track".to_string()), None, None));
-    let start = start_sec.unwrap_or(tl.playhead_sec).max(0.0);
-
+    // ── 阶段 1（锁外）：全部文件探测 / header 解码 ──
+    // 这些 IO 在慢盘/网络盘上可能耗时数百毫秒以上，绝不能持有全局 timeline
+    // 锁执行 —— 该锁是所有命令与 UI 轮询的串行点（同文件 import_audio_item
+    // 已遵循此模式，本命令此前在锁内做整段多文件解码属于回归）。
     let mut takes = Vec::<crate::state::ClipTake>::new();
     let mut missing: Vec<String> = Vec::new();
     for path in paths {
@@ -1323,25 +1433,26 @@ pub(super) fn import_media_files_as_takes(
     }
 
     if takes.is_empty() {
-        drop(tl);
-        let mut payload = crate::models::TimelineStatePayload {
-            ok: false,
-            tracks: vec![],
-            clips: vec![],
-            created_clip_ids: None,
-            created_track_ids: None,
-            selected_track_id: None,
-            selected_clip_id: None,
-            bpm: 120.0,
-            playhead_sec: 0.0,
-            project_sec: None,
-            project: Some(state.project_meta_payload()),
-            missing_files: Some(missing),
-            disabled_group_ids: vec![],
-            tempo_map: None,
-        };
-        return payload;
+        return take_error_payload_with_missing(
+            &state,
+            "no readable media file for takes".to_string(),
+            missing,
+        );
     }
+
+    // ── 阶段 2（短暂持锁）：装配 ──
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+
+    // checkpoint 在任何变更（含可能的新建轨道）之前：撤销应把本次导入
+    // 产生的一切（clip + 自动新建的 track）一并回退。
+    state.checkpoint_timeline(&tl);
+
+    let target_track_id = track_id
+        .filter(|id| tl.tracks.iter().any(|t| t.id == *id))
+        .or_else(|| tl.selected_track_id.clone())
+        .or_else(|| tl.tracks.first().map(|t| t.id.clone()))
+        .unwrap_or_else(|| tl.add_track(Some("Track".to_string()), None, None));
+    let start = start_sec.unwrap_or(tl.playhead_sec).max(0.0);
 
     let length = takes
         .iter()

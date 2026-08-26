@@ -2038,8 +2038,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     }
                                 }}
                             >
-                                {t("import_across_tracks" as any) ||
-                                    "Import across tracks (one per track)"}
+                                {t("import_across_tracks")}
                             </button>
                             <button
                                 className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
@@ -2056,7 +2055,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     );
                                 }}
                             >
-                                {t("import_as_takes" as any) || "Add as Takes"}
+                                {t("import_as_takes")}
                             </button>
                         </div>
                     </div>

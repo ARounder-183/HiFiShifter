@@ -80,8 +80,9 @@ pub struct TimelineClipTake {
     pub midi_fill_gaps: Option<bool>,
 }
 
-impl From<&crate::state::ClipTake> for TimelineClipTake {
-    fn from(take: &crate::state::ClipTake) -> Self {
+impl TimelineClipTake {
+    /// 完整转换（含 MIDI 音符数据）—— 用于全量 payload。
+    pub fn from_take(take: &crate::state::ClipTake, include_midi: bool) -> Self {
         Self {
             id: take.id.clone(),
             name: take.name.clone(),
@@ -96,13 +97,23 @@ impl From<&crate::state::ClipTake> for TimelineClipTake {
             playback_rate: take.playback_rate,
             reversed: take.reversed,
             loop_enabled: take.loop_enabled,
-            midi_note_data: take.midi_note_data.clone(),
+            midi_note_data: if include_midi {
+                take.midi_note_data.clone()
+            } else {
+                None
+            },
             midi_fill_gaps: if take.midi_note_data.is_some() {
                 Some(take.midi_fill_gaps)
             } else {
                 None
             },
         }
+    }
+}
+
+impl From<&crate::state::ClipTake> for TimelineClipTake {
+    fn from(take: &crate::state::ClipTake) -> Self {
+        Self::from_take(take, true)
     }
 }
 

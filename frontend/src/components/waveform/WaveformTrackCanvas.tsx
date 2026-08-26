@@ -58,8 +58,21 @@ const _downsamplePool: Float32Array[] = [];
 const POOL_MAX = 8;
 const LEADING_OVERLAP_ALPHA = 0.5;
 
+/** darkenWaveformStroke 的结果缓存：绘制循环内每个 inactive lane 都会调用，
+ * 输入色板在会话内高度重复，按输入字符串缓存避免每帧正则解析。 */
+const _darkenCache = new Map<string, string>();
+
 /** 将 inactive take 的波形颜色压暗；支持常用 CSS 颜色格式。 */
 function darkenWaveformStroke(color: string): string {
+    const cached = _darkenCache.get(color);
+    if (cached !== undefined) return cached;
+    const result = computeDarkenedWaveformStroke(color);
+    if (_darkenCache.size > 64) _darkenCache.clear();
+    _darkenCache.set(color, result);
+    return result;
+}
+
+function computeDarkenedWaveformStroke(color: string): string {
     const hex = color.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
     if (hex) {
         let value = hex[1];
@@ -134,7 +147,12 @@ export interface WaveformTrackCanvasProps {
     takeSeparatorColor?: string;
 }
 
-type WaveformRenderClip = ClipInfo & { __takeLane?: TakeLaneLayout };
+type WaveformRenderClip = ClipInfo & {
+    __takeLane?: TakeLaneLayout;
+    /** 展开 lane 前的真实 Clip id（lane 的 id 带 `::take::` 后缀，不能用于
+     * leadingOverlapSecByClipId 等以真实 clip id 为键的查表）。 */
+    __originClipId?: string;
+};
 
 function expandClipsForTakeLanes(
     clips: ClipInfo[],
@@ -172,6 +190,7 @@ function expandClipsForTakeLanes(
             output.push({
                 ...clip,
                 id: `${clip.id}::take::${take.id}`,
+                __originClipId: clip.id,
                 sourcePath: effectiveTake.sourcePath,
                 durationSec: effectiveTake.durationSec,
                 durationFrames: effectiveTake.durationFrames,
@@ -229,6 +248,13 @@ export const WaveformTrackCanvas = React.memo(
         const viewportWidthPxRef = React.useRef(viewportWidthPx);
         const showAllTakesRef = React.useRef(showAllTakes);
         const takeSeparatorColorRef = React.useRef(takeSeparatorColor);
+        /** take-lane 展开结果缓存：输入三元组未变时复用上一帧对象。 */
+        const expandedTakeLanesCacheRef = React.useRef<{
+            clips: ClipInfo[];
+            showAllTakes: boolean;
+            height: number;
+            result: WaveformRenderClip[];
+        } | null>(null);
 
         // 同步 ref
         pxPerSecRef.current = props.pxPerSec;
@@ -296,14 +322,38 @@ export const WaveformTrackCanvas = React.memo(
             const currentStrokeWidth = strokeWidthRef.current;
             const currentViewportWidthPx = viewportWidthPxRef.current;
             const currentShowAllTakes = showAllTakesRef.current;
-            const currentClips = expandClipsForTakeLanes(
-                clipsRef.current,
-                currentShowAllTakes,
-                currentWaveformHeight,
-            );
+            // take-lane 展开是纯函数且开销随 clip×take 数增长；滚动/缩放时
+            // 每帧重算属于纯分配 churn。按输入三元组 memo 化（clips 数组引用
+            // 在 Redux 更新时才会变化，与数据一致性天然对齐）。
+            const expandedCache = expandedTakeLanesCacheRef.current;
+            let currentClips: WaveformRenderClip[];
+            if (
+                expandedCache !== null &&
+                expandedCache.clips === clipsRef.current &&
+                expandedCache.showAllTakes === currentShowAllTakes &&
+                expandedCache.height === currentWaveformHeight
+            ) {
+                currentClips = expandedCache.result;
+            } else {
+                currentClips = expandClipsForTakeLanes(
+                    clipsRef.current,
+                    currentShowAllTakes,
+                    currentWaveformHeight,
+                );
+                expandedTakeLanesCacheRef.current = {
+                    clips: clipsRef.current,
+                    showAllTakes: currentShowAllTakes,
+                    height: currentWaveformHeight,
+                    result: currentClips,
+                };
+            }
             const displayW = Math.max(1, Math.ceil(currentViewportWidthPx));
             const baseDisplayHeight = currentWaveformHeight;
             let displayH = baseDisplayHeight;
+            // 每帧解析一次主题相关的默认分界线颜色（避免循环内反复读 DOM）。
+            const defaultSeparatorColor = document.documentElement.classList.contains("dark")
+                ? "rgba(255, 255, 255, 0.16)"
+                : "rgba(0, 0, 0, 0.18)";
 
             // 取消限制 dpr 为 1
             const dpr = window.devicePixelRatio || 1;
@@ -776,11 +826,16 @@ export const WaveformTrackCanvas = React.memo(
 
                     const baseAlpha = (clip.muted ? 0.4 : 1.0) * (takeLane?.inactive ? 0.78 : 1);
                     // 前导重叠可视化仅作用于第一个分段（重叠区只在 clip 起始处）。
+                    // 查表必须用展开前的真实 Clip id：lane 的 id 带 `::take::`
+                    // 后缀，直接查会导致多 take 展示下重叠可视化静默丢失。
                     const leadingOverlapSec = Math.max(
                         0,
                         Math.min(
                             clip.lengthSec,
-                            Number(currentLeadingOverlapSecByClipId[clip.id] ?? 0) || 0,
+                            Number(
+                                currentLeadingOverlapSecByClipId[clip.__originClipId ?? clip.id] ??
+                                    0,
+                            ) || 0,
                         ),
                     );
                     const leadingOverlapRightPx =
@@ -949,12 +1004,9 @@ export const WaveformTrackCanvas = React.memo(
 
                 // 多 Take lane 分界线：只在 lane 顶部绘制（首条 lane 顶边
                 // 即 Clip header 边界，不重复画）。颜色与轨道边框一致地保持低对比。
+                // （主题色已在绘制帧开始时统一解析，见 defaultSeparatorColor。）
                 if (takeLane && takeLane.index > 0) {
-                    const separatorColor =
-                        takeSeparatorColorRef.current ??
-                        (document.documentElement.classList.contains("dark")
-                            ? "rgba(255, 255, 255, 0.16)"
-                            : "rgba(0, 0, 0, 0.18)");
+                    const separatorColor = takeSeparatorColorRef.current ?? defaultSeparatorColor;
                     ctx.save();
                     ctx.strokeStyle = separatorColor;
                     ctx.lineWidth = 1;

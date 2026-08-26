@@ -22,11 +22,12 @@ import {
 import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { computeEffectiveSnap, beginSnapGesture, endSnapGesture } from "../../../../utils/timelineSnapping";
 import {
-    SNAP_HIGHLIGHT_GROUP,
-    clearSnapHighlights,
-} from "../../../../utils/snapHighlight";
+    computeEffectiveSnap,
+    beginSnapGesture,
+    endSnapGesture,
+} from "../../../../utils/timelineSnapping";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import type { SnapTimelineOpts } from "./useTimelineState";
 
@@ -107,10 +108,7 @@ export function useSnapOffsetDrag(deps: {
             const rawAbs = clipStart + baseOffset + (pointerSec - startPointerSec);
 
             // "拖动时切换吸附"：修饰键把吸附总开关临时取反。
-            const effectiveSnap = computeEffectiveSnap(
-                snapEnabled,
-                isModifierActive(noSnapKb, ev),
-            );
+            const effectiveSnap = computeEffectiveSnap(snapEnabled, isModifierActive(noSnapKb, ev));
             let absPos = rawAbs;
             if (effectiveSnap) {
                 // 单点吸附：手柄绝对位置对齐目标；被吸附对象侧高亮 =
@@ -139,6 +137,8 @@ export function useSnapOffsetDrag(deps: {
             endSnapGesture();
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             // 松手持久化最终值（读取当前乐观状态，拖拽期间已收敛）。
+            // checkpoint:false：undo 检查点已在拖拽开始时创建（第 74 行），
+            // 远端默认再建一个会把"无变化的拖前状态"多压一层。
             const finalClip = sessionRef.current.clips.find((c) => c.id === clipId);
             void dispatch(
                 setClipStateRemote({
@@ -148,10 +148,16 @@ export function useSnapOffsetDrag(deps: {
                         0,
                         clipLen,
                     ),
+                    checkpoint: false,
                 }),
-            ).finally(() => {
-                dispatch(endInteraction());
-            });
+            )
+                .unwrap()
+                .catch(() => {
+                    // 失败不产生 unhandled rejection；交互锁仍需释放。
+                })
+                .finally(() => {
+                    dispatch(endInteraction());
+                });
         }
 
         window.addEventListener("pointermove", onMove);

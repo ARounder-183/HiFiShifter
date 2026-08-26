@@ -836,8 +836,12 @@ export function useTimelineClipActions(
         (clipId: string, newName: string) => {
             const clip = sessionRef.current?.clips.find((entry) => entry.id === clipId);
             const takes = clip?.takes ?? [];
-            const activeTake = takes.find((entry) => entry.id === clip?.activeTakeId) ?? takes[0];
-            if (activeTake) {
+            // 仅多 Take Clip 的改名写入 active take（UI 展示名此时取 take 名）。
+            // 单 Take / 无 takes 时展示名是容器 name，必须走容器改名 ——
+            // 后端 rename_take 不回写容器名，误路由会让重命名"看起来无效"。
+            if (takes.length > 1) {
+                const activeTake =
+                    takes.find((entry) => entry.id === clip?.activeTakeId) ?? takes[0];
                 void dispatch(
                     renameClipTakeRemote({ clipId, takeId: activeTake.id, name: newName }),
                 );

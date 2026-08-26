@@ -46,9 +46,12 @@ export function hitInactiveTakeLane(
 ): TakeLaneLayout | null {
     const lanes = resolveTakeLaneLayouts(clip, showAllTakes, bodyHeightPx);
     if (!lanes) return null;
+    // 先钳制到 body 内：负值（header 底边 1px 容差）不应命中 lane 0。
+    // 再用半开区间 [top, top+height)：±1px 双侧容差会让相邻 lane 边界处
+    // 同时命中两个区间，find() 恒取上面的 lane，与视觉分界线不符。
+    const clampedY = Math.max(0, Math.min(bodyHeightPx - 1e-6, localY));
     const lane = lanes.find(
-        (entry) =>
-            entry.inactive && localY >= entry.top - 1 && localY <= entry.top + entry.height + 1,
+        (entry) => entry.inactive && clampedY >= entry.top && clampedY < entry.top + entry.height,
     );
     return lane ?? null;
 }

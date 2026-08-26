@@ -312,18 +312,17 @@ fn compute_take_source_anchor_sec(
 fn reaper_take_volume(values: &[f64]) -> f64 {
     // Item 默认 take：VOLPAN <trim> <pan> <volume> <pan law> → volume = [2]。
     // 显式 take：TAKEVOLPAN <pan> <volume> <pan law> → volume = [1]。
-    let idx = if values.len() >= 4 { 2 } else { 1 };
-    values
-        .get(idx)
-        .copied()
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or_else(|| {
-            values
-                .first()
-                .copied()
-                .filter(|v| v.is_finite() && *v > 0.0)
-                .unwrap_or(1.0)
-        })
+    // 兜底候选同样跳过 index 0（trim/pan 不是增益）：显式 take 的
+    // [pan=0.5, vol=0, law] 若回退到 index 0 会把 pan 当成 0.5 倍增益。
+    let candidates: &[usize] = if values.len() >= 4 { &[2, 1] } else { &[1] };
+    for &idx in candidates {
+        if let Some(v) = values.get(idx).copied() {
+            if v.is_finite() && v > 0.0 {
+                return v;
+            }
+        }
+    }
+    1.0
 }
 
 fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
@@ -422,13 +421,35 @@ fn build_audio_clip_take(
         skipped_files.push(raw_path.clone());
     }
 
-    let (source_start, source_end) = compute_item_source_window_sec(
+    let (mut source_start, mut source_end) = compute_item_source_window_sec(
         take,
         item.length.max(0.0) * play_rate,
         duration_sec,
         item_reversed,
         item_loop,
     );
+    // 兜底：与 flat/active 导入路径一致 —— 窗口被 SECTION/SOFFS 组合裁成
+    // 零长度时回退到基于锚点的正向区间，避免 inactive take 切过去即静音。
+    if source_end - source_start <= 1e-9 {
+        let consumed = item.length.max(0.0) * play_rate;
+        let (min_bound, max_bound, has_section) =
+            compute_take_source_bounds_sec(take, duration_sec);
+        let anchor =
+            compute_take_source_anchor_sec(take, min_bound, max_bound, has_section, item_reversed);
+        let (fallback_start, fallback_end) = if item_reversed {
+            let end = anchor;
+            let start = (end - consumed).max(min_bound).min(end);
+            (start, end)
+        } else {
+            let start = anchor;
+            let end = (start + consumed).min(max_bound).max(start);
+            (start, end)
+        };
+        if fallback_end - fallback_start > source_end - source_start {
+            source_start = fallback_start;
+            source_end = fallback_end;
+        }
+    }
 
     let name = if take.name.trim().is_empty() {
         clip_name_from_path(&audio_path)
@@ -1062,6 +1083,14 @@ fn process_item(
     // 检查 MIDI 源
     if let Some(ref src) = take.source {
         if src.source_type.eq_ignore_ascii_case("MIDI") {
+            // 混合 take 的 item（MIDI active + 音频 inactive）当前只导入
+            // active take：显式记录这一限制，避免静默丢数据无人察觉。
+            if !item.takes.is_empty() {
+                eprintln!(
+                    "reaper_import: item at {} has {} non-active take(s) dropped (mixed MIDI/audio takes are not fully supported yet)",
+                    item.position, item.takes.len()
+                );
+            }
             if let Some(ref midi_data) = src.midi_source {
                 process_midi_item(
                     item,

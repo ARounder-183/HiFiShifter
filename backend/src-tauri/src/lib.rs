@@ -124,6 +124,10 @@ mod world_vocoder;
 #[cfg(feature = "__test-internals")]
 pub mod __test_internals {
     pub use crate::pitch_clip::trim_and_resample_midi;
+    // REAPER 导出往返：Windows 上 lib 单测 harness 无法启动（见模块注释），
+    // 速率/多 take 导出的关键回归经由集成测试执行。
+    pub use crate::reaper_export::build_reaper_clipboard;
+    pub use crate::reaper_parser::parse_clipboard_bytes;
     pub use crate::state::{
         Clip, SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions,
         TimelineState,

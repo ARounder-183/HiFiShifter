@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
@@ -26,6 +26,7 @@ const MenuItem: React.FC<{
     onClick: () => void;
 }> = ({ label, shortcut, disabled, danger, onClick }) => (
     <button
+        role="menuitem"
         className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
             ${
                 disabled
@@ -247,6 +248,11 @@ export const ClipContextMenu: React.FC<{
     const { t } = useI18n();
     const dispatch = useAppDispatch();
     const menuRef = useRef<HTMLDivElement>(null);
+    /** Take 重命名的内联输入草稿（替代 window.prompt）。 */
+    const [takeRenameDraft, setTakeRenameDraft] = useState<{
+        takeId: string;
+        value: string;
+    } | null>(null);
     const ids = selectedClips.length >= 2 ? selectedClips.map((c) => c.id) : [clip.id];
     const isMulti = ids.length >= 2;
     const isSingle = !isMulti;
@@ -297,9 +303,22 @@ export const ClipContextMenu: React.FC<{
         if (rect.bottom > vh) el.style.top = `${Math.max(0, vh - rect.height)}px`;
     }, [x, y]);
 
+    // Escape 关闭菜单（键盘可达性）；输入框内的 Escape 由其自身的
+    // onKeyDown stopPropagation 拦截，不会触发这里。
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                onClose();
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [onClose]);
+
     return (
         <div
             ref={menuRef}
+            role="menu"
             data-hs-context-menu="1"
             className="fixed z-50 min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
@@ -337,7 +356,7 @@ export const ClipContextMenu: React.FC<{
             <Divider />
             <SubMenu
                 label={t("clip_takes")}
-                badge={takes.length > 0 ? String(takes.length) : undefined}
+                badge={takes.length > 1 ? String(takes.length) : undefined}
             >
                 {isMulti && (
                     <MenuItem
@@ -353,10 +372,12 @@ export const ClipContextMenu: React.FC<{
                         {takes.map((take) => (
                             <MenuItem
                                 key={take.id}
+                                // 活跃 take 用 ● 标记；非活跃用 em-space（U+2003，
+                                // 不会被 HTML 空白折叠）保持对齐。
                                 label={`${
                                     take.id === clip.activeTakeId
                                         ? t("clip_take_active_mark")
-                                        : "  "
+                                        : "\u2003"
                                 } ${take.name || take.id}`}
                                 disabled={takes.length <= 1}
                                 onClick={() => {
@@ -440,22 +461,52 @@ export const ClipContextMenu: React.FC<{
                             disabled={!activeTake}
                             onClick={() => {
                                 if (!activeTake) return;
-                                const next = window.prompt(
-                                    t("ctx_rename"),
-                                    activeTake.name || activeTake.id,
-                                );
-                                if (next && next.trim()) {
-                                    void dispatch(
-                                        renameClipTakeRemote({
-                                            clipId: clip.id,
-                                            takeId: activeTake.id,
-                                            name: next.trim(),
-                                        }),
-                                    );
-                                }
-                                close();
+                                // 内联输入替代 window.prompt：Tauri/WKWebView 下
+                                // 脚本对话框普遍不可用（静默返回 null），且会同步
+                                // 阻塞 UI 线程。
+                                setTakeRenameDraft({
+                                    takeId: activeTake.id,
+                                    value: activeTake.name || "",
+                                });
                             }}
                         />
+                        {takeRenameDraft && (
+                            <div className="px-3 py-1.5" onPointerDown={(e) => e.stopPropagation()}>
+                                <input
+                                    autoFocus
+                                    role="menuitem"
+                                    aria-label={t("clip_take_rename")}
+                                    className="w-full bg-qt-window text-[12px] border border-qt-border rounded px-2 py-1 outline-none focus:border-qt-highlight text-qt-text"
+                                    value={takeRenameDraft.value}
+                                    onChange={(e) =>
+                                        setTakeRenameDraft({
+                                            ...takeRenameDraft,
+                                            value: e.target.value,
+                                        })
+                                    }
+                                    onKeyDown={(e) => {
+                                        // 先于窗口级 Escape 关闭处理。
+                                        e.stopPropagation();
+                                        if (e.key === "Enter") {
+                                            const next = takeRenameDraft.value.trim();
+                                            if (next) {
+                                                void dispatch(
+                                                    renameClipTakeRemote({
+                                                        clipId: clip.id,
+                                                        takeId: takeRenameDraft.takeId,
+                                                        name: next,
+                                                    }),
+                                                );
+                                            }
+                                            setTakeRenameDraft(null);
+                                            close();
+                                        } else if (e.key === "Escape") {
+                                            setTakeRenameDraft(null);
+                                        }
+                                    }}
+                                />
+                            </div>
+                        )}
                         <MenuItem
                             label={t("clip_take_remove")}
                             danger

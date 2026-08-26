@@ -192,7 +192,7 @@ pub fn build_clip_fragment(
     fragment_timeline.clips = clips
         .into_iter()
         .map(|mut clip| {
-            clip.waveform_preview = None;
+            clip.clear_waveform_preview_caches();
             clip
         })
         .collect();
@@ -246,7 +246,7 @@ pub fn build_track_fragment(
         .filter(|clip| selected_track_ids.contains(&clip.track_id))
         .cloned()
         .map(|mut clip| {
-            clip.waveform_preview = None;
+            clip.clear_waveform_preview_caches();
             clip
         })
         .collect();
@@ -276,7 +276,7 @@ pub fn build_project_fragment(
 ) -> ProjectFragment {
     let mut fragment_timeline = timeline;
     for clip in &mut fragment_timeline.clips {
-        clip.waveform_preview = None;
+        clip.clear_waveform_preview_caches();
     }
     fragment_timeline.project_sec = max_clip_end_sec(&fragment_timeline).max(4.0).ceil();
     ProjectFragment {
@@ -483,8 +483,10 @@ pub fn merge_project_fragment(
             .as_ref()
             .map(|group| remap_group_id(&mut group_id_map, group));
         clip.start_sec = (clip.start_sec + time_offset_sec).max(0.0);
-        clip.waveform_preview = None;
+        // 先物化 Take → 投影，再统一清波形缓存；顺序颠倒会让 normalize_takes
+        // 把 Take 里残留的旧预览写回投影，清空失效并随片段携带大数据。
         clip.normalize_takes();
+        clip.clear_waveform_preview_caches();
         clip.remap_take_ids();
 
         let created_id = clip.id.clone();

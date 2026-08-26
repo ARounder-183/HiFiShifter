@@ -251,20 +251,38 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     item.selected = false;
 
     let active_take = working.takes[active_idx].clone();
-    // REAPER 的 ITEM PLAYRATE 承载 Clip 级倍率；显式 TAKE PLAYRATE 承载
-    // Take 自身倍率。这样修饰键拉伸（Clip 级）不会污染各 Take 的速率。
+    // RPP 格式没有 Item 级 PLAYRATE 行：take 的 PLAYRATE 就是该 take 的
+    // 有效播放速率（导入端也按此读取）。因此：
+    // - default take（= active take）必须写 **组合有效速率**
+    //   `clip_rate × take_rate` —— 与 develop 单窗口时代导出
+    //   `clip.playback_rate` 的行为一致，否则带速率的 item 往返即丢速；
+    // - 显式 take 同样写各自组合速率，保证在 REAPER 里切换 take 时
+    //   听到的速度与 HiFiShifter 渲染一致。
+    let clip_rate = if working.clip_playback_rate.is_finite() && working.clip_playback_rate > 1e-6 {
+        working.clip_playback_rate
+    } else {
+        1.0
+    };
     if !fill_reaper_take(
         &mut item.default_take,
         &active_take,
         working.length_sec,
         bpm,
         true,
-        working.clip_playback_rate,
+        clip_rate * active_take.playback_rate,
     ) {
         return None;
     }
 
-    for (idx, take) in working.takes.iter().enumerate().skip(1) {
+    // 显式 TAKE 块列出除 active 之外的全部 take（active 已由 default_take
+    // 承载）。此前实现固定 skip(1)：当 active 不是第一个 take 时会把
+    // active 重复写一份、而真正的第一个 take 被静默丢弃，再导入即得到
+    // 错误的 take 集合。所有显式 take 均不打 SEL 标记 —— 导入端在无 SEL
+    // 时回退到 default_take，恰好还原当前 active 选择。
+    for (idx, take) in working.takes.iter().enumerate() {
+        if idx == active_idx {
+            continue;
+        }
         let mut dest = crate::reaper_parser::ReaperTake::default();
         if fill_reaper_take(
             &mut dest,
@@ -272,9 +290,9 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
             working.length_sec,
             bpm,
             false,
-            take.playback_rate,
+            clip_rate * take.playback_rate,
         ) {
-            dest.selected = idx == active_idx;
+            dest.selected = false;
             item.takes.push(dest);
         }
     }
@@ -408,6 +426,49 @@ mod tests {
         assert_eq!(item.takes[0].vol_pan[0], 0.0);
         assert_eq!(item.takes[0].vol_pan[1], 1.0);
         assert_eq!(item.takes[0].vol_pan[2], -1.0);
+    }
+
+    #[test]
+    fn multi_take_export_preserves_rates_and_nonzero_active_index() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Rates".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            // takes = [Rates(1.0), Second(1.0)]；随后把 Clip 级倍率设为 2.0，
+            // 并给第二个 take 自身速率 1.5（组合有效速率 3.0），再把 active
+            // 切到第二个 take —— 覆盖“active 非首位 + 非 1 速率”的导出路径。
+            let mut second = clip.active_take().clone();
+            second.id = crate::state::new_id("take");
+            second.name = "Second".to_string();
+            second.source_path = Some("C:/audio/b.wav".to_string());
+            clip.add_take(second);
+            clip.clip_playback_rate = 2.0;
+            clip.playback_rate = 2.0;
+            clip.sync_take_from_flat();
+            let second_id = clip.takes[1].id.clone();
+            clip.switch_active_take(&second_id)
+                .expect("second take exists");
+            clip.takes[1].playback_rate = 1.5;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        // active take（Second）作为 default take：PLAYRATE = clip 级 × take 自身。
+        assert_eq!(item.default_take.name, "Second");
+        assert!((item.default_take.play_rate[0] - 3.0).abs() < 1e-9);
+        // 显式 TAKE 块只含非 active 的第一个 take，且不打 SEL 标记：
+        // 导入端在无 SEL 时回退 default_take，恰好还原 active 选择。
+        assert_eq!(item.takes.len(), 1);
+        assert_eq!(item.takes[0].name, "Rates");
+        assert!((item.takes[0].play_rate[0] - 2.0).abs() < 1e-9);
+        assert!(!item.takes[0].selected);
     }
 
     #[test]

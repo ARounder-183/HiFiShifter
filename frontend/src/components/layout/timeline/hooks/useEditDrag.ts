@@ -2084,7 +2084,10 @@ export function useEditDrag(deps: {
                             clipId: drag.clipId,
                             startSec: singleClipNow.startSec,
                             lengthSec: singleClipNow.lengthSec,
-                            playbackRate: singleClipNow.playbackRate,
+                            // 与上方 auto-crossfade 分支同口径：拉伸修改的是
+                            // Clip 级倍率；发平铺 playbackRate 会在后端被当作
+                            // 组合有效速率写坏 Take 自身速率。
+                            clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
                             snapOffsetSec: singleClipNow.snapOffsetSec,
                             fadeInSec: singleClipNow.fadeInSec,
                             fadeOutSec: singleClipNow.fadeOutSec,
@@ -2116,7 +2119,9 @@ export function useEditDrag(deps: {
                         setClipStateRemote({
                             clipId: drag.clipId,
                             lengthSec: singleClipNow.lengthSec,
-                            playbackRate: singleClipNow.playbackRate,
+                            // 与上方 auto-crossfade 分支同口径：发 Clip 级倍率
+                            // 而不是组合有效速率（理由见 stretch_left 分支）。
+                            clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
                             snapOffsetSec: singleClipNow.snapOffsetSec,
                             fadeInSec: singleClipNow.fadeInSec,
                             fadeOutSec: singleClipNow.fadeOutSec,

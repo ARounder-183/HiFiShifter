@@ -457,6 +457,13 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                     for (const c of result.clips ?? []) {
                         if (c.id) accumulatedNewClipIds.push(c.id);
                     }
+                } else {
+                    // 单次全有全无调用：失败必须显式拒绝而不是返回 ok:true
+                    // 的空结果（missing_files 携带后端给出的具体原因）。
+                    const missing = (imported as { missing_files?: string[] }).missing_files;
+                    return rejectWithValue(
+                        missing?.join("; ") || "import_media_files_as_takes_failed",
+                    );
                 }
             } else if (mode === "across-time") {
                 // Import files sequentially on the same track

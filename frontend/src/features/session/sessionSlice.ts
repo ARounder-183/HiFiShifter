@@ -738,7 +738,10 @@ function applyTimelineTracksOnly(state: SessionState, timeline: TimelineState) {
 
 function applyTimelineStatePreservingPitchVisuals(state: SessionState, timeline: TimelineState) {
     const currentParamsEpoch = state.paramsEpoch;
-    const currentClipPitchCurves = state.clipPitchCurves;
+    // 必须捕获浅拷贝快照：在 Immer producer 内直接持有 state.clipPitchCurves
+    // 得到的是 draft 代理，applyTimelineState 随后的 prune（delete 缺失 clip）
+    // 会透过代理可见，"恢复"赋值等于把已删空的 draft 原样写回。
+    const currentClipPitchCurves = { ...state.clipPitchCurves };
     applyTimelineState(state, timeline, { force: true });
     state.paramsEpoch = currentParamsEpoch;
     state.clipPitchCurves = currentClipPitchCurves;
@@ -880,7 +883,7 @@ function applyOptimisticClipState(
     if (payload.formantMorph !== undefined) {
         clip.formantMorph = payload.formantMorph ? { ...payload.formantMorph } : undefined;
     }
-    updateActiveTakeFromFlat(clip);
+    updateTakesFromFlatWithSync(state, clip);
 
     const clipEnd = clip.startSec + clip.lengthSec;
     if (clipEnd > state.projectSec) {
@@ -931,7 +934,7 @@ function applyOptimisticBulkClipState(
         if (update.loopEnabled !== undefined) {
             clip.loopEnabled = Boolean(update.loopEnabled);
         }
-        updateActiveTakeFromFlat(clip);
+        updateTakesFromFlatWithSync(state, clip);
     }
 }
 
@@ -1035,6 +1038,29 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.midiFillGaps = clip.midiFillGaps;
 }
 
+/**
+ * 与后端 `patch_clip_state` 的“同步编辑所有 Take”语义对齐：开启该设置时，
+ * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop）需要镜像到全部 Take，
+ * 否则多 Take 展示下 inactive lane 的拖拽预览与后端口径短暂分叉
+ * （fulfilled 快照才会收敛）。`playbackRate` 平铺值是组合有效速率，
+ * 写入各 Take 前按倍率反推 —— 与后端 from_clip 口径一致。
+ */
+function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void {
+    updateActiveTakeFromFlat(clip);
+    if (!state.syncEditsAcrossTakes) return;
+    const takes = clip.takes ?? [];
+    if (takes.length <= 1) return;
+    const rateMultiplier = getClipRateMultiplier(clip);
+    for (const take of takes) {
+        take.gain = clip.gain;
+        take.sourceStartSec = clip.sourceStartSec;
+        take.sourceEndSec = clip.sourceEndSec;
+        take.playbackRate = clamp(clip.playbackRate / rateMultiplier, 0.1, 10);
+        take.reversed = clip.reversed;
+        take.loopEnabled = clip.loopEnabled;
+    }
+}
+
 function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
     clip.gain = take.gain;
     clip.sourcePath = take.sourcePath;
@@ -1063,6 +1089,84 @@ function applyTimelineStatePreservingPlayhead(state: SessionState, timeline: Tim
     const playheadSec = state.playheadSec;
     applyTimelineState(state, timeline, { force: true });
     state.playheadSec = Math.max(0, Number(playheadSec ?? 0) || 0);
+}
+
+// ── Take 乐观切换的回滚支持 ─────────────────────────────────────────────
+// pending 阶段会本地切换 activeTakeId 并物化平铺投影；后端失败（rejected 或
+// fulfilled ok:false）时若无回滚，UI 显示与音频引擎播放的内容将持续分裂，
+// 直到下一次全量 fetchTimeline。这里按 clipId 记录切换前快照供恢复。
+
+type TakeOptimisticFlat = Pick<
+    ClipInfo,
+    | "gain"
+    | "sourcePath"
+    | "sourcePathRelative"
+    | "durationSec"
+    | "durationFrames"
+    | "sourceSampleRate"
+    | "sourceStartSec"
+    | "sourceEndSec"
+    | "playbackRate"
+    | "clipPlaybackRate"
+    | "reversed"
+    | "loopEnabled"
+    | "midiNoteData"
+    | "midiNoteCount"
+    | "midiFillGaps"
+>;
+
+const pendingTakeRollbacks = new Map<
+    string,
+    { activeTakeId: string | undefined; flat: TakeOptimisticFlat }
+>();
+
+const TAKE_FLAT_KEYS = [
+    "gain",
+    "sourcePath",
+    "sourcePathRelative",
+    "durationSec",
+    "durationFrames",
+    "sourceSampleRate",
+    "sourceStartSec",
+    "sourceEndSec",
+    "playbackRate",
+    "clipPlaybackRate",
+    "reversed",
+    "loopEnabled",
+    "midiNoteData",
+    "midiNoteCount",
+    "midiFillGaps",
+] as const;
+
+function captureTakeRollback(state: SessionState, clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        const clip = state.clips.find((entry) => entry.id === clipId);
+        if (!clip) continue;
+        const flat = {} as TakeOptimisticFlat;
+        for (const key of TAKE_FLAT_KEYS) {
+            // @ts-expect-error -- 按同构键组浅拷贝，字段集合由类型约束保证一致
+            flat[key] = clip[key];
+        }
+        pendingTakeRollbacks.set(clipId, { activeTakeId: clip.activeTakeId, flat });
+    }
+}
+
+function restoreTakeRollback(state: SessionState, clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        const snapshot = pendingTakeRollbacks.get(clipId);
+        if (!snapshot) continue;
+        pendingTakeRollbacks.delete(clipId);
+        const clip = state.clips.find((entry) => entry.id === clipId);
+        if (!clip) continue;
+        clip.activeTakeId = snapshot.activeTakeId;
+        Object.assign(clip, snapshot.flat);
+    }
+}
+
+function clearTakeRollback(clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        pendingTakeRollbacks.delete(clipId);
+    }
 }
 
 /**
@@ -3559,7 +3663,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -3608,7 +3713,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -3658,7 +3764,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -4146,13 +4253,25 @@ const sessionSlice = createSlice({
                 const takes = clip.takes ?? [];
                 const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
                 if (!take) return;
+                captureTakeRollback(state, [action.meta.arg.clipId]);
                 clip.activeTakeId = take.id;
                 applyActiveTakeToFlat(clip, take);
             })
             .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    // 后端拒绝：回滚乐观切换并给出可见反馈。
+                    restoreTakeRollback(state, [action.meta.arg.clipId]);
+                    state.error = "Take switch rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                clearTakeRollback([action.meta.arg.clipId]);
                 applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(setClipActiveTakeRemote.rejected, (state, action) => {
+                restoreTakeRollback(state, [action.meta.arg.clipId]);
+                setRejected(state, action);
             })
 
             .addCase(cycleClipTakesRemote.pending, (state, action) => {
@@ -4170,46 +4289,90 @@ const sessionSlice = createSlice({
                             ? (currentIndex + 1) % takes.length
                             : (currentIndex + takes.length - 1) % takes.length;
                     const next = takes[nextIndex];
+                    captureTakeRollback(state, [clipId]);
                     clip.activeTakeId = next.id;
                     applyActiveTakeToFlat(clip, next);
                 }
             })
             .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    restoreTakeRollback(state, action.meta.arg.clipIds);
+                    state.error = "Take cycle rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                clearTakeRollback(action.meta.arg.clipIds);
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
+            .addCase(cycleClipTakesRemote.rejected, (state, action) => {
+                restoreTakeRollback(state, action.meta.arg.clipIds);
+                setRejected(state, action);
+            })
+
+            .addCase(packClipsIntoTakesRemote.rejected, setRejected)
+
+            .addCase(explodeClipTakesRemote.rejected, setRejected)
+
+            .addCase(duplicateClipTakeRemote.rejected, setRejected)
+            .addCase(removeClipTakeRemote.rejected, setRejected)
+            .addCase(renameClipTakeRemote.rejected, setRejected)
+            .addCase(addClipTakeFromMediaRemote.rejected, setRejected)
 
             .addCase(packClipsIntoTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Pack into takes failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(explodeClipTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Explode takes failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(duplicateClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Duplicate take failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(removeClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Remove take failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(renameClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Rename take failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(addClipTakeFromMediaRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = "Add take from media failed";
+                    state.status = "Failed";
+                    return;
+                }
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
 
@@ -4287,7 +4450,8 @@ const sessionSlice = createSlice({
                 const currentPlayheadSec = state.playheadSec;
                 // 保留 paramsEpoch 和 clipPitchCurves，避免触发钢琴窗音高曲线重新渲染
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照，防止 draft 代理被后续 prune 透过修改
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
                 applyTimelineTracksOnly(state, payload);
                 state.playheadSec = currentPlayheadSec;
                 state.paramsEpoch = currentParamsEpoch;
