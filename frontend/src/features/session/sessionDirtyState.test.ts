@@ -1,15 +1,19 @@
+import { test } from "vitest";
+
 import { markProjectDirty } from "./sessionDirtyState.js";
 
-function assertEqual<T>(actual: T, expected: T): void {
-    if (actual !== expected) {
-        throw new Error(`Expected ${String(expected)}, received ${String(actual)}`);
+test("features/session/sessionDirtyState.test.ts scripted checks", async () => {
+    function assertEqual<T>(actual: T, expected: T): void {
+        if (actual !== expected) {
+            throw new Error(`Expected ${String(expected)}, received ${String(actual)}`);
+        }
     }
-}
 
-const project = { dirty: false };
+    const project = { dirty: false };
 
-markProjectDirty(project);
+    markProjectDirty(project);
 
-assertEqual(project.dirty, true);
+    assertEqual(project.dirty, true);
 
-console.log("session dirty state checks passed");
+    console.log("session dirty state checks passed");
+});

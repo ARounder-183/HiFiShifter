@@ -5,7 +5,6 @@
 //
 // 参考规范：用户需求文档§2
 
-use crate::audio_utils::try_read_wav_info;
 use crate::midi_import::{self, MidiNoteEvent};
 use crate::models::PitchRange;
 use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};

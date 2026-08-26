@@ -7,17 +7,6 @@ pub fn is_available() -> bool {
     false
 }
 
-pub fn infer_pitch_edit_mono(
-    mono: &[f32],
-    _sample_rate: u32,
-    _start_sec: f64,
-    _target_midi_at_time: impl Fn(f64) -> f64,
-    _formant_shift_fn: impl Fn(f64) -> f32,
-) -> Result<Vec<f32>, String> {
-    // When ONNX is unavailable, behave as bypass (no pitch edit).
-    Ok(mono.to_vec())
-}
-
 // Stub for ONNX diagnostic info
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,72 +120,6 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
     // ONNX feature disabled: bypass. We ignore playback_rate and formant
     // adjustments in the stub and return input PCM unchanged.
     Ok(mono.to_vec())
-}
-
-pub fn infer_pitch_edit_mono_batch(
-    clips: &[(&[f32], u32, f64, usize)],
-    _midi_at_time: impl Fn(usize, f64) -> f64,
-    _formant_shift_at_time: impl Fn(usize, f64) -> f32,
-) -> Result<Vec<Vec<f32>>, String> {
-    let mut out = Vec::with_capacity(clips.len());
-    for &(mono, _, _, expected) in clips {
-        let mut pcm = mono.to_vec();
-        pcm.resize(expected, 0.0);
-        out.push(pcm);
-    }
-    Ok(out)
-}
-
-pub fn prepare_clip_mel_f0(
-    _mono_pcm: &[f32],
-    _sample_rate: u32,
-    _start_sec: f64,
-    _midi_at_time: &dyn Fn(f64) -> f64,
-    _formant_shift_at_time: &dyn Fn(f64) -> f32,
-) -> Result<(Vec<f32>, Vec<f32>, usize, u32, usize), String> {
-    Err("ONNX feature not compiled".to_string())
-}
-
-pub struct ChunkJob {
-    pub clip_idx: usize,
-    pub mel_seg: Vec<f32>,
-    pub f0_seg: Vec<f32>,
-    pub chunk_t: usize,
-    pub frame_off: usize,
-    pub chunk_end: usize,
-}
-
-pub struct ChunkResult {
-    pub clip_idx: usize,
-    pub frame_off: usize,
-    pub chunk_end: usize,
-    pub waveform: Vec<f32>,
-}
-
-pub fn collect_uncached_chunks(
-    _clip_idx: usize,
-    _mel_full: &[f32],
-    _f0_full: &[f32],
-    _total_t: usize,
-    _num_mels: usize,
-    _cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
-) -> Vec<ChunkJob> {
-    vec![]
-}
-
-pub fn collect_all_chunks_for_clip(
-    _clip_idx: usize,
-    _mel_full: &[f32],
-    _f0_full: &[f32],
-    _total_t: usize,
-    _num_mels: usize,
-    _cache_get: &dyn Fn(usize, usize) -> Option<Vec<f32>>,
-) -> (Vec<(usize, usize, Option<Vec<f32>>)>, Vec<ChunkJob>) {
-    (vec![], vec![])
-}
-
-pub fn batch_infer_cross_clip(_jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, String> {
-    Err("ONNX feature not compiled".to_string())
 }
 
 pub fn infer_pitch_edit_chunked_optimized(

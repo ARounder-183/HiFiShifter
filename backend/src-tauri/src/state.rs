@@ -1497,14 +1497,6 @@ impl RippleMode {
             _ => Self::Off,
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Track => "track",
-            Self::All => "all",
-        }
-    }
 }
 
 impl TimelineState {
@@ -4741,39 +4733,6 @@ impl TimelineState {
         carry
     }
 
-    /// 某绝对秒位置生效的音阶音级集合（Tempo Map 音阶覆盖优先，否则工程音阶）。
-    /// 语义与前端 `effectiveScaleAtSec` 及 `scale_segments` 一致：
-    /// 音阶为 null 的变化点表示“跟随之前的音阶”（透明），需继续向前寻找
-    /// 最近一个显式携带音阶的变化点；找不到才回退工程音阶。
-    pub fn effective_scale_notes_at_sec(&self, sec: f64) -> Vec<u8> {
-        let Some(points) = self.tempo_map.as_ref() else {
-            return self.project_scale_notes.clone();
-        };
-        let target = sec.max(0.0);
-        for point in points.iter().rev() {
-            if point.position_sec > target + 1e-9 {
-                continue;
-            }
-            if let Some(scale) = point.scale.as_ref() {
-                if let Some(key) = scale.key.as_deref() {
-                    if let Some(notes) = scale_notes_for_key(key) {
-                        return notes;
-                    }
-                }
-                if let Some(notes) = scale.notes.as_ref() {
-                    let mut normalized: Vec<u8> = notes.iter().map(|v| v % 12).collect();
-                    normalized.sort_unstable();
-                    normalized.dedup();
-                    if !normalized.is_empty() {
-                        return normalized;
-                    }
-                }
-            }
-            // 该点音阶为 null（跟随之前的音阶）：继续向前寻找。
-        }
-        self.project_scale_notes.clone()
-    }
-
     /// 逐段生效音阶（(段起始秒, 音级集合)，按时间升序；首段从 0 开始）。
     /// 供逐帧渲染路径使用（帧时间单调递增，可用游标快速查询）。
     pub fn scale_segments(&self) -> Vec<(f64, Vec<u8>)> {
@@ -5441,13 +5400,6 @@ impl TimelineState {
         shifted_ids
     }
 
-    pub fn remove_clip(&mut self, clip_id: &str) {
-        self.clips.retain(|c| c.id != clip_id);
-        if self.selected_clip_id.as_deref() == Some(clip_id) {
-            self.selected_clip_id = None;
-        }
-    }
-
     /// 批量删除多个 clip，只触发一次状态变更
     pub fn remove_clips(&mut self, clip_ids: &[String]) {
         let id_set: HashSet<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
@@ -5457,23 +5409,6 @@ impl TimelineState {
                 self.selected_clip_id = None;
             }
         }
-    }
-
-    pub fn move_clip(
-        &mut self,
-        clip_id: &str,
-        start_sec: f64,
-        track_id: Option<String>,
-        move_linked_params: bool,
-    ) {
-        self.move_clips(
-            &[MoveClipPayload {
-                clip_id: clip_id.to_string(),
-                start_sec,
-                track_id,
-            }],
-            move_linked_params,
-        );
     }
 
     pub fn move_clips(&mut self, moves: &[MoveClipPayload], move_linked_params: bool) {

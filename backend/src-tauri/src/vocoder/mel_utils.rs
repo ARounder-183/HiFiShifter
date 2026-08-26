@@ -123,24 +123,6 @@ pub fn reflect_pad(y: &[f32], left: usize, right: usize) -> Vec<f32> {
     out
 }
 
-/// Reflect-pad `y` into a pre-allocated buffer (zero-copy reuse).
-pub fn reflect_pad_into(y: &[f32], left: usize, right: usize, out: &mut Vec<f32>) {
-    out.clear();
-    if y.is_empty() {
-        out.resize(left + right, 0.0);
-        return;
-    }
-    let len = y.len();
-    out.reserve(left + len + right);
-    for i in -(left as isize)..0 {
-        out.push(y[reflect_index(i, len)]);
-    }
-    out.extend_from_slice(y);
-    for i in (len as isize)..((len as isize) + (right as isize)) {
-        out.push(y[reflect_index(i, len)]);
-    }
-}
-
 /// Hann window of length `len`.
 pub fn hann_window(len: usize) -> Vec<f32> {
     if len == 0 {
@@ -157,52 +139,6 @@ pub fn hann_window(len: usize) -> Vec<f32> {
         w.push(0.5 - 0.5 * x.cos());
     }
     w
-}
-
-/// Compute STFT magnitude spectrogram.
-/// Returns a `Vec<Vec<f32>>` where result[freq_bin][frame_idx] is the magnitude.
-pub fn stft_magnitude(
-    signal: &[f32],
-    n_fft: usize,
-    win_size: usize,
-    hop: usize,
-    window: &[f32],
-) -> Result<Vec<Vec<f32>>, String> {
-    use num_complex::Complex32;
-    use rustfft::FftPlanner;
-
-    if signal.len() < win_size {
-        return Ok(vec![vec![0.0; 1]]);
-    }
-
-    let n_freqs = n_fft / 2 + 1;
-    let n_frames = 1 + (signal.len() - win_size) / hop;
-
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(n_fft);
-    let mut fft_buf = vec![Complex32::new(0.0, 0.0); n_fft];
-
-    let mut result = vec![vec![0.0f32; n_frames]; n_freqs];
-
-    for frame in 0..n_frames {
-        let start = frame * hop;
-
-        for i in 0..win_size.min(signal.len() - start) {
-            fft_buf[i] = Complex32::new(signal[start + i] * window[i], 0.0);
-        }
-        for i in win_size..n_fft {
-            fft_buf[i] = Complex32::new(0.0, 0.0);
-        }
-
-        fft.process(&mut fft_buf);
-
-        for f in 0..n_freqs {
-            let c = fft_buf[f];
-            result[f][frame] = (c.re * c.re + c.im * c.im).sqrt();
-        }
-    }
-
-    Ok(result)
 }
 
 /// Linear resample mono audio from `in_rate` to `out_rate`.

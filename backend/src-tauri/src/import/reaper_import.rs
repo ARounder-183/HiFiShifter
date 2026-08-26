@@ -8,7 +8,7 @@ use crate::models::PitchRange;
 use crate::reaper_parser::{
     self, reaper_fade_auto_length_sec, reaper_fade_effective_length_sec,
     reaper_fade_manual_length_sec, stretch_segments_from_markers, ReaperData, ReaperEnvelope,
-    ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperSource, ReaperTake, ReaperTrack,
+    ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
 };
 use crate::state::{
     Clip, PitchAnalysisAlgo, TempoPointData, TimelineState, Track, TrackParamsState,

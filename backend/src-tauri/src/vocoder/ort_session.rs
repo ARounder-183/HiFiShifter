@@ -31,6 +31,7 @@ pub const COREML_FIXED_TIME_FRAMES: usize = 4096;
 /// Stores whether the most recently created CoreML session for each role is
 /// pinned to [`COREML_FIXED_TIME_FRAMES`].  Only the vocoder model requires
 /// the fixed dimension; FCPE/HNSEP keep their dynamic shapes.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = OnceLock::new();
 
 /// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
@@ -38,6 +39,7 @@ static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = Onc
 /// hung CoreML inference can never block the benchmark or rendering again.
 static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn coreml_disabled() -> bool {
     COREML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
@@ -102,6 +104,7 @@ fn set_coreml_pinned(role: OrtSessionRole, pinned: bool) {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[allow(dead_code)] // call sites live in macOS-only branches; kept for API symmetry
 fn set_coreml_pinned(_role: OrtSessionRole, _pinned: bool) {}
 
 /// Build a CoreML execution provider with the options that make the
@@ -385,6 +388,7 @@ fn try_register_webgpu_ep(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 )))]
+#[allow(dead_code)] // call sites live in linux-x86_64 / macos-ARM64 branches only
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -446,6 +450,7 @@ fn try_register_coreml_ep(
 /// Windows GPU driver provides D3D12/DirectX passthrough via /dev/dxg.
 /// Mesa's Lavapipe software renderer may be available but offers poor
 /// performance and limited SPIR-V feature support.
+#[allow(dead_code)] // call sites live in linux-x86_64-only branches
 fn is_wsl2() -> bool {
     if cfg!(target_os = "linux") {
         if let Ok(version) = std::fs::read_to_string("/proc/version") {
@@ -459,6 +464,7 @@ fn is_wsl2() -> bool {
 /// Emit diagnostic info about the Vulkan environment. Helps debug
 /// WebGPU/Dawn initialization failures, especially in WSL2 where
 /// Vulkan ICD availability is limited.
+#[allow(dead_code)] // call sites live in linux-x86_64-only branches
 fn log_vulkan_diagnostics() {
     // Check for Vulkan ICDs
     for icd_dir in ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"] {

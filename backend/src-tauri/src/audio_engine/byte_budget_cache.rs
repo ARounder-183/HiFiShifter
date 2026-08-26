@@ -43,6 +43,9 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Create a cache with capacity from env or default, and budget from env.
+    // 泛型 API 面：部分 (K, V) 实例化组合暂未用到这两个入口，
+    // dead_code 分析按实例化逐个报告，这里统一标注保留。
+    #[allow(dead_code)]
     pub fn from_env(capacity: usize) -> Self {
         Self::new(capacity, env_cache_budget_bytes())
     }
@@ -53,6 +56,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Get a mutable reference to an entry, promoting it in LRU order.
+    #[allow(dead_code)]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.inner.get_mut(key).map(|(v, _)| v)
     }
@@ -81,6 +85,9 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Remove an entry by key, returning its value and byte weight.
+    // 以下多个入口同 from_env / get_mut：泛型 API 面，按实例化组合
+    // 逐个报告 dead_code，这里统一标注保留。
+    #[allow(dead_code)]
     pub fn pop(&mut self, key: &K) -> Option<(V, u64)> {
         if let Some((value, weight)) = self.inner.pop(key) {
             self.total_bytes = self.total_bytes.saturating_sub(weight);
@@ -118,11 +125,13 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Whether the cache is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
     /// Check if a key exists without promoting it.
+    #[allow(dead_code)]
     pub fn contains_key(&self, key: &K) -> bool {
         self.inner.contains(key)
     }
@@ -133,6 +142,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Budget in bytes.
+    #[allow(dead_code)]
     pub fn budget_bytes(&self) -> u64 {
         self.budget_bytes
     }
@@ -151,6 +161,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     }
 
     /// Resize the entry capacity (may cause eviction of LRU entries).
+    #[allow(dead_code)]
     pub fn resize(&mut self, new_capacity: usize) {
         let new_cap = NonZeroUsize::new(new_capacity.max(1)).unwrap();
         self.inner.resize(new_cap);

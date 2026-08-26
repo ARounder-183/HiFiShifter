@@ -9,10 +9,7 @@
 //! by `ort::ep::DirectML::with_device_id()` on standard WDDM configurations.
 
 use serde::Serialize;
-use windows::core::Interface;
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
-};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC1};
 
 /// Information about a single DXGI GPU adapter.
 #[derive(Debug, Clone, Serialize)]

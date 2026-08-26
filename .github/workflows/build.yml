@@ -26,6 +26,9 @@ jobs:
           npm --prefix frontend ci
           npm --prefix frontend run build
 
+      - name: Run frontend unit tests
+        run: npm --prefix frontend run test
+
       - name: Archive frontend dist
         run: |
           cd frontend
