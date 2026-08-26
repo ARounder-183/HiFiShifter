@@ -55,7 +55,8 @@ export function computeTimelineRectSelection(params: {
 export function useTimelineSelectionRect(params: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
     sessionRef: React.RefObject<SessionState>;
-    pxPerBeat: number;
+    /** 内容坐标系使用的像素密度：秒 → px（不是 beat → px）。 */
+    pxPerSec: number;
     rowHeight: number;
 
     clearContextMenu: () => void;
@@ -65,7 +66,7 @@ export function useTimelineSelectionRect(params: {
     const {
         scrollRef,
         sessionRef,
-        pxPerBeat,
+        pxPerSec,
         rowHeight,
         clearContextMenu,
         setMultiSelectedClipIds,
@@ -220,19 +221,16 @@ export function useTimelineSelectionRect(params: {
             }
 
             const session = sessionRef.current;
-            // Clip 像素位置必须与矩形同一坐标系：矩形 x 为内容像素
-            // （pxPerSec 空间）。此前误用 pxPerBeat（= pxPerSec·60/bpm），
-            // 在 120BPM 下恰好缩小一半 —— 表现为"选区越靠右、命中偏移越大"。
-            const pxPerSec = Math.max(
-                1e-9,
-                (pxPerBeat * Math.max(1, session.bpm)) / 60,
-            );
+            // Clip 像素位置必须与矩形同一坐标系：两者都使用内容像素密度
+            // pxPerSec。不要从 pxPerBeat 反推；调用方曾误传 pxPerSec，
+            // 会在非 60 BPM 时造成水平命中偏移。
+            const contentPxPerSec = Math.max(1e-9, pxPerSec);
             const selectedInRect: string[] = [];
             for (const clip of session.clips) {
                 const trackIdx = session.tracks.findIndex((t) => t.id === clip.trackId);
                 if (trackIdx < 0) continue;
-                const cx1 = clip.startSec * pxPerSec;
-                const cx2 = (clip.startSec + clip.lengthSec) * pxPerSec;
+                const cx1 = clip.startSec * contentPxPerSec;
+                const cx2 = (clip.startSec + clip.lengthSec) * contentPxPerSec;
                 const cy1 = trackIdx * rowHeight;
                 const cy2 = cy1 + rowHeight;
                 const hit = cx2 >= rect.x1 && cx1 <= rect.x2 && cy2 >= rect.y1 && cy1 <= rect.y2;

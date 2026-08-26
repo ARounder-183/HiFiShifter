@@ -298,7 +298,7 @@ export function useTimelineClipActions(
     const { selectionRect, onPointerDown: onSelectionRectPointerDown } = useTimelineSelectionRect({
         scrollRef,
         sessionRef,
-        pxPerBeat: pxPerSec,
+        pxPerSec,
         rowHeight,
         clearContextMenu,
         setMultiSelectedClipIds,
