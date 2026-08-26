@@ -631,6 +631,7 @@ export const zhCN = {
     // Toolbar toggle buttons
     auto_crossfade: "自动交叉淡化",
     sync_edits_across_takes: "同步编辑所有 Take",
+    options_show_all_takes: "显示所有 Take (如果空间足够)",
     ripple: "波纹编辑（自动跟进）",
     ripple_tooltip_off: "波纹编辑（自动跟进）：关闭。左键开启（按轨道跟进）；右键选择模式。",
     ripple_tooltip_track:

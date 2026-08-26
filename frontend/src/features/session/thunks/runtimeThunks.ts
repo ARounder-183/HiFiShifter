@@ -34,6 +34,7 @@ export const persistUiSettings = createAsyncThunk(
         const s = (getState() as { session: SessionState }).session;
         return settingsApi.saveUiSettings({
             autoCrossfade: s.autoCrossfadeEnabled,
+            showAllTakes: s.showAllTakes,
             syncEditsAcrossTakes: s.syncEditsAcrossTakes,
             loopNewClips: s.loopNewClipsEnabled,
             splitTransitionEnabled: s.splitTransitionEnabled,

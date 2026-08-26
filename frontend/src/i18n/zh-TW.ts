@@ -632,6 +632,7 @@ export const zhTW = {
     // 工具列切換按鈕
     auto_crossfade: "自動交叉淡化",
     sync_edits_across_takes: "同步編輯所有 Take",
+    options_show_all_takes: "顯示所有 Take (如果空間足夠)",
     ripple: "波紋編輯（自動跟進）",
     ripple_tooltip_off: "波紋編輯（自動跟進）：關閉。左鍵開啟（按軌道跟進）；右鍵選擇模式。",
     ripple_tooltip_track:

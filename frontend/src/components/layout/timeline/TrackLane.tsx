@@ -148,6 +148,10 @@ type TrackLaneProps = {
     verticalTrackLockTrackId?: string | null;
     /** 所有 clip 数据（用于跨轨道 ghost 查找） */
     allClips?: ClipInfo[];
+    /** 在空间足够时显示全部 Take 波形。 */
+    showAllTakes?: boolean;
+    /** 点击 inactive take 波形时切换 active take。 */
+    onActivateTake?: (clipId: string, takeId: string) => void;
 };
 
 export const TrackLane = React.memo(
@@ -194,6 +198,8 @@ export const TrackLane = React.memo(
             ghostDrag,
             verticalTrackLockTrackId,
             allClips,
+            showAllTakes = true,
+            onActivateTake,
         } = props;
 
         // 获取波形颜色配置
@@ -292,9 +298,7 @@ export const TrackLane = React.memo(
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
         }, []);
         const isOverlapLayerTarget = React.useCallback((target: EventTarget | null) => {
-            return (
-                (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null
-            );
+            return (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null;
         }, []);
         const primeSelection = React.useCallback(
             (clipId: string, shouldPrimeSelection: boolean, clientX?: number) => {
@@ -529,10 +533,7 @@ export const TrackLane = React.memo(
                     );
                 }}
                 onContextMenuCapture={(event) => {
-                    if (
-                        isClipItemTarget(event.target) ||
-                        isOverlapLayerTarget(event.target)
-                    ) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
@@ -548,10 +549,7 @@ export const TrackLane = React.memo(
                     openContextMenu(hit.clipId, event.clientX, event.clientY);
                 }}
                 onPointerDownCapture={(event) => {
-                    if (
-                        isClipItemTarget(event.target) ||
-                        isOverlapLayerTarget(event.target)
-                    ) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     if (event.button !== 0) {
@@ -606,6 +604,10 @@ export const TrackLane = React.memo(
                     viewportEndSec={viewportEndSec}
                     strokeColor={waveformColors.stroke}
                     strokeWidth={1}
+                    showAllTakes={showAllTakes}
+                    takeSeparatorColor={
+                        themeMode === "dark" ? "rgba(255, 255, 255, 0.18)" : "rgba(0, 0, 0, 0.20)"
+                    }
                 />
                 {/* MIDI 音高预览 Canvas：绘制 MIDI clip 的音高线 */}
                 <MidiPitchTrackCanvas
@@ -662,6 +664,8 @@ export const TrackLane = React.memo(
                             disabledGroupIds={disabledGroupIds}
                             onToggleGroupDisabled={onToggleGroupDisabled}
                             hovered={hoveredClipId === clip.id}
+                            showAllTakes={showAllTakes}
+                            onActivateTake={onActivateTake}
                         />
                     );
                 })}
@@ -677,11 +681,13 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-                    startEditDrag={startEditDrag as (
-                        e: React.PointerEvent,
-                        clipId: string,
-                        type: Parameters<typeof startEditDrag>[2],
-                    ) => void}
+                    startEditDrag={
+                        startEditDrag as (
+                            e: React.PointerEvent,
+                            clipId: string,
+                            type: Parameters<typeof startEditDrag>[2],
+                        ) => void
+                    }
                     startSnapOffsetDrag={startSnapOffsetDrag}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
@@ -763,6 +769,8 @@ export const TrackLane = React.memo(
             prev.ghostDrag === next.ghostDrag &&
             prev.verticalTrackLockTrackId === next.verticalTrackLockTrackId &&
             prev.allClips === next.allClips &&
+            prev.showAllTakes === next.showAllTakes &&
+            prev.onActivateTake === next.onActivateTake &&
             sameStringArray(prev.overlayClipIds, next.overlayClipIds) &&
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&

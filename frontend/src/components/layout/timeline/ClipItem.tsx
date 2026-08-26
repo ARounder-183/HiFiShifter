@@ -11,6 +11,7 @@
  */
 import React from "react";
 
+import { useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
@@ -22,6 +23,7 @@ import {
     snapOffsetHandleXPx,
 } from "./constants";
 import { FadeHitLayer } from "./FadeHitLayer";
+import { hitInactiveTakeLane } from "./takeLanes";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import {
     ClipHeader,
@@ -68,6 +70,8 @@ export const ClipItem = React.memo(function ClipItem({
     disabledGroupIds,
     onToggleGroupDisabled,
     hovered = false,
+    showAllTakes = true,
+    onActivateTake,
 }: {
     clip: ClipInfo;
     rowHeight: number;
@@ -141,8 +145,13 @@ export const ClipItem = React.memo(function ClipItem({
     disabledGroupIds?: string[];
     onToggleGroupDisabled?: (groupId: string) => void;
     hovered?: boolean;
+    /** 与轨道波形渲染一致的“显示全部 Take”设置。 */
+    showAllTakes?: boolean;
+    /** 点击 inactive take 波形 lane 时触发（优先级低于常规编辑手势）。 */
+    onActivateTake?: (clipId: string, takeId: string) => void;
 }) {
     const { t } = useI18n();
+    const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
     const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
@@ -154,8 +163,10 @@ export const ClipItem = React.memo(function ClipItem({
     // body 区高度（与 WaveformTrackCanvas 一致）：轨道高 - 上下 padding - 头部高。
     const bodyHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
     // 有效 fade = 自动交叉淡化（>0 时覆盖）否则手动 fade（对齐 REAPER 分离存储模型）。
-    const effectiveFadeInSec = (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : (clip.fadeInSec ?? 0);
-    const effectiveFadeOutSec = (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : (clip.fadeOutSec ?? 0);
+    const effectiveFadeInSec =
+        (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : (clip.fadeInSec ?? 0);
+    const effectiveFadeOutSec =
+        (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : (clip.fadeOutSec ?? 0);
     const leadingOverlapPx = Math.max(
         0,
         Math.min(width, Math.max(0, leadingOverlapSec) * pxPerSec),
@@ -343,6 +354,18 @@ export const ClipItem = React.memo(function ClipItem({
                 const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
                 const primedSelection = shouldPrimeSelection && !selected;
 
+                // Inactive take 命中只接管“无移动、无编辑修饰键的 click”。
+                // 拖拽仍然进入下方正常 Clip move 流程；header/edge/fade/snap
+                // 等子控件已在更早阶段 stopPropagation，因此不会被抢占。
+                let clickedInactiveTakeId: string | null = null;
+                if (e.button === 0 && !altKeyDown && !doShiftRangeSelect && !doCtrlToggleOnly) {
+                    const bounds = e.currentTarget.getBoundingClientRect();
+                    const localBodyY = e.clientY - bounds.top - CLIP_HEADER_HEIGHT;
+                    clickedInactiveTakeId =
+                        hitInactiveTakeLane(clip, showAllTakes, bodyHeight, localBodyY)?.takeId ??
+                        null;
+                }
+
                 if (primedSelection) {
                     ensureSelected(clip.id);
                     selectClipRemote(clip.id);
@@ -351,7 +374,11 @@ export const ClipItem = React.memo(function ClipItem({
 
                 // Seek should happen on click, not on drag.
                 // Track whether the pointer moved beyond a small deadzone.
-                const allowSeek = !altKeyDown && !primaryModifierDown && !e.shiftKey;
+                const allowSeek =
+                    !altKeyDown &&
+                    !primaryModifierDown &&
+                    !e.shiftKey &&
+                    clickedInactiveTakeId == null;
                 const startX = e.clientX;
                 const startY = e.clientY;
                 let moved = false;
@@ -369,6 +396,15 @@ export const ClipItem = React.memo(function ClipItem({
                     window.removeEventListener("pointerup", onUp, true);
                     window.removeEventListener("pointercancel", onUp, true);
                     if (!moved) {
+                        if (clickedInactiveTakeId) {
+                            // 暂停/停止状态下，点击 inactive take 除了切换，
+                            // 还会把播放光标带到点击位置；播放中不打断当前位置。
+                            if (!isPlaying) {
+                                seekFromClientX(ev.clientX, true);
+                            }
+                            onActivateTake?.(clip.id, clickedInactiveTakeId);
+                            return;
+                        }
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
                         } else if (shouldPrimeSelection && !primedSelection) {
@@ -433,8 +469,7 @@ export const ClipItem = React.memo(function ClipItem({
                 <div
                     className="absolute bottom-0 z-[70]"
                     style={{
-                        left:
-                            snapOffsetHandleXPx(clip.snapOffsetSec, pxPerSec) - 1,
+                        left: snapOffsetHandleXPx(clip.snapOffsetSec, pxPerSec) - 1,
                         width: SNAP_OFFSET_HANDLE_SIZE_PX + 3,
                         height: SNAP_OFFSET_HIT_HEIGHT_PX,
                         cursor: "ew-resize",

@@ -725,6 +725,7 @@ export const enUS = {
     // Toolbar toggle buttons
     auto_crossfade: "Auto Crossfade",
     sync_edits_across_takes: "Sync Edits Across Takes",
+    options_show_all_takes: "Show all takes (when room)",
     ripple: "Ripple Editing (Auto Follow)",
     ripple_tooltip_off:
         "Ripple Editing (Auto Follow): Off. Left-click to enable (per track); right-click to choose mode.",

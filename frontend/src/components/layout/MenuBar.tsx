@@ -22,6 +22,8 @@ import {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
+    toggleShowAllTakes,
+    toggleSyncEditsAcrossTakes,
     toggleClipboardPreview,
     toggleParamValuePopup,
     toggleTempoMapVisible,
@@ -984,6 +986,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
+                    </DropdownMenu.Item>
+
+                    {/* Take display / editing options */}
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleShowAllTakes());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleSyncEditsAcrossTakes());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.syncEditsAcrossTakes, tAny("sync_edits_across_takes"))}
                     </DropdownMenu.Item>
 
                     {/* Auto-reload modified media — same level as Background Pre-render */}

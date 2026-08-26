@@ -117,6 +117,7 @@ type TimelineSessionSlice = Pick<
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "showAllTakes"
     | "tempoMap"
     | "tempoMapVisible"
     | "trackMeters"
@@ -262,6 +263,7 @@ export function useTimelineState(): TimelineStateResult {
     const s = useAppSelector(
         (state: RootState) => ({
             autoCrossfadeEnabled: state.session.autoCrossfadeEnabled,
+            showAllTakes: state.session.showAllTakes,
             autoScrollEnabled: state.session.autoScrollEnabled,
             beats: state.session.beats,
             bpm: state.session.bpm,

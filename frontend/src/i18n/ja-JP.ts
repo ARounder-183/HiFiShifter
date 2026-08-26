@@ -652,6 +652,7 @@ export const jaJP = {
     // ツールバートグルボタン
     auto_crossfade: "自動クロスフェード",
     sync_edits_across_takes: "すべてのテイクに編集を同期",
+    options_show_all_takes: "すべてのテイクを表示（余裕がある場合）",
     ripple: "リップル編集（オートフォロー）",
     ripple_tooltip_off:
         "リップル編集（オートフォロー）：オフ。左クリックで有効化（トラック単位）；右クリックでモード選択。",

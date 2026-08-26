@@ -318,6 +318,8 @@ export interface SessionState {
     paramEditorSyncTimeline: boolean;
 
     autoCrossfadeEnabled: boolean;
+    /** 空间足够时显示 Clip 内全部 Take 波形。 */
+    showAllTakes: boolean;
     /** 同步编辑所有 Take：内容级编辑同步到同一 Clip 的全部 Take。 */
     syncEditsAcrossTakes: boolean;
     /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
@@ -1051,6 +1053,19 @@ function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
 }
 
 /**
+ * 应用权威时间轴，但保留前端当前播放光标。
+ *
+ * 后端 `TimelineState.playhead_sec` 只在显式 seek / transport 操作时同步；
+ * 普通 take 管理命令返回的全量快照可能携带旧值。切换/管理 take 不应该
+ * 改变播放位置，因此这里在覆写后恢复本地光标。
+ */
+function applyTimelineStatePreservingPlayhead(state: SessionState, timeline: TimelineState): void {
+    const playheadSec = state.playheadSec;
+    applyTimelineState(state, timeline, { force: true });
+    state.playheadSec = Math.max(0, Number(playheadSec ?? 0) || 0);
+}
+
+/**
  * 将后端返回的 TimelineState 全量覆写到前端 Redux state。
  *
  * @param force  默认 false。当 `_interactionLockCount > 0`（用户正在拖动/滑动等连续交互）
@@ -1410,6 +1425,7 @@ const initialState: SessionState = {
     paramEditorSyncTimeline: false,
 
     autoCrossfadeEnabled: true,
+    showAllTakes: true,
     syncEditsAcrossTakes: true,
     loopNewClipsEnabled: true,
     splitTransitionEnabled: true,
@@ -1731,6 +1747,9 @@ const sessionSlice = createSlice({
         },
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
+        },
+        toggleShowAllTakes(state) {
+            state.showAllTakes = !state.showAllTakes;
         },
         toggleSyncEditsAcrossTakes(state) {
             state.syncEditsAcrossTakes = !state.syncEditsAcrossTakes;
@@ -2093,6 +2112,20 @@ const sessionSlice = createSlice({
                 const value = Number(action.payload.sourceEndSec);
                 clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
             }
+
+            // Slip 的实时预览写在 active-take 投影上；展开全部 Take 时，
+            // 必须同步对应 lane，否则拖拽期间波形不会移动。
+            updateActiveTakeFromFlat(clip);
+            if (state.syncEditsAcrossTakes) {
+                for (const take of clip.takes ?? []) {
+                    if (action.payload.sourceStartSec !== undefined) {
+                        take.sourceStartSec = clip.sourceStartSec;
+                    }
+                    if (action.payload.sourceEndSec !== undefined) {
+                        take.sourceEndSec = clip.sourceEndSec;
+                    }
+                }
+            }
         },
         setClipFades(
             state,
@@ -2453,6 +2486,7 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
+                state.showAllTakes = Boolean(s.showAllTakes ?? true);
                 state.syncEditsAcrossTakes = Boolean(s.syncEditsAcrossTakes ?? true);
                 state.loopNewClipsEnabled = s.loopNewClips ?? true;
                 state.splitTransitionEnabled = Boolean(s.splitTransitionEnabled ?? true);
@@ -4118,7 +4152,7 @@ const sessionSlice = createSlice({
             .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(cycleClipTakesRemote.pending, (state, action) => {
@@ -4143,40 +4177,40 @@ const sessionSlice = createSlice({
             .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(packClipsIntoTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(explodeClipTakesRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(duplicateClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(removeClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(renameClipTakeRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(addClipTakeFromMediaRemote.fulfilled, (state, action) => {
                 const payload = action.payload as { ok?: boolean } & TimelineState;
                 if (!payload.ok) return;
-                applyTimelineState(state, payload, { force: true });
+                applyTimelineStatePreservingPlayhead(state, payload);
             })
 
             .addCase(replaceClipSourceRemote.fulfilled, (state, action) => {
@@ -4403,6 +4437,7 @@ export const {
     setShowPlayheadTimeInTrackHeader,
     setParamEditorSyncTimeline,
     toggleAutoCrossfade,
+    toggleShowAllTakes,
     toggleSyncEditsAcrossTakes,
     toggleSplitTransition,
     setSplitTransitionMode,

@@ -179,6 +179,9 @@ const MAX_COORD_ABS: i32 = 1_000_000;
 pub struct UiSettings {
     #[serde(default = "default_true")]
     pub auto_crossfade: bool,
+    /// 空间足够时在 Clip 内显示全部 Take 波形。
+    #[serde(default = "default_true")]
+    pub show_all_takes: bool,
     #[serde(default = "default_true")]
     pub split_transition_enabled: bool,
     #[serde(default = "default_split_transition_mode")]
@@ -723,6 +726,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             auto_crossfade: true,
+            show_all_takes: true,
             split_transition_enabled: true,
             split_transition_mode: default_split_transition_mode(),
             split_transition_duration_unit: default_split_transition_duration_unit(),

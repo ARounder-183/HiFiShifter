@@ -12,7 +12,6 @@ import {
 import {
     CheckIcon,
     DoubleArrowRightIcon,
-    LayersIcon,
     PauseIcon,
     Pencil1Icon,
     PlayIcon,
@@ -33,7 +32,6 @@ import {
     updateTransportBpm,
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
-    toggleSyncEditsAcrossTakes,
     toggleSplitTransition,
     toggleSnap,
     togglePlayheadZoom,
@@ -1192,21 +1190,6 @@ export function ActionBar() {
                             opacity="0.5"
                         />
                     </svg>
-                </IconButton>
-
-                {/* Sync edits across takes */}
-                <IconButton
-                    size="1"
-                    variant={s.syncEditsAcrossTakes ? "solid" : "ghost"}
-                    color="gray"
-                    data-tooltip={tAny("sync_edits_across_takes")}
-                    tabIndex={-1}
-                    onClick={() => {
-                        dispatch(toggleSyncEditsAcrossTakes());
-                        void dispatch(persistUiSettings());
-                    }}
-                >
-                    <LayersIcon />
                 </IconButton>
 
                 {/* Split Transition */}

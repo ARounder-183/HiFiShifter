@@ -32,6 +32,7 @@ import {
     setClipStateRemote,
     setClipsStateBulkRemote,
     setClipFades,
+    setClipActiveTakeRemote,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
@@ -540,6 +541,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     checkpoint,
                 }),
             );
+        },
+        [dispatch],
+    );
+    const activateTrackLaneTake = React.useCallback(
+        (clipId: string, takeId: string) => {
+            void dispatch(setClipActiveTakeRemote({ clipId, takeId }));
         },
         [dispatch],
     );
@@ -1739,6 +1746,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             ghostDrag={ghostDrag}
                                             verticalTrackLockTrackId={verticalTrackLockTrackId}
                                             allClips={s.clips}
+                                            showAllTakes={s.showAllTakes}
+                                            onActivateTake={activateTrackLaneTake}
                                             startClipDrag={startClipDrag}
                                             startEditDrag={startEditDrag}
                                             startSnapOffsetDrag={startSnapOffsetDrag}

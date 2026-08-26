@@ -5,6 +5,8 @@ export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
 export interface UiSettings {
     autoCrossfade: boolean;
+    /** 空间足够时显示 Clip 内全部 Take 波形。 */
+    showAllTakes?: boolean;
     splitTransitionEnabled?: boolean;
     splitTransitionMode?: "fade" | "overlap";
     splitTransitionDurationUnit?: "seconds" | "percent";

@@ -724,6 +724,7 @@ export const koKR = {
     // 도구 모음 토글 버튼
     auto_crossfade: "자동 크로스페이드",
     sync_edits_across_takes: "모든 테이크에 편집 동기화",
+    options_show_all_takes: "모든 테이크 표시(공간이 충분할 때)",
     ripple: "리플 편집 (자동 추적)",
     ripple_tooltip_off:
         "리플 편집 (자동 추적): 꺼짐. 왼쪽 클릭으로 켜기 (트랙 단위); 오른쪽 클릭으로 모드 선택.",
