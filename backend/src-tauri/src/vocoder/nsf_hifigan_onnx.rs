@@ -16,7 +16,9 @@ static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 /// the CoreML EP is active on macOS ARM64.  On other platforms / EPs the
 /// session keeps the model's dynamic `time` axis and no padding is needed.
 fn session_time_frames() -> Option<usize> {
-    if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder) {
+    if crate::vocoder_ort_session::coreml_active(
+        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+    ) {
         Some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
     } else {
         None
@@ -90,14 +92,28 @@ pub fn set_chunk_progress_callback(cb: Option<Box<dyn Fn(f64) + Send + Sync>>) {
 }
 
 pub fn reset_chunk_progress(total: usize) {
-    CHUNK_PROGRESS_TOTAL.get_or_init(|| std::sync::atomic::AtomicUsize::new(0)).store(total, std::sync::atomic::Ordering::Relaxed);
-    CHUNK_PROGRESS_DONE.get_or_init(|| std::sync::atomic::AtomicUsize::new(0)).store(0, std::sync::atomic::Ordering::Relaxed);
+    CHUNK_PROGRESS_TOTAL
+        .get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+        .store(total, std::sync::atomic::Ordering::Relaxed);
+    CHUNK_PROGRESS_DONE
+        .get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
+        .store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn emit_chunk_progress(_local: f64) {
-    let done = CHUNK_PROGRESS_DONE.get().map(|a| a.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1).unwrap_or(0);
-    let total = CHUNK_PROGRESS_TOTAL.get().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(1);
-    let progress = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+    let done = CHUNK_PROGRESS_DONE
+        .get()
+        .map(|a| a.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
+        .unwrap_or(0);
+    let total = CHUNK_PROGRESS_TOTAL
+        .get()
+        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(1);
+    let progress = if total > 0 {
+        done as f64 / total as f64
+    } else {
+        0.0
+    };
     if let Some(slot) = CHUNK_PROGRESS_CB.get() {
         if let Some(cb) = slot.lock().unwrap().as_ref() {
             cb(progress);
@@ -110,7 +126,10 @@ static ACTIVE_EP: OnceLock<String> = OnceLock::new();
 
 /// Returns the EP that was actually used for the live session (e.g. "directml", "webgpu", "cpu").
 pub fn active_ep() -> String {
-    ACTIVE_EP.get().cloned().unwrap_or_else(|| "unknown".to_string())
+    ACTIVE_EP
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn ensure_ort_init() -> Result<(), String> {
@@ -146,7 +165,6 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
     let _ = ACTIVE_EP.set(ep);
     Ok(session)
 }
-
 
 #[derive(Debug, Clone, Deserialize)]
 struct NsfHifiganConfig {
@@ -187,8 +205,8 @@ fn default_model_dir_guess() -> Option<PathBuf> {
         .join("resources")
         .join("models")
         .join("nsf_hifigan");
-    let has_model = p.join(vocoder_model_filename()).is_file()
-        || p.join("pc_nsf_hifigan.onnx").is_file();
+    let has_model =
+        p.join(vocoder_model_filename()).is_file() || p.join("pc_nsf_hifigan.onnx").is_file();
     if has_model && p.join("config.json").is_file() {
         return Some(p);
     }
@@ -283,7 +301,15 @@ pub(crate) fn probe_load() -> Result<String, String> {
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
-            .map(|(i, &d)| if d > 0 { d as usize } else if i == 0 { 1 } else { 4 })
+            .map(|(i, &d)| {
+                if d > 0 {
+                    d as usize
+                } else if i == 0 {
+                    1
+                } else {
+                    4
+                }
+            })
             .collect();
         let total: usize = test_shape.iter().product::<usize>().max(1);
         let data: Vec<f32> = vec![0.0f32; total];
@@ -616,14 +642,18 @@ pub fn drop_shared_session() {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        eprintln!("[nsf_hifigan] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
+        eprintln!(
+            "[nsf_hifigan] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up"
+        );
     }
 }
 
 /// 初始化（或获取已有的）全局 Session。
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
     if let Some(ref session) = *guard {
         return Ok(Arc::clone(session));
     }
@@ -967,7 +997,12 @@ impl NsfHifiganOnnx {
     ///
     /// `mel_slice`: `[n_mels * t]` 列主序 mel 数据（借用，不转移所有权）。
     /// `f0_slice`: `[t]` F0 数据。
-    fn run_model_from_slices(&mut self, mel_slice: &[f32], f0_slice: &[f32], t: usize) -> Result<Vec<f32>, String> {
+    fn run_model_from_slices(
+        &mut self,
+        mel_slice: &[f32],
+        f0_slice: &[f32],
+        t: usize,
+    ) -> Result<Vec<f32>, String> {
         // resize + copy 复用已分配容量，避免 per-chunk realloc
         self.mel_scratch.resize(mel_slice.len(), 0.0);
         self.mel_scratch.copy_from_slice(mel_slice);
@@ -1004,7 +1039,10 @@ impl NsfHifiganOnnx {
 
     /// Each item is (mel_vec, f0_vec, t) where t is the mel frame count.
     /// Returns Vec of output waveforms, each trimmed to its original expected length.
-    fn run_model_batch(&mut self, items: &[(Vec<f32>, Vec<f32>, usize)]) -> Result<Vec<Vec<f32>>, String> {
+    fn run_model_batch(
+        &mut self,
+        items: &[(Vec<f32>, Vec<f32>, usize)],
+    ) -> Result<Vec<Vec<f32>>, String> {
         if items.is_empty() {
             return Ok(vec![]);
         }
@@ -1043,7 +1081,8 @@ impl NsfHifiganOnnx {
             for m in 0..n_mels {
                 let src_offset = m * t;
                 let dst_offset = (i * n_mels + m) * max_t;
-                mel_batch[dst_offset..dst_offset + t].copy_from_slice(&mel[src_offset..src_offset + t]);
+                mel_batch[dst_offset..dst_offset + t]
+                    .copy_from_slice(&mel[src_offset..src_offset + t]);
             }
             f0_batch[i * max_t..i * max_t + t].copy_from_slice(f0);
             out_lengths.push(t * hop);
@@ -1085,13 +1124,21 @@ impl NsfHifiganOnnx {
     }
 
     /// 从全 mel 矩阵切片并推理，复用 `mel_seg_buf` 避免 per-chunk 堆分配。
-    fn run_model_chunk(&mut self, mel_full: &[f32], t: usize, frame_off: usize, chunk_t: usize, f0_slice: &[f32]) -> Result<Vec<f32>, String> {
+    fn run_model_chunk(
+        &mut self,
+        mel_full: &[f32],
+        t: usize,
+        frame_off: usize,
+        chunk_t: usize,
+        f0_slice: &[f32],
+    ) -> Result<Vec<f32>, String> {
         let n_mels = self.cfg.num_mels;
         self.mel_seg_buf.clear();
         for m in 0..n_mels {
             let src_start = m * t + frame_off;
             let src_end = src_start + chunk_t;
-            self.mel_seg_buf.extend_from_slice(&mel_full[src_start..src_end]);
+            self.mel_seg_buf
+                .extend_from_slice(&mel_full[src_start..src_end]);
         }
         // take 转移所有权为局部变量，避开 &self 与 &mut self 冲突
         let mel_data = std::mem::take(&mut self.mel_seg_buf);
@@ -1256,7 +1303,9 @@ thread_local! {
 
 fn probe() -> Result<(), String> {
     let mutex = PROBE.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("PROBE lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("PROBE lock poisoned: {e}"))?;
     if let Some(ref res) = *guard {
         return res.clone();
     }
@@ -1279,16 +1328,18 @@ pub fn is_available() -> bool {
 }
 
 /// Helper to get or reload TLS_SESSION based on global SESSION_EPOCH.
-fn with_tls_session<R>(f: impl FnOnce(&mut NsfHifiganOnnx) -> Result<R, String>) -> Result<R, String> {
+fn with_tls_session<R>(
+    f: impl FnOnce(&mut NsfHifiganOnnx) -> Result<R, String>,
+) -> Result<R, String> {
     if let Err(e) = probe() {
         return Err(e);
     }
-    
+
     let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-    
+
     TLS_SESSION.with(|cell| {
         let mut opt = cell.borrow_mut();
-        
+
         // If loaded epoch doesn't match current epoch, discard it
         if let Some(Ok(ref sess)) = *opt {
             if sess.epoch != current_epoch {
@@ -1298,17 +1349,17 @@ fn with_tls_session<R>(f: impl FnOnce(&mut NsfHifiganOnnx) -> Result<R, String>)
             // Also retry if previous attempt failed but epoch has moved
             *opt = None;
         }
-        
+
         if opt.is_none() {
             *opt = Some(NsfHifiganOnnx::load());
         }
-        
+
         let sess = opt
             .as_mut()
             .expect("TLS_SESSION initialized")
             .as_mut()
             .map_err(|e| e.clone())?;
-            
+
         f(sess)
     })
 }
@@ -1612,14 +1663,14 @@ pub fn infer_pitch_edit_chunked_optimized(
 
     TLS_SESSION.with(|cell| {
         let mut opt = cell.borrow_mut();
-        
+
         let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
         if let Some(Ok(ref sess)) = *opt {
             if sess.epoch != current_epoch {
                 *opt = None;
             }
         }
-        
+
         if opt.is_none() {
             *opt = Some(NsfHifiganOnnx::load());
         }
@@ -1697,8 +1748,13 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
         let processed_before = cached_chunks.len();
-        eprintln!("[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
-            t, total_chunks, cached_chunks.len(), needs_inference.len());
+        eprintln!(
+            "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
+            t,
+            total_chunks,
+            cached_chunks.len(),
+            needs_inference.len()
+        );
 
         // Report progress for cached chunks
         if !cached_chunks.is_empty() {
@@ -1707,23 +1763,29 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         // 4b. 批量推理需要推理的 chunk
         if !needs_inference.is_empty() {
-            let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference.iter().map(|&fi| {
-                let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
-                let chunk_t = chunk_end - fi;
-                let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
-                for m in 0..sess.cfg.num_mels {
-                    let src = &mel_full[m * t + fi..m * t + chunk_end];
-                    let dst = &mut mel_seg[m * chunk_t..(m + 1) * chunk_t];
-                    dst.copy_from_slice(src);
-                }
-                let f0_seg = f0_full[fi..chunk_end].to_vec();
-                (mel_seg, f0_seg, chunk_t)
-            }).collect();
+            let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference
+                .iter()
+                .map(|&fi| {
+                    let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                    let chunk_t = chunk_end - fi;
+                    let mut mel_seg = vec![0.0f32; sess.cfg.num_mels * chunk_t];
+                    for m in 0..sess.cfg.num_mels {
+                        let src = &mel_full[m * t + fi..m * t + chunk_end];
+                        let dst = &mut mel_seg[m * chunk_t..(m + 1) * chunk_t];
+                        dst.copy_from_slice(src);
+                    }
+                    let f0_seg = f0_full[fi..chunk_end].to_vec();
+                    (mel_seg, f0_seg, chunk_t)
+                })
+                .collect();
 
             let t_batch = std::time::Instant::now();
             let batch_results = sess.run_model_batch(&batch_items)?;
-            eprintln!("[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
-                t_batch.elapsed().as_millis(), batch_results.len());
+            eprintln!(
+                "[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
+                t_batch.elapsed().as_millis(),
+                batch_results.len()
+            );
 
             for (i, wf) in batch_results.into_iter().enumerate() {
                 let fi = needs_inference[i];
@@ -2222,12 +2284,12 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
 /// Returns Vec of output waveforms, one per input clip.
 pub fn infer_pitch_edit_mono_batch(
     clips: &[(
-        &[f32],           // audio_mono
-        u32,              // sample_rate
-        f64,              // start_sec
-        usize,            // expected_out_frames
+        &[f32], // audio_mono
+        u32,    // sample_rate
+        f64,    // start_sec
+        usize,  // expected_out_frames
     )],
-    midi_at_time: impl Fn(usize, f64) -> f64,     // (clip_index, abs_time) -> midi
+    midi_at_time: impl Fn(usize, f64) -> f64, // (clip_index, abs_time) -> midi
     formant_shift_at_time: impl Fn(usize, f64) -> f32, // (clip_index, abs_time) -> cents
 ) -> Result<Vec<Vec<f32>>, String> {
     if clips.is_empty() {
@@ -2262,19 +2324,27 @@ pub fn infer_pitch_edit_mono_batch(
             items.push((mel, f0, t));
         }
 
-        eprintln!("[nsf_hifigan] batch: {} clips, sizes={:?}",
-            items.len(), items.iter().map(|(_, _, t)| t).collect::<Vec<_>>());
+        eprintln!(
+            "[nsf_hifigan] batch: {} clips, sizes={:?}",
+            items.len(),
+            items.iter().map(|(_, _, t)| t).collect::<Vec<_>>()
+        );
 
         let t_batch_start = std::time::Instant::now();
 
         // Phase 2: run batched GPU inference
         let batch_results = sess.run_model_batch(&items)?;
 
-        eprintln!("[nsf_hifigan] batch inference: {}ms", t_batch_start.elapsed().as_millis());
+        eprintln!(
+            "[nsf_hifigan] batch inference: {}ms",
+            t_batch_start.elapsed().as_millis()
+        );
 
         // Phase 3: resample back and pad to expected lengths
         let mut results = Vec::with_capacity(clips.len());
-        for (i, (batch_out, &(_, sample_rate, _, expected_len))) in batch_results.iter().zip(clips.iter()).enumerate() {
+        for (i, (batch_out, &(_, sample_rate, _, expected_len))) in
+            batch_results.iter().zip(clips.iter()).enumerate()
+        {
             let mut out = if model_sr == sample_rate {
                 batch_out.clone()
             } else {
@@ -2339,7 +2409,14 @@ pub fn prepare_clip_mel_f0(
             })
             .collect();
         if formant_shifts.iter().any(|s| s.abs() >= 0.5) {
-            shift_mel_formant(&mut mel_full, n_mels, t, &formant_shifts, sess.cfg.fmin, sess.cfg.fmax);
+            shift_mel_formant(
+                &mut mel_full,
+                n_mels,
+                t,
+                &formant_shifts,
+                sess.cfg.fmin,
+                sess.cfg.fmax,
+            );
         }
 
         Ok((mel_full, f0_full, t, model_sr, hop))
@@ -2370,7 +2447,14 @@ pub fn collect_uncached_chunks(
                 .copy_from_slice(&mel_full[m * total_t + frame_off..m * total_t + chunk_end]);
         }
         let f0_seg = f0_full[frame_off..chunk_end].to_vec();
-        jobs.push(ChunkJob { clip_idx, mel_seg, f0_seg, chunk_t, frame_off, chunk_end });
+        jobs.push(ChunkJob {
+            clip_idx,
+            mel_seg,
+            f0_seg,
+            chunk_t,
+            frame_off,
+            chunk_end,
+        });
         frame_off = chunk_end;
     }
     jobs
@@ -2399,7 +2483,14 @@ pub fn collect_all_chunks_for_clip(
                     .copy_from_slice(&mel_full[m * total_t + frame_off..m * total_t + chunk_end]);
             }
             let f0_seg = f0_full[frame_off..chunk_end].to_vec();
-            uncached_jobs.push(ChunkJob { clip_idx, mel_seg, f0_seg, chunk_t, frame_off, chunk_end });
+            uncached_jobs.push(ChunkJob {
+                clip_idx,
+                mel_seg,
+                f0_seg,
+                chunk_t,
+                frame_off,
+                chunk_end,
+            });
         }
         all_chunks.push((frame_off, chunk_end, cached));
         frame_off = chunk_end;
@@ -2431,16 +2522,19 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
     if jobs.is_empty() {
         return Ok(vec![]);
     }
-    
+
     with_tls_session(|sess| {
         let n = jobs.len();
         // CoreML and DirectML sessions are compiled with batch=1 pinned, so
         // cross-clip batches must be executed one chunk at a time.
-        if crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder)
-            || sess.batch_pinned_to_one {
+        if crate::vocoder_ort_session::coreml_active(
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        ) || sess.batch_pinned_to_one
+        {
             let mut results = Vec::with_capacity(n);
             for job in &jobs {
-                let waveform = sess.run_model(job.mel_seg.clone(), job.f0_seg.clone(), job.chunk_t)?;
+                let waveform =
+                    sess.run_model(job.mel_seg.clone(), job.f0_seg.clone(), job.chunk_t)?;
                 results.push(ChunkResult {
                     clip_idx: job.clip_idx,
                     frame_off: job.frame_off,
@@ -2453,10 +2547,12 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
         }
         // CoreML sessions are compiled with a fixed `time` dimension: pad the
         // whole batch to that length and trim each job's output below.
-        let max_t = crate::vocoder_ort_session::coreml_active(crate::vocoder_ort_session::OrtSessionRole::Vocoder)
-            .then_some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
-            .map(|fixed| fixed.max(jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1)))
-            .unwrap_or_else(|| jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1));
+        let max_t = crate::vocoder_ort_session::coreml_active(
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        )
+        .then_some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
+        .map(|fixed| fixed.max(jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1)))
+        .unwrap_or_else(|| jobs.iter().map(|j| j.chunk_t).max().unwrap_or(1));
         let n_mels = sess.cfg.num_mels;
         let hop = sess.cfg.hop_size;
 
@@ -2501,8 +2597,10 @@ pub fn batch_infer_cross_clip(jobs: Vec<ChunkJob>) -> Result<Vec<ChunkResult>, S
         };
 
         let batch_ms = t_batch.elapsed().as_millis();
-        eprintln!("[nsf_hifigan] cross_clip_batch: {} chunks, max_t={}, batch_gpu={}ms",
-            n, max_t, batch_ms);
+        eprintln!(
+            "[nsf_hifigan] cross_clip_batch: {} chunks, max_t={}, batch_gpu={}ms",
+            n, max_t, batch_ms
+        );
 
         // 拆分结果
         let max_out_t = max_t * hop;
@@ -2588,7 +2686,11 @@ fn build_benchmark_inputs(
             .collect();
         let total: usize = test_shape.iter().product::<usize>().max(1);
         // Non-zero f0 keeps the model's f0 differential (Pad data) valid.
-        let fill = if input.name() == "f0" { 440.0f32 } else { 0.0f32 };
+        let fill = if input.name() == "f0" {
+            440.0f32
+        } else {
+            0.0f32
+        };
         let data: Vec<f32> = vec![fill; total];
         let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
             .map_err(|e| format!("build benchmark tensor '{}' failed: {e}", input.name()))?;
@@ -2616,7 +2718,10 @@ fn timed_session_run(
             .lock()
             .map_err(|e| e.to_string())
             .and_then(|mut guard| {
-                guard.run(input_pairs).map(|_| ()).map_err(|e| e.to_string())
+                guard
+                    .run(input_pairs)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
         let _ = tx.send((t0.elapsed(), result));
     });
@@ -2655,13 +2760,22 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         .any(|provider| provider == "WebGpuExecutionProvider");
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
-    let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
 
     eprintln!("[benchmark] ========================================");
-    eprintln!("[benchmark] model={} frames={frames} audio_sec={audio_sec:.2}s runs={runs}",
-        onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
-    eprintln!("[benchmark] model_sr={} num_mels={} hop={} n_fft={}",
-        cfg.sampling_rate, cfg.num_mels, cfg.hop_size, cfg.n_fft);
+    eprintln!(
+        "[benchmark] model={} frames={frames} audio_sec={audio_sec:.2}s runs={runs}",
+        onnx_path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    );
+    eprintln!(
+        "[benchmark] model_sr={} num_mels={} hop={} n_fft={}",
+        cfg.sampling_rate, cfg.num_mels, cfg.hop_size, cfg.n_fft
+    );
     eprintln!("[benchmark] cpu_cores={cpu_cores} ort={ort_build_info}");
     eprintln!("[benchmark] providers={available_providers:?}");
     eprintln!("[benchmark] dml_adapters={dml_adapters:?}");
@@ -2677,18 +2791,27 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     {
         let _guard = crate::vocoder_ort_session::EpOverrideGuard::new("cpu".to_string());
         let t_session = std::time::Instant::now();
-        let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)?;
-        eprintln!("[benchmark] CPU session created in {}ms", t_session.elapsed().as_millis());
+        let (mut cpu_session, _) = crate::vocoder_ort_session::build_ort_session(
+            &onnx_path,
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        )?;
+        eprintln!(
+            "[benchmark] CPU session created in {}ms",
+            t_session.elapsed().as_millis()
+        );
 
         // Warmup
         let mel = vec![0.0f32; cfg.num_mels * frames];
         let f0 = vec![440.0f32; frames];
-        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+        let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
+            .unwrap();
         let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
         let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
 
         for _ in 0..runs {
-            let mt = Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice())).unwrap();
+            let mt =
+                Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
+                    .unwrap();
             let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
             let t = std::time::Instant::now();
             let _ = cpu_session.run(ort::inputs![mt, ft]).unwrap();
@@ -2698,8 +2821,11 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     cpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let cpu_median = cpu_times[cpu_times.len() / 2];
     let cpu_rt_factor = audio_sec / (cpu_median / 1000.0);
-    eprintln!("[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
-        t_cpu_total.elapsed().as_millis(), cpu_times);
+    eprintln!(
+        "[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
+        t_cpu_total.elapsed().as_millis(),
+        cpu_times
+    );
 
     // 2. Benchmark GPU (CoreML on macOS, WebGPU elsewhere) if available
     let mut gpu_median = None;
@@ -2713,10 +2839,18 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     // explicitly forces the GPU EP choice which is safe because it only
     // triggers EP init within the benchmark's controlled scope.
     if gpu_available {
-        let gpu_ep_choice = if cfg!(target_os = "macos") { "coreml" } else { "webgpu" };
+        let gpu_ep_choice = if cfg!(target_os = "macos") {
+            "coreml"
+        } else {
+            "webgpu"
+        };
         let gpu_session_res = {
-            let _guard = crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
-            crate::vocoder_ort_session::build_ort_session(&onnx_path, crate::vocoder_ort_session::OrtSessionRole::Vocoder)
+            let _guard =
+                crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
+            crate::vocoder_ort_session::build_ort_session(
+                &onnx_path,
+                crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+            )
         };
 
         if let Ok((gpu_session, ep)) = gpu_session_res {
@@ -2736,9 +2870,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     match timed_session_run(&gpu_session, inputs, timeout) {
                         Ok(Some(_)) => true,
                         Ok(None) => {
-                            gpu_error = Some(format!(
-                                "{ep} warmup inference timed out after {timeout:?}"
-                            ));
+                            gpu_error =
+                                Some(format!("{ep} warmup inference timed out after {timeout:?}"));
                             eprintln!("[benchmark] WARNING: {ep} warmup inference TIMED OUT");
                             if ep == "coreml" {
                                 crate::vocoder_ort_session::disable_coreml(
@@ -2765,9 +2898,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                         match timed_session_run(&gpu_session, inputs, timeout) {
                             Ok(Some(ms)) => gpu_times.push(ms),
                             Ok(None) => {
-                                gpu_error = Some(format!(
-                                    "{ep} inference timed out after {timeout:?}"
-                                ));
+                                gpu_error =
+                                    Some(format!("{ep} inference timed out after {timeout:?}"));
                                 eprintln!("[benchmark] WARNING: {ep} inference TIMED OUT");
                                 if ep == "coreml" {
                                     crate::vocoder_ort_session::disable_coreml(
@@ -2788,8 +2920,10 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                         let median = gpu_times[gpu_times.len() / 2];
                         gpu_median = Some(median);
                         gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                        eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
-                            audio_sec / (median / 1000.0));
+                        eprintln!(
+                            "[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
+                            audio_sec / (median / 1000.0)
+                        );
                     } else if gpu_error.is_none() {
                         gpu_error = Some(format!("{ep} did not complete any timed run"));
                     }
@@ -2801,7 +2935,9 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                 ));
             }
         } else {
-            let err = gpu_session_res.err().unwrap_or_else(|| "unknown error".to_string());
+            let err = gpu_session_res
+                .err()
+                .unwrap_or_else(|| "unknown error".to_string());
             gpu_error = Some(err.clone());
             eprintln!("[benchmark] GPU session creation FAILED: {err}");
         }
@@ -2823,27 +2959,29 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         };
 
         if let Ok((mut dml_session, ep)) = dml_session_res {
-            eprintln!("[benchmark] DirectML session created in {}ms (ep={ep})", dml_total.elapsed().as_millis());
+            eprintln!(
+                "[benchmark] DirectML session created in {}ms (ep={ep})",
+                dml_total.elapsed().as_millis()
+            );
             if ep == "directml" {
                 let mut dml_times = Vec::new();
                 let mel = vec![0.0f32; cfg.num_mels * frames];
                 let f0 = vec![440.0f32; frames];
 
                 // Warmup
-                let mt = Tensor::from_array(
-                    ([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()),
-                )
-                .unwrap();
+                let mt =
+                    Tensor::from_array(([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()))
+                        .unwrap();
                 let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice())).unwrap();
                 if dml_session.run(ort::inputs![mt, ft]).is_ok() {
                     for run_i in 0..runs {
-                        let mt = Tensor::from_array(
-                            ([1, cfg.num_mels, frames], mel.clone().into_boxed_slice()),
-                        )
+                        let mt = Tensor::from_array((
+                            [1, cfg.num_mels, frames],
+                            mel.clone().into_boxed_slice(),
+                        ))
                         .unwrap();
-                        let ft =
-                            Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
-                                .unwrap();
+                        let ft = Tensor::from_array(([1, frames], f0.clone().into_boxed_slice()))
+                            .unwrap();
                         let t = std::time::Instant::now();
                         let _ = dml_session.run(ort::inputs![mt, ft]).unwrap();
                         let ms = t.elapsed().as_secs_f64() * 1000.0;

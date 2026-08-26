@@ -1337,11 +1337,10 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         // 若此前后台预渲染因为音高分析未完成而跳过了一些 clip，
         // 现在缓存已经就绪，补触发一次后台渲染，避免用户等待进度结束后
         // 首次播放时仍要重新渲染。
-        if crate::commands::playback::AUTO_BG_RENDER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-            && crate::commands::playback::BG_RENDER_PITCH_PENDING.swap(
-                false,
-                std::sync::atomic::Ordering::AcqRel,
-            )
+        if crate::commands::playback::AUTO_BG_RENDER_ENABLED
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && crate::commands::playback::BG_RENDER_PITCH_PENDING
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             if let Some(app) = s.app_handle.as_ref() {
                 let _ = crate::commands::playback::request_background_render(app);
@@ -1530,18 +1529,16 @@ fn emit_clip_pitch_data_for_clip(
             // floor_mod 映射逐帧一致；纯 MIDI clip 无媒体 → 周期退化为窗口
             // 跨度）。不能用窗口比较做可见性过滤 —— split 产生的"环绕窗口"
             // （start > end）会把所有音符误判为越界而全部丢弃。
-            if let Some(placement) = crate::state::place_note_occurrence_in_loop(
-                clip,
-                note.start_sec,
-                note.end_sec,
-                fp,
-            ) {
+            if let Some(placement) =
+                crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
+            {
                 let note_value = note.note as f32;
                 let mut cycle_offset = 0usize;
                 while cycle_offset < clip_visible_frames {
                     let write_start = cycle_offset + placement.first_start_frame;
-                    let write_end = (cycle_offset + placement.first_start_frame + placement.len_frames)
-                        .min(clip_visible_frames);
+                    let write_end =
+                        (cycle_offset + placement.first_start_frame + placement.len_frames)
+                            .min(clip_visible_frames);
                     if write_start >= write_end {
                         break;
                     }
@@ -1714,6 +1711,9 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track_id = timeline.tracks[0].id.clone();
         timeline.clips.push(Clip {
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
             id: "clip-1".to_string(),
             track_id,
             name: "clip".to_string(),

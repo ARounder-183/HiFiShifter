@@ -6,11 +6,11 @@ mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
 pub(crate) mod commands;
-#[path = "audio/hifigan_tension.rs"]
-mod hifigan_tension;
+mod formant_cache;
 #[path = "audio/formant_morph.rs"]
 mod formant_morph;
-mod formant_cache;
+#[path = "audio/hifigan_tension.rs"]
+mod hifigan_tension;
 mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
@@ -24,8 +24,8 @@ mod pitch_config;
 mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
-mod renderer;
 mod recording;
+mod renderer;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
@@ -94,14 +94,14 @@ mod reaper_export;
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
-#[path = "audio/sstretch.rs"]
-mod sstretch;
 #[path = "audio/soundtouch.rs"]
 mod soundtouch;
+#[path = "audio/sstretch.rs"]
+mod sstretch;
 mod state;
-mod system_clipboard;
 #[path = "vocoder/streaming_world.rs"]
 mod streaming_world;
+mod system_clipboard;
 mod temp_manager;
 #[path = "audio/time_stretch.rs"]
 mod time_stretch;
@@ -281,6 +281,7 @@ pub fn run() {
             if let Some(cfg_dir) = state.config_dir.get() {
                 let ui = crate::config::load_ui_settings(cfg_dir);
                 crate::config::set_loop_new_clips_default(ui.loop_new_clips);
+                crate::config::set_sync_edits_across_takes(ui.sync_edits_across_takes);
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
@@ -428,6 +429,15 @@ pub fn run() {
             commands::apply_clip_linked_params,
             commands::set_clip_state,
             commands::set_clips_state_bulk,
+            commands::set_clip_active_take,
+            commands::cycle_clip_takes,
+            commands::pack_clips_into_takes,
+            commands::explode_clip_takes,
+            commands::duplicate_clip_take,
+            commands::remove_clip_take,
+            commands::rename_clip_take,
+            commands::add_clip_take_from_media,
+            commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,
             commands::replace_clip_source,
             commands::check_source_files_changed,

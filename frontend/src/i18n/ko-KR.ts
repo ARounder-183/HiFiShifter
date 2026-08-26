@@ -387,6 +387,17 @@ export const koKR = {
     aria_resize_panels: "패널 크기 조정",
     clip_mute: "음소거",
     clip_unmute: "음소거 해제",
+    clip_takes: "테이크",
+    clip_pack_into_takes: "클립을 테이크로 통합",
+    clip_take_add: "미디어에서 테이크 추가...",
+    clip_take_cycle_next: "다음 테이크로 전환",
+    clip_take_cycle_prev: "이전 테이크로 전환",
+    clip_take_duplicate: "현재 테이크 복제",
+    clip_take_remove: "테이크 삭제",
+    clip_take_explode: "테이크를 개별 클립으로 분리",
+    clip_take_rename: "테이크 이름 바꾸기",
+    clip_take_active_mark: "●",
+    clip_take_add_hint: "더 많은 테이크 관리 기능은 Reaper 멀티 테이크 가져오기와 함께 제공됩니다",
     fade_in: "페이드 인",
     fade_out: "페이드 아웃",
     show_secondary_param: "보조 파라미터 오버레이 표시",
@@ -598,6 +609,8 @@ export const koKR = {
     kb_clip_normalize: "클립 노멀라이즈",
     kb_clip_group: "클립 그룹화",
     kb_clip_ungroup: "클립 그룹 해제",
+    kb_clip_cycle_take: "테이크 순환",
+    kb_clip_cycle_take_prev: "테이크 역순 순환",
     qs_auto_normalize: "배치 시 자동 노멀라이즈",
     kb_group_pianoroll: "피아노 롤",
     kb_group_modifier: "수정 키",
@@ -710,6 +723,7 @@ export const koKR = {
 
     // 도구 모음 토글 버튼
     auto_crossfade: "자동 크로스페이드",
+    sync_edits_across_takes: "모든 테이크에 편집 동기화",
     ripple: "리플 편집 (자동 추적)",
     ripple_tooltip_off:
         "리플 편집 (자동 추적): 꺼짐. 왼쪽 클릭으로 켜기 (트랙 단위); 오른쪽 클릭으로 모드 선택.",
@@ -1037,6 +1051,7 @@ export const koKR = {
     import_dialog_title: "파일 가져오기",
     import_button: "가져오기",
     import_across_tracks: "트랙 간 추가",
+    import_as_takes: "테이크로 추가",
     // Overlapping clips context menu
     overlapping_clips_header: "겹치는 클립 ({n})",
 

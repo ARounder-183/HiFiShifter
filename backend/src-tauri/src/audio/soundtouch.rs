@@ -163,10 +163,13 @@ impl SoundTouchState {
         if in_frames == 0 {
             return Ok(());
         }
-        let ret =
-            unsafe { soundtouch_putSamples(self.handle, input_interleaved.as_ptr(), in_frames as c_uint) };
+        let ret = unsafe {
+            soundtouch_putSamples(self.handle, input_interleaved.as_ptr(), in_frames as c_uint)
+        };
         if ret == 0 {
-            return Err(SoundTouchError::ProcessingFailed("soundtouch_putSamples failed"));
+            return Err(SoundTouchError::ProcessingFailed(
+                "soundtouch_putSamples failed",
+            ));
         }
         Ok(())
     }
@@ -179,7 +182,11 @@ impl SoundTouchState {
         Ok(())
     }
 
-    fn drain_available(&mut self, out: &mut Vec<f32>, max_frames_per_read: usize) -> Result<(), SoundTouchError> {
+    fn drain_available(
+        &mut self,
+        out: &mut Vec<f32>,
+        max_frames_per_read: usize,
+    ) -> Result<(), SoundTouchError> {
         let mut temp = vec![0.0f32; max_frames_per_read.max(1) * self.channels];
         loop {
             let available = unsafe { soundtouch_numSamples(self.handle) as usize };
@@ -188,11 +195,8 @@ impl SoundTouchState {
             }
             let want_frames = available.min(max_frames_per_read.max(1));
             let got = unsafe {
-                soundtouch_receiveSamples(
-                    self.handle,
-                    temp.as_mut_ptr(),
-                    want_frames as c_uint,
-                ) as usize
+                soundtouch_receiveSamples(self.handle, temp.as_mut_ptr(), want_frames as c_uint)
+                    as usize
             };
             if got == 0 {
                 break;
@@ -223,8 +227,8 @@ unsafe impl Send for RealtimeStretcher {}
 
 impl RealtimeStretcher {
     pub fn new(sample_rate: u32, channels: usize, time_ratio: f64) -> Result<Self, String> {
-        let inner = SoundTouchState::new(sample_rate, channels, time_ratio)
-            .map_err(|e| e.to_string())?;
+        let inner =
+            SoundTouchState::new(sample_rate, channels, time_ratio).map_err(|e| e.to_string())?;
         if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
             if let Some(version) = version_string() {
                 eprintln!(
@@ -311,9 +315,11 @@ pub fn try_time_stretch_interleaved_offline(
         ));
     }
 
-    let mut state = SoundTouchState::new(sample_rate, channels, time_ratio)
+    let mut state =
+        SoundTouchState::new(sample_rate, channels, time_ratio).map_err(|e| e.to_string())?;
+    state
+        .put_samples(input_interleaved)
         .map_err(|e| e.to_string())?;
-    state.put_samples(input_interleaved).map_err(|e| e.to_string())?;
     state.flush().map_err(|e| e.to_string())?;
 
     let mut out = Vec::with_capacity(out_frames_hint.max(1) * channels);

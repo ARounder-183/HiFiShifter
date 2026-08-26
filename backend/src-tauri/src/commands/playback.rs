@@ -948,8 +948,9 @@ fn render_single_clip(
         (clip.source_start_sec * in_rate as f64).round() as i64
     };
     let segment: Vec<f32> = if loop_mode {
-        let out_source_frames =
-            ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0)) as usize;
+        let out_source_frames = ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64)
+            .ceil()
+            .max(2.0)) as usize;
         crate::mixdown::build_loop_tiled_segment(
             &pcm,
             in_channels_usize,
@@ -1004,9 +1005,9 @@ fn render_single_clip(
         // 同一条目互相投毒（get_or_compute 不校验长度/内容）。
         let (key_start_sec, key_end_sec) = if loop_mode {
             let total_frames = ((total_sec * in_rate as f64).round() as i64).max(1);
-            let consumed_frames =
-                ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0))
-                    as i64;
+            let consumed_frames = ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64)
+                .ceil()
+                .max(2.0)) as i64;
             let start_frame = anchor_frame.rem_euclid(total_frames);
             (
                 start_frame as f64 / in_rate as f64,

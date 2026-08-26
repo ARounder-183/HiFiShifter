@@ -238,24 +238,88 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],
                 playbackRate: args[8],
-                reversed: args[9],
-                loopEnabled: args[10],
-                snapOffsetSec: args[11],
-                fadeInSec: args[12],
-                fadeOutSec: args[13],
-                fadeInCurve: args[14],
-                fadeOutCurve: args[15],
-                autoFadeInSec: args[16],
-                autoFadeOutSec: args[17],
-                color: args[18],
-                formantMorph: args[19],
-                checkpoint: args[20],
+                clipPlaybackRate: args[9],
+                reversed: args[10],
+                loopEnabled: args[11],
+                snapOffsetSec: args[12],
+                fadeInSec: args[13],
+                fadeOutSec: args[14],
+                fadeInCurve: args[15],
+                fadeOutCurve: args[16],
+                autoFadeInSec: args[17],
+                autoFadeOutSec: args[18],
+                color: args[19],
+                formantMorph: args[20],
+                checkpoint: args[21],
             };
 
         case "set_clips_state_bulk":
             return {
                 updates: args[0],
                 checkpoint: args[1],
+            };
+
+        case "set_clip_active_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "cycle_clip_takes":
+            return {
+                clipIds: args[0],
+                direction: args[1],
+                checkpoint: args[2],
+            };
+
+        case "pack_clips_into_takes":
+            return {
+                clipIds: args[0],
+                checkpoint: args[1],
+            };
+
+        case "explode_clip_takes":
+            return {
+                clipId: args[0],
+                checkpoint: args[1],
+            };
+
+        case "duplicate_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "remove_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "rename_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "add_clip_take_from_media":
+            return {
+                clipId: args[0],
+                sourcePath: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "import_media_files_as_takes":
+            return {
+                paths: args[0],
+                trackId: args[1],
+                startSec: args[2],
             };
 
         case "duplicate_clips_bulk":

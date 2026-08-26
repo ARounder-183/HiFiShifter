@@ -298,6 +298,17 @@ export const zhTW = {
     aria_resize_panels: "調整面板大小",
     clip_mute: "靜音",
     clip_unmute: "取消靜音",
+    clip_takes: "Take",
+    clip_pack_into_takes: "跨軌道聚合為 Take",
+    clip_take_add: "從媒體檔案新增 Take...",
+    clip_take_cycle_next: "循環切換到下一個 Take",
+    clip_take_cycle_prev: "循環切換到上一個 Take",
+    clip_take_duplicate: "複製目前 Take",
+    clip_take_remove: "刪除 Take",
+    clip_take_explode: "將 Take 展開為獨立 Clip",
+    clip_take_rename: "重新命名 Take",
+    clip_take_active_mark: "●",
+    clip_take_add_hint: "更多 Take 管理功能將隨 Reaper 多 Take 匯入逐步開放",
     fade_in: "淡入",
     fade_out: "淡出",
     show_secondary_param: "顯示副參數疊加曲線",
@@ -508,6 +519,8 @@ export const zhTW = {
     kb_clip_normalize: "正規化音訊片段",
     kb_clip_group: "編組音訊片段",
     kb_clip_ungroup: "解組音訊片段",
+    kb_clip_cycle_take: "循環切換 Take",
+    kb_clip_cycle_take_prev: "反向循環切換 Take",
     qs_auto_normalize: "放置時自動正規化",
     kb_group_pianoroll: "鋼琴捲簾",
     kb_group_modifier: "修飾鍵",
@@ -618,6 +631,7 @@ export const zhTW = {
 
     // 工具列切換按鈕
     auto_crossfade: "自動交叉淡化",
+    sync_edits_across_takes: "同步編輯所有 Take",
     ripple: "波紋編輯（自動跟進）",
     ripple_tooltip_off: "波紋編輯（自動跟進）：關閉。左鍵開啟（按軌道跟進）；右鍵選擇模式。",
     ripple_tooltip_track:
@@ -938,6 +952,7 @@ export const zhTW = {
     import_dialog_title: "匯入檔案",
     import_button: "匯入",
     import_across_tracks: "跨軌道新增",
+    import_as_takes: "作為 Take 新增",
     // 重疊片段右鍵選單
     overlapping_clips_header: "重疊的音訊片段 ({n})",
 

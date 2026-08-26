@@ -74,6 +74,8 @@ export interface UiSettings {
     autoReloadModifiedMedia?: boolean;
     /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
     loopNewClips?: boolean;
+    /** 同步编辑所有 Take：内容级编辑同步到同一 Clip 的全部 Take。 */
+    syncEditsAcrossTakes?: boolean;
     customScalePresets?: Array<{
         id: string;
         name: string;

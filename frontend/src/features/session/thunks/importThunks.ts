@@ -144,9 +144,7 @@ export const importAudioFromPath = createAsyncThunk(
                 missing_files?: string[];
             };
             return rejectWithValue(
-                failure.error?.message ??
-                    failure.missing_files?.[0] ??
-                    "import_audio_item_failed",
+                failure.error?.message ?? failure.missing_files?.[0] ?? "import_audio_item_failed",
             );
         }
         const beforeClipIds = new Set(
@@ -404,16 +402,17 @@ export const importAudioFileAtPosition = createAsyncThunk(
 );
 
 /**
- * 多文件导入，支持两种模式:
+ * 多文件导入，支持三种模式:
  * - "across-time": 在同一轨道依次排列（按顺序首尾相连）
  * - "across-tracks": 每个文件分配到不同的新轨道，起始位置相同
+ * - "as-takes": 所有文件合并为一个 Clip 的多个 Take，长度取最长媒体
  */
 export const importMultipleAudioAtPosition = createAsyncThunk(
     "session/importMultipleAudioAtPosition",
     async (
         payload: {
             audioPaths: string[];
-            mode: "across-time" | "across-tracks";
+            mode: "across-time" | "across-tracks" | "as-takes";
             trackId?: string | null;
             startSec?: number;
         },
@@ -446,7 +445,20 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
             let firstImported: unknown = null;
             const accumulatedNewClipIds: string[] = [];
 
-            if (mode === "across-time") {
+            if (mode === "as-takes") {
+                const imported = await webApi.importMediaFilesAsTakes({
+                    paths: audioPaths,
+                    trackId: payload.trackId,
+                    startSec,
+                });
+                if ((imported as { ok?: boolean }).ok) {
+                    lastImported = imported;
+                    const result = imported as { clips?: Array<{ id?: string }> };
+                    for (const c of result.clips ?? []) {
+                        if (c.id) accumulatedNewClipIds.push(c.id);
+                    }
+                }
+            } else if (mode === "across-time") {
                 // Import files sequentially on the same track
                 let cursor = startSec;
                 let targetTrackId: string | undefined;

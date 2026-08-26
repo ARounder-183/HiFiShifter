@@ -83,8 +83,10 @@ impl SynthConfig {
 ///
 /// 打开工程时若文件版本高于该值，必须先经用户确认后才能尝试加载。
 ///
-/// v4：`Clip.loop_enabled`（Loop / 循环源属性）。v3 及更早的工程不含该字段，
-/// 打开时按"为新的音频块启用循环"设置迁移（见 open_project）。
+/// v4：Clip Take 结构（`takes` + `active_take_id`）、`Clip.loop_enabled`
+/// （Loop / 循环源属性）与 `Clip.snap_offset_sec`。v3 及更早的扁平 Clip
+/// 打开时迁移为单 Take，并按"为新的音频块启用循环"设置补齐 Loop
+/// （见 open_project）。
 pub const CURRENT_PROJECT_FILE_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,16 +193,20 @@ pub fn read_project_file_version(bytes: &[u8]) -> Option<u32> {
 pub fn load_project_file(bytes: &[u8]) -> Result<ProjectFile, String> {
     // 先尝试 MessagePack（新格式）
     if let Ok(mut pf) = rmp_serde::from_slice::<ProjectFile>(bytes) {
+        pf.timeline.normalize_clip_takes();
         pf.timeline.migrate_legacy_common_param_curves();
         pf.timeline.restore_derived_clip_fields();
+        pf.timeline.sync_clip_takes_from_flat();
         return Ok(pf);
     }
     // fallback：JSON（兼容旧工程文件）
     serde_json::from_slice(bytes)
         .map_err(|e| format!("无法解析工程文件: {}", e))
         .map(|mut pf: ProjectFile| {
+            pf.timeline.normalize_clip_takes();
             pf.timeline.migrate_legacy_common_param_curves();
             pf.timeline.restore_derived_clip_fields();
+            pf.timeline.sync_clip_takes_from_flat();
             pf
         })
 }
@@ -284,21 +290,34 @@ fn compute_relative_source_path(source_path: &Path, project_path: &Path) -> Opti
 }
 
 pub fn prepare_source_paths_for_save(mut tl: TimelineState, project_path: &Path) -> TimelineState {
+    tl.sync_clip_takes_from_flat();
     for c in tl.clips.iter_mut() {
-        if let Some(sp) = c.source_path.clone() {
-            let trimmed = sp.trim();
-            if trimmed.is_empty() {
-                c.source_path_relative = None;
-            } else {
-                let p = PathBuf::from(trimmed);
-                if p.is_absolute() {
-                    c.source_path_relative = compute_relative_source_path(&p, project_path);
+        for take in &mut c.takes {
+            if let Some(sp) = take.source_path.clone() {
+                let trimmed = sp.trim();
+                if trimmed.is_empty() {
+                    take.source_path_relative = None;
                 } else {
-                    c.source_path_relative = Some(trimmed.replace('\\', "/"));
+                    let p = PathBuf::from(trimmed);
+                    if p.is_absolute() {
+                        take.source_path_relative = compute_relative_source_path(&p, project_path);
+                    } else {
+                        take.source_path_relative = Some(trimmed.replace('\\', "/"));
+                    }
                 }
+            } else {
+                take.source_path_relative = None;
             }
-        } else {
-            c.source_path_relative = None;
+        }
+        // active take 的内存投影与磁盘数据保持一致。
+        let active_take = c
+            .active_take_id
+            .as_deref()
+            .and_then(|id| c.takes.iter().find(|t| t.id == id))
+            .or_else(|| c.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(c);
         }
     }
     tl
@@ -325,18 +344,30 @@ pub fn prepare_timeline_for_project_save(
     mut tl: TimelineState,
     project_path: &Path,
 ) -> TimelineState {
+    tl.sync_clip_takes_from_flat();
     for clip in &mut tl.clips {
-        clip.waveform_preview = None;
-        // 保证保存的工程中携带用于后续哈希匹配的内容指纹。
-        // 已持久化或运行时刚更新的值保持不变；旧工程没有指纹时按当前
-        // 磁盘文件补算一次，文件缺失则继续保持 None。
-        if clip.source_file_fingerprint.is_none() {
-            if let Some(source_path) = clip.source_path.as_deref().map(str::trim) {
-                if !source_path.is_empty() {
-                    clip.source_file_fingerprint =
-                        crate::audio_utils::compute_file_fingerprint(Path::new(source_path));
+        for take in &mut clip.takes {
+            take.waveform_preview = None;
+            // 保证保存的工程中携带用于后续哈希匹配的内容指纹。
+            // 已持久化或运行时刚更新的值保持不变；旧工程没有指纹时按当前
+            // 磁盘文件补算一次，文件缺失则继续保持 None。
+            if take.source_file_fingerprint.is_none() {
+                if let Some(source_path) = take.source_path.as_deref().map(str::trim) {
+                    if !source_path.is_empty() {
+                        take.source_file_fingerprint =
+                            crate::audio_utils::compute_file_fingerprint(Path::new(source_path));
+                    }
                 }
             }
+        }
+        let active_take = clip
+            .active_take_id
+            .as_deref()
+            .and_then(|id| clip.takes.iter().find(|t| t.id == id))
+            .or_else(|| clip.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(clip);
         }
         // 注意：duration_sec / duration_frames / source_sample_rate 是基础媒体信息，
         // 始终原样序列化（不省略），以免旧版本读取时缺少必需字段。
@@ -402,68 +433,80 @@ pub fn resolve_source_paths_on_open(
     let mut missing_files = std::collections::BTreeSet::new();
 
     for c in tl.clips.iter_mut() {
-        let source_path_raw = c
-            .source_path
-            .as_ref()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let source_path_relative_raw = c
-            .source_path_relative
-            .as_ref()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
+        for take in &mut c.takes {
+            let source_path_raw = take
+                .source_path
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+            let source_path_relative_raw = take
+                .source_path_relative
+                .as_ref()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
 
-        let mut resolved_absolute: Option<String> = None;
-        let mut missing_display_abs: Option<String> = None;
+            let mut resolved_absolute: Option<String> = None;
+            let mut missing_display_abs: Option<String> = None;
 
-        if let Some(sp) = source_path_raw.as_ref() {
-            let p = PathBuf::from(sp);
-            if p.is_absolute() {
-                if p.exists() {
-                    resolved_absolute = Some(p.to_string_lossy().to_string());
-                } else {
-                    missing_display_abs = Some(p.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        if resolved_absolute.is_none() {
-            if let Some(rel) = source_path_relative_raw.as_ref() {
-                let joined = dir.join(rel);
-                if joined.exists() {
-                    resolved_absolute = Some(joined.to_string_lossy().to_string());
-                } else if missing_display_abs.is_none() {
-                    missing_display_abs = Some(joined.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        if resolved_absolute.is_none() {
             if let Some(sp) = source_path_raw.as_ref() {
                 let p = PathBuf::from(sp);
-                if !p.is_absolute() {
-                    let joined = dir.join(p);
+                if p.is_absolute() {
+                    if p.exists() {
+                        resolved_absolute = Some(p.to_string_lossy().to_string());
+                    } else {
+                        missing_display_abs = Some(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+
+            if resolved_absolute.is_none() {
+                if let Some(rel) = source_path_relative_raw.as_ref() {
+                    let joined = dir.join(rel);
                     if joined.exists() {
                         resolved_absolute = Some(joined.to_string_lossy().to_string());
-                        c.source_path_relative = Some(sp.clone());
                     } else if missing_display_abs.is_none() {
                         missing_display_abs = Some(joined.to_string_lossy().to_string());
                     }
                 }
             }
-        }
 
-        if let Some(found) = resolved_absolute {
-            c.source_path = Some(found);
-            if c.source_path_relative.is_none() {
-                c.source_path_relative = source_path_relative_raw;
+            if resolved_absolute.is_none() {
+                if let Some(sp) = source_path_raw.as_ref() {
+                    let p = PathBuf::from(sp);
+                    if !p.is_absolute() {
+                        let joined = dir.join(p);
+                        if joined.exists() {
+                            resolved_absolute = Some(joined.to_string_lossy().to_string());
+                            take.source_path_relative = Some(sp.clone());
+                        } else if missing_display_abs.is_none() {
+                            missing_display_abs = Some(joined.to_string_lossy().to_string());
+                        }
+                    }
+                }
             }
-        } else if let Some(missing_abs) = missing_display_abs {
-            c.source_path = Some(missing_abs.clone());
-            if c.source_path_relative.is_none() {
-                c.source_path_relative = source_path_relative_raw;
+
+            if let Some(found) = resolved_absolute {
+                take.source_path = Some(found);
+                if take.source_path_relative.is_none() {
+                    take.source_path_relative = source_path_relative_raw;
+                }
+            } else if let Some(missing_abs) = missing_display_abs {
+                take.source_path = Some(missing_abs.clone());
+                if take.source_path_relative.is_none() {
+                    take.source_path_relative = source_path_relative_raw;
+                }
+                missing_files.insert(missing_abs);
             }
-            missing_files.insert(missing_abs);
+        }
+        // 把 active take 的解析结果物化到内存投影。
+        let active_take = c
+            .active_take_id
+            .as_deref()
+            .and_then(|id| c.takes.iter().find(|t| t.id == id))
+            .or_else(|| c.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(c);
         }
     }
 
@@ -572,8 +615,7 @@ mod tests {
             );
         }
 
-        // Track / Clip / TimelineState 中属于旧版本必需或基础语义的字段
-        // 即使取默认值也必须存在（旧版本反序列化要求字段必须携带）。
+        // Track / Clip 容器 / TimelineState 的基础语义字段必须始终出现。
         for key in [
             "\"parent_id\"",
             "\"muted\"",
@@ -581,18 +623,6 @@ mod tests {
             "\"volume\"",
             "\"compose_enabled\"",
             "\"pitch_analysis_algo\"",
-            "\"source_path\"",
-            "\"duration_sec\"",
-            "\"duration_frames\"",
-            "\"source_sample_rate\"",
-            "\"waveform_preview\"",
-            "\"pitch_range\"",
-            "\"gain\"",
-            "\"source_start_sec\"",
-            "\"source_end_sec\"",
-            "\"playback_rate\"",
-            "\"reversed\"",
-            "\"loop_enabled\"",
             "\"fade_in_sec\"",
             "\"fade_out_sec\"",
             "\"fade_in_curve\"",
@@ -601,9 +631,24 @@ mod tests {
             "\"selected_clip_id\"",
             "\"playhead_sec\"",
         ] {
+            assert!(text.contains(key), "field {key} must always be serialized");
+        }
+
+        // v4 起媒体字段位于 ClipTake 中；Clip 顶层不再平铺源媒体字段。
+        for key in [
+            "\"takes\"",
+            "\"active_take_id\"",
+            "\"source_path\"",
+            "\"gain\"",
+            "\"source_start_sec\"",
+            "\"source_end_sec\"",
+            "\"playback_rate\"",
+            "\"reversed\"",
+            "\"loop_enabled\"",
+        ] {
             assert!(
                 text.contains(key),
-                "field {key} must always be present to stay readable by older app versions"
+                "take field {key} must be serialized inside takes"
             );
         }
     }
@@ -615,8 +660,8 @@ mod tests {
         let pf = project_file_with_clip(prepared);
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         assert!(
-            bytes.len() < 2048,
-            "cache/default-only project should serialize to <2KB, got {}",
+            bytes.len() < 4096,
+            "cache/default-only project should serialize to <4KB, got {}",
             bytes.len()
         );
     }
@@ -771,5 +816,106 @@ mod tests {
             loaded.synth_config.default_pipeline,
             Some(SynthPipelineKind::WorldVocoder)
         );
+
+        let take = &clip.takes[0];
+        assert_eq!(take.id, clip.active_take_id.as_deref().unwrap());
+        assert!((take.gain - 0.75).abs() < f32::EPSILON);
+        assert_eq!(take.source_start_sec, 0.25);
+        assert_eq!(take.source_file_fingerprint, Some(0x1122334455667788));
+    }
+
+    #[test]
+    fn legacy_flat_clip_json_migrates_to_single_take() {
+        let value = serde_json::json!({
+            "version": 3,
+            "name": "legacy",
+            "timeline": {
+                "tracks": [{
+                    "id": "track_1",
+                    "name": "Track",
+                    "order": 0,
+                    "muted": false,
+                    "solo": false,
+                    "volume": 1.0,
+                    "compose_enabled": false,
+                    "pitch_analysis_algo": "nsf_hifigan_onnx",
+                    "color": "#4a8fd1"
+                }],
+                "clips": [{
+                    "id": "clip_1",
+                    "track_id": "track_1",
+                    "name": "Legacy Clip",
+                    "start_sec": 0.0,
+                    "length_sec": 2.0,
+                    "color": "blue",
+                    "source_path": "C:/audio/a.wav",
+                    "duration_sec": 10.0,
+                    "duration_frames": 480000,
+                    "source_sample_rate": 48000,
+                    "waveform_preview": null,
+                    "pitch_range": null,
+                    "gain": 0.5,
+                    "muted": false,
+                    "source_start_sec": 1.0,
+                    "source_end_sec": 0.0,
+                    "playback_rate": 1.0,
+                    "reversed": false,
+                    "fade_in_sec": 0.0,
+                    "fade_out_sec": 0.0,
+                    "fade_in_curve": "sine",
+                    "fade_out_curve": "sine"
+                }],
+                "bpm": 120.0,
+                "playhead_sec": 0.0,
+                "project_sec": 32.0,
+                "next_track_order": 1
+            }
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let pf = load_project_file(&bytes).expect("legacy JSON should load");
+
+        let clip = &pf.timeline.clips[0];
+        assert_eq!(clip.takes.len(), 1);
+        let take = &clip.takes[0];
+        assert_eq!(clip.active_take_id.as_deref(), Some(take.id.as_str()));
+        assert_eq!(take.source_path.as_deref(), Some("C:/audio/a.wav"));
+        assert!((take.gain - 0.5).abs() < f32::EPSILON);
+        assert_eq!(take.source_start_sec, 1.0);
+        assert_eq!(
+            take.source_end_sec, 0.0,
+            "v3 哨兵保留给 open_project 版本迁移"
+        );
+        assert_eq!(clip.source_path.as_deref(), Some("C:/audio/a.wav"));
+        assert!((clip.gain - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn v4_flat_projection_is_not_serialized_at_clip_level() {
+        let tl = prepare_timeline_for_project_save(
+            timeline_with_clip_and_zero_curves(),
+            Path::new("C:/proj/test.hshp"),
+        );
+        let pf = project_file_with_clip(tl);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let clip = &value["timeline"]["clips"][0];
+        assert!(clip.get("takes").is_some(), "takes must be serialized");
+        for flat in [
+            "source_path",
+            "duration_sec",
+            "gain",
+            "source_start_sec",
+            "source_end_sec",
+            "playback_rate",
+            "reversed",
+            "loop_enabled",
+            "midi_note_data",
+        ] {
+            assert!(
+                clip.get(flat).is_none(),
+                "Clip 顶层不应再序列化 {flat}（{text}）"
+            );
+        }
     }
 }

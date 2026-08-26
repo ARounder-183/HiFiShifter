@@ -356,9 +356,7 @@ struct FormantDetection {
 /// 参数：`bin_hz` = sample_rate / fft_size。
 fn detect_f1_f2(envelope: &[f32], bin_hz: f32) -> FormantDetection {
     let half = envelope.len();
-    let bin_of = |hz: f32| -> usize {
-        ((hz / bin_hz) as usize).clamp(1, half.saturating_sub(2))
-    };
+    let bin_of = |hz: f32| -> usize { ((hz / bin_hz) as usize).clamp(1, half.saturating_sub(2)) };
 
     let f1_lo = bin_of(F1_SEARCH_LO_HZ);
     let f1_hi = bin_of(F1_SEARCH_HI_HZ);
@@ -635,7 +633,10 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .sum::<f32>()
             / input.len() as f32;
-        assert!(diff > 1.0e-3, "audible difference expected, got diff={diff}");
+        assert!(
+            diff > 1.0e-3,
+            "audible difference expected, got diff={diff}"
+        );
     }
 
     #[test]

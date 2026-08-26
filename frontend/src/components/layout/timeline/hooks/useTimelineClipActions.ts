@@ -27,6 +27,7 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
     replaceClipSourceRemote,
+    renameClipTakeRemote,
     splitClipsAtRemote,
 } from "../../../../features/session/sessionSlice";
 import {
@@ -199,9 +200,9 @@ export function useTimelineClipActions(
         (state: RootState) => state.session.multiSelectedClipIds,
     );
     const selectedClipId = useAppSelector((state: RootState) => state.session.selectedClipId);
-    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<
-        string | null
-    >(null);
+    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<string | null>(
+        null,
+    );
     const updateRangeSelectAnchor = React.useCallback(
         (clipId: string | null) => {
             lastClickedClipIdRef.current = clipId;
@@ -752,7 +753,7 @@ export function useTimelineClipActions(
                 !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
                 Boolean(
                     nextPrimaryClip &&
-                        nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
+                    nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
                 );
 
             void dispatch(
@@ -833,6 +834,15 @@ export function useTimelineClipActions(
 
     const commitTrackLaneRename = React.useCallback(
         (clipId: string, newName: string) => {
+            const clip = sessionRef.current?.clips.find((entry) => entry.id === clipId);
+            const takes = clip?.takes ?? [];
+            const activeTake = takes.find((entry) => entry.id === clip?.activeTakeId) ?? takes[0];
+            if (activeTake) {
+                void dispatch(
+                    renameClipTakeRemote({ clipId, takeId: activeTake.id, name: newName }),
+                );
+                return;
+            }
             void dispatch(
                 setClipStateRemote({
                     clipId,

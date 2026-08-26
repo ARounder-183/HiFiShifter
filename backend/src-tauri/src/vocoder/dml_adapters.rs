@@ -64,8 +64,8 @@ pub fn enumerate_dml_adapters() -> DmlAdapterList {
 
 fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
     // Create DXGI factory — this is always available on Windows 8+
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
-        .map_err(|e| format!("CreateDXGIFactory1 failed: {e}"))?;
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1 failed: {e}"))?;
 
     let mut adapters = Vec::new();
     let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
@@ -92,7 +92,8 @@ fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
                     adapters.push(DmlAdapterInfo {
                         device_id: index,
                         name,
-                        dedicated_video_memory_mb: (desc.DedicatedVideoMemory as u64) / (1024 * 1024),
+                        dedicated_video_memory_mb: (desc.DedicatedVideoMemory as u64)
+                            / (1024 * 1024),
                         shared_system_memory_mb: (desc.SharedSystemMemory as u64) / (1024 * 1024),
                         vendor_id: desc.VendorId,
                         device_id_pci: desc.DeviceId,

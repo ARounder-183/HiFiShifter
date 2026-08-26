@@ -134,12 +134,7 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
 }
 
 pub fn infer_pitch_edit_mono_batch(
-    clips: &[(
-        &[f32],
-        u32,
-        f64,
-        usize,
-    )],
+    clips: &[(&[f32], u32, f64, usize)],
     _midi_at_time: impl Fn(usize, f64) -> f64,
     _formant_shift_at_time: impl Fn(usize, f64) -> f32,
 ) -> Result<Vec<Vec<f32>>, String> {

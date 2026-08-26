@@ -90,12 +90,7 @@ fn clip_source_bounds_frames(clip: &Clip, src_total_frames: usize, sr: u32) -> (
     // - Loop：窗口字段只承载锚点相位，边界值不参与回绕数学（此处取值
     //   仅供"窗口退化跳过"守卫之外的通用路径，Loop 分支不会被其截断）。
     let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
-    source_bounds_frames(
-        win_start.max(0.0),
-        win_end,
-        src_total_frames,
-        sr,
-    )
+    source_bounds_frames(win_start.max(0.0), win_end, src_total_frames, sr)
 }
 
 pub(crate) fn make_stretch_key(
@@ -417,20 +412,19 @@ pub(crate) fn build_snapshot(
         let repeat = clip.loop_enabled;
 
         // Loop 模式下换算锚点到指定缓冲长度的辅助闭包（拉伸域按 1/rate 缩放）。
-        let rescale_anchor =
-            |buf_frames: usize, rate_scale: f64| -> Option<i64> {
-                let rate_scale = if rate_scale.is_finite() && rate_scale > 1e-6 {
-                    rate_scale
-                } else {
-                    1.0
-                };
-                let raw = if clip.reversed {
-                    (rev_anchor_sec * out_rate as f64 / rate_scale).round() as i64 - 1
-                } else {
-                    (clip.source_start_sec * out_rate as f64 / rate_scale).round() as i64
-                };
-                Some(raw.rem_euclid(buf_frames.max(1) as i64))
+        let rescale_anchor = |buf_frames: usize, rate_scale: f64| -> Option<i64> {
+            let rate_scale = if rate_scale.is_finite() && rate_scale > 1e-6 {
+                rate_scale
+            } else {
+                1.0
             };
+            let raw = if clip.reversed {
+                (rev_anchor_sec * out_rate as f64 / rate_scale).round() as i64 - 1
+            } else {
+                (clip.source_start_sec * out_rate as f64 / rate_scale).round() as i64
+            };
+            Some(raw.rem_euclid(buf_frames.max(1) as i64))
+        };
 
         // Leading silence（前导静音）按**消费方向**取值（与离线渲染一致）：
         // - 正放：窗口起点越过媒体起点（ss<0）→ 前导静音；
@@ -474,7 +468,9 @@ pub(crate) fn build_snapshot(
             let slice_end = if clip.loop_enabled {
                 src_render.pcm.len()
             } else {
-                (src_end as usize).saturating_mul(2).min(src_render.pcm.len())
+                (src_end as usize)
+                    .saturating_mul(2)
+                    .min(src_render.pcm.len())
             };
             let mut clip_pcm = src_render.pcm[slice_start..slice_end].to_vec();
             if clip.reversed && !clip.loop_enabled {
@@ -508,10 +504,7 @@ pub(crate) fn build_snapshot(
                 params,
             );
             match crate::formant_cache::get_or_compute_formant_audio(
-                key,
-                &clip_pcm,
-                out_rate,
-                params,
+                key, &clip_pcm, out_rate, params,
             ) {
                 Ok(entry) => {
                     crate::formant_cache::formant_debug_log(format!(
@@ -534,8 +527,9 @@ pub(crate) fn build_snapshot(
                         loop_anchor_frame = rescale_anchor(src_render.frames, 1.0);
                     }
                     if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {
-                        let target_frames =
-                            ((src_render.frames as f64) / playback_rate).round().max(2.0) as usize;
+                        let target_frames = ((src_render.frames as f64) / playback_rate)
+                            .round()
+                            .max(2.0) as usize;
                         let stretched = crate::time_stretch::time_stretch_interleaved(
                             src_render.pcm.as_slice(),
                             2,
@@ -552,8 +546,7 @@ pub(crate) fn build_snapshot(
                         playback_rate_render = 1.0;
                         if clip.loop_enabled {
                             // 拉伸后的缓冲覆盖 D/rate 秒：锚点按 1/rate 缩放。
-                            loop_anchor_frame =
-                                rescale_anchor(src_render.frames, playback_rate);
+                            loop_anchor_frame = rescale_anchor(src_render.frames, playback_rate);
                         }
                     }
                 }
@@ -578,7 +571,14 @@ pub(crate) fn build_snapshot(
                     crate::state::clip_effective_source_end_sec(clip),
                 )
             };
-            let key = make_stretch_key(path, out_rate, stretch_algorithm, key_start, key_end, playback_rate);
+            let key = make_stretch_key(
+                path,
+                out_rate,
+                stretch_algorithm,
+                key_start,
+                key_end,
+                playback_rate,
+            );
             if let Ok(m) = stretch_cache.lock() {
                 if let Some(stretched) = m.get(&key) {
                     src_render = stretched.clone();
@@ -662,7 +662,10 @@ pub(crate) fn build_snapshot(
             let needs_pitch_edit =
                 crate::pitch_editing::does_clip_need_processor_render(timeline, clip, start_sec);
 
-            eprintln!("[snapshot] clip_id={} needs_pitch_edit={}", clip.id, needs_pitch_edit);
+            eprintln!(
+                "[snapshot] clip_id={} needs_pitch_edit={}",
+                clip.id, needs_pitch_edit
+            );
 
             if needs_pitch_edit {
                 // 优先从 pending_rendered_keys 查找渲染线程传递的 cache_key
@@ -804,21 +807,16 @@ pub(crate) fn build_snapshot(
                         // 【优雅降级】：尝试获取该 Clip 最近一次成功的渲染结果作为过渡垫音
                         let mut fallback_pcm = None;
                         let mut fallback_breath = None;
-                        let needs_breath = processor_params.map_or(false, |(
-                            _,
-                            _,
-                            _,
-                            renderer_id,
-                            entry,
-                            _,
-                            _,
-                        )| {
-                            renderer_id == "nsf_hifigan_onnx"
-                                && crate::pitch_editing::extra_param_enabled(
-                                    &entry.extra_params,
-                                    "breath_enabled",
-                                )
-                        });
+                        let needs_breath = processor_params.map_or(
+                            false,
+                            |(_, _, _, renderer_id, entry, _, _)| {
+                                renderer_id == "nsf_hifigan_onnx"
+                                    && crate::pitch_editing::extra_param_enabled(
+                                        &entry.extra_params,
+                                        "breath_enabled",
+                                    )
+                            },
+                        );
 
                         let needs_tension = processor_params.map_or(
                             false,
@@ -920,7 +918,10 @@ pub(crate) fn build_snapshot(
             reversed: if clip.loop_enabled {
                 clip.reversed
             } else {
-                formant_params.is_some().then_some(false).unwrap_or(clip.reversed)
+                formant_params
+                    .is_some()
+                    .then_some(false)
+                    .unwrap_or(clip.reversed)
             },
             playback_rate: playback_rate_render,
             local_src_offset_frames,

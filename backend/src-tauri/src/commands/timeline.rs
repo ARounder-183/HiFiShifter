@@ -224,8 +224,7 @@ pub(super) fn import_audio_item(
     };
 
     let source_meta = std::path::Path::new(&source_path);
-    if source_meta.exists()
-        && crate::audio_utils::try_read_audio_header_only(source_meta).is_none()
+    if source_meta.exists() && crate::audio_utils::try_read_audio_header_only(source_meta).is_none()
     {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut payload = tl.to_payload();
@@ -720,6 +719,7 @@ pub(super) fn set_clip_state(
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
     playback_rate: Option<f32>,
+    clip_playback_rate: Option<f32>,
     reversed: Option<bool>,
     loop_enabled: Option<bool>,
     snap_offset_sec: Option<f64>,
@@ -752,6 +752,7 @@ pub(super) fn set_clip_state(
             source_start_sec,
             source_end_sec,
             playback_rate,
+            clip_playback_rate,
             reversed,
             loop_enabled,
             snap_offset_sec,
@@ -778,9 +779,9 @@ pub(super) fn set_clip_state(
                     if delta.abs() > 1e-9 {
                         let affected_tracks = match ripple_mode {
                             crate::state::RippleMode::All => None,
-                            crate::state::RippleMode::Track => Some(HashSet::from([
-                                before_clip.track_id.clone(),
-                            ])),
+                            crate::state::RippleMode::Track => {
+                                Some(HashSet::from([before_clip.track_id.clone()]))
+                            }
                             crate::state::RippleMode::Off => None,
                         };
                         let shifted = tl.ripple_shift_clips(
@@ -929,6 +930,482 @@ pub(super) fn set_clips_state_bulk(
     for root in ripple_roots {
         crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
     }
+    payload
+}
+
+fn invalidate_take_related_caches(clip_id: &str) {
+    crate::synth_clip_cache::invalidate_clip_all_caches(clip_id);
+    crate::formant_cache::invalidate_formant_cache_for_clip(clip_id);
+    if let Ok(mut mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
+        mgr.remove_state(clip_id);
+    }
+}
+
+pub(super) fn set_clip_active_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let (track_id, switch_result) = {
+        let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) else {
+            drop(tl);
+            let mut payload = crate::models::TimelineStatePayload {
+                ok: false,
+                tracks: vec![],
+                clips: vec![],
+                created_clip_ids: None,
+                created_track_ids: None,
+                selected_track_id: None,
+                selected_clip_id: None,
+                bpm: 120.0,
+                playhead_sec: 0.0,
+                project_sec: None,
+                project: None,
+                missing_files: None,
+                disabled_group_ids: vec![],
+                tempo_map: None,
+            };
+            payload.project = Some(state.project_meta_payload());
+            return payload;
+        };
+        let track_id = clip.track_id.clone();
+        (track_id, clip.switch_active_take(&take_id))
+    };
+    if let Err(err) = switch_result {
+        drop(tl);
+        let mut payload = crate::models::TimelineStatePayload {
+            ok: false,
+            tracks: vec![],
+            clips: vec![],
+            created_clip_ids: None,
+            created_track_ids: None,
+            selected_track_id: None,
+            selected_clip_id: None,
+            bpm: 120.0,
+            playhead_sec: 0.0,
+            project_sec: None,
+            project: None,
+            missing_files: Some(vec![err]),
+            disabled_group_ids: vec![],
+            tempo_map: None,
+        };
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
+    let root_track_id = tl.resolve_root_track_id(&track_id);
+
+    invalidate_take_related_caches(&clip_id);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+
+    if let Some(root_id) = root_track_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+    }
+    payload
+}
+
+pub(super) fn cycle_clip_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    direction: i32,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let mut changed: Vec<(String, String)> = Vec::new();
+    for clip in &mut tl.clips {
+        if !clip_ids.contains(&clip.id) {
+            continue;
+        }
+        if clip.cycle_active_take(direction) {
+            changed.push((clip.id.clone(), clip.track_id.clone()));
+        }
+    }
+    let mut roots: HashSet<String> = HashSet::new();
+    for (clip_id, track_id) in &changed {
+        if let Some(root) = tl.resolve_root_track_id(track_id) {
+            roots.insert(root);
+        }
+    }
+    let changed_ids: Vec<String> = changed.into_iter().map(|(id, _)| id).collect();
+    for clip_id in &changed_ids {
+        invalidate_take_related_caches(clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    for root in roots {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+    }
+    payload
+}
+
+pub(super) fn pack_clips_into_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let created = tl.pack_clips_into_takes(&clip_ids);
+    if let Some(clip_id) = created.as_ref() {
+        invalidate_take_related_caches(clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.created_clip_ids = created.map(|id| vec![id]);
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+pub(super) fn explode_clip_takes(
+    state: State<'_, AppState>,
+    clip_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let created = tl.explode_clip_takes(&clip_id);
+    for id in &created {
+        invalidate_take_related_caches(id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    if !created.is_empty() {
+        payload.created_clip_ids = Some(created);
+    }
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+pub(super) fn duplicate_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let result = if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+        if let Some(source) = clip.take(&take_id).cloned() {
+            let mut copy = source;
+            copy.id = crate::state::new_id("take");
+            copy.name = if copy.name.trim().is_empty() {
+                "Take Copy".to_string()
+            } else {
+                format!("{} Copy", copy.name)
+            };
+            let copy_id = clip.add_take(copy);
+            Ok(copy_id)
+        } else {
+            Err("take not found".to_string())
+        }
+    } else {
+        Err("clip not found".to_string())
+    };
+    match result {
+        Ok(_) => {
+            state.audio_engine.update_timeline(tl.clone());
+            let mut payload = tl.to_payload();
+            payload.project = Some(state.project_meta_payload());
+            payload
+        }
+        Err(err) => {
+            drop(tl);
+            let mut payload = crate::models::TimelineStatePayload {
+                ok: false,
+                tracks: vec![],
+                clips: vec![],
+                created_clip_ids: None,
+                created_track_ids: None,
+                selected_track_id: None,
+                selected_clip_id: None,
+                bpm: 120.0,
+                playhead_sec: 0.0,
+                project_sec: None,
+                project: None,
+                missing_files: Some(vec![err]),
+                disabled_group_ids: vec![],
+                tempo_map: None,
+            };
+            payload.project = Some(state.project_meta_payload());
+            payload
+        }
+    }
+}
+
+pub(super) fn remove_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let mut changed = false;
+    if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+        if clip.remove_take(&take_id).is_ok() {
+            changed = true;
+        }
+    }
+    if changed {
+        invalidate_take_related_caches(&clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+pub(super) fn rename_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    name: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+        let _ = clip.rename_take(&take_id, &name);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload
+}
+
+pub(super) fn add_clip_take_from_media(
+    state: State<'_, AppState>,
+    clip_id: String,
+    source_path: String,
+    name: Option<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let mut missing: Option<String> = None;
+    if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
+        let info = crate::audio_utils::try_read_audio_header_only(Path::new(&source_path));
+        let duration_sec = info.as_ref().map(|i| i.duration_sec);
+        let duration_frames = info.as_ref().map(|i| i.total_frames);
+        let source_sample_rate = info.as_ref().map(|i| i.sample_rate);
+        let file_name = Path::new(&source_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Take".to_string());
+        let take = crate::state::ClipTake {
+            id: crate::state::new_id("take"),
+            name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
+            gain: 1.0,
+            source_path: Some(source_path),
+            source_path_relative: None,
+            duration_sec,
+            duration_frames,
+            source_sample_rate,
+            source_file_fingerprint: None,
+            source_file_mtime: None,
+            source_file_size: None,
+            waveform_preview: info.as_ref().map(|i| i.waveform_preview.clone()),
+            pitch_range: Some(crate::models::PitchRange {
+                min: -24.0,
+                max: 24.0,
+            }),
+            source_start_sec: 0.0,
+            source_end_sec: duration_sec.unwrap_or(clip.length_sec),
+            playback_rate: 1.0,
+            reversed: false,
+            loop_enabled: crate::config::loop_new_clips_default(),
+            midi_note_data: None,
+            midi_fill_gaps: false,
+            stretch_markers: Vec::new(),
+            envelopes: None,
+        };
+        clip.add_take(take);
+    } else {
+        missing = Some("clip not found".to_string());
+    }
+    if missing.is_none() {
+        invalidate_take_related_caches(&clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload.missing_files = missing.map(|m| vec![m]);
+    payload
+}
+
+pub(super) fn import_media_files_as_takes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    track_id: Option<String>,
+    start_sec: Option<f64>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    state.checkpoint_timeline(&tl);
+
+    let target_track_id = track_id
+        .filter(|id| tl.tracks.iter().any(|t| t.id == *id))
+        .or_else(|| tl.selected_track_id.clone())
+        .or_else(|| tl.tracks.first().map(|t| t.id.clone()))
+        .unwrap_or_else(|| tl.add_track(Some("Track".to_string()), None, None));
+    let start = start_sec.unwrap_or(tl.playhead_sec).max(0.0);
+
+    let mut takes = Vec::<crate::state::ClipTake>::new();
+    let mut missing: Vec<String> = Vec::new();
+    for path in paths {
+        let trimmed = path.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let file_path = Path::new(&trimmed);
+        if !file_path.exists() {
+            missing.push(trimmed.clone());
+            continue;
+        }
+        let Some(info) = crate::audio_utils::try_read_audio_header_only(file_path) else {
+            missing.push(trimmed.clone());
+            continue;
+        };
+        let file_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Take".to_string());
+        takes.push(crate::state::ClipTake {
+            id: crate::state::new_id("take"),
+            name: file_name.clone(),
+            gain: 1.0,
+            source_path: Some(trimmed.clone()),
+            source_path_relative: None,
+            duration_sec: Some(info.duration_sec),
+            duration_frames: Some(info.total_frames),
+            source_sample_rate: Some(info.sample_rate),
+            source_file_fingerprint: None,
+            source_file_mtime: None,
+            source_file_size: None,
+            waveform_preview: None,
+            pitch_range: Some(crate::models::PitchRange {
+                min: -24.0,
+                max: 24.0,
+            }),
+            source_start_sec: 0.0,
+            source_end_sec: info.duration_sec,
+            playback_rate: 1.0,
+            reversed: false,
+            loop_enabled: crate::config::loop_new_clips_default(),
+            midi_note_data: None,
+            midi_fill_gaps: false,
+            stretch_markers: Vec::new(),
+            envelopes: None,
+        });
+    }
+
+    if takes.is_empty() {
+        drop(tl);
+        let mut payload = crate::models::TimelineStatePayload {
+            ok: false,
+            tracks: vec![],
+            clips: vec![],
+            created_clip_ids: None,
+            created_track_ids: None,
+            selected_track_id: None,
+            selected_clip_id: None,
+            bpm: 120.0,
+            playhead_sec: 0.0,
+            project_sec: None,
+            project: Some(state.project_meta_payload()),
+            missing_files: Some(missing),
+            disabled_group_ids: vec![],
+            tempo_map: None,
+        };
+        return payload;
+    }
+
+    let length = takes
+        .iter()
+        .filter_map(|t| t.duration_sec)
+        .fold(0.0f64, f64::max)
+        .max(0.01);
+    let active_take_id = Some(takes[0].id.clone());
+    let clip_name = takes[0].name.clone();
+    let clip_id = crate::state::new_id("clip");
+    let mut clip = crate::state::Clip {
+        id: clip_id.clone(),
+        takes,
+        active_take_id,
+        group_id: None,
+        track_id: target_track_id,
+        name: clip_name,
+        start_sec: start,
+        length_sec: length,
+        color: "#4fc3f7".to_string(),
+        source_path: None,
+        source_path_relative: None,
+        duration_sec: None,
+        duration_frames: None,
+        source_sample_rate: None,
+        source_file_mtime: None,
+        source_file_size: None,
+        source_file_fingerprint: None,
+        waveform_preview: None,
+        pitch_range: None,
+        gain: 1.0,
+        muted: false,
+        source_start_sec: 0.0,
+        source_end_sec: length,
+        playback_rate: 1.0,
+        clip_playback_rate: 1.0,
+        reversed: false,
+        loop_enabled: crate::config::loop_new_clips_default(),
+        snap_offset_sec: 0.0,
+        fade_in_sec: 0.0,
+        fade_out_sec: 0.0,
+        fade_in_curve: "sine".to_string(),
+        fade_out_curve: "sine".to_string(),
+        auto_fade_in_sec: 0.0,
+        auto_fade_out_sec: 0.0,
+        extra_curves: None,
+        extra_params: None,
+        formant_morph: None,
+        midi_note_data: None,
+        midi_fill_gaps: false,
+    };
+    clip.normalize_takes();
+    crate::state::TimelineState::populate_clip_file_metadata(&mut clip);
+    tl.clips.push(clip);
+    tl.ensure_project_end_sec(start + length);
+    tl.selected_clip_id = Some(clip_id.clone());
+    tl.playhead_sec = start;
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    payload.missing_files = if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    };
     payload
 }
 
@@ -1244,9 +1721,7 @@ pub(super) fn split_clips_at(
 ///
 /// 返回 `(模式, 是否平移参数线)`。参数线跟随开关读取全局“锁定参数线”
 /// 设置，与前端拖拽移动时传入的 `moveLinkedParams` 语义保持一致。
-fn ripple_settings(
-    state: &State<'_, AppState>,
-) -> (crate::state::RippleMode, bool) {
+fn ripple_settings(state: &State<'_, AppState>) -> (crate::state::RippleMode, bool) {
     let settings = if let Some(dir) = state.config_dir.get() {
         let mut settings = crate::config::load_ui_settings(dir);
         settings.normalize_ripple_mode();

@@ -393,6 +393,17 @@ export const enUS = {
     aria_resize_panels: "Resize panels",
     clip_mute: "Mute",
     clip_unmute: "Unmute",
+    clip_takes: "Take",
+    clip_pack_into_takes: "Pack Clips into Takes",
+    clip_take_add: "Add Take from Media...",
+    clip_take_cycle_next: "Cycle to Next Take",
+    clip_take_cycle_prev: "Cycle to Previous Take",
+    clip_take_duplicate: "Duplicate Current Take",
+    clip_take_remove: "Delete Take",
+    clip_take_explode: "Explode Takes into Clips",
+    clip_take_rename: "Rename Take",
+    clip_take_active_mark: "●",
+    clip_take_add_hint: "More take management will be added with Reaper multi-take import",
     fade_in: "Fade In",
     fade_out: "Fade Out",
     show_secondary_param: "Show secondary parameter overlay",
@@ -599,6 +610,8 @@ export const enUS = {
     kb_clip_normalize: "Normalize Clip",
     kb_clip_group: "Group Clips",
     kb_clip_ungroup: "Ungroup Clips",
+    kb_clip_cycle_take: "Cycle Take",
+    kb_clip_cycle_take_prev: "Cycle Take (Reverse)",
     qs_auto_normalize: "Auto-normalize on place",
     kb_group_pianoroll: "Piano Roll",
     kb_group_modifier: "Modifier Keys",
@@ -711,6 +724,7 @@ export const enUS = {
 
     // Toolbar toggle buttons
     auto_crossfade: "Auto Crossfade",
+    sync_edits_across_takes: "Sync Edits Across Takes",
     ripple: "Ripple Editing (Auto Follow)",
     ripple_tooltip_off:
         "Ripple Editing (Auto Follow): Off. Left-click to enable (per track); right-click to choose mode.",
@@ -1039,6 +1053,7 @@ export const enUS = {
     import_dialog_title: "Import files",
     import_button: "Import",
     import_across_tracks: "Add Across Tracks",
+    import_as_takes: "Add as Takes",
     // Overlapping clips context menu
     overlapping_clips_header: "Overlapping clips ({n})",
 

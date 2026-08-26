@@ -37,12 +37,12 @@ mod processor_caps;
 pub(crate) mod project;
 #[path = "commands/project_import.rs"]
 mod project_import;
-#[path = "commands/recording.rs"]
-mod recording;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
 mod reaper_clipboard;
+#[path = "commands/recording.rs"]
+mod recording;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
@@ -216,9 +216,7 @@ pub fn run_timed_auto_backup(
 // ===================== recording =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_recording_settings(
-    state: State<'_, AppState>,
-) -> crate::config::RecordingSettings {
+pub fn get_recording_settings(state: State<'_, AppState>) -> crate::config::RecordingSettings {
     recording::get_recording_settings(state)
 }
 
@@ -251,9 +249,7 @@ pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_recording_state(
-    state: State<'_, AppState>,
-) -> crate::recording::RecordingStatePayload {
+pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::RecordingStatePayload {
     recording::get_recording_state(state)
 }
 
@@ -377,7 +373,13 @@ pub async fn get_root_mix_waveform_peaks_segment(
 ) -> self::waveform::WaveformPeaksSegmentPayload {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        waveform::get_root_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
+        waveform::get_root_mix_waveform_peaks_segment(
+            state,
+            track_id,
+            start_sec,
+            duration_sec,
+            columns,
+        )
     })
     .await
     {
@@ -445,7 +447,10 @@ pub async fn get_waveform_mipmap_binary(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn preload_waveform_mipmap(app: tauri::AppHandle, source_path: String) -> serde_json::Value {
+pub async fn preload_waveform_mipmap(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         waveform::preload_waveform_mipmap(state, source_path)
@@ -714,6 +719,7 @@ pub fn set_clip_state(
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
     playback_rate: Option<f32>,
+    clip_playback_rate: Option<f32>,
     reversed: Option<bool>,
     loop_enabled: Option<bool>,
     snap_offset_sec: Option<f64>,
@@ -738,6 +744,7 @@ pub fn set_clip_state(
         source_start_sec,
         source_end_sec,
         playback_rate,
+        clip_playback_rate,
         reversed,
         loop_enabled,
         snap_offset_sec,
@@ -760,6 +767,96 @@ pub fn set_clips_state_bulk(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     timeline::set_clips_state_bulk(state, updates, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_clip_active_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_active_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn cycle_clip_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    direction: Option<i32>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::cycle_clip_takes(state, clip_ids, direction.unwrap_or(1), checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn pack_clips_into_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::pack_clips_into_takes(state, clip_ids, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn explode_clip_takes(
+    state: State<'_, AppState>,
+    clip_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::explode_clip_takes(state, clip_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn duplicate_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::duplicate_clip_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::remove_clip_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    name: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::rename_clip_take(state, clip_id, take_id, name, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_clip_take_from_media(
+    state: State<'_, AppState>,
+    clip_id: String,
+    source_path: String,
+    name: Option<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_media_files_as_takes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    track_id: Option<String>,
+    start_sec: Option<f64>,
+) -> crate::models::TimelineStatePayload {
+    timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -887,10 +984,7 @@ pub fn select_clip(
 // ===================== native timeline clipboard =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn copy_timeline_clips(
-    state: State<'_, AppState>,
-    clip_ids: Vec<String>,
-) -> serde_json::Value {
+pub fn copy_timeline_clips(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {
     timeline_clipboard::copy_timeline_clips(&state, clip_ids)
 }
 
@@ -1447,4 +1541,3 @@ pub fn save_ui_settings(
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }
-

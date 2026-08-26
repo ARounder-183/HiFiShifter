@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 mod capture;
-#[cfg(target_os = "windows")]
-mod wasapi;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod wasapi;
 
 pub use capture::{AppAudioInfo, AudioDeviceInfo};
 use capture::{CaptureContext, WriterMsg};
@@ -141,8 +141,8 @@ fn write_wav_thread(
         bits_per_sample: bit_depth as u16,
         sample_format,
     };
-    let mut writer = WavWriter::create(path, spec)
-        .map_err(|err| format!("recording_error_create_wav:{err}"))?;
+    let mut writer =
+        WavWriter::create(path, spec).map_err(|err| format!("recording_error_create_wav:{err}"))?;
 
     loop {
         match rx.recv() {
@@ -318,9 +318,7 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
     // cpal streams) are not Send.
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let thread_ctx = ctx.clone();
-    let thread_join = std::thread::spawn(move || {
-        capture::run_capture(plan, thread_ctx, ready_tx)
-    });
+    let thread_join = std::thread::spawn(move || capture::run_capture(plan, thread_ctx, ready_tx));
 
     let readiness = ready_rx.recv_timeout(Duration::from_secs(8));
     match &readiness {

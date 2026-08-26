@@ -440,26 +440,30 @@ fn build_soundtouch() {
     // Verify SoundTouch source exists; auto-clone if missing
     let st_src_path = Path::new(st_src);
     if !st_src_path.join("CMakeLists.txt").exists() {
-        println!(
-            "cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning..."
-        );
+        println!("cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning...");
         if st_src_path.exists() {
             let _ = std::fs::remove_dir_all(st_src_path);
         }
-        let parent = st_src_path.parent().expect("[soundtouch] invalid source path");
+        let parent = st_src_path
+            .parent()
+            .expect("[soundtouch] invalid source path");
         let _ = std::fs::create_dir_all(parent);
 
         let mut clone = Command::new("git");
         clone.args([
             "clone",
-            "--depth", "1",
-            "--branch", "2.3.3",
+            "--depth",
+            "1",
+            "--branch",
+            "2.3.3",
             "https://codeberg.org/soundtouch/soundtouch.git",
             "soundtouch",
         ]);
         clone.current_dir(parent);
 
-        let status = clone.status().expect("[soundtouch] failed to run git clone");
+        let status = clone
+            .status()
+            .expect("[soundtouch] failed to run git clone");
         if !status.success() {
             eprintln!("\n========================================");
             eprintln!("ERROR: Failed to auto-clone SoundTouch source!");
@@ -470,9 +474,7 @@ fn build_soundtouch() {
             eprintln!("========================================\n");
             panic!("SoundTouch source clone failed. See error message above for instructions.");
         }
-        println!(
-            "cargo:warning=[soundtouch] SoundTouch source cloned successfully"
-        );
+        println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
     }
 
     // Only re-run if build.rs itself changes - the SoundTouch source tree is modified
@@ -480,13 +482,8 @@ fn build_soundtouch() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
-        target
-            .split('-')
-            .nth(2)
-            .unwrap_or_default()
-            .to_string()
-    });
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
+        .unwrap_or_else(|_| target.split('-').nth(2).unwrap_or_default().to_string());
     println!(
         "cargo:warning=[soundtouch] TARGET={} TARGET_OS={}",
         target, target_os
@@ -497,9 +494,13 @@ fn build_soundtouch() {
 
     // Patch SoundTouchDLL.rc to use windows.h instead of afxres.h (MFC header not always available)
     if is_windows {
-        let rc_file = st_src_path.join("source").join("SoundTouchDLL").join("SoundTouchDLL.rc");
+        let rc_file = st_src_path
+            .join("source")
+            .join("SoundTouchDLL")
+            .join("SoundTouchDLL.rc");
         if rc_file.exists() {
-            let content = std::fs::read_to_string(&rc_file).expect("[soundtouch] failed to read SoundTouchDLL.rc");
+            let content = std::fs::read_to_string(&rc_file)
+                .expect("[soundtouch] failed to read SoundTouchDLL.rc");
             // Only write if the file actually needs patching to avoid triggering Tauri's file watcher.
             if content.contains("afxres.h") && !content.contains("#include <windows.h>") {
                 let patched = content.replace("#include \"afxres.h\"", "#include <windows.h>");
@@ -513,8 +514,11 @@ fn build_soundtouch() {
                     patched
                 };
                 if patched != content {
-                    std::fs::write(&rc_file, &patched).expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
-                    println!("cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h");
+                    std::fs::write(&rc_file, &patched)
+                        .expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
+                    println!(
+                        "cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h"
+                    );
                 }
             }
         }
@@ -539,11 +543,17 @@ fn build_soundtouch() {
         }
     }
 
-    println!("cargo:warning=[soundtouch] is_windows={} is_apple={}", is_windows, is_apple);
+    println!(
+        "cargo:warning=[soundtouch] is_windows={} is_apple={}",
+        is_windows, is_apple
+    );
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let build_dir = Path::new(&out_dir).join("soundtouch_build");
-    println!("cargo:warning=[soundtouch] build_dir={}", build_dir.display());
+    println!(
+        "cargo:warning=[soundtouch] build_dir={}",
+        build_dir.display()
+    );
 
     // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     // Use the path as-is (cmake handles relative paths fine, and canonicalize
@@ -562,10 +572,18 @@ fn build_soundtouch() {
     }
 
     println!("cargo:warning=[soundtouch] spawning cmake configure...");
-    let status = cfg.status().expect("[soundtouch] failed to run cmake configure");
-    println!("cargo:warning=[soundtouch] cmake configure exit status: {}", status);
+    let status = cfg
+        .status()
+        .expect("[soundtouch] failed to run cmake configure");
+    println!(
+        "cargo:warning=[soundtouch] cmake configure exit status: {}",
+        status
+    );
     if !status.success() {
-        panic!("[soundtouch] CMake configure failed with exit code {:?}", status.code());
+        panic!(
+            "[soundtouch] CMake configure failed with exit code {:?}",
+            status.code()
+        );
     }
     println!("cargo:warning=[soundtouch] cmake configure succeeded");
 
@@ -575,14 +593,22 @@ fn build_soundtouch() {
     bld.arg("--config").arg("Release");
 
     println!("cargo:warning=[soundtouch] spawning cmake build...");
-    let output = bld.output().expect("[soundtouch] failed to run cmake build");
-    println!("cargo:warning=[soundtouch] cmake build exit status: {}", output.status);
+    let output = bld
+        .output()
+        .expect("[soundtouch] failed to run cmake build");
+    println!(
+        "cargo:warning=[soundtouch] cmake build exit status: {}",
+        output.status
+    );
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         println!("cargo:warning=[soundtouch] cmake build stderr:\n{}", stderr);
         println!("cargo:warning=[soundtouch] cmake build stdout:\n{}", stdout);
-        panic!("[soundtouch] CMake build failed with exit code {:?}", output.status.code());
+        panic!(
+            "[soundtouch] CMake build failed with exit code {:?}",
+            output.status.code()
+        );
     }
     println!("cargo:warning=[soundtouch] cmake build succeeded");
 
@@ -596,15 +622,17 @@ fn build_soundtouch() {
         format!("lib{}.so", lib_name)
     };
 
-    let lib_src = find_file(&build_dir, &lib_filename)
-        .unwrap_or_else(|| {
-            panic!(
-                "[soundtouch] Could not find {} in build directory {}",
-                lib_filename,
-                build_dir.display()
-            )
-        });
-    println!("cargo:warning=[soundtouch] found shared lib: {}", lib_src.display());
+    let lib_src = find_file(&build_dir, &lib_filename).unwrap_or_else(|| {
+        panic!(
+            "[soundtouch] Could not find {} in build directory {}",
+            lib_filename,
+            build_dir.display()
+        )
+    });
+    println!(
+        "cargo:warning=[soundtouch] found shared lib: {}",
+        lib_src.display()
+    );
 
     // Force a stable, relocatable Mach-O install name.  The library is bundled
     // into HiFiShifter.app/Contents/Frameworks and loaded through @rpath, so it
@@ -706,7 +734,6 @@ fn build_soundtouch() {
     } else {
         println!("cargo:warning=[soundtouch] macOS framework dylib unchanged, skipping write");
     }
-
 }
 
 /// Recursively search for a file by name under `dir`.
@@ -885,7 +912,10 @@ fn stage_ort_macos_dylibs() {
         let src_bytes = std::fs::read(&path).unwrap_or_default();
         let dst_bytes = std::fs::read(&dst).unwrap_or_default();
         if src_bytes == dst_bytes {
-            println!("cargo:warning=[ort] {} unchanged, skipping write", dst.display());
+            println!(
+                "cargo:warning=[ort] {} unchanged, skipping write",
+                dst.display()
+            );
             continue;
         }
 
@@ -898,7 +928,11 @@ fn stage_ort_macos_dylibs() {
             );
             continue;
         }
-        println!("cargo:warning=[ort] staged {} to {}", path.display(), dst.display());
+        println!(
+            "cargo:warning=[ort] staged {} to {}",
+            path.display(),
+            dst.display()
+        );
 
         // Make the staged dylib relocatable: set @rpath/<name> as its install
         // name and rewrite absolute dependency paths to @rpath/<basename>.
@@ -912,7 +946,11 @@ fn stage_ort_macos_dylibs() {
             target_dir.display()
         );
     } else {
-        println!("cargo:warning=[ort] staged {} ORT dylib(s) into {}", staged, staging_dir.display());
+        println!(
+            "cargo:warning=[ort] staged {} ORT dylib(s) into {}",
+            staged,
+            staging_dir.display()
+        );
     }
 }
 
@@ -938,7 +976,11 @@ fn normalize_macos_dylib(path: &std::path::Path, staging_dir: &std::path::Path) 
         .status();
     if let Ok(status) = id_status {
         if status.success() {
-            println!("cargo:warning=[ort] set install name {} on {}", install_name, path.display());
+            println!(
+                "cargo:warning=[ort] set install name {} on {}",
+                install_name,
+                path.display()
+            );
         }
     }
 
@@ -998,7 +1040,6 @@ fn normalize_macos_dylib(path: &std::path::Path, staging_dir: &std::path::Path) 
     }
 }
 
-
 /// Minimal protobuf reader/writer (no external crates) used to rewrite the
 /// NSF-HiFiGAN ONNX model so the Pad node's runtime-derived `pads` become a
 /// constant initializer.  CoreML EP cannot compile the stock model's dynamic
@@ -1042,28 +1083,44 @@ mod coreml_pb {
                 0 => {
                     let start = pos;
                     read_varint(data, &mut pos)?;
-                    fields.push(Field { num, wire, payload: data[start..pos].to_vec() });
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[start..pos].to_vec(),
+                    });
                 }
                 2 => {
                     let len = read_varint(data, &mut pos)? as usize;
                     if pos + len > data.len() {
                         return Err("protobuf length overflow".to_string());
                     }
-                    fields.push(Field { num, wire, payload: data[pos..pos + len].to_vec() });
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + len].to_vec(),
+                    });
                     pos += len;
                 }
                 5 => {
                     if pos + 4 > data.len() {
                         return Err("protobuf fixed32 overflow".to_string());
                     }
-                    fields.push(Field { num, wire, payload: data[pos..pos + 4].to_vec() });
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + 4].to_vec(),
+                    });
                     pos += 4;
                 }
                 1 => {
                     if pos + 8 > data.len() {
                         return Err("protobuf fixed64 overflow".to_string());
                     }
-                    fields.push(Field { num, wire, payload: data[pos..pos + 8].to_vec() });
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + 8].to_vec(),
+                    });
                     pos += 8;
                 }
                 w => return Err(format!("unsupported protobuf wire type {w}")),
@@ -1113,7 +1170,7 @@ mod coreml_pb {
 /// (including the ~54 MB weight raw_data) are preserved verbatim.
 #[cfg(target_os = "macos")]
 fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    use coreml_pb::{Field, encode, parse};
+    use coreml_pb::{encode, parse, Field};
 
     let patch = load_pads_patch()?;
     let data = std::fs::read(src).map_err(|e| e.to_string())?;
@@ -1123,10 +1180,18 @@ fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<
     let mut changed = false;
     for f in &model_fields {
         if f.num == 7 && f.wire == 2 {
-            out_model.push(Field { num: 7, wire: 2, payload: rewrite_graph(&f.payload, &patch)? });
+            out_model.push(Field {
+                num: 7,
+                wire: 2,
+                payload: rewrite_graph(&f.payload, &patch)?,
+            });
             changed = true;
         } else {
-            out_model.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() });
+            out_model.push(Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            });
         }
     }
     if !changed {
@@ -1144,8 +1209,8 @@ fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<
 fn load_pads_patch() -> Result<std::collections::HashMap<String, Vec<i64>>, String> {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut map = std::collections::HashMap::new();
     for raw in text.lines() {
         let line = raw.trim();
@@ -1191,7 +1256,7 @@ fn rewrite_graph(
     graph: &[u8],
     patch: &std::collections::HashMap<String, Vec<i64>>,
 ) -> Result<Vec<u8>, String> {
-    use coreml_pb::{Field, encode, parse};
+    use coreml_pb::{encode, parse, Field};
 
     let gfields = parse(graph)?;
     let mut nodes: Vec<Field> = Vec::new();
@@ -1206,8 +1271,16 @@ fn rewrite_graph(
                 wire: 2,
                 payload: rewrite_node(&f.payload, patch, &mut next_id, &mut new_inits)?,
             }),
-            (5, 2) => inits.push(Field { num: 5, wire: 2, payload: f.payload.clone() }),
-            _ => others.push(Field { num: f.num, wire: f.wire, payload: f.payload.clone() }),
+            (5, 2) => inits.push(Field {
+                num: 5,
+                wire: 2,
+                payload: f.payload.clone(),
+            }),
+            _ => others.push(Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            }),
         }
     }
 
@@ -1222,7 +1295,11 @@ fn rewrite_graph(
         out.extend(encode(&[f]));
     }
     for t in new_inits {
-        out.extend(encode(&[Field { num: 5, wire: 2, payload: t }]));
+        out.extend(encode(&[Field {
+            num: 5,
+            wire: 2,
+            payload: t,
+        }]));
     }
     Ok(out)
 }
@@ -1241,7 +1318,7 @@ fn rewrite_node(
     next_id: &mut usize,
     new_inits: &mut Vec<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    use coreml_pb::{Field, encode, parse};
+    use coreml_pb::{encode, parse, Field};
 
     let nf = parse(node)?;
     let mut op_type = String::new();
@@ -1270,7 +1347,11 @@ fn rewrite_node(
                     continue;
                 }
             }
-            out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
+            out.extend(encode(&[Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            }]));
         }
         return Ok(out);
     }
@@ -1287,7 +1368,11 @@ fn rewrite_node(
                 if f.num == 1 && f.wire == 2 {
                     continue; // rebuilt below
                 }
-                out.extend(encode(&[Field { num: f.num, wire: f.wire, payload: f.payload.clone() }]));
+                out.extend(encode(&[Field {
+                    num: f.num,
+                    wire: f.wire,
+                    payload: f.payload.clone(),
+                }]));
             }
             for (i, inp) in inputs.iter().enumerate() {
                 let name: &[u8] = if i == 1 { const_name.as_bytes() } else { inp };
@@ -1315,8 +1400,12 @@ fn generate_coreml_model_variant() {
     let patch_path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
     let build_script = std::path::Path::new(file!());
     let src_m = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
-    let patch_m = std::fs::metadata(&patch_path).and_then(|m| m.modified()).ok();
-    let build_m = std::fs::metadata(build_script).and_then(|m| m.modified()).ok();
+    let patch_m = std::fs::metadata(&patch_path)
+        .and_then(|m| m.modified())
+        .ok();
+    let build_m = std::fs::metadata(build_script)
+        .and_then(|m| m.modified())
+        .ok();
     let dst_m = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
     if dst.is_file()
         && dst_m >= src_m
@@ -1326,7 +1415,10 @@ fn generate_coreml_model_variant() {
         return;
     }
     match rewrite_coreml_model(&src, &dst) {
-        Ok(()) => println!("cargo:warning=[build.rs] generated CoreML model variant: {}", dst.display()),
+        Ok(()) => println!(
+            "cargo:warning=[build.rs] generated CoreML model variant: {}",
+            dst.display()
+        ),
         Err(e) => println!("cargo:warning=[build.rs] failed to generate CoreML model variant: {e}"),
     }
 }

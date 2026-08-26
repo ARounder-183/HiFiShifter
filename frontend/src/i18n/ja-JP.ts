@@ -313,6 +313,17 @@ export const jaJP = {
     aria_resize_panels: "パネルサイズを変更",
     clip_mute: "ミュート",
     clip_unmute: "ミュート解除",
+    clip_takes: "テイク",
+    clip_pack_into_takes: "クリップをテイクに集約",
+    clip_take_add: "メディアからテイクを追加...",
+    clip_take_cycle_next: "次のテイクへ切替",
+    clip_take_cycle_prev: "前のテイクへ切替",
+    clip_take_duplicate: "現在のテイクを複製",
+    clip_take_remove: "テイクを削除",
+    clip_take_explode: "テイクを個別クリップに展開",
+    clip_take_rename: "テイク名を変更",
+    clip_take_active_mark: "●",
+    clip_take_add_hint: "その他のテイク管理は Reaper マルチテイクの取り込みとともに追加予定です",
     fade_in: "フェードイン",
     fade_out: "フェードアウト",
     show_secondary_param: "サブパラメータオーバーレイを表示",
@@ -524,6 +535,8 @@ export const jaJP = {
     kb_clip_normalize: "クリップをノーマライズ",
     kb_clip_group: "クリップをグループ化",
     kb_clip_ungroup: "クリップのグループ解除",
+    kb_clip_cycle_take: "テイクを切替",
+    kb_clip_cycle_take_prev: "逆順でテイクを切替",
     qs_auto_normalize: "配置時に自動ノーマライズ",
     kb_group_pianoroll: "ピアノロール",
     kb_group_modifier: "修飾キー",
@@ -638,6 +651,7 @@ export const jaJP = {
 
     // ツールバートグルボタン
     auto_crossfade: "自動クロスフェード",
+    sync_edits_across_takes: "すべてのテイクに編集を同期",
     ripple: "リップル編集（オートフォロー）",
     ripple_tooltip_off:
         "リップル編集（オートフォロー）：オフ。左クリックで有効化（トラック単位）；右クリックでモード選択。",
@@ -963,6 +977,7 @@ export const jaJP = {
     import_dialog_title: "ファイルをインポート",
     import_button: "インポート",
     import_across_tracks: "トラック間に追加",
+    import_as_takes: "テイクとして追加",
     // Overlapping clips context menu
     overlapping_clips_header: "重なっているクリップ ({n})",
 

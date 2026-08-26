@@ -99,11 +99,7 @@ pub fn formant_debug_log(message: impl AsRef<str>) {
     let line = format!("[formant] {}", message.as_ref());
     eprintln!("{line}");
     let log_path = std::env::temp_dir().join("hifishifter-formant-debug.log");
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{line}");
     }
 }
@@ -250,10 +246,8 @@ pub fn compute_formant_cache_entry_for_clip(
     };
 
     let src_i0 = (slice_start_sec * in_rate as f64).floor().max(0.0) as usize;
-    let src_i1 = ((slice_end_sec * in_rate as f64)
-        .ceil()
-        .max(src_i0 as f64) as usize)
-        .min(in_frames);
+    let src_i1 =
+        ((slice_end_sec * in_rate as f64).ceil().max(src_i0 as f64) as usize).min(in_frames);
     if src_i1 <= src_i0 + 1 {
         return Err("source_slice_too_short".to_string());
     }
@@ -287,7 +281,11 @@ pub fn compute_formant_cache_entry_for_clip(
         &clip.id,
         Path::new(source_path),
         out_rate,
-        if loop_mode { 0.0 } else { raw_win_start_sec.max(0.0) },
+        if loop_mode {
+            0.0
+        } else {
+            raw_win_start_sec.max(0.0)
+        },
         if loop_mode {
             // 与 snapshot 的查找键使用同一来源（优先 clip 元数据）——
             // 避免 wav 头时长与解码帧时长在 1ms 量化边界处错开键值。
@@ -358,8 +356,12 @@ pub fn get_or_compute_formant_audio(
         }
     }
 
-    let processed =
-        crate::formant_morph::apply_formant_morph_interleaved(input_stereo, sample_rate, 2, params)?;
+    let processed = crate::formant_morph::apply_formant_morph_interleaved(
+        input_stereo,
+        sample_rate,
+        2,
+        params,
+    )?;
     formant_debug_log(format!(
         "cache miss compute clip_id={} enabled={} f1={:.1} f2={:.1} strength={:.3} frames={} diff={:.8}",
         key.clip_id,

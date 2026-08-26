@@ -138,6 +138,24 @@ export interface TrackMeterInfo {
     clipped: boolean;
 }
 
+export interface ClipTakeInfo {
+    id: string;
+    name: string;
+    gain: number;
+    sourcePath?: string;
+    sourcePathRelative?: string;
+    durationSec?: number;
+    durationFrames?: number;
+    sourceSampleRate?: number;
+    sourceStartSec: number;
+    sourceEndSec: number;
+    playbackRate: number;
+    reversed: boolean;
+    loopEnabled: boolean;
+    midiNoteData?: MidiNoteEvent[];
+    midiFillGaps?: boolean;
+}
+
 export interface ClipInfo {
     id: string;
     trackId: string;
@@ -145,7 +163,11 @@ export interface ClipInfo {
     startSec: number;
     lengthSec: number;
     color: "blue" | "violet" | "emerald" | "amber" | "cyan";
+    /** 全部 take 元数据；active take 的媒体字段同时平铺在 ClipInfo 上。 */
+    takes?: ClipTakeInfo[];
+    activeTakeId?: string;
     sourcePath?: string;
+    sourcePathRelative?: string;
     durationSec?: number;
     durationFrames?: number; // 精确frame总数
     sourceSampleRate?: number; // 源文件采样率
@@ -156,6 +178,8 @@ export interface ClipInfo {
     sourceStartSec: number;
     sourceEndSec: number;
     playbackRate: number;
+    /** Clip 级播放倍率；playbackRate = clipPlaybackRate × activeTake.playbackRate。 */
+    clipPlaybackRate?: number;
     reversed: boolean;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
@@ -187,6 +211,38 @@ export interface ClipFormantMorph {
 }
 
 export type WaveformPreview = number[] | { l: number[]; r: number[] };
+
+/**
+ * Clip 头部展示名：
+ * - 多 Take 时显示 active take 名称与序号（VEGAS 风格：`name (n / count)`）；
+ * - 单 Take 时只显示名称，不暴露 Take 计数。
+ */
+export function clipDisplayName(clip: {
+    name: string;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
+}): string {
+    const takes = clip.takes ?? [];
+    if (takes.length <= 1) return clip.name;
+    const index = Math.max(
+        0,
+        takes.findIndex((take) => take.id === clip.activeTakeId),
+    );
+    const take = takes[index];
+    const takeName = take?.name || clip.name;
+    return `${takeName} (${index + 1} / ${takes.length})`;
+}
+
+/** 当前可编辑的 Take 名称；单 Take 时也编辑 Take 名称而非容器名。 */
+export function activeClipTakeName(clip: {
+    name: string;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
+}): string {
+    const takes = clip.takes ?? [];
+    const activeTake = takes.find((take) => take.id === clip.activeTakeId) ?? takes[0];
+    return activeTake?.name || clip.name;
+}
 
 export interface MidiNoteEvent {
     startSec: number;

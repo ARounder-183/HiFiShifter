@@ -120,9 +120,12 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 // 窗口跨度）。注意不能用 start/end 与窗口比较做可见性过滤 ——
                 // split 产生的"环绕窗口"（start > end）会把所有音符误判为
                 // 越界而全部丢弃。
-                if let Some(placement) =
-                    crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
-                {
+                if let Some(placement) = crate::state::place_note_occurrence_in_loop(
+                    clip,
+                    note.start_sec,
+                    note.end_sec,
+                    fp,
+                ) {
                     let note_value = note.note as f32;
                     let mut cycle_offset = 0usize;
                     while cycle_offset < clip_visible_frames {
@@ -290,8 +293,7 @@ pub(crate) fn assemble_pitch_orig_from_cache(
                 // 此前此分支既不感知倒放方向、也不感知域外静音：slip 左移
                 // /trim 延伸过的 Clip 根曲线会整体错位。
                 let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-                let (win_start_sec, win_end_sec) =
-                    crate::state::clip_pitch_trim_window_sec(clip);
+                let (win_start_sec, win_end_sec) = crate::state::clip_pitch_trim_window_sec(clip);
                 let mut mapped = crate::pitch_clip::assemble_nonloop_pitch_from_window(
                     &cached.midi,
                     fp,

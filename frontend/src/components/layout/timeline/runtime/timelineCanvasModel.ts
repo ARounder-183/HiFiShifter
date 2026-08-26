@@ -1,4 +1,5 @@
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
+import { clipDisplayName } from "../../../../features/session/sessionTypes";
 
 type SparseRenderClip = {
     id: string;
@@ -9,6 +10,8 @@ type SparseRenderClip = {
     gain: number;
     playbackRate: number;
     muted: boolean;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
     midiNoteCount?: number;
     groupId?: string;
     fadeInSec: number;
@@ -130,7 +133,7 @@ export function buildSparseClipRenderModel(args: {
         (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
             trackId: clip.trackId,
-            name: clip.name,
+            name: clipDisplayName(clip),
             leftPx: clip.startSec * args.pxPerSec - args.scrollLeft,
             topPx: visibleIndex * args.rowHeight,
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),

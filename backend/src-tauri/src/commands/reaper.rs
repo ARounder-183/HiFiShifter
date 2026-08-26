@@ -153,11 +153,7 @@ pub(super) fn import_reaper_project(
     // 更新工程元信息
     {
         let p = &mut *state.project.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(first) = result
-            .tempo_map
-            .as_ref()
-            .and_then(|points| points.first())
-        {
+        if let Some(first) = result.tempo_map.as_ref().and_then(|points| points.first()) {
             p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
             p.time_signature_denominator = first.denominator.unwrap_or(4);
         } else {

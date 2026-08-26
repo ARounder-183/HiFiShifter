@@ -227,7 +227,10 @@ impl ProcessingStage for HiFiGanStage {
 
         let breath_enabled =
             crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
-        let formant_curve = cc.extra_curves.get("formant_shift_cents").map(|v| v.as_slice());
+        let formant_curve = cc
+            .extra_curves
+            .get("formant_shift_cents")
+            .map(|v| v.as_slice());
         if !breath_enabled {
             // ── 非 Breath 路径 ──────────────────────────────────────────────
             let render_ctx = RenderContext {

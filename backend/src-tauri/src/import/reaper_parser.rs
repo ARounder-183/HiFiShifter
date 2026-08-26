@@ -593,12 +593,7 @@ pub fn reaper_fade_is_auto(values: &[f64]) -> bool {
         return false;
     }
     let selector_idx = values.len().saturating_sub(3);
-    values
-        .get(selector_idx)
-        .copied()
-        .unwrap_or(0.0)
-        .round() as i32
-        == 1
+    values.get(selector_idx).copied().unwrap_or(0.0).round() as i32 == 1
 }
 
 /// 读取 fade 数组中的“手动淡化长度”（索引 1）。
@@ -1359,10 +1354,17 @@ fn push_reaper_source(out: &mut Vec<u8>, source: &ReaperSource) {
         out,
         format!(
             "<SOURCE {}",
-            if source_type.is_empty() { "WAVE" } else { &source_type }
+            if source_type.is_empty() {
+                "WAVE"
+            } else {
+                &source_type
+            }
         ),
     );
-    push_reaper_token(out, format!("FILE {}", quote_reaper_string(&source.file_path)));
+    push_reaper_token(
+        out,
+        format!("FILE {}", quote_reaper_string(&source.file_path)),
+    );
     push_reaper_token(out, ">".to_string());
 }
 
@@ -1380,7 +1382,11 @@ fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool)
     push_reaper_token(out, format!("NAME {}", quote_reaper_string(&take.name)));
     push_reaper_array(
         out,
-        if is_item_default { "VOLPAN" } else { "TAKEVOLPAN" },
+        if is_item_default {
+            "VOLPAN"
+        } else {
+            "TAKEVOLPAN"
+        },
         &take.vol_pan,
     );
     if !is_item_default {
@@ -1397,11 +1403,20 @@ fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool)
 
 fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
     push_reaper_token(out, "<ITEM".to_string());
-    push_reaper_token(out, format!("POSITION {}", format_reaper_f64(item.position)));
-    push_reaper_token(out, format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)));
+    push_reaper_token(
+        out,
+        format!("POSITION {}", format_reaper_f64(item.position)),
+    );
+    push_reaper_token(
+        out,
+        format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)),
+    );
     push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length)));
     push_reaper_token(out, format!("LOOP {}", if item.is_loop { 1 } else { 0 }));
-    push_reaper_token(out, format!("ALLTAKES {}", if item.all_takes { 1 } else { 0 }));
+    push_reaper_token(
+        out,
+        format!("ALLTAKES {}", if item.all_takes { 1 } else { 0 }),
+    );
     push_reaper_array(out, "FADEIN", &item.fade_in);
     push_reaper_array(out, "FADEOUT", &item.fade_out);
     push_reaper_int_array(out, "MUTE", &item.mute);
@@ -1438,10 +1453,16 @@ pub fn serialize_reaper_clipboard(data: &ReaperData, as_track_data: bool) -> Vec
     for (index, track) in data.tracks.iter().enumerate() {
         if as_track_data {
             push_reaper_token(&mut out, "<TRACK".to_string());
-            push_reaper_token(&mut out, format!("NAME {}", quote_reaper_string(&track.name)));
+            push_reaper_token(
+                &mut out,
+                format!("NAME {}", quote_reaper_string(&track.name)),
+            );
             push_reaper_array(&mut out, "VOLPAN", &track.vol_pan);
             push_reaper_int_array(&mut out, "MUTESOLO", &track.mute_solo);
-            push_reaper_token(&mut out, format!("IPHASE {}", if track.iphase { 1 } else { 0 }));
+            push_reaper_token(
+                &mut out,
+                format!("IPHASE {}", if track.iphase { 1 } else { 0 }),
+            );
         }
 
         for item in &track.items {
@@ -1541,7 +1562,8 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         assert!((reaper_fade_manual_length_sec(&manual_in) - 0.01).abs() < 1e-12);
         assert!(reaper_fade_auto_length_sec(&manual_in) == 0.0);
 
-        let manual_long = parse_fade_array(&["FADEIN", "1", "0.674609629036", "0", "1", "0", "0", "0"]);
+        let manual_long =
+            parse_fade_array(&["FADEIN", "1", "0.674609629036", "0", "1", "0", "0", "0"]);
         assert!(!reaper_fade_is_auto(&manual_long));
         assert!((reaper_fade_manual_length_sec(&manual_long) - 0.674609629036).abs() < 1e-12);
         assert_eq!(
@@ -1551,7 +1573,8 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
 
         // - 自动交叉淡化：selector（索引 4）为 1；索引 1 = 手动长度（保留），
         //   索引 2 = 自动长度（= 重叠量）。有效长度取自动。
-        let auto_out = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let auto_out =
+            parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&auto_out));
         assert_eq!(auto_out[1], 0.01); // 手动长度不被自动值覆盖
         assert!((reaper_fade_manual_length_sec(&auto_out) - 0.01).abs() < 1e-12);
@@ -1566,16 +1589,22 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         // fade_test.rpp 场景：Item A 手动淡出 0.6711s → 重叠后自动交叉淡化 0.176286s
         // （自动 = 重叠量），手动淡化被保留在索引 1。
         let a_fadeout = parse_fade_array(&[
-            "FADEOUT", "1.1", "0.67114827520773", "0.17628573810208", "1", "1", "0", "0",
+            "FADEOUT",
+            "1.1",
+            "0.67114827520773",
+            "0.17628573810208",
+            "1",
+            "1",
+            "0",
+            "0",
         ]);
         assert!(reaper_fade_is_auto(&a_fadeout));
         assert!((reaper_fade_manual_length_sec(&a_fadeout) - 0.67114827520773).abs() < 1e-12);
         assert!((reaper_fade_auto_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
         assert!((reaper_fade_effective_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
 
-        let b_fadein = parse_fade_array(&[
-            "FADEIN", "1.1", "0", "0.17628573810208", "1", "1", "0", "0",
-        ]);
+        let b_fadein =
+            parse_fade_array(&["FADEIN", "1.1", "0", "0.17628573810208", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&b_fadein));
         assert!(reaper_fade_manual_length_sec(&b_fadein) == 0.0);
         assert!((reaper_fade_auto_length_sec(&b_fadein) - 0.17628573810208).abs() < 1e-12);

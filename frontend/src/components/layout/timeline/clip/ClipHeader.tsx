@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
 import type { ClipFormantMorph, ClipInfo } from "../../../../features/session/sessionTypes";
+import { activeClipTakeName, clipDisplayName } from "../../../../features/session/sessionTypes";
 import { CLIP_HEADER_HEIGHT } from "../constants";
 import { formatGainDbValue, gainToDb } from "../math";
 import { AppTooltipBubble } from "../../../../components/AppTooltip";
@@ -83,10 +84,12 @@ export const ClipHeader: React.FC<{
                   .replace("{gain}", formatGainDbValue(clampedGainDb))
                   .replace("{delta}", formatGainDbValue(clampedGainDb - gainDragBaseDb));
     const showGainTooltip = gainHovered || gainDragBaseDb != null;
+    const displayName = clipDisplayName(clip);
+    const editTakeName = activeClipTakeName(clip);
     const clipTooltipText =
         clip.midiNoteCount != null
-            ? `${t("clip_type_midi_prefix")} ${clip.name}`
-            : (clip.sourcePath ?? clip.name);
+            ? `${t("clip_type_midi_prefix")} ${displayName}`
+            : (clip.sourcePath ?? displayName);
 
     // 根据 clip 像素宽度决定显示哪些元素（从右往左依次隐藏）
     // >= 152px: 全显示 | 116-152: 隐藏名称 | 96-116: 隐藏播放速率 | 68-96: 隐藏增益值+F | 52-68: 隐藏F | 32-52: 只留增益旋钮 | < 32px: 全隐藏
@@ -107,7 +110,7 @@ export const ClipHeader: React.FC<{
         muted: Boolean(clip.muted),
         gain: clip.gain,
         playbackRate: clip.playbackRate,
-        name: clip.name,
+        name: displayName,
         fontFamily,
         isPitchAdjustment,
     });
@@ -148,7 +151,7 @@ export const ClipHeader: React.FC<{
     // 外部触发重命名（来自右键菜单）
     React.useEffect(() => {
         if (triggerRename && !nameEditing) {
-            setNameInputVal(clip.name);
+            setNameInputVal(editTakeName);
             setNameEditing(true);
             setTimeout(() => {
                 const input = nameInputRef.current;
@@ -162,7 +165,7 @@ export const ClipHeader: React.FC<{
 
     function commitNameEdit() {
         const trimmed = nameInputVal.trim();
-        const finalName = trimmed.length > 0 ? trimmed : clip.name;
+        const finalName = trimmed.length > 0 ? trimmed : editTakeName;
         onRenameCommit?.(clip.id, finalName);
         setNameEditing(false);
         onRenameDone?.();
@@ -171,7 +174,7 @@ export const ClipHeader: React.FC<{
     function beginNameEditing() {
         onRenameClickCandidate?.(null);
         onRenameStart?.(clip.id);
-        setNameInputVal(clip.name);
+        setNameInputVal(editTakeName);
         setNameEditing(true);
         setTimeout(() => {
             // 第二次点击的 mousedown 要么被名称 div 拦截，要么命中刚挂载的 input；
@@ -561,7 +564,7 @@ export const ClipHeader: React.FC<{
                                 e.stopPropagation();
                             }}
                         >
-                            {clip.name}
+                            {displayName}
                         </div>
                     )}
                 </div>

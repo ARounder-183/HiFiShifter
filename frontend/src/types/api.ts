@@ -33,6 +33,30 @@ export interface TimelineTrack {
     color: string;
 }
 
+export interface TimelineClipTake {
+    id: string;
+    name: string;
+    gain: number;
+    source_path?: string;
+    source_path_relative?: string;
+    duration_sec?: number;
+    duration_frames?: number;
+    source_sample_rate?: number;
+    source_start_sec: number;
+    source_end_sec: number;
+    playback_rate: number;
+    reversed: boolean;
+    loop_enabled: boolean;
+    midi_note_data?: Array<{
+        start_sec: number;
+        end_sec: number;
+        note: number;
+        velocity: number;
+        channel?: number;
+    }>;
+    midi_fill_gaps?: boolean;
+}
+
 export interface TimelineClip {
     id: string;
     group_id?: string;
@@ -41,6 +65,8 @@ export interface TimelineClip {
     start_sec: number;
     length_sec: number;
     color: string;
+    takes?: TimelineClipTake[];
+    active_take_id?: string;
     source_path?: string;
     source_path_relative?: string;
     duration_sec?: number;
@@ -56,6 +82,8 @@ export interface TimelineClip {
     source_start_sec?: number;
     source_end_sec?: number;
     playback_rate?: number;
+    /** Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。 */
+    clip_playback_rate?: number;
     reversed?: boolean;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;

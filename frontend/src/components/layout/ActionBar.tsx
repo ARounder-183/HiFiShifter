@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Flex, Select, TextField, Button, IconButton, Separator, Text, Box } from "@radix-ui/themes";
+import {
+    Flex,
+    Select,
+    TextField,
+    Button,
+    IconButton,
+    Separator,
+    Text,
+    Box,
+} from "@radix-ui/themes";
 import {
     CheckIcon,
     DoubleArrowRightIcon,
+    LayersIcon,
     PauseIcon,
     Pencil1Icon,
     PlayIcon,
@@ -23,6 +33,7 @@ import {
     updateTransportBpm,
     setProjectTimelineSettingsRemote,
     toggleAutoCrossfade,
+    toggleSyncEditsAcrossTakes,
     toggleSplitTransition,
     toggleSnap,
     togglePlayheadZoom,
@@ -250,7 +261,7 @@ export function ActionBar() {
         () =>
             s.project?.useCustomScale && s.project?.customScale
                 ? s.project.customScale.notes
-                : s.project?.baseScale ?? "C",
+                : (s.project?.baseScale ?? "C"),
         [s.project],
     );
 
@@ -705,7 +716,10 @@ export function ActionBar() {
                         }
                         if (v === "__custom__") {
                             if (s.project?.customScale) {
-                                applyBaseScale(s.project.customScale.notes, s.project.customScale.name);
+                                applyBaseScale(
+                                    s.project.customScale.notes,
+                                    s.project.customScale.name,
+                                );
                             }
                             return;
                         }
@@ -873,7 +887,9 @@ export function ActionBar() {
                             <button
                                 type="button"
                                 className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
-                                onClick={() => void applyRecordingSettings({ captureMode: "device" })}
+                                onClick={() =>
+                                    void applyRecordingSettings({ captureMode: "device" })
+                                }
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
                                 <span>{tAny("recording_mode_device")}</span>
@@ -888,7 +904,9 @@ export function ActionBar() {
                                 onPointerDown={(e) => e.stopPropagation()}
                             >
                                 <span>{tAny("recording_mode_loopback")}</span>
-                                {recording.settings.captureMode === "loopback" ? <CheckIcon /> : null}
+                                {recording.settings.captureMode === "loopback" ? (
+                                    <CheckIcon />
+                                ) : null}
                             </button>
                             <button
                                 type="button"
@@ -956,7 +974,9 @@ export function ActionBar() {
                                         type="button"
                                         className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
                                         onClick={() =>
-                                            void applyRecordingSettings({ loopbackDevice: "default" })
+                                            void applyRecordingSettings({
+                                                loopbackDevice: "default",
+                                            })
                                         }
                                         onPointerDown={(e) => e.stopPropagation()}
                                     >
@@ -1174,6 +1194,21 @@ export function ActionBar() {
                     </svg>
                 </IconButton>
 
+                {/* Sync edits across takes */}
+                <IconButton
+                    size="1"
+                    variant={s.syncEditsAcrossTakes ? "solid" : "ghost"}
+                    color="gray"
+                    data-tooltip={tAny("sync_edits_across_takes")}
+                    tabIndex={-1}
+                    onClick={() => {
+                        dispatch(toggleSyncEditsAcrossTakes());
+                        void dispatch(persistUiSettings());
+                    }}
+                >
+                    <LayersIcon />
+                </IconButton>
+
                 {/* Split Transition */}
                 <IconButton
                     size="1"
@@ -1198,16 +1233,8 @@ export function ActionBar() {
                         xmlns="http://www.w3.org/2000/svg"
                     >
                         <path d="M7.5 1.5V13.5" stroke="currentColor" strokeWidth="1.2" />
-                        <path
-                            d="M3.5 3.5L7.5 5.5L3.5 7.5Z"
-                            fill="currentColor"
-                            opacity="0.85"
-                        />
-                        <path
-                            d="M11.5 7.5L7.5 9.5L11.5 11.5Z"
-                            fill="currentColor"
-                            opacity="0.45"
-                        />
+                        <path d="M3.5 3.5L7.5 5.5L3.5 7.5Z" fill="currentColor" opacity="0.85" />
+                        <path d="M11.5 7.5L7.5 9.5L11.5 11.5Z" fill="currentColor" opacity="0.45" />
                     </svg>
                 </IconButton>
 
@@ -1478,9 +1505,11 @@ export function ActionBar() {
                 onOpenChange={setRecordingSettingsOpen}
             />
 
-
             {snapSettingsOpen && (
-                <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
+                <SnapGridSettingsDialog
+                    open={snapSettingsOpen}
+                    onOpenChange={setSnapSettingsOpen}
+                />
             )}
 
             {/* Snap Context Menu removed: right-click opens the settings dialog above. */}
@@ -1523,14 +1552,7 @@ function RippleIcon({ multiTrack }: { multiTrack: boolean }) {
                         fill="currentColor"
                         opacity="0.75"
                     />
-                    <rect
-                        x="8.6"
-                        y={y}
-                        width="2.9"
-                        height="2.4"
-                        rx="0.6"
-                        fill="currentColor"
-                    />
+                    <rect x="8.6" y={y} width="2.9" height="2.4" rx="0.6" fill="currentColor" />
                 </g>
             ))}
             <path

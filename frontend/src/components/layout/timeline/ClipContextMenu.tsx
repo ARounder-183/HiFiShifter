@@ -1,9 +1,20 @@
-import React, { useLayoutEffect, useRef } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
-import { useAppSelector } from "../../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { selectKeybinding, formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
+import {
+    addClipTakeFromMediaRemote,
+    cycleClipTakesRemote,
+    duplicateClipTakeRemote,
+    explodeClipTakesRemote,
+    packClipsIntoTakesRemote,
+    removeClipTakeRemote,
+    renameClipTakeRemote,
+    setClipActiveTakeRemote,
+} from "../../../features/session/sessionSlice";
+import { webApi } from "../../../services/webviewApi";
 import { sortAndFilterFadedClips } from "./clipFadeContext";
 
 // ── 单条菜单项 ──────────────────────────────────────────────────────────────
@@ -36,6 +47,101 @@ const MenuItem: React.FC<{
 );
 
 const Divider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
+
+/** 一级菜单中的二级子菜单；悬停或点击均可展开。 */
+const SubMenu: React.FC<{
+    label: string;
+    disabled?: boolean;
+    badge?: string;
+    children: React.ReactNode;
+}> = ({ label, disabled = false, badge, children }) => {
+    const [open, setOpen] = useState(false);
+    const wrapperRef = useRef<HTMLDivElement>(null);
+    const panelRef = useRef<HTMLDivElement>(null);
+
+    useLayoutEffect(() => {
+        if (!open) return;
+        const panel = panelRef.current;
+        if (!panel) return;
+        panel.style.left = "calc(100% - 4px)";
+        panel.style.right = "auto";
+        panel.style.top = "-5px";
+        panel.style.bottom = "auto";
+
+        const rect = panel.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        if (rect.right > vw - 4) {
+            panel.style.left = "auto";
+            panel.style.right = "calc(100% - 4px)";
+        }
+        if (rect.bottom > vh - 4) {
+            panel.style.top = "auto";
+            panel.style.bottom = "-5px";
+        }
+    }, [open]);
+
+    return (
+        <div
+            ref={wrapperRef}
+            className="relative"
+            onMouseEnter={() => {
+                if (!disabled) setOpen(true);
+            }}
+            onMouseLeave={() => setOpen(false)}
+        >
+            <button
+                className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
+                    ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
+                disabled={disabled}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    if (!disabled) setOpen((value) => !value);
+                }}
+                aria-haspopup="menu"
+                aria-expanded={open}
+            >
+                <span className="flex items-center gap-2 min-w-0">
+                    <span className="truncate">{label}</span>
+                    {badge && (
+                        <span className="text-[10px] leading-none rounded bg-black/20 px-1 py-0.5 opacity-70">
+                            {badge}
+                        </span>
+                    )}
+                </span>
+                <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 15 15"
+                    fill="none"
+                    aria-hidden="true"
+                    className="opacity-50 shrink-0"
+                >
+                    <path
+                        d="M6 3.5L10 7.5L6 11.5"
+                        stroke="currentColor"
+                        strokeWidth="1.2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                    />
+                </svg>
+            </button>
+            {open && !disabled && (
+                <div
+                    ref={panelRef}
+                    role="menu"
+                    data-hs-context-menu="1"
+                    className="absolute z-[60] min-w-[190px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {children}
+                </div>
+            )}
+        </div>
+    );
+};
 
 // ── 渐变曲线选项 ────────────────────────────────────────────────────────────
 const CURVE_OPTION_KEYS: { value: FadeCurveType; key: MessageKey }[] = [
@@ -139,6 +245,7 @@ export const ClipContextMenu: React.FC<{
     onFadeCurveChange,
 }) => {
     const { t } = useI18n();
+    const dispatch = useAppDispatch();
     const menuRef = useRef<HTMLDivElement>(null);
     const ids = selectedClips.length >= 2 ? selectedClips.map((c) => c.id) : [clip.id];
     const isMulti = ids.length >= 2;
@@ -146,6 +253,8 @@ export const ClipContextMenu: React.FC<{
 
     // 音高参考块判断
     const isPitch = (c: ClipInfo) => c.midiNoteCount != null;
+    const takes = Array.isArray(clip.takes) ? clip.takes : [];
+    const activeTake = takes.find((take) => take.id === clip.activeTakeId) ?? takes[0];
     const allPitchAdjustment = selectedClips.length > 0 && selectedClips.every(isPitch);
     const hasPitchAdjustment = selectedClips.some(isPitch);
     const audioOnlyIds = selectedClips.filter((c) => !isPitch(c)).map((c) => c.id);
@@ -197,12 +306,9 @@ export const ClipContextMenu: React.FC<{
             onPointerDown={(e) => e.stopPropagation()}
         >
             {isMulti && (
-                <>
-                    <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
-                        {t("ctx_selected_n").replace("{n}", String(selectedClips.length))}
-                    </div>
-                    <Divider />
-                </>
+                <div className="px-3 py-1 text-[11px] text-qt-text/50 select-none">
+                    {t("ctx_selected_n").replace("{n}", String(selectedClips.length))}
+                </div>
             )}
 
             <MenuItem
@@ -228,6 +334,155 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
+            <Divider />
+            <SubMenu
+                label={t("clip_takes")}
+                badge={takes.length > 0 ? String(takes.length) : undefined}
+            >
+                {isMulti && (
+                    <MenuItem
+                        label={t("clip_pack_into_takes")}
+                        onClick={() => {
+                            void dispatch(packClipsIntoTakesRemote({ clipIds: ids }));
+                            close();
+                        }}
+                    />
+                )}
+                {isSingle && (
+                    <>
+                        {takes.map((take) => (
+                            <MenuItem
+                                key={take.id}
+                                label={`${
+                                    take.id === clip.activeTakeId
+                                        ? t("clip_take_active_mark")
+                                        : "  "
+                                } ${take.name || take.id}`}
+                                disabled={takes.length <= 1}
+                                onClick={() => {
+                                    void dispatch(
+                                        setClipActiveTakeRemote({
+                                            clipId: clip.id,
+                                            takeId: take.id,
+                                        }),
+                                    );
+                                    close();
+                                }}
+                            />
+                        ))}
+                        {takes.length > 1 && (
+                            <>
+                                <Divider />
+                                <MenuItem
+                                    label={t("clip_take_cycle_prev")}
+                                    onClick={() => {
+                                        void dispatch(
+                                            cycleClipTakesRemote({
+                                                clipIds: [clip.id],
+                                                direction: -1,
+                                            }),
+                                        );
+                                        close();
+                                    }}
+                                />
+                                <MenuItem
+                                    label={t("clip_take_cycle_next")}
+                                    onClick={() => {
+                                        void dispatch(
+                                            cycleClipTakesRemote({
+                                                clipIds: [clip.id],
+                                                direction: 1,
+                                            }),
+                                        );
+                                        close();
+                                    }}
+                                />
+                            </>
+                        )}
+                        <Divider />
+                        <MenuItem
+                            label={t("clip_take_add")}
+                            onClick={() => {
+                                void (async () => {
+                                    const picked = await webApi.openAudioDialog();
+                                    const path =
+                                        picked && typeof picked === "object" && "path" in picked
+                                            ? String((picked as { path?: unknown }).path ?? "")
+                                            : "";
+                                    if (path) {
+                                        void dispatch(
+                                            addClipTakeFromMediaRemote({
+                                                clipId: clip.id,
+                                                sourcePath: path,
+                                            }),
+                                        );
+                                    }
+                                })();
+                                close();
+                            }}
+                        />
+                        <MenuItem
+                            label={t("clip_take_duplicate")}
+                            disabled={!activeTake}
+                            onClick={() => {
+                                if (!activeTake) return;
+                                void dispatch(
+                                    duplicateClipTakeRemote({
+                                        clipId: clip.id,
+                                        takeId: activeTake.id,
+                                    }),
+                                );
+                                close();
+                            }}
+                        />
+                        <MenuItem
+                            label={t("clip_take_rename")}
+                            disabled={!activeTake}
+                            onClick={() => {
+                                if (!activeTake) return;
+                                const next = window.prompt(
+                                    t("ctx_rename"),
+                                    activeTake.name || activeTake.id,
+                                );
+                                if (next && next.trim()) {
+                                    void dispatch(
+                                        renameClipTakeRemote({
+                                            clipId: clip.id,
+                                            takeId: activeTake.id,
+                                            name: next.trim(),
+                                        }),
+                                    );
+                                }
+                                close();
+                            }}
+                        />
+                        <MenuItem
+                            label={t("clip_take_remove")}
+                            danger
+                            disabled={takes.length <= 1 || !activeTake}
+                            onClick={() => {
+                                if (!activeTake) return;
+                                void dispatch(
+                                    removeClipTakeRemote({
+                                        clipId: clip.id,
+                                        takeId: activeTake.id,
+                                    }),
+                                );
+                                close();
+                            }}
+                        />
+                        {takes.length > 1 && (
+                            <MenuItem
+                                label={t("clip_take_explode")}
+                                onClick={() => {
+                                    void dispatch(explodeClipTakesRemote({ clipId: clip.id }));
+                                    close();
+                                }}
+                            />
+                        )}
+                    </>
+                )}
+            </SubMenu>
             <MenuItem
                 label={
                     allReversed

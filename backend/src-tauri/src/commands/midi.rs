@@ -77,8 +77,11 @@ pub(super) fn get_midi_tracks(
         }
     };
 
-    let tracks_with_notes: Vec<&MidiTrackInfo> =
-        parse_result.tracks.iter().filter(|t| t.note_count > 0).collect();
+    let tracks_with_notes: Vec<&MidiTrackInfo> = parse_result
+        .tracks
+        .iter()
+        .filter(|t| t.note_count > 0)
+        .collect();
 
     midi_log(format!(
         "get_midi_tracks: parsed tracks_total={} tracks_with_notes={}",
@@ -109,7 +112,9 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
     let midi_data = match crate::commands::reaper_clipboard::read_midi_clipboard() {
         Ok(data) => data,
         Err(e) => {
-            midi_log(format!("read_midi_clipboard_to_memory: clipboard_error={e}"));
+            midi_log(format!(
+                "read_midi_clipboard_to_memory: clipboard_error={e}"
+            ));
             return serde_json::json!({"ok": false, "error": "midi_clipboard_empty"});
         }
     };
@@ -155,8 +160,11 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
         }
     }
 
-    let tracks_with_notes: Vec<&MidiTrackInfo> =
-        parse_result.tracks.iter().filter(|t| t.note_count > 0).collect();
+    let tracks_with_notes: Vec<&MidiTrackInfo> = parse_result
+        .tracks
+        .iter()
+        .filter(|t| t.note_count > 0)
+        .collect();
 
     midi_log(format!(
         "read_midi_clipboard_to_memory: parsed tracks_total={} tracks_with_notes={} initial_bpm={:.2}",
@@ -422,12 +430,8 @@ pub(super) fn import_midi_to_pitch(
         align_offset,
     );
 
-    let touched = midi_import::write_notes_to_pitch_edit(
-        &notes,
-        frame_period_ms,
-        target_slice,
-        align_offset,
-    );
+    let touched =
+        midi_import::write_notes_to_pitch_edit(&notes, frame_period_ms, target_slice, align_offset);
 
     // 填补音符之间的空隙（仅在导入的音符范围内）
     if fill_gaps.unwrap_or(false) {
@@ -472,11 +476,15 @@ pub(super) fn import_midi_to_pitch(
         return serde_json::json!({"ok": false, "error": "no_frames_touched"});
     }
 
+    tl.sync_clip_takes_from_flat();
     state.audio_engine.update_timeline(tl.clone());
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = state
+                .clipboard_midi_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             cache.remove(guid);
         }
     }
@@ -596,8 +604,7 @@ pub(super) fn import_midi_as_clip(
         // set_timeline_tempo_map 的幂等约定一致：无变化不产生撤销步）。
         let will_change = match &points {
             Some(pts) => {
-                let has_change =
-                    pts.iter().any(|p| p.position_sec > 1e-9) || pts.len() > 1;
+                let has_change = pts.iter().any(|p| p.position_sec > 1e-9) || pts.len() > 1;
                 if has_change {
                     true
                 } else {
@@ -623,8 +630,7 @@ pub(super) fn import_midi_as_clip(
         // render_scale_signature 会覆盖该情况，无需单独跟踪 project_scale_changed。
         match points {
             Some(points) => {
-                let has_change =
-                    points.iter().any(|p| p.position_sec > 1e-9) || points.len() > 1;
+                let has_change = points.iter().any(|p| p.position_sec > 1e-9) || points.len() > 1;
                 if has_change {
                     tl.tempo_map = Some(points);
                     tl.normalize_tempo_map();
@@ -665,9 +671,7 @@ pub(super) fn import_midi_as_clip(
                                     }
                                     tl.project_scale_notes =
                                         crate::state::scale_notes_for_key(&key)
-                                            .unwrap_or_else(|| {
-                                                vec![0, 2, 4, 5, 7, 9, 11]
-                                            });
+                                            .unwrap_or_else(|| vec![0, 2, 4, 5, 7, 9, 11]);
                                     p.base_scale = key;
                                     p.use_custom_scale = false;
                                     p.custom_scale = None;
@@ -804,6 +808,7 @@ pub(super) fn import_midi_as_clip(
                 .map(|c| c.track_id.clone())
                 .unwrap_or_default(),
         );
+        tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.created_clip_ids = Some(vec![clip_id]);
@@ -866,10 +871,7 @@ pub(super) fn import_midi_as_clip(
                     .iter()
                     .map(|n| n.start_sec)
                     .fold(f64::INFINITY, f64::min);
-                let last_end = group
-                    .iter()
-                    .map(|n| n.end_sec)
-                    .fold(0.0f64, f64::max);
+                let last_end = group.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
                 let normalized: Vec<midi_import::MidiNoteEvent> = group
                     .iter()
                     .map(|n| midi_import::MidiNoteEvent {
@@ -974,6 +976,7 @@ pub(super) fn import_midi_as_clip(
                 }
             }
         }
+        tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.created_clip_ids = Some(created_clip_ids);
@@ -986,7 +989,10 @@ pub(super) fn import_midi_as_clip(
 
         if let Some(ref guid) = clipboard_guid {
             if !guid.is_empty() {
-                let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+                let mut cache = state
+                    .clipboard_midi_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 cache.remove(guid);
             }
         }
@@ -1018,7 +1024,6 @@ pub(super) fn replace_midi_clip_data(
         clip_id, midi_path, track_indices, fill_gaps, close_leading_gap
     ));
 
-
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let project_bpm = tl.bpm;
 
@@ -1046,7 +1051,11 @@ pub(super) fn replace_midi_clip_data(
     let mode = note_bpm_mode.as_deref().unwrap_or("midi");
     let target_bpm: Option<f64> = match mode {
         "project" => {
-            if import_as_project { None } else { Some(project_bpm) }
+            if import_as_project {
+                None
+            } else {
+                Some(project_bpm)
+            }
         }
         "specified" => specified_bpm.filter(|&b| b > 0.0 && b.is_finite()),
         _ => None,
@@ -1161,6 +1170,7 @@ pub(super) fn replace_midi_clip_data(
             .map(|c| c.track_id.clone())
             .unwrap_or_default(),
     );
+    tl.sync_clip_takes_from_flat();
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -1171,7 +1181,10 @@ pub(super) fn replace_midi_clip_data(
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = state
+                .clipboard_midi_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             cache.remove(guid);
         }
     }

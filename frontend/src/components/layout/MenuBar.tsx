@@ -38,8 +38,6 @@ import {
     subscribePianoRollSelection,
 } from "../../utils/pianoRollSelectionBus";
 
-
-
 import {
     importAudioAtPosition,
     importAudioFromDialog,
@@ -250,9 +248,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         // 选区并未真正受到影响。
         const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
         if (changes.length === 0) return null;
-        if (
-            changes.every((c) => scaleLikeEquals(c.scale, projectScale))
-        ) {
+        if (changes.every((c) => scaleLikeEquals(c.scale, projectScale))) {
             return null;
         }
         return tAny("project_scale_tempo_map_hint");
@@ -345,10 +341,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             document.body.getAttribute("data-hs-focus-window") === "timeline";
 
         if (
-            (op === "copy" ||
-                op === "cut" ||
-                op === "paste" ||
-                op === "pasteTracks") &&
+            (op === "copy" || op === "cut" || op === "paste" || op === "pasteTracks") &&
             inTimeline &&
             !inPianoRoll &&
             !inTrackHeader
@@ -657,9 +650,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Time Display */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tAny("time_display")}
-                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger>{tAny("time_display")}</DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
@@ -1078,10 +1069,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setTimeDisplaySettingsOpen}
             />
 
-            <SnapGridSettingsDialog
-                open={snapSettingsOpen}
-                onOpenChange={setSnapSettingsOpen}
-            />
+            <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
 
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
 
@@ -1153,6 +1141,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 }}
                             >
                                 {t("import_across_tracks")}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = menuImportMode;
+                                    setMenuImportMode(null);
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "as-takes",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
+                                }}
+                            >
+                                {t("import_as_takes")}
                             </button>
                         </div>
 

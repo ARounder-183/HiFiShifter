@@ -368,9 +368,8 @@ mod tests {
     use super::processor_bakes_common_mix_curves;
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
-        child_formant_offset_curve_key, common_pan_curve_for_clip,
-        common_volume_curve_for_clip, extra_curve_for_clip,
-        hifigan_formant_shift_active_for_clip,
+        child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
+        extra_curve_for_clip, hifigan_formant_shift_active_for_clip,
     };
     #[cfg(feature = "vslib")]
     use crate::state::SynthPipelineKind;
@@ -380,6 +379,9 @@ mod tests {
     fn make_clip() -> Clip {
         Clip {
             id: "clip-a".to_string(),
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
             track_id: "track-a".to_string(),
             name: "Clip".to_string(),
             start_sec: 0.0,
@@ -447,7 +449,10 @@ mod tests {
         let effective = build_clip_effective_formant_shift_curve(
             &timeline,
             &clip,
-            timeline.params_by_root_track.get(&clip_track_root(&timeline, &clip).unwrap()).unwrap(),
+            timeline
+                .params_by_root_track
+                .get(&clip_track_root(&timeline, &clip).unwrap())
+                .unwrap(),
             3,
         )
         .expect("effective formant curve");
@@ -626,7 +631,11 @@ pub(crate) fn scale_degree_to_midi(abs_degree: f64, offsets: &[i32]) -> f64 {
     lower + (upper - lower) * frac
 }
 
-pub(crate) fn transpose_midi_by_scale_steps(midi: f64, degree_steps: f64, scale_notes: &[u8]) -> f64 {
+pub(crate) fn transpose_midi_by_scale_steps(
+    midi: f64,
+    degree_steps: f64,
+    scale_notes: &[u8],
+) -> f64 {
     if !midi.is_finite() || degree_steps.abs() <= 1e-9 {
         return midi;
     }
@@ -715,18 +724,22 @@ fn active_child_pitch_offset_config<'a>(
     let mut layers: Vec<ChildPitchOffsetLayer<'a>> = Vec::with_capacity(lineage_child_ids.len());
 
     for track_id in lineage_child_ids {
-        let cents_curve = entry.and_then(|state| {
-            state.extra_curves.get(&child_pitch_offset_curve_key(
-                ChildPitchOffsetParamMode::Cents,
-                track_id,
-            ))
-        }).map(|v| v.as_slice());
-        let degree_steps_curve = entry.and_then(|state| {
-            state.extra_curves.get(&child_pitch_offset_curve_key(
-                ChildPitchOffsetParamMode::Degrees,
-                track_id,
-            ))
-        }).map(|v| v.as_slice());
+        let cents_curve = entry
+            .and_then(|state| {
+                state.extra_curves.get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Cents,
+                    track_id,
+                ))
+            })
+            .map(|v| v.as_slice());
+        let degree_steps_curve = entry
+            .and_then(|state| {
+                state.extra_curves.get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Degrees,
+                    track_id,
+                ))
+            })
+            .map(|v| v.as_slice());
 
         let static_cents = CHILD_PITCH_OFFSET_CENTS_DEFAULT;
         let static_degree_steps = CHILD_PITCH_OFFSET_DEGREES_DEFAULT;
@@ -800,17 +813,16 @@ fn active_child_formant_offset_config<'a>(
         .find(|track| track.id == root_track_id)
         .map(|track| SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
         .unwrap_or(SynthPipelineKind::WorldVocoder);
-    let supports_formant = matches!(root_kind, SynthPipelineKind::NsfHifiganOnnx)
-        || {
-            #[cfg(feature = "vslib")]
-            {
-                matches!(root_kind, SynthPipelineKind::VocalShifterVslib)
-            }
-            #[cfg(not(feature = "vslib"))]
-            {
-                false
-            }
-        };
+    let supports_formant = matches!(root_kind, SynthPipelineKind::NsfHifiganOnnx) || {
+        #[cfg(feature = "vslib")]
+        {
+            matches!(root_kind, SynthPipelineKind::VocalShifterVslib)
+        }
+        #[cfg(not(feature = "vslib"))]
+        {
+            false
+        }
+    };
     if !supports_formant {
         return None;
     }
@@ -842,15 +854,16 @@ fn active_child_formant_offset_config<'a>(
 
     let frame_period_ms = entry.map(|state| state.frame_period_ms).unwrap_or(5.0);
     let mut has_effective = false;
-    let mut layers: Vec<ChildFormantOffsetLayer<'a>> =
-        Vec::with_capacity(lineage_child_ids.len());
+    let mut layers: Vec<ChildFormantOffsetLayer<'a>> = Vec::with_capacity(lineage_child_ids.len());
 
     for track_id in lineage_child_ids {
-        let curve = entry.and_then(|state| {
-            state
-                .extra_curves
-                .get(&child_formant_offset_curve_key(track_id))
-        }).map(|v| v.as_slice());
+        let curve = entry
+            .and_then(|state| {
+                state
+                    .extra_curves
+                    .get(&child_formant_offset_curve_key(track_id))
+            })
+            .map(|v| v.as_slice());
 
         has_effective = has_effective
             || curve_differs_from_default_in_range_with_tolerance(
@@ -1020,12 +1033,7 @@ pub(crate) fn build_clip_input_pitch_curve(
                 let frame_idx = start_idx.saturating_add(local_idx);
                 let sec = (frame_idx as f64) * fp / 1000.0;
                 let scale_notes = cursor.notes_at(sec);
-                apply_child_pitch_offset_to_midi(
-                    midi as f64,
-                    cfg,
-                    frame_idx,
-                    scale_notes,
-                ) as f32
+                apply_child_pitch_offset_to_midi(midi as f64, cfg, frame_idx, scale_notes) as f32
             })
             .collect()
     } else {
@@ -1047,8 +1055,7 @@ impl<'a> ScaleSegmentsCursor<'a> {
     }
 
     pub(crate) fn notes_at(&mut self, sec: f64) -> &'a [u8] {
-        while self.index + 1 < self.segments.len()
-            && self.segments[self.index + 1].0 <= sec + 1e-9
+        while self.index + 1 < self.segments.len() && self.segments[self.index + 1].0 <= sec + 1e-9
         {
             self.index += 1;
         }
@@ -1350,8 +1357,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行其内部拉伸。
     let needs_processor_stretch = {
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let compose_or_pitch_adjust =
-            track.compose_enabled || entry.has_pitch_adjustment_active;
+        let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
         let handles =
             crate::renderer::processor_handles_time_stretch(kind, compose_or_pitch_adjust);
         let rate = (clip.playback_rate as f64).max(1e-6);
@@ -1471,12 +1477,9 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             if *value > 0.0 {
                 let sec = (frame_idx as f64) * frame_period_ms / 1000.0;
                 let scale_notes = cursor.notes_at(sec);
-                *value = apply_child_pitch_offset_to_midi(
-                    *value as f64,
-                    cfg,
-                    frame_idx,
-                    scale_notes,
-                ) as f32;
+                *value =
+                    apply_child_pitch_offset_to_midi(*value as f64, cfg, frame_idx, scale_notes)
+                        as f32;
             }
         }
 
@@ -1719,7 +1722,10 @@ pub fn does_clip_need_processor_render(
     // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
     // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
     // 同样，用户手动绘制了 pitch 曲线时也必须触发渲染。
-    if !track.compose_enabled && !entry.has_pitch_adjustment_active && !entry.pitch_edit_user_modified {
+    if !track.compose_enabled
+        && !entry.has_pitch_adjustment_active
+        && !entry.pitch_edit_user_modified
+    {
         return false;
     }
     if !pitch_edit_backend_available_for_track(track) && !entry.pitch_edit_user_modified {
@@ -1741,8 +1747,7 @@ pub fn does_clip_need_processor_render(
     // 即使用户没有编辑音高，也需要触发处理器预渲染以执行其内部拉伸。
     let needs_processor_stretch = {
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let compose_or_pitch_adjust =
-            track.compose_enabled || entry.has_pitch_adjustment_active;
+        let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
         let handles =
             crate::renderer::processor_handles_time_stretch(kind, compose_or_pitch_adjust);
         let rate = (clip.playback_rate as f64).max(1e-6);

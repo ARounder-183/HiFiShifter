@@ -29,6 +29,7 @@ const positional = [
     0.25, // sourceStartSec
     3.25, // sourceEndSec
     1.5, // playbackRate
+    1.25, // clipPlaybackRate
     true, // reversed
     true, // loopEnabled
     0.75, // snapOffsetSec
@@ -56,6 +57,7 @@ const expectedKeys = [
     "sourceStartSec",
     "sourceEndSec",
     "playbackRate",
+    "clipPlaybackRate",
     "reversed",
     "loopEnabled",
     "snapOffsetSec",
@@ -76,5 +78,53 @@ assertEqual(mapped.snapOffsetSec, 0.75, "snapOffsetSec value");
 assertEqual(mapped.fadeInSec, 0.1, "fadeInSec value");
 assertEqual(mapped.fadeOutSec, 0.2, "fadeOutSec value");
 assertEqual(mapped.checkpoint, false, "checkpoint value");
+
+// Take 相关命令映射：这些命令曾经漏映射，导致前端乐观更新生效但后端调用
+// 抛 "method not wired yet"，任何后续权威时间轴刷新都会回滚 Take 切换。
+assertEqual(
+    buildTauriArgs("set_clip_active_take", ["clip-1", "take-2", true]),
+    { clipId: "clip-1", takeId: "take-2", checkpoint: true },
+    "set_clip_active_take mapping",
+);
+assertEqual(
+    buildTauriArgs("cycle_clip_takes", [["clip-1"], -1, false]),
+    { clipIds: ["clip-1"], direction: -1, checkpoint: false },
+    "cycle_clip_takes mapping",
+);
+assertEqual(
+    buildTauriArgs("duplicate_clip_take", ["clip-1", "take-2", false]),
+    { clipId: "clip-1", takeId: "take-2", checkpoint: false },
+    "duplicate_clip_take mapping",
+);
+assertEqual(
+    buildTauriArgs("remove_clip_take", ["clip-1", "take-2", false]),
+    { clipId: "clip-1", takeId: "take-2", checkpoint: false },
+    "remove_clip_take mapping",
+);
+assertEqual(
+    buildTauriArgs("rename_clip_take", ["clip-1", "take-2", "Lead", false]),
+    { clipId: "clip-1", takeId: "take-2", name: "Lead", checkpoint: false },
+    "rename_clip_take mapping",
+);
+assertEqual(
+    buildTauriArgs("add_clip_take_from_media", ["clip-1", "C:/a.wav", "Take B", false]),
+    { clipId: "clip-1", sourcePath: "C:/a.wav", name: "Take B", checkpoint: false },
+    "add_clip_take_from_media mapping",
+);
+assertEqual(
+    buildTauriArgs("pack_clips_into_takes", [["clip-1", "clip-2"], true]),
+    { clipIds: ["clip-1", "clip-2"], checkpoint: true },
+    "pack_clips_into_takes mapping",
+);
+assertEqual(
+    buildTauriArgs("explode_clip_takes", ["clip-1", true]),
+    { clipId: "clip-1", checkpoint: true },
+    "explode_clip_takes mapping",
+);
+assertEqual(
+    buildTauriArgs("import_media_files_as_takes", [["a.wav", "b.wav"], "track-1", 2.5]),
+    { paths: ["a.wav", "b.wav"], trackId: "track-1", startSec: 2.5 },
+    "import_media_files_as_takes mapping",
+);
 
 console.log(`invoke mapping checks passed (${checks})`);

@@ -48,6 +48,8 @@ export type ActionId =
     | "clip.normalize" // 规格化选中 clip
     | "clip.group" // 编组选中 clip
     | "clip.ungroup" // 解组选中 clip
+    | "clip.cycleTake" // 循环切换选中 clip 的活跃 take
+    | "clip.cycleTakePrev" // 反向循环切换选中 clip 的活跃 take
     // PianoRoll 操作
     | "pianoRoll.copy" // PianoRoll 内复制参数帧
     | "pianoRoll.paste" // PianoRoll 内粘贴参数帧

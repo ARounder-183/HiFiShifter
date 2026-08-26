@@ -523,7 +523,10 @@ impl ClipProcessor for VslibProcessor {
             let volume_c = ctx.extra_curves.get("volume").map(|v| v.as_slice());
 
             let pan_c = ctx.extra_curves.get("pan").map(|v| v.as_slice());
-            let formant_c = ctx.extra_curves.get("formant_shift_cents").map(|v| v.as_slice());
+            let formant_c = ctx
+                .extra_curves
+                .get("formant_shift_cents")
+                .map(|v| v.as_slice());
             let breathiness_c = ctx.extra_curves.get("breathiness").map(|v| v.as_slice());
             let sample_points = [0, ctrl_pnt_num / 2, ctrl_pnt_num - 1];
 

@@ -28,40 +28,37 @@ use std::slice;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use windows::core::{implement, Interface, IUnknown, PCSTR, PWSTR};
+use windows::core::{implement, IUnknown, Interface, PCSTR, PWSTR};
+use windows::Win32::Devices::Properties;
 use windows::Win32::Foundation::{CloseHandle, E_POINTER, HANDLE, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    self, ActivateAudioInterfaceAsync, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    self, eConsole, eRender, ActivateAudioInterfaceAsync, AudioSessionStateActive,
+    AudioSessionStateExpired, AudioSessionStateInactive, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
+    IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+    IMMDeviceEnumerator, ISimpleAudioVolume, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
     AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive,
-    DEVICE_STATE_ACTIVE,
-    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
-    IActivateAudioInterfaceCompletionHandler_Impl,
-    IAudioCaptureClient, IAudioClient, IAudioSessionControl2, IAudioSessionManager2,
-    ISimpleAudioVolume, IMMDevice, IMMDeviceEnumerator,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eConsole, eRender,
+    DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    WAVEFORMATEXTENSIBLE_0,
 };
 use windows::Win32::Media::KernelStreaming::{
     KSDATAFORMAT_SUBTYPE_PCM, SPEAKER_FRONT_CENTER, SPEAKER_FRONT_LEFT, SPEAKER_FRONT_RIGHT,
     WAVE_FORMAT_EXTENSIBLE,
 };
-use windows::Win32::Media::Multimedia::{
-    KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT,
-};
+use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_MULTITHREADED, STGM_READ, StructuredStorage,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, StructuredStorage, CLSCTX_ALL,
+    COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::{
-    CreateEventA, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW, WaitForSingleObject,
+    CreateEventA, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::Variant::VT_LPWSTR;
-use windows::Win32::Devices::Properties;
 
 /// Runs system-sound (loopback) capture until the stop signal is set.
 pub fn run_loopback_capture(
@@ -177,7 +174,9 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
                 }
             }
         } else {
-            let _ = this.tx.send(Err(windows::core::Error::from_hresult(result)));
+            let _ = this
+                .tx
+                .send(Err(windows::core::Error::from_hresult(result)));
         }
         Ok(())
     }
@@ -267,7 +266,9 @@ unsafe fn build_float_format(sample_rate: u32, channels: u16) -> WAVEFORMATEXTEN
             cbSize: (std::mem::size_of::<WAVEFORMATEXTENSIBLE>()
                 - std::mem::size_of::<WAVEFORMATEX>()) as u16,
         },
-        Samples: WAVEFORMATEXTENSIBLE_0 { wValidBitsPerSample: 32 },
+        Samples: WAVEFORMATEXTENSIBLE_0 {
+            wValidBitsPerSample: 32,
+        },
         dwChannelMask: channel_mask,
         SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     }
@@ -284,9 +285,7 @@ enum NativeDecoder {
 impl NativeDecoder {
     unsafe fn decode(&self, data: *const u8, count: usize) -> Vec<f32> {
         match self {
-            NativeDecoder::F32 => {
-                slice::from_raw_parts(data as *const f32, count).to_vec()
-            }
+            NativeDecoder::F32 => slice::from_raw_parts(data as *const f32, count).to_vec(),
             NativeDecoder::I16 => slice::from_raw_parts(data as *const i16, count)
                 .iter()
                 .map(|v| *v as f32 / 32768.0)
@@ -307,13 +306,11 @@ impl NativeDecoder {
     }
 }
 
-unsafe fn decode_mix_format(
-    ptr: *const WAVEFORMATEX,
-) -> Option<(NativeDecoder, u16, u32)> {
+unsafe fn decode_mix_format(ptr: *const WAVEFORMATEX) -> Option<(NativeDecoder, u16, u32)> {
     let format = &*ptr;
     let channels = format.nChannels;
     let rate = format.nSamplesPerSec;
-        let decoder = match (format.wBitsPerSample, format.wFormatTag as u32) {
+    let decoder = match (format.wBitsPerSample, format.wFormatTag as u32) {
         (8, Audio::WAVE_FORMAT_PCM) => NativeDecoder::U8,
         (16, Audio::WAVE_FORMAT_PCM) => NativeDecoder::I16,
         (32, WAVE_FORMAT_IEEE_FLOAT) => NativeDecoder::F32,
@@ -353,13 +350,7 @@ enum CaptureOutput {
 }
 
 impl CaptureOutput {
-    unsafe fn push(
-        &mut self,
-        data: *mut u8,
-        frames: usize,
-        silent: bool,
-        ctx: &CaptureContext,
-    ) {
+    unsafe fn push(&mut self, data: *mut u8, frames: usize, silent: bool, ctx: &CaptureContext) {
         match self {
             CaptureOutput::NativeF32 { channels } => {
                 let count = frames * *channels as usize;
@@ -384,7 +375,8 @@ impl CaptureOutput {
                 let converted =
                     convert_channels(&decoded, *channels_in as usize, *channels_out as usize);
                 if let Some(resampler) = resampler {
-                    if let Ok(out) = resampler.push_interleaved(&converted, *channels_out as usize) {
+                    if let Ok(out) = resampler.push_interleaved(&converted, *channels_out as usize)
+                    {
                         ctx.push(&out);
                     }
                 } else {
@@ -440,10 +432,8 @@ unsafe fn init_capture_client(
             .GetMixFormat()
             .map_err(|e| format!("recording_error_wasapi_init:{e}"))?;
         let _mix_guard = MixFormatGuard(mix);
-        let (decoder, mix_channels, mix_rate) =
-            decode_mix_format(mix).ok_or_else(|| {
-                "recording_error_wasapi_init:unsupported mix format".to_string()
-            })?;
+        let (decoder, mix_channels, mix_rate) = decode_mix_format(mix)
+            .ok_or_else(|| "recording_error_wasapi_init:unsupported mix format".to_string())?;
         client
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -503,9 +493,7 @@ unsafe fn run_capture_loop(
             let mut data: *mut u8 = ptr::null_mut();
             let mut frames: u32 = 0;
             let mut flags: u32 = 0;
-            if let Err(err) =
-                capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)
-            {
+            if let Err(err) = capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) {
                 consecutive_errors += 1;
                 if consecutive_errors > 50 {
                     return Err(format!("recording_error_wasapi_read:{err}"));
@@ -554,8 +542,7 @@ unsafe fn run_app_capture_fallback(
     ctx: Arc<CaptureContext>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let enumerator = create_enumerator()
-        .map_err(|e| format!("recording_error_enumeration:{e}"))?;
+    let enumerator = create_enumerator().map_err(|e| format!("recording_error_enumeration:{e}"))?;
     let device = enumerator
         .GetDefaultAudioEndpoint(eRender, eConsole)
         .map_err(|e| format!("recording_error_loopback_not_found:{e}"))?;
@@ -583,7 +570,10 @@ unsafe fn run_app_capture_fallback(
                     continue;
                 }
                 if let Ok(volume) = session.cast::<ISimpleAudioVolume>() {
-                    let previous = volume.GetMute().map(|value| value.as_bool()).unwrap_or(false);
+                    let previous = volume
+                        .GetMute()
+                        .map(|value| value.as_bool())
+                        .unwrap_or(false);
                     if !previous {
                         let _ = volume.SetMute(true, ptr::null());
                     }
@@ -658,8 +648,7 @@ unsafe fn device_friendly_name(device: &IMMDevice) -> Option<String> {
 }
 
 unsafe fn get_endpoint_device(device_id: &str) -> Result<IMMDevice, String> {
-    let enumerator = create_enumerator()
-        .map_err(|e| format!("recording_error_enumeration:{e}"))?;
+    let enumerator = create_enumerator().map_err(|e| format!("recording_error_enumeration:{e}"))?;
     let id = device_id.strip_prefix("loopback:").unwrap_or(device_id);
     if id.is_empty() || id == "default" {
         return enumerator
@@ -714,8 +703,8 @@ pub fn enumerate_loopback_devices() -> Vec<AudioDeviceInfo> {
                         if id.is_empty() {
                             continue;
                         }
-                        let name = device_friendly_name(&device)
-                            .unwrap_or_else(|| "Unknown".to_string());
+                        let name =
+                            device_friendly_name(&device).unwrap_or_else(|| "Unknown".to_string());
                         devices.push(AudioDeviceInfo {
                             id: format!("loopback:{id}"),
                             name,

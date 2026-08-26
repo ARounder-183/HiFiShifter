@@ -136,7 +136,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
                 None
             }
         } else {
-            let src_frame_u = if src_frame >= 0.0 { src_frame as u64 } else { 0 };
+            let src_frame_u = if src_frame >= 0.0 {
+                src_frame as u64
+            } else {
+                0
+            };
             let range = clip.src_end_frame.saturating_sub(clip.src_start_frame);
             if range == 0 {
                 return None;
@@ -491,8 +495,8 @@ fn mix_into_scratch_stereo(
         // 若后台预渲染激活，自动暂停播放（而非无限静音等待）。
         // 已渲染完成的 clip 在后台渲染线程存入缓存后，
         // 用户可手动再次按下播放键继续。
-        let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let bg_render =
+            crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if bg_render {
             is_playing.store(false, std::sync::atomic::Ordering::Relaxed);
             eprintln!(

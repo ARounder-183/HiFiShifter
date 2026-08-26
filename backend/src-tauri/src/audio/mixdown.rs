@@ -207,13 +207,16 @@ pub(crate) fn build_loop_tiled_segment(
             let start_frame = (idx + 1 - run) as usize;
             (start_frame * channels, (idx as usize + 1) * channels)
         } else {
-            ((idx as usize) * channels, (idx as usize + run as usize) * channels)
+            (
+                (idx as usize) * channels,
+                (idx as usize + run as usize) * channels,
+            )
         };
         out.extend_from_slice(&pcm[base..end_base]);
         if reversed {
             // 就地反转刚追加的 run 个帧的帧序（每帧 channels 个样本整体交换）。
             let len = out.len();
-            let block = &mut out[len - (run as usize) * channels ..];
+            let block = &mut out[len - (run as usize) * channels..];
             let half = run as usize / 2;
             for f in 0..half {
                 let a = f * channels;
@@ -557,8 +560,7 @@ pub fn render_mixdown_interleaved(
         let (loop_seg_local_start_sec, loop_seg_len_sec) = if loop_mode {
             let local_start = (start_sec - clip_start_sec).max(0.0);
             let local_end = (end_sec - clip_start_sec).min(clip_timeline_len_sec);
-            let q_start =
-                (local_start - local_start % LOOP_SEG_QUANTUM_SEC).max(0.0);
+            let q_start = (local_start - local_start % LOOP_SEG_QUANTUM_SEC).max(0.0);
             let q_end = ((local_end / LOOP_SEG_QUANTUM_SEC).ceil() * LOOP_SEG_QUANTUM_SEC)
                 .min(clip_timeline_len_sec.max(0.0));
             (q_start, (q_end - q_start).max(0.0))
@@ -576,9 +578,7 @@ pub fn render_mixdown_interleaved(
             } else {
                 anchor_frame + skip_src_frames
             };
-            let out_source_frames = ((loop_seg_len_sec.max(0.0)
-                * playback_rate
-                * in_rate as f64)
+            let out_source_frames = ((loop_seg_len_sec.max(0.0) * playback_rate * in_rate as f64)
                 .ceil()
                 .max(2.0)) as usize;
             (advanced_anchor, out_source_frames)
@@ -647,9 +647,8 @@ pub fn render_mixdown_interleaved(
             let (key_start_sec, key_end_sec) = if loop_mode {
                 // 与上方片段构建共享同一组几何数值（loop_advanced_anchor /
                 // loop_out_source_frames），键与 segment 内容严格对应。
-                let start_frame = loop_advanced_anchor.rem_euclid(
-                    ((total_sec * in_rate as f64).round() as i64).max(1),
-                );
+                let start_frame = loop_advanced_anchor
+                    .rem_euclid(((total_sec * in_rate as f64).round() as i64).max(1));
                 (
                     start_frame as f64 / in_rate as f64,
                     (start_frame + loop_out_source_frames as i64) as f64 / in_rate as f64,
@@ -672,8 +671,9 @@ pub fn render_mixdown_interleaved(
                 loop_mode,
                 params,
             );
-            match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params)
-            {
+            match crate::formant_cache::get_or_compute_formant_audio(
+                key, &segment, out_rate, params,
+            ) {
                 Ok(entry) => {
                     segment = entry.pcm_stereo.as_ref().clone();
                 }
@@ -717,8 +717,7 @@ pub fn render_mixdown_interleaved(
 
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
-            let seg_start_sec =
-                clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
+            let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
             let mut seg = segment;
             let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
                 timeline,
@@ -782,8 +781,7 @@ pub fn render_mixdown_interleaved(
         // Mix into output, considering overlap window.
         // The audio segment starts after pre_silence_sec (Loop：再叠加窗口
         // 起点的 clip 局部偏移 —— 平铺段只覆盖窗口交集，见上方) and lasts seg_frames/out_rate.
-        let seg_start_sec =
-            clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
+        let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
         let seg_end_sec = seg_start_sec + (seg_frames as f64) / out_rate as f64;
 
         // Loop（循环源）：平铺段只覆盖【导出窗口 ∩ clip】，seg 内的帧偏移是
@@ -791,7 +789,9 @@ pub fn render_mixdown_interleaved(
         // 求值 —— 否则局部导出（后台预渲染、区间导出、波形 peaks）会在每个
         // 窗口边界重新触发 fade-in。非 Loop 时该偏移为 0，行为不变。
         let loop_local_offset_frames = if loop_mode {
-            ((loop_seg_local_start_sec * out_rate as f64).round().max(0.0)) as usize
+            ((loop_seg_local_start_sec * out_rate as f64)
+                .round()
+                .max(0.0)) as usize
         } else {
             0usize
         };

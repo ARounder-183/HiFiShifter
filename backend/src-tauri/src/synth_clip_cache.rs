@@ -29,8 +29,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::pitch_editing::PitchCurvesSnapshot;
 
 // 导入 clip 渲染状态管理器
-use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
+use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 
 // ─── 缓存容量 ──────────────────────────────────────────────────────────────────
 
@@ -554,7 +554,10 @@ pub fn compute_rendered_clip_hash(
     }
 
     // 混入 extra_curves，并且【只 Hash 当前时间切片的片段】，避免性能问题与错误缓存失效
-    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves.iter().map(|(k, v)| (k, v.as_slice())).collect();
+    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves
+        .iter()
+        .map(|(k, v)| (k, v.as_slice()))
+        .collect();
     sorted_curves.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted_curves {
         // 调用已定义好的过滤函数，防止后处理参数改变引发灾难级的底层重渲染
@@ -772,7 +775,10 @@ static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCac
 pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
     GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
         let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
-        Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity(), budget))
+        Mutex::new(TensionRenderedClipCache::new(
+            rendered_clip_capacity(),
+            budget,
+        ))
     })
 }
 
@@ -885,8 +891,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
-                clip_id,
-                before
+                clip_id, before
             );
         }
     }

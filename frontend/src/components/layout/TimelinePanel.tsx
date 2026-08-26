@@ -78,14 +78,8 @@ import {
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
-import {
-    SNAP_HIGHLIGHT_GROUP,
-    clearSnapHighlights,
-} from "../../utils/snapHighlight";
-import {
-    beginSnapGesture,
-    endSnapGesture,
-} from "../../utils/timelineSnapping";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
+import { beginSnapGesture, endSnapGesture } from "../../utils/timelineSnapping";
 import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
@@ -99,7 +93,10 @@ import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandl
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
-import { computeAutoFollowScrollLeft, computeFocusCursorScrollLeft } from "../../utils/autoFollowScroll";
+import {
+    computeAutoFollowScrollLeft,
+    computeFocusCursorScrollLeft,
+} from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
@@ -395,7 +392,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             syncScrollLeft(next);
         }
         dispatch(setPendingPlayheadReveal(null));
-    }, [pendingPlayheadRevealSec, pxPerSec, dynamicProjectSec, scrollRef, syncScrollLeft, dispatch]);
+    }, [
+        pendingPlayheadRevealSec,
+        pxPerSec,
+        dynamicProjectSec,
+        scrollRef,
+        syncScrollLeft,
+        dispatch,
+    ]);
 
     const timeContext = React.useMemo<TimeFormatContext>(
         () => ({
@@ -1232,7 +1236,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     timelineSnap={s.timelineSnap}
                     projectScale={projectScale}
                     projectScaleName={
-                        s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
+                        s.project.useCustomScale
+                            ? (s.project.customScale?.name ?? undefined)
+                            : undefined
                     }
                     fallbackDenominator={s.project.timeSignatureDenominator}
                     customScalePresets={s.customScalePresets}
@@ -2025,6 +2031,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             >
                                 {t("import_across_tracks" as any) ||
                                     "Import across tracks (one per track)"}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = importModeMenu;
+                                    setImportModeMenu(null);
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "as-takes",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
+                                }}
+                            >
+                                {t("import_as_takes" as any) || "Add as Takes"}
                             </button>
                         </div>
                     </div>

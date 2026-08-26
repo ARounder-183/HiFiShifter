@@ -61,6 +61,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "clip.normalize": { key: "n", ctrl: true, shift: true },
     "clip.group": { key: "g" },
     "clip.ungroup": { key: "u" },
+    "clip.cycleTake": { key: "t" },
+    "clip.cycleTakePrev": { key: "t", shift: true },
 
     // PianoRoll 操作
     "pianoRoll.copy": { key: "c", ctrl: true },
@@ -225,6 +227,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "clip.normalize": { labelKey: "kb_clip_normalize", group: "clip" },
     "clip.group": { labelKey: "kb_clip_group", group: "clip" },
     "clip.ungroup": { labelKey: "kb_clip_ungroup", group: "clip" },
+    "clip.cycleTake": { labelKey: "kb_clip_cycle_take", group: "clip" },
+    "clip.cycleTakePrev": { labelKey: "kb_clip_cycle_take_prev", group: "clip" },
 
     "pianoRoll.copy": { labelKey: "kb_pianoroll_copy", group: "pianoRoll" },
     "pianoRoll.paste": { labelKey: "kb_pianoroll_paste", group: "pianoRoll" },

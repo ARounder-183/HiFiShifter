@@ -297,6 +297,17 @@ export const zhCN = {
     aria_resize_panels: "调整面板大小",
     clip_mute: "静音",
     clip_unmute: "取消静音",
+    clip_takes: "Take",
+    clip_pack_into_takes: "跨轨道聚合为 Take",
+    clip_take_add: "从媒体文件添加 Take...",
+    clip_take_cycle_next: "循环切换到下一个 Take",
+    clip_take_cycle_prev: "循环切换到上一个 Take",
+    clip_take_duplicate: "复制当前 Take",
+    clip_take_remove: "删除 Take",
+    clip_take_explode: "将 Take 展开为独立 Clip",
+    clip_take_rename: "重命名 Take",
+    clip_take_active_mark: "●",
+    clip_take_add_hint: "更多 Take 管理功能将随 Reaper 多 Take 导入逐步开放",
     fade_in: "淡入",
     fade_out: "淡出",
     show_secondary_param: "显示副参数叠加曲线",
@@ -507,6 +518,8 @@ export const zhCN = {
     kb_clip_normalize: "规格化音频块",
     kb_clip_group: "编组音频块",
     kb_clip_ungroup: "解组音频块",
+    kb_clip_cycle_take: "循环切换 Take",
+    kb_clip_cycle_take_prev: "反向循环切换 Take",
     qs_auto_normalize: "放置时自动规格化",
     kb_group_pianoroll: "钢琴卷帘",
     kb_group_modifier: "修饰键",
@@ -617,6 +630,7 @@ export const zhCN = {
 
     // Toolbar toggle buttons
     auto_crossfade: "自动交叉淡化",
+    sync_edits_across_takes: "同步编辑所有 Take",
     ripple: "波纹编辑（自动跟进）",
     ripple_tooltip_off: "波纹编辑（自动跟进）：关闭。左键开启（按轨道跟进）；右键选择模式。",
     ripple_tooltip_track:
@@ -937,6 +951,7 @@ export const zhCN = {
     import_dialog_title: "导入文件",
     import_button: "导入",
     import_across_tracks: "跨轨道添加",
+    import_as_takes: "作为 Take 添加",
     // Overlapping clips context menu
     overlapping_clips_header: "重叠的音频块 ({n})",
 

@@ -19,14 +19,7 @@ import type {
     WaveformPeaksSegmentPayload,
 } from "../types/api";
 
-import {
-    coreApi,
-    paramsApi,
-    projectApi,
-    recordingApi,
-    timelineApi,
-    waveformApi,
-} from "./api";
+import { coreApi, paramsApi, projectApi, recordingApi, timelineApi, waveformApi } from "./api";
 
 export const webApi = {
     // Core
@@ -130,6 +123,15 @@ export const webApi = {
     applyClipLinkedParams: timelineApi.applyClipLinkedParams,
     setClipState: timelineApi.setClipState,
     setClipsStateBulk: timelineApi.setClipsStateBulk,
+    setClipActiveTake: timelineApi.setClipActiveTake,
+    cycleClipTakes: timelineApi.cycleClipTakes,
+    packClipsIntoTakes: timelineApi.packClipsIntoTakes,
+    explodeClipTakes: timelineApi.explodeClipTakes,
+    duplicateClipTake: timelineApi.duplicateClipTake,
+    removeClipTake: timelineApi.removeClipTake,
+    renameClipTake: timelineApi.renameClipTake,
+    addClipTakeFromMedia: timelineApi.addClipTakeFromMedia,
+    importMediaFilesAsTakes: timelineApi.importMediaFilesAsTakes,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,
     replaceClipSource: timelineApi.replaceClipSource,
     searchSourceFileReplacements: timelineApi.searchSourceFileReplacements,

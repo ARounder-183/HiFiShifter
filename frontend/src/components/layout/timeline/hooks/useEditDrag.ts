@@ -31,10 +31,7 @@ import { isModifierActive } from "../../../../features/keybindings/keybindingsSl
 import type { Keybinding } from "../../../../features/keybindings/types";
 import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
-import {
-    loopSnapThresholdSec,
-    nearestBoundarySnapOffsetSec,
-} from "../../../../utils/loopSnap";
+import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec } from "../../../../utils/loopSnap";
 import {
     beginSnapGesture,
     computeEffectiveSnap,
@@ -397,6 +394,7 @@ export type EditDragState = {
     basestartSec: number;
     baselengthSec: number;
     basePlaybackRate: number;
+    baseClipPlaybackRate: number;
     baseSourceStartSec: number;
     baseSourceEndSec: number;
     basefadeInSec: number;
@@ -466,10 +464,7 @@ export type EditDragState = {
  * 不能用“对 0 取 max”或“对各成员取最大正位移”的方式，否则负位移会被吞掉、
  * 向右正常而向左无实时波纹（曾为此引入 bug）。
  */
-function computeRegionRightEdgeDelta(
-    drag: EditDragState,
-    clips: SessionState["clips"],
-): number {
+function computeRegionRightEdgeDelta(drag: EditDragState, clips: SessionState["clips"]): number {
     let maxOldRight = Number.NEGATIVE_INFINITY;
     let maxNewRight = Number.NEGATIVE_INFINITY;
     for (const id of drag.selectedClipIds) {
@@ -633,7 +628,8 @@ export function useEditDrag(deps: {
         let rippleOrigin = clip.startSec;
         const rippleTracks = new Set<string>([String(clip.trackId)]);
         for (const id of selectedClipIds) {
-            const editedClip = id === clipId ? clip : sessionRef.current.clips.find((x) => x.id === id);
+            const editedClip =
+                id === clipId ? clip : sessionRef.current.clips.find((x) => x.id === id);
             if (!editedClip) continue;
             rippleOrigin = Math.min(rippleOrigin, editedClip.startSec);
             rippleTracks.add(String(editedClip.trackId));
@@ -664,11 +660,7 @@ export function useEditDrag(deps: {
         for (const id of selectedClipIds) {
             if (type === "trim_left" || type === "stretch_left" || type === "fade_in") {
                 editSides[id] = { fadeIn: true, fadeOut: false };
-            } else if (
-                type === "trim_right" ||
-                type === "stretch_right" ||
-                type === "fade_out"
-            ) {
+            } else if (type === "trim_right" || type === "stretch_right" || type === "fade_out") {
                 editSides[id] = { fadeIn: false, fadeOut: true };
             } else {
                 editSides[id] = { fadeIn: false, fadeOut: false };
@@ -679,7 +671,9 @@ export function useEditDrag(deps: {
         // 否则用手动长度。这样从“自动交叉淡化”直接拖成“手动淡入淡出”时，
         // 以用户当前看到的长度作为起点，拖拽过程不会从自动值跳变到隐藏的手动值。
         const effectiveFadeInSec =
-            Number(clip.autoFadeInSec ?? 0) > 0 ? Number(clip.autoFadeInSec) : Number(clip.fadeInSec);
+            Number(clip.autoFadeInSec ?? 0) > 0
+                ? Number(clip.autoFadeInSec)
+                : Number(clip.fadeInSec);
         const effectiveFadeOutSec =
             Number(clip.autoFadeOutSec ?? 0) > 0
                 ? Number(clip.autoFadeOutSec)
@@ -708,6 +702,7 @@ export function useEditDrag(deps: {
             basestartSec: clip.startSec,
             baselengthSec: clip.lengthSec,
             basePlaybackRate: Number(clip.playbackRate ?? 1) || 1,
+            baseClipPlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
             baseSourceStartSec: clip.sourceStartSec,
             baseSourceEndSec: clip.sourceEndSec,
             basefadeInSec: effectiveFadeInSec,
@@ -831,8 +826,7 @@ export function useEditDrag(deps: {
                     // - trim_right / stretch_right → 后缘。
                     // 目标侧（网格线/对方 Clip 边缘等）与被吸附边标记都由
                     // snapTimelineDetailed 的 highlight 通道统一发布。
-                    const leftEdge =
-                        drag.type === "trim_right" || drag.type === "stretch_right";
+                    const leftEdge = drag.type === "trim_right" || drag.type === "stretch_right";
                     beat = snapTimelineDetailed(beat, "clip", {
                         originSec: leftEdge ? drag.rightEdgeBeat : drag.basestartSec,
                         anchorTrackId,
@@ -971,10 +965,7 @@ export function useEditDrag(deps: {
                         } else if (base.reversed) {
                             // 倒放非 Loop：右缘延伸向下消费窗口起点（→0），
                             // 耗尽后继续增长的部分为静音尾巴，窗口保持不变。
-                            let nextTrimStart = Math.max(
-                                0,
-                                base.sourceStartSec - delta * rate,
-                            );
+                            let nextTrimStart = Math.max(0, base.sourceStartSec - delta * rate);
                             nextTrimStart = Math.min(nextTrimStart, base.sourceEndSec);
                             updates.push({
                                 clipId: drag.clipId,
@@ -1039,10 +1030,7 @@ export function useEditDrag(deps: {
                             updates.push({
                                 clipId: partner,
                                 startSec: base.startSec + startDelta,
-                                lengthSec: Math.max(
-                                    0,
-                                    base.lengthSec - startDelta,
-                                ),
+                                lengthSec: Math.max(0, base.lengthSec - startDelta),
                                 sourceEndSec: nextTrimEnd,
                             });
                         } else if (base.loopEnabled) {
@@ -1103,7 +1091,10 @@ export function useEditDrag(deps: {
                         autoFadeOutSec?: number;
                     }> = [];
                     if (opposite && drag.crossfadeBaseOverlapSec > 0.001) {
-                        const newOverlap = Math.max(0.0002, drag.crossfadeBaseOverlapSec + 2 * delta);
+                        const newOverlap = Math.max(
+                            0.0002,
+                            drag.crossfadeBaseOverlapSec + 2 * delta,
+                        );
                         const ratio = newOverlap / drag.crossfadeBaseOverlapSec;
                         const aFade = drag.basefadeOutSec * ratio;
                         const bFade = drag.crossfadePartnerFadeInSec * ratio;
@@ -1193,7 +1184,9 @@ export function useEditDrag(deps: {
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
                                 // 手动拖拽淡入 = 用户手动 fade，且清除该侧自动交叉淡化。
-                                dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }));
+                                dispatch(
+                                    setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }),
+                                );
                                 // 直接 webApi 持久化（不走 thunk）：其 fulfilled 不会 force-apply
                                 // 整份时间线覆盖本地乐观值，避免拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
@@ -1238,7 +1231,9 @@ export function useEditDrag(deps: {
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[drag.clipId] = now;
                                 // 手动拖拽淡出 = 手动 fade，且清除该侧自动交叉淡化。
-                                dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }));
+                                dispatch(
+                                    setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }),
+                                );
                                 // 直接 webApi 持久化（不走 thunk）：避免 force-apply 覆盖本地
                                 // 乐观 fade 导致拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
@@ -1361,8 +1356,7 @@ export function useEditDrag(deps: {
                             {
                                 const base = drag.baseByClipId[clipId];
                                 if (base) {
-                                    const ratio =
-                                        next.lengthSec / Math.max(1e-6, base.lengthSec);
+                                    const ratio = next.lengthSec / Math.max(1e-6, base.lengthSec);
                                     dispatch(
                                         setClipSnapOffset({
                                             clipId,
@@ -1378,7 +1372,7 @@ export function useEditDrag(deps: {
                             dispatch(
                                 setClipPlaybackRate({
                                     clipId,
-                                    playbackRate: next.playbackRate,
+                                    clipPlaybackRate: next.clipPlaybackRate,
                                 }),
                             );
                             dispatch(
@@ -1450,11 +1444,20 @@ export function useEditDrag(deps: {
                                 // Loop + 向左延伸：内容保持锚定 —— 锚点沿遍历方向
                                 // 回退 |δ|·rate 并对整个媒体时长取模环绕
                                 //（正放减 source_start，倒放加 source_end）。
-                                dispatch(moveClipStart({ clipId: id, startSec: base.startSec + limitedDelta }));
+                                dispatch(
+                                    moveClipStart({
+                                        clipId: id,
+                                        startSec: base.startSec + limitedDelta,
+                                    }),
+                                );
                                 dispatch(
                                     setClipLength({
                                         clipId: id,
-                                        lengthSec: clamp(base.lengthSec - limitedDelta, minLen, 10_000),
+                                        lengthSec: clamp(
+                                            base.lengthSec - limitedDelta,
+                                            minLen,
+                                            10_000,
+                                        ),
                                     }),
                                 );
                                 if (base.reversed) {
@@ -1482,12 +1485,8 @@ export function useEditDrag(deps: {
                                 }
                             } else if (base.loopEnabled && base.reversed) {
                                 // Loop + 倒放 + 裁短：锚点(source_end)向下推进并环绕。
-                                let nextTrimEnd =
-                                    base.sourceEndSec - limitedDelta * rate;
-                                nextTrimEnd = wrapIntoMediaDomain(
-                                    nextTrimEnd,
-                                    base,
-                                );
+                                let nextTrimEnd = base.sourceEndSec - limitedDelta * rate;
+                                nextTrimEnd = wrapIntoMediaDomain(nextTrimEnd, base);
                                 const actualDeltaTimeline = limitedDelta;
                                 const nextStart = base.startSec + actualDeltaTimeline;
                                 const nextLen = clamp(
@@ -1502,12 +1501,8 @@ export function useEditDrag(deps: {
                                 );
                             } else if (base.loopEnabled) {
                                 // Loop + 正放 + 裁短：锚点(source_start)向上推进并环绕。
-                                let nextTrimStart =
-                                    base.sourceStartSec + limitedDelta * rate;
-                                nextTrimStart = wrapIntoMediaDomain(
-                                    nextTrimStart,
-                                    base,
-                                );
+                                let nextTrimStart = base.sourceStartSec + limitedDelta * rate;
+                                nextTrimStart = wrapIntoMediaDomain(nextTrimStart, base);
                                 const actualDeltaTimeline = limitedDelta;
                                 const nextStart = base.startSec + actualDeltaTimeline;
                                 const nextLen = clamp(
@@ -1575,8 +1570,8 @@ export function useEditDrag(deps: {
                     const rawLen = clamp(drag.rightEdgeBeat - desiredStart, minLen, 10_000);
                     const baseLen = Math.max(1e-6, Number(drag.baselengthSec) || 0);
                     const baseRate =
-                        drag.basePlaybackRate > 0 && Number.isFinite(drag.basePlaybackRate)
-                            ? drag.basePlaybackRate
+                        drag.baseClipPlaybackRate > 0 && Number.isFinite(drag.baseClipPlaybackRate)
+                            ? drag.baseClipPlaybackRate
                             : 1;
                     const nextRate = clamp((baseRate * baseLen) / Math.max(1e-6, rawLen), 0.1, 10);
                     const correctedLen = (baseRate * baseLen) / nextRate;
@@ -1589,7 +1584,9 @@ export function useEditDrag(deps: {
                     });
                     dispatch(moveClipStart({ clipId: drag.clipId, startSec: nextStart }));
                     dispatch(setClipLength({ clipId: drag.clipId, lengthSec: correctedLen }));
-                    dispatch(setClipPlaybackRate({ clipId: drag.clipId, playbackRate: nextRate }));
+                    dispatch(
+                        setClipPlaybackRate({ clipId: drag.clipId, clipPlaybackRate: nextRate }),
+                    );
                     // SnapOffset 随拉伸同步缩放：总比例 × 拖拽起始基准偏移。
                     dispatch(
                         setClipSnapOffset({
@@ -1668,10 +1665,7 @@ export function useEditDrag(deps: {
                                 } else if (base.sourceStartSec > 1e-9) {
                                     // 延伸：先向下消费窗口下方余量（→0），
                                     // 耗尽后继续增长的部分为静音尾巴，窗口保持不变。
-                                    nextTrimStart = Math.max(
-                                        0,
-                                        base.sourceEndSec - nextLen * rate,
-                                    );
+                                    nextTrimStart = Math.max(0, base.sourceEndSec - nextLen * rate);
                                     nextTrimStart = Math.min(nextTrimStart, base.sourceStartSec);
                                 }
                                 dispatch(setClipLength({ clipId: id, lengthSec: nextLen }));
@@ -1728,8 +1722,8 @@ export function useEditDrag(deps: {
                     const rawLen = clamp(desiredRight - drag.basestartSec, minLen, 10_000);
                     const baseLen = Math.max(1e-6, Number(drag.baselengthSec) || 0);
                     const baseRate =
-                        drag.basePlaybackRate > 0 && Number.isFinite(drag.basePlaybackRate)
-                            ? drag.basePlaybackRate
+                        drag.baseClipPlaybackRate > 0 && Number.isFinite(drag.baseClipPlaybackRate)
+                            ? drag.baseClipPlaybackRate
                             : 1;
                     const nextRate = clamp((baseRate * baseLen) / Math.max(1e-6, rawLen), 0.1, 10);
                     const correctedLen = (baseRate * baseLen) / nextRate;
@@ -1740,7 +1734,9 @@ export function useEditDrag(deps: {
                         nextLengthSec: correctedLen,
                     });
                     dispatch(setClipLength({ clipId: drag.clipId, lengthSec: correctedLen }));
-                    dispatch(setClipPlaybackRate({ clipId: drag.clipId, playbackRate: nextRate }));
+                    dispatch(
+                        setClipPlaybackRate({ clipId: drag.clipId, clipPlaybackRate: nextRate }),
+                    );
                     // SnapOffset 随拉伸同步缩放：总比例 × 拖拽起始基准偏移。
                     dispatch(
                         setClipSnapOffset({
@@ -1870,7 +1866,7 @@ export function useEditDrag(deps: {
                             clipId: id,
                             startSec: now.startSec,
                             lengthSec: now.lengthSec,
-                            playbackRate: now.playbackRate,
+                            clipPlaybackRate: now.clipPlaybackRate ?? 1,
                             snapOffsetSec: now.snapOffsetSec,
                             fadeInSec: now.fadeInSec,
                             fadeOutSec: now.fadeOutSec,
@@ -1883,7 +1879,7 @@ export function useEditDrag(deps: {
                             clipId: string;
                             startSec: number;
                             lengthSec: number;
-                            playbackRate: number;
+                            clipPlaybackRate: number;
                             snapOffsetSec: number;
                             fadeInSec: number;
                             fadeOutSec: number;
@@ -1892,8 +1888,8 @@ export function useEditDrag(deps: {
 
                 if (stretchPatches.length > 0) {
                     reapplyRates = stretchPatches
-                        .filter((p) => p.playbackRate !== 1)
-                        .map((p) => ({ clipId: p.clipId, rate: p.playbackRate }));
+                        .filter((p) => p.clipPlaybackRate !== 1)
+                        .map((p) => ({ clipId: p.clipId, rate: p.clipPlaybackRate }));
                     persistPromise = runInsideUndoGroup(async () => {
                         const stretchPersistPromises = stretchPatches.map((patch) =>
                             dispatch(
@@ -1901,7 +1897,7 @@ export function useEditDrag(deps: {
                                     clipId: patch.clipId,
                                     startSec: patch.startSec,
                                     lengthSec: patch.lengthSec,
-                                    playbackRate: patch.playbackRate,
+                                    clipPlaybackRate: patch.clipPlaybackRate,
                                     snapOffsetSec: patch.snapOffsetSec,
                                     fadeInSec: patch.fadeInSec,
                                     fadeOutSec: patch.fadeOutSec,
@@ -2074,7 +2070,7 @@ export function useEditDrag(deps: {
                                 clipId: drag.clipId,
                                 startSec: singleClipNow.startSec,
                                 lengthSec: singleClipNow.lengthSec,
-                                playbackRate: singleClipNow.playbackRate,
+                                clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
                                 snapOffsetSec: singleClipNow.snapOffsetSec,
                                 fadeInSec: singleClipNow.fadeInSec,
                                 fadeOutSec: singleClipNow.fadeOutSec,
@@ -2095,8 +2091,10 @@ export function useEditDrag(deps: {
                         }),
                     ).unwrap();
                 }
-                if (singleClipNow.playbackRate !== 1) {
-                    reapplyRates = [{ clipId: drag.clipId, rate: singleClipNow.playbackRate }];
+                if ((singleClipNow.clipPlaybackRate ?? 1) !== 1) {
+                    reapplyRates = [
+                        { clipId: drag.clipId, rate: singleClipNow.clipPlaybackRate ?? 1 },
+                    ];
                 }
             } else if (drag.type === "stretch_right" && singleClipNow) {
                 if (shouldApplyAutoCrossfade) {
@@ -2105,7 +2103,7 @@ export function useEditDrag(deps: {
                             setClipStateRemote({
                                 clipId: drag.clipId,
                                 lengthSec: singleClipNow.lengthSec,
-                                playbackRate: singleClipNow.playbackRate,
+                                clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
                                 snapOffsetSec: singleClipNow.snapOffsetSec,
                                 fadeInSec: singleClipNow.fadeInSec,
                                 fadeOutSec: singleClipNow.fadeOutSec,
@@ -2125,8 +2123,10 @@ export function useEditDrag(deps: {
                         }),
                     ).unwrap();
                 }
-                if (singleClipNow.playbackRate !== 1) {
-                    reapplyRates = [{ clipId: drag.clipId, rate: singleClipNow.playbackRate }];
+                if ((singleClipNow.clipPlaybackRate ?? 1) !== 1) {
+                    reapplyRates = [
+                        { clipId: drag.clipId, rate: singleClipNow.clipPlaybackRate ?? 1 },
+                    ];
                 }
             } else if (drag.type === "crossfade_edges") {
                 const patches = drag.selectedClipIds
@@ -2266,7 +2266,7 @@ export function useEditDrag(deps: {
             if (reapplyRates && reapplyRates.length > 0 && persistPromise) {
                 void persistPromise.then(() => {
                     for (const { clipId, rate } of reapplyRates!) {
-                        dispatch(setClipPlaybackRate({ clipId, playbackRate: rate }));
+                        dispatch(setClipPlaybackRate({ clipId, clipPlaybackRate: rate }));
                     }
                 });
             }

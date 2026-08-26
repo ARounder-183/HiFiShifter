@@ -38,7 +38,11 @@ pub struct TimelineSnapSettings {
     pub snap_cursor_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
     pub snap_cursor_to_grid: bool,
-    #[serde(default = "default_true", alias = "gridSnapFollowsGridVisibility", alias = "grid_snap_follows_grid_visibility")]
+    #[serde(
+        default = "default_true",
+        alias = "gridSnapFollowsGridVisibility",
+        alias = "grid_snap_follows_grid_visibility"
+    )]
     pub snap_follows_grid_visibility: bool,
     #[serde(default)]
     pub snap_to_grid_any_distance: bool,
@@ -119,7 +123,8 @@ impl TimelineSnapSettings {
     fn valid_grid(value: &str) -> bool {
         matches!(
             value,
-            "1/1" | "1/2"
+            "1/1"
+                | "1/2"
                 | "1/4"
                 | "1/8"
                 | "1/16"
@@ -321,6 +326,10 @@ pub struct UiSettings {
     /// - VocalShifter 等其他格式导入生成的音频 Clip 的默认值。
     #[serde(default = "default_true")]
     pub loop_new_clips: bool,
+    /// 同步编辑所有 Take：启用后，对 active Take 的内容级编辑
+    /// （源偏移、播放速率、倒放、Loop、增益）会尝试同步到同一 Clip 的其余 Take。
+    #[serde(default = "default_true")]
+    pub sync_edits_across_takes: bool,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -339,6 +348,18 @@ pub fn loop_new_clips_default() -> bool {
 /// 同步"新 Clip 默认 Loop 属性"的进程级生效值。
 pub fn set_loop_new_clips_default(enabled: bool) {
     LOOP_NEW_CLIPS_DEFAULT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// "同步编辑所有 Take"的进程级生效值（默认开启）。
+pub static SYNC_EDITS_ACROSS_TAKES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub fn sync_edits_across_takes() -> bool {
+    SYNC_EDITS_ACROSS_TAKES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_sync_edits_across_takes(enabled: bool) {
+    SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn default_ort_ep() -> String {
@@ -759,6 +780,7 @@ impl Default for UiSettings {
             auto_background_render: true,
             auto_reload_modified_media: true,
             loop_new_clips: true,
+            sync_edits_across_takes: true,
         }
     }
 }
@@ -772,9 +794,8 @@ impl UiSettings {
         if !self.split_transition_duration_sec.is_finite() {
             self.split_transition_duration_sec = default_split_transition_duration_sec();
         } else {
-            self.split_transition_duration_sec = self
-                .split_transition_duration_sec
-                .clamp(0.001, 10.0);
+            self.split_transition_duration_sec =
+                self.split_transition_duration_sec.clamp(0.001, 10.0);
         }
         if !["seconds", "percent"].contains(&self.split_transition_duration_unit.as_str()) {
             self.split_transition_duration_unit = default_split_transition_duration_unit();
@@ -782,24 +803,16 @@ impl UiSettings {
         if !self.split_transition_duration_percent.is_finite() {
             self.split_transition_duration_percent = default_split_transition_duration_percent();
         } else {
-            self.split_transition_duration_percent = self
-                .split_transition_duration_percent
-                .clamp(0.01, 100.0);
+            self.split_transition_duration_percent =
+                self.split_transition_duration_percent.clamp(0.01, 100.0);
         }
-        if ![
-            "linear",
-            "sine",
-            "exponential",
-            "logarithmic",
-            "scurve",
-        ]
-        .contains(&self.split_transition_curve.as_str())
+        if !["linear", "sine", "exponential", "logarithmic", "scurve"]
+            .contains(&self.split_transition_curve.as_str())
         {
             self.split_transition_curve = default_split_transition_curve();
         }
         if !["auto", "always"].contains(&self.split_transition_overlap_crossfade.as_str()) {
-            self.split_transition_overlap_crossfade =
-                default_split_transition_overlap_crossfade();
+            self.split_transition_overlap_crossfade = default_split_transition_overlap_crossfade();
         }
         self.normalize_time_display();
         self.timeline_snap.normalize();
@@ -841,6 +854,7 @@ mod tests {
             UserStretchAlgorithm::Signalsmith
         );
         assert!(settings.default_hifigan_mel_stretch);
+        assert!(settings.sync_edits_across_takes);
         assert!(settings.split_transition_enabled);
         assert_eq!(settings.split_transition_mode, "overlap");
         assert_eq!(settings.split_transition_duration_unit, "seconds");
@@ -889,7 +903,6 @@ mod tests {
         track_mode.normalize_ripple_mode();
         assert_eq!(track_mode.ripple_mode, "track");
     }
-
 }
 
 /// 持久化配置根结构。

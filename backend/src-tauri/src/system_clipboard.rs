@@ -245,13 +245,15 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
     let text = if is_wayland {
         Command::new("wl-paste").args(["--no-newline"]).output()
     } else {
-        Command::new("xclip").args(["-selection", "clipboard", "-o"]).output()
+        Command::new("xclip")
+            .args(["-selection", "clipboard", "-o"])
+            .output()
     };
 
     match text {
-        Ok(output) if output.status.success() => {
-            Ok(decode_text_envelope(String::from_utf8_lossy(&output.stdout).trim()))
-        }
+        Ok(output) if output.status.success() => Ok(decode_text_envelope(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        )),
         _ => Ok(None),
     }
 }

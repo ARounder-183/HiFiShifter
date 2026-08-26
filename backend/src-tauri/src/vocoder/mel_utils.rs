@@ -161,7 +161,13 @@ pub fn hann_window(len: usize) -> Vec<f32> {
 
 /// Compute STFT magnitude spectrogram.
 /// Returns a `Vec<Vec<f32>>` where result[freq_bin][frame_idx] is the magnitude.
-pub fn stft_magnitude(signal: &[f32], n_fft: usize, win_size: usize, hop: usize, window: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+pub fn stft_magnitude(
+    signal: &[f32],
+    n_fft: usize,
+    win_size: usize,
+    hop: usize,
+    window: &[f32],
+) -> Result<Vec<Vec<f32>>, String> {
     use num_complex::Complex32;
     use rustfft::FftPlanner;
 

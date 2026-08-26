@@ -25,6 +25,7 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     );
     // Sync "loop for new clips" default (used by importers / legacy project migration)
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
+    crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
     settings
 }
 
@@ -53,7 +54,8 @@ pub(super) fn save_ui_settings(
                             Some(serde_json::Value::Object(base_nested)) => {
                                 if let serde_json::Value::Object(patch_nested) = value {
                                     for (nested_key, nested_value) in patch_nested {
-                                        base_nested.insert(nested_key.clone(), nested_value.clone());
+                                        base_nested
+                                            .insert(nested_key.clone(), nested_value.clone());
                                     }
                                 }
                             }
@@ -89,6 +91,7 @@ pub(super) fn save_ui_settings(
         std::sync::atomic::Ordering::Relaxed,
     );
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
+    crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
 
     let ep_changed = prev_ep != settings.ort_ep;
 

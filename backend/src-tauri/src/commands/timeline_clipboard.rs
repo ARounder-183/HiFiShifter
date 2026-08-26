@@ -259,8 +259,7 @@ pub(super) fn paste_timeline_clipboard(
         Err(hifi_error) => {
             // No (or invalid) HiFiShifter clipboard data: fall back to the
             // REAPERMedia format so items copied in REAPER paste natively.
-            let fallback =
-                super::reaper_clipboard::paste_reaper_clipboard(state, None, None);
+            let fallback = super::reaper_clipboard::paste_reaper_clipboard(state, None, None);
             if fallback.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
                 return fallback;
             }

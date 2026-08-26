@@ -150,7 +150,7 @@ fn pitch_curve_to_track_events(
     // ── Phase 2: 构建音符候选 ──────────────────────────────────────────────
     struct NoteCandidate {
         start_idx: usize,
-        end_idx: usize,   // exclusive
+        end_idx: usize, // exclusive
         min_pitch: f32,
         max_pitch: f32,
     }
@@ -470,15 +470,14 @@ fn make_conductor_track(
     }];
 
     let mut last_tick: u64 = 0;
-    let mut push_meta = |events: &mut Vec<TrackEvent<'static>>,
-                         tick: u64,
-                         kind: midly::MetaMessage<'static>| {
-        events.push(TrackEvent {
-            delta: delta_u28(tick.saturating_sub(last_tick)),
-            kind: TrackEventKind::Meta(kind),
-        });
-        last_tick = tick;
-    };
+    let mut push_meta =
+        |events: &mut Vec<TrackEvent<'static>>, tick: u64, kind: midly::MetaMessage<'static>| {
+            events.push(TrackEvent {
+                delta: delta_u28(tick.saturating_sub(last_tick)),
+                kind: TrackEventKind::Meta(kind),
+            });
+            last_tick = tick;
+        };
 
     let Some(map) = timeline.tempo_map.as_ref() else {
         // 与 TempoTickConverter::new 的钳制保持一致（10-960）。
@@ -493,12 +492,7 @@ fn make_conductor_track(
         push_meta(
             &mut events,
             0,
-            MetaMessage::TimeSignature(
-                fallback_beats_per_bar.clamp(1, 32) as u8,
-                2,
-                24,
-                8,
-            ),
+            MetaMessage::TimeSignature(fallback_beats_per_bar.clamp(1, 32) as u8, 2, 24, 8),
         );
         push_meta(
             &mut events,
@@ -724,20 +718,16 @@ fn read_pitch_for_clip(
             // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与实时引擎 /
             // assemble 的放置算法一致）。不能用窗口比较过滤可见性 —— split
             // 产生的"环绕窗口"（start > end）会把所有音符误判为越界。
-            if let Some(placement) = crate::state::place_note_occurrence_in_loop(
-                clip,
-                note.start_sec,
-                note.end_sec,
-                fp,
-            ) {
+            if let Some(placement) =
+                crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
+            {
                 let note_value = note.note as f32;
                 let mut cycle_offset = 0usize;
                 while cycle_offset < target_frames {
                     let write_start = cycle_offset + placement.first_start_frame;
-                    let write_end = (cycle_offset
-                        + placement.first_start_frame
-                        + placement.len_frames)
-                        .min(target_frames);
+                    let write_end =
+                        (cycle_offset + placement.first_start_frame + placement.len_frames)
+                            .min(target_frames);
                     if write_start >= write_end {
                         break;
                     }
@@ -907,7 +897,8 @@ pub(super) fn export_pitch_to_midi(
     for (idx, entry) in request.tracks.iter().enumerate() {
         let channel = channels[idx];
 
-        let name_bytes: &'static [u8] = Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
+        let name_bytes: &'static [u8] =
+            Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
 
         let (pitch_values, fp) = match read_pitch_for_export(&timeline, entry) {
             Ok(v) => v,
@@ -959,8 +950,7 @@ pub(super) fn export_pitch_to_midi(
                 .params_by_root_track
                 .get(&entry.root_track_id)
                 .map(|p| {
-                    !p.pitch_edit.iter().any(|v| *v > 0.0)
-                        && !p.pitch_orig.iter().any(|v| *v > 0.0)
+                    !p.pitch_edit.iter().any(|v| *v > 0.0) && !p.pitch_orig.iter().any(|v| *v > 0.0)
                 })
                 .unwrap_or(true)
         });
@@ -1081,7 +1071,7 @@ mod tests {
 
     #[test]
     fn non_compose_export_reads_midi_clip_fallback() {
-        use super::{read_pitch_for_export, EXPORT_FRAME_PERIOD_MS, MidiExportTrackEntry};
+        use super::{read_pitch_for_export, MidiExportTrackEntry, EXPORT_FRAME_PERIOD_MS};
         use crate::midi_import::MidiNoteEvent;
 
         let mut timeline = TimelineState::default();

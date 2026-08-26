@@ -602,9 +602,10 @@ fn process_single_clip(
             // Calculate pre_silence_sec for clip placement.
             // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
             // 末端）；Loop 的负 source_start 是环绕锚点，不产生前导静音。
-            let pre_silence_sec =
-                crate::state::clip_leading_silence_sec(clip, crate::state::clip_source_media_duration_sec(clip))
-                    / playback_rate.max(1e-6);
+            let pre_silence_sec = crate::state::clip_leading_silence_sec(
+                clip,
+                crate::state::clip_source_media_duration_sec(clip),
+            ) / playback_rate.max(1e-6);
 
             // Estimate clip_total_frames (from original audio)
             let clip_total_frames = if clip.loop_enabled {
@@ -943,9 +944,10 @@ fn compute_pitch_curve_with_incremental_refresh(
                 1.0
             };
             // 前导静音按消费方向取值（同 process_single_clip；Loop 恒为 0）。
-            let pre_silence_sec =
-                crate::state::clip_leading_silence_sec(clip, crate::state::clip_source_media_duration_sec(clip))
-                    / playback_rate.max(1e-6);
+            let pre_silence_sec = crate::state::clip_leading_silence_sec(
+                clip,
+                crate::state::clip_source_media_duration_sec(clip),
+            ) / playback_rate.max(1e-6);
 
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
             // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
@@ -1402,11 +1404,10 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
             } else {
                 (clip.source_start_sec * in_rate as f64).round() as i64
             };
-            let out_source_frames = ((clip_timeline_len_sec.max(0.0)
-                * playback_rate
-                * in_rate as f64)
-                .ceil()
-                .max(2.0)) as usize;
+            let out_source_frames =
+                ((clip_timeline_len_sec.max(0.0) * playback_rate * in_rate as f64)
+                    .ceil()
+                    .max(2.0)) as usize;
             let tiled = crate::mixdown::build_loop_tiled_segment(
                 &pcm,
                 in_channels_usize,
@@ -1429,9 +1430,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
             }
 
             let src_i0 = (slice_lo * in_rate as f64).floor().max(0.0) as usize;
-            let src_i1 = (slice_hi * in_rate as f64)
-                .ceil()
-                .max(src_i0 as f64) as usize;
+            let src_i1 = (slice_hi * in_rate as f64).ceil().max(src_i0 as f64) as usize;
             let src_i1 = src_i1.min(in_frames);
             if src_i1 <= src_i0 + 1 {
                 continue;
@@ -1442,8 +1441,12 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
         // Resample to analysis rate (44100) and convert to mono.
         // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
-        let mut segment =
-            crate::mixdown::linear_resample_interleaved(&segment, in_channels_usize, in_rate, 44100);
+        let mut segment = crate::mixdown::linear_resample_interleaved(
+            &segment,
+            in_channels_usize,
+            in_rate,
+            44100,
+        );
         if clip.reversed && !clip.loop_enabled {
             crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
         }

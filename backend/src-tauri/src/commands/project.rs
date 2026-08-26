@@ -519,61 +519,73 @@ fn save_project_archive_to_zip_inner(
     archive_logs.push(format!("Target zip: {}", zip_path.display()));
     archive_logs.push(format!("Embedded project file: {}", project_entry_name));
 
+    pf.timeline.sync_clip_takes_from_flat();
     for clip in pf.timeline.clips.iter_mut() {
-        let Some(source_path) = clip.source_path.clone() else {
-            continue;
-        };
-        if source_path.trim().is_empty() {
-            clip.source_path = None;
-            continue;
-        }
+        for take in &mut clip.takes {
+            let Some(source_path) = take.source_path.clone() else {
+                continue;
+            };
+            if source_path.trim().is_empty() {
+                take.source_path = None;
+                continue;
+            }
 
-        if let Some(existing) = source_to_entry.get(&source_path) {
-            clip.source_path_relative = Some(existing.clone());
-            clip.source_path = None;
-            continue;
-        }
+            if let Some(existing) = source_to_entry.get(&source_path) {
+                take.source_path_relative = Some(existing.clone());
+                take.source_path = None;
+                continue;
+            }
 
-        let abs_path = PathBuf::from(&source_path);
-        if !abs_path.is_absolute() || !abs_path.exists() {
+            let abs_path = PathBuf::from(&source_path);
+            if !abs_path.is_absolute() || !abs_path.exists() {
+                archive_logs.push(format!(
+                    "Skip missing or non-absolute source: {} (clip={}, take={})",
+                    source_path, clip.id, take.id
+                ));
+                take.source_path = None;
+                continue;
+            }
+
+            let relative_candidate = current_project_dir
+                .as_ref()
+                .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
+                .map(|p| p.to_string_lossy().replace('\\', "/"));
+
+            let desired_entry_path = if let Some(rel) = relative_candidate {
+                rel
+            } else {
+                let file_name = abs_path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("audio.wav");
+                format!("Archived/{}", file_name)
+            };
+
+            let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
+            if unique_entry != desired_entry_path {
+                archive_logs.push(format!(
+                    "Name collision resolved: {} -> {}",
+                    desired_entry_path, unique_entry
+                ));
+            }
+
+            source_to_entry.insert(source_path.clone(), unique_entry.clone());
+            take.source_path_relative = Some(unique_entry.clone());
+            take.source_path = None;
             archive_logs.push(format!(
-                "Skip missing or non-absolute source: {} (clip={})",
-                source_path, clip.id
-            ));
-            clip.source_path = None;
-            continue;
-        }
-
-        let relative_candidate = current_project_dir
-            .as_ref()
-            .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"));
-
-        let desired_entry_path = if let Some(rel) = relative_candidate {
-            rel
-        } else {
-            let file_name = abs_path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("audio.wav");
-            format!("Archived/{}", file_name)
-        };
-
-        let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
-        if unique_entry != desired_entry_path {
-            archive_logs.push(format!(
-                "Name collision resolved: {} -> {}",
-                desired_entry_path, unique_entry
+                "Archive source: {} -> {}",
+                source_path, unique_entry
             ));
         }
-
-        source_to_entry.insert(source_path.clone(), unique_entry.clone());
-        clip.source_path_relative = Some(unique_entry.clone());
-        clip.source_path = None;
-        archive_logs.push(format!(
-            "Archive source: {} -> {}",
-            source_path, unique_entry
-        ));
+        let active_take = clip
+            .active_take_id
+            .as_deref()
+            .and_then(|id| clip.takes.iter().find(|t| t.id == id))
+            .or_else(|| clip.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(clip);
+        }
     }
 
     let bytes = serialize_project_file_for_path(&pf, Path::new(&project_entry_name))?;
@@ -916,6 +928,8 @@ pub(super) fn open_project(
     for clip in &mut pf.timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
     }
+    // 迁移/规范化都发生在 active take 内存投影上，写回 Take 权威数据。
+    pf.timeline.sync_clip_takes_from_flat();
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
@@ -939,6 +953,7 @@ pub(super) fn open_project(
         for clip in &mut tl.clips {
             crate::state::TimelineState::populate_clip_file_metadata(clip);
         }
+        tl.sync_clip_takes_from_flat();
         let normalized_base_scale = normalize_scale_key(&pf.base_scale);
         let normalized_custom_scale = normalize_custom_scale(pf.custom_scale.clone());
         let normalized_use_custom_scale = pf.use_custom_scale && normalized_custom_scale.is_some();

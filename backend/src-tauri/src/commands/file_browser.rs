@@ -216,12 +216,11 @@ pub(crate) fn read_audio_preview(
 
     let max = max_frames.unwrap_or(480_000) as usize;
 
-    let (sample_rate, channels, samples) =
-        if crate::media::is_video_extension(path) {
-            crate::media::decode_media_audio_prefix_f32(path, None, max)?
-        } else {
-            crate::audio_utils::decode_audio_f32_interleaved(path)?
-        };
+    let (sample_rate, channels, samples) = if crate::media::is_video_extension(path) {
+        crate::media::decode_media_audio_prefix_f32(path, None, max)?
+    } else {
+        crate::audio_utils::decode_audio_f32_interleaved(path)?
+    };
 
     let total_frames = samples.len() / channels.max(1) as usize;
     let frames_to_use = total_frames.min(max);

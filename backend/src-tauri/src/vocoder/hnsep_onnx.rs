@@ -115,7 +115,9 @@ pub fn selected_ep_name() -> Option<&'static str> {
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
     if let Some(ref session) = *guard {
         return Ok(Arc::clone(session));
     }
@@ -279,13 +281,8 @@ pub fn cache_separation(
     noise: Arc<Vec<f32>>,
 ) {
     let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
-    let entry = HnsepCacheEntry {
-        harmonic,
-        noise,
-    };
-    let mut cache = global_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let entry = HnsepCacheEntry { harmonic, noise };
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
 }
 

@@ -99,7 +99,10 @@ fn duplicate_child_becomes_next_sibling_of_source() {
     // 显示顺序中克隆紧跟源子轨道（父轨道之后）。
     let order = display_order(&tl);
     let c1_pos = order.iter().position(|id| id == &c1).unwrap();
-    assert_eq!(order.get(c1_pos + 1).map(String::as_str), Some(copy.as_str()));
+    assert_eq!(
+        order.get(c1_pos + 1).map(String::as_str),
+        Some(copy.as_str())
+    );
 }
 
 #[test]

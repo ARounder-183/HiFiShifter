@@ -75,10 +75,7 @@ fn import_finished_recording(
     state: &AppState,
     finished: &RecordingFinishedInfo,
 ) -> Result<TimelineStatePayload, String> {
-    let mut timeline = state
-        .timeline
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
+    let mut timeline = state.timeline.lock().unwrap_or_else(|err| err.into_inner());
     state.checkpoint_timeline(&timeline);
 
     let start_sec = finished.start_sec.max(0.0);
@@ -97,9 +94,8 @@ fn import_finished_recording(
     });
 
     let target_track_id = if selected_is_empty {
-        selected_track_id.unwrap_or_else(|| {
-            timeline.add_track(Some(recording_track_name.clone()), None, None)
-        })
+        selected_track_id
+            .unwrap_or_else(|| timeline.add_track(Some(recording_track_name.clone()), None, None))
     } else if let Some(selected) = selected_track_id {
         let mut root_tracks: Vec<_> = timeline
             .tracks
@@ -116,11 +112,7 @@ fn import_finished_recording(
             .position(|id| *id == selected_root)
             .map(|index| index + 1)
             .unwrap_or(root_order.len());
-        timeline.add_track(
-            Some(recording_track_name.clone()),
-            None,
-            Some(insert_index),
-        )
+        timeline.add_track(Some(recording_track_name.clone()), None, Some(insert_index))
     } else {
         timeline.add_track(Some(recording_track_name), None, None)
     };
