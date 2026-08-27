@@ -93,9 +93,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             viewportEndSec={props.viewportEndSec}
             pxPerSec={props.pxPerSec}
             color={color}
-            style={{ zIndex: 2 }}
             viewportSource={timelineViewportBus}
-            compensateNativeScroll
         />
     );
 });

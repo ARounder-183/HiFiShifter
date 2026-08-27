@@ -123,6 +123,10 @@ export const BackgroundGrid: React.FC<{
 
     const lastDrawKeyRef = useRef<string | null>(null);
 
+    useLayoutEffect(() => {
+        lastDrawKeyRef.current = null;
+    });
+
     const draw = useCallback((nextScrollLeft?: number) => {
         const svg = svgRef.current;
         if (!svg) return;

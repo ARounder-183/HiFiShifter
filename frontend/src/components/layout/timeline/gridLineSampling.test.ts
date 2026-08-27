@@ -6,6 +6,7 @@ import {
     selectStrongGridBarMultiple,
     selectUniformGridStepBeats,
 } from "./gridLineSampling.ts";
+import { selectRulerStep } from "./timeFormat.ts";
 
 let checks = 0;
 
@@ -81,3 +82,22 @@ assertEqual(resolveGridLineSpacing(4000, MAX_WEAK_GRID_LINES, 8), 25, "wide view
 }
 
 console.log(`gridLineSampling checks passed (${checks})`);
+
+// Ruler and grid must always select the same musical step before the line
+// budget is applied. Otherwise the two layers appear to shift apart while
+// zooming, then snap back together.
+{
+    const rulerStep = selectRulerStep({
+        pxPerBeat: 240,
+        grid: "1/16",
+        beatsPerBar: 4,
+        minLabelSpacingPx: 12,
+    });
+    const gridStep = selectUniformGridStepBeats({
+        pxPerBeat: 240,
+        grid: "1/16",
+        beatsPerBar: 4,
+        minSpacingPx: 12,
+    });
+    assertEqual(gridStep, rulerStep, "grid uses the ruler step");
+}

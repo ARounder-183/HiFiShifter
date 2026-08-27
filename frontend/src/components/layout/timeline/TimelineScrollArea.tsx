@@ -8,6 +8,7 @@ import { getTimelineWheelAction } from "../wheelGesture";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
 import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
+import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
@@ -18,6 +19,7 @@ export const TimelineScrollArea: React.FC<
         rowHeight: number;
         setRowHeight: React.Dispatch<React.SetStateAction<number>>;
         setScrollLeft: React.Dispatch<React.SetStateAction<number>>;
+        rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
         scrollHorizontalKb?: Keybinding;
         scrollVerticalKb?: Keybinding;
         horizontalZoomKb?: Keybinding;
@@ -33,6 +35,7 @@ export const TimelineScrollArea: React.FC<
     rowHeight,
     setRowHeight,
     setScrollLeft,
+    rulerContentRef,
     onScroll,
     scrollHorizontalKb,
     scrollVerticalKb,
@@ -68,6 +71,7 @@ export const TimelineScrollArea: React.FC<
         nextRowHeight: number;
         nextScrollTop: number;
     } | null>(null);
+    const applyingZoomRef = useRef(false);
 
     useEffect(() => {
         pxPerSecRef.current = pxPerSec;
@@ -79,6 +83,9 @@ export const TimelineScrollArea: React.FC<
 
     const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
         const next = scroller.scrollLeft;
+        if (applyingZoomRef.current) {
+            return;
+        }
         const nextSnapshot = {
             scrollLeft: next,
             pxPerSec: pxPerSecRef.current,
@@ -94,8 +101,11 @@ export const TimelineScrollArea: React.FC<
         }
         lastViewportDispatchRef.current = nextSnapshot;
         lastScrollLeftRef.current = next;
+        if (rulerContentRef.current) {
+            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+        }
         setScrollLeft(next);
-    }, [setScrollLeft]);
+    }, [rulerContentRef, setScrollLeft]);
 
     useEffect(() => {
         const scroller = scrollRef.current;
@@ -123,9 +133,21 @@ export const TimelineScrollArea: React.FC<
         if (!scroller || !pending) return;
         if (Math.abs(pending.nextPxPerSec - pxPerSec) > 1e-9) return;
 
-        pendingZoomRef.current = null;
+        applyingZoomRef.current = true;
         scroller.scrollLeft = pending.nextScrollLeft;
-        syncScrollLeft(scroller);
+        // Native scrollLeft is quantized and may fire transitionary clamped
+        // scroll events before the new padded width is fully laid out. Keep the
+        // transaction open until the target offset is actually accepted.
+        if (Math.abs(scroller.scrollLeft - pending.nextScrollLeft) <= 0.5) {
+            applyingZoomRef.current = false;
+            pendingZoomRef.current = null;
+            scroller.scrollLeft = pending.nextScrollLeft;
+            syncScrollLeft(scroller);
+            if (rulerContentRef.current) {
+                rulerContentRef.current.style.transform = `translateX(${-pending.nextScrollLeft}px)`;
+            }
+            return;
+        }
     }, [projectSec, pxPerSec, scrollRef, syncScrollLeft]);
 
     useLayoutEffect(() => {
@@ -238,7 +260,10 @@ export const TimelineScrollArea: React.FC<
             const factor = dir > 0 ? 1.1 : 0.9;
 
             const basePxPerSec = zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
-            const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
+            const baseScrollLeft =
+                zoomPendingRef.current?.nextScrollLeft ??
+                pendingZoomRef.current?.nextScrollLeft ??
+                scroller.scrollLeft;
 
             const totalSec = Math.max(0, projectSec);
             const minPxPerSec = resolveTimelineMinPxPerSec({
@@ -270,9 +295,19 @@ export const TimelineScrollArea: React.FC<
                     zoomRafRef.current = null;
                     const pending = zoomPendingRef.current;
                     if (!pending) return;
-                    zoomPendingRef.current = null;
-                    pendingZoomRef.current = pending;
-                    setPxPerSec(pending.nextPxPerSec);
+                zoomPendingRef.current = null;
+                pendingZoomRef.current = pending;
+                pxPerSecRef.current = pending.nextPxPerSec;
+                timelineViewportBus.emit(
+                    pending.nextScrollLeft,
+                    pending.nextPxPerSec,
+                    scroller.clientWidth,
+                );
+                if (rulerContentRef.current) {
+                    rulerContentRef.current.style.transform = `translateX(${-pending.nextScrollLeft}px)`;
+                }
+                setScrollLeft(pending.nextScrollLeft);
+                setPxPerSec(pending.nextPxPerSec);
                 });
             }
         };
@@ -287,6 +322,7 @@ export const TimelineScrollArea: React.FC<
         scrollRef,
         setPxPerSec,
         setRowHeight,
+        rulerContentRef,
         scrollHorizontalKb,
         scrollVerticalKb,
         horizontalZoomKb,

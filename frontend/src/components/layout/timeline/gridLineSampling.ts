@@ -1,5 +1,5 @@
-import { gridStepBeats } from "./grid";
-import { rulerStepCandidates } from "./timeFormat";
+import { gridStepBeats } from "./grid.ts";
+import { selectRulerStep } from "./timeFormat.ts";
 
 /**
  * 根据视口宽度限制网格线的绘制密度。
@@ -32,7 +32,7 @@ export function resolveGridLineSpacing(
 /**
  * 选择弱网格线的显示步长（拍）。
  *
- * 候选步长与标尺共用同一套 `rulerStepCandidates`：
+ * 候选步长与标尺保持同一选择规则：
  * - 优先使用最细、且屏幕间距不小于 minSpacingPx 的音乐步长；
  * - 网格步长本身过密时，逐级放大到候选阶梯；
  * - 缩得过小时按小节整数倍继续放大。
@@ -43,23 +43,19 @@ export function selectUniformGridStepBeats(args: {
     beatsPerBar: number;
     minSpacingPx: number;
 }): number {
-    const bpb = Math.max(1, Math.round(args.beatsPerBar));
     const pxPerBeat = Math.max(1e-9, args.pxPerBeat);
     const spacing = Math.max(1, args.minSpacingPx);
-    const gridStep = Math.max(1e-9, gridStepBeats(args.grid));
-    const candidates = rulerStepCandidates(args.grid, bpb);
-
-    for (const step of candidates) {
-        if (step >= gridStep - 1e-9 && step * pxPerBeat >= spacing - 1e-9) {
-            return step;
-        }
-    }
-
-    let step = bpb;
-    while (step * pxPerBeat < spacing - 1e-9) {
-        step *= 2;
-    }
-    return step;
+    const rulerStep = selectRulerStep({
+        pxPerBeat,
+        grid: args.grid,
+        beatsPerBar: args.beatsPerBar,
+        minLabelSpacingPx: spacing,
+    });
+    // Grid lines may be denser than labels, but must never select a coarser
+    // musical step than the ruler; otherwise the two layers visibly diverge.
+    let step = Math.max(1e-9, gridStepBeats(args.grid));
+    while (step * pxPerBeat < spacing - 1e-9) step *= 2;
+    return Math.min(rulerStep, step);
 }
 
 export function selectStrongGridBarMultiple(

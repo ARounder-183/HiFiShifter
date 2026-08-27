@@ -141,9 +141,10 @@ export function resolveHorizontalWheelZoom(args: {
 }
 
 /**
- * Quantized native scroll positions must not leak into a viewport-sized
- * canvas that already renders local coordinates. Keep the canvas at content
- * x=0 and preserve the fractional world position that the browser rounded.
+ * Resolve the placement for a viewport-sized canvas that renders local
+ * coordinates. The wrapper is inside scrolled content, so it must follow the
+ * native scroll offset; the canvas model still consumes the exact requested
+ * scroll to avoid losing the fractional zoom anchor.
  */
 export function resolveCanvasViewportOffset(args: {
     requestedScrollLeft: number;
@@ -154,8 +155,7 @@ export function resolveCanvasViewportOffset(args: {
         ? args.actualScrollLeft
         : args.requestedScrollLeft;
     const requested = Number.isFinite(args.requestedScrollLeft) ? args.requestedScrollLeft : actual;
-    const viewport = Math.max(1, args.viewportWidth);
-    const leftPx = Math.min(viewport, Math.max(-viewport, requested - actual));
+    const leftPx = Math.max(0, actual);
     return {
         leftPx,
         localScrollLeftPx: requested,

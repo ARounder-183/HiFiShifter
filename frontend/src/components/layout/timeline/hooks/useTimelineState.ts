@@ -89,6 +89,8 @@ export interface TimelineStateResult {
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
+    rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
+    rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     playheadDragRef: React.MutableRefObject<{
@@ -171,6 +173,7 @@ export interface TimelineStateResult {
     pendingDropDurationPathRef: React.MutableRefObject<string | null>;
 
     // Functions
+    setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
     setScrollLeftAction: React.Dispatch<React.SetStateAction<number>>;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
@@ -265,6 +268,8 @@ export function useTimelineState(): TimelineStateResult {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const trackListScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
+    const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
+    const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
@@ -286,6 +291,7 @@ export function useTimelineState(): TimelineStateResult {
     // ── State 声明 ────────────────────────────────────────────
     const [scrollLeft, setScrollLeft] = useState(0);
     const [nativeScrollLeft, setNativeScrollLeft] = useState(0);
+    const setScrollLeftState = setScrollLeft;
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.pxPerSec"));
         return Number.isFinite(stored) && stored > 0
@@ -361,6 +367,15 @@ export function useTimelineState(): TimelineStateResult {
         }
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+        }
+        const playheadLeftPx =
+            (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
+        if (playheadRef.current) playheadRef.current.style.left = `${playheadLeftPx}px`;
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
         }
         setNativeScrollLeft(next);
         // ★ 立即广播视口变化 → WaveformTrackCanvas 直接 invalidate（绕过 React）
@@ -922,6 +937,8 @@ export function useTimelineState(): TimelineStateResult {
         scrollRef,
         trackListScrollRef,
         rulerContentRef,
+        rulerPlayheadLineRef,
+        rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
         playheadDragRef,
@@ -977,6 +994,7 @@ export function useTimelineState(): TimelineStateResult {
 
         syncScrollLeft,
         setScrollLeftAction,
+        setScrollLeftState,
         secFromClientX,
         beatFromClientX,
         trackIdFromClientY,

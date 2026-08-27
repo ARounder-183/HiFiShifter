@@ -63,7 +63,6 @@ const model = buildSparseClipRenderModel({
     },
     pxPerSec: 100,
     rowHeight: 48,
-    scrollLeft: 50,
     selectedClipId: "clip-b",
     multiSelectedClipIds: ["clip-c", "clip-b"],
     renamingClipId: "clip-a",
@@ -86,7 +85,7 @@ assertEqual(
     [
         {
             id: "clip-a",
-            leftPx: 150,
+            leftPx: 200,
             topPx: 0,
             widthPx: 300,
             fadeInPx: 25,
@@ -99,7 +98,7 @@ assertEqual(
         },
         {
             id: "clip-b",
-            leftPx: 750,
+            leftPx: 800,
             topPx: 0,
             widthPx: 100,
             fadeInPx: 0,
@@ -112,7 +111,7 @@ assertEqual(
         },
         {
             id: "clip-c",
-            leftPx: 350,
+            leftPx: 400,
             topPx: 48,
             widthPx: 200,
             fadeInPx: 0,

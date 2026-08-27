@@ -18,19 +18,25 @@ function assertNear(actual: number, expected: number, label: string): void {
     }
 }
 
-// Native scrollLeft is integer/device-pixel quantized. A local-coordinate
-// canvas must consume the exact requested scroll while the wrapper absorbs
-// only the rounding error; otherwise clips visually drift during zoom.
+// A viewport-sized canvas renders local coordinates (world - requested
+// scroll). Its wrapper lives inside the scrolled content, so the wrapper must
+// be placed at the actual native scroll offset. Using only the rounding
+// residual leaves the whole canvas near content x=0 and clips appear to jump
+// out of view after zooming.
 {
     const result = resolveCanvasViewportOffset({
-        requestedScrollLeft: 456.789,
-        actualScrollLeft: 456,
+        requestedScrollLeft: 2456.789,
+        actualScrollLeft: 2456,
         viewportWidth: 987.654,
     });
-    assertNear(result.leftPx, 0.789, "canvas wrapper absorbs native scroll rounding error");
+    assertNear(
+        result.leftPx,
+        2456,
+        "canvas wrapper follows native scroll position beyond one viewport",
+    );
     assertNear(
         result.localScrollLeftPx,
-        456.789,
+        2456.789,
         "canvas keeps the exact requested local scroll position",
     );
 }

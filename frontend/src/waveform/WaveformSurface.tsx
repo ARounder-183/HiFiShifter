@@ -25,7 +25,6 @@ export interface WaveformSurfaceProps {
             listener: (scrollLeft: number, pxPerSec: number, width: number) => void,
         ): () => void;
     };
-    compensateNativeScroll?: boolean;
 }
 
 export const WaveformSurface = React.memo(function WaveformSurface(props: WaveformSurfaceProps) {
@@ -35,7 +34,6 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     const fallbackRendererRef = React.useRef<Canvas2dWaveformRenderer | null>(null);
     const rafRef = React.useRef<number | null>(null);
     const drawRef = React.useRef<() => void>(() => {});
-    const hasPresentedRef = React.useRef(false);
     const rootRef = React.useRef<HTMLDivElement | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
 
@@ -60,7 +58,6 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 Math.max(1, current.heightPx),
                 window.devicePixelRatio || 1,
             );
-            hasPresentedRef.current = true;
         },
         [],
     );
@@ -97,9 +94,6 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 );
             },
         });
-
-        if (!geometry.complete && hasPresentedRef.current) return;
-        if (!geometry.complete && geometry.vertices.length === 0) return;
 
         if (rendererKind === "webgl2" && webglRendererRef.current) {
             try {
@@ -185,15 +179,12 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     React.useEffect(() => {
         const source = props.viewportSource;
         if (!source) return;
-        const apply = (scrollLeft: number) => {
-            if (props.compensateNativeScroll && rootRef.current) {
-                rootRef.current.style.transform = `translate3d(${scrollLeft}px,0,0)`;
-            }
+        const apply = () => {
             invalidate();
         };
-        apply(source.getSnapshot().scrollLeft);
-        return source.subscribe((scrollLeft) => apply(scrollLeft));
-    }, [invalidate, props.compensateNativeScroll, props.viewportSource]);
+        apply();
+        return source.subscribe(() => apply());
+    }, [invalidate, props.viewportSource]);
 
     React.useEffect(
         () => () => {
