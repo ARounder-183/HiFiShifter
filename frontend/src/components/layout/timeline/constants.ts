@@ -16,6 +16,19 @@ export const TRACK_ADD_ROW_HEIGHT = 32;
 export const CLIP_HEADER_HEIGHT = 18;
 export const CLIP_BODY_PADDING_Y = 6;
 
+// ── 淡化角部手柄几何（左右边缘的垂直所有权切分）────────────────────
+//
+// 每条左/右边缘按高度分成两段、归属两种手势（几何级切分，非 z 竞争）：
+//   y ∈ [0, FADE_CORNER_RESERVE_PX)      → 淡入/淡出角部拖拽控件；
+//   y ∈ [FADE_CORNER_RESERVE_PX, 底部]   → ClipEdgeHandles 裁短/延长/拉伸。
+/** 左右边缘让给淡化控件的顶部带总高。 */
+export const FADE_CORNER_RESERVE_PX = 48;
+/** 角部横帽：从边缘向内的宽度；高度恰为 header 带，覆盖"真边角"。 */
+export const FADE_CORNER_CAP_WIDTH_PX = 22;
+export const FADE_CORNER_CAP_HEIGHT_PX = CLIP_HEADER_HEIGHT;
+/** 边缘上部竖条宽度（骑在边缘线上，位于横帽正下方直至 RESERVE）。 */
+export const FADE_CORNER_EDGE_WIDTH_PX = 6;
+
 /**
  * 拖拽“落到新轨道”时的哨兵 trackId（moveClipTrack 用它标记待创建轨道）。
  * 放在轻量 constants 中，供渲染层等无 Redux 依赖的模块引用。

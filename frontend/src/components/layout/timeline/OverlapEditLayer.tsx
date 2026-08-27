@@ -19,6 +19,8 @@
  *   3. 包络线命中块最次。
  */
 import React from "react";
+import type { ReactNode } from "react";
+
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 import {
     CLIP_BODY_PADDING_Y,
@@ -31,10 +33,16 @@ import { buildFadeHitTargets } from "./fadeHitTargets";
 import { fadeGainSigned } from "./reaperFade";
 import { modifierWatcher } from "./hooks/modifierWatcher";
 import {
+    buildCrossfadeGripInfoContent,
     buildCrossfadeGripInfoText,
+    buildSingleFadeInfoContent,
     buildSingleFadeInfoText,
+    publishFadeRichTooltip,
 } from "./fadeTooltipText";
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
+import type { Keybinding } from "../../../features/keybindings/types";
+import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
+import { requestOpenFadeContextMenu, requestResetFadeCurvature, isNativeMultiClick } from "./fadeContextMenuBus";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 
 export type OverlapEditType =
@@ -152,6 +160,16 @@ function computeCrossfadeGripPoint(args: {
     };
 }
 
+type CrossfadeSides = { out: FadeContextSideLike; in: FadeContextSideLike };
+
+type FadeContextSideLike = {
+    clipId: string;
+    isOut: boolean;
+    shape: number;
+    dir: number;
+    lengthSec: number;
+};
+
 type EditZone = {
     key: string;
     clipId: string;
@@ -165,9 +183,35 @@ type EditZone = {
     partnerClipId?: string;
     /** 显式层叠优先级（交叉点手柄应高于所有淡入淡出/边缘控件）。 */
     zIndex?: number;
-    /** 悬停信息浮标文本（data-tooltip）；缺省时不展示。 */
+    /** 悬停信息浮标（纯文本回退 + 富内容经发布器注册）；缺省时不展示。 */
     tooltip?: string;
+    /** 富内容节点（首行为内联曲线图标）。渲染时由回调 ref 发布。 */
+    richTooltip?: ReactNode;
+    /** 右键菜单载荷：该 zone 对应的包络侧（抓手为 null —— 由双侧快照承担）。 */
+    contextSide?: FadeContextSideLike;
+    /** 抓手专属：交叉点两侧包络快照。 */
+    crossfadeSides?: CrossfadeSides;
+    /** 是否为包络线本体命中（区别于区域边缘竖线）：双击重置仅对它生效。 */
+    line?: boolean;
 };
+
+/**
+ * pointerdown 现场判定循环修饰键是否按下（按下瞬间的事件本身是最可靠
+ * 信号源；与 FadeHitLayer.cycleModifierHeld 同一套子集匹配规则）。
+ */
+function cycleModifierHeld(kb: Keybinding, event: PointerEvent): boolean {
+    const requiredCtrl =
+        kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
+    const requiredAlt =
+        kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
+    const requiredShift =
+        kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
+    return (
+        (!requiredCtrl || event.ctrlKey || event.metaKey) &&
+        (!requiredAlt || event.altKey) &&
+        (!requiredShift || event.shiftKey)
+    );
+}
 
 export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     trackClips,
@@ -184,6 +228,9 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     startSnapOffsetDrag,
     fadeLengthFormatCtx,
     t,
+    shapeCycleKb,
+    onCrossfadeCycleClick,
+    onFadeShapeSingleCycle,
 }: {
     trackClips: ClipInfo[];
     pxPerSec: number;
@@ -193,6 +240,12 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** i18n 文案查询。 */
     t: (key: string) => string;
+    /** 形状循环键绑定（抓手点击用）。 */
+    shapeCycleKb: Keybinding | null;
+    /** 抓手上的循环点击：同时切换交叉点两侧。 */
+    onCrossfadeCycleClick?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
+    /** 单条包络线上的循环点击（Ctrl+点击，非抓手）。 */
+    onFadeShapeSingleCycle?: (side: { clipId: string; isOut: boolean }) => void;
     selectedClipId: string | null;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
@@ -266,6 +319,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         topPx: target.top,
                         heightPx: target.height,
                         cursor: "nwse-resize",
+                        line: target.kind === "line",
                         tooltip: buildSingleFadeInfoText({
                             isOut: false,
                             shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
@@ -274,6 +328,21 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             formatCtx: fadeLengthFormatCtx,
                             t,
                         }),
+                        richTooltip: buildSingleFadeInfoContent({
+                            isOut: false,
+                            shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                            dir: later.fadeInDir ?? 0,
+                            lengthSec: laterFadeInSec,
+                            formatCtx: fadeLengthFormatCtx,
+                            t,
+                        }),
+                        contextSide: {
+                            clipId: later.id,
+                            isOut: false,
+                            shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                            dir: later.fadeInDir ?? 0,
+                            lengthSec: laterFadeInSec,
+                        },
                     });
                 }
             }
@@ -306,6 +375,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         topPx: target.top,
                         heightPx: target.height,
                         cursor: "nesw-resize",
+                        line: target.kind === "line",
                         tooltip: buildSingleFadeInfoText({
                             isOut: true,
                             shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
@@ -314,6 +384,21 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             formatCtx: fadeLengthFormatCtx,
                             t,
                         }),
+                        richTooltip: buildSingleFadeInfoContent({
+                            isOut: true,
+                            shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                            dir: earlier.fadeOutDir ?? 0,
+                            lengthSec: earlierFadeOutSec,
+                            formatCtx: fadeLengthFormatCtx,
+                            t,
+                        }),
+                        contextSide: {
+                            clipId: earlier.id,
+                            isOut: true,
+                            shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                            dir: earlier.fadeOutDir ?? 0,
+                            lengthSec: earlierFadeOutSec,
+                        },
                     });
                 }
             }
@@ -394,6 +479,20 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         formatCtx: fadeLengthFormatCtx,
                         t,
                     });
+                    const gripRichTooltip = buildCrossfadeGripInfoContent({
+                        earlier: {
+                            shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                            dir: earlier.fadeOutDir ?? 0,
+                            lengthSec: earlierFadeOutSec,
+                        },
+                        later: {
+                            shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                            dir: later.fadeInDir ?? 0,
+                            lengthSec: laterFadeInSec,
+                        },
+                        formatCtx: fadeLengthFormatCtx,
+                        t,
+                    });
                     zones.push({
                         key: `${earlier.id}:${later.id}:crossfade-grip`,
                         clipId: earlier.id,
@@ -406,6 +505,27 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         // Alt（曲率修饰键）按住时光标切换，提示"拖动曲线"模式。
                         cursor: altPressed ? "move" : "ew-resize",
                         tooltip: gripTooltip,
+                        richTooltip: gripRichTooltip,
+                        crossfadeSides: {
+                            out: {
+                                clipId: earlier.id,
+                                isOut: true,
+                                shape: Number.isFinite(earlier.fadeOutShape)
+                                    ? earlier.fadeOutShape
+                                    : 0,
+                                dir: earlier.fadeOutDir ?? 0,
+                                lengthSec: earlierFadeOutSec,
+                            },
+                            in: {
+                                clipId: later.id,
+                                isOut: false,
+                                shape: Number.isFinite(later.fadeInShape)
+                                    ? later.fadeInShape
+                                    : 0,
+                                dir: later.fadeInDir ?? 0,
+                                lengthSec: laterFadeInSec,
+                            },
+                        },
                         zIndex: 300,
                     });
                 }
@@ -551,12 +671,105 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     }}
                     data-hs-zone-top={String(zone.topPx)}
                     data-tooltip={zone.tooltip}
+                    data-hs-crossfade-grip={zone.crossfadeSides ? "1" : undefined}
+                    ref={(element) => {
+                        publishFadeRichTooltip(element, zone.richTooltip ?? null);
+                    }}
                     onPointerDown={(e) => {
+                        // Ctrl（可配置）+左键点击：
+                        // - 抓手（交叉点）= 同时循环切换交叉点两侧；
+                        // - 单条包络线 zone = 只循环切换该线。
+                        // 其余情况进入原有的延迟起手拖拽流程。
+                        const cycleHeld =
+                            e.button === 0 &&
+                            shapeCycleKb != null &&
+                            !isNoneBinding(shapeCycleKb) &&
+                            cycleModifierHeld(shapeCycleKb, e.nativeEvent);
+                        if (e.button === 0 && cycleHeld) {
+                            if (zone.crossfadeSides) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onCrossfadeCycleClick?.([
+                                    { clipId: zone.crossfadeSides.out.clipId, isOut: true },
+                                    { clipId: zone.crossfadeSides.in.clipId, isOut: false },
+                                ]);
+                                return;
+                            }
+                            if (zone.contextSide) {
+                                // 边缘竖线（trim/stretch 混合带）保留长度语义：
+                                // 由外层 type 联合排除，此处无需再判 snap_offset。
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onFadeShapeSingleCycle?.(zone.contextSide);
+                                return;
+                            }
+                        }
+                        // 双击重置曲率：
+                        // - 抓手（交叉点）= 同时重置两侧；
+                        // - 包络线本体 = 只重置该侧；边缘竖线不参与。
+                        // 循环键按住时循环优先，双击重置让位。
+                        if (
+                            e.button === 0 &&
+                            !cycleHeld &&
+                            isNativeMultiClick(e.nativeEvent)
+                        ) {
+                            if (zone.crossfadeSides) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                requestResetFadeCurvature({
+                                    sides: [
+                                        {
+                                            clipId: zone.crossfadeSides.out.clipId,
+                                            isOut: true,
+                                        },
+                                        {
+                                            clipId: zone.crossfadeSides.in.clipId,
+                                            isOut: false,
+                                        },
+                                    ],
+                                });
+                                return;
+                            }
+                            if (zone.line === true && zone.contextSide) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                requestResetFadeCurvature({
+                                    sides: [
+                                        {
+                                            clipId: zone.contextSide.clipId,
+                                            isOut: zone.contextSide.isOut,
+                                        },
+                                    ],
+                                });
+                                return;
+                            }
+                        }
                         if (zone.type === "snap_offset") {
                             startSnapOffsetEdit(e, zone.clipId);
                             return;
                         }
                         startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId);
+                    }}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (zone.crossfadeSides) {
+                            // 抓手：双列 —— 先前者淡出，后后者淡入。
+                            requestOpenFadeContextMenu({
+                                clientX: e.clientX,
+                                clientY: e.clientY,
+                                primary: zone.crossfadeSides.out,
+                                secondary: zone.crossfadeSides.in,
+                            });
+                            return;
+                        }
+                        if (!zone.contextSide) return;
+                        requestOpenFadeContextMenu({
+                            clientX: e.clientX,
+                            clientY: e.clientY,
+                            primary: zone.contextSide,
+                            secondary: null,
+                        });
                     }}
                 />
             ))}

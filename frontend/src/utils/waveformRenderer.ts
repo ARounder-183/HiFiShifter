@@ -225,7 +225,9 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
 
         // 淡出：时间 (clipDuration - fadeOutSec) -> clipDuration，增益 1 -> 0
         if (fadeOutSec > 0 && time > fadeOutStart) {
-            gain *= 1 - fadeGainSigned(fadeOutShape, fadeOutDir, "out", (time - fadeOutStart) * invFadeOutSec);
+            // fadeGainSigned("out") 返回的就是该时刻的剩余响度增益（1→0 递减），
+            // 直接相乘；绝不能再套 1 - 补号 —— 那会把淡出反向成淡入。
+            gain *= fadeGainSigned(fadeOutShape, fadeOutDir, "out", (time - fadeOutStart) * invFadeOutSec);
         }
 
         // 应用增益

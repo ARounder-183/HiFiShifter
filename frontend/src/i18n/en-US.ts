@@ -643,6 +643,7 @@ export const enUS = {
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip)",
     kb_modifier_crossfade_grip: "Crossfade Grip (hold while dragging the crossfade crossing point)",
     kb_modifier_fade_curvature: "Fade curvature (hold + drag fade line)",
+    fade_menu_curvature_hint: "Curvature (hold {keys} and drag the envelope)",
     kb_modifier_fade_shape_cycle: "Cycle fade shape (hold + click fade line)",
     kb_modifier_horizontal_zoom: "Horizontal Zoom (hold + scroll)",
     kb_modifier_pr_vzoom: "Vertical Zoom (hold + scroll)",

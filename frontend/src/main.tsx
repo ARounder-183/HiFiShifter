@@ -7,6 +7,7 @@ import "./index.css";
 import App from "./App.tsx";
 import { store } from "./app/store";
 import { AppTooltipProvider } from "./components/AppTooltip";
+import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { initModifierWatcher } from "./components/layout/timeline/hooks/modifierWatcher";
@@ -22,7 +23,7 @@ createRoot(document.getElementById("root")!).render(
         <Provider store={store}>
             <I18nProvider>
                 <AppThemeProvider>
-                    <AppTooltipProvider>
+                    <AppTooltipProvider isSuppressedExternal={() => fadeToolTipSuppress.isSuppressed}>
                         <GlobalGestureServices />
                         <App />
                     </AppTooltipProvider>

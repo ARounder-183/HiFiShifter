@@ -870,13 +870,13 @@ pub fn render_mixdown_interleaved(
             }
             if fade_out_frames > 0 && local_in_clip + fade_out_frames > clip_total_frames {
                 let remain = clip_total_frames.saturating_sub(local_in_clip);
-                // 淡出：σ 镜像已烘焙进表 —— 以"剩余比例"为索引进度，
-                // 时间上从 g(x=1) 衰减到 g(x=0)。线性分支的 remain/N 同语义。
+                // 淡出表按【区间内时间进度】下降采样（见 audio_engine/mix.rs
+                // 同一约定的注释）；用已消耗进度索引，避免把淡出反向。
+                let consumed = 1.0 - remain as f64 / fade_out_frames as f64;
                 g *= match &fade_out_lut {
                     Some(lut) => crate::fade_curves::sample_fade_lut(
                         lut,
-                        (remain as f64 / fade_out_frames as f64)
-                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
                     ),
                     None => (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0),
                 };

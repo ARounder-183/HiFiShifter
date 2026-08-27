@@ -2431,22 +2431,28 @@ export function useEditDrag(deps: {
                     ];
                 }
             } else if (drag.type === "crossfade_edges") {
-                const patches = drag.selectedClipIds
-                    .map((id) => {
-                        const now = sessionRef.current.clips.find((c) => c.id === id);
-                        if (!now) return null;
-                        return {
-                            clipId: id,
-                            startSec: now.startSec,
-                            lengthSec: now.lengthSec,
-                            sourceStartSec: now.sourceStartSec,
-                            sourceEndSec: now.sourceEndSec,
-                            fadeInSec: now.fadeInSec,
-                            fadeOutSec: now.fadeOutSec,
-                            autoFadeInSec: now.autoFadeInSec ?? 0,
-                            autoFadeOutSec: now.autoFadeOutSec ?? 0,
-                        };
-                    })
+                    const patches = drag.selectedClipIds
+                        .map((id) => {
+                            const now = sessionRef.current.clips.find((c) => c.id === id);
+                            if (!now) return null;
+                            return {
+                                clipId: id,
+                                startSec: now.startSec,
+                                lengthSec: now.lengthSec,
+                                sourceStartSec: now.sourceStartSec,
+                                sourceEndSec: now.sourceEndSec,
+                                fadeInSec: now.fadeInSec,
+                                fadeOutSec: now.fadeOutSec,
+                                autoFadeInSec: now.autoFadeInSec ?? 0,
+                                autoFadeOutSec: now.autoFadeOutSec ?? 0,
+                                // 交叉点曲率拖拽的最终落盘：随整份 patch 一并提交，
+                                // 避免 bulk/远端回灌丢掉拖拽期方向。
+                                fadeInShape: now.fadeInShape,
+                                fadeInDir: now.fadeInDir,
+                                fadeOutShape: now.fadeOutShape,
+                                fadeOutDir: now.fadeOutDir,
+                            };
+                        })
                     .filter(
                         (
                             patch,
@@ -2460,6 +2466,10 @@ export function useEditDrag(deps: {
                             fadeOutSec: number;
                             autoFadeInSec: number;
                             autoFadeOutSec: number;
+                            fadeInShape: number;
+                            fadeInDir: number;
+                            fadeOutShape: number;
+                            fadeOutDir: number;
                         } => patch != null,
                     );
                 if (patches.length > 0) {
@@ -2476,6 +2486,10 @@ export function useEditDrag(deps: {
                                     fadeOutSec: patch.fadeOutSec,
                                     autoFadeInSec: patch.autoFadeInSec,
                                     autoFadeOutSec: patch.autoFadeOutSec,
+                                    fadeInShape: patch.fadeInShape,
+                                    fadeInDir: patch.fadeInDir,
+                                    fadeOutShape: patch.fadeOutShape,
+                                    fadeOutDir: patch.fadeOutDir,
                                     checkpoint: false,
                                 }),
                             ).unwrap(),
@@ -2490,7 +2504,16 @@ export function useEditDrag(deps: {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
                         const nextClip = sessionRef.current.clips.find((c) => c.id === clipId);
-                        return [clipId, { fadeInSec: nextClip?.fadeInSec ?? 0 }] as const;
+                        return [
+                            clipId,
+                            {
+                                fadeInSec: nextClip?.fadeInSec ?? 0,
+                                // 曲率/形状拖拽的最终落盘：缺了它们，
+                                // bulk fulfilled 的整份回灌会丢掉拖拽期修改。
+                                fadeInDir: nextClip?.fadeInDir ?? 0,
+                                fadeInShape: nextClip?.fadeInShape ?? 0,
+                            },
+                        ] as const;
                     }),
                 );
                 persistPromise = dispatch(
@@ -2518,7 +2541,14 @@ export function useEditDrag(deps: {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
                         const nextClip = sessionRef.current.clips.find((c) => c.id === clipId);
-                        return [clipId, { fadeOutSec: nextClip?.fadeOutSec ?? 0 }] as const;
+                        return [
+                            clipId,
+                            {
+                                fadeOutSec: nextClip?.fadeOutSec ?? 0,
+                                fadeOutDir: nextClip?.fadeOutDir ?? 0,
+                                fadeOutShape: nextClip?.fadeOutShape ?? 0,
+                            },
+                        ] as const;
                     }),
                 );
                 persistPromise = dispatch(

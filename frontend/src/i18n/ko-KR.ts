@@ -642,6 +642,7 @@ export const koKR = {
     kb_modifier_copy_drag: "복사 드래그 (클립 드래그 중 누르기)",
     kb_modifier_crossfade_grip: "크로스페이드 핸들 (크로스페이드 교차점 드래그 중 누르기)",
     kb_modifier_fade_curvature: "페이드 곡률(길게 누른 채 드래그)",
+    fade_menu_curvature_hint: "곡률({keys}를 누른 채 드래그)",
     kb_modifier_fade_shape_cycle: "페이드 형태 순환(누른 채 클릭)",
     kb_modifier_horizontal_zoom: "수평 줌 (누른 채 스크롤)",
     kb_modifier_pr_vzoom: "수직 줌 (누른 채 스크롤)",

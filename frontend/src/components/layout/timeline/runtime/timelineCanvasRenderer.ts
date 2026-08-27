@@ -20,48 +20,90 @@ function drawFadeCurveStroke(
 ): void {
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
-    // ── 自适应采样：陡峭预设的"爆发段"在两端，均匀采样（≤48 点）会画出
-    // 可见折线。这里均匀基线按宽度给量，并在两端各补对数加密点；指数
-    // 求值很便宜（一次 pow），总点数仍在百级，远低于每帧渲染预算。
     const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
     if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
-        // 直线快路径。
+        // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
+        // y 轴向下：增益 1 → 屏幕上方（topPx）。
         ctx.beginPath();
-        ctx.moveTo(args.leftPx, args.topPx);
-        ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
+        if (args.mode === "in") {
+            ctx.moveTo(args.leftPx, args.topPx + heightPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx);
+        } else {
+            ctx.moveTo(args.leftPx, args.topPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
+        }
         ctx.stroke();
         return;
     }
-    const isSteep =
-        shapeId === 3 || shapeId === 4 || shapeId === 6 ||
-        (Math.abs(args.dir) > 0.85 && shapeId !== 5 && shapeId !== 6);
-    const baseSteps = Math.max(
-        16,
-        Math.min(isSteep ? 96 : 64, Math.round(widthPx / 4)),
-    );
-    const ts: number[] = [];
-    for (let i = 0; i < baseSteps; i += 1) ts.push(i / (baseSteps - 1));
-    // 端部密度按"曲率强度"决定（|dir| 越大越需要），最多两端各 10 点。
-    const edgeCount = isSteep ? 10 : 4;
-    for (let k = 1; k <= edgeCount; k += 1) {
-        const eps = 0.02 / Math.pow(2, k);
-        ts.push(eps);
-        ts.push(1 - eps);
-    }
-    ts.sort((a, b) => a - b);
 
-    ctx.beginPath();
-    let first = true;
-    for (const t of ts) {
-        const x = args.leftPx + t * widthPx;
-        const gain = fadeGainSigned(args.shape, args.dir, args.mode, t);
-        const y = args.topPx + heightPx * (1 - gain);
-        if (first) {
-            ctx.moveTo(x, y);
-            first = false;
-        } else {
-            ctx.lineTo(x, y);
+    // ── 偏差驱动的自适应细分 ────────────────────────────────────────
+    // 固定采样数（此前 ≤96 点且按宽度均分）在极端缩放下相邻采样点相距
+    // 几十甚至上百像素，陡峭预设的末段"爆发区"在两采样点之间会被画成
+    // 一条直弦——视觉上曲线"没接到角上"。这里改为按【屏幕空间偏差】
+    // 递归细分：弦中点到真实曲线的偏差超过 0.6px 就继续拆分，直到
+    // 折线与真实曲线处处贴合。端点 t=0/1 始终包含（增益在两端被核心
+    // 函数精确钳制），因此曲线必然精确落在左下/右上（或反向）边角上。
+    const gainAt = (t: number): number =>
+        fadeGainSigned(args.shape, args.dir, args.mode, t);
+    const xAt = (t: number): number => args.leftPx + t * widthPx;
+    const yAt = (t: number): number => args.topPx + heightPx * (1 - gainAt(t));
+
+    const MAX_POINTS = 1200;
+    const TOLERANCE_PX = 0.6;
+
+    interface Segment {
+        t0: number;
+        t1: number;
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+        dev: number;
+        tm: number;
+        xm: number;
+        ym: number;
+    }
+
+    const evaluateDeviation = (t0: number, t1: number, x0: number, y0: number, x1: number, y1: number) => {
+        const tm = (t0 + t1) / 2;
+        const xm = xAt(tm);
+        const ym = yAt(tm);
+        const cx = (x0 + x1) / 2;
+        const cy = (y0 + y1) / 2;
+        const dev = Math.hypot(xm - cx, ym - cy);
+        return { tm, xm, ym, dev };
+    };
+
+    const segments: Segment[] = [];
+    const pushSegment = (t0: number, t1: number, x0: number, y0: number, x1: number, y1: number) => {
+        const { tm, xm, ym, dev } = evaluateDeviation(t0, t1, x0, y0, x1, y1);
+        segments.push({ t0, t1, x0, y0, x1, y1, dev, tm, xm, ym });
+    };
+
+    pushSegment(0, 1, args.leftPx, yAt(0), args.leftPx + widthPx, yAt(1));
+
+    // 始终细分偏差最大的段；上限保护极端缩放下的工作量。
+    while (segments.length < MAX_POINTS) {
+        let worstIndex = -1;
+        let worstDev = TOLERANCE_PX;
+        for (let i = 0; i < segments.length; i += 1) {
+            if (segments[i].dev > worstDev) {
+                worstDev = segments[i].dev;
+                worstIndex = i;
+            }
         }
+        if (worstIndex < 0) break;
+        const seg = segments[worstIndex];
+        segments.splice(worstIndex, 1);
+        pushSegment(seg.t0, seg.tm, seg.x0, seg.y0, seg.xm, seg.ym);
+        pushSegment(seg.tm, seg.t1, seg.xm, seg.ym, seg.x1, seg.y1);
+    }
+
+    segments.sort((a, b) => a.t0 - b.t0);
+    ctx.beginPath();
+    ctx.moveTo(segments[0].x0, segments[0].y0);
+    for (const seg of segments) {
+        ctx.lineTo(seg.x1, seg.y1);
     }
     ctx.stroke();
 }
@@ -336,9 +378,9 @@ export function drawTimelineCanvas(
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
-                topPx: bodyTop + 1,
+                topPx: bodyTop,
                 widthPx: Math.min(clipWidth, clip.fadeInPx),
-                heightPx: Math.max(1, bodyHeight - 2),
+                heightPx: bodyHeight,
                 shape: clip.fadeInShape,
                 dir: clip.fadeInDir,
                 mode: "in",
@@ -356,9 +398,9 @@ export function drawTimelineCanvas(
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
-                topPx: bodyTop + 1,
+                topPx: bodyTop,
                 widthPx: Math.min(clipWidth, clip.fadeOutPx),
-                heightPx: Math.max(1, bodyHeight - 2),
+                heightPx: bodyHeight,
                 shape: clip.fadeOutShape,
                 dir: clip.fadeOutDir,
                 mode: "out",

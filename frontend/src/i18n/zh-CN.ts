@@ -556,6 +556,7 @@ export const zhCN = {
     kb_modifier_copy_drag: "复制拖动（拖动音频块时按住）",
     kb_modifier_crossfade_grip: "交叉淡化手柄（拖动交叉点手柄时按住）",
     kb_modifier_fade_curvature: "淡化曲率（按住并拖动包络线）",
+    fade_menu_curvature_hint: "淡化曲率（按住 {keys} 并拖动包络线）",
     kb_modifier_fade_shape_cycle: "循环切换淡化形状（按住并点击包络线）",
     kb_modifier_horizontal_zoom: "水平缩放（按住+滚轮）",
     kb_modifier_pr_vzoom: "竖直缩放（按住+滚轮）",

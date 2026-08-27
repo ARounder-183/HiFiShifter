@@ -1,5 +1,6 @@
 import React from "react";
 import { isPrimaryModifierDown } from "../../../../utils/platform";
+import { FADE_CORNER_RESERVE_PX } from "../constants";
 
 export const ClipEdgeHandles: React.FC<{
     clipId: string;
@@ -36,8 +37,11 @@ export const ClipEdgeHandles: React.FC<{
     seekFromClientX,
     startEditDrag,
 }) => {
+    // 左右边缘的垂直所有权切分：顶部 FADE_CORNER_RESERVE_PX 让给淡入/
+    // 淡出角部控件（ClipItem 渲染），裁短/延长只从其下沿开始 —— 几何上
+    // 互不重叠，任何层叠顺序下都不会互相抢事件。
     const yStyle: React.CSSProperties = {
-        top: 0,
+        top: FADE_CORNER_RESERVE_PX,
         bottom: 0,
     };
 

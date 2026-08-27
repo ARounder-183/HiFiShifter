@@ -20,10 +20,17 @@ import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { buildFadeHitTargets } from "./fadeHitTargets";
 import {
+    buildSingleFadeInfoContent,
     buildSingleFadeInfoText,
+    publishFadeRichTooltip,
     type FadeLabelLookup,
     type FadeLengthFormatContext,
 } from "./fadeTooltipText";
+import {
+    isNativeMultiClick,
+    requestOpenFadeContextMenu,
+    requestResetFadeCurvature,
+} from "./fadeContextMenuBus";
 
 export const FadeHitLayer = React.memo(function FadeHitLayer({
     clipLeftPx,
@@ -44,6 +51,7 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
     clipXTo,
     zIndex = 40,
     shapeCycleKb,
+    clipId,
     onShapeCycleClick,
     onFadeInPointerDown,
     onFadeOutPointerDown,
@@ -70,6 +78,8 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
     zIndex?: number;
     /** 形状循环键绑定；null / "无" 绑定时禁用点击切换。 */
     shapeCycleKb: Keybinding | null;
+    /** 所属 clip id（右键菜单载荷用）。 */
+    clipId: string;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
     onShapeCycleClick?: (side: "in" | "out") => void;
     onFadeInPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
@@ -92,12 +102,37 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
 
     if (targets.length === 0) return null;
 
+    // 预构建每侧的富内容节点（同侧命中块共享同一引用；注册表按元素分键）。
+    const richIn = buildSingleFadeInfoContent({
+        isOut: false,
+        shape: fadeInShape,
+        dir: fadeInDir,
+        lengthSec: effectiveFadeInSec,
+        formatCtx,
+        t: t as unknown as FadeLabelLookup,
+    });
+    const richOut = buildSingleFadeInfoContent({
+        isOut: true,
+        shape: fadeOutShape,
+        dir: fadeOutDir,
+        lengthSec: effectiveFadeOutSec,
+        formatCtx,
+        t: t as unknown as FadeLabelLookup,
+    });
+    // 回调 ref：命中块挂载/更新时把富内容注册进 AppTooltipProvider。
+    const publishRef =
+        (content: React.ReactNode) =>
+        (element: HTMLDivElement | null): void => {
+            publishFadeRichTooltip(element, content);
+        };
+
     return (
         <>
             {targets.map((target, index) => {
                 const isLine = target.kind === "line";
                 const side: "in" | "out" = target.type === "fade_in" ? "in" : "out";
-                // 信息浮标对所有淡变编辑目标生效（包络线 + 区域边缘竖线）。
+                // data-tooltip 保留纯文本版本（无 JS 场景回退）；悬停实际展示
+                // 富内容（首行为内联曲线图标）。
                 const tooltip = buildSingleFadeInfoText({
                     isOut: target.type === "fade_out",
                     shape: target.type === "fade_in" ? fadeInShape : fadeOutShape,
@@ -112,6 +147,9 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                 return (
                     <div
                         key={`${target.kind}-${target.type}-${index}`}
+                        ref={publishRef(
+                            target.type === "fade_in" ? richIn : richOut,
+                        )}
                         className="absolute"
                         style={{
                             left: target.left,
@@ -124,20 +162,63 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                         }}
                         data-hs-fade-hit={target.type}
                         data-hs-fade-y={String(target.top)}
+                        data-hs-clip-id={clipId}
                         data-tooltip={tooltip}
+                        onContextMenu={(e) => {
+                            // 右键落在交叉点抓手（更高层的 OverlapEditLayer）
+                            // 上时不在这里弹菜单，由抓手自身分发双侧载荷。
+                            const grab = (e.target as Element | null)?.closest?.(
+                                "[data-hs-crossfade-grip]",
+                            );
+                            if (grab) return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            requestOpenFadeContextMenu({
+                                clientX: e.clientX,
+                                clientY: e.clientY,
+                                primary: {
+                                    clipId:
+                                        e.currentTarget.dataset.hsClipId ?? "",
+                                    isOut: target.type === "fade_out",
+                                    shape:
+                                        target.type === "fade_in"
+                                            ? fadeInShape
+                                            : fadeOutShape,
+                                    dir:
+                                        target.type === "fade_in"
+                                            ? fadeInDir
+                                            : fadeOutDir,
+                                    lengthSec:
+                                        target.type === "fade_in"
+                                            ? effectiveFadeInSec
+                                            : effectiveFadeOutSec,
+                                },
+                                secondary: null,
+                            });
+                        }}
                         onPointerDown={(e) => {
                             if (e.button !== 0) return;
                             // 形状循环点击仅对包络线命中生效（边缘竖线是长度语义）。
-                            if (
-                                isLine &&
+                            // 循环键优先于双击重置。
+                            const cycleHeld =
                                 onShapeCycleClick &&
                                 shapeCycleKb != null &&
                                 !isNoneBinding(shapeCycleKb) &&
-                                cycleModifierHeld(shapeCycleKb, e.nativeEvent)
-                            ) {
+                                cycleModifierHeld(shapeCycleKb, e.nativeEvent);
+                            if (isLine && cycleHeld) {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 onShapeCycleClick(side);
+                                return;
+                            }
+                            // 双击包络线 = 重置该曲线曲率到当前形状默认值
+                            // （仅包络线本体；边缘竖线保持长度语义）。
+                            if (isLine && !cycleHeld && isNativeMultiClick(e.nativeEvent)) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                requestResetFadeCurvature({
+                                    sides: [{ clipId, isOut: target.type === "fade_out" }],
+                                });
                                 return;
                             }
                             if (target.type === "fade_in") onFadeInPointerDown(e);

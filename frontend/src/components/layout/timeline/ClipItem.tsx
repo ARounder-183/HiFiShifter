@@ -14,11 +14,21 @@ import React from "react";
 import { useAppSelector } from "../../../app/hooks";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
+import {
+    buildSingleFadeInfoContent,
+    buildSingleFadeInfoText,
+    publishFadeRichTooltip,
+} from "./fadeTooltipText";
+import { resolveCurvatureEditBase } from "./reaperFade";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
+    FADE_CORNER_CAP_HEIGHT_PX,
+    FADE_CORNER_CAP_WIDTH_PX,
+    FADE_CORNER_EDGE_WIDTH_PX,
+    FADE_CORNER_RESERVE_PX,
     CLIP_BODY_PADDING_Y,
     CLIP_HEADER_HEIGHT,
     SNAP_OFFSET_HANDLE_SIZE_PX,
@@ -36,6 +46,7 @@ import {
 } from "./clip/ClipHeader";
 
 const LEADING_OVERLAP_ALPHA = 0.5;
+
 
 export const ClipItem = React.memo(function ClipItem({
     clip,
@@ -182,6 +193,53 @@ export const ClipItem = React.memo(function ClipItem({
         (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : (clip.fadeInSec ?? 0);
     const effectiveFadeOutSec =
         (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : (clip.fadeOutSec ?? 0);
+    // 角部手柄悬停信息：使用与包络线一致的三行格式；长度显示当前有效值
+    //（未创建淡化时为 0，明确告诉用户“从这里拖出一个淡变”）。
+    const cornerTooltipIn = buildSingleFadeInfoText({
+        isOut: false,
+        shape: resolveCurvatureEditBase(Number(clip.fadeInShape) || 0).shape,
+        dir: Number(clip.fadeInDir ?? 0),
+        lengthSec: effectiveFadeInSec,
+        formatCtx: fadeLengthFormatCtx,
+        t: (key) => t(key as Parameters<typeof t>[0]),
+    });
+    const cornerTooltipOut = buildSingleFadeInfoText({
+        isOut: true,
+        shape: resolveCurvatureEditBase(Number(clip.fadeOutShape) || 0).shape,
+        dir: Number(clip.fadeOutDir ?? 0),
+        lengthSec: effectiveFadeOutSec,
+        formatCtx: fadeLengthFormatCtx,
+        t: (key) => t(key as Parameters<typeof t>[0]),
+    });
+    // 角部手柄的富内容浮标：类型行以内联曲线图标替代文字名称，悬停时由
+    // AppTooltipProvider 的富内容表渲染（data-tooltip 文本保留作回退）。
+    const cornerRichContentIn = buildSingleFadeInfoContent({
+        isOut: false,
+        shape: resolveCurvatureEditBase(Number(clip.fadeInShape) || 0).shape,
+        dir: Number(clip.fadeInDir ?? 0),
+        lengthSec: effectiveFadeInSec,
+        formatCtx: fadeLengthFormatCtx,
+        t: (key) => t(key as Parameters<typeof t>[0]),
+    });
+    const cornerRichContentOut = buildSingleFadeInfoContent({
+        isOut: true,
+        shape: resolveCurvatureEditBase(Number(clip.fadeOutShape) || 0).shape,
+        dir: Number(clip.fadeOutDir ?? 0),
+        lengthSec: effectiveFadeOutSec,
+        formatCtx: fadeLengthFormatCtx,
+        t: (key) => t(key as Parameters<typeof t>[0]),
+    });
+    const cornerInCapRef = React.useRef<HTMLDivElement | null>(null);
+    const cornerInEdgeRef = React.useRef<HTMLDivElement | null>(null);
+    const cornerOutCapRef = React.useRef<HTMLDivElement | null>(null);
+    const cornerOutEdgeRef = React.useRef<HTMLDivElement | null>(null);
+    React.useLayoutEffect(() => {
+        publishFadeRichTooltip(cornerInCapRef.current, cornerRichContentIn);
+        publishFadeRichTooltip(cornerInEdgeRef.current, cornerRichContentIn);
+        publishFadeRichTooltip(cornerOutCapRef.current, cornerRichContentOut);
+        publishFadeRichTooltip(cornerOutEdgeRef.current, cornerRichContentOut);
+    }, [cornerRichContentIn, cornerRichContentOut]);
+
     const leadingOverlapPx = Math.max(
         0,
         Math.min(width, Math.max(0, leadingOverlapSec) * pxPerSec),
@@ -495,6 +553,68 @@ export const ClipItem = React.memo(function ClipItem({
                     startEditDrag={startEditDrag}
                 />
 
+                {/* Fade 角落创建/编辑手柄（L 形）：真左上/右上边角 —— 顶部横帽
+                    覆盖 header 带与 body 上沿，左右竖条覆盖边缘上部直至
+                    FADE_CORNER_RESERVE_PX；此高度带以下才是 EdgeHandles 的
+                    裁短/延长区（constants 中做了所有权切分，不靠 z 竞争）。
+                    悬停信息为富内容三行淡变 ToolTips（首行为内联曲线图标，
+                    经 publishFadeRichTooltip 注册）；长度显示当前有效值
+                    （未创建时为 0）。z 高于 SnapOffset 握把不影响：互不相交。 */}
+                <div
+                    ref={cornerInCapRef}
+                    className="absolute left-0 top-0 z-[65]"
+                    style={{
+                        width: FADE_CORNER_CAP_WIDTH_PX,
+                        height: FADE_CORNER_CAP_HEIGHT_PX,
+                        cursor: "nwse-resize",
+                    }}
+                    onPointerDown={(e) => {
+                        startDeferredFadeEditDrag(e, "fade_in");
+                    }}
+                    data-tooltip={cornerTooltipIn}
+                />
+                <div
+                    ref={cornerInEdgeRef}
+                    className="absolute left-0 z-[65]"
+                    style={{
+                        top: FADE_CORNER_CAP_HEIGHT_PX,
+                        width: FADE_CORNER_EDGE_WIDTH_PX,
+                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        cursor: "ew-resize",
+                    }}
+                    onPointerDown={(e) => {
+                        startDeferredFadeEditDrag(e, "fade_in");
+                    }}
+                    data-tooltip={cornerTooltipIn}
+                />
+                <div
+                    ref={cornerOutCapRef}
+                    className="absolute right-0 top-0 z-[65]"
+                    style={{
+                        width: FADE_CORNER_CAP_WIDTH_PX,
+                        height: FADE_CORNER_CAP_HEIGHT_PX,
+                        cursor: "nesw-resize",
+                    }}
+                    onPointerDown={(e) => {
+                        startDeferredFadeEditDrag(e, "fade_out");
+                    }}
+                    data-tooltip={cornerTooltipOut}
+                />
+                <div
+                    ref={cornerOutEdgeRef}
+                    className="absolute right-0 z-[65]"
+                    style={{
+                        top: FADE_CORNER_CAP_HEIGHT_PX,
+                        width: FADE_CORNER_EDGE_WIDTH_PX,
+                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        cursor: "ew-resize",
+                    }}
+                    onPointerDown={(e) => {
+                        startDeferredFadeEditDrag(e, "fade_out");
+                    }}
+                    data-tooltip={cornerTooltipOut}
+                />
+
                 {/* SnapOffset 命中握把（透明）：**跟随 ◣ 三角位置**（三角
                     视觉由轨道级 Canvas 绘制），z 高于左缘 trim/stretch 条
                     （z-60，全高、始终可命中）——否则三角所在处会被边缘
@@ -553,28 +673,6 @@ export const ClipItem = React.memo(function ClipItem({
                     {/* Body (waveform + edit handles)。data-hs-clip-body 供
                         淡化曲率拖拽把指针 clientY 映射回包络增益。 */}
                     <div className="absolute inset-0" data-hs-clip-body="1">
-                        {/* Fade 角落创建/编辑手柄：始终存在（即使当前无淡化），
-                            可从此拖拽“造出一个”淡化；淡化存在时也是有效抓取点
-                            （对齐 REAPER 顶部角落三角）。完全透明、不做悬停高亮，
-                            仅以 resize 光标提示。left/right 10px 避开
-                            ClipEdgeHandles 的 10px 宽度。 */}
-                        <div
-                            className="absolute left-[10px] top-0 w-[16px] h-[16px] z-[55]"
-                            style={{ cursor: "nwse-resize" }}
-                            onPointerDown={(e) => {
-                                startDeferredFadeEditDrag(e, "fade_in");
-                            }}
-                            data-tooltip={t("fade_in")}
-                        />
-                        <div
-                            className="absolute right-[10px] top-0 w-[16px] h-[16px] z-[55]"
-                            style={{ cursor: "nesw-resize" }}
-                            onPointerDown={(e) => {
-                                startDeferredFadeEditDrag(e, "fade_out");
-                            }}
-                            data-tooltip={t("fade_out")}
-                        />
-
                         {/* Fade 拖拽控件：抓「绘制的包络线」和「淡化区域边缘竖线」，
                             而非整片淡入淡出区域（对齐 REAPER）。命中块很小，未命中处
                             会自然穿透到 clip body（拖拽移动 clip）。 */}
@@ -604,6 +702,7 @@ export const ClipItem = React.memo(function ClipItem({
                                 formatCtx={fadeLengthFormatCtx}
                                 t={(key) => t(key as Parameters<typeof t>[0])}
                                 shapeCycleKb={fadeShapeCycleKb}
+                                clipId={clip.id}
                                 onShapeCycleClick={(side) => onFadeShapeCycleClick?.(clip.id, side)}
                                 onFadeInPointerDown={(e) => startDeferredFadeEditDrag(e, "fade_in")}
                                 onFadeOutPointerDown={(e) =>

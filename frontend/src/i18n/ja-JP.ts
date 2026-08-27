@@ -568,6 +568,7 @@ export const jaJP = {
     kb_modifier_copy_drag: "コピードラッグ（クリップドラッグ中に押す）",
     kb_modifier_crossfade_grip: "クロスフェードハンドル（クロスフェード交点ドラッグ中に押す）",
     kb_modifier_fade_curvature: "フェードカーブ（押しながらドラッグで調整）",
+    fade_menu_curvature_hint: "カーブ（{keys} を押しながらドラッグで調整）",
     kb_modifier_fade_shape_cycle: "フェード形状を切り替え（押しながらクリック）",
     kb_modifier_horizontal_zoom: "水平ズーム（押しながらスクロール）",
     kb_modifier_pr_vzoom: "垂直ズーム（押しながらスクロール）",

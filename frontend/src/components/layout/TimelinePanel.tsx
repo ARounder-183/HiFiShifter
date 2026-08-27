@@ -19,6 +19,7 @@ import {
     FADE_PRESETS,
 } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
+import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
 import {
     addTrackRemote,
     closeClipFormantToolWindow,
@@ -574,7 +575,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const fadeShapeCycleKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.fadeShapeCycleClick"),
     );
-    const handleFadeShapeCycleClick = React.useCallback(
+    /** 单侧循环到下一个形状并重置默认曲率。 */
+    const cycleOneFade = React.useCallback(
         (clipId: string, side: "in" | "out") => {
             const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
             if (!clip) return;
@@ -584,7 +586,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 ? Math.trunc(side === "in" ? clip.fadeInShape : clip.fadeOutShape)
                 : 0;
             const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
-            const nextPreset = FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
+            const nextPreset =
+                FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
             const nextDir = defaultFadeDirFor(nextPreset.shape, side === "out");
             dispatch(
                 setClipFades({
@@ -603,7 +606,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [dispatch],
+        [dispatch, sessionRef],
+    );
+
+    // Ctrl+点击循环切换：普通包络线只切该线；交叉点抓手同时切换两侧
+    // （前者淡出 + 后者淡入）。
+    const handleFadeShapeCycleClick = React.useCallback(
+        (clipId: string, side: "in" | "out") => {
+            cycleOneFade(clipId, side);
+        },
+        [cycleOneFade],
+    );
+    const handleCrossfadeCycleClick = React.useCallback(
+        (sides: Array<{ clipId: string; isOut: boolean }>) => {
+            for (const side of sides) {
+                cycleOneFade(side.clipId, side.isOut ? "out" : "in");
+            }
+        },
+        [cycleOneFade],
     );
     const activeFormantToolClip = React.useMemo(
         () =>
@@ -1807,6 +1827,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             fadeShapeCycleKb={fadeShapeCycleKb}
                                             fadeLengthFormatCtx={fadeLengthFormatCtx}
                                             onFadeShapeCycleClick={handleFadeShapeCycleClick}
+                                            onCrossfadeCycleClick={handleCrossfadeCycleClick}
                                             startClipDrag={startClipDrag}
                                             startEditDrag={startEditDrag}
                                             startSnapOffsetDrag={startSnapOffsetDrag}
@@ -2120,6 +2141,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     </div>
                 )}
 
+                <FadeContextMenuHost />
                 {contextMenu
                     ? (() => {
                           const ctxClip = sessionRef.current.clips.find(

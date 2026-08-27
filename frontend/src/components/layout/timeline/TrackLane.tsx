@@ -172,6 +172,10 @@ type TrackLaneProps = {
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
     onFadeShapeCycleClick?: (clipId: string, side: "in" | "out") => void;
+    /** 抓手上的循环点击：同时切换交叉点两侧。 */
+    onCrossfadeCycleClick?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
+    /** 单条包络线上的循环点击（Ctrl+点击，非抓手）。 */
+    onFadeShapeSingleCycle?: (side: { clipId: string; isOut: boolean }) => void;
 };
 
 export const TrackLane = React.memo(
@@ -190,6 +194,7 @@ export const TrackLane = React.memo(
             fadeShapeCycleKb = null,
             fadeLengthFormatCtx,
             onFadeShapeCycleClick,
+            onCrossfadeCycleClick,
             selectedClipId,
             multiSelectedClipIds,
             multiSelectedSet,
@@ -713,6 +718,11 @@ export const TrackLane = React.memo(
                     startEditDrag={startEditDrag}
                     startSnapOffsetDrag={startSnapOffsetDrag}
                     fadeLengthFormatCtx={fadeLengthFormatCtx}
+                    shapeCycleKb={fadeShapeCycleKb}
+                    onCrossfadeCycleClick={onCrossfadeCycleClick}
+                    onFadeShapeSingleCycle={({ clipId, isOut }) =>
+                        onFadeShapeCycleClick?.(clipId, isOut ? "out" : "in")
+                    }
                     t={(key) => t(key as Parameters<typeof t>[0])}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}

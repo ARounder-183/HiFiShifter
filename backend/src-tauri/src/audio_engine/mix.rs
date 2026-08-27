@@ -247,17 +247,18 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
                     ),
                     None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
                 };
-                let _ = &clip.fade_out_lut;
             }
             if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
                 let remain = clip.length_frames.saturating_sub(local);
-                // 淡出：σ 镜像已烘焙进表 —— 以"剩余比例"为索引进度，
-                // 时间上从 g(x=1) 衰减到 g(x=0)。线性分支的 remain/N 同语义。
+                // 淡出表按【区间内时间进度】下降采样（t=0 处 1 → t=1 处 0），
+                // 因此必须用"已消耗进度"索引。剩余比例的走向恰好相反，
+                // 用它做索引会把淡出整体反成淡入（历史 bug）。线性分支的
+                // remain/N 与补号形式恒等，保持不动。
+                let consumed = 1.0 - remain as f64 / clip.fade_out_frames as f64;
                 g *= match &clip.fade_out_lut {
                     Some(lut) => crate::fade_curves::sample_fade_lut(
                         lut,
-                        (remain as f64 / clip.fade_out_frames as f64)
-                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
                     ),
                     None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
                 };
@@ -385,12 +386,29 @@ fn collect_track_meter_block(
 
             let mut g = clip.gain;
             if clip.fade_in_frames > 0 && local < clip.fade_in_frames {
-                // Keep meter path consistent with audio callback fade behavior.
-                g *= ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0);
+                // Meter path must mirror the audio callback exactly:
+                // shape-aware fade-in via the same per-clip LUT.
+                g *= match &clip.fade_in_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        ((local + 1) as f64 / clip.fade_in_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
                 let remain = clip.length_frames.saturating_sub(local);
-                g *= (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0);
+                // 淡出表按区间内时间进度下降采样 —— 用已消耗进度索引
+                // （与主回调同一约定，剩余比例索引会把淡出反向）。
+                let consumed = 1.0 - remain as f64 / clip.fade_out_frames as f64;
+                g *= match &clip.fade_out_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if g <= 0.0 {
                 continue;
