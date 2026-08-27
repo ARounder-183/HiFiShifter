@@ -6,8 +6,8 @@
  * - Clip 的选中、拖拽、右键菜单等交互逻辑
  * - 支持 trim/stretch 编辑手柄
  *
- * 波形渲染由 WaveformTrackCanvas（轨道级 Canvas）统一负责，
- * ClipItem 仅提供 DOM 交互层。
+ * 波形渲染由 TimelineSurface 内的 TimelineWaveformSurface（共享 WebGL2 波形面）
+ * 统一负责，ClipItem 仅提供 DOM 交互层。
  */
 import React from "react";
 
@@ -742,7 +742,7 @@ export const ClipItem = React.memo(function ClipItem({
                             />
                         )}
 
-                        {/* 波形由 WaveformTrackCanvas（轨道级 Canvas）统一渲染，此处不再包含波形内容 */}
+                        {/* 波形由 TimelineWaveformSurface（共享 WebGL2 波形面）统一渲染，此处不再包含波形内容 */}
                     </div>
                 </div>
             </div>

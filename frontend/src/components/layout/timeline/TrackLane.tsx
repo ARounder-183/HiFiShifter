@@ -827,7 +827,7 @@ startEditDrag={startEditDrag}
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&
             prev.onToggleGroupDisabled === next.onToggleGroupDisabled
-            // viewportStartSec / viewportEndSec are consumed by WaveformTrackCanvas via the viewport bus
+            // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
             // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );
     },
