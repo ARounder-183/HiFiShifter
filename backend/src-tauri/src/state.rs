@@ -1467,8 +1467,8 @@ pub struct TimelineState {
     pub disabled_group_ids: HashSet<String>,
 }
 
-/// 反序列化缺省（老工程文件没有该字段）：下一条轨道排序号从 1 起步，
-/// 与 `TimelineState::default()` 的构造值一致。
+/// Deserialization default (older project files lack the field): the next
+/// track order starts at 1, matching `TimelineState::default()`.
 fn default_next_track_order() -> i32 {
     1
 }
@@ -3685,7 +3685,8 @@ mod tests {
         assert_eq!(pasted.gain, 1.5);
         assert!(pasted.muted);
         assert!(pasted.reversed);
-        // 粘贴/克隆路径：模板显式字段覆盖源，dir 夹紧在 [-1, 1]。
+        // Paste/clone path: explicit template fields override the source, dir is
+        // clamped to [-1, 1].
         assert_eq!(pasted.fade_out_shape, 3.0);
         assert!((pasted.fade_in_dir - 0.4).abs() < 1e-9);
         assert!((pasted.fade_out_dir - 0.75).abs() < 1e-9);
@@ -4592,14 +4593,16 @@ fn default_clip_color() -> String {
     "emerald".to_string()
 }
 
-/// `fade_in_curve`/`fade_out_curve` 的反序列化缺省。
+/// Deserialization default for `fade_in_curve`/`fade_out_curve`.
 ///
-/// 必须返回空串：`reconcile_legacy_fade_fields` 以"空字符串才视为未设置"
-/// 判定 legacy 曲线（见 [`Clip::reconcile_legacy_fade_fields`]）。旧工程
-/// 没有该字段时若缺省成 "sine" 等命名曲线，会把新模型的 shape/dir 误迁移
-/// 覆盖（如 1.1 → 5.0）。真实 legacy 数据在文件里带有非空曲线字符串，
-/// 而引擎/导入构造点（audio_engine、pitch_editing 等）直接写字面量，
-/// 不经过该默认函数。
+/// Must be the empty string: `reconcile_legacy_fade_fields` treats an empty
+/// curve string as "not set" (see [`Clip::reconcile_legacy_fade_fields`]).
+/// If old projects lacking the field defaulted to a named curve such as
+/// "sine", the legacy migration would wrongly overwrite the new shape/dir
+/// model (e.g. 1.1 → 5.0 on load). Real legacy data carries non-empty curve
+/// strings in the file, and engine/import construction sites
+/// (audio_engine, pitch_editing, ...) write literal strings, never going
+/// through this default.
 fn default_fade_curve() -> String {
     String::new()
 }

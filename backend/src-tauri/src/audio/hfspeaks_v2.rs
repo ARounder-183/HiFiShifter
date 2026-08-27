@@ -801,7 +801,8 @@ impl WaveformPeakCache {
         self.total_bytes = 0;
     }
 
-    // 缓存内省访问器：单元测试与诊断路径使用，非测试构建下无调用方。
+    // Cache introspection accessors: used by unit tests and diagnostics;
+        // no callers in non-test builds.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()

@@ -55,15 +55,29 @@ fn main() {
     // files must exist before this call.
     tauri_build::build();
 
-    // ── Windows：为【测试二进制】嵌入 ComCtl32 v6 应用清单 ─────────────────
-    // tauri_build 只通过 `cargo:rustc-link-arg-bins` 给 bin 目标嵌清单；
-    // cargo test 的测试 harness exe 不在其中。而依赖树（winit/tauri dialog）
-    // 静态导入了 comctl32.dll!TaskDialogIndirect —— 该函数只存在于 v6
-    // side-by-side 程序集，无清单时 loader 绑定到 System32 的 v5 副本，
-    // 进程初始化阶段直接 STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) 失败，
-    // 所有 cargo test 在 Windows 上都无法启动。
+    // ── Windows: comctl32!TaskDialogIndirect v6 manifest vs. delay-load ─────
+    // The dependency tree (winit/tauri dialog) statically imports
+    // comctl32.dll!TaskDialogIndirect, which exists only in the v6
+    // side-by-side assembly. Without a v6 manifest the loader binds to the
+    // v5 copy in System32 and process init fails immediately with
+    // STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139).
+    //
+    // The main binary gets a Common-Controls v6 manifest from tauri_build
+    // (resource.lib); cargo has no link-arg channel for the lib unit-test
+    // harness (the block below only reaches tests/ integration targets), so
+    // the harness cannot embed a manifest.
+    //
+    // Root fix (see .cargo/config.toml at the repo root): delay-load
+    // comctl32 wholesale (/DELAYLOAD) — the harness never binds comctl32 at
+    // startup and unit tests never open dialogs (so the load never
+    // triggers); the main binary keeps its v6 manifest and binds v6 on
+    // first real dialog use. `cargo test` and `cargo build` now work
+    // directly on Windows with no manifest injection of any kind.
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     {
+        // The manifest below is still embedded for integration tests
+        // (tests/): kept defensively, so any future integration test that
+        // really opens a system dialog binds the v6 assembly.
         let manifest_out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default())
             .join("hifishifter_tests.manifest");
         let manifest_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -83,12 +97,12 @@ fn main() {
 </assembly>
 "#;
         let _ = std::fs::write(&manifest_out, manifest_xml);
-        // 注意：只能用 `-tests`（作用于 tests/ 下的集成测试目标）。
-        // 通用的 `rustc-link-arg` 会同时打到主 bin —— 主程序已由 tauri_build
-        // 通过 resource.lib 内嵌了清单，再来一份 /MANIFEST:EMBED 会触发
-        // CVT1100 duplicate resource。而 lib 单元测试 harness 没有对应的
-        // link-arg 通道（cargo 限制），其在 Windows 上无法启动的问题见
-        // tests/smoke.rs 的说明。
+        // Only `-tests` may be used here (integration test targets only).
+        // A generic `rustc-link-arg` would also reach the main binary — it
+        // already embeds a manifest from tauri_build's resource.lib and a
+        // second /MANIFEST:EMBED would hit CVT1100 duplicate resource. The
+        // lib unit-test harness has no such channel and is covered by the
+        // comctl32 delay-load setup in .cargo/config.toml.
         println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
         println!(
             "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
@@ -421,8 +435,8 @@ fn build_vslib() {
                 dll_dst.display()
             );
         }
-        // 测试可执行文件位于 target/<profile>/deps/，加载器只在该目录与 PATH
-        // 中查找 DLL；一并复制到 deps/，否则 cargo test 无法启动。
+        // Test executables live in target/<profile>/deps/, where the loader
+        // looks for DLLs; copy there as well or cargo test cannot start.
         let deps_dir = target_dir.join("deps");
         let _ = std::fs::create_dir_all(&deps_dir);
         let dll_dst_deps = deps_dir.join("vslib_x64.dll");
@@ -740,8 +754,8 @@ fn build_soundtouch() {
         );
     }
 
-    // 测试可执行文件位于 target/<profile>/deps/，加载器只在该目录与 PATH
-    // 中查找共享库；一并复制到 deps/，否则 cargo test 无法启动。
+    // Test executables live in target/<profile>/deps/, where the loader
+    // looks for shared libraries; copy there as well or cargo test cannot start.
     let deps_dir = target_dir.join("deps");
     let _ = std::fs::create_dir_all(&deps_dir);
     let lib_dst_deps = deps_dir.join(&lib_filename);
