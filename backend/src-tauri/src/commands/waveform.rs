@@ -4,6 +4,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::hfspeaks_v2::{WaveformManifestPayload, WaveformTileRequest};
+
 use super::common::guard_waveform_command;
 
 const WAVEFORM_COLUMNS_MIN: usize = 16;
@@ -387,4 +389,30 @@ pub(super) fn batch_get_waveform_mipmap(
     }
 
     result
+}
+
+pub(super) fn get_waveform_manifest(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> Result<WaveformManifestPayload, String> {
+    let peaks = state.get_or_compute_waveform_peaks_v2(&source_path)?;
+    Ok(peaks.to_manifest_payload(&source_path))
+}
+
+pub(super) fn get_waveform_tiles_binary(
+    state: State<'_, AppState>,
+    source_path: String,
+    revision: String,
+    requests: Vec<WaveformTileRequest>,
+) -> Result<String, String> {
+    let peaks = state.get_or_compute_waveform_peaks_v2(&source_path)?;
+    let expected_revision = crate::hfspeaks_v2::HfsPeakFile::source_revision(std::path::Path::new(
+        &source_path,
+    ));
+    if revision != expected_revision {
+        return Err("waveform source revision mismatch".to_string());
+    }
+
+    let bytes = peaks.to_tile_binary(&requests);
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }

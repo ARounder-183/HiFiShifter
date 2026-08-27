@@ -435,6 +435,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "batch_get_waveform_mipmap":
             return { sourcePaths: args[0] };
 
+        case "get_waveform_manifest":
+            return { sourcePath: args[0] };
+
+        case "get_waveform_tiles_binary":
+            return { sourcePath: args[0], revision: args[1], requests: args[2] };
+
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
             return {

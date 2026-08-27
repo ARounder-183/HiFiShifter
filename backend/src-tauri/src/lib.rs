@@ -403,6 +403,8 @@ pub fn run() {
             commands::get_waveform_mipmap_binary,
             commands::preload_waveform_mipmap,
             commands::batch_get_waveform_mipmap,
+            commands::get_waveform_manifest,
+            commands::get_waveform_tiles_binary,
             commands::import_audio_item,
             commands::import_audio_bytes,
             commands::add_track,

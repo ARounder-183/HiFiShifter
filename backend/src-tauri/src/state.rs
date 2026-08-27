@@ -1531,9 +1531,8 @@ pub struct AppState {
     pub waveform_cache_dir: std::sync::Mutex<PathBuf>,
 
     /// V2 多级 mipmap 波形缓存 (key = source_path)
-    pub waveform_cache_v2: std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>>,
-    >,
+    pub waveform_cache_v2:
+        std::sync::Mutex<crate::hfspeaks_v2::WaveformPeakCache>,
 
     /// Inflight deduplication for waveform peak computation.
     /// When a file is being computed, its source_path is in this set.
@@ -1591,7 +1590,9 @@ impl Default for AppState {
             suppress_checkpoints: std::sync::atomic::AtomicBool::new(false),
 
             waveform_cache_dir: std::sync::Mutex::new(crate::hfspeaks_v2::default_cache_dir()),
-            waveform_cache_v2: std::sync::Mutex::new(std::collections::HashMap::new()),
+            waveform_cache_v2: std::sync::Mutex::new(
+                crate::hfspeaks_v2::WaveformPeakCache::default(),
+            ),
 
             waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             waveform_inflight_cv: std::sync::Condvar::new(),
