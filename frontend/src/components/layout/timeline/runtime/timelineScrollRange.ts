@@ -48,8 +48,7 @@ export function resolvePlayheadZoomScrollLeft(args: {
     viewportOffsetPx?: number;
 }): number {
     const offset = Number.isFinite(args.viewportOffsetPx) ? (args.viewportOffsetPx as number) : 0;
-    const playheadScreenX =
-        args.playheadSec * args.basePxPerSec - args.baseScrollLeft - offset;
+    const playheadScreenX = args.playheadSec * args.basePxPerSec - args.baseScrollLeft - offset;
     if (playheadScreenX >= 0 && playheadScreenX <= args.viewportWidth) {
         return args.playheadSec * args.nextPxPerSec - playheadScreenX - offset;
     }
@@ -138,5 +137,27 @@ export function resolveHorizontalWheelZoom(args: {
     return {
         nextPxPerSec,
         nextScrollLeft: clampNumber(nextScrollLeft, minScroll, range.maxScrollLeft),
+    };
+}
+
+/**
+ * Quantized native scroll positions must not leak into a viewport-sized
+ * canvas that already renders local coordinates. Keep the canvas at content
+ * x=0 and preserve the fractional world position that the browser rounded.
+ */
+export function resolveCanvasViewportOffset(args: {
+    requestedScrollLeft: number;
+    actualScrollLeft: number;
+    viewportWidth: number;
+}): { leftPx: number; localScrollLeftPx: number } {
+    const actual = Number.isFinite(args.actualScrollLeft)
+        ? args.actualScrollLeft
+        : args.requestedScrollLeft;
+    const requested = Number.isFinite(args.requestedScrollLeft) ? args.requestedScrollLeft : actual;
+    const viewport = Math.max(1, args.viewportWidth);
+    const leftPx = Math.min(viewport, Math.max(-viewport, requested - actual));
+    return {
+        leftPx,
+        localScrollLeftPx: requested,
     };
 }

@@ -1,5 +1,6 @@
 import {
     resolveHorizontalWheelZoom,
+    resolveCanvasViewportOffset,
     resolvePlayheadZoomScrollLeft,
     resolveTimelineScrollRange,
 } from "./timelineScrollRange.ts";
@@ -15,6 +16,23 @@ function assertNear(actual: number, expected: number, label: string): void {
     if (Math.abs(actual - expected) > 1e-6) {
         throw new Error(`${label}: expected ${expected}, received ${actual}`);
     }
+}
+
+// Native scrollLeft is integer/device-pixel quantized. A local-coordinate
+// canvas must consume the exact requested scroll while the wrapper absorbs
+// only the rounding error; otherwise clips visually drift during zoom.
+{
+    const result = resolveCanvasViewportOffset({
+        requestedScrollLeft: 456.789,
+        actualScrollLeft: 456,
+        viewportWidth: 987.654,
+    });
+    assertNear(result.leftPx, 0.789, "canvas wrapper absorbs native scroll rounding error");
+    assertNear(
+        result.localScrollLeftPx,
+        456.789,
+        "canvas keeps the exact requested local scroll position",
+    );
 }
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -206,6 +224,37 @@ function assertEqual(actual: unknown, expected: unknown, label: string): void {
         maxPxPerSec: 8000,
     });
     assertNear(zoom!.nextScrollLeft, 0, "track zoom clamps to zero minimum");
+}
+
+// 轨道视图端到端：鼠标锚点的“世界秒”必须在缩放前后保持不变。
+// 这正是水平缩放时 clip 出现微量偏移的坐标系不变量。
+{
+    const basePxPerSec = 123.456;
+    const baseScrollLeft = 456.789;
+    const anchorScreenX = 321.654;
+    const totalSec = 100;
+    const viewportWidth = 987.654;
+    const anchorWorldSec = (baseScrollLeft + anchorScreenX) / basePxPerSec;
+
+    for (const factor of [1.1, 0.9]) {
+        const zoom = resolveHorizontalWheelZoom({
+            factor,
+            basePxPerSec,
+            baseScrollLeft,
+            totalSec,
+            viewportWidth,
+            playheadZoomEnabled: false,
+            playheadSec: null,
+            anchorScreenX,
+            minPxPerSec: 0.5,
+            maxPxPerSec: 8000,
+        });
+        assertNear(
+            (zoom!.nextScrollLeft + anchorScreenX) / zoom!.nextPxPerSec,
+            anchorWorldSec,
+            `mouse anchor world stays fixed through track zoom (factor ${factor})`,
+        );
+    }
 }
 
 // 光标位于同步空白区（世界坐标 < 0）：锚点钳制到工程起点，纯缩放不产生水平移动

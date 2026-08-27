@@ -81,7 +81,10 @@ import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
-import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
+import {
+    resolveCanvasViewportOffset,
+    resolveTimelineScrollRange,
+} from "./timeline/runtime/timelineScrollRange";
 
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
@@ -1144,6 +1147,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         () => resolveTimelineScrollRange({ contentWidth, viewportWidth }),
         [contentWidth, viewportWidth],
     );
+    const timelineCanvasOffset = useMemo(
+        () =>
+            resolveCanvasViewportOffset({
+                requestedScrollLeft: scrollLeft,
+                actualScrollLeft: state.nativeScrollLeft,
+                viewportWidth,
+            }),
+        [scrollLeft, state.nativeScrollLeft, viewportWidth],
+    );
 
     // ═════════════════════════════════════════════════════════
     // JSX 渲染
@@ -1610,7 +1622,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     className="absolute pointer-events-none"
                                     style={{
                                         top: timelineRenderModel.startIndex * rowHeight,
-                                        left: scrollLeft,
+                                        left: timelineCanvasOffset.leftPx,
                                         width: viewportWidth,
                                         height: visibleTrackCanvasHeight,
                                         zIndex: 1,

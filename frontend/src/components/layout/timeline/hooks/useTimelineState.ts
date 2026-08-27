@@ -110,6 +110,7 @@ export interface TimelineStateResult {
 
     // State values
     scrollLeft: number;
+    nativeScrollLeft: number;
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
     viewportWidth: number;
@@ -284,6 +285,7 @@ export function useTimelineState(): TimelineStateResult {
 
     // ── State 声明 ────────────────────────────────────────────
     const [scrollLeft, setScrollLeft] = useState(0);
+    const [nativeScrollLeft, setNativeScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.pxPerSec"));
         return Number.isFinite(stored) && stored > 0
@@ -309,6 +311,7 @@ export function useTimelineState(): TimelineStateResult {
 
     useEffect(() => {
         scrollLeftRef.current = scrollLeft;
+        setNativeScrollLeft(scrollLeft);
     }, [scrollLeft]);
 
     useEffect(() => {
@@ -359,6 +362,7 @@ export function useTimelineState(): TimelineStateResult {
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
+        setNativeScrollLeft(next);
         // ★ 立即广播视口变化 → WaveformTrackCanvas 直接 invalidate（绕过 React）
         timelineViewportBus.emit(next, pxPerSecRef.current, viewportWidthRef.current);
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
@@ -487,8 +491,8 @@ export function useTimelineState(): TimelineStateResult {
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
-    const crossfadeGripKb = useAppSelector(
-        (state) => selectKeybinding(state, "modifier.clipCrossfadeGrip"),
+    const crossfadeGripKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipCrossfadeGrip"),
     );
     const scrollHorizontalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollHorizontal"),
@@ -929,6 +933,7 @@ export function useTimelineState(): TimelineStateResult {
         panRef,
 
         scrollLeft,
+        nativeScrollLeft,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
