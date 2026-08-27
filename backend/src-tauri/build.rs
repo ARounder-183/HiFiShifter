@@ -421,6 +421,25 @@ fn build_vslib() {
                 dll_dst.display()
             );
         }
+        // 测试可执行文件位于 target/<profile>/deps/，加载器只在该目录与 PATH
+        // 中查找 DLL；一并复制到 deps/，否则 cargo test 无法启动。
+        let deps_dir = target_dir.join("deps");
+        let _ = std::fs::create_dir_all(&deps_dir);
+        let dll_dst_deps = deps_dir.join("vslib_x64.dll");
+        if dll_dst_deps != dll_dst {
+            if let Err(e) = std::fs::copy(&dll_src, &dll_dst_deps) {
+                println!(
+                    "cargo:warning=[vslib] could not copy DLL to {}: {}",
+                    dll_dst_deps.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "cargo:warning=[vslib] copied vslib_x64.dll to {}",
+                    dll_dst_deps.display()
+                );
+            }
+        }
     } else {
         println!("cargo:warning=[vslib] OUT_DIR not set; skipping DLL copy")
     }
@@ -719,6 +738,28 @@ fn build_soundtouch() {
             lib_src.display(),
             lib_dst_target.display()
         );
+    }
+
+    // 测试可执行文件位于 target/<profile>/deps/，加载器只在该目录与 PATH
+    // 中查找共享库；一并复制到 deps/，否则 cargo test 无法启动。
+    let deps_dir = target_dir.join("deps");
+    let _ = std::fs::create_dir_all(&deps_dir);
+    let lib_dst_deps = deps_dir.join(&lib_filename);
+    if lib_dst_deps != lib_dst_target {
+        if let Err(e) = std::fs::copy(&lib_src, &lib_dst_deps) {
+            println!(
+                "cargo:warning=[soundtouch] could not copy {} to {}: {}",
+                lib_src.display(),
+                lib_dst_deps.display(),
+                e
+            );
+        } else {
+            println!(
+                "cargo:warning=[soundtouch] copied {} to {}",
+                lib_src.display(),
+                lib_dst_deps.display()
+            );
+        }
     }
 
     // Also copy to source tree path for tauri_build resource validation.
