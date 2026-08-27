@@ -67,6 +67,7 @@ import {
     TrackAreaContextMenu,
     TimelineCanvasViewport,
     TimelineScrollArea,
+    TimelineWaveformSurface,
     TimeRuler,
     TrackLane,
     TrackList,
@@ -89,7 +90,10 @@ import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions"
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
-import { computeAutoFollowScrollLeft, computeFocusCursorScrollLeft } from "../../utils/autoFollowScroll";
+import {
+    computeAutoFollowScrollLeft,
+    computeFocusCursorScrollLeft,
+} from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
@@ -379,7 +383,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             syncScrollLeft(next);
         }
         dispatch(setPendingPlayheadReveal(null));
-    }, [pendingPlayheadRevealSec, pxPerSec, dynamicProjectSec, scrollRef, syncScrollLeft, dispatch]);
+    }, [
+        pendingPlayheadRevealSec,
+        pxPerSec,
+        dynamicProjectSec,
+        scrollRef,
+        syncScrollLeft,
+        dispatch,
+    ]);
 
     const timeContext = React.useMemo<TimeFormatContext>(
         () => ({
@@ -1205,7 +1216,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     timelineSnap={s.timelineSnap}
                     projectScale={projectScale}
                     projectScaleName={
-                        s.project.useCustomScale ? (s.project.customScale?.name ?? undefined) : undefined
+                        s.project.useCustomScale
+                            ? (s.project.customScale?.name ?? undefined)
+                            : undefined
                     }
                     fallbackDenominator={s.project.timeSignatureDenominator}
                     customScalePresets={s.customScalePresets}
@@ -1607,6 +1620,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         width={Math.max(1, Math.ceil(viewportWidth))}
                                         height={visibleTrackCanvasHeight}
                                         model={timelineCanvasModel}
+                                    />
+                                </div>
+                            ) : null}
+
+                            {viewportWidth > 0 ? (
+                                <div
+                                    className="absolute pointer-events-none"
+                                    style={{
+                                        top: timelineRenderModel.startIndex * rowHeight,
+                                        left: 0,
+                                        width: viewportWidth,
+                                        height: visibleTrackCanvasHeight,
+                                        zIndex: 2,
+                                    }}
+                                >
+                                    <TimelineWaveformSurface
+                                        tracks={visibleTracks}
+                                        clipsByTrackId={visibleTrackClipsById}
+                                        rowHeight={rowHeight}
+                                        widthPx={Math.max(1, Math.ceil(viewportWidth))}
+                                        heightPx={visibleTrackCanvasHeight}
+                                        viewportStartSec={viewportStartSec}
+                                        viewportEndSec={viewportEndSec}
+                                        pxPerSec={pxPerSec}
                                     />
                                 </div>
                             ) : null}

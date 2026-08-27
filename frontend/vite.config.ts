@@ -19,6 +19,7 @@ export default defineConfig({
             input: {
                 main: resolve(__dirname, "index.html"),
                 appearance: resolve(__dirname, "appearance.html"),
+                waveformTest: resolve(__dirname, "waveform-test.html"),
             },
         },
     },

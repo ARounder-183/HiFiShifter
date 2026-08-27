@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Waveform Renderer Test</title>
+        <style>
+            body {
+                margin: 0;
+                padding: 24px;
+                background: #202124;
+                color: #f4f5f6;
+                font: 14px system-ui;
+            }
+            main {
+                display: grid;
+                gap: 16px;
+                max-width: 760px;
+            }
+            section {
+                display: grid;
+                gap: 6px;
+            }
+            canvas {
+                width: 640px;
+                height: 120px;
+                background: #303238;
+                border: 1px solid #60636b;
+            }
+            #result[data-status="pass"] {
+                color: #71db92;
+            }
+            #result[data-status="fail"] {
+                color: #ff7b7b;
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <h1>Waveform renderer test</h1>
+            <div id="result" data-status="running">Running...</div>
+            <section><strong>WebGL2</strong><canvas id="webgl"></canvas></section>
+            <section><strong>Canvas 2D fallback</strong><canvas id="canvas2d"></canvas></section>
+        </main>
+        <script type="module" src="/src/waveform/browserTestMain.ts"></script>
+    </body>
+</html>

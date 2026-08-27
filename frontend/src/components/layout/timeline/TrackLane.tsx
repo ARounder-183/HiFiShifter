@@ -11,10 +11,7 @@ import { ClipItem } from "./ClipItem";
 import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
-import { WaveformTrackCanvas } from "../../waveform/WaveformTrackCanvas";
 import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
-import { getWaveformColors } from "../../../theme/waveformColors";
 
 function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
@@ -193,13 +190,6 @@ export const TrackLane = React.memo(
             allClips,
         } = props;
 
-        // 获取波形颜色配置
-        const { mode: themeMode } = useAppTheme();
-        const waveformColors = React.useMemo(
-            () => getWaveformColors(themeMode, "timeline"),
-            [themeMode],
-        );
-
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
@@ -288,9 +278,7 @@ export const TrackLane = React.memo(
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
         }, []);
         const isOverlapLayerTarget = React.useCallback((target: EventTarget | null) => {
-            return (
-                (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null
-            );
+            return (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null;
         }, []);
         const primeSelection = React.useCallback(
             (clipId: string, shouldPrimeSelection: boolean, clientX?: number) => {
@@ -502,10 +490,7 @@ export const TrackLane = React.memo(
                     );
                 }}
                 onContextMenuCapture={(event) => {
-                    if (
-                        isClipItemTarget(event.target) ||
-                        isOverlapLayerTarget(event.target)
-                    ) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
@@ -521,10 +506,7 @@ export const TrackLane = React.memo(
                     openContextMenu(hit.clipId, event.clientX, event.clientY);
                 }}
                 onPointerDownCapture={(event) => {
-                    if (
-                        isClipItemTarget(event.target) ||
-                        isOverlapLayerTarget(event.target)
-                    ) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     if (event.button !== 0) {
@@ -562,20 +544,6 @@ export const TrackLane = React.memo(
                         </div>
                     </div>
                 ) : null}
-                {/* 轨道级波形 Canvas：一个 Canvas 绘制该轨道所有可见 clip 的波形 */}
-                <WaveformTrackCanvas
-                    clips={trackClips}
-                    leadingOverlapSecByClipId={leadingOverlapSecByClipId}
-                    trackHeight={rowHeight}
-                    waveformTop={CLIP_HEADER_HEIGHT}
-                    waveformHeight={waveformHeight}
-                    pxPerSec={pxPerSec}
-                    viewportWidthPx={viewportWidthPx}
-                    viewportStartSec={viewportStartSec}
-                    viewportEndSec={viewportEndSec}
-                    strokeColor={waveformColors.stroke}
-                    strokeWidth={1}
-                />
                 {/* MIDI 音高预览 Canvas：绘制 MIDI clip 的音高线 */}
                 <MidiPitchTrackCanvas
                     clips={trackClips}
@@ -645,11 +613,13 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-                    startEditDrag={startEditDrag as (
-                        e: React.PointerEvent,
-                        clipId: string,
-                        type: Parameters<typeof startEditDrag>[2],
-                    ) => void}
+                    startEditDrag={
+                        startEditDrag as (
+                            e: React.PointerEvent,
+                            clipId: string,
+                            type: Parameters<typeof startEditDrag>[2],
+                        ) => void
+                    }
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {

@@ -28,6 +28,7 @@
 type ViewportListener = (scrollLeft: number, pxPerSec: number, viewportWidth: number) => void;
 
 const _listeners = new Set<ViewportListener>();
+let _snapshot = { scrollLeft: 0, pxPerSec: 150, viewportWidth: 1, revision: 0 };
 
 export const timelineViewportBus = {
     /**
@@ -35,9 +36,20 @@ export const timelineViewportBus = {
      * 由 TimelinePanel.syncScrollLeft() 在每次滚动/缩放时调用
      */
     emit(scrollLeft: number, pxPerSec: number, viewportWidth: number): void {
+        _snapshot = {
+            scrollLeft,
+            pxPerSec,
+            viewportWidth,
+            revision: _snapshot.revision + 1,
+        };
         for (const fn of _listeners) {
             fn(scrollLeft, pxPerSec, viewportWidth);
         }
+    },
+
+    /** Current value lets newly mounted virtual rows render without waiting for another event. */
+    getSnapshot(): typeof _snapshot {
+        return _snapshot;
     },
 
     /**

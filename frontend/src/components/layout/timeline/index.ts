@@ -15,5 +15,6 @@ export * from "./ClipItem";
 export * from "./TimelineScrollArea";
 export * from "./TrackLane";
 export * from "./TimelineCanvasViewport";
+export * from "./TimelineWaveformSurface";
 export * from "./TimelineTrackHeaderVirtualList";
 export * from "./useTimelineSelectionRect";
