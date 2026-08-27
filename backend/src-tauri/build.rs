@@ -844,6 +844,10 @@ fn stage_ort_macos_dylibs() {
         .nth(3)
         .expect("[ort] unexpected OUT_DIR depth");
     let staging_dir = Path::new("resources/macos");
+    // This directory is a build output. Without an explicit rerun guard, Cargo's
+    // default filesystem tracking sees newly staged dylibs as inputs and starts
+    // another build, creating a watch loop in `cargo tauri dev`.
+    println!("cargo:rerun-if-changed=build.rs");
 
     if let Err(e) = std::fs::create_dir_all(staging_dir) {
         println!(
@@ -889,13 +893,24 @@ fn stage_ort_macos_dylibs() {
             continue;
         }
 
-        if let Err(e) = std::fs::write(&dst, &src_bytes) {
+        let temp_dst = staging_dir.join(format!("{}.tmp", name));
+        if let Err(e) = std::fs::write(&temp_dst, &src_bytes) {
             println!(
                 "cargo:warning=[ort] could not stage {} to {}: {}",
                 path.display(),
+                temp_dst.display(),
+                e
+            );
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&temp_dst, &dst) {
+            println!(
+                "cargo:warning=[ort] could not replace {} with {}: {}",
+                temp_dst.display(),
                 dst.display(),
                 e
             );
+            let _ = std::fs::remove_file(&temp_dst);
             continue;
         }
         println!("cargo:warning=[ort] staged {} to {}", path.display(), dst.display());

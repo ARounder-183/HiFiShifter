@@ -1,5 +1,8 @@
 // FCPE ONNX pitch detector stub (used when `onnx` feature is disabled).
 
+pub const FCPE_F0_MIN_HZ: f64 = 32.7;
+pub const FCPE_F0_MAX_HZ: f64 = 1975.5;
+
 pub fn is_available() -> bool {
     false
 }

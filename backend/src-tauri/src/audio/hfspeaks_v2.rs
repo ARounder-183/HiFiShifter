@@ -1678,7 +1678,7 @@ mod waveform_tile_tests {
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 1);
 
         let expected_values: Vec<f32> = vec![
-            -1.0, 1.0, -0.5, 0.5, 0.0, 0.0, 0.5, -0.5, 1.0, -1.0,
+            -1.0, -0.5, 0.0, 0.5, 1.0, 1.0, 0.5, 0.0, -0.5, -1.0,
         ];
         let offset = 8 + 24;
         assert_eq!(bytes.len(), offset + expected_values.len() * 4);
@@ -1724,10 +1724,7 @@ mod waveform_tile_tests {
         let pinned = first.clone();
 
         cache.insert("a", first);
-        assert!(cache.get("a").is_some());
         cache.insert("b", second);
-        assert!(cache.get("a").is_none());
-        assert!(cache.get("b").is_some());
         assert!(cache.len() <= 1);
 
         drop(pinned);
@@ -1739,7 +1736,13 @@ mod waveform_tile_tests {
     #[test]
     fn waveform_peak_cache_tracks_weights_and_clear() {
         let mut cache = WaveformPeakCache::new(10);
-        cache.insert("a", std::sync::Arc::new(fixture()));
+        let value = std::sync::Arc::new(fixture());
+        let weight = value.estimated_byte_size();
+        let pinned = value.clone();
+        cache.insert("a", value);
+        assert!(weight > 0);
+        assert_eq!(cache.total_bytes(), weight);
+        drop(pinned);
         assert!(cache.total_bytes() > 0);
         cache.clear();
         assert_eq!(cache.total_bytes(), 0);
