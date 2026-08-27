@@ -270,6 +270,11 @@ export const ClipItem = React.memo(function ClipItem({
             e.stopPropagation();
             clearContextMenu();
 
+            // 注意：双击重置曲率的判定在 FadeHitLayer 的 onPointerDown 里完成
+            // （包络线本体命中才参与）。这里不能再调 noteFadeLinePointerDown ——
+            // 同一键被记录两次（间隔 0ms）会被误判为双击，导致每次按下都触发
+            // 重置并提前返回，拖拽（曲率/长度）全部失效。
+
             // Only check physical Alt key for click-selection bypass.
             // altPressed tracks the stretch modifier and must not interfere
             // with primary-modifier/Shift selection behavior.
@@ -351,7 +356,28 @@ export const ClipItem = React.memo(function ClipItem({
                         selectClipRemote(clip.id);
                         recordLastClickPosition?.(e.clientX);
                     }
-                    seekFromClientX(ev.clientX, true);
+                    // 所有淡化命中（包络线 / 边缘竖线 / 角部，均展示淡入淡出
+                    // ToolTips）单击（未拖动）→ 播放头跳到淡化区内侧边缘（淡入
+                    // → 右缘，淡出 → 左缘），与 REAPER 行为对齐。交叉点
+                    // （OverlapEditLayer 抓手）仍按点击位置跳转。坐标用 **clip
+                    // 根元素** rect 计算 —— hit 元素自身位于 clip 内部，取其
+                    // rect 会多算一级偏移。
+                    const fadeSec =
+                        type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
+                    const innerEdgeSec =
+                        type === "fade_in"
+                            ? clip.startSec + fadeSec
+                            : clip.startSec + clip.lengthSec - fadeSec;
+                    const clipRoot = targetEl.closest("[data-hs-clip-item]");
+                    const clipRootRect = clipRoot?.getBoundingClientRect();
+                    if (clipRootRect) {
+                        seekFromClientX(
+                            clipRootRect.left + (innerEdgeSec - clip.startSec) * pxPerSec,
+                            true,
+                        );
+                    } else {
+                        seekFromClientX(ev.clientX, true);
+                    }
                 }
             };
 
@@ -362,6 +388,8 @@ export const ClipItem = React.memo(function ClipItem({
         [
             clearContextMenu,
             clip.id,
+            clip.startSec,
+            clip.lengthSec,
             ensureSelected,
             isInMultiSelectedSet,
             multiSelectedCount,
@@ -374,6 +402,9 @@ export const ClipItem = React.memo(function ClipItem({
             selected,
             startEditDrag,
             altPressed,
+            effectiveFadeInSec,
+            effectiveFadeOutSec,
+            pxPerSec,
         ],
     );
 

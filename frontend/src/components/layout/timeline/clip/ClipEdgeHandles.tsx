@@ -79,6 +79,8 @@ export const ClipEdgeHandles: React.FC<{
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
                     const mode = stretchActive ? "stretch_left" : "trim_left";
+                    // 单击（未拖动）松开时，播放头跳到该边缘的准确位置（左缘）。
+                    const seekToEdgeClientX = () => targetEl.getBoundingClientRect().left;
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {
@@ -119,7 +121,7 @@ export const ClipEdgeHandles: React.FC<{
                                 selectClipRemote(clipId);
                                 recordLastClickPosition?.(e.clientX);
                             }
-                            seekFromClientX(ev.clientX, true);
+                            seekFromClientX(seekToEdgeClientX(), true);
                         }
                     };
 
@@ -156,6 +158,8 @@ export const ClipEdgeHandles: React.FC<{
                     const pointerId = e.pointerId;
                     const targetEl = e.currentTarget as HTMLElement;
                     const mode = stretchActive ? "stretch_right" : "trim_right";
+                    // 单击（未拖动）松开时，播放头跳到该边缘的准确位置（右缘）。
+                    const seekToEdgeClientX = () => targetEl.getBoundingClientRect().right;
                     let dragStarted = false;
 
                     const onMove = (ev: PointerEvent) => {
@@ -196,7 +200,7 @@ export const ClipEdgeHandles: React.FC<{
                                 selectClipRemote(clipId);
                                 recordLastClickPosition?.(e.clientX);
                             }
-                            seekFromClientX(ev.clientX, true);
+                            seekFromClientX(seekToEdgeClientX(), true);
                         }
                     };
 

@@ -181,6 +181,88 @@ export function solveDirAt(
     return Math.min(1, Math.max(-1, candidates[0].dir));
 }
 
+/**
+ * 最近点求解器：把指针位置投影到曲线族上，返回屏幕距离最近的 (t, dir)。
+ *
+ * 与 {@link solveDirAt}（固定 t 的竖直反解）的本质区别：反解在"平坦带"
+ * （如 S 曲线中部对曲率不敏感、或目标增益超出可达范围）会把 dir 打到
+ * 边界极值，指针稍一偏移就在 ±1 之间瞬变。最近点投影则把指针视为
+ * 曲线族的吸引子 —— 平坦区拖拽时 dir 平滑滑向边界，永不突变。
+ *
+ * @param pointerX01 指针在淡化区内的归一化 x [0,1]
+ * @param pointerY01 指针的归一化目标增益 [0,1]（1 = 响）
+ * @param aspectYOverX y 距离的屏幕权重（= 绘制高度 / 宽度），使距离
+ *        度量在非正方形淡化区里依然符合视觉直觉
+ */
+export function solveNearestCurveDir(args: {
+    shape: number;
+    dir: number;
+    mode: "in" | "out";
+    pointerX01: number;
+    pointerY01: number;
+    aspectYOverX?: number;
+}): { t: number; dir: number; gain: number } {
+    const rawAspect = args.aspectYOverX;
+    const aspect =
+        typeof rawAspect === "number" && Number.isFinite(rawAspect) && rawAspect > 0
+            ? rawAspect
+            : 1;
+    const px = Math.min(1, Math.max(0, args.pointerX01));
+    const py = Math.min(1, Math.max(0, args.pointerY01));
+    const dirClamp = (d: number) => Math.min(1, Math.max(-1, d));
+
+    const distanceOf = (t: number, d: number): number => {
+        const g = fadeGainSigned(args.shape, d, args.mode, t);
+        const dx = t - px;
+        const dy = (g - py) * aspect;
+        return Math.hypot(dx, dy);
+    };
+
+    // 粗扫描：(dir × t) 网格取最优。
+    const DIR_STEPS = 40;
+    const T_STEPS = 64;
+    let bestT = 0.5;
+    let bestDir = dirClamp(args.dir);
+    let bestDist = Infinity;
+    for (let di = 0; di <= DIR_STEPS; di += 1) {
+        const d = -1 + (2 * di) / DIR_STEPS;
+        for (let ti = 0; ti <= T_STEPS; ti += 1) {
+            const t = ti / T_STEPS;
+            const dist = distanceOf(t, d);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestT = t;
+                bestDir = d;
+            }
+        }
+    }
+
+    // 局部精化：围绕最优点逐步缩小步长的网格下降。
+    let stepT = 1 / T_STEPS;
+    let stepD = 2 / DIR_STEPS;
+    for (let iter = 0; iter < 10; iter += 1) {
+        for (const [dt, dd] of [
+            [stepT, 0],
+            [-stepT, 0],
+            [0, stepD],
+            [0, -stepD],
+        ]) {
+            const nt = Math.min(1, Math.max(0, bestT + dt));
+            const nd = dirClamp(bestDir + dd);
+            const dist = distanceOf(nt, nd);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestT = nt;
+                bestDir = nd;
+            }
+        }
+        stepT /= 2;
+        stepD /= 2;
+    }
+
+    return { t: bestT, dir: bestDir, gain: fadeGainSigned(args.shape, bestDir, args.mode, bestT) };
+}
+
 
 /**
  * 曲率编辑的基础形状解析。

@@ -28,7 +28,7 @@ import {
 import { clamp } from "../math";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
-import { resolveCurvatureEditBase, solveDirAt } from "../reaperFade";
+import { resolveCurvatureEditBase, solveNearestCurveDir } from "../reaperFade";
 import { modifierWatcher } from "./modifierWatcher";
 
 /**
@@ -1085,8 +1085,27 @@ export function useEditDrag(deps: {
                             currentEv.clientY,
                         );
                         if (!pa || !pb) return;
-                        const dirA = solveDirAt(sides.a.shape, "out", pa.t, pa.gain, sides.a.baseDir);
-                        const dirB = solveDirAt(sides.b.shape, "in", pb.t, pb.gain, sides.b.baseDir);
+                        // 最近点投影求解：两侧各自独立，平坦带平滑无瞬变。
+                        const dirA = solveNearestCurveDir({
+                            shape: sides.a.shape,
+                            dir: sides.a.baseDir,
+                            mode: "out",
+                            pointerX01: pa.t,
+                            pointerY01: pa.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, sides.a.widthSec * pxPerSec),
+                        }).dir;
+                        const dirB = solveNearestCurveDir({
+                            shape: sides.b.shape,
+                            dir: sides.b.baseDir,
+                            mode: "in",
+                            pointerX01: pb.t,
+                            pointerY01: pb.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, sides.b.widthSec * pxPerSec),
+                        }).dir;
                         sides.a.baseDir = dirA;
                         sides.b.baseDir = dirB;
                         batch(() => {
@@ -1382,16 +1401,18 @@ export function useEditDrag(deps: {
                             currentEv.clientY,
                         );
                         if (!pt) return;
-                        const nextDir = solveDirAt(
-                            drag.fadeCurveSide.shape,
-                            "in",
-                            pt.t,
-                            pt.gain,
-                            drag.fadeCurveSide.baseDir,
-                        );
+                        const nextDir = solveNearestCurveDir({
+                            shape: drag.fadeCurveSide.shape,
+                            dir: drag.fadeCurveSide.baseDir,
+                            mode: "in",
+                            pointerX01: pt.t,
+                            pointerY01: pt.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                        }).dir;
                         const side = drag.fadeCurveSide;
                         side.baseDir = nextDir;
-                        side.shape = resolveCurvatureEditBase(side.shape).shape;
                         // 曲率只作用于当前 clip 的该侧（跨轨多选各行基准不同，
                         // 无法共用同一指针 Y；对齐 REAPER 只改当前 item）。
                         dispatch(setClipFades({ clipId: drag.clipId, fadeInDir: nextDir }));
@@ -1472,16 +1493,18 @@ export function useEditDrag(deps: {
                             currentEv.clientY,
                         );
                         if (!pt) return;
-                        const nextDir = solveDirAt(
-                            drag.fadeCurveSide.shape,
-                            "out",
-                            pt.t,
-                            pt.gain,
-                            drag.fadeCurveSide.baseDir,
-                        );
+                        const nextDir = solveNearestCurveDir({
+                            shape: drag.fadeCurveSide.shape,
+                            dir: drag.fadeCurveSide.baseDir,
+                            mode: "out",
+                            pointerX01: pt.t,
+                            pointerY01: pt.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                        }).dir;
                         const side = drag.fadeCurveSide;
                         side.baseDir = nextDir;
-                        side.shape = resolveCurvatureEditBase(side.shape).shape;
                         dispatch(setClipFades({ clipId: drag.clipId, fadeOutDir: nextDir }));
                         try {
                             const now = Date.now();

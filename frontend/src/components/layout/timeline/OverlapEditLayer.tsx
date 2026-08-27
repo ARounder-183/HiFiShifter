@@ -42,7 +42,8 @@ import {
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
-import { requestOpenFadeContextMenu, requestResetFadeCurvature, isNativeMultiClick } from "./fadeContextMenuBus";
+import { requestOpenFadeContextMenu, requestResetFadeCurvature } from "./fadeContextMenuBus";
+import { noteFadeLinePointerDown } from "./hooks/fadeLineClickGesture";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 
 export type OverlapEditType =
@@ -226,6 +227,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     recordLastClickPosition,
     startEditDrag,
     startSnapOffsetDrag,
+    seekFromClientX,
     fadeLengthFormatCtx,
     t,
     shapeCycleKb,
@@ -252,6 +254,8 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
     recordLastClickPosition?: (clientX: number) => void;
+    /** 播放头寻址（单击包络线 → 内侧边缘；交叉点 → 点击位置）。 */
+    seekFromClientX: (clientX: number, commit: boolean) => void;
     startEditDrag: (
         e: React.PointerEvent,
         clipId: string,
@@ -564,6 +568,8 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         clipId: string,
         type: Exclude<OverlapEditType, "snap_offset">,
         partnerClipId?: string,
+        /** 手势延后判定：按下后未拖动即松开时触发（循环切换等点击语义）。 */
+        deferredClick?: (ev: PointerEvent) => void,
     ) => {
         if (event.button !== 0) return;
         event.preventDefault();
@@ -646,6 +652,10 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
             window.removeEventListener("pointermove", onMove, true);
             window.removeEventListener("pointerup", onEnd, true);
             window.removeEventListener("pointercancel", onEnd, true);
+            // 手势延后判定：未拖动即松开 = 点击语义（如 Ctrl 循环切换、单击寻址）。
+            if (!dragStarted && deferredClick) {
+                deferredClick(ev);
+            }
         };
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerup", onEnd, true);
@@ -676,43 +686,51 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         publishFadeRichTooltip(element, zone.richTooltip ?? null);
                     }}
                     onPointerDown={(e) => {
-                        // Ctrl（可配置）+左键点击：
-                        // - 抓手（交叉点）= 同时循环切换交叉点两侧；
-                        // - 单条包络线 zone = 只循环切换该线。
-                        // 其余情况进入原有的延迟起手拖拽流程。
+                        // Ctrl（可配置）+左键按下：延后判定用户意图 ——
+                        // 拖动超过阈值 = 抓手/淡化长度拖拽（保持原语义，
+                        // 含 Ctrl 的反向缩放模式）；未拖动即松开 = 循环切换。
+                        // 这样循环点击与交叉淡化手柄共用 Ctrl 也不再冲突。
                         const cycleHeld =
                             e.button === 0 &&
                             shapeCycleKb != null &&
                             !isNoneBinding(shapeCycleKb) &&
                             cycleModifierHeld(shapeCycleKb, e.nativeEvent);
-                        if (e.button === 0 && cycleHeld) {
-                            if (zone.crossfadeSides) {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                onCrossfadeCycleClick?.([
-                                    { clipId: zone.crossfadeSides.out.clipId, isOut: true },
-                                    { clipId: zone.crossfadeSides.in.clipId, isOut: false },
-                                ]);
-                                return;
-                            }
-                            if (zone.contextSide) {
-                                // 边缘竖线（trim/stretch 混合带）保留长度语义：
-                                // 由外层 type 联合排除，此处无需再判 snap_offset。
-                                e.preventDefault();
-                                e.stopPropagation();
-                                onFadeShapeSingleCycle?.(zone.contextSide);
-                                return;
-                            }
+                        if (cycleHeld && zone.type !== "snap_offset") {
+                            startDeferredEdit(
+                                e,
+                                zone.clipId,
+                                zone.type,
+                                zone.partnerClipId,
+                                () => {
+                                    if (zone.crossfadeSides) {
+                                        onCrossfadeCycleClick?.([
+                                            {
+                                                clipId: zone.crossfadeSides.out.clipId,
+                                                isOut: true,
+                                            },
+                                            {
+                                                clipId: zone.crossfadeSides.in.clipId,
+                                                isOut: false,
+                                            },
+                                        ]);
+                                    } else if (zone.contextSide) {
+                                        onFadeShapeSingleCycle?.(zone.contextSide);
+                                    }
+                                },
+                            );
+                            return;
                         }
                         // 双击重置曲率：
                         // - 抓手（交叉点）= 同时重置两侧；
                         // - 包络线本体 = 只重置该侧；边缘竖线不参与。
                         // 循环键按住时循环优先，双击重置让位。
-                        if (
-                            e.button === 0 &&
+                        // 检测用时间窗 + zone 键（pointerdown detail 不可靠）。
+                        const zoneClickKey = `${zone.clipId}:${zone.type}:${Math.round(zone.topPx)}:${zone.crossfadeSides ? "grip" : "env"}`;
+                        const dblReset =
                             !cycleHeld &&
-                            isNativeMultiClick(e.nativeEvent)
-                        ) {
+                            e.button === 0 &&
+                            noteFadeLinePointerDown(zoneClickKey) === "double";
+                        if (dblReset) {
                             if (zone.crossfadeSides) {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -748,7 +766,38 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             startSnapOffsetEdit(e, zone.clipId);
                             return;
                         }
-                        startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId);
+                        // 未拖动即松开 = 单击寻址：
+                        // - 交叉点抓手 → 跳转到点击位置（保持原行为）；
+                        // - 包络线本体 → 跳转到淡化区内侧边缘（淡入 → 右缘，
+                        //   淡出 → 左缘）；
+                        // - Clip 边缘（trim/stretch）→ 跳转到该边缘的准确位置。
+                        // 双击重置分支已提前 return，第二击不会走到这里。
+                        const zoneEl = e.currentTarget as HTMLElement;
+                        startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId, (ev) => {
+                            if (zone.crossfadeSides) {
+                                seekFromClientX(ev.clientX, true);
+                                return;
+                            }
+                            const layerRoot = zoneEl.closest("[data-hs-overlap-layer]");
+                            const clip = trackClips.find((entry) => entry.id === zone.clipId);
+                            if (!clip || !layerRoot) return;
+                            const baseLeft = layerRoot.getBoundingClientRect().left;
+                            if (zone.type === "trim_left" || zone.type === "trim_right") {
+                                // 边缘命中：跳到左缘（trim_left）或右缘（trim_right）。
+                                const edgeSec =
+                                    zone.type === "trim_left"
+                                        ? clip.startSec
+                                        : clip.startSec + clip.lengthSec;
+                                seekFromClientX(baseLeft + edgeSec * pxPerSec, true);
+                                return;
+                            }
+                            if (zone.line && zone.contextSide) {
+                                const innerSec = zone.contextSide.isOut
+                                    ? clip.startSec + clip.lengthSec - zone.contextSide.lengthSec
+                                    : clip.startSec + zone.contextSide.lengthSec;
+                                seekFromClientX(baseLeft + innerSec * pxPerSec, true);
+                            }
+                        });
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();

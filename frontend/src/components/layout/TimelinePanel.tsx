@@ -20,6 +20,7 @@ import {
 } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
+import { createPortal } from "react-dom";
 import {
     addTrackRemote,
     closeClipFormantToolWindow,
@@ -1931,20 +1932,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 />
                             ) : null}
 
-                            {/* Playhead Cursor */}
+                            {/* Playhead Cursor
+                                交互等级最低：pointer-events-none 让播放头永远不
+                                拦截其它编辑目标（淡入淡出包络、Clip 边缘、Body 拖拽等）。
+                                视觉顺序不变 —— z-20 仍在 Clip 之上。播放头拖拽由
+                                轨道空白区（TrackLane 的 seek 手势）与标尺承接。 */}
                             <div
                                 ref={playheadRef}
-                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 cursor-ew-resize"
+                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 pointer-events-none"
                                 style={{
                                     left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
                                 }}
                                 onMouseDown={(e) => {
+                                    // pointer-events-none：此事件不会派发到播放头，
+                                    // 保留分支仅为与上方 pointerdown 的 ref 语义一致。
                                     if (!suppressPlayheadMouseDownRef.current) return;
                                     suppressPlayheadMouseDownRef.current = false;
                                     e.preventDefault();
                                     e.stopPropagation();
                                 }}
                                 onPointerDown={(e) => {
+                                    // pointer-events-none：播放头自身不再接收指针
+                                    // 事件，此分支不再执行（播放头拖拽改由轨道空白区
+                                    // 与标尺承接）。保留代码以避免清理相关 ref 时
+                                    // 波及双击重命名候选逻辑。
                                     if (e.button !== 0) return;
 
                                     // 双击名称的第二次点击：第一次点击已把播放头移到这里，
@@ -2181,6 +2192,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                               currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
 
                           return (
+                              createPortal(
                               <ClipContextMenu
                                   x={contextMenu.x}
                                   y={contextMenu.y}
@@ -2365,12 +2377,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           }),
                                       );
                                   }}
-                              />
-                          );
+                              />,
+                              document.body
+                          ));
                       })()
                     : null}
 
-                {trackAreaMenu ? (
+                {trackAreaMenu
+                    ? createPortal(
                     <TrackAreaContextMenu
                         x={trackAreaMenu.x}
                         y={trackAreaMenu.y}
@@ -2395,7 +2409,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         onPaste={pasteClipsAtPlayhead}
                         onSplit={splitSelectedAtPlayhead}
                         onClose={() => setTrackAreaMenu(null)}
-                    />
+                    />,
+                    document.body
                 ) : null}
 
                 <QuickClipExportDialog

@@ -426,6 +426,38 @@ export const TrackLane = React.memo(
                 startClipDrag,
             ],
         );
+        /**
+         * 轨道空白区（无任何 clip 编辑目标）的播放头手势：交互等级最低的
+         * 播放头拖拽入口。按下立即提交一次 seek，拖动中视觉跟随（commit=false），
+         * 松开提交。与标尺行为一致；Clip / 淡变 / 边缘等更优目标会先行命中，
+         * 因此本手势永远不会与它们抢交互。
+         */
+        const beginBackgroundSeekInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const pointerId = event.pointerId;
+                seekFromClientX(event.clientX, true);
+
+                const onMove = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    seekFromClientX(ev.clientX, false);
+                };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    window.removeEventListener("pointermove", onMove, true);
+                    window.removeEventListener("pointerup", onEnd, true);
+                    window.removeEventListener("pointercancel", onEnd, true);
+                    seekFromClientX(ev.clientX, true);
+                };
+                window.addEventListener("pointermove", onMove, true);
+                window.addEventListener("pointerup", onEnd, true);
+                window.addEventListener("pointercancel", onEnd, true);
+            },
+            [seekFromClientX],
+        );
+
         const beginEdgeInteraction = React.useCallback(
             (
                 event: React.PointerEvent<HTMLDivElement>,
@@ -462,6 +494,7 @@ export const TrackLane = React.memo(
                 const startX = event.clientX;
                 const startY = event.clientY;
                 const pointerId = event.pointerId;
+                const laneEl = event.currentTarget as HTMLElement;
                 let dragStarted = false;
 
                 event.preventDefault();
@@ -498,7 +531,16 @@ export const TrackLane = React.memo(
                         if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clipId, true, event.clientX);
                         }
-                        seekFromClientX(ev.clientX, true);
+                        // 单击 Clip 边缘（未拖动）→ 播放头跳到该边缘的准确位置。
+                        // lane 容器左缘即时间轴 0 秒的客户坐标；clip 左/右缘在
+                        // lane 内 = startSec（左缘）或 startSec+lengthSec（右缘）。
+                        const edgeClip = trackClips.find((entry) => entry.id === clipId);
+                        const laneRect = laneEl.getBoundingClientRect();
+                        const edgeSec =
+                            edge === "trim_left"
+                                ? edgeClip?.startSec ?? 0
+                                : (edgeClip?.startSec ?? 0) + (edgeClip?.lengthSec ?? 0);
+                        seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
                     }
                 };
 
@@ -588,6 +630,9 @@ export const TrackLane = React.memo(
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
                     if (!hit.clipId) {
+                        // 空白区 = 最低优先级播放头手势（播放头自身 pointer-events-none，
+                        // 拖拽/单击落点都在这里响应）。
+                        beginBackgroundSeekInteraction(event);
                         return;
                     }
                     const clip = trackClips.find((candidate) => candidate.id === hit.clipId);
@@ -717,6 +762,7 @@ export const TrackLane = React.memo(
                     recordLastClickPosition={recordLastClickPosition}
                     startEditDrag={startEditDrag}
                     startSnapOffsetDrag={startSnapOffsetDrag}
+                    seekFromClientX={seekFromClientX}
                     fadeLengthFormatCtx={fadeLengthFormatCtx}
                     shapeCycleKb={fadeShapeCycleKb}
                     onCrossfadeCycleClick={onCrossfadeCycleClick}

@@ -14,6 +14,7 @@
  * 淡变信息浮标，避免与菜单互相遮挡。
  */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import {
@@ -27,7 +28,7 @@ import {
     defaultFadeDirFor,
     FADE_PRESETS,
     fadeGainSigned,
-    solveDirAt,
+    solveNearestCurveDir,
 } from "./reaperFade";
 import { FadeShapeIcon } from "./FadeShapeIcon";
 import type { FadeLabelLookup } from "./fadeTooltipText";
@@ -112,7 +113,14 @@ const CurvatureSlider: React.FC<{
         );
         const yWithin = Math.min(inner, Math.max(0, clientY - rect.top - pad));
         const targetGain = 1 - yWithin / inner;
-        const next = solveDirAt(shape, isOut ? "out" : "in", t, targetGain, dir);
+        const next = solveNearestCurveDir({
+            shape,
+            dir,
+            mode: isOut ? "out" : "in",
+            pointerX01: t,
+            pointerY01: targetGain,
+            aspectYOverX: 1,
+        }).dir;
         onChange(Number(next.toFixed(2)));
     };
 
@@ -304,14 +312,14 @@ export const FadeContextMenu: React.FC<{
     const labelFor = (side: FadeContextSide) =>
         side.isOut ? t("fade_out") : t("fade_in");
 
-    return (
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
             {...{ [FADE_CONTEXT_MENU_ATTR]: "1" }}
             data-hs-floating-menu="1"
             data-hs-context-menu="1"
-            className="fixed z-[95] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            className="fixed z-[999] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onContextMenu={(e) => e.preventDefault()}
             onPointerDown={(e) => e.stopPropagation()}
@@ -359,7 +367,8 @@ export const FadeContextMenu: React.FC<{
             <div className="px-2 pt-1 pb-0.5 text-[9px] text-qt-text/40 select-none">
                 {curvatureHint}
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 };
 

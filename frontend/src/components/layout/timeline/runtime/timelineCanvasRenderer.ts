@@ -64,13 +64,37 @@ function drawFadeCurveStroke(
         ym: number;
     }
 
-    const evaluateDeviation = (t0: number, t1: number, x0: number, y0: number, x1: number, y1: number) => {
+    const evaluateDeviation = (
+        t0: number,
+        t1: number,
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+    ) => {
+        // 偏差度量使用【中点 + 两个四分点】联合探测：仅取弦中点 vs 曲线
+        // 中点时，点对称的 S 曲线（g(0.5)=0.5，g(t)+g(1-t)=1）偏差恒为 0，
+        // 会被误判为"足够平直"而画成直线 —— 正是"两类 S 曲线永远是直线"
+        // 的根因。多点探测对任何单调形状都可靠。
         const tm = (t0 + t1) / 2;
+        const tq0 = t0 + (t1 - t0) * 0.25;
+        const tq1 = t0 + (t1 - t0) * 0.75;
         const xm = xAt(tm);
         const ym = yAt(tm);
-        const cx = (x0 + x1) / 2;
-        const cy = (y0 + y1) / 2;
-        const dev = Math.hypot(xm - cx, ym - cy);
+        const xq0 = xAt(tq0);
+        const yq0 = yAt(tq0);
+        const xq1 = xAt(tq1);
+        const yq1 = yAt(tq1);
+        const devMid = Math.hypot(xm - (x0 + x1) / 2, ym - (y0 + y1) / 2);
+        const devQ0 = Math.hypot(
+            xq0 - (x0 + (x1 - x0) * 0.25),
+            yq0 - (y0 + (y1 - y0) * 0.25),
+        );
+        const devQ1 = Math.hypot(
+            xq1 - (x0 + (x1 - x0) * 0.75),
+            yq1 - (y0 + (y1 - y0) * 0.75),
+        );
+        const dev = Math.max(devMid, devQ0, devQ1);
         return { tm, xm, ym, dev };
     };
 

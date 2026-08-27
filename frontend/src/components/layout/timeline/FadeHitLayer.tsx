@@ -26,11 +26,8 @@ import {
     type FadeLabelLookup,
     type FadeLengthFormatContext,
 } from "./fadeTooltipText";
-import {
-    isNativeMultiClick,
-    requestOpenFadeContextMenu,
-    requestResetFadeCurvature,
-} from "./fadeContextMenuBus";
+import { requestOpenFadeContextMenu, requestResetFadeCurvature } from "./fadeContextMenuBus";
+import { noteFadeLinePointerDown } from "./hooks/fadeLineClickGesture";
 
 export const FadeHitLayer = React.memo(function FadeHitLayer({
     clipLeftPx,
@@ -162,6 +159,7 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                         }}
                         data-hs-fade-hit={target.type}
                         data-hs-fade-y={String(target.top)}
+                        data-hs-fade-line={String(target.kind === "line")}
                         data-hs-clip-id={clipId}
                         data-tooltip={tooltip}
                         onContextMenu={(e) => {
@@ -199,7 +197,8 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                         onPointerDown={(e) => {
                             if (e.button !== 0) return;
                             // 形状循环点击仅对包络线命中生效（边缘竖线是长度语义）。
-                            // 循环键优先于双击重置。
+                            // 循环键与长度拖拽共用时无法在按下瞬间区分意图：
+                            // 延后判定 —— 拖动超阈值 = 长度拖拽；未拖动松开 = 循环。
                             const cycleHeld =
                                 onShapeCycleClick &&
                                 shapeCycleKb != null &&
@@ -208,12 +207,61 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                             if (isLine && cycleHeld) {
                                 e.preventDefault();
                                 e.stopPropagation();
-                                onShapeCycleClick(side);
+                                const startX = e.clientX;
+                                const startY = e.clientY;
+                                const pointerId = e.pointerId;
+                                const el = e.currentTarget;
+                                let dragStarted = false;
+                                const onMove = (ev: PointerEvent) => {
+                                    if (ev.pointerId !== pointerId || dragStarted) return;
+                                    const dx = ev.clientX - startX;
+                                    const dy = ev.clientY - startY;
+                                    if (dx * dx + dy * dy < 9) return;
+                                    dragStarted = true;
+                                    // 意图 = 长度拖拽：交给原有淡变拖拽起手。
+                                    (
+                                        target.type === "fade_in"
+                                            ? onFadeInPointerDown
+                                            : onFadeOutPointerDown
+                                    )({
+                                        button: 0,
+                                        pointerId,
+                                        clientX: ev.clientX,
+                                        clientY: ev.clientY,
+                                        currentTarget: el,
+                                        nativeEvent: ev,
+                                        altKey: ev.altKey,
+                                        ctrlKey: ev.ctrlKey,
+                                        metaKey: ev.metaKey,
+                                        shiftKey: ev.shiftKey,
+                                        preventDefault() {},
+                                        stopPropagation() {},
+                                    } as unknown as React.PointerEvent<HTMLDivElement>);
+                                };
+                                const onUp = (ev: PointerEvent) => {
+                                    window.removeEventListener("pointermove", onMove, true);
+                                    window.removeEventListener("pointerup", onUp, true);
+                                    window.removeEventListener("pointercancel", onUp, true);
+                                    if (!dragStarted && ev.pointerId === pointerId) {
+                                        // 未拖动 = 点击：循环切换到下一个形状。
+                                        onShapeCycleClick(side);
+                                    }
+                                };
+                                window.addEventListener("pointermove", onMove, true);
+                                window.addEventListener("pointerup", onUp, true);
+                                window.addEventListener("pointercancel", onUp, true);
                                 return;
                             }
                             // 双击包络线 = 重置该曲线曲率到当前形状默认值
                             // （仅包络线本体；边缘竖线保持长度语义）。
-                            if (isLine && !cycleHeld && isNativeMultiClick(e.nativeEvent)) {
+                            // 检测用时间窗 + 目标键（pointerdown 的 detail 在
+                            // 部分 WebView 恒为 0，不可靠）。
+                            if (
+                                isLine &&
+                                !cycleHeld &&
+                                noteFadeLinePointerDown(`${clipId}:${target.type}`) ===
+                                    "double"
+                            ) {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 requestResetFadeCurvature({
