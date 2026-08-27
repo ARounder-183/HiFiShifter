@@ -5,6 +5,9 @@ import React from "react";
 
 import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
+import type { Keybinding } from "../../../features/keybindings/types";
+import { useI18n } from "../../../i18n/I18nProvider";
+import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
@@ -109,6 +112,17 @@ type TrackLaneProps = {
             | "fade_out"
             | "gain"
             | "crossfade_edges",
+        /** 延迟起手的类型化私有通道（与 useEditDrag.EditDragChannelOpts 一致）。 */
+        channel?:
+            | {
+                  dragStartClientX?: number;
+                  crossfadePartnerClipId?: string | null;
+                  fadePointerEnv?: {
+                      envTopClientY: number;
+                      bodyHeightPx: number;
+                  } | null;
+              }
+            | undefined,
     ) => void;
     /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
     startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
@@ -152,6 +166,12 @@ type TrackLaneProps = {
     showAllTakes?: boolean;
     /** 点击 inactive take 波形时切换 active take。 */
     onActivateTake?: (clipId: string, takeId: string) => void;
+    /** 形状循环键绑定（modifier.fadeShapeCycleClick），透传给 ClipItem。 */
+    fadeShapeCycleKb?: Keybinding | null;
+    /** 淡化长度 ToolTips 的相对时长时间上下文。 */
+    fadeLengthFormatCtx: FadeLengthFormatContext;
+    /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
+    onFadeShapeCycleClick?: (clipId: string, side: "in" | "out") => void;
 };
 
 export const TrackLane = React.memo(
@@ -167,6 +187,9 @@ export const TrackLane = React.memo(
             viewportEndSec,
             overlayClipIds = [],
             altPressed,
+            fadeShapeCycleKb = null,
+            fadeLengthFormatCtx,
+            onFadeShapeCycleClick,
             selectedClipId,
             multiSelectedClipIds,
             multiSelectedSet,
@@ -201,6 +224,9 @@ export const TrackLane = React.memo(
             showAllTakes = true,
             onActivateTake,
         } = props;
+
+        // 淡变信息浮标与子层 i18n 文案。
+        const { t } = useI18n();
 
         // 获取波形颜色配置
         const { mode: themeMode } = useAppTheme();
@@ -666,6 +692,9 @@ export const TrackLane = React.memo(
                             hovered={hoveredClipId === clip.id}
                             showAllTakes={showAllTakes}
                             onActivateTake={onActivateTake}
+                            fadeShapeCycleKb={fadeShapeCycleKb}
+                            onFadeShapeCycleClick={onFadeShapeCycleClick}
+                            fadeLengthFormatCtx={fadeLengthFormatCtx}
                         />
                     );
                 })}
@@ -681,14 +710,10 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-                    startEditDrag={
-                        startEditDrag as (
-                            e: React.PointerEvent,
-                            clipId: string,
-                            type: Parameters<typeof startEditDrag>[2],
-                        ) => void
-                    }
+                    startEditDrag={startEditDrag}
                     startSnapOffsetDrag={startSnapOffsetDrag}
+                    fadeLengthFormatCtx={fadeLengthFormatCtx}
+                    t={(key) => t(key as Parameters<typeof t>[0])}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {

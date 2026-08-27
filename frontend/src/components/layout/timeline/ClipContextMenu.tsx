@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
+import { FadeShapeIcon } from "./FadeShapeIcon";
+import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
@@ -144,44 +145,60 @@ const SubMenu: React.FC<{
     );
 };
 
-// ── 渐变曲线选项 ────────────────────────────────────────────────────────────
-const CURVE_OPTION_KEYS: { value: FadeCurveType; key: MessageKey }[] = [
-    { value: "linear", key: "fade_curve_linear" },
-    { value: "sine", key: "fade_curve_sine" },
-    { value: "exponential", key: "fade_curve_exponential" },
-    { value: "logarithmic", key: "fade_curve_logarithmic" },
-    { value: "scurve", key: "fade_curve_scurve" },
+function effectiveFadeSecondsOf(clip: ClipInfo): { in: number; out: number } {
+    return {
+        in: (clip.autoFadeInSec ?? 0) > 0 ? (clip.autoFadeInSec ?? 0) : clip.fadeInSec,
+        out: (clip.autoFadeOutSec ?? 0) > 0 ? (clip.autoFadeOutSec ?? 0) : clip.fadeOutSec,
+    };
+}
+
+// ── REAPER 七预设淡变形状 ────────────────────────────────────────────────
+// 菜单顺序与 REAPER 7.x 淡变右键菜单一致（Linear / Fast Start / Fast End /
+// Fast Start Steep / Fast End Steep / Slow Start/End (Steep)），形状 id 与
+// timeline/reaperFade.ts FADE_PRESETS 对应。
+const FADE_SHAPE_OPTIONS: { shape: number; key: MessageKey }[] = [
+    { shape: 0, key: "fade_shape_linear" },
+    { shape: 1, key: "fade_shape_fast_start" },
+    { shape: 2, key: "fade_shape_fast_end" },
+    { shape: 3, key: "fade_shape_fast_start_steep" },
+    { shape: 4, key: "fade_shape_fast_end_steep" },
+    { shape: 5, key: "fade_shape_slow_start_end" },
+    { shape: 6, key: "fade_shape_slow_start_end_steep" },
 ];
 
-const FadeCurveRow: React.FC<{
+const FadeShapeRow: React.FC<{
     label: string;
-    current: FadeCurveType;
-    onSelect: (c: FadeCurveType) => void;
+    current: number;
+    /** 本行是淡出（图标水平镜像，曲线方向与画布一致）。 */
+    isOut?: boolean;
+    onSelect: (shape: number) => void;
     t: (key: MessageKey) => string;
-}> = ({ label, current, onSelect, t }) => (
-    <div className="px-3 py-1.5 flex items-center gap-1.5 flex-wrap">
+}> = ({ label, current, isOut = false, onSelect, t }) => (
+    <div className="px-3 py-1.5 flex items-center gap-1 flex-wrap">
         <span className="text-[11px] text-qt-text/60 mr-1 shrink-0">{label}</span>
-        {CURVE_OPTION_KEYS.map((opt) => (
+        {FADE_SHAPE_OPTIONS.map((opt) => (
             <button
-                key={opt.value}
+                key={opt.key}
                 data-tooltip={t(opt.key)}
-                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors
+                className={`p-0.5 rounded transition-colors leading-none
                     ${
-                        current === opt.value
+                        // 小数变体（如 1.1）按基础族高亮（REAPER 同语义）。
+                        Math.trunc(current) === opt.shape
                             ? "bg-qt-highlight text-white"
                             : "bg-qt-button hover:bg-qt-button-hover text-qt-text/80"
                     }`}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                     e.stopPropagation();
-                    onSelect(opt.value);
+                    onSelect(opt.shape);
                 }}
             >
-                {t(opt.key)}
+                <FadeShapeIcon shape={opt.shape} mirrored={isOut} />
             </button>
         ))}
     </div>
 );
+
 
 // ── 主组件 ──────────────────────────────────────────────────────────────────
 export const ClipContextMenu: React.FC<{
@@ -215,7 +232,8 @@ export const ClipContextMenu: React.FC<{
     onNormalize: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
-    onFadeCurveChange?: (clipId: string, target: "in" | "out", curve: FadeCurveType) => void;
+    /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
+    onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
 }> = ({
     x,
     y,
@@ -243,7 +261,7 @@ export const ClipContextMenu: React.FC<{
     onNormalize,
     onToggleReverse,
     onToggleLoop,
-    onFadeCurveChange,
+    onFadeShapeChange,
 }) => {
     const { t } = useI18n();
     const dispatch = useAppDispatch();
@@ -716,7 +734,7 @@ export const ClipContextMenu: React.FC<{
                 />
             )}
 
-            {onFadeCurveChange &&
+            {onFadeShapeChange &&
                 (() => {
                     const fadedClips = isSingle
                         ? sortAndFilterFadedClips({
@@ -754,22 +772,24 @@ export const ClipContextMenu: React.FC<{
                                             {fc.name || fc.id}
                                         </div>
                                     )}
-                                    {fc.fadeInSec > 0 && (
-                                        <FadeCurveRow
+                                    {effectiveFadeSecondsOf(fc).in > 0 && (
+                                        <FadeShapeRow
                                             label={t("fade_in")}
-                                            current={(fc.fadeInCurve as FadeCurveType) ?? "sine"}
-                                            onSelect={(c) => {
-                                                onFadeCurveChange(fc.id, "in", c);
+                                            current={Number.isFinite(fc.fadeInShape) ? fc.fadeInShape : 0}
+                                            isOut={false}
+                                            onSelect={(shape) => {
+                                                onFadeShapeChange?.(fc.id, "in", shape);
                                             }}
                                             t={t}
                                         />
                                     )}
-                                    {fc.fadeOutSec > 0 && (
-                                        <FadeCurveRow
+                                    {effectiveFadeSecondsOf(fc).out > 0 && (
+                                        <FadeShapeRow
                                             label={t("fade_out")}
-                                            current={(fc.fadeOutCurve as FadeCurveType) ?? "sine"}
-                                            onSelect={(c) => {
-                                                onFadeCurveChange(fc.id, "out", c);
+                                            current={Number.isFinite(fc.fadeOutShape) ? fc.fadeOutShape : 0}
+                                            isOut={true}
+                                            onSelect={(shape) => {
+                                                onFadeShapeChange?.(fc.id, "out", shape);
                                             }}
                                             t={t}
                                         />

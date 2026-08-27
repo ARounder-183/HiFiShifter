@@ -658,8 +658,10 @@ pub struct CreateClipTemplatePayload {
     pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
-    pub fade_in_curve: Option<String>,
-    pub fade_out_curve: Option<String>,
+    pub fade_in_shape: Option<f64>,
+    pub fade_out_shape: Option<f64>,
+    pub fade_in_dir: Option<f64>,
+    pub fade_out_dir: Option<f64>,
     #[serde(default)]
     pub auto_fade_in_sec: Option<f64>,
     #[serde(default)]
@@ -1064,12 +1066,27 @@ pub struct Clip {
     pub fade_in_sec: f64,
     #[serde(default)]
     pub fade_out_sec: f64,
-    /// 淡入曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve")]
+    /// 淡入曲线类型（旧版命名枚举；仅作读取兼容保留，不再序列化写出）。
+    #[serde(default = "default_fade_curve", skip_serializing)]
     pub fade_in_curve: String,
-    /// 淡出曲线类型（linear/sine/exponential/logarithmic/scurve），默认 sine
-    #[serde(default = "default_fade_curve")]
+    /// 淡出曲线类型（旧版命名枚举；仅作读取兼容保留，不再序列化写出）。
+    #[serde(default = "default_fade_curve", skip_serializing)]
     pub fade_out_curve: String,
+    /// 淡入形状：REAPER 的浮点形状 id（整数 0..6 为标准七预设：
+    /// 0=线性、1/2=轻微凸/凹、3/4=陡峭凸/凹、5/6=轻微/锐利 S；
+    /// 小数变体（如 1.1、5.1）为 REAPER 扩展编码，原样透传保存。
+    /// 对标 REAPER FADEIN 行首槽位）。默认 0（线性）。
+    #[serde(default)]
+    pub fade_in_shape: f64,
+    /// 淡出形状（语义同 [`Clip::fade_in_shape`]）。
+    #[serde(default)]
+    pub fade_out_shape: f64,
+    /// 淡入曲率，对标 REAPER `D_FADEINDIR`，范围 [-1, 1]；默认 0。
+    #[serde(default)]
+    pub fade_in_dir: f64,
+    /// 淡出曲率，对标 REAPER `D_FADEOUTDIR`，范围 [-1, 1]；默认 0。
+    #[serde(default)]
+    pub fade_out_dir: f64,
 
     /// 自动交叉淡化长度（秒，由剪辑重叠派生；**不覆盖手动 fade**）。
     ///
@@ -1104,7 +1121,53 @@ pub struct Clip {
     pub midi_fill_gaps: bool,
 }
 
+/// 旧命名曲线枚举 → （REAPER 浮点形状 id, 曲率）。
+///
+/// 仅用于读取兼容迁移（v3 与早期开发版 v4 工程里的
+/// `fade_in_curve`/`fade_out_curve` 字符串）。旧曲线只影响渲染装饰，
+/// 音频引擎从未应用过，因此近似映射不构成听感回退：
+/// - linear → 形状 0（线性）
+/// - exponential（t² 起伏偏晚）→ 形状 2（轻微凹）
+/// - logarithmic（√t 起伏偏早）→ 形状 1（轻微凸）
+/// - sine / scurve（对称平滑）→ 形状 5（轻微 S）
+pub fn legacy_curve_to_fade_spec(curve: &str) -> (f64, f64) {
+    match curve {
+        "exponential" => (2.0, 0.0),
+        "logarithmic" => (1.0, 0.0),
+        "sine" | "scurve" => (5.0, 0.0),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// 把可能带负号的曲率夹紧到 REAPER 允许的范围 [-1, 1]。
+pub fn clamp_fade_dir(dir: f64) -> f64 {
+    dir.clamp(-1.0, 1.0)
+}
+
 impl Clip {
+    /// 读取期兼容：把旧命名曲线字符串换算成 (shape, dir)。
+    ///
+    /// 规则：字符串为空（VocalShifter 导入等哨兵）或新字段已由工程文件显式
+    /// 提供且非默认时不动 —— 这里的实现采用"空字符串才视为未设置"的策略，
+    /// 因为 `#[serde(default)]` 无法区分"缺省 0"与"显式 0"，而旧数据里
+    /// 只要写过淡变就必然带有非空曲线字符串。
+    pub fn reconcile_legacy_fade_fields(&mut self) {
+        let (in_shape, in_dir) = legacy_curve_to_fade_spec(&self.fade_in_curve);
+        if !self.fade_in_curve.is_empty() {
+            self.fade_in_shape = in_shape;
+            self.fade_in_dir = in_dir;
+            self.fade_in_curve.clear();
+        }
+        let (out_shape, out_dir) = legacy_curve_to_fade_spec(&self.fade_out_curve);
+        if !self.fade_out_curve.is_empty() {
+            self.fade_out_shape = out_shape;
+            self.fade_out_dir = out_dir;
+            self.fade_out_curve.clear();
+        }
+        self.fade_in_dir = clamp_fade_dir(self.fade_in_dir);
+        self.fade_out_dir = clamp_fade_dir(self.fade_out_dir);
+    }
+
     /// 有效淡入长度：自动交叉淡化启用时用自动值，否则用手动值。
     pub fn effective_fade_in_sec(&self) -> f64 {
         if self.auto_fade_in_sec > 0.0 {
@@ -1316,8 +1379,10 @@ pub struct ClipStatePatch {
     pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
-    pub fade_in_curve: Option<String>,
-    pub fade_out_curve: Option<String>,
+    pub fade_in_shape: Option<f64>,
+    pub fade_out_shape: Option<f64>,
+    pub fade_in_dir: Option<f64>,
+    pub fade_out_dir: Option<f64>,
     pub auto_fade_in_sec: Option<f64>,
     pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
@@ -3472,8 +3537,10 @@ mod tests {
                     snap_offset_sec: None,
                     fade_in_sec: Some(0.15),
                     fade_out_sec: Some(0.25),
-                    fade_in_curve: Some("sine".into()),
-                    fade_out_curve: Some("logarithmic".into()),
+                    fade_in_shape: Some(5.0),
+                    fade_out_shape: Some(1.0),
+                    fade_in_dir: Some(-0.25),
+                    fade_out_dir: None,
                     auto_fade_in_sec: None,
                     auto_fade_out_sec: None,
                     linked_params: None,
@@ -3497,8 +3564,10 @@ mod tests {
                     snap_offset_sec: None,
                     fade_in_sec: Some(0.05),
                     fade_out_sec: Some(0.1),
-                    fade_in_curve: Some("linear".into()),
-                    fade_out_curve: Some("scurve".into()),
+                    fade_in_shape: Some(0.0),
+                    fade_out_shape: Some(5.0),
+                    fade_in_dir: None,
+                    fade_out_dir: None,
                     auto_fade_in_sec: None,
                     auto_fade_out_sec: None,
                     linked_params: None,
@@ -3521,8 +3590,8 @@ mod tests {
         assert!(first.muted);
         assert!((first.source_start_sec - 0.3).abs() < 1e-6);
         assert!((first.source_end_sec - 1.8).abs() < 1e-6);
-        assert_eq!(first.fade_in_curve, "sine");
-        assert_eq!(first.fade_out_curve, "logarithmic");
+        assert_eq!(first.fade_in_shape, 5.0);
+        assert_eq!(first.fade_out_shape, 1.0);
         assert_eq!(
             timeline.selected_clip_id.as_deref(),
             Some(created[0].as_str())
@@ -3552,8 +3621,8 @@ mod tests {
                 reversed: Some(true),
                 fade_in_sec: Some(0.1),
                 fade_out_sec: Some(0.2),
-                fade_in_curve: Some("linear".into()),
-                fade_out_curve: Some("scurve".into()),
+                fade_in_dir: Some(-0.5),
+                fade_out_dir: Some(0.75),
                 ..Default::default()
             },
         );
@@ -3583,8 +3652,10 @@ mod tests {
                 snap_offset_sec: None,
                 fade_in_sec: Some(0.1),
                 fade_out_sec: Some(0.2),
-                fade_in_curve: Some("linear".into()),
-                fade_out_curve: Some("scurve".into()),
+                fade_in_shape: Some(6.0),
+                fade_out_shape: Some(3.0),
+                fade_in_dir: Some(0.4),
+                fade_out_dir: None,
                 auto_fade_in_sec: None,
                 auto_fade_out_sec: None,
                 linked_params: None,
@@ -3606,7 +3677,10 @@ mod tests {
         assert_eq!(pasted.gain, 1.5);
         assert!(pasted.muted);
         assert!(pasted.reversed);
-        assert_eq!(pasted.fade_out_curve, "scurve");
+        // 粘贴/克隆路径：shape 原样复制，dir 夹紧在 [-1, 1]。
+        assert_eq!(pasted.fade_out_shape, 3.0);
+        assert!((pasted.fade_in_dir - (-0.5)).abs() < 1e-9);
+        assert!((pasted.fade_out_dir - 0.75).abs() < 1e-9);
     }
 
     #[test]
@@ -4068,8 +4142,8 @@ mod tests {
         assert!((right.length_sec - 1.5).abs() < 1e-9);
         assert!((right.fade_in_sec - 0.1).abs() < 1e-9);
         assert!((right.source_start_sec - 2.0).abs() < 1e-9);
-        assert_eq!(left.fade_out_curve, "sine");
-        assert_eq!(right.fade_in_curve, "sine");
+        assert_eq!(left.fade_out_shape, 5.0);
+        assert_eq!(right.fade_in_shape, 5.0);
     }
 
     #[test]
@@ -4529,8 +4603,13 @@ impl TimelineState {
 
     /// 全部 Clip 统一规范化 Take：旧工程（takes 为空）由 active 投影生成
     /// 单 Take；新工程把 active take 物化到内存投影。
+    ///
+    /// 同时执行旧 Fade 曲线字段的一次性兼容迁移（v3 / 早期开发版 v4 的
+    /// 命名曲线字符串 → REAPER 形状/曲率模型）。工程加载、剪贴板片段
+    /// 合并等所有反序列化边界都会经过这里，确保迁移不遗漏。
     pub fn normalize_clip_takes(&mut self) {
         for clip in &mut self.clips {
+            clip.reconcile_legacy_fade_fields();
             clip.normalize_takes();
         }
     }
@@ -4579,9 +4658,10 @@ impl TimelineState {
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
-                fade_in_curve: Some(c.fade_in_curve.clone()),
-                fade_out_curve: Some(c.fade_out_curve.clone()),
-                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                fade_in_shape: Some(c.fade_in_shape),
+                fade_out_shape: Some(c.fade_out_shape),
+                fade_in_dir: Some(c.fade_in_dir),
+                fade_out_dir: Some(c.fade_out_dir),                auto_fade_in_sec: Some(c.auto_fade_in_sec),
                 auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
@@ -4663,9 +4743,10 @@ impl TimelineState {
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
                 fade_out_sec: Some(c.fade_out_sec),
-                fade_in_curve: Some(c.fade_in_curve.clone()),
-                fade_out_curve: Some(c.fade_out_curve.clone()),
-                auto_fade_in_sec: Some(c.auto_fade_in_sec),
+                fade_in_shape: Some(c.fade_in_shape),
+                fade_out_shape: Some(c.fade_out_shape),
+                fade_in_dir: Some(c.fade_in_dir),
+                fade_out_dir: Some(c.fade_out_dir),                auto_fade_in_sec: Some(c.auto_fade_in_sec),
                 auto_fade_out_sec: Some(c.auto_fade_out_sec),
                 formant_morph: c
                     .formant_morph
@@ -5392,8 +5473,12 @@ impl TimelineState {
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
-            fade_in_curve: default_fade_curve(),
-            fade_out_curve: default_fade_curve(),
+            fade_in_shape: 1.0,
+            fade_out_shape: 1.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            fade_in_curve: String::new(),
+            fade_out_curve: String::new(),
             auto_fade_in_sec: 0.0,
             auto_fade_out_sec: 0.0,
             extra_curves: None,
@@ -5635,8 +5720,10 @@ impl TimelineState {
                 snap_offset_sec: None,
                 fade_in_sec,
                 fade_out_sec,
-                fade_in_curve: None,
-                fade_out_curve: None,
+                fade_in_shape: None,
+                fade_out_shape: None,
+                fade_in_dir: None,
+                fade_out_dir: None,
                 auto_fade_in_sec: None,
                 auto_fade_out_sec: None,
                 color: None,
@@ -5732,11 +5819,17 @@ impl TimelineState {
             if let Some(v) = patch.fade_out_sec {
                 c.fade_out_sec = v.max(0.0);
             }
-            if let Some(v) = patch.fade_in_curve {
-                c.fade_in_curve = v;
+            if let Some(v) = patch.fade_in_shape {
+                c.fade_in_shape = v;
             }
-            if let Some(v) = patch.fade_out_curve {
-                c.fade_out_curve = v;
+            if let Some(v) = patch.fade_out_shape {
+                c.fade_out_shape = v;
+            }
+            if let Some(v) = patch.fade_in_dir {
+                c.fade_in_dir = clamp_fade_dir(v);
+            }
+            if let Some(v) = patch.fade_out_dir {
+                c.fade_out_dir = clamp_fade_dir(v);
             }
             if let Some(v) = patch.auto_fade_in_sec {
                 c.auto_fade_in_sec = v.max(0.0);
@@ -5864,8 +5957,10 @@ impl TimelineState {
                     snap_offset_sec: template.snap_offset_sec,
                     fade_in_sec: template.fade_in_sec,
                     fade_out_sec: template.fade_out_sec,
-                    fade_in_curve: template.fade_in_curve.clone(),
-                    fade_out_curve: template.fade_out_curve.clone(),
+                    fade_in_shape: template.fade_in_shape,
+                    fade_out_shape: template.fade_out_shape,
+                    fade_in_dir: template.fade_in_dir,
+                    fade_out_dir: template.fade_out_dir,
                     auto_fade_in_sec: template.auto_fade_in_sec,
                     auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
@@ -6069,8 +6164,12 @@ impl TimelineState {
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
-            fade_in_curve: "sine".to_string(),
-            fade_out_curve: "sine".to_string(),
+            fade_in_shape: 1.0,
+            fade_out_shape: 1.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            fade_in_curve: String::new(),
+            fade_out_curve: String::new(),
             auto_fade_in_sec: 0.0,
             auto_fade_out_sec: 0.0,
             extra_curves: None,
@@ -6510,8 +6609,13 @@ impl TimelineState {
             left.auto_fade_out_sec = 0.0;
             right.auto_fade_in_sec = 0.0;
             if let Some(curve) = opts.curve.as_deref() {
-                left.fade_out_curve = curve.to_string();
-                right.fade_in_curve = curve.to_string();
+                // 分割过渡设置仍是旧命名曲线（独立 UI 设置），在边界写入时
+                // 统一换算为 REAPER 形状/曲率模型。
+                let (shape, dir) = legacy_curve_to_fade_spec(curve);
+                left.fade_out_shape = shape;
+                left.fade_out_dir = dir;
+                right.fade_in_shape = shape;
+                right.fade_in_dir = dir;
             }
         };
         // 延伸重叠模式：重叠区的交叉淡化写入“自动交叉淡化”长度（跟随重叠，
@@ -6522,8 +6626,13 @@ impl TimelineState {
             left.fade_out_sec = 0.0;
             right.fade_in_sec = 0.0;
             if let Some(curve) = opts.curve.as_deref() {
-                left.fade_out_curve = curve.to_string();
-                right.fade_in_curve = curve.to_string();
+                // 分割过渡设置仍是旧命名曲线（独立 UI 设置），在边界写入时
+                // 统一换算为 REAPER 形状/曲率模型。
+                let (shape, dir) = legacy_curve_to_fade_spec(curve);
+                left.fade_out_shape = shape;
+                left.fade_out_dir = dir;
+                right.fade_in_shape = shape;
+                right.fade_in_dir = dir;
             }
         };
 
@@ -6979,8 +7088,10 @@ impl TimelineState {
                 glued.muted = false;
                 glued.fade_in_sec = 0.0;
                 glued.fade_out_sec = 0.0;
-                glued.fade_in_curve = default_fade_curve();
-                glued.fade_out_curve = default_fade_curve();
+                glued.fade_in_shape = 0.0;
+                glued.fade_out_shape = 0.0;
+                glued.fade_in_dir = 0.0;
+                glued.fade_out_dir = 0.0;
                 glued.extra_curves = None;
                 glued.extra_params = None;
                 glued.pitch_range = Some(PitchRange {

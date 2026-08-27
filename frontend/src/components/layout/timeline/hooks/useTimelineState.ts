@@ -191,6 +191,7 @@ export interface TimelineStateResult {
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
     crossfadeGripKb: Keybinding;
+    fadeCurvatureKb: Keybinding;
 
     // Drop preview
     dropPreview: {
@@ -532,6 +533,9 @@ export function useTimelineState(): TimelineStateResult {
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
     const crossfadeGripKb = useAppSelector(
         (state) => selectKeybinding(state, "modifier.clipCrossfadeGrip"),
+    );
+    const fadeCurvatureKb = useAppSelector(
+        (state) => selectKeybinding(state, "modifier.fadeCurvatureDrag"),
     );
     const scrollHorizontalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollHorizontal"),
@@ -1062,6 +1066,7 @@ export function useTimelineState(): TimelineStateResult {
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
 
         dropPreview,
         setDropPreview,

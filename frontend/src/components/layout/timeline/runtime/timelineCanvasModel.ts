@@ -16,8 +16,10 @@ type SparseRenderClip = {
     groupId?: string;
     fadeInSec: number;
     fadeOutSec: number;
-    fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-    fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+    fadeInShape: number;
+    fadeOutShape: number;
+    fadeInDir: number;
+    fadeOutDir: number;
     /** 自动交叉淡化长度（可选；缺省 0），用于“有效 fade”显示。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
@@ -35,8 +37,10 @@ export type TimelineCanvasClipModel = {
     headerHeightPx: number;
     fadeInPx: number;
     fadeOutPx: number;
-    fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-    fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+    fadeInShape: number;
+    fadeOutShape: number;
+    fadeInDir: number;
+    fadeOutDir: number;
     selected: boolean;
     muted: boolean;
     gain: number;
@@ -149,8 +153,10 @@ export function buildSparseClipRenderModel(args: {
                 ((clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec) *
                     args.pxPerSec,
             ),
-            fadeInCurve: clip.fadeInCurve,
-            fadeOutCurve: clip.fadeOutCurve,
+            fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+            fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+            fadeInDir: clip.fadeInDir ?? 0,
+            fadeOutDir: clip.fadeOutDir ?? 0,
             selected:
                 multiSelectedSet != null
                     ? multiSelectedSet.has(clip.id)

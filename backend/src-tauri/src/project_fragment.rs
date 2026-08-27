@@ -476,6 +476,7 @@ pub fn merge_project_fragment(
             continue;
         };
         let mut clip = source_clip.clone();
+        clip.reconcile_legacy_fade_fields();
         clip.id = new_id("clip");
         clip.track_id = mapped_track_id;
         clip.group_id = source_clip
@@ -612,6 +613,10 @@ mod tests {
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
             auto_fade_in_sec: 0.0,
             auto_fade_out_sec: 0.0,
             extra_curves: None,

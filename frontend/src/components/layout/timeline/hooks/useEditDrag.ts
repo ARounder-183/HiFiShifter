@@ -28,6 +28,38 @@ import {
 import { clamp } from "../math";
 import { advanceFineAxisDrag, type FineAxisDragState } from "../fineAxisDrag";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import { resolveCurvatureEditBase, solveDirAt } from "../reaperFade";
+import { modifierWatcher } from "./modifierWatcher";
+
+/**
+ * 拖拽发起方经"延迟起手"后带给 startEditDrag 的类型化私有通道。
+ * 曾经这些字段被直接塞到伪造的事件对象上（不可类型的字符串走私），
+ * 现改为显式可选参数；事件对象只承担 React PointerEvent 本身的职责。
+ */
+export type EditDragChannelOpts = {
+    /** 延迟起手时的按下 X（相对拖拽锚点用）。 */
+    dragStartClientX?: number;
+    /** 交叉点拖拽的后一个 clip id。 */
+    crossfadePartnerClipId?: string | null;
+    /**
+     * Alt 曲率拖拽环境：包络 gain=1 基准线的客户 Y 与 body 高度，
+     * 由发起组件在按下瞬间快照。缺失时曲率分支自动回退为长度模式。
+     */
+    fadePointerEnv?: { envTopClientY: number; bodyHeightPx: number } | null;
+};
+
+/** 曲率拖拽的指针→增益映射环境（由发起组件在按下瞬间快照）。 */
+type FadeCurvePointerEnv = NonNullable<EditDragChannelOpts["fadePointerEnv"]>;
+
+function sanitizeFadeEnv(
+    raw: EditDragChannelOpts["fadePointerEnv"],
+): FadeCurvePointerEnv | null {
+    if (!raw) return null;
+    const top = Number(raw.envTopClientY);
+    const height = Number(raw.bodyHeightPx);
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) return null;
+    return { envTopClientY: top, bodyHeightPx: height };
+}
 import type { Keybinding } from "../../../../features/keybindings/types";
 import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
@@ -377,6 +409,30 @@ async function stretchTrackLinkedParams(
     }
 }
 
+/**
+ * 曲率拖拽：把指针时间/客户 Y 映射到曲线归一化坐标。
+ * t 夹紧到 (0.001,0.999) 避免端点处 dir 反解退化；gain 由包络基准线换算。
+ */
+function resolveCurvePointer(
+    env: FadeCurvePointerEnv,
+    side: { leftSec: number; widthSec: number },
+    pointerSec: number,
+    clientY: number,
+): { t: number; gain: number } | null {
+    if (!(side.widthSec > 1e-9)) return null;
+    const t = Math.min(0.999, Math.max(0.001, (pointerSec - side.leftSec) / side.widthSec));
+    const gain = Math.min(
+        1,
+        Math.max(0, 1 - (clientY - env.envTopClientY) / Math.max(1, env.bodyHeightPx)),
+    );
+    return { t, gain };
+}
+
+/**
+ * 淡化拖拽不再自带浮标：悬停信息 ToolTips 由 FadeHitLayer/OverlapEditLayer
+ * 通过 data-tooltip 展示（类型/长度/曲率），拖拽时 AppTooltip 持续跟随指针，
+ * 已覆盖实时反馈需求。
+ */
 export type EditDragType =
     | "trim_left"
     | "trim_right"
@@ -431,6 +487,40 @@ export type EditDragState = {
     crossfadeBaseFadeOutAuto: boolean;
     crossfadePartnerFadeInSec: number;
     crossfadePartnerFadeInAuto: boolean;
+    /**
+     * Alt 曲率拖拽：按下瞬间的指针→增益映射环境。
+     * 缺失（角落手柄创建淡化等场景）时修饰键分支自动回退到长度模式。
+     */
+    fadeCurveEnv: FadeCurvePointerEnv | null;
+    /** 单侧曲率快照：冻结的区域（秒，拖拽中长度不变）、形状与基准 dir。
+     *  promoteFromLinear：源形状是线性（曲率对其无可见效果），首次实际
+     *  编辑时必须同时提交提升后的形状（见 reaperFade.resolveCurvatureEditBase）。 */
+    fadeCurveSide: {
+        leftSec: number;
+        widthSec: number;
+        shape: number;
+        baseDir: number;
+        promoteFromLinear: boolean;
+    } | null;
+    /** 交叉点曲率快照：前 clip 淡出 / 后 clip 淡入两侧各自独立求解。 */
+    crossfadeCurveSides: {
+        a: {
+            clipId: string;
+            leftSec: number;
+            widthSec: number;
+            shape: number;
+            baseDir: number;
+            promoteFromLinear: boolean;
+        };
+        b: {
+            clipId: string;
+            leftSec: number;
+            widthSec: number;
+            shape: number;
+            baseDir: number;
+            promoteFromLinear: boolean;
+        };
+    } | null;
     /** Per-clip base state for multi-clip trim operations */
     baseByClipId: Record<
         string,
@@ -507,6 +597,8 @@ export function useEditDrag(deps: {
     paramFineAdjustKb: Keybinding;
     /** modifier.clipCrossfadeGrip 绑定（交叉点手柄拖拽反向/缩放模式） */
     crossfadeGripKb: Keybinding;
+    /** modifier.fadeCurvatureDrag 绑定（按住并拖动淡化包络线 = 调整曲率） */
+    fadeCurvatureKb: Keybinding;
 }) {
     const {
         scrollRef,
@@ -523,13 +615,19 @@ export function useEditDrag(deps: {
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
     } = deps;
 
     const editDragRef = useRef<EditDragState | null>(null);
     // 用于节流向后端发送 clip 状态更新，避免拖动时频繁覆盖与后端同步引起闪烁
     const lastRemoteSentRef = useRef<Record<string, number>>({});
 
-    function startEditDrag(e: React.PointerEvent, clipId: string, type: EditDragType) {
+    function startEditDrag(
+        e: React.PointerEvent,
+        clipId: string,
+        type: EditDragType,
+        channel: EditDragChannelOpts = {},
+    ) {
         if (e.button !== 0) return;
         const clip = sessionRef.current.clips.find((c) => c.id === clipId);
         if (!clip) return;
@@ -539,8 +637,7 @@ export function useEditDrag(deps: {
         // 淡入淡出的相对拖拽锚点：以“鼠标按下位置”（deferred 起点通过 dragStartClientX
         // 传入）作为零偏移，而不是“实时把边缘线对齐到指针位置”。这样从包络线中间
         // 开始拖拽也不会发生跳变。
-        const dragStartClientX =
-            (e as unknown as { dragStartClientX?: number }).dragStartClientX ?? e.clientX;
+        const dragStartClientX = channel.dragStartClientX ?? e.clientX;
         const basePointerSec = beatFromClientX(
             dragStartClientX,
             scroller.getBoundingClientRect(),
@@ -567,10 +664,7 @@ export function useEditDrag(deps: {
             : initialIds;
         // 交叉点拖拽：只作用于参与交叉淡化的两个 clip（不可扩展编组）。
         const crossfadePartnerClipId =
-            type === "crossfade_edges"
-                ? ((e as unknown as { crossfadePartnerClipId?: string }).crossfadePartnerClipId ??
-                  null)
-                : null;
+            type === "crossfade_edges" ? (channel.crossfadePartnerClipId ?? null) : null;
         if (type === "crossfade_edges") {
             if (!crossfadePartnerClipId) return;
             selectedClipIds = [clipId, crossfadePartnerClipId];
@@ -695,6 +789,67 @@ export function useEditDrag(deps: {
         const crossfadePartnerFadeInAuto = Boolean(
             crossfadePartnerClip && Number(crossfadePartnerClip.autoFadeInSec ?? 0) > 0,
         );
+
+        // Alt 曲率拖拽快照：区域以秒冻结（拖拽中不改长度），形状沿用该侧当前
+        // 值；求解器输出新 dir。交叉点模式同时快照两侧。
+        const fadePointerEnv = sanitizeFadeEnv(channel.fadePointerEnv);
+        let fadeCurveSide: EditDragState["fadeCurveSide"] = null;
+        if (type === "fade_in" || type === "fade_out") {
+            const widthSec = Math.max(
+                0,
+                Math.min(
+                    type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec,
+                    clip.lengthSec,
+                ),
+            );
+            const rawShape =
+                (type === "fade_in" ? Number(clip.fadeInShape) : Number(clip.fadeOutShape)) || 0;
+            const curvatureBase = resolveCurvatureEditBase(rawShape);
+            fadeCurveSide = {
+                leftSec:
+                    type === "fade_in"
+                        ? clip.startSec
+                        : clip.startSec + clip.lengthSec - widthSec,
+                widthSec,
+                shape: curvatureBase.shape,
+                baseDir:
+                    (type === "fade_in" ? Number(clip.fadeInDir) : Number(clip.fadeOutDir)) || 0,
+                promoteFromLinear: curvatureBase.promotedFromLinear,
+            };
+        }
+        let crossfadeCurveSides: EditDragState["crossfadeCurveSides"] = null;
+        if (type === "crossfade_edges" && crossfadePartnerClip) {
+            const widthA = Math.max(
+                0,
+                Math.min(effectiveFadeOutSec, clip.lengthSec),
+            );
+            const widthB = Math.max(
+                0,
+                Math.min(crossfadePartnerFadeInSec, crossfadePartnerClip.lengthSec),
+            );
+            const baseA = resolveCurvatureEditBase(Number(clip.fadeOutShape) || 0);
+            const baseB = resolveCurvatureEditBase(
+                Number(crossfadePartnerClip.fadeInShape) || 0,
+            );
+            crossfadeCurveSides = {
+                a: {
+                    clipId: clip.id,
+                    leftSec: clip.startSec + clip.lengthSec - widthA,
+                    widthSec: widthA,
+                    shape: baseA.shape,
+                    baseDir: Number(clip.fadeOutDir) || 0,
+                    promoteFromLinear: baseA.promotedFromLinear,
+                },
+                b: {
+                    clipId: crossfadePartnerClip.id,
+                    leftSec: crossfadePartnerClip.startSec,
+                    widthSec: widthB,
+                    shape: baseB.shape,
+                    baseDir: Number(crossfadePartnerClip.fadeInDir) || 0,
+                    promoteFromLinear: baseB.promotedFromLinear,
+                },
+            };
+        }
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -728,6 +883,9 @@ export function useEditDrag(deps: {
             crossfadeBaseFadeOutAuto,
             crossfadePartnerFadeInSec,
             crossfadePartnerFadeInAuto,
+            fadeCurveEnv: fadePointerEnv,
+            fadeCurveSide,
+            crossfadeCurveSides,
             baseByClipId: Object.fromEntries(
                 selectedClipIds.map((id) => {
                     const c =
@@ -803,6 +961,9 @@ export function useEditDrag(deps: {
                 ticking = false;
                 if (!latestEvent) return;
                 const currentEv = latestEvent;
+                // 自愈：持续从真实原生事件刷新全局修饰键快照，覆盖 keydown
+                // 被其他层拦截、窗口失焦恢复等导致的按键状态漂移。
+                modifierWatcher.refreshFromEvent(currentEv);
 
                 const drag = editDragRef.current;
                 const el = scrollRef.current;
@@ -902,6 +1063,58 @@ export function useEditDrag(deps: {
                 if (drag.type === "crossfade_edges") {
                     const partner = drag.crossfadePartnerClipId;
                     if (!partner) return;
+                    // ── Alt 曲率模式：两条包络线分别求解“经过指针点”的新曲率，
+                    // 视觉上等价于把交叉点拖到光标位置（对齐 REAPER 在交叉上下文
+                    // 的 Alt 行为）。边缘位置与淡化长度完全不动。
+                    if (
+                        modifierWatcher.isKeybindingActive(fadeCurvatureKb, currentEv) &&
+                        drag.fadeCurveEnv &&
+                        drag.crossfadeCurveSides
+                    ) {
+                        const sides = drag.crossfadeCurveSides;
+                        const pa = resolveCurvePointer(
+                            drag.fadeCurveEnv,
+                            sides.a,
+                            beat,
+                            currentEv.clientY,
+                        );
+                        const pb = resolveCurvePointer(
+                            drag.fadeCurveEnv,
+                            sides.b,
+                            beat,
+                            currentEv.clientY,
+                        );
+                        if (!pa || !pb) return;
+                        const dirA = solveDirAt(sides.a.shape, "out", pa.t, pa.gain, sides.a.baseDir);
+                        const dirB = solveDirAt(sides.b.shape, "in", pb.t, pb.gain, sides.b.baseDir);
+                        sides.a.baseDir = dirA;
+                        sides.b.baseDir = dirB;
+                        batch(() => {
+                            dispatch(setClipFades({ clipId: sides.a.clipId, fadeOutDir: dirA }));
+                            dispatch(setClipFades({ clipId: sides.b.clipId, fadeInDir: dirB }));
+                        });
+                        try {
+                            const now = Date.now();
+                            const key = `${sides.a.clipId}:${sides.b.clipId}:curve-cross`;
+                            const last = lastRemoteSentRef.current[key] || 0;
+                            if (now - last > 200) {
+                                lastRemoteSentRef.current[key] = now;
+                                void webApi.setClipState({
+                                    clipId: sides.a.clipId,
+                                    fadeOutDir: dirA,
+                                    checkpoint: false,
+                                });
+                                void webApi.setClipState({
+                                    clipId: sides.b.clipId,
+                                    fadeInDir: dirB,
+                                    checkpoint: false,
+                                });
+                            }
+                        } catch {
+                            // Best-effort remote preview update.
+                        }
+                        return;
+                    }
                     // 修饰键（默认 Ctrl/Cmd）→ 反向模式：A 右缘与 B 左缘向相反方向移动，
                     // 重叠长度改变，淡化长度按比例缩放（auto 保持 == 重叠长度）。
                     const opposite = isModifierActive(crossfadeGripKb, currentEv);
@@ -1156,6 +1369,49 @@ export function useEditDrag(deps: {
                 }
 
                 if (drag.type === "fade_in") {
+                    // ── Alt 曲率模式（每帧实时求值，可与长度模式无缝互切）──
+                    if (
+                        modifierWatcher.isKeybindingActive(fadeCurvatureKb, currentEv) &&
+                        drag.fadeCurveEnv &&
+                        drag.fadeCurveSide
+                    ) {
+                        const pt = resolveCurvePointer(
+                            drag.fadeCurveEnv,
+                            drag.fadeCurveSide,
+                            beat,
+                            currentEv.clientY,
+                        );
+                        if (!pt) return;
+                        const nextDir = solveDirAt(
+                            drag.fadeCurveSide.shape,
+                            "in",
+                            pt.t,
+                            pt.gain,
+                            drag.fadeCurveSide.baseDir,
+                        );
+                        const side = drag.fadeCurveSide;
+                        side.baseDir = nextDir;
+                        side.shape = resolveCurvatureEditBase(side.shape).shape;
+                        // 曲率只作用于当前 clip 的该侧（跨轨多选各行基准不同，
+                        // 无法共用同一指针 Y；对齐 REAPER 只改当前 item）。
+                        dispatch(setClipFades({ clipId: drag.clipId, fadeInDir: nextDir }));
+                        try {
+                            const now = Date.now();
+                            const key = `${drag.clipId}:curve-in`;
+                            const last = lastRemoteSentRef.current[key] || 0;
+                            if (now - last > 200) {
+                                lastRemoteSentRef.current[key] = now;
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeInDir: nextDir,
+                                    checkpoint: false,
+                                });
+                            }
+                        } catch {
+                            // Best-effort remote preview update.
+                        }
+                        return;
+                    }
                     // 相对拖拽：记录起点偏移，新长度 = 基础长度 + 指针位移。
                     // 不再“让边缘线实时对齐指针”，从包络线任意位置拖动都不会跳变。
                     const delta = beat - drag.basePointerSec;
@@ -1203,6 +1459,47 @@ export function useEditDrag(deps: {
                     return;
                 }
                 if (drag.type === "fade_out") {
+                    // ── Alt 曲率模式 ──
+                    if (
+                        modifierWatcher.isKeybindingActive(fadeCurvatureKb, currentEv) &&
+                        drag.fadeCurveEnv &&
+                        drag.fadeCurveSide
+                    ) {
+                        const pt = resolveCurvePointer(
+                            drag.fadeCurveEnv,
+                            drag.fadeCurveSide,
+                            beat,
+                            currentEv.clientY,
+                        );
+                        if (!pt) return;
+                        const nextDir = solveDirAt(
+                            drag.fadeCurveSide.shape,
+                            "out",
+                            pt.t,
+                            pt.gain,
+                            drag.fadeCurveSide.baseDir,
+                        );
+                        const side = drag.fadeCurveSide;
+                        side.baseDir = nextDir;
+                        side.shape = resolveCurvatureEditBase(side.shape).shape;
+                        dispatch(setClipFades({ clipId: drag.clipId, fadeOutDir: nextDir }));
+                        try {
+                            const now = Date.now();
+                            const key = `${drag.clipId}:curve-out`;
+                            const last = lastRemoteSentRef.current[key] || 0;
+                            if (now - last > 200) {
+                                lastRemoteSentRef.current[key] = now;
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeOutDir: nextDir,
+                                    checkpoint: false,
+                                });
+                            }
+                        } catch {
+                            // Best-effort remote preview update.
+                        }
+                        return;
+                    }
                     // 相对拖拽：新长度 = 基础长度 − 指针位移（向右缩短、向左增长），
                     // 从包络线中间开始拖也不再跳变。
                     const delta = beat - drag.basePointerSec;

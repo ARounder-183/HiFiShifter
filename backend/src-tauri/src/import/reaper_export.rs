@@ -15,25 +15,29 @@ pub struct ReaperExportResult {
     pub track_count: usize,
 }
 
-fn fade_shape(curve: &str) -> f64 {
-    match curve {
-        "linear" => 0.0,
-        "sine" => 1.0,
-        "exponential" => 2.0,
-        "logarithmic" => 3.0,
-        "scurve" => 4.0,
-        _ => 1.0,
-    }
-}
-
-fn fade_values(curve: &str, length_sec: f64) -> Vec<f64> {
+/// 写出 FADEIN/FADEOUT 数组。
+///
+/// 布局对照 REAPER 7.x 实测样本（详见 reaper_parser::reaper_fade_shape_dir）：
+/// `[shape, 手动长度, 自动交叉淡化长度, 取整形状(镜像槽), 自动selector, 曲率dir, 0]`。
+/// 索引 3 在官方样本中存放取整后的基础形状（如形状 1.1 时写 1），保持一致；
+/// 第二曲率参数（索引 6）语义未公开，固定写 0。
+/// 手动/自动分别来自 Clip 的 `fade_*_sec` 与 `auto_fade_*_sec`，
+/// 与应用内"有效 fade"模型一一对应，不再像旧实现那样合并成一个手动值。
+pub(crate) fn fade_values(
+    shape: f64,
+    dir: f64,
+    manual_length_sec: f64,
+    auto_length_sec: f64,
+) -> Vec<f64> {
+    let shape = if shape.is_finite() { shape } else { 0.0 };
+    let mirror_base = shape.trunc().clamp(0.0, 255.0);
     vec![
-        fade_shape(curve),
-        length_sec.max(0.0),
-        0.0,
-        1.0,
-        0.0,
-        0.0,
+        shape,
+        manual_length_sec.max(0.0),
+        auto_length_sec.max(0.0),
+        mirror_base,
+        if auto_length_sec > 1e-9 { 1.0 } else { 0.0 },
+        dir.clamp(-1.0, 1.0),
         0.0,
     ]
 }
@@ -247,9 +251,20 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     // 给全部 take）。这是 RPP 格式的表达力边界，非实现遗漏。
     item.is_loop = working.takes[active_idx].loop_enabled;
     item.all_takes = false;
-    // 导出“有效 fade”（自动交叉淡化覆盖手动 fade），与渲染一致。
-    item.fade_in = fade_values(&working.fade_in_curve, working.effective_fade_in_sec());
-    item.fade_out = fade_values(&working.fade_out_curve, working.effective_fade_out_sec());
+    // 手动长度与自动交叉淡化长度分槽写出（REAPER 索引 1 / 索引 2 +
+    // selector），形状与曲率原样导出，保证 REAPER 渲染与应用一致。
+    item.fade_in = fade_values(
+        working.fade_in_shape,
+        working.fade_in_dir,
+        working.fade_in_sec,
+        working.auto_fade_in_sec,
+    );
+    item.fade_out = fade_values(
+        working.fade_out_shape,
+        working.fade_out_dir,
+        working.fade_out_sec,
+        working.auto_fade_out_sec,
+    );
     item.mute = vec![if working.muted { 1 } else { 0 }, 0];
     item.selected = false;
 

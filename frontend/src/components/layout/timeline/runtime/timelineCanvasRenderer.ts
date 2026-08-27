@@ -4,7 +4,7 @@ import {
     resolveFontFamily,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
-import { fadeCurveGain } from "../paths.js";
+import { fadeGainSigned } from "../reaperFade.js";
 
 function drawFadeCurveStroke(
     ctx: CanvasRenderingContext2D,
@@ -13,22 +13,52 @@ function drawFadeCurveStroke(
         topPx: number;
         widthPx: number;
         heightPx: number;
-        curve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+        shape: number;
+        dir: number;
         mode: "in" | "out";
     },
 ): void {
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
-    const steps = Math.max(12, Math.min(48, Math.round(widthPx / 8)));
+    // ── 自适应采样：陡峭预设的"爆发段"在两端，均匀采样（≤48 点）会画出
+    // 可见折线。这里均匀基线按宽度给量，并在两端各补对数加密点；指数
+    // 求值很便宜（一次 pow），总点数仍在百级，远低于每帧渲染预算。
+    const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
+    if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
+        // 直线快路径。
+        ctx.beginPath();
+        ctx.moveTo(args.leftPx, args.topPx);
+        ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
+        ctx.stroke();
+        return;
+    }
+    const isSteep =
+        shapeId === 3 || shapeId === 4 || shapeId === 6 ||
+        (Math.abs(args.dir) > 0.85 && shapeId !== 5 && shapeId !== 6);
+    const baseSteps = Math.max(
+        16,
+        Math.min(isSteep ? 96 : 64, Math.round(widthPx / 4)),
+    );
+    const ts: number[] = [];
+    for (let i = 0; i < baseSteps; i += 1) ts.push(i / (baseSteps - 1));
+    // 端部密度按"曲率强度"决定（|dir| 越大越需要），最多两端各 10 点。
+    const edgeCount = isSteep ? 10 : 4;
+    for (let k = 1; k <= edgeCount; k += 1) {
+        const eps = 0.02 / Math.pow(2, k);
+        ts.push(eps);
+        ts.push(1 - eps);
+    }
+    ts.sort((a, b) => a - b);
+
     ctx.beginPath();
-    for (let index = 0; index < steps; index += 1) {
-        const t = index / Math.max(1, steps - 1);
+    let first = true;
+    for (const t of ts) {
         const x = args.leftPx + t * widthPx;
-        const gain =
-            args.mode === "in" ? fadeCurveGain(t, args.curve) : fadeCurveGain(1 - t, args.curve);
+        const gain = fadeGainSigned(args.shape, args.dir, args.mode, t);
         const y = args.topPx + heightPx * (1 - gain);
-        if (index === 0) {
+        if (first) {
             ctx.moveTo(x, y);
+            first = false;
         } else {
             ctx.lineTo(x, y);
         }
@@ -50,8 +80,10 @@ export function drawTimelineCanvas(
             headerHeightPx: number;
             fadeInPx: number;
             fadeOutPx: number;
-            fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-            fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+            fadeInShape: number;
+            fadeOutShape: number;
+            fadeInDir: number;
+            fadeOutDir: number;
             selected: boolean;
             muted: boolean;
             gain: number;
@@ -307,7 +339,8 @@ export function drawTimelineCanvas(
                 topPx: bodyTop + 1,
                 widthPx: Math.min(clipWidth, clip.fadeInPx),
                 heightPx: Math.max(1, bodyHeight - 2),
-                curve: clip.fadeInCurve,
+                shape: clip.fadeInShape,
+                dir: clip.fadeInDir,
                 mode: "in",
             });
         }
@@ -326,7 +359,8 @@ export function drawTimelineCanvas(
                 topPx: bodyTop + 1,
                 widthPx: Math.min(clipWidth, clip.fadeOutPx),
                 heightPx: Math.max(1, bodyHeight - 2),
-                curve: clip.fadeOutCurve,
+                shape: clip.fadeOutShape,
+                dir: clip.fadeOutDir,
                 mode: "out",
             });
         }

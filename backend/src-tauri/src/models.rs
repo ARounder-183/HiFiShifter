@@ -158,8 +158,12 @@ pub struct TimelineClip {
     pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
-    pub fade_in_curve: Option<String>,
-    pub fade_out_curve: Option<String>,
+    /// REAPER 浮点形状 id（整数 0..6 为标准七预设；小数变体原样透传）。
+    pub fade_in_shape: Option<f64>,
+    pub fade_out_shape: Option<f64>,
+    /// 曲率（REAPER D_FADEINDIR），范围 [-1, 1]。
+    pub fade_in_dir: Option<f64>,
+    pub fade_out_dir: Option<f64>,
     /// 自动交叉淡化长度（秒），与手动 fade（fade_in_sec/fade_out_sec）分离存储。
     pub auto_fade_in_sec: Option<f64>,
     pub auto_fade_out_sec: Option<f64>,

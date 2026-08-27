@@ -206,12 +206,14 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 clipId: "clip-a",
                 name: "Renamed",
                 gain: 1.5,
-                fadeOutCurve: "scurve",
+                fadeOutShape: 6,
+                fadeOutDir: 0.35,
             }),
         );
         assertEqual(next.clips[0].name, "Renamed", "clip name updates on pending");
         assertEqual(next.clips[0].gain, 1.5, "clip gain updates on pending");
-        assertEqual(next.clips[0].fadeOutCurve, "scurve", "clip fade curve updates on pending");
+        assertEqual(next.clips[0].fadeOutShape, 6, "clip fade shape updates on pending");
+        assertEqual(next.clips[0].fadeOutDir, 0.35, "clip fade dir updates on pending");
     }
 
     {

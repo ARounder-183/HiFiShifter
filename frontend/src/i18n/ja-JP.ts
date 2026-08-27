@@ -442,9 +442,21 @@ export const jaJP = {
 
     fade_curve_linear: "リニア",
     fade_curve_sine: "サイン",
-    fade_curve_exponential: "エクスポネンシャル",
-    fade_curve_logarithmic: "ログ",
+    fade_curve_exponential: "指数",
+    fade_curve_logarithmic: "対数",
     fade_curve_scurve: "S カーブ",
+
+    // REAPER 七プリセット フェード形状（順序は timeline/reaperFade.ts FADE_PRESETS に一致）。
+    fade_shape_linear: "リニア",
+    fade_shape_fast_start: "ファストスタート",
+    fade_shape_fast_end: "ファストエンド",
+    fade_shape_fast_start_steep: "シャープなファストスタート",
+    fade_shape_fast_end_steep: "シャープなファストエンド",
+    fade_shape_slow_start_end: "スロースタート／エンド（S カーブ）",
+    fade_shape_slow_start_end_steep: "シャープなスロースタート／エンド",
+    curvature: "カーブ",
+    fade_type_label: "タイプ",
+    length: "長さ",
 
     gain_value_tooltip: "ゲイン：{gain} dB",
     gain_value_tooltip_drag: "ゲイン：{gain} dB（{delta} dB）",
@@ -555,6 +567,8 @@ export const jaJP = {
     kb_modifier_no_snap: "ドラッグ中にスナップを切り替えます（押すと現在のスナップを反転）",
     kb_modifier_copy_drag: "コピードラッグ（クリップドラッグ中に押す）",
     kb_modifier_crossfade_grip: "クロスフェードハンドル（クロスフェード交点ドラッグ中に押す）",
+    kb_modifier_fade_curvature: "フェードカーブ（押しながらドラッグで調整）",
+    kb_modifier_fade_shape_cycle: "フェード形状を切り替え（押しながらクリック）",
     kb_modifier_horizontal_zoom: "水平ズーム（押しながらスクロール）",
     kb_modifier_pr_vzoom: "垂直ズーム（押しながらスクロール）",
     kb_modifier_param_morph: "パラメータ形状変形（選択範囲内で押す）",

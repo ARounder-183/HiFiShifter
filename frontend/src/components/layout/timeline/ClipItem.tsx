@@ -12,9 +12,12 @@
 import React from "react";
 
 import { useAppSelector } from "../../../app/hooks";
+import type { Keybinding } from "../../../features/keybindings/types";
+import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { isPrimaryModifierDown } from "../../../utils/platform";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
+import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
     CLIP_BODY_PADDING_Y,
     CLIP_HEADER_HEIGHT,
@@ -23,6 +26,7 @@ import {
     snapOffsetHandleXPx,
 } from "./constants";
 import { FadeHitLayer } from "./FadeHitLayer";
+import { modifierWatcher } from "./hooks/modifierWatcher";
 import { hitInactiveTakeLane } from "./takeLanes";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import {
@@ -72,6 +76,9 @@ export const ClipItem = React.memo(function ClipItem({
     hovered = false,
     showAllTakes = true,
     onActivateTake,
+    fadeShapeCycleKb = null,
+    onFadeShapeCycleClick,
+    fadeLengthFormatCtx,
 }: {
     clip: ClipInfo;
     rowHeight: number;
@@ -112,6 +119,8 @@ export const ClipItem = React.memo(function ClipItem({
             | "fade_out"
             | "gain"
             | "crossfade_edges",
+        /** 延迟起手的类型化私有通道（曲率环境、相对拖拽锚点、交叉配对）。 */
+        channel?: EditDragChannelOpts,
     ) => void;
     /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
     startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
@@ -149,6 +158,12 @@ export const ClipItem = React.memo(function ClipItem({
     showAllTakes?: boolean;
     /** 点击 inactive take 波形 lane 时触发（优先级低于常规编辑手势）。 */
     onActivateTake?: (clipId: string, takeId: string) => void;
+    /** 形状循环键绑定（无绑定时不启用点击切换）。 */
+    fadeShapeCycleKb?: Keybinding | null;
+    /** 淡化长度 ToolTips 的相对时长时间上下文。 */
+    fadeLengthFormatCtx: FadeLengthFormatContext;
+    /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
+    onFadeShapeCycleClick?: (clipId: string, side: "in" | "out") => void;
 }) {
     const { t } = useI18n();
     const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
@@ -218,6 +233,20 @@ export const ClipItem = React.memo(function ClipItem({
             const startY = e.clientY;
             const pointerId = e.pointerId;
             const targetEl = e.currentTarget as HTMLElement;
+            // 曲率拖拽环境：包络“gain=1 基准线”的客户坐标。**基准 y 在按下
+            // 瞬间从 hit 元素几何推导一次**，之后手势全程固定 —— 这与指针的
+            // 原始 clientY 无关（滚动/布局变化下两者解耦），曲率求解恒一致。
+            let fadePointerEnv: { envTopClientY: number; bodyHeightPx: number } | undefined;
+            {
+                const hitYLocal = Number(targetEl.dataset.hsFadeY);
+                if (Number.isFinite(hitYLocal)) {
+                    const rect = targetEl.getBoundingClientRect();
+                    fadePointerEnv = {
+                        envTopClientY: rect.top - hitYLocal,
+                        bodyHeightPx: bodyHeight,
+                    };
+                }
+            }
             let dragStarted = false;
 
             const onMove = (ev: PointerEvent) => {
@@ -231,12 +260,16 @@ export const ClipItem = React.memo(function ClipItem({
                         button: 0,
                         pointerId,
                         clientX: startX,
-                        dragStartClientX: startX,
                         currentTarget: targetEl,
                     } as unknown as React.PointerEvent,
                     clip.id,
                     type,
+                    // 类型化通道：不再把私有字段走私到事件对象上。
+                    { dragStartClientX: startX, fadePointerEnv },
                 );
+                // 手势已开始：用起手事件初始化全局修饰键快照（后续每帧由
+                // useEditDrag 从原生 pointermove 持续自愈）。
+                modifierWatcher.refreshFromEvent(ev);
             };
 
             const onEnd = (ev: PointerEvent) => {
@@ -517,8 +550,9 @@ export const ClipItem = React.memo(function ClipItem({
                         top: CLIP_HEADER_HEIGHT,
                     }}
                 >
-                    {/* Body (waveform + edit handles) */}
-                    <div className="absolute inset-0">
+                    {/* Body (waveform + edit handles)。data-hs-clip-body 供
+                        淡化曲率拖拽把指针 clientY 映射回包络增益。 */}
+                    <div className="absolute inset-0" data-hs-clip-body="1">
                         {/* Fade 角落创建/编辑手柄：始终存在（即使当前无淡化），
                             可从此拖拽“造出一个”淡化；淡化存在时也是有效抓取点
                             （对齐 REAPER 顶部角落三角）。完全透明、不做悬停高亮，
@@ -560,9 +594,17 @@ export const ClipItem = React.memo(function ClipItem({
                                         ? Math.min(width, effectiveFadeOutSec * pxPerSec)
                                         : 0
                                 }
-                                fadeInCurve={clip.fadeInCurve}
-                                fadeOutCurve={clip.fadeOutCurve}
+                                fadeInShape={Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0}
+                                fadeInDir={clip.fadeInDir ?? 0}
+                                fadeOutShape={Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0}
+                                fadeOutDir={clip.fadeOutDir ?? 0}
                                 zIndex={40}
+                                effectiveFadeInSec={effectiveFadeInSec}
+                                effectiveFadeOutSec={effectiveFadeOutSec}
+                                formatCtx={fadeLengthFormatCtx}
+                                t={(key) => t(key as Parameters<typeof t>[0])}
+                                shapeCycleKb={fadeShapeCycleKb}
+                                onShapeCycleClick={(side) => onFadeShapeCycleClick?.(clip.id, side)}
                                 onFadeInPointerDown={(e) => startDeferredFadeEditDrag(e, "fade_in")}
                                 onFadeOutPointerDown={(e) =>
                                     startDeferredFadeEditDrag(e, "fade_out")

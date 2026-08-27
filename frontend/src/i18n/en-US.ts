@@ -526,6 +526,18 @@ export const enUS = {
     fade_curve_logarithmic: "Logarithmic",
     fade_curve_scurve: "S-Curve",
 
+    // REAPER 七预设淡变形状（顺序对齐 timeline/reaperFade.ts FADE_PRESETS）。
+    fade_shape_linear: "Linear",
+    fade_shape_fast_start: "Fast Start",
+    fade_shape_fast_end: "Fast End",
+    fade_shape_fast_start_steep: "Fast Start Steep",
+    fade_shape_fast_end_steep: "Fast End Steep",
+    fade_shape_slow_start_end: "Slow Start/End (S-Curve)",
+    fade_shape_slow_start_end_steep: "Slow Start/End Steep",
+    curvature: "Curvature",
+    fade_type_label: " Type",
+    length: "Length",
+
     gain_value_tooltip: "Gain: {gain} dB",
     gain_value_tooltip_drag: "Gain: {gain} dB ({delta} dB)",
     track_change_color: "Change track color",
@@ -630,6 +642,8 @@ export const enUS = {
     kb_modifier_no_snap: "Toggle snap while dragging (hold to invert current snap)",
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip)",
     kb_modifier_crossfade_grip: "Crossfade Grip (hold while dragging the crossfade crossing point)",
+    kb_modifier_fade_curvature: "Fade curvature (hold + drag fade line)",
+    kb_modifier_fade_shape_cycle: "Cycle fade shape (hold + click fade line)",
     kb_modifier_horizontal_zoom: "Horizontal Zoom (hold + scroll)",
     kb_modifier_pr_vzoom: "Vertical Zoom (hold + scroll)",
     kb_modifier_param_morph: "Param Morph (hold inside param selection)",

@@ -25,7 +25,6 @@
 
 import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
-import type { FadeCurveType } from "../layout/timeline/paths";
 import { waveformMipmapStore } from "../../utils/waveformMipmapStore";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
 import {
@@ -651,8 +650,10 @@ export const WaveformTrackCanvas = React.memo(
                     // —— 长于一个周期的淡化横跨多段时包络保持连续。
                     fadeInSec: effectiveFadeInSec,
                     fadeOutSec: effectiveFadeOutSec,
-                    fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
-                    fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
+                    fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+                    fadeInDir: clip.fadeInDir ?? 0,
+                    fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+                    fadeOutDir: clip.fadeOutDir ?? 0,
                     dataStartSec: 0,
                     dataDurationSec: 0,
                     clipTimeOffsetSec: 0,

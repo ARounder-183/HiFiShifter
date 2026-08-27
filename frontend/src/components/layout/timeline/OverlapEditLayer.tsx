@@ -28,7 +28,14 @@ import {
     snapOffsetHandleXPx,
 } from "./constants";
 import { buildFadeHitTargets } from "./fadeHitTargets";
-import { fadeCurveGain, type FadeCurveType } from "./paths";
+import { fadeGainSigned } from "./reaperFade";
+import { modifierWatcher } from "./hooks/modifierWatcher";
+import {
+    buildCrossfadeGripInfoText,
+    buildSingleFadeInfoText,
+} from "./fadeTooltipText";
+import type { FadeLengthFormatContext } from "./fadeTooltipText";
+import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 
 export type OverlapEditType =
     | "trim_left"
@@ -71,22 +78,26 @@ function computeCrossfadeGripPoint(args: {
     earlierEndPx: number;
     /** 前一个 clip 淡出包络的像素宽度。 */
     earlierFadePx: number;
-    earlierCurve: FadeCurveType;
+    earlierShape: number;
+    earlierDir: number;
     /** 后一个 clip 的左边缘 X（px，时间轴坐标）。 */
     laterStartPx: number;
     /** 后一个 clip 淡入包络的像素宽度。 */
     laterFadePx: number;
-    laterCurve: FadeCurveType;
+    laterShape: number;
+    laterDir: number;
     bodyTop: number;
     bodyHeight: number;
 }): { x: number; y: number } | null {
     const {
         earlierEndPx,
         earlierFadePx,
-        earlierCurve,
+        earlierShape,
+        earlierDir,
         laterStartPx,
         laterFadePx,
-        laterCurve,
+        laterShape,
+        laterDir,
         bodyTop,
         bodyHeight,
     } = args;
@@ -100,10 +111,10 @@ function computeCrossfadeGripPoint(args: {
     // B 淡入 y 随 x 增大而减小，因此 yA-yB 严格单调 → 二分求零点。
     const yDiff = (x: number): number => {
         const tA = (x - earlierLeftPx) / earlierFadePx;
-        const gainA = fadeCurveGain(1 - tA, earlierCurve);
+        const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
         const yA = bodyTop + bodyHeight * (1 - gainA);
         const tB = (x - laterStartPx) / laterFadePx;
-        const gainB = fadeCurveGain(tB, laterCurve);
+        const gainB = fadeGainSigned(laterShape, laterDir, "in", tB);
         const yB = bodyTop + bodyHeight * (1 - gainB);
         return yA - yB;
     };
@@ -134,7 +145,7 @@ function computeCrossfadeGripPoint(args: {
 
     const x = (low + high) / 2;
     const tA = (x - earlierLeftPx) / earlierFadePx;
-    const gainA = fadeCurveGain(1 - tA, earlierCurve);
+    const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
     return {
         x,
         y: bodyTop + bodyHeight * (1 - gainA),
@@ -154,6 +165,8 @@ type EditZone = {
     partnerClipId?: string;
     /** 显式层叠优先级（交叉点手柄应高于所有淡入淡出/边缘控件）。 */
     zIndex?: number;
+    /** 悬停信息浮标文本（data-tooltip）；缺省时不展示。 */
+    tooltip?: string;
 };
 
 export const OverlapEditLayer = React.memo(function OverlapEditLayer({
@@ -169,11 +182,17 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     recordLastClickPosition,
     startEditDrag,
     startSnapOffsetDrag,
+    fadeLengthFormatCtx,
+    t,
 }: {
     trackClips: ClipInfo[];
     pxPerSec: number;
     rowHeight: number;
     altPressed: boolean;
+    /** 淡化长度 ToolTips 的相对时长时间上下文。 */
+    fadeLengthFormatCtx: FadeLengthFormatContext;
+    /** i18n 文案查询。 */
+    t: (key: string) => string;
     selectedClipId: string | null;
     multiSelectedClipIds: string[];
     multiSelectedSet: Set<string>;
@@ -184,6 +203,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         e: React.PointerEvent,
         clipId: string,
         type: Exclude<OverlapEditType, "snap_offset">,
+        channel?: EditDragChannelOpts,
     ) => void;
     /** SnapOffset 角部拖拽入口（重叠区左下角仍可调整吸附偏移）。 */
     startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
@@ -228,15 +248,17 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     bodyHeight: bodyHeightPx,
                     fadeInPx: laterFadeInSec * pxPerSec,
                     fadeOutPx: 0,
-                    fadeInCurve: later.fadeInCurve,
-                    fadeOutCurve: "sine",
+                    fadeInShape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                    fadeInDir: later.fadeInDir ?? 0,
+                    fadeOutShape: 0,
+                    fadeOutDir: 0,
                     clipXFrom: overlapStartPx,
                     clipXTo: overlapEndPx,
                 });
-                for (let t = 0; t < targets.length; t += 1) {
-                    const target = targets[t];
+                for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+                    const target = targets[targetIndex];
                     zones.push({
-                        key: `${earlier.id}:${later.id}:later-fade:${t}`,
+                        key: `${earlier.id}:${later.id}:later-fade:${targetIndex}`,
                         clipId: later.id,
                         type: "fade_in",
                         leftPx: target.left,
@@ -244,6 +266,14 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         topPx: target.top,
                         heightPx: target.height,
                         cursor: "nwse-resize",
+                        tooltip: buildSingleFadeInfoText({
+                            isOut: false,
+                            shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                            dir: later.fadeInDir ?? 0,
+                            lengthSec: laterFadeInSec,
+                            formatCtx: fadeLengthFormatCtx,
+                            t,
+                        }),
                     });
                 }
             }
@@ -258,15 +288,17 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     bodyHeight: bodyHeightPx,
                     fadeInPx: 0,
                     fadeOutPx: earlierFadeOutSec * pxPerSec,
-                    fadeInCurve: "sine",
-                    fadeOutCurve: earlier.fadeOutCurve,
+                    fadeInShape: 0,
+                    fadeInDir: 0,
+                    fadeOutShape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                    fadeOutDir: earlier.fadeOutDir ?? 0,
                     clipXFrom: overlapStartPx,
                     clipXTo: overlapEndPx,
                 });
-                for (let t = 0; t < targets.length; t += 1) {
-                    const target = targets[t];
+                for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+                    const target = targets[targetIndex];
                     zones.push({
-                        key: `${earlier.id}:${later.id}:earlier-fade:${t}`,
+                        key: `${earlier.id}:${later.id}:earlier-fade:${targetIndex}`,
                         clipId: earlier.id,
                         type: "fade_out",
                         leftPx: target.left,
@@ -274,6 +306,14 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         topPx: target.top,
                         heightPx: target.height,
                         cursor: "nesw-resize",
+                        tooltip: buildSingleFadeInfoText({
+                            isOut: true,
+                            shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                            dir: earlier.fadeOutDir ?? 0,
+                            lengthSec: earlierFadeOutSec,
+                            formatCtx: fadeLengthFormatCtx,
+                            t,
+                        }),
                     });
                 }
             }
@@ -329,15 +369,31 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 const grip = computeCrossfadeGripPoint({
                     earlierEndPx,
                     earlierFadePx: fA,
-                    earlierCurve: earlier.fadeOutCurve,
+                    earlierShape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                    earlierDir: earlier.fadeOutDir ?? 0,
                     laterStartPx,
                     laterFadePx: fB,
-                    laterCurve: later.fadeInCurve,
+                    laterShape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                    laterDir: later.fadeInDir ?? 0,
                     bodyTop: bodyTopPx,
                     bodyHeight: bodyHeightPx,
                 });
                 if (grip) {
                     const gripSize = 16;
+                    const gripTooltip = buildCrossfadeGripInfoText({
+                        earlier: {
+                            shape: Number.isFinite(earlier.fadeOutShape) ? earlier.fadeOutShape : 0,
+                            dir: earlier.fadeOutDir ?? 0,
+                            lengthSec: earlierFadeOutSec,
+                        },
+                        later: {
+                            shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
+                            dir: later.fadeInDir ?? 0,
+                            lengthSec: laterFadeInSec,
+                        },
+                        formatCtx: fadeLengthFormatCtx,
+                        t,
+                    });
                     zones.push({
                         key: `${earlier.id}:${later.id}:crossfade-grip`,
                         clipId: earlier.id,
@@ -347,7 +403,9 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         widthPx: gripSize,
                         topPx: grip.y - gripSize / 2,
                         heightPx: gripSize,
-                        cursor: altPressed ? "col-resize" : "ew-resize",
+                        // Alt（曲率修饰键）按住时光标切换，提示"拖动曲线"模式。
+                        cursor: altPressed ? "move" : "ew-resize",
+                        tooltip: gripTooltip,
                         zIndex: 300,
                     });
                 }
@@ -410,6 +468,27 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         const startY = event.clientY;
         const pointerId = event.pointerId;
         const currentTarget = event.currentTarget as HTMLElement;
+        // 曲率拖拽环境：本层坐标即 lane 坐标，gain=1 基准线的客户 y =
+        // 层容器 top + bodyTopPx；高度为行高推导的 body 高度。
+        let fadePointerEnv:
+            | { envTopClientY: number; bodyHeightPx: number }
+            | undefined;
+        {
+            const layerRoot = currentTarget.closest("[data-hs-overlap-layer]");
+            const hitTop = currentTarget.getBoundingClientRect().top;
+            const hitTopLocal = Number((currentTarget as HTMLElement).dataset.hsZoneTop);
+            const baseTopClientY =
+                layerRoot != null
+                    ? layerRoot.getBoundingClientRect().top
+                    : hitTop - (Number.isFinite(hitTopLocal) ? hitTopLocal : 0);
+            fadePointerEnv = {
+                envTopClientY: baseTopClientY + CLIP_HEADER_HEIGHT,
+                bodyHeightPx: Math.max(
+                    1,
+                    rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                ),
+            };
+        }
         let dragStarted = false;
 
         const onMove = (ev: PointerEvent) => {
@@ -424,12 +503,6 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     pointerId,
                     clientX: ev.clientX,
                     clientY: ev.clientY,
-                    dragStartClientX: startX,
-                    crossfadePartnerClipId: partnerClipId,
-                    altKey: ev.altKey,
-                    metaKey: ev.metaKey,
-                    ctrlKey: ev.ctrlKey,
-                    shiftKey: ev.shiftKey,
                     currentTarget,
                     nativeEvent: ev,
                     preventDefault: () => {},
@@ -437,7 +510,16 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 } as unknown as React.PointerEvent,
                 clipId,
                 type,
+                // 类型化通道：交叉配对与曲率环境不再走私到事件对象上。
+                {
+                    dragStartClientX: startX,
+                    crossfadePartnerClipId: partnerClipId,
+                    fadePointerEnv,
+                },
             );
+            // 手势开始：用起手事件初始化全局修饰键快照（此后每帧由
+            // useEditDrag 从原生 pointermove 持续自愈）。
+            modifierWatcher.refreshFromEvent(ev);
         };
         const onEnd = (ev: PointerEvent) => {
             if (ev.pointerId !== pointerId) return;
@@ -467,6 +549,8 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                         cursor: zone.cursor,
                         zIndex: zone.zIndex,
                     }}
+                    data-hs-zone-top={String(zone.topPx)}
+                    data-tooltip={zone.tooltip}
                     onPointerDown={(e) => {
                         if (zone.type === "snap_offset") {
                             startSnapOffsetEdit(e, zone.clipId);

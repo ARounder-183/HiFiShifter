@@ -192,8 +192,14 @@ export interface ClipInfo {
     snapOffsetSec: number;
     fadeInSec: number;
     fadeOutSec: number;
-    fadeInCurve: FadeCurveType;
-    fadeOutCurve: FadeCurveType;
+    /** 淡入形状：REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传）。 */
+    fadeInShape: number;
+    /** 淡出形状（语义同 fadeInShape）。 */
+    fadeOutShape: number;
+    /** 淡入曲率（REAPER D_FADEINDIR），范围 [-1, 1]。 */
+    fadeInDir: number;
+    /** 淡出曲率（REAPER D_FADEOUTDIR），范围 [-1, 1]。 */
+    fadeOutDir: number;
     /** 自动交叉淡化长度（秒），与手动 fade（fadeInSec/fadeOutSec）分离存储。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;

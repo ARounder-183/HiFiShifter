@@ -97,6 +97,10 @@ pub(crate) struct EngineClip {
 
     pub(crate) fade_in_frames: u64,
     pub(crate) fade_out_frames: u64,
+    /// 形状化淡化的增益查表（含两端点，FADE_LUT_SIZE+1 项）。
+    /// None 时退化为旧线性渐变（长度为 0 的淡化不会进入混音分支）。
+    pub(crate) fade_in_lut: Option<Arc<Vec<f32>>>,
+    pub(crate) fade_out_lut: Option<Arc<Vec<f32>>>,
     pub(crate) gain: f32,
 
     /// 预渲染后的 stereo interleaved PCM（优先级最高）。

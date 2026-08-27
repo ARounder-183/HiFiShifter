@@ -13,6 +13,12 @@ import React, { useMemo } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
+import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import {
+    defaultFadeDirFor,
+    FADE_PRESETS,
+} from "./timeline/reaperFade";
+import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import {
     addTrackRemote,
     closeClipFormantToolWindow,
@@ -340,6 +346,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
         dropPreview,
         setDropPreview,
         clipDropNewTrack,
@@ -410,6 +417,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             tempoMap: s.tempoMap,
         }),
         [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    // 淡化长度 ToolTips 的相对时长上下文：主/副时间单位 + 工程计时参数。
+    const fadeLengthFormatCtx = React.useMemo<FadeLengthFormatContext>(
+        () => ({
+            primaryTimeUnit: s.primaryTimeUnit,
+            secondaryTimeUnit: s.secondaryTimeUnit,
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+        }),
+        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid],
     );
 
     const projectScale = React.useMemo<ScaleLike | null>(
@@ -547,6 +566,42 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const activateTrackLaneTake = React.useCallback(
         (clipId: string, takeId: string) => {
             void dispatch(setClipActiveTakeRemote({ clipId, takeId }));
+        },
+        [dispatch],
+    );
+    // 淡化曲线循环点击：Ctrl（modifier.fadeShapeCycleClick）+左键点包络线
+    // → 顺序切换到下一个预设形状，并把该侧曲率重置为新形状的默认值。
+    const fadeShapeCycleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeShapeCycleClick"),
+    );
+    const handleFadeShapeCycleClick = React.useCallback(
+        (clipId: string, side: "in" | "out") => {
+            const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
+            if (!clip) return;
+            const currentShape = Number.isFinite(
+                side === "in" ? clip.fadeInShape : clip.fadeOutShape,
+            )
+                ? Math.trunc(side === "in" ? clip.fadeInShape : clip.fadeOutShape)
+                : 0;
+            const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
+            const nextPreset = FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
+            const nextDir = defaultFadeDirFor(nextPreset.shape, side === "out");
+            dispatch(
+                setClipFades({
+                    clipId,
+                    ...(side === "in"
+                        ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
+                        : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
+                }),
+            );
+            void dispatch(
+                setClipStateRemote({
+                    clipId,
+                    ...(side === "in"
+                        ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
+                        : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
+                }),
+            );
         },
         [dispatch],
     );
@@ -794,6 +849,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
     });
 
     const startSlipDrag = useSlipDrag({
@@ -1748,6 +1804,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             allClips={s.clips}
                                             showAllTakes={s.showAllTakes}
                                             onActivateTake={activateTrackLaneTake}
+                                            fadeShapeCycleKb={fadeShapeCycleKb}
+                                            fadeLengthFormatCtx={fadeLengthFormatCtx}
+                                            onFadeShapeCycleClick={handleFadeShapeCycleClick}
                                             startClipDrag={startClipDrag}
                                             startEditDrag={startEditDrag}
                                             startSnapOffsetDrag={startSnapOffsetDrag}
@@ -2211,29 +2270,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       setContextMenu(null);
                                       void handleExportMidi(ids);
                                   }}
-                                  onFadeCurveChange={(clipId, target, curve) => {
+                                  onFadeShapeChange={(clipId, target, shape) => {
+                                      // 切换形状必须重置曲率（REAPER 语义：各形状的
+                                      // 默认曲率由形状自身定义，见 reaperFade 的
+                                      // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
+                                      const dir = defaultFadeDirFor(shape, target === "out");
                                       dispatch(
                                           setClipFades({
                                               clipId,
                                               ...(target === "in"
-                                                  ? {
-                                                        fadeInCurve: curve,
-                                                    }
-                                                  : {
-                                                        fadeOutCurve: curve,
-                                                    }),
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
                                           }),
                                       );
                                       void dispatch(
                                           setClipStateRemote({
                                               clipId,
                                               ...(target === "in"
-                                                  ? {
-                                                        fadeInCurve: curve,
-                                                    }
-                                                  : {
-                                                        fadeOutCurve: curve,
-                                                    }),
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
                                           }),
                                       );
                                   }}

@@ -1106,8 +1106,10 @@ export function drawPianoRoll(args: {
                 // 长于一个周期的淡化横跨多段时包络保持连续。
                 fadeInSec: effectiveFadeInPiano,
                 fadeOutSec: effectiveFadeOutPiano,
-                fadeInCurve: entry.fadeInCurve ?? "linear",
-                fadeOutCurve: entry.fadeOutCurve ?? "linear",
+                fadeInShape: entry.fadeInShape ?? 0,
+                fadeInDir: entry.fadeInDir ?? 0,
+                fadeOutShape: entry.fadeOutShape ?? 0,
+                fadeOutDir: entry.fadeOutDir ?? 0,
                 dataStartSec: result.dataStartSec,
                 dataDurationSec: result.dataDurationSec,
                 clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,

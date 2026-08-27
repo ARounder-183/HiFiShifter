@@ -91,8 +91,12 @@ export interface TimelineClip {
     snap_offset_sec?: number;
     fade_in_sec?: number;
     fade_out_sec?: number;
-    fade_in_curve?: string;
-    fade_out_curve?: string;
+    /** REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传保存）。 */
+    fade_in_shape?: number;
+    fade_out_shape?: number;
+    /** 曲率（REAPER D_FADEINDIR/OUTDIR），范围 [-1, 1]。 */
+    fade_in_dir?: number;
+    fade_out_dir?: number;
     /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
     auto_fade_in_sec?: number;
     auto_fade_out_sec?: number;

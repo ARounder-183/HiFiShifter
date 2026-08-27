@@ -766,13 +766,32 @@ pub fn render_mixdown_interleaved(
                 })
                 .unwrap_or((None, 5.0, None, 5.0));
 
-        // Apply fades (linear) and gain (timeline-referenced).
+        // Apply fades and gain (timeline-referenced)。淡化按 REAPER 形状/曲率
+        // 查表求值（与实时引擎、画布渲染同一公式核心）。
         let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
         let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
+        let fade_in_lut = if fade_in_frames > 0 {
+            Some(crate::fade_curves::global_fade_lut(
+                clip.fade_in_shape,
+                clip.fade_in_dir,
+                false,
+            ))
+        } else {
+            None
+        };
+        let fade_out_lut = if fade_out_frames > 0 {
+            Some(crate::fade_curves::global_fade_lut(
+                clip.fade_out_shape,
+                clip.fade_out_dir,
+                true,
+            ))
+        } else {
+            None
+        };
 
         let seg_frames = segment.len() / 2;
         let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
@@ -840,11 +859,27 @@ pub fn render_mixdown_interleaved(
 
             let mut g = gain;
             if fade_in_frames > 0 && local_in_clip < fade_in_frames {
-                g *= (local_in_clip as f32 / fade_in_frames as f32).clamp(0.0, 1.0);
+                g *= match &fade_in_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        (local_in_clip as f64 / fade_in_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => (local_in_clip as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if fade_out_frames > 0 && local_in_clip + fade_out_frames > clip_total_frames {
                 let remain = clip_total_frames.saturating_sub(local_in_clip);
-                g *= (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0);
+                // 淡出：σ 镜像已烘焙进表 —— 以"剩余比例"为索引进度，
+                // 时间上从 g(x=1) 衰减到 g(x=0)。线性分支的 remain/N 同语义。
+                g *= match &fade_out_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        (remain as f64 / fade_out_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if g <= 0.0 {
                 continue;

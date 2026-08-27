@@ -51,8 +51,10 @@ test("features/session/sessionSlice.formantMorph.test.ts scripted checks", async
                         reversed: false,
                         fade_in_sec: 0,
                         fade_out_sec: 0,
-                        fade_in_curve: "sine",
-                        fade_out_curve: "sine",
+                        fade_in_shape: 5,
+                        fade_out_shape: 5,
+                        fade_in_dir: 0,
+                        fade_out_dir: 0,
                         formant_morph: {
                             enabled: true,
                             target_f1_hz: 700,

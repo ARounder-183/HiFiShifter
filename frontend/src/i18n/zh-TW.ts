@@ -430,6 +430,18 @@ export const zhTW = {
     fade_curve_logarithmic: "對數",
     fade_curve_scurve: "S曲線",
 
+    // REAPER 七預設淡变形狀（順序對齊 timeline/reaperFade.ts FADE_PRESETS）。
+    fade_shape_linear: "線性",
+    fade_shape_fast_start: "快起",
+    fade_shape_fast_end: "快收",
+    fade_shape_fast_start_steep: "陡峭快起",
+    fade_shape_fast_end_steep: "陡峭快收",
+    fade_shape_slow_start_end: "慢起慢收（S 曲線）",
+    fade_shape_slow_start_end_steep: "陡峭慢起慢收（銳利 S 曲線）",
+    curvature: "曲率",
+    fade_type_label: "類型",
+    length: "長度",
+
     gain_value_tooltip: "增益：{gain} dB",
     gain_value_tooltip_drag: "增益：{gain} dB【{delta} dB】",
     track_change_color: "變更軌道顏色",
@@ -544,6 +556,8 @@ export const zhTW = {
     kb_modifier_no_snap: "拖動時切換吸附（按住可反轉目前吸附）",
     kb_modifier_copy_drag: "複製拖動（拖動音訊片段時按住）",
     kb_modifier_crossfade_grip: "交叉淡化手柄（拖動交叉點手柄時按住）",
+    kb_modifier_fade_curvature: "淡化曲率（按住並拖動包絡線）",
+    kb_modifier_fade_shape_cycle: "循環切換淡化形狀（按住並點擊包絡線）",
     kb_modifier_horizontal_zoom: "水平縮放（按住+滾輪）",
     kb_modifier_pr_vzoom: "垂直縮放（按住+滾輪）",
     kb_modifier_param_morph: "參數形變（參數編輯器選取區內按住）",

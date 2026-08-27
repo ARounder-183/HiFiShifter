@@ -5,6 +5,7 @@ mod audio_utils;
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
+mod fade_curves;
 pub(crate) mod commands;
 mod formant_cache;
 #[path = "audio/formant_morph.rs"]

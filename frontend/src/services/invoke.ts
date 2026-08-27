@@ -244,13 +244,15 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 snapOffsetSec: args[12],
                 fadeInSec: args[13],
                 fadeOutSec: args[14],
-                fadeInCurve: args[15],
-                fadeOutCurve: args[16],
-                autoFadeInSec: args[17],
-                autoFadeOutSec: args[18],
-                color: args[19],
-                formantMorph: args[20],
-                checkpoint: args[21],
+                fadeInShape: args[15],
+                fadeOutShape: args[16],
+                fadeInDir: args[17],
+                fadeOutDir: args[18],
+                autoFadeInSec: args[19],
+                autoFadeOutSec: args[20],
+                color: args[21],
+                formantMorph: args[22],
+                checkpoint: args[23],
             };
 
         case "set_clips_state_bulk":

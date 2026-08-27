@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
+import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
@@ -41,10 +41,12 @@ export interface ClipPeaksEntry {
     /** 自动交叉淡化时长（秒）；>0 时有效淡化 = 自动值，否则用手动值。 */
     autoFadeInSec: number;
     autoFadeOutSec: number;
-    /** 淡入曲线类型 */
-    fadeInCurve: FadeCurveType;
-    /** 淡出曲线类型 */
-    fadeOutCurve: FadeCurveType;
+    /** 淡入形状（REAPER 形状 id）与曲率。 */
+    fadeInShape: number;
+    fadeInDir: number;
+    /** 淡出形状（REAPER 形状 id）与曲率。 */
+    fadeOutShape: number;
+    fadeOutDir: number;
     /** source 文件路径（用于从 mipmap store 获取数据） */
     sourcePath: string;
     /** clip 是否静音 */
@@ -165,8 +167,10 @@ export function useClipsPeaksForPianoRoll(args: {
                 fadeOutSec: clip.fadeOutSec ?? 0,
                 autoFadeInSec: clip.autoFadeInSec ?? 0,
                 autoFadeOutSec: clip.autoFadeOutSec ?? 0,
-                fadeInCurve: clip.fadeInCurve ?? "linear",
-                fadeOutCurve: clip.fadeOutCurve ?? "linear",
+                fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+                fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+                fadeInDir: clip.fadeInDir ?? 0,
+                fadeOutDir: clip.fadeOutDir ?? 0,
                 sourcePath: clip.sourcePath ?? "",
                 muted: clip.muted ?? false,
                 reversed: Boolean(clip.reversed),

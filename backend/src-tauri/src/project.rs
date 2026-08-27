@@ -625,8 +625,10 @@ mod tests {
             "\"pitch_analysis_algo\"",
             "\"fade_in_sec\"",
             "\"fade_out_sec\"",
-            "\"fade_in_curve\"",
-            "\"fade_out_curve\"",
+            "\"fade_in_shape\"",
+            "\"fade_out_shape\"",
+            "\"fade_in_dir\"",
+            "\"fade_out_dir\"",
             "\"selected_track_id\"",
             "\"selected_clip_id\"",
             "\"playhead_sec\"",
@@ -740,8 +742,10 @@ mod tests {
             clip.loop_enabled = true;
             clip.fade_in_sec = 0.1;
             clip.fade_out_sec = 0.2;
-            clip.fade_in_curve = "logarithmic".to_string();
-            clip.fade_out_curve = "exponential".to_string();
+            clip.fade_in_shape = 3.0;
+            clip.fade_out_shape = 4.0;
+            clip.fade_in_dir = 0.35;
+            clip.fade_out_dir = -0.5;
             clip.color = "blue".to_string();
             clip.source_file_fingerprint = Some(0x1122334455667788);
         }
@@ -795,8 +799,10 @@ mod tests {
         assert!(clip.loop_enabled, "loop flag must roundtrip");
         assert!((clip.fade_in_sec - 0.1).abs() < 1e-12);
         assert!((clip.fade_out_sec - 0.2).abs() < 1e-12);
-        assert_eq!(clip.fade_in_curve, "logarithmic");
-        assert_eq!(clip.fade_out_curve, "exponential");
+        assert_eq!(clip.fade_in_shape, 3.0);
+        assert_eq!(clip.fade_out_shape, 4.0);
+        assert_eq!(clip.fade_in_dir, 0.35);
+        assert_eq!(clip.fade_out_dir, -0.5);
         assert_eq!(
             clip.source_file_fingerprint,
             Some(0x1122334455667788),
@@ -887,6 +893,79 @@ mod tests {
         );
         assert_eq!(clip.source_path.as_deref(), Some("C:/audio/a.wav"));
         assert!((clip.gain - 0.5).abs() < f32::EPSILON);
+        // 旧命名曲线在加载时换算为 REAPER 形状/曲率模型（sine → 轻微 S）。
+        assert_eq!(clip.fade_in_shape, 5.0);
+        assert_eq!(clip.fade_out_shape, 5.0);
+        assert_eq!(clip.fade_in_dir, 0.0);
+        assert_eq!(clip.fade_out_dir, 0.0);
+    }
+
+    #[test]
+    fn legacy_named_curves_migrate_to_reaper_shapes() {
+        let value = serde_json::json!({
+            "version": 3,
+            "name": "legacy-fades",
+            "timeline": {
+                "tracks": [{
+                    "id": "track_1",
+                    "name": "Track",
+                    "order": 0,
+                    "muted": false,
+                    "solo": false,
+                    "volume": 1.0,
+                    "compose_enabled": false,
+                    "pitch_analysis_algo": "nsf_hifigan_onnx",
+                    "color": "#4a8fd1"
+                }],
+                "clips": [{
+                    "id": "clip_1",
+                    "track_id": "track_1",
+                    "name": "Fades",
+                    "start_sec": 0.0,
+                    "length_sec": 2.0,
+                    "color": "blue",
+                    "fade_in_sec": 0.25,
+                    "fade_out_sec": 0.4,
+                    "fade_in_curve": "exponential",
+                    "fade_out_curve": "logarithmic"
+                }],
+                "bpm": 120.0,
+                "playhead_sec": 0.0,
+                "project_sec": 32.0
+            }
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let pf = load_project_file(&bytes).expect("legacy JSON should load");
+        let clip = &pf.timeline.clips[0];
+        // exponential（晚起）→ 形状 2；logarithmic（早起）→ 形状 1。
+        assert_eq!(clip.fade_in_shape, 2.0);
+        assert_eq!(clip.fade_out_shape, 1.0);
+        // 迁移后旧字符串被清空，新保存不再写出。
+        let serialized = serde_json::to_string(&pf).expect("project must serialize");
+        assert!(
+            !serialized.contains("\"fade_in_curve\""),
+            "legacy curve strings must not be serialized after migration"
+        );
+    }
+
+    #[test]
+    fn reaper_fade_fields_roundtrip_through_project_file() {
+        let mut tl = timeline_with_clip_and_zero_curves();
+        {
+            let clip = &mut tl.clips[0];
+            clip.fade_in_shape = 1.1; // REAPER 小数变体原样透传
+            clip.fade_in_dir = 0.25;
+            clip.fade_out_shape = 6.0;
+            clip.fade_out_dir = -1.0;
+        }
+        let pf = project_file_with_clip(tl);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
+        let loaded = load_project_file(&bytes).expect("msgpack roundtrip must load");
+        let clip = &loaded.timeline.clips[0];
+        assert_eq!(clip.fade_in_shape, 1.1);
+        assert_eq!(clip.fade_in_dir, 0.25);
+        assert_eq!(clip.fade_out_shape, 6.0);
+        assert_eq!(clip.fade_out_dir, -1.0);
     }
 
     #[test]

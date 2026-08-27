@@ -39,8 +39,10 @@ test("services/invoke.test.ts scripted checks", async () => {
         0.75, // snapOffsetSec
         0.1, // fadeInSec
         0.2, // fadeOutSec
-        "sine", // fadeInCurve
-        "linear", // fadeOutCurve
+        3, // fadeInShape
+        4, // fadeOutShape
+        -0.25, // fadeInDir
+        0.5, // fadeOutDir
         0.3, // autoFadeInSec
         0.4, // autoFadeOutSec
         "#112233", // color
@@ -67,8 +69,10 @@ test("services/invoke.test.ts scripted checks", async () => {
         "snapOffsetSec",
         "fadeInSec",
         "fadeOutSec",
-        "fadeInCurve",
-        "fadeOutCurve",
+        "fadeInShape",
+        "fadeOutShape",
+        "fadeInDir",
+        "fadeOutDir",
         "autoFadeInSec",
         "autoFadeOutSec",
         "color",

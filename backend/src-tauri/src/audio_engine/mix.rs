@@ -239,11 +239,28 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             let mut g = clip.gain;
             if clip.fade_in_frames > 0 && local < clip.fade_in_frames {
                 // Use frame-centered fade-in so the first frame is not hard-zeroed.
-                g *= ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0);
+                g *= match &clip.fade_in_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        ((local + 1) as f64 / clip.fade_in_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
+                };
+                let _ = &clip.fade_out_lut;
             }
             if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
                 let remain = clip.length_frames.saturating_sub(local);
-                g *= (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0);
+                // 淡出：σ 镜像已烘焙进表 —— 以"剩余比例"为索引进度，
+                // 时间上从 g(x=1) 衰减到 g(x=0)。线性分支的 remain/N 同语义。
+                g *= match &clip.fade_out_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        (remain as f64 / clip.fade_out_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if g <= 0.0 {
                 continue;

@@ -804,8 +804,10 @@ function applyOptimisticClipState(
         snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         formantMorph?: ClipFormantMorph;
@@ -875,11 +877,17 @@ function applyOptimisticClipState(
     if (payload.fadeOutSec !== undefined) {
         clip.fadeOutSec = Math.max(0, Number(payload.fadeOutSec) || 0);
     }
-    if (payload.fadeInCurve !== undefined) {
-        clip.fadeInCurve = payload.fadeInCurve as FadeCurveType;
+    if (payload.fadeInShape !== undefined) {
+        clip.fadeInShape = payload.fadeInShape;
     }
-    if (payload.fadeOutCurve !== undefined) {
-        clip.fadeOutCurve = payload.fadeOutCurve as FadeCurveType;
+    if (payload.fadeOutShape !== undefined) {
+        clip.fadeOutShape = payload.fadeOutShape;
+    }
+    if (payload.fadeInDir !== undefined) {
+        clip.fadeInDir = Math.min(1, Math.max(-1, Number(payload.fadeInDir) || 0));
+    }
+    if (payload.fadeOutDir !== undefined) {
+        clip.fadeOutDir = Math.min(1, Math.max(-1, Number(payload.fadeOutDir) || 0));
     }
     if (payload.autoFadeInSec !== undefined) {
         clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
@@ -1245,8 +1253,15 @@ function applyTimelineState(
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
-            fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
-            fadeOutCurve: (clip.fade_out_curve ?? "sine") as FadeCurveType,
+            // 后端未提供形状字段时（极旧开发版载荷），与新建默认一致取快起。
+            fadeInShape: Number.isFinite(Number(clip.fade_in_shape))
+                ? Number(clip.fade_in_shape)
+                : 1,
+            fadeOutShape: Number.isFinite(Number(clip.fade_out_shape))
+                ? Number(clip.fade_out_shape)
+                : 1,
+            fadeInDir: Math.min(1, Math.max(-1, Number(clip.fade_in_dir ?? 0) || 0)),
+            fadeOutDir: Math.min(1, Math.max(-1, Number(clip.fade_out_dir ?? 0) || 0)),
             autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
             autoFadeOutSec: Math.max(0, Number(clip.auto_fade_out_sec ?? 0) || 0),
             formantMorph: clip.formant_morph
@@ -1504,8 +1519,11 @@ function upsertImportedClip(
         snapOffsetSec: 0,
         fadeInSec: 0,
         fadeOutSec: 0,
-        fadeInCurve: "sine" as FadeCurveType,
-        fadeOutCurve: "sine" as FadeCurveType,
+        // 新建默认曲线 = 快起（REAPER Fast Start；dir 锚点 0）。
+        fadeInShape: 1,
+        fadeOutShape: 1,
+        fadeInDir: 0,
+        fadeOutDir: 0,
     });
     state.selectedClipId = newClipId;
     state.playheadSec = startSec;
@@ -2262,8 +2280,10 @@ const sessionSlice = createSlice({
                 clipId: string;
                 fadeInSec?: number;
                 fadeOutSec?: number;
-                fadeInCurve?: FadeCurveType;
-                fadeOutCurve?: FadeCurveType;
+                fadeInShape?: number;
+                fadeOutShape?: number;
+                fadeInDir?: number;
+                fadeOutDir?: number;
             }>,
         ) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
@@ -2274,11 +2294,18 @@ const sessionSlice = createSlice({
             if (action.payload.fadeOutSec !== undefined) {
                 clip.fadeOutSec = Math.max(0, action.payload.fadeOutSec);
             }
-            if (action.payload.fadeInCurve !== undefined) {
-                clip.fadeInCurve = action.payload.fadeInCurve;
+            // 形状原样透传（REAPER 允许小数变体）；曲率夹紧到 [-1, 1]。
+            if (action.payload.fadeInShape !== undefined) {
+                clip.fadeInShape = action.payload.fadeInShape;
             }
-            if (action.payload.fadeOutCurve !== undefined) {
-                clip.fadeOutCurve = action.payload.fadeOutCurve;
+            if (action.payload.fadeOutShape !== undefined) {
+                clip.fadeOutShape = action.payload.fadeOutShape;
+            }
+            if (action.payload.fadeInDir !== undefined) {
+                clip.fadeInDir = Math.min(1, Math.max(-1, action.payload.fadeInDir));
+            }
+            if (action.payload.fadeOutDir !== undefined) {
+                clip.fadeOutDir = Math.min(1, Math.max(-1, action.payload.fadeOutDir));
             }
         },
         /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
@@ -2355,8 +2382,10 @@ const sessionSlice = createSlice({
                 snapOffsetSec: 0,
                 fadeInSec: 0,
                 fadeOutSec: 0,
-                fadeInCurve: "sine" as FadeCurveType,
-                fadeOutCurve: "sine" as FadeCurveType,
+                fadeInShape: 1,
+                fadeOutShape: 1,
+                fadeInDir: 0,
+                fadeOutDir: 0,
             });
             state.selectedClipId = newClipId;
             state.selectedTrackId = action.payload.trackId;

@@ -57,20 +57,11 @@ fn convert_volume(vol: f64) -> f32 {
     (vol as f32).clamp(0.0, 1.0)
 }
 
-fn reaper_fade_curve(values: &[f64]) -> String {
-    let shape = values.first().copied().unwrap_or(0.0).round() as i32;
-    match shape {
-        0 => "linear",
-        1 => "sine",
-        2 => "exponential",
-        3 => "logarithmic",
-        4 => "scurve",
-        5 => "exponential",
-        6 => "logarithmic",
-        _ => "sine",
-    }
-    .to_string()
-}
+/// 将 REAPER fade 数组换算为（浮点形状 id, 曲率）。
+///
+/// 历史：旧实现把形状数字映射到内部命名曲线枚举（"sine"/"exponential"…），
+/// v4 起 Clip 直接保存 REAPER 的形状/曲率原值，无需再经过命名枚举中转。
+use super::reaper_parser::reaper_fade_shape_dir;
 
 fn derive_fades_from_item_volume_envelope(
     item: &ReaperItem,
@@ -1163,15 +1154,17 @@ fn process_item(
     let item_length = item.length; // visible length (seconds)
     let (manual_fade_in_sec, manual_fade_out_sec, auto_fade_in_sec, auto_fade_out_sec) =
         effective_item_fades(item, take, item_length.max(0.0));
-    let fade_in_curve = if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
-        reaper_fade_curve(&take.fade_in)
+    // 形状/曲率与长度使用同一 take-vs-item 优先规则。
+    let (fade_in_shape, fade_in_dir) = if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
+        reaper_fade_shape_dir(&take.fade_in)
     } else {
-        reaper_fade_curve(&item.fade_in)
+        reaper_fade_shape_dir(&item.fade_in)
     };
-    let fade_out_curve = if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9 {
-        reaper_fade_curve(&take.fade_out)
+    let (fade_out_shape, fade_out_dir) = if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9
+    {
+        reaper_fade_shape_dir(&take.fade_out)
     } else {
-        reaper_fade_curve(&item.fade_out)
+        reaper_fade_shape_dir(&item.fade_out)
     };
 
     // 获取音高包络（如果有）
@@ -1318,8 +1311,12 @@ fn process_item(
                 },
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
-                fade_in_curve: "sine".to_string(),
-                fade_out_curve: "sine".to_string(),
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
                 auto_fade_in_sec: 0.0,
                 auto_fade_out_sec: 0.0,
                 extra_curves: None,
@@ -1371,21 +1368,34 @@ fn process_item(
                 manual_fade_out_sec.min(clip.length_sec.max(0.0))
             };
 
-            let fade_in_curve_name = if seg_idx == 0 {
-                fade_in_curve.clone()
+            // 段间合成淡化用线性（REAPER 拉伸段默认）；item 首尾保留导入形状/曲率。
+            let fade_in_shape = if seg_idx == 0 {
+                Some(fade_in_shape)
             } else {
-                "sine".to_string()
+                None
             };
-            let fade_out_curve_name = if seg_idx + 1 == seg_count {
-                fade_out_curve.clone()
+            let fade_out_shape = if seg_idx + 1 == seg_count {
+                Some(fade_out_shape)
             } else {
-                "sine".to_string()
+                None
             };
 
             clip.fade_in_sec = fade_in_sec;
             clip.fade_out_sec = fade_out_sec;
-            clip.fade_in_curve = fade_in_curve_name;
-            clip.fade_out_curve = fade_out_curve_name;
+            if let Some(shape) = fade_in_shape {
+                clip.fade_in_shape = shape;
+                clip.fade_in_dir = fade_in_dir;
+            } else {
+                clip.fade_in_shape = 0.0;
+                clip.fade_in_dir = 0.0;
+            }
+            if let Some(shape) = fade_out_shape {
+                clip.fade_out_shape = shape;
+                clip.fade_out_dir = fade_out_dir;
+            } else {
+                clip.fade_out_shape = 0.0;
+                clip.fade_out_dir = 0.0;
+            }
 
             // item 自身首/尾缘淡化：手动长度写入 fade_*（来自 REAPER 索引 1），
             // 自动交叉淡化长度写入 auto_fade_*（来自 REAPER 索引 2，仅该侧有自动标记）。
@@ -1496,8 +1506,12 @@ fn process_item(
             // auto_fade_*（REAPER 索引 2）。分开后自动值归零、手动值正确恢复。
             fade_in_sec: manual_fade_in_sec,
             fade_out_sec: manual_fade_out_sec,
-            fade_in_curve,
-            fade_out_curve,
+            fade_in_shape,
+            fade_out_shape,
+            fade_in_dir,
+            fade_out_dir,
+            fade_in_curve: String::new(),
+            fade_out_curve: String::new(),
             auto_fade_in_sec,
             auto_fade_out_sec,
             extra_curves: None,
@@ -1894,8 +1908,12 @@ fn process_midi_item(
         snap_offset_sec: item.snap_offs.max(0.0).min(item_length.max(0.0)),
         fade_in_sec: 0.0,
         fade_out_sec: 0.0,
-        fade_in_curve: "sine".to_string(),
-        fade_out_curve: "sine".to_string(),
+        fade_in_shape: 0.0,
+        fade_out_shape: 0.0,
+        fade_in_dir: 0.0,
+        fade_out_dir: 0.0,
+        fade_in_curve: String::new(),
+        fade_out_curve: String::new(),
         auto_fade_in_sec: 0.0,
         auto_fade_out_sec: 0.0,
         extra_curves: None,

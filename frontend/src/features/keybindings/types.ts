@@ -72,6 +72,8 @@ export type ActionId =
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
     | "modifier.clipCopyDrag" // 拖动 clip 时进入复制模式
     | "modifier.clipCrossfadeGrip" // 交叉点手柄拖拽时切换“反向缩放”模式
+    | "modifier.fadeCurvatureDrag" // 按住并拖动淡入淡出包络线/交叉点时调整曲率
+    | "modifier.fadeShapeCycleClick" // 按住左键点击包络线循环切换曲线类型
     | "modifier.horizontalZoom" // 按住+滚轮水平缩放
     | "modifier.pianoRollVerticalZoom" // PianoRoll Ctrl+滚轮垂直缩放
     | "modifier.scrollHorizontal" // 按住+滚轮水平滚动
@@ -122,7 +124,7 @@ export interface ActionMeta {
      * 修饰键操作类型（仅用于修饰键冲突检测）。
      * 同类型的修饰键绑定才会提示冲突，不同类型不提示。
      */
-    modifierOperationType?: "drag" | "wheel";
+    modifierOperationType?: "drag" | "wheel" | "click";
     /**
      * 作用域上下文（仅用于冲突检测）。
      * 具有不同 scopedContext 的绑定不会视为冲突，

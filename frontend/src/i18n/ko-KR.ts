@@ -520,6 +520,18 @@ export const koKR = {
     fade_curve_logarithmic: "로그",
     fade_curve_scurve: "S 커브",
 
+    // REAPER 일곱 프리셋 페이드 형태(순서는 timeline/reaperFade.ts FADE_PRESETS와 일치).
+    fade_shape_linear: "직선",
+    fade_shape_fast_start: "패스트 스타트",
+    fade_shape_fast_end: "패스트 엔드",
+    fade_shape_fast_start_steep: "샤프 패스트 스타트",
+    fade_shape_fast_end_steep: "샤프 패스트 엔드",
+    fade_shape_slow_start_end: "슬로우 스타트/엔드(S 커브)",
+    fade_shape_slow_start_end_steep: "샤프 슬로우 스타트/엔드",
+    curvature: "곡률",
+    fade_type_label: " 타입",
+    length: "길이",
+
     gain_value_tooltip: "게인: {gain} dB",
     gain_value_tooltip_drag: "게인: {gain} dB ({delta} dB)",
     track_change_color: "트랙 색상 변경",
@@ -629,6 +641,8 @@ export const koKR = {
     kb_modifier_no_snap: "드래그 중 스냅을 전환합니다 (누르면 현재 스냅을 반전)",
     kb_modifier_copy_drag: "복사 드래그 (클립 드래그 중 누르기)",
     kb_modifier_crossfade_grip: "크로스페이드 핸들 (크로스페이드 교차점 드래그 중 누르기)",
+    kb_modifier_fade_curvature: "페이드 곡률(길게 누른 채 드래그)",
+    kb_modifier_fade_shape_cycle: "페이드 형태 순환(누른 채 클릭)",
     kb_modifier_horizontal_zoom: "수평 줌 (누른 채 스크롤)",
     kb_modifier_pr_vzoom: "수직 줌 (누른 채 스크롤)",
     kb_modifier_param_morph: "파라미터 형태 변형 (선택 영역에서 누르기)",

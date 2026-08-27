@@ -88,6 +88,17 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         modifierOnly: true,
         ctrl: true,
     },
+    // 淡化包络曲率：对齐 REAPER “Alt 拖动调整张力”惯例；Alt 在
+    // 包络线/交叉点目标上无其他绑定，语义干净。
+    "modifier.fadeCurvatureDrag": { key: "alt", modifierOnly: true, alt: true },
+    // 参数线点击循环切换曲线类型：默认 Ctrl。macOS 上 ctrl 字段自动映射
+    // 为 ⌘（与 copyDrag/crossfadeGrip 同一约定）；operationType 用独立
+    // "click"，与既有 Ctrl+drag 系键位不构成同类型冲突。
+    "modifier.fadeShapeCycleClick": {
+        key: "control",
+        modifierOnly: true,
+        ctrl: true,
+    },
     "modifier.horizontalZoom": { key: "__none__", modifierOnly: true },
     "modifier.pianoRollVerticalZoom": {
         key: "control",
@@ -293,6 +304,16 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_modifier_crossfade_grip",
         group: "modifier",
         modifierOperationType: "drag",
+    },
+    "modifier.fadeCurvatureDrag": {
+        labelKey: "kb_modifier_fade_curvature",
+        group: "modifier",
+        modifierOperationType: "drag",
+    },
+    "modifier.fadeShapeCycleClick": {
+        labelKey: "kb_modifier_fade_shape_cycle",
+        group: "modifier",
+        modifierOperationType: "click",
     },
     "modifier.horizontalZoom": {
         labelKey: "kb_modifier_horizontal_zoom",

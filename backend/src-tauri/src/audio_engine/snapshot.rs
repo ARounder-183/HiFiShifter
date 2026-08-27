@@ -599,6 +599,25 @@ pub(crate) fn build_snapshot(
         let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as u64;
+        // 形状化淡化查表：仅在对应长度有效时构建，混音端按 (shape,dir) 缓存命中。
+        let fade_in_lut = if fade_in_frames > 0 {
+            Some(Arc::new(crate::fade_curves::global_fade_lut(
+                clip.fade_in_shape,
+                clip.fade_in_dir,
+                false,
+            )))
+        } else {
+            None
+        };
+        let fade_out_lut = if fade_out_frames > 0 {
+            Some(Arc::new(crate::fade_curves::global_fade_lut(
+                clip.fade_out_shape,
+                clip.fade_out_dir,
+                true,
+            )))
+        } else {
+            None
+        };
 
         // 提前计算 root_track_id，避免后续冗余溯源
         let root_track_id = timeline.resolve_root_track_id(&clip.track_id);
@@ -932,6 +951,8 @@ pub(crate) fn build_snapshot(
             loop_anchor_frame,
             fade_in_frames,
             fade_out_frames,
+            fade_in_lut,
+            fade_out_lut,
             gain,
             rendered_pcm,
             breath_noise_pcm,
@@ -1050,6 +1071,8 @@ pub(crate) fn build_snapshot_for_file(
             loop_anchor_frame: None,
             fade_in_frames: 0,
             fade_out_frames: 0,
+            fade_in_lut: None,
+            fade_out_lut: None,
             gain: 1.0,
             rendered_pcm: None,
             breath_noise_pcm: None,

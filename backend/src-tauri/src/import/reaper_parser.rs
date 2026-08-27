@@ -633,6 +633,31 @@ pub fn reaper_fade_effective_length_sec(values: &[f64]) -> f64 {
     }
 }
 
+/// 读取 fade 数组的 REAPER 浮点形状 id 与曲率（D_FADEINDIR，[-1,1]）。
+///
+/// - 索引 0：形状（浮点；整数 0..6 为标准七预设，小数变体如 1.1/5.1
+///   是官方开发者帖确认的扩展编码 —— 1.1→内部形状 7（等功率）、
+///   5.1→内部形状 6（锐利 S 曲线）），原样透传；
+/// - 索引 1：手动淡化长度；索引 2：自动交叉淡化长度（见上方辅助函数）；
+/// - 索引 3：形状镜像值（与索引 0 同步写出，如 `FADEIN 5.1 … 0 5.1 …`），
+///   解析时仅作索引 0 缺失时的回退；
+/// - 倒数第 3 位：自动交叉淡化 selector（见 reaper_fade_is_auto）；
+/// - 索引 5：曲率 D_FADEINDIR ∈ [-1, 1]（用户示例工程里淡入 0.25 /
+///   淡出 0.35 落在此槽）；
+/// - 索引 6：第二曲率参数 D_FADEINDIR2（语义未公开，暂不消费）。
+pub fn reaper_fade_shape_dir(values: &[f64]) -> (f64, f64) {
+    let mut shape = values.first().copied().unwrap_or(0.0);
+    if values.len() >= 4 && (shape == 0.0 || !shape.is_finite()) {
+        // 索引 0 缺失或异常时回退到镜像槽。
+        shape = values[3];
+    }
+    if !shape.is_finite() {
+        shape = 0.0;
+    }
+    let dir = values.get(5).copied().unwrap_or(0.0);
+    (shape, dir.clamp(-1.0, 1.0))
+}
+
 /// 解析可能带引号的路径字符串
 fn parse_path_string(tokens: &[&str]) -> String {
     if tokens.len() < 2 {
@@ -1612,5 +1637,72 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         // 过短数组（<4 个值）不能把 shape 误当 selector / 自动标记。
         assert!(!reaper_fade_is_auto(&[1.0, 0.1]));
         assert!(!reaper_fade_is_auto(&[1.0, 0.1, 0.0]));
+    }
+
+    #[test]
+    fn decodes_reaper7_shape_and_curvature_fields() {
+        // fade_in_out_test.rpp（REAPER 7.78 / win64 实测导出）：
+        // 淡入曲率 0.25、淡出曲率 0.35，形状槽为整数 0。
+        let fade_in = parse_fade_array(&[
+            "FADEIN", "0", "0.89154277826174", "0", "0", "0", "0.25", "0",
+        ]);
+        let fade_out = parse_fade_array(&[
+            "FADEOUT", "0", "0.61492516492441", "0", "0", "0", "0.35", "0",
+        ]);
+        assert_eq!(fade_in.len(), 7);
+        assert!(!reaper_fade_is_auto(&fade_in));
+        assert!((reaper_fade_manual_length_sec(&fade_in) - 0.89154277826174).abs() < 1e-12);
+        let (in_shape, in_dir) = reaper_fade_shape_dir(&fade_in);
+        assert_eq!(in_shape, 0.0);
+        assert!((in_dir - 0.25).abs() < 1e-12);
+        let (out_shape, out_dir) = reaper_fade_shape_dir(&fade_out);
+        assert_eq!(out_shape, 0.0);
+        assert!((out_dir - 0.35).abs() < 1e-12);
+
+        // 开发者帖实测样本：小数变体形状 `5.1` 在索引 0 与镜像槽同步出现；
+        // 镜像槽（索引 3）存的是取整后的基础形状（官方自动淡化样本中
+        // 形状 1.1 对应镜像槽写 1），仅在索引 0 缺失时作为回退。
+        let fractional = parse_fade_array(&[
+            "FADEIN", "5.1", "0.40101698468005", "0", "5.1", "0", "0", "0",
+        ]);
+        let (shape, dir) = reaper_fade_shape_dir(&fractional);
+        assert!((shape - 5.1).abs() < 1e-12, "fractional shape passthrough");
+        assert_eq!(dir, 0.0);
+
+        let auto = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let (auto_shape, auto_dir) = reaper_fade_shape_dir(&auto);
+        assert!((auto_shape - 1.1).abs() < 1e-12);
+        assert_eq!(auto_dir, 0.0);
+
+        // 索引 5 的曲率越界时夹紧到 [-1, 1]；短数组的曲率回退 0。
+        let clamped = reaper_fade_shape_dir(&parse_fade_array(&[
+            "FADEIN", "2", "0.01", "0", "2", "0", "3.7", "0",
+        ]));
+        assert_eq!(clamped.1, 1.0);
+        let (short_shape, short_dir) =
+            reaper_fade_shape_dir(&parse_fade_array(&["FADEIN", "4", "0.02"]));
+        assert_eq!(short_shape, 4.0);
+        assert_eq!(short_dir, 0.0);
+    }
+
+    #[test]
+    fn exported_fade_values_are_understood_by_reaper_layout() {
+        // 导出 → 解析往返：shape/dir/手动与自动长度各归其位。
+        let values = super::super::reaper_export::fade_values(3.0, 0.42, 0.1, 0.25);
+        assert_eq!(values.len(), 7);
+        assert!(reaper_fade_is_auto(&values));
+        assert!((reaper_fade_manual_length_sec(&values) - 0.1).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&values) - 0.25).abs() < 1e-12);
+        let (shape, dir) = reaper_fade_shape_dir(&values);
+        assert_eq!(shape, 3.0);
+        assert!((dir - 0.42).abs() < 1e-12);
+
+        // 手动淡化的 selector 为 0，形状小数变体原样写出、镜像槽取整。
+        let manual = super::super::reaper_export::fade_values(5.1, -0.75, 0.33, 0.0);
+        assert!(!reaper_fade_is_auto(&manual));
+        assert_eq!(manual[3], 5.0, "mirror slot stores truncated base shape");
+        let (shape, dir) = reaper_fade_shape_dir(&manual);
+        assert!((shape - 5.1).abs() < 1e-12);
+        assert!((dir - (-0.75)).abs() < 1e-12);
     }
 }

@@ -200,8 +200,10 @@ export const timelineApi = {
         snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         color?: string;
@@ -231,8 +233,10 @@ export const timelineApi = {
             payload.snapOffsetSec,
             payload.fadeInSec,
             payload.fadeOutSec,
-            payload.fadeInCurve,
-            payload.fadeOutCurve,
+            payload.fadeInShape,
+            payload.fadeOutShape,
+            payload.fadeInDir,
+            payload.fadeOutDir,
             payload.autoFadeInSec,
             payload.autoFadeOutSec,
             payload.color,

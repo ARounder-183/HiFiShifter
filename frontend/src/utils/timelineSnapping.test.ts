@@ -51,8 +51,10 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
             fadeOutSec: 0,
             gain: 1,
             muted: false,
-            fadeInCurve: "sine",
-            fadeOutCurve: "sine",
+            fadeInShape: 0,
+            fadeInDir: 0,
+            fadeOutShape: 0,
+            fadeOutDir: 0,
         },
         {
             id: "c1",
@@ -71,8 +73,10 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
             fadeOutSec: 0,
             gain: 1,
             muted: false,
-            fadeInCurve: "sine",
-            fadeOutCurve: "sine",
+            fadeInShape: 0,
+            fadeInDir: 0,
+            fadeOutShape: 0,
+            fadeOutDir: 0,
         },
     ];
 
