@@ -58,7 +58,6 @@ export function buildSparseClipRenderModel(args: {
     visibleTrackClipsById: Record<string, SparseRenderClip[]>;
     pxPerSec: number;
     rowHeight: number;
-    scrollLeft: number;
     selectedClipId: string | null;
     multiSelectedClipIds: string[];
     renamingClipId: string | null;
@@ -137,8 +136,8 @@ export function buildSparseClipRenderModel(args: {
         (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
             trackId: clip.trackId,
-            name: clipDisplayName(clip),
-            leftPx: clip.startSec * args.pxPerSec - args.scrollLeft,
+name: clipDisplayName(clip),
+            leftPx: clip.startSec * args.pxPerSec,
             topPx: visibleIndex * args.rowHeight,
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),
             heightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y),

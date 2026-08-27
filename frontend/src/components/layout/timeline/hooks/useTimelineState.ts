@@ -134,6 +134,8 @@ export interface TimelineStateResult {
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
+    rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
+    rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     playheadDragRef: React.MutableRefObject<{
@@ -155,6 +157,7 @@ export interface TimelineStateResult {
 
     // State values
     scrollLeft: number;
+    nativeScrollLeft: number;
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
     viewportWidth: number;
@@ -216,6 +219,7 @@ export interface TimelineStateResult {
     pendingDropDurationPathRef: React.MutableRefObject<string | null>;
 
     // Functions
+    setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
     setScrollLeftAction: React.Dispatch<React.SetStateAction<number>>;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
@@ -308,6 +312,8 @@ export function useTimelineState(): TimelineStateResult {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const trackListScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
+    const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
+    const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
@@ -328,6 +334,8 @@ export function useTimelineState(): TimelineStateResult {
 
     // ── State 声明 ────────────────────────────────────────────
     const [scrollLeft, setScrollLeft] = useState(0);
+    const [nativeScrollLeft, setNativeScrollLeft] = useState(0);
+    const setScrollLeftState = setScrollLeft;
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.pxPerSec"));
         return Number.isFinite(stored) && stored > 0
@@ -353,6 +361,7 @@ export function useTimelineState(): TimelineStateResult {
 
     useEffect(() => {
         scrollLeftRef.current = scrollLeft;
+        setNativeScrollLeft(scrollLeft);
     }, [scrollLeft]);
 
     useEffect(() => {
@@ -403,7 +412,17 @@ export function useTimelineState(): TimelineStateResult {
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
-        // ★ 立即广播视口变化 → WaveformTrackCanvas 直接 invalidate（绕过 React）
+        const playheadLeftPx =
+            (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
+        if (playheadRef.current) playheadRef.current.style.left = `${playheadLeftPx}px`;
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+        }
+        setNativeScrollLeft(next);
+        // ★ 立即广播视口变化 → TimelineWaveformSurface 直接 invalidate（绕过 React）
         timelineViewportBus.emit(next, pxPerSecRef.current, viewportWidthRef.current);
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
@@ -531,8 +550,8 @@ export function useTimelineState(): TimelineStateResult {
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
-    const crossfadeGripKb = useAppSelector(
-        (state) => selectKeybinding(state, "modifier.clipCrossfadeGrip"),
+    const crossfadeGripKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipCrossfadeGrip"),
     );
     const fadeCurvatureKb = useAppSelector(
         (state) => selectKeybinding(state, "modifier.fadeCurvatureDrag"),
@@ -1022,6 +1041,8 @@ export function useTimelineState(): TimelineStateResult {
         scrollRef,
         trackListScrollRef,
         rulerContentRef,
+        rulerPlayheadLineRef,
+        rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
         playheadDragRef,
@@ -1033,6 +1054,7 @@ export function useTimelineState(): TimelineStateResult {
         panRef,
 
         scrollLeft,
+        nativeScrollLeft,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
@@ -1077,6 +1099,7 @@ export function useTimelineState(): TimelineStateResult {
 
         syncScrollLeft,
         setScrollLeftAction,
+        setScrollLeftState,
         secFromClientX,
         beatFromClientX,
         trackIdFromClientY,

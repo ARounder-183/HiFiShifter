@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import {
     resolveHorizontalWheelZoom,
+    resolveCanvasViewportOffset,
     resolvePlayheadZoomScrollLeft,
     resolveTimelineScrollRange,
 } from "./timelineScrollRange.ts";
@@ -25,6 +26,29 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         if (actual !== expected) {
             throw new Error(`${label}: expected ${expected}, received ${actual}`);
         }
+    }
+
+    // A viewport-sized canvas renders local coordinates (world - requested
+    // scroll). Its wrapper lives inside the scrolled content, so the wrapper must
+    // be placed at the actual native scroll offset. Using only the rounding
+    // residual leaves the whole canvas near content x=0 and clips appear to jump
+    // out of view after zooming.
+    {
+        const result = resolveCanvasViewportOffset({
+            requestedScrollLeft: 2456.789,
+            actualScrollLeft: 2456,
+            viewportWidth: 987.654,
+        });
+        assertNear(
+            result.leftPx,
+            2456,
+            "canvas wrapper follows native scroll position beyond one viewport",
+        );
+        assertNear(
+            result.localScrollLeftPx,
+            2456.789,
+            "canvas keeps the exact requested local scroll position",
+        );
     }
 
     // 工程小于视口：右侧允许滚到工程右端，左侧不允许越过工程起点
@@ -123,6 +147,37 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         // 轨道坐标下光标屏幕 x = 6*100 - (300+200) = 100；
         // 缩放后参数编辑器绘制 scrollLeft = 6*110 - 100 - 200 = 360。
         assertNear(scrollLeft, 360, "synced playhead zoom preserves its shared screen position");
+    }
+
+    // 轨道视图端到端：鼠标锚点的“世界秒”必须在缩放前后保持不变。
+    // 这正是水平缩放时 clip 出现微量偏移的坐标系不变量。
+    {
+        const basePxPerSec = 123.456;
+        const baseScrollLeft = 456.789;
+        const anchorScreenX = 321.654;
+        const totalSec = 100;
+        const viewportWidth = 987.654;
+        const anchorWorldSec = (baseScrollLeft + anchorScreenX) / basePxPerSec;
+
+        for (const factor of [1.1, 0.9]) {
+            const zoom = resolveHorizontalWheelZoom({
+                factor,
+                basePxPerSec,
+                baseScrollLeft,
+                totalSec,
+                viewportWidth,
+                playheadZoomEnabled: false,
+                playheadSec: null,
+                anchorScreenX,
+                minPxPerSec: 0.5,
+                maxPxPerSec: 8000,
+            });
+            assertNear(
+                (zoom!.nextScrollLeft + anchorScreenX) / zoom!.nextPxPerSec,
+                anchorWorldSec,
+                `mouse anchor world stays fixed through track zoom (factor ${factor})`,
+            );
+        }
     }
 
     // 共享滚轮缩放：鼠标锚点保持不动

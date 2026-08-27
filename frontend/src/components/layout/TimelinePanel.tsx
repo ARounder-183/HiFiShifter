@@ -74,8 +74,8 @@ import {
     ClipContextMenu,
     TRACK_ADD_ROW_HEIGHT,
     TrackAreaContextMenu,
-    TimelineCanvasViewport,
     TimelineScrollArea,
+    TimelineSurface,
     TimeRuler,
     TrackLane,
     TrackList,
@@ -271,8 +271,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const { t } = useI18n();
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
-    const rulerPlayheadLineRef = React.useRef<HTMLDivElement | null>(null);
-    const rulerPlayheadHeadRef = React.useRef<HTMLDivElement | null>(null);
     // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
     // 记录名称区域的第一次点击，让播放头在短时间内收到同位置点击时转而进入重命名。
     const renameClickCandidateRef = React.useRef<ClipRenameClickCandidate | null>(null);
@@ -311,6 +309,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         scrollRef,
         trackListScrollRef,
         rulerContentRef,
+        rulerPlayheadLineRef,
+        rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
         playheadDragRef,
@@ -319,6 +319,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportWidthRef,
         rowHeightRef,
         scrollLeft,
+        setScrollLeftState,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
@@ -355,7 +356,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setClipDropNewTrack,
         pendingDropDurationPathRef,
         syncScrollLeft,
-        setScrollLeftAction,
         beatFromClientX,
         trackIdFromClientY,
         rowTopForTrackId,
@@ -1219,7 +1219,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 visibleTrackClipsById,
                 pxPerSec,
                 rowHeight,
-                scrollLeft,
                 selectedClipId: s.selectedClipId,
                 multiSelectedClipIds,
                 renamingClipId,
@@ -1231,7 +1230,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             renamingClipId,
             rowHeight,
             s.selectedClipId,
-            scrollLeft,
             visibleTrackClipsById,
             visibleTracks,
         ],
@@ -1248,7 +1246,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         () => resolveTimelineScrollRange({ contentWidth, viewportWidth }),
         [contentWidth, viewportWidth],
     );
-
     // ═════════════════════════════════════════════════════════
     // JSX 渲染
     // ═════════════════════════════════════════════════════════
@@ -1376,7 +1373,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     setPxPerSec={setPxPerSec}
                     rowHeight={rowHeight}
                     setRowHeight={setRowHeight}
-                    setScrollLeft={setScrollLeftAction}
+                    setScrollLeft={setScrollLeftState}
+                    rulerContentRef={rulerContentRef}
                     scrollHorizontalKb={scrollHorizontalKb}
                     scrollVerticalKb={scrollVerticalKb}
                     horizontalZoomKb={horizontalZoomKb}
@@ -1709,25 +1707,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 strongLineXs={tempoGridLineXs?.strong ?? null}
                             />
 
-                            {viewportWidth > 0 ? (
-                                <div
-                                    className="absolute pointer-events-none"
-                                    style={{
-                                        top: timelineRenderModel.startIndex * rowHeight,
-                                        left: scrollLeft,
-                                        width: viewportWidth,
-                                        height: visibleTrackCanvasHeight,
-                                        zIndex: 1,
-                                    }}
-                                >
-                                    <TimelineCanvasViewport
-                                        width={Math.max(1, Math.ceil(viewportWidth))}
-                                        height={visibleTrackCanvasHeight}
-                                        model={timelineCanvasModel}
-                                    />
-                                </div>
-                            ) : null}
-
                             {clipDropNewTrack ? (
                                 <div
                                     className="absolute left-0 right-0 pointer-events-none z-20"
@@ -2055,6 +2034,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }}
                             />
                         </div>
+
+                        {viewportWidth > 0 ? (
+                            <TimelineSurface
+                                tracks={visibleTracks}
+                                clipsByTrackId={visibleTrackClipsById}
+                                rowHeight={rowHeight}
+                                widthPx={Math.max(1, Math.ceil(viewportWidth))}
+                                heightPx={visibleTrackCanvasHeight}
+                                topPx={timelineRenderModel.startIndex * rowHeight}
+                                viewportStartSec={viewportStartSec}
+                                viewportEndSec={viewportEndSec}
+                                pxPerSec={pxPerSec}
+                                clipModel={timelineCanvasModel}
+                            />
+                        ) : null}
                     </div>
                 </TimelineScrollArea>
 

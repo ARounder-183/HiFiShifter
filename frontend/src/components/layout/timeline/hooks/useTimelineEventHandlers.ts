@@ -381,6 +381,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 nextScale: zoom.nextPxPerSec,
                 nextScrollLeft: zoom.nextScrollLeft,
             };
+            pxPerSecRef.current = zoom.nextPxPerSec;
             setPxPerSec(zoom.nextPxPerSec);
         }
 

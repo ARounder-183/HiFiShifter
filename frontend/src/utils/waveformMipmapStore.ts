@@ -41,12 +41,12 @@ const SPP_HYSTERESIS_EXIT_SCALE = 0.75;
 const LEVEL_COUNT = 3;
 
 /**
- * 文件级 mipmap 缓存的最大条目数（LRU 上限）。
+ * 文件级 mipmap 缓存的最大 backing-store 字节数。
  *
  * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
  * 该上限在"避免内存累积"与"频繁切换音频不需要重新解码"之间取折中。
  */
-const MAX_FILE_CACHE_SIZE = 512;
+const MAX_CACHE_BYTES = 192 * 1024 * 1024;
 
 // ============== 类型 ==============
 
@@ -74,6 +74,8 @@ interface FileMipmapCache {
     loadingLevels: Set<number>;
     /** 已确认加载失败、在 invalidate() 前不再自动重试的级别 */
     failedLevels: Set<number>;
+    /** 当前三级 Float32Array backing store 的总字节数 */
+    bytes: number;
 }
 
 /** 加载状态回调 */
@@ -88,6 +90,7 @@ export type LoadCallback = (
 class WaveformMipmapStoreImpl {
     /** sourcePath → FileMipmapCache */
     private cache = new Map<string, FileMipmapCache>();
+    private cacheBytes = 0;
 
     /** 加载状态监听器 */
     private listeners = new Set<LoadCallback>();
@@ -152,11 +155,14 @@ class WaveformMipmapStoreImpl {
      * 写入或覆盖缓存条目，并按 LRU 上限淘汰最旧条目。
      */
     private cacheSet(sourcePath: string, entry: FileMipmapCache): void {
-        if (this.cache.has(sourcePath)) {
+        const previous = this.cache.get(sourcePath);
+        if (previous) {
             // 删除旧位置，确保重新插入到末尾
             this.cache.delete(sourcePath);
+            this.cacheBytes -= previous.bytes;
         }
         this.cache.set(sourcePath, entry);
+        this.cacheBytes += entry.bytes;
         this.evictIfNeeded();
     }
 
@@ -171,14 +177,16 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
-     * 当条目数超过 MAX_FILE_CACHE_SIZE 时，按 LRU 顺序淘汰最旧的。
+     * 当数据超过字节预算时，按 LRU 顺序淘汰最旧的。
      * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存（保守做法）。
      */
     private evictIfNeeded(): void {
-        while (this.cache.size > MAX_FILE_CACHE_SIZE) {
+        while (this.cacheBytes > MAX_CACHE_BYTES && this.cache.size > 1) {
             const oldestKey = this.cache.keys().next().value as string | undefined;
             if (!oldestKey) break;
+            const oldest = this.cache.get(oldestKey);
             this.cache.delete(oldestKey);
+            this.cacheBytes -= oldest?.bytes ?? 0;
         }
     }
 
@@ -461,6 +469,43 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
+     * 获取零拷贝 min/max 视图及其实际时间边界。
+     *
+     * 共享 WebGL/Canvas surface 直接消费这两个 subarray，避免每帧构造
+     * interleaved、gain 和 downsample 中间数组。
+     */
+    getBestSliceView(
+        sourcePath: string,
+        preferredLevel: WaveformMipmapLevel,
+        startSec: number,
+        durationSec: number,
+    ): {
+        min: Float32Array;
+        max: Float32Array;
+        dataStartSec: number;
+        dataDurationSec: number;
+    } | null {
+        let peaks = this.getPeaks(sourcePath, preferredLevel);
+        if (!peaks) peaks = this.getNearestLoadedLevel(sourcePath, preferredLevel);
+        if (!peaks) return null;
+
+        const { sampleRate, divisionFactor } = peaks;
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
+        const endIdx = Math.min(
+            peaks.min.length,
+            Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
+        );
+        if (endIdx <= startIdx) return null;
+
+        return {
+            min: peaks.min.subarray(startIdx, endIdx),
+            max: peaks.max.subarray(startIdx, endIdx),
+            dataStartSec: (startIdx * divisionFactor) / sampleRate,
+            dataDurationSec: ((endIdx - startIdx) * divisionFactor) / sampleRate,
+        };
+    }
+
+    /**
      * 预加载文件的所有三级 mipmap 数据
      *
      * 音频导入/项目打开时调用。
@@ -517,6 +562,7 @@ class WaveformMipmapStoreImpl {
                     levels: [null, null, null],
                     loadingLevels: new Set(),
                     failedLevels: new Set(),
+                    bytes: 0,
                 };
                 this.cacheSet(sp, entry);
             } else {
@@ -584,6 +630,7 @@ class WaveformMipmapStoreImpl {
      * 清除指定文件缓存
      */
     invalidate(sourcePath: string): void {
+        this.cacheBytes -= this.cache.get(sourcePath)?.bytes ?? 0;
         this.cache.delete(sourcePath);
     }
 
@@ -606,6 +653,7 @@ class WaveformMipmapStoreImpl {
                 levels: [null, null, null],
                 loadingLevels: new Set(),
                 failedLevels: new Set(),
+                bytes: 0,
             };
             this.cacheSet(normalized, entry);
         } else {
@@ -626,6 +674,8 @@ class WaveformMipmapStoreImpl {
      */
     clear(): void {
         this.cache.clear();
+        this.cacheBytes = 0;
+        this.interleavedPool.length = 0;
     }
 
     /**
@@ -659,6 +709,7 @@ class WaveformMipmapStoreImpl {
                 levels: [null, null, null],
                 loadingLevels: new Set(),
                 failedLevels: new Set(),
+                bytes: 0,
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -718,6 +769,7 @@ class WaveformMipmapStoreImpl {
                 levels: [null, null, null],
                 loadingLevels: new Set(),
                 failedLevels: new Set(),
+                bytes: 0,
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -727,12 +779,18 @@ class WaveformMipmapStoreImpl {
         entry.sampleRate = decoded.sampleRate;
         const clampedLevel = Math.min(level, 2) as 0 | 1 | 2;
         entry.failedLevels.delete(clampedLevel);
+        const previous = entry.levels[clampedLevel];
+        const previousBytes = previous ? previous.min.byteLength + previous.max.byteLength : 0;
+        const nextBytes = decoded.min.byteLength + decoded.max.byteLength;
         entry.levels[clampedLevel] = {
             min: decoded.min,
             max: decoded.max,
             divisionFactor: decoded.divisionFactor,
             sampleRate: decoded.sampleRate,
         };
+        entry.bytes += nextBytes - previousBytes;
+        this.cacheBytes += nextBytes - previousBytes;
+        this.evictIfNeeded();
     }
 
     private getSliceFromPeaks(

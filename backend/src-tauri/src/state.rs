@@ -2077,9 +2077,8 @@ pub struct AppState {
     pub waveform_cache_dir: std::sync::Mutex<PathBuf>,
 
     /// V2 多级 mipmap 波形缓存 (key = source_path)
-    pub waveform_cache_v2: std::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<crate::hfspeaks_v2::HfsPeakFile>>,
-    >,
+    pub waveform_cache_v2:
+        std::sync::Mutex<crate::hfspeaks_v2::WaveformPeakCache>,
 
     /// Inflight deduplication for waveform peak computation.
     /// When a file is being computed, its source_path is in this set.
@@ -2137,7 +2136,9 @@ impl Default for AppState {
             suppress_checkpoints: std::sync::atomic::AtomicBool::new(false),
 
             waveform_cache_dir: std::sync::Mutex::new(crate::hfspeaks_v2::default_cache_dir()),
-            waveform_cache_v2: std::sync::Mutex::new(std::collections::HashMap::new()),
+            waveform_cache_v2: std::sync::Mutex::new(
+                crate::hfspeaks_v2::WaveformPeakCache::default(),
+            ),
 
             waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             waveform_inflight_cv: std::sync::Condvar::new(),
@@ -2231,7 +2232,7 @@ impl AppState {
 
         // ── 1. 检查内存缓存 ──
         {
-            let cache = self
+            let mut cache = self
                 .waveform_cache_v2
                 .lock()
                 .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -2269,7 +2270,7 @@ impl AppState {
                     .unwrap_or_else(|e| e.into_inner());
 
                 // 计算已完成，从缓存读取
-                let cache = self
+                let mut cache = self
                     .waveform_cache_v2
                     .lock()
                     .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -2314,7 +2315,7 @@ impl AppState {
                     .waveform_cache_v2
                     .lock()
                     .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                cache.insert(source_path.to_string(), cached.clone());
+                cache.insert(source_path, cached.clone());
             }
             // 磁盘缓存命中：发送 cached 状态事件
             if let Some(handle) = self.app_handle.get() {
@@ -2416,7 +2417,7 @@ impl AppState {
                 .waveform_cache_v2
                 .lock()
                 .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-            cache.insert(source_path.to_string(), peaks.clone());
+            cache.insert(source_path, peaks.clone());
         }
         // 移除 inflight 标记并通知等待线程
         self.remove_waveform_inflight(source_path);

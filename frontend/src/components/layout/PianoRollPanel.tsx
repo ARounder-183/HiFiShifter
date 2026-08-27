@@ -113,6 +113,7 @@ import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRoot
 import { averageSelectionValues, smoothSelectionValues } from "./pianoRoll/selectionTransforms";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
+import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
@@ -5241,6 +5242,15 @@ export const PianoRollPanel: React.FC = () => {
                                     weakLineXs={tempoGridLineXs?.weak ?? null}
                                     strongLineXs={tempoGridLineXs?.strong ?? null}
                                     sticky
+                                />
+
+                                <PianoRollWaveformSurface
+                                    clips={clipPeaks}
+                                    widthPx={viewSize.w}
+                                    heightPx={viewSize.h}
+                                    scrollLeftPx={scrollLeft}
+                                    pxPerSec={pxPerSec}
+                                    colors={waveformColors}
                                 />
 
                                 <canvas

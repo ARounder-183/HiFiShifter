@@ -1,0 +1,183 @@
+import type { WaveformGeometry } from "./geometry.ts";
+
+export interface WaveformSurfaceRenderer {
+    readonly kind: "webgl2" | "canvas2d";
+    render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void;
+    dispose(): void;
+}
+
+function resizeCanvas(
+    canvas: HTMLCanvasElement,
+    widthPx: number,
+    heightPx: number,
+    dpr: number,
+): { width: number; height: number } {
+    const width = Math.max(1, Math.round(widthPx * dpr));
+    const height = Math.max(1, Math.round(heightPx * dpr));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const cssWidth = `${Math.max(1, widthPx)}px`;
+    const cssHeight = `${Math.max(1, heightPx)}px`;
+    if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth;
+    if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight;
+    return { width, height };
+}
+
+function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error("Unable to create waveform shader");
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const message = gl.getShaderInfoLog(shader) ?? "Unknown waveform shader error";
+        gl.deleteShader(shader);
+        throw new Error(message);
+    }
+    return shader;
+}
+
+export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
+    readonly kind = "webgl2" as const;
+    private readonly canvas: HTMLCanvasElement;
+    private readonly gl: WebGL2RenderingContext;
+    private readonly program: WebGLProgram;
+    private readonly buffer: WebGLBuffer;
+    private readonly resolutionLocation: WebGLUniformLocation;
+
+    constructor(canvas: HTMLCanvasElement) {
+        this.canvas = canvas;
+        const gl = canvas.getContext("webgl2", {
+            alpha: true,
+            antialias: false,
+            depth: false,
+            stencil: false,
+            premultipliedAlpha: true,
+            preserveDrawingBuffer: false,
+            powerPreference: "high-performance",
+        });
+        if (!gl) throw new Error("WebGL2 is unavailable");
+        this.gl = gl;
+
+        const vertex = compileShader(
+            gl,
+            gl.VERTEX_SHADER,
+            `#version 300 es
+            in vec2 a_position;
+            in vec4 a_color;
+            uniform vec2 u_resolution;
+            out vec4 v_color;
+            void main() {
+                vec2 zeroToOne = a_position / u_resolution;
+                vec2 clip = zeroToOne * 2.0 - 1.0;
+                gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+                v_color = a_color;
+            }`,
+        );
+        const fragment = compileShader(
+            gl,
+            gl.FRAGMENT_SHADER,
+            `#version 300 es
+            precision mediump float;
+            in vec4 v_color;
+            out vec4 outColor;
+            void main() { outColor = v_color; }`,
+        );
+        const program = gl.createProgram();
+        if (!program) throw new Error("Unable to create waveform WebGL program");
+        gl.attachShader(program, vertex);
+        gl.attachShader(program, fragment);
+        gl.linkProgram(program);
+        gl.deleteShader(vertex);
+        gl.deleteShader(fragment);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            const message = gl.getProgramInfoLog(program) ?? "Unknown waveform link error";
+            gl.deleteProgram(program);
+            throw new Error(message);
+        }
+        const buffer = gl.createBuffer();
+        if (!buffer) throw new Error("Unable to create waveform vertex buffer");
+        const resolutionLocation = gl.getUniformLocation(program, "u_resolution");
+        if (!resolutionLocation) throw new Error("Waveform resolution uniform is missing");
+        this.program = program;
+        this.buffer = buffer;
+        this.resolutionLocation = resolutionLocation;
+    }
+
+    render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void {
+        const gl = this.gl;
+        const internal = resizeCanvas(this.canvas, widthPx, heightPx, dpr);
+        gl.viewport(0, 0, internal.width, internal.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(this.program);
+        gl.uniform2f(this.resolutionLocation, widthPx, heightPx);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices, gl.DYNAMIC_DRAW);
+
+        const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
+        const position = gl.getAttribLocation(this.program, "a_position");
+        const color = gl.getAttribLocation(this.program, "a_color");
+        gl.enableVertexAttribArray(position);
+        gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+        gl.enableVertexAttribArray(color);
+        gl.vertexAttribPointer(
+            color,
+            4,
+            gl.FLOAT,
+            false,
+            stride,
+            2 * Float32Array.BYTES_PER_ELEMENT,
+        );
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.drawArrays(gl.LINES, 0, geometry.vertices.length / 6);
+    }
+
+    dispose(): void {
+        this.gl.deleteBuffer(this.buffer);
+        this.gl.deleteProgram(this.program);
+    }
+}
+
+export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
+    readonly kind = "canvas2d" as const;
+    private readonly backCanvas = document.createElement("canvas");
+    private readonly canvas: HTMLCanvasElement;
+
+    constructor(canvas: HTMLCanvasElement) {
+        this.canvas = canvas;
+    }
+
+    render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void {
+        const internal = resizeCanvas(this.canvas, widthPx, heightPx, dpr);
+        resizeCanvas(this.backCanvas, widthPx, heightPx, dpr);
+        const back = this.backCanvas.getContext("2d");
+        const visible = this.canvas.getContext("2d");
+        if (!back || !visible) throw new Error("Canvas 2D is unavailable");
+
+        back.setTransform(dpr, 0, 0, dpr, 0, 0);
+        back.clearRect(0, 0, widthPx, heightPx);
+        back.lineWidth = 1;
+        const vertices = geometry.vertices;
+        for (let offset = 0; offset + 11 < vertices.length; offset += 12) {
+            const red = Math.round((vertices[offset + 2] ?? 1) * 255);
+            const green = Math.round((vertices[offset + 3] ?? 1) * 255);
+            const blue = Math.round((vertices[offset + 4] ?? 1) * 255);
+            const alpha = vertices[offset + 5] ?? 1;
+            back.strokeStyle = `rgba(${red},${green},${blue},${alpha})`;
+            back.beginPath();
+            back.moveTo(vertices[offset] ?? 0, vertices[offset + 1] ?? 0);
+            back.lineTo(vertices[offset + 6] ?? 0, vertices[offset + 7] ?? 0);
+            back.stroke();
+        }
+
+        visible.setTransform(1, 0, 0, 1, 0, 0);
+        visible.clearRect(0, 0, internal.width, internal.height);
+        visible.drawImage(this.backCanvas, 0, 0);
+    }
+
+    dispose(): void {
+        this.backCanvas.width = 1;
+        this.backCanvas.height = 1;
+    }
+}

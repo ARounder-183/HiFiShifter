@@ -33,6 +33,10 @@ import {
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
 
+function isLegacyWaveformRendererEnabled(): boolean {
+    return false;
+}
+
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
  */
@@ -686,8 +690,7 @@ export function drawPianoRoll(args: {
             const pc = ((midi % 12) + 12) % 12;
             const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
 
-            const normalColor =
-                pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
+            const normalColor = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
             ctx.strokeStyle = normalColor;
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -801,345 +804,343 @@ export function drawPianoRoll(args: {
         }
     }
 
-    // ========================================
-    // 废弃离屏 Canvas，保留 mipmap 级数状态即可
-    // ========================================
-    const drawPianoRollRef = drawPianoRoll as unknown as {
-        _lastLevelByClip?: Record<string, 0 | 1 | 2>;
-    };
-    if (!drawPianoRollRef._lastLevelByClip) {
-        drawPianoRollRef._lastLevelByClip = {};
-    }
-    const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
+    // Shared WaveformSurface now owns background waveform rendering. Keep this
+    // legacy block unreachable until its remaining helper imports are removed.
+    if (isLegacyWaveformRendererEnabled()) {
+        // ========================================
+        // 废弃离屏 Canvas，保留 mipmap 级数状态即可
+        // ========================================
+        const drawPianoRollRef = drawPianoRoll as unknown as {
+            _lastLevelByClip?: Record<string, 0 | 1 | 2>;
+        };
+        if (!drawPianoRollRef._lastLevelByClip) {
+            drawPianoRollRef._lastLevelByClip = {};
+        }
+        const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
 
-    // 级别提示键清理：该 map 挂在模块级函数属性上（跨卸载存活），
-    // 已删除/不可见 clip 的 `${path}::${clipId}` 键若不清理会无限累积。
-    {
-        const liveKeys = new Set<string>();
+        // 级别提示键清理：该 map 挂在模块级函数属性上（跨卸载存活），
+        // 已删除/不可见 clip 的 `${path}::${clipId}` 键若不清理会无限累积。
+        {
+            const liveKeys = new Set<string>();
+            for (const entry of clipPeaks) {
+                if (entry.sourcePath) liveKeys.add(`${entry.sourcePath}::${entry.clipId}`);
+            }
+            for (const key of Object.keys(lastLevelByClip)) {
+                if (!liveKeys.has(key)) delete lastLevelByClip[key];
+            }
+        }
+
+        // Background waveform: per-clip 叠加绘制
+        // 与 WaveformTrackCanvas 保持一致的数据路径：
+        // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform
         for (const entry of clipPeaks) {
-            if (entry.sourcePath) liveKeys.add(`${entry.sourcePath}::${entry.clipId}`);
-        }
-        for (const key of Object.keys(lastLevelByClip)) {
-            if (!liveKeys.has(key)) delete lastLevelByClip[key];
-        }
-    }
+            if (!entry.sourcePath) continue;
+            if (entry.muted) continue;
 
-    // Background waveform: per-clip 叠加绘制
-    // 与 WaveformTrackCanvas 保持一致的数据路径：
-    // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform
-    for (const entry of clipPeaks) {
-        if (!entry.sourcePath) continue;
-        if (entry.muted) continue;
+            const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
+            const sourceStartSec = entry.sourceStartSec ?? 0;
+            const sourceDurSec = entry.sourceDurationSec;
+            if (sourceDurSec <= 0) continue;
 
-        const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
-        const sourceStartSec = entry.sourceStartSec ?? 0;
-        const sourceDurSec = entry.sourceDurationSec;
-        if (sourceDurSec <= 0) continue;
+            const clipStartSec = entry.startSec;
+            const clipEndSec = clipStartSec + entry.lengthSec;
+            const clipWidthPx = entry.lengthSec * pxPerSec;
+            if (clipWidthPx <= 0) continue;
 
-        const clipStartSec = entry.startSec;
-        const clipEndSec = clipStartSec + entry.lengthSec;
-        const clipWidthPx = entry.lengthSec * pxPerSec;
-        if (clipWidthPx <= 0) continue;
+            // 只渲染当前视口内的片段
+            const visStartSec = Math.max(clipStartSec, visibleStartSec);
+            const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
+            if (visEndSec <= visStartSec) continue;
 
-        // 只渲染当前视口内的片段
-        const visStartSec = Math.max(clipStartSec, visibleStartSec);
-        const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
-        if (visEndSec <= visStartSec) continue;
+            const viewportStartPx = Math.round(scrollLeft);
+            const clipStartPx = Math.round(clipStartSec * pxPerSec);
 
-        const viewportStartPx = Math.round(scrollLeft);
-        const clipStartPx = Math.round(clipStartSec * pxPerSec);
-
-        const isLoop = Boolean(entry.loopEnabled);
-        const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
-        const storedSourceEndSec =
-            Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
-        // 消费窗口模型（与后端 clip_playback_window_sec / WaveformTrackCanvas
-        // 一致）：正放 win=[ss, ss+len·r)、倒放 win=[se−len·r, se)。倒放的
-        // sourceStartSec 不参与取窗 —— 否则延伸/trim 写入的域外锚点会让波形
-        // 与音频错位。
-        const { winStartSec, winEndSec } = resolvePlaybackWindowSec({
-            loopEnabled: isLoop,
-            reversed: Boolean(entry.reversed),
-            sourceStartSec,
-            playbackRate: pr,
-            lengthSec: entry.lengthSec,
-            sourceEndSec: storedSourceEndSec,
-        });
-        const effSrcEndPiano = Math.min(winEndSec, mediaDurPiano || winEndSec);
-        let clipSourceSpanSec: number;
-        if (!isLoop) {
-            // 非 Loop：窗口宽度恒为 len·r（域外为静音，无数据 → 空白）。
-            clipSourceSpanSec = Math.max(0, winEndSec - winStartSec);
-        } else if (mediaDurPiano > 1e-6) {
-            // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与媒体
-            // 时长决定 —— split 等编辑会产生 sourceStart > sourceEnd 的"环绕
-            // 窗口"，可用性只取决于媒体时长本身（否则波形会整体消失）。
-            clipSourceSpanSec = mediaDurPiano;
-        } else {
-            // 无有效媒体时长：退化为窗口跨度
-            clipSourceSpanSec = Math.max(
-                0,
-                Math.min(winEndSec, sourceDurSec || winEndSec) - winStartSec,
-            );
-        }
-        if (clipSourceSpanSec <= 0) continue;
-
-        // ── 循环分段（Loop = 循环原始音频文件，与 WaveformTrackCanvas 一致）──
-        // 语义：正放 src(t)=mod(sourceStart+t·pr, D)、倒放 src(t)=mod(sourceEnd−t·pr, D)，
-        // D = 完整媒体时长。分段 = 头部进入段 + 整文件重复段；
-        // 每段携带自己的源窗口，clipDuration === 源跨度/pr（倒放镜像成立），
-        // 超出 clip 长度的部分仅通过绘制矩形裁掉。
-        // 淡入淡出按 clip 局部时间求值（每段携带完整淡化参数）。
-        interface PianoRollTile {
-            localStartSec: number;
-            durationSec: number;
-            srcWinStart: number;
-            srcWinEnd: number;
-        }
-        const tiles: PianoRollTile[] = [];
-        if (!isLoop) {
-            tiles.push({
-                localStartSec: 0,
-                durationSec: entry.lengthSec,
-                srcWinStart: winStartSec,
-                srcWinEnd: winEndSec,
+            const isLoop = Boolean(entry.loopEnabled);
+            const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
+            const storedSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
+            // 消费窗口模型（与后端 clip_playback_window_sec / WaveformTrackCanvas
+            // 一致）：正放 win=[ss, ss+len·r)、倒放 win=[se−len·r, se)。倒放的
+            // sourceStartSec 不参与取窗 —— 否则延伸/trim 写入的域外锚点会让波形
+            // 与音频错位。
+            const { winStartSec, winEndSec } = resolvePlaybackWindowSec({
+                loopEnabled: isLoop,
+                reversed: Boolean(entry.reversed),
+                sourceStartSec,
+                playbackRate: pr,
+                lengthSec: entry.lengthSec,
+                sourceEndSec: storedSourceEndSec,
             });
-        } else if (!(mediaDurPiano > 1e-6)) {
-            // 无有效媒体时长：退化为单片近似
-            tiles.push({
-                localStartSec: 0,
-                durationSec: entry.lengthSec,
-                srcWinStart: winStartSec,
-                srcWinEnd: winEndSec,
-            });
-        } else {
-            // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D) 一致，
-            // 与 WaveformTrackCanvas 相同）—— 负 / 超界存储锚点正确环绕。
-            const anchorFwd = modEuclid(sourceStartSec, mediaDurPiano);
-            const anchorRev = modEuclid(effSrcEndPiano, mediaDurPiano);
-            const headDur = (entry.reversed ? anchorRev : mediaDurPiano - anchorFwd) / pr;
-            const bodyDur = mediaDurPiano / pr;
-            const visLocalStart = Math.max(0, visStartSec - clipStartSec);
-            const visLocalEnd = Math.min(entry.lengthSec, visEndSec - clipStartSec);
-            // 分段数按【可见区间】估算（与 WaveformTrackCanvas 一致）——
-            // 长循环 clip 不会落入"单片拉伸近似"。
-            // 首个重复段取**包含视口左缘**的那一段（floor），避免左缘空隙。
-            const firstBodyIndex = Math.max(
-                0,
-                Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
-            );
-            const approxCount =
-                2 +
-                Math.ceil(
-                    (visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur,
+            const effSrcEndPiano = Math.min(winEndSec, mediaDurPiano || winEndSec);
+            let clipSourceSpanSec: number;
+            if (!isLoop) {
+                // 非 Loop：窗口宽度恒为 len·r（域外为静音，无数据 → 空白）。
+                clipSourceSpanSec = Math.max(0, winEndSec - winStartSec);
+            } else if (mediaDurPiano > 1e-6) {
+                // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与媒体
+                // 时长决定 —— split 等编辑会产生 sourceStart > sourceEnd 的"环绕
+                // 窗口"，可用性只取决于媒体时长本身（否则波形会整体消失）。
+                clipSourceSpanSec = mediaDurPiano;
+            } else {
+                // 无有效媒体时长：退化为窗口跨度
+                clipSourceSpanSec = Math.max(
+                    0,
+                    Math.min(winEndSec, sourceDurSec || winEndSec) - winStartSec,
                 );
-            if (visLocalEnd > visLocalStart && approxCount <= 4096) {
-                if (headDur > 1e-9 && visLocalStart < headDur) {
+            }
+            if (clipSourceSpanSec <= 0) continue;
+
+            // ── 循环分段（Loop = 循环原始音频文件，与 WaveformTrackCanvas 一致）──
+            // 语义：正放 src(t)=mod(sourceStart+t·pr, D)、倒放 src(t)=mod(sourceEnd−t·pr, D)，
+            // D = 完整媒体时长。分段 = 头部进入段 + 整文件重复段；
+            // 每段携带自己的源窗口，clipDuration === 源跨度/pr（倒放镜像成立），
+            // 超出 clip 长度的部分仅通过绘制矩形裁掉。
+            // 淡入淡出按 clip 局部时间求值（每段携带完整淡化参数）。
+            interface PianoRollTile {
+                localStartSec: number;
+                durationSec: number;
+                srcWinStart: number;
+                srcWinEnd: number;
+            }
+            const tiles: PianoRollTile[] = [];
+            if (!isLoop) {
+                tiles.push({
+                    localStartSec: 0,
+                    durationSec: entry.lengthSec,
+                    srcWinStart: winStartSec,
+                    srcWinEnd: winEndSec,
+                });
+            } else if (!(mediaDurPiano > 1e-6)) {
+                // 无有效媒体时长：退化为单片近似
+                tiles.push({
+                    localStartSec: 0,
+                    durationSec: entry.lengthSec,
+                    srcWinStart: winStartSec,
+                    srcWinEnd: winEndSec,
+                });
+            } else {
+                // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D) 一致，
+                // 与 WaveformTrackCanvas 相同）—— 负 / 超界存储锚点正确环绕。
+                const anchorFwd = modEuclid(sourceStartSec, mediaDurPiano);
+                const anchorRev = modEuclid(effSrcEndPiano, mediaDurPiano);
+                const headDur = (entry.reversed ? anchorRev : mediaDurPiano - anchorFwd) / pr;
+                const bodyDur = mediaDurPiano / pr;
+                const visLocalStart = Math.max(0, visStartSec - clipStartSec);
+                const visLocalEnd = Math.min(entry.lengthSec, visEndSec - clipStartSec);
+                // 分段数按【可见区间】估算（与 WaveformTrackCanvas 一致）——
+                // 长循环 clip 不会落入"单片拉伸近似"。
+                // 首个重复段取**包含视口左缘**的那一段（floor），避免左缘空隙。
+                const firstBodyIndex = Math.max(
+                    0,
+                    Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
+                );
+                const approxCount =
+                    2 + Math.ceil((visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur);
+                if (visLocalEnd > visLocalStart && approxCount <= 4096) {
+                    if (headDur > 1e-9 && visLocalStart < headDur) {
+                        tiles.push({
+                            localStartSec: 0,
+                            durationSec: headDur,
+                            srcWinStart: entry.reversed ? 0 : anchorFwd,
+                            srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
+                        });
+                    }
+                    let segOffset = headDur + firstBodyIndex * bodyDur;
+                    for (
+                        let guard = 0;
+                        segOffset < visLocalEnd - 1e-9 && guard < 4096;
+                        guard += 1
+                    ) {
+                        tiles.push({
+                            localStartSec: segOffset,
+                            durationSec: bodyDur,
+                            srcWinStart: 0,
+                            srcWinEnd: mediaDurPiano,
+                        });
+                        segOffset += bodyDur;
+                    }
+                } else {
+                    // 退化保护：单片近似。
+                    // 用"进入段"窗口（锚点 → 媒体末端/起点）近似，
+                    // 避免按 [start, start+span] 取到越界源区间。
                     tiles.push({
                         localStartSec: 0,
-                        durationSec: headDur,
+                        durationSec: entry.lengthSec,
                         srcWinStart: entry.reversed ? 0 : anchorFwd,
                         srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
                     });
                 }
-                let segOffset =
-                    headDur + firstBodyIndex * bodyDur;
-                for (
-                    let guard = 0;
-                    segOffset < visLocalEnd - 1e-9 && guard < 4096;
-                    guard += 1
-                ) {
-                    tiles.push({
-                        localStartSec: segOffset,
-                        durationSec: bodyDur,
-                        srcWinStart: 0,
-                        srcWinEnd: mediaDurPiano,
-                    });
-                    segOffset += bodyDur;
+                if (tiles.length === 0) continue;
+            }
+
+            // ── 同窗口切片缓存 ─────────────────────────────────────────────
+            // 单条目切片缓存：窗口参数相同的相邻瓦片（或重绘间未变化的窗口）
+            // 直接复用上一次切片，缓存持有 store buffer 直到换窗或本 clip
+            // 结束（与 WaveformTrackCanvas 保持一致）。
+            let fetchCacheKey: string | null = null;
+            let fetchCacheResult: {
+                interleaved: Float32Array;
+                dataStartSec: number;
+                dataDurationSec: number;
+            } | null = null;
+            const releaseFetchCache = () => {
+                if (fetchCacheResult) {
+                    waveformMipmapStore.releaseInterleaved(fetchCacheResult.interleaved);
+                    fetchCacheResult = null;
                 }
-            } else {
-                // 退化保护：单片近似。
-                // 用"进入段"窗口（锚点 → 媒体末端/起点）近似，
-                // 避免按 [start, start+span] 取到越界源区间。
-                tiles.push({
-                    localStartSec: 0,
-                    durationSec: entry.lengthSec,
-                    srcWinStart: entry.reversed ? 0 : anchorFwd,
-                    srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
-                });
-            }
-            if (tiles.length === 0) continue;
-        }
-
-        // ── 同窗口切片缓存 ─────────────────────────────────────────────
-        // 单条目切片缓存：窗口参数相同的相邻瓦片（或重绘间未变化的窗口）
-        // 直接复用上一次切片，缓存持有 store buffer 直到换窗或本 clip
-        // 结束（与 WaveformTrackCanvas 保持一致）。
-        let fetchCacheKey: string | null = null;
-        let fetchCacheResult: {
-            interleaved: Float32Array;
-            dataStartSec: number;
-            dataDurationSec: number;
-        } | null = null;
-        const releaseFetchCache = () => {
-            if (fetchCacheResult) {
-                waveformMipmapStore.releaseInterleaved(fetchCacheResult.interleaved);
-                fetchCacheResult = null;
-            }
-            fetchCacheKey = null;
-        };
-
-        // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel
-        // 实现滞后防抖）。级别只依赖 pxPerSec 与采样率，对本 clip 的所有
-        // 瓦片都相同 —— 移到循环外，避免每瓦片重复计算与写回。
-        const sampleRate = entry.sourceSampleRate || 44100;
-        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
-        const previousLevel = lastLevelByClip[levelKey];
-        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
-        lastLevelByClip[levelKey] = stableLevel;
-
-        // 边缘外扩（与 WaveformTrackCanvas 相同的公式）：保证像素列插值
-        // 在瓦片可见边界处不缺数据。
-        const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, pxPerSec)) * pr);
-
-        for (const tile of tiles) {
-            const tileLocalEndSec = tile.localStartSec + tile.durationSec;
-            const visLocalStart = Math.max(tile.localStartSec, visStartSec - clipStartSec);
-            const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
-            if (visLocalEnd <= visLocalStart) continue;
-
-            // 该分段自己的源窗口（头部进入段 / 整文件重复段）。
-            // 只请求当前可见部分对应的源数据 —— 此前整窗取数（正放/倒放重复
-            // 段即整个媒体 [0, D]），长媒体的每个循环瓦片都要对全量 peaks 跑
-            // applyGains/renderWaveform 的索引换算，开销随媒体时长线性放大；
-            // 与 WaveformTrackCanvas 一致地取"瓦片 ∩ 视口"后，成本只与
-            // 可见像素相关。renderWaveform 依据 dataStartSec/dataDurationSec
-            // 把部分数据映射回正确的屏幕位置，绘制结果不变。
-            const tileSpanStartSec = tile.srcWinStart;
-            const tileSpanEndSec = tile.srcWinEnd;
-            const sourceVisStartSec = entry.reversed
-                ? tileSpanEndSec - (visLocalEnd - tile.localStartSec) * pr
-                : tileSpanStartSec + (visLocalStart - tile.localStartSec) * pr;
-            const sourceVisEndSec = entry.reversed
-                ? tileSpanEndSec - (visLocalStart - tile.localStartSec) * pr
-                : tileSpanStartSec + (visLocalEnd - tile.localStartSec) * pr;
-            // 取数范围 clamp 到媒体 [0, mediaDurPiano]：消费窗口（尤其倒放
-            // 延伸后的 [se−len·r, se]）可越出媒体域，缺失区间无数据、自然
-            // 渲染为空白 —— 与音频的静音表达一致。
-            const sourceTimeStart = Math.max(
-                0,
-                tileSpanStartSec,
-                Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSecPiano,
-            );
-            const sourceTimeEnd = Math.min(
-                mediaDurPiano,
-                tileSpanEndSec,
-                Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSecPiano,
-            );
-            // 可见区与媒体域无交集（纯静音段）：跳过取数与绘制，防止退化
-            // 请求把媒体开头的 1ms 数据错误映射进静音区。
-            if (!(sourceTimeEnd > sourceTimeStart + 1e-9)) {
-                releaseFetchCache();
-                continue;
-            }
-            const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
-
-            // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）
-            const fetchKey = `${sourceTimeStart}|${sourceDuration}`;
-            if (!fetchCacheResult || fetchKey !== fetchCacheKey) {
-                releaseFetchCache();
-                fetchCacheKey = fetchKey;
-                fetchCacheResult = waveformMipmapStore.getInterleavedSlice(
-                    entry.sourcePath,
-                    stableLevel,
-                    sourceTimeStart,
-                    sourceDuration,
-                );
-            }
-            const result = fetchCacheResult;
-            if (!result || result.interleaved.length < 4) {
-                releaseFetchCache();
-                continue;
-            }
-
-            // 瓦片在画布上的可见像素范围
-            const tileVisLeft =
-                Math.round((clipStartSec + visLocalStart) * pxPerSec) - viewportStartPx;
-            const tileVisRight =
-                Math.round((clipStartSec + visLocalEnd) * pxPerSec) - viewportStartPx;
-            if (tileVisRight <= tileVisLeft) {
-                continue;
-            }
-
-            // clipPixelOffset = canvas 左边缘对应的瓦片局部像素：
-            // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
-            // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
-            // 子像素漂移。
-            const tileStartTimelinePx = clipStartPx + tile.localStartSec * pxPerSec;
-            const clipPixelOffset =
-                Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
-
-            const effectiveFadeInPiano =
-                Number(entry.autoFadeInSec ?? 0) > 0
-                    ? Number(entry.autoFadeInSec) || 0
-                    : Number(entry.fadeInSec ?? 0) || 0;
-            const effectiveFadeOutPiano =
-                Number(entry.autoFadeOutSec ?? 0) > 0
-                    ? Number(entry.autoFadeOutSec) || 0
-                    : Number(entry.fadeOutSec ?? 0) || 0;
-
-            // 构建渲染参数（以单个循环分段为坐标系；
-            // sourceStart + clipDuration·rate === 该段源窗口终点，倒放镜像成立）
-            const params: WaveformRenderParams = {
-                canvasWidth: w,
-                canvasHeight: h,
-                centerY: h / 2,
-                zeroDbHalfHeight: h / 2,
-                sourceStartSec: tile.srcWinStart,
-                clipDuration: tile.durationSec,
-                playbackRate: pr,
-                reversed: entry.reversed,
-                sourceDurationSec: sourceDurSec,
-                volumeGain: Number(entry.gain ?? 1) || 1,
-                // 每个分段都携带完整淡化参数（增益按 clip 局部时间求值），
-                // 长于一个周期的淡化横跨多段时包络保持连续。
-                fadeInSec: effectiveFadeInPiano,
-                fadeOutSec: effectiveFadeOutPiano,
-                fadeInShape: entry.fadeInShape ?? 0,
-                fadeInDir: entry.fadeInDir ?? 0,
-                fadeOutShape: entry.fadeOutShape ?? 0,
-                fadeOutDir: entry.fadeOutDir ?? 0,
-                dataStartSec: result.dataStartSec,
-                dataDurationSec: result.dataDurationSec,
-                clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
-                clipTotalDurationSec: entry.lengthSec,
-                clipPixelOffset,
-                clipTotalWidthPx: Math.max(1, tile.durationSec * pxPerSec),
+                fetchCacheKey = null;
             };
 
-            // 应用增益（音量 + 淡入淡出）
-            const withGains = applyGainsToPeaks(result.interleaved, params);
+            // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel
+            // 实现滞后防抖）。级别只依赖 pxPerSec 与采样率，对本 clip 的所有
+            // 瓦片都相同 —— 移到循环外，避免每瓦片重复计算与写回。
+            const sampleRate = entry.sourceSampleRate || 44100;
+            const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
+            const levelKey = `${entry.sourcePath}::${entry.clipId}`;
+            const previousLevel = lastLevelByClip[levelKey];
+            const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+            lastLevelByClip[levelKey] = stableLevel;
 
-            ctx.save();
-            // beginPath 必须先于 rect：canvas 路径不受 save/restore 管理，
-            // 缺失会让 rect 永久累积（clip 区域 = 历史所有矩形并集，
-            // 跨瓦片/跨 clip 渗透，且每帧路径增长造成渐进卡顿）。
-            ctx.beginPath();
-            ctx.rect(tileVisLeft, 0, tileVisRight - tileVisLeft, h);
-            ctx.clip();
+            // 边缘外扩（与 WaveformTrackCanvas 相同的公式）：保证像素列插值
+            // 在瓦片可见边界处不缺数据。
+            const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, pxPerSec)) * pr);
 
-            // 静音 clip 半透明
-            ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
-            renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
+            for (const tile of tiles) {
+                const tileLocalEndSec = tile.localStartSec + tile.durationSec;
+                const visLocalStart = Math.max(tile.localStartSec, visStartSec - clipStartSec);
+                const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
+                if (visLocalEnd <= visLocalStart) continue;
 
-            ctx.restore();
-            if (withGains !== result.interleaved) {
-                releaseGainBuffer(withGains);
+                // 该分段自己的源窗口（头部进入段 / 整文件重复段）。
+                // 只请求当前可见部分对应的源数据 —— 此前整窗取数（正放/倒放重复
+                // 段即整个媒体 [0, D]），长媒体的每个循环瓦片都要对全量 peaks 跑
+                // applyGains/renderWaveform 的索引换算，开销随媒体时长线性放大；
+                // 与 WaveformTrackCanvas 一致地取"瓦片 ∩ 视口"后，成本只与
+                // 可见像素相关。renderWaveform 依据 dataStartSec/dataDurationSec
+                // 把部分数据映射回正确的屏幕位置，绘制结果不变。
+                const tileSpanStartSec = tile.srcWinStart;
+                const tileSpanEndSec = tile.srcWinEnd;
+                const sourceVisStartSec = entry.reversed
+                    ? tileSpanEndSec - (visLocalEnd - tile.localStartSec) * pr
+                    : tileSpanStartSec + (visLocalStart - tile.localStartSec) * pr;
+                const sourceVisEndSec = entry.reversed
+                    ? tileSpanEndSec - (visLocalStart - tile.localStartSec) * pr
+                    : tileSpanStartSec + (visLocalEnd - tile.localStartSec) * pr;
+                // 取数范围 clamp 到媒体 [0, mediaDurPiano]：消费窗口（尤其倒放
+                // 延伸后的 [se−len·r, se]）可越出媒体域，缺失区间无数据、自然
+                // 渲染为空白 —— 与音频的静音表达一致。
+                const sourceTimeStart = Math.max(
+                    0,
+                    tileSpanStartSec,
+                    Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSecPiano,
+                );
+                const sourceTimeEnd = Math.min(
+                    mediaDurPiano,
+                    tileSpanEndSec,
+                    Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSecPiano,
+                );
+                // 可见区与媒体域无交集（纯静音段）：跳过取数与绘制，防止退化
+                // 请求把媒体开头的 1ms 数据错误映射进静音区。
+                if (!(sourceTimeEnd > sourceTimeStart + 1e-9)) {
+                    releaseFetchCache();
+                    continue;
+                }
+                const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
+
+                // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）
+                const fetchKey = `${sourceTimeStart}|${sourceDuration}`;
+                if (!fetchCacheResult || fetchKey !== fetchCacheKey) {
+                    releaseFetchCache();
+                    fetchCacheKey = fetchKey;
+                    fetchCacheResult = waveformMipmapStore.getInterleavedSlice(
+                        entry.sourcePath,
+                        stableLevel,
+                        sourceTimeStart,
+                        sourceDuration,
+                    );
+                }
+                const result = fetchCacheResult;
+                if (!result || result.interleaved.length < 4) {
+                    releaseFetchCache();
+                    continue;
+                }
+
+                // 瓦片在画布上的可见像素范围
+                const tileVisLeft =
+                    Math.round((clipStartSec + visLocalStart) * pxPerSec) - viewportStartPx;
+                const tileVisRight =
+                    Math.round((clipStartSec + visLocalEnd) * pxPerSec) - viewportStartPx;
+                if (tileVisRight <= tileVisLeft) {
+                    continue;
+                }
+
+                // clipPixelOffset = canvas 左边缘对应的瓦片局部像素：
+                // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
+                // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
+                // 子像素漂移。
+                const tileStartTimelinePx = clipStartPx + tile.localStartSec * pxPerSec;
+                const clipPixelOffset = Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
+
+                const effectiveFadeInPiano =
+                    Number(entry.autoFadeInSec ?? 0) > 0
+                        ? Number(entry.autoFadeInSec) || 0
+                        : Number(entry.fadeInSec ?? 0) || 0;
+                const effectiveFadeOutPiano =
+                    Number(entry.autoFadeOutSec ?? 0) > 0
+                        ? Number(entry.autoFadeOutSec) || 0
+                        : Number(entry.fadeOutSec ?? 0) || 0;
+
+                // 构建渲染参数（以单个循环分段为坐标系；
+                // sourceStart + clipDuration·rate === 该段源窗口终点，倒放镜像成立）
+                const params: WaveformRenderParams = {
+                    canvasWidth: w,
+                    canvasHeight: h,
+                    centerY: h / 2,
+                    zeroDbHalfHeight: h / 2,
+                    sourceStartSec: tile.srcWinStart,
+                    clipDuration: tile.durationSec,
+                    playbackRate: pr,
+                    reversed: entry.reversed,
+                    sourceDurationSec: sourceDurSec,
+                    volumeGain: Number(entry.gain ?? 1) || 1,
+                    // 每个分段都携带完整淡化参数（增益按 clip 局部时间求值），
+                    // 长于一个周期的淡化横跨多段时包络保持连续。
+                    fadeInSec: effectiveFadeInPiano,
+                    fadeOutSec: effectiveFadeOutPiano,
+                    fadeInShape: Number.isFinite(entry.fadeInShape) ? entry.fadeInShape : 0,
+                    fadeInDir: entry.fadeInDir ?? 0,
+                    fadeOutShape: Number.isFinite(entry.fadeOutShape) ? entry.fadeOutShape : 0,
+                    fadeOutDir: entry.fadeOutDir ?? 0,
+                    dataStartSec: result.dataStartSec,
+                    dataDurationSec: result.dataDurationSec,
+                    clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
+                    clipTotalDurationSec: entry.lengthSec,
+                    clipPixelOffset,
+                    clipTotalWidthPx: Math.max(1, tile.durationSec * pxPerSec),
+                };
+
+                // 应用增益（音量 + 淡入淡出）
+                const withGains = applyGainsToPeaks(result.interleaved, params);
+
+                ctx.save();
+                // beginPath 必须先于 rect：canvas 路径不受 save/restore 管理，
+                // 缺失会让 rect 永久累积（clip 区域 = 历史所有矩形并集，
+                // 跨瓦片/跨 clip 渗透，且每帧路径增长造成渐进卡顿）。
+                ctx.beginPath();
+                ctx.rect(tileVisLeft, 0, tileVisRight - tileVisLeft, h);
+                ctx.clip();
+
+                // 静音 clip 半透明
+                ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
+                renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
+
+                ctx.restore();
+                if (withGains !== result.interleaved) {
+                    releaseGainBuffer(withGains);
+                }
+                // store 复用池 buffer 由 fetchCache 统一持有/归还。
             }
-            // store 复用池 buffer 由 fetchCache 统一持有/归还。
+            releaseFetchCache();
         }
-        releaseFetchCache();
     }
 
     // Selection (time band)

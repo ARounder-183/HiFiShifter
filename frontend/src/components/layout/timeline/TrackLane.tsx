@@ -14,10 +14,7 @@ import { ClipItem } from "./ClipItem";
 import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
-import { WaveformTrackCanvas } from "../../waveform/WaveformTrackCanvas";
 import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
-import { getWaveformColors } from "../../../theme/waveformColors";
 
 function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
@@ -230,16 +227,8 @@ export const TrackLane = React.memo(
             onActivateTake,
         } = props;
 
-        // 淡变信息浮标与子层 i18n 文案。
+// 淡变信息浮标与子层 i18n 文案。
         const { t } = useI18n();
-
-        // 获取波形颜色配置
-        const { mode: themeMode } = useAppTheme();
-        const waveformColors = React.useMemo(
-            () => getWaveformColors(themeMode, "timeline"),
-            [themeMode],
-        );
-
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
@@ -667,24 +656,6 @@ export const TrackLane = React.memo(
                         </div>
                     </div>
                 ) : null}
-                {/* 轨道级波形 Canvas：一个 Canvas 绘制该轨道所有可见 clip 的波形 */}
-                <WaveformTrackCanvas
-                    clips={trackClips}
-                    leadingOverlapSecByClipId={leadingOverlapSecByClipId}
-                    trackHeight={rowHeight}
-                    waveformTop={CLIP_HEADER_HEIGHT}
-                    waveformHeight={waveformHeight}
-                    pxPerSec={pxPerSec}
-                    viewportWidthPx={viewportWidthPx}
-                    viewportStartSec={viewportStartSec}
-                    viewportEndSec={viewportEndSec}
-                    strokeColor={waveformColors.stroke}
-                    strokeWidth={1}
-                    showAllTakes={showAllTakes}
-                    takeSeparatorColor={
-                        themeMode === "dark" ? "rgba(255, 255, 255, 0.18)" : "rgba(0, 0, 0, 0.20)"
-                    }
-                />
                 {/* MIDI 音高预览 Canvas：绘制 MIDI clip 的音高线 */}
                 <MidiPitchTrackCanvas
                     clips={trackClips}
@@ -760,7 +731,7 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-                    startEditDrag={startEditDrag}
+startEditDrag={startEditDrag}
                     startSnapOffsetDrag={startSnapOffsetDrag}
                     seekFromClientX={seekFromClientX}
                     fadeLengthFormatCtx={fadeLengthFormatCtx}

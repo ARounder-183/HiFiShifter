@@ -3,6 +3,7 @@ import React from "react";
 import { drawTimelineCanvas } from "./runtime/timelineCanvasRenderer";
 import { resolveFontFamily } from "./runtime/timelineCanvasStyle";
 import type { TimelineCanvasClipModel } from "./runtime/timelineCanvasModel";
+import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 
 export const TimelineCanvasViewport: React.FC<{
     width: number;
@@ -18,11 +19,11 @@ export const TimelineCanvasViewport: React.FC<{
     const widthRef = React.useRef(width);
     const heightRef = React.useRef(height);
     const modelRef = React.useRef(model);
+    const viewportRef = React.useRef(timelineViewportBus.getSnapshot());
 
     widthRef.current = width;
     heightRef.current = height;
     modelRef.current = model;
-
     const invalidate = React.useCallback(() => {
         if (rafRef.current != null) return;
         rafRef.current = requestAnimationFrame(() => {
@@ -44,6 +45,8 @@ export const TimelineCanvasViewport: React.FC<{
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, displayWidth, displayHeight);
+            ctx.translate(-viewportRef.current.scrollLeft, 0);
             drawTimelineCanvas(ctx, {
                 width: displayWidth,
                 height: displayHeight,
@@ -58,6 +61,12 @@ export const TimelineCanvasViewport: React.FC<{
     React.useLayoutEffect(() => {
         invalidate();
     }, [height, invalidate, model, width]);
+
+    React.useEffect(() => {
+        return timelineViewportBus.subscribe((scrollLeft, pxPerSec, viewportWidth) => {
+            viewportRef.current = { scrollLeft, pxPerSec, viewportWidth, revision: 0 };
+        });
+    }, []);
 
     React.useEffect(() => {
         return () => {
