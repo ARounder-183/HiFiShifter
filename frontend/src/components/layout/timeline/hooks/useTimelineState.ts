@@ -934,6 +934,12 @@ export function useTimelineState(): TimelineStateResult {
             // 播放光标自身已足够醒目，不发布被吸附对象侧高亮；
             // 但吸附到网格线/Clip 边缘等处时，仍高亮对应目标（仅拖拽期间，
             // 即 commit=false；单击跳转完全不走高亮通道）。
+            //
+            // commit=true（提交式落点：拖拽松手 / 点击跳转 / 双击边缘）意味着
+            // 播放头手势语境结束：这里统一清除瞬态吸附高亮。所有播放头拖拽
+            // 路径（标尺 / 轨道空白区 / 面板背景）共用此收口，即使拖拽中途被
+            // 快捷键等其它方式打断（如按住鼠标时直接开始播放再松手），高亮也
+            // 不会残留到手势之外。
             const beat = snapTimelineDetailed(
                 rawBeat,
                 "cursor",
@@ -943,6 +949,7 @@ export function useTimelineState(): TimelineStateResult {
             if (commit) {
                 dispatch(setplayheadSec(beat));
                 void dispatch(seekPlayhead(beat));
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             } else {
                 // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步
                 dispatch(setplayheadSec(beat));

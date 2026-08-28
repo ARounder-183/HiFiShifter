@@ -308,6 +308,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             clearSnapHighlights();
         };
     }, []);
+
+    // 播放开始（键盘快捷键 / 播放按钮 / 远端传输皆可触发）＝拖拽视觉语境终止：
+    // 按住鼠标拖拽期间开始播放时，吸附竖线高亮必须立即消失，而不是冻结在原地
+    // 直到松手才被手势结束逻辑清理。
+    const timelineRuntimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
+    React.useEffect(() => {
+        if (timelineRuntimeIsPlaying) {
+            clearSnapHighlights();
+        }
+    }, [timelineRuntimeIsPlaying]);
     const {
         dispatch,
         s,
@@ -1409,9 +1419,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             window.removeEventListener("mousemove", onMove, true);
                             window.removeEventListener("mouseup", onEnd, true);
                             window.removeEventListener("mouseleave", onEnd, true);
-                            if (!moved) return;
+                            if (!moved) {
+                                // 未拖动的单击不会发布高亮；仍兜底清除一次，
+                                // 防止此前异常中断手势的残留。
+                                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                                return;
+                            }
                             lastSec = updateAt(ev.clientX, false);
                             void dispatch(seekPlayhead(lastSec));
+                            // 最后一步 update 仍会发布一次吸附高亮，必须在其后
+                            // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
+                            // 且任何单击跳转都不再清理它。
+                            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         };
 
                         window.addEventListener("mousemove", onMove, true);

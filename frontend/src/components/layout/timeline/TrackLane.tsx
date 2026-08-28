@@ -16,6 +16,7 @@ import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
 import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../utils/snapHighlight";
 
 function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
@@ -458,6 +459,11 @@ export const TrackLane = React.memo(
                     window.removeEventListener("pointerup", onEnd, true);
                     window.removeEventListener("pointercancel", onEnd, true);
                     seekFromClientX(ev.clientX, true);
+                    // 拖拽结束（含 pointercancel 中断）＝播放头手势语境终止：
+                    // 清除吸附竖线高亮。提交式 seek（setPlayheadFromClientX）内部
+                    // 也会清理，这里显式兜底保证手势语义自包含 — 否则最后一步
+                    // 网格吸附的高亮会冻结在轨道空白区，只有其它拖拽才能覆盖掉。
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 };
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onEnd, true);
