@@ -789,7 +789,7 @@ export const koKR = {
     split_transition_overlap_hint:
         "확장 및 겹치기 모드는 앞 클립을 뒤로 X초, 뒤 클립을 앞으로 X초 늘려 2X초의 겹치는 구간을 만듭니다. 연장 범위는 클립 원본 소재의 실제 길이 범위 안으로 제한됩니다.",
     snap: "스냅",
-    snap_grid_settings_title: "스냅/그리드 설정",
+    snap_grid_settings_title: "스냅/그리드 설정...",
     snap_section_grid: "그리드",
     snap_grid_show_lines: "그리드 선 표시",
     snap_grid_spacing: "그리드 간격",

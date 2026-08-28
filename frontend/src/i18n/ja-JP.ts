@@ -721,7 +721,7 @@ export const jaJP = {
     split_transition_overlap_hint:
         "拡張オーバーラップでは、前のクリップを後方へ X 秒、後ろのクリップを前方へ X 秒延長して 2X 秒の重なりを作ります。延長範囲はクリップの元素材の実際の長さの範囲内に制限されます。",
     snap: "スナップ",
-    snap_grid_settings_title: "スナップ/グリッド設定",
+    snap_grid_settings_title: "スナップ/グリッド設定...",
     snap_section_grid: "グリッド",
     snap_grid_show_lines: "グリッド線を表示",
     snap_grid_spacing: "グリッド間隔",

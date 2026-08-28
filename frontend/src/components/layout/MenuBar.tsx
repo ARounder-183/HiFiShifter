@@ -648,6 +648,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {withCheck(s.tempoMapVisible, tAny("menu_view_tempo_map"))}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleShowAllTakes());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
                     {/* Time Display */}
@@ -735,10 +743,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_options")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
-                        {tAny("snap_grid_settings_title")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator />
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {tAny("stretch_project_override")}
@@ -991,14 +995,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* Take display / editing options */}
                     <DropdownMenu.Item
                         onSelect={() => {
-                            dispatch(toggleShowAllTakes());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
                             dispatch(toggleSyncEditsAcrossTakes());
                             void dispatch(persistUiSettings());
                         }}
@@ -1019,6 +1015,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* Loop for new clips — 为新的音频块启用循环（默认开启） */}
                     <DropdownMenu.Item onSelect={() => onLoopNewClipsChange(!loopNewClips)}>
                         {withCheck(loopNewClips, tAny("options_loop_new_clips"))}
+                    </DropdownMenu.Item>
+
+                    <DropdownMenu.Separator />
+
+                    {/* Snap/Grid Settings — above Keyboard Shortcuts */}
+                    <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
+                        {tAny("snap_grid_settings_title")}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />
