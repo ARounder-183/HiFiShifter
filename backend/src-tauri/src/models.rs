@@ -303,6 +303,9 @@ pub struct TimelineStatePayload {
 pub struct OpenProjectPayload {
     #[serde(flatten)]
     pub timeline: TimelineStatePayload,
+    /// 打开失败的具体原因（文件不存在/无权限/解析失败等），前端用于展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_version_too_new: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

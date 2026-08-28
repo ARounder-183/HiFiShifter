@@ -1,14 +1,22 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
 use super::types::EngineClip;
 use super::types::EngineSnapshot;
-use super::types::TrackMeterValue;
 use super::util::clamp11;
 
 const SNAPSHOT_XFADE_FRAMES: usize = 256;
+
+/// Unsigned 16-bit silence level (0x8000), keeping the waveform centered.
+const U16_SILENCE: u16 = 32768;
+
+/// Map a [-1, 1] sample to unsigned 16-bit with 0x8000 as the zero point.
+#[inline]
+fn f32_to_u16(v: f32) -> u16 {
+    ((v * 32768.0) + 32768.0).round().clamp(0.0, 65535.0) as u16
+}
 
 #[derive(Default)]
 pub(crate) struct SnapshotTransitionState {
@@ -17,10 +25,90 @@ pub(crate) struct SnapshotTransitionState {
     fade_remaining_frames: usize,
 }
 
+/// RT-local per-track meter scratch. Lives entirely inside the audio
+/// callback thread: `track_peaks` holds the running max amplitude per
+/// track slot (index = `snap.track_ids` position) for the current block.
 #[derive(Default)]
 pub(crate) struct TrackMeterScratch {
-    per_track_mix: std::collections::HashMap<String, Vec<f32>>,
-    active_track_ids: std::collections::HashSet<String>,
+    track_peaks: Vec<f32>,
+}
+
+impl TrackMeterScratch {
+    fn reset(&mut self, track_count: usize) {
+        if self.track_peaks.len() < track_count {
+            // Grows only when the project gains tracks; rare and bounded.
+            self.track_peaks.resize(track_count, 0.0);
+        }
+        for p in self.track_peaks.iter_mut() {
+            *p = 0.0;
+        }
+    }
+}
+
+/// Lock-free handoff of per-track block peaks from the audio callback to
+/// the meter thread. The RT side only writes fixed atomic slots (no locks,
+/// no allocation); the meter thread polls `generation` and publishes the
+/// values into the shared `meter_state` map, keeping stderr logging and
+/// map rebuilds off the RT thread.
+pub(crate) struct TrackMeterBus {
+    /// f32 bits of each track slot's latest block peak.
+    slots: Vec<AtomicU32>,
+    generation: AtomicU64,
+    /// Position of the block that auto-paused playback during a pending
+    /// background render (0 = none). Drained + logged by the meter thread.
+    auto_pause_pos: AtomicU64,
+    /// Position of the last block that rendered silence while a clip was
+    /// still pending synthesis. Debug aid, drained by the meter thread.
+    pending_pos: AtomicU64,
+}
+
+impl TrackMeterBus {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: (0..capacity).map(|_| AtomicU32::new(0)).collect(),
+            generation: AtomicU64::new(0),
+            auto_pause_pos: AtomicU64::new(0),
+            pending_pos: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn slot_peak(&self, slot: usize) -> f32 {
+        f32::from_bits(
+            self.slots
+                .get(slot)
+                .map(|s| s.load(Ordering::Relaxed))
+                .unwrap_or(0),
+        )
+    }
+
+    /// Drain the recorded auto-pause position (0 if none recorded).
+    pub(crate) fn take_auto_pause_pos(&self) -> u64 {
+        self.auto_pause_pos.swap(0, Ordering::Relaxed)
+    }
+
+    /// Drain the recorded pending-clip position (0 if none recorded).
+    pub(crate) fn take_pending_pos(&self) -> u64 {
+        self.pending_pos.swap(0, Ordering::Relaxed)
+    }
+
+    /// RT side: publish one block of per-track peaks (0.0 for silent slots).
+    fn publish_block(&self, peaks: &[f32], track_count: usize) {
+        for (slot, peak) in peaks.iter().take(track_count).enumerate() {
+            if let Some(s) = self.slots.get(slot) {
+                s.store(peak.to_bits(), Ordering::Relaxed);
+            }
+        }
+        for slot in peaks.len()..track_count {
+            if let Some(s) = self.slots.get(slot) {
+                s.store(0.0f32.to_bits(), Ordering::Relaxed);
+            }
+        }
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn sample_automation_curve(
@@ -188,22 +276,15 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
 }
 
 pub(crate) fn mix_snapshot_clips_into_scratch(
-    frames: usize,
+    _frames: usize,
     snap: &EngineSnapshot,
     pos0: u64,
     pos1: u64,
     scratch: &mut [f32],
-    meter_scratch: Option<&mut TrackMeterScratch>,
+    meter: Option<&mut TrackMeterScratch>,
 ) {
-    let mut meter_scratch = meter_scratch;
-    if let Some(ms) = meter_scratch.as_deref_mut() {
-        for track_id in ms.active_track_ids.drain() {
-            if let Some(buf) = ms.per_track_mix.get_mut(&track_id) {
-                buf.resize(frames * 2, 0.0);
-                buf.fill(0.0);
-            }
-        }
-    }
+    let mut meter = meter;
+    let has_meter = meter.is_some();
 
     for clip in snap.clips.iter() {
         let clip_start = clip.start_frame;
@@ -216,6 +297,19 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
         let overlap_end = clip_end.min(pos1);
         if overlap_end <= overlap_start {
             continue;
+        }
+
+        // Meter slot lookup happens once per clip (not per frame); it only
+        // costs a few short string compares against snap.track_ids.
+        let meter_slot = if has_meter {
+            snap.track_ids.iter().position(|id| id == &clip.track_id)
+        } else {
+            None
+        };
+        if let (Some(m), Some(slot)) = (meter.as_deref_mut(), meter_slot) {
+            if m.track_peaks.len() <= slot {
+                m.track_peaks.resize(slot + 1, 0.0);
+            }
         }
 
         let out_off = (overlap_start - pos0) as usize;
@@ -276,20 +370,16 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             let mixed_r = r * g;
             scratch[oi] += mixed_l;
             scratch[oi + 1] += mixed_r;
-            if let Some(ms) = meter_scratch.as_deref_mut() {
-                let first_use_this_block = !ms.active_track_ids.contains(&clip.track_id);
-                let track_buf = ms
-                    .per_track_mix
-                    .entry(clip.track_id.clone())
-                    .or_insert_with(|| vec![0.0; frames * 2]);
-                if track_buf.len() != frames * 2 {
-                    track_buf.resize(frames * 2, 0.0);
+            if let (Some(m), Some(slot)) = (meter.as_deref_mut(), meter_slot) {
+                let peak = &mut m.track_peaks[slot];
+                let l_abs = mixed_l.abs();
+                let r_abs = mixed_r.abs();
+                if l_abs > *peak {
+                    *peak = l_abs;
                 }
-                if first_use_this_block {
-                    ms.active_track_ids.insert(clip.track_id.clone());
+                if r_abs > *peak {
+                    *peak = r_abs;
                 }
-                track_buf[oi] += mixed_l;
-                track_buf[oi + 1] += mixed_r;
             }
         }
     }
@@ -311,6 +401,7 @@ fn render_snapshot_window(
     pos0: u64,
     pos1: u64,
     scratch: &mut Vec<f32>,
+    meter: Option<&mut TrackMeterScratch>,
 ) -> bool {
     scratch.resize(frames * 2, 0.0);
     scratch.fill(0.0);
@@ -319,141 +410,9 @@ fn render_snapshot_window(
         return false;
     }
 
-    mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch.as_mut_slice(), None);
+    mix_snapshot_clips_into_scratch(frames, snap, pos0, pos1, scratch.as_mut_slice(), meter);
     true
 }
-
-fn collect_track_meter_block(
-    frames: usize,
-    snap: &EngineSnapshot,
-    pos0: u64,
-    pos1: u64,
-    meter_scratch: &mut TrackMeterScratch,
-) {
-    // Reuse existing buffers: only clear, don't drain/reallocate.
-    for track_id in &meter_scratch.active_track_ids {
-        if let Some(buf) = meter_scratch.per_track_mix.get_mut(track_id) {
-            if buf.len() == frames * 2 {
-                buf.fill(0.0);
-            } else {
-                buf.resize(frames * 2, 0.0);
-                buf.fill(0.0);
-            }
-        }
-    }
-    meter_scratch.active_track_ids.clear();
-
-    for clip in snap.clips.iter() {
-        let clip_start = clip.start_frame;
-        let clip_end = clip.start_frame.saturating_add(clip.length_frames);
-        if clip_end <= pos0 || clip_start >= pos1 {
-            continue;
-        }
-
-        let overlap_start = clip_start.max(pos0);
-        let overlap_end = clip_end.min(pos1);
-        if overlap_end <= overlap_start {
-            continue;
-        }
-
-        let out_off = (overlap_start - pos0) as usize;
-        let clip_off = overlap_start - clip_start;
-        let mix_frames = (overlap_end - overlap_start) as usize;
-
-        let track_buf = meter_scratch
-            .per_track_mix
-            .entry(clip.track_id.clone())
-            .or_insert_with(|| vec![0.0; frames * 2]);
-        if track_buf.len() != frames * 2 {
-            track_buf.resize(frames * 2, 0.0);
-            track_buf.fill(0.0);
-        }
-        // Track first use by checking if this track_id is already active.
-        let _is_new = meter_scratch.active_track_ids.insert(clip.track_id.clone());
-
-        for f in 0..mix_frames {
-            let local = clip_off + f as u64;
-            let local_i64 = if local > i64::MAX as u64 {
-                continue;
-            } else {
-                local as i64
-            };
-            let local_adj_i64 = local_i64.saturating_add(clip.local_src_offset_frames);
-            if local_adj_i64 < 0 {
-                continue;
-            }
-            let local_adj = local_adj_i64 as f64;
-
-            let mut g = clip.gain;
-            if clip.fade_in_frames > 0 && local < clip.fade_in_frames {
-                // Meter path must mirror the audio callback exactly:
-                // shape-aware fade-in via the same per-clip LUT.
-                g *= match &clip.fade_in_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        ((local + 1) as f64 / clip.fade_in_frames as f64)
-                            * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
-                };
-            }
-            if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
-                let remain = clip.length_frames.saturating_sub(local);
-                // 淡出表按区间内时间进度下降采样 —— 用已消耗进度索引
-                // （与主回调同一约定，剩余比例索引会把淡出反向）。
-                let consumed = 1.0 - remain as f64 / clip.fade_out_frames as f64;
-                g *= match &clip.fade_out_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
-                };
-            }
-            if g <= 0.0 {
-                continue;
-            }
-
-            let Some((l, r)) = sample_clip_pcm(clip, local, local_adj) else {
-                continue;
-            };
-
-            let oi = (out_off + f) * 2;
-            track_buf[oi] += l * g;
-            track_buf[oi + 1] += r * g;
-        }
-    }
-}
-
-fn update_track_meter_state(
-    snap: &EngineSnapshot,
-    meter_scratch: &TrackMeterScratch,
-    meter_state: &Arc<Mutex<std::collections::HashMap<String, TrackMeterValue>>>,
-    meter_generation: &AtomicU64,
-) {
-    let mut next = std::collections::HashMap::with_capacity(snap.track_ids.len());
-    if let Ok(mut state) = meter_state.lock() {
-        for track_id in snap.track_ids.iter() {
-            let block_peak = meter_scratch
-                .per_track_mix
-                .get(track_id)
-                .map(|buf| buf.iter().fold(0.0f32, |acc, sample| acc.max(sample.abs())))
-                .unwrap_or(0.0);
-            let prev = state.get(track_id).copied().unwrap_or_default();
-            next.insert(
-                track_id.clone(),
-                TrackMeterValue {
-                    peak_linear: block_peak,
-                    max_peak_linear: prev.max_peak_linear.max(block_peak),
-                    clipped: prev.clipped || block_peak >= 1.0,
-                },
-            );
-        }
-        *state = next;
-        meter_generation.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 fn blend_snapshot_windows_in_place(
     current_and_out: &mut [f32],
     from: &[f32],
@@ -491,6 +450,13 @@ fn advance_playback_position(
     }
 }
 
+/// Outcome of one callback block, consumed by the RT-side meter publish.
+/// Blocks muted while waiting on a pending render carry zeroed peaks, so
+/// publishing them keeps the meters at silence for the duration.
+pub(crate) struct BlockRender {
+    snapshot: Arc<EngineSnapshot>,
+}
+
 fn mix_into_scratch_stereo(
     frames: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
@@ -500,12 +466,14 @@ fn mix_into_scratch_stereo(
     scratch: &mut Vec<f32>,
     scratch_fade_from: &mut Vec<f32>,
     transition: &mut SnapshotTransitionState,
-) {
+    meter: &mut TrackMeterScratch,
+    bus: &TrackMeterBus,
+) -> Option<BlockRender> {
     scratch.resize(frames * 2, 0.0);
     scratch.fill(0.0);
 
     if !is_playing.load(Ordering::Relaxed) {
-        return;
+        return None;
     }
 
     let snap = snapshot.load_full();
@@ -524,7 +492,9 @@ fn mix_into_scratch_stereo(
     }
     transition.current_snapshot = Some(snap.clone());
 
-    let current_ready = render_snapshot_window(frames, &snap, pos0, pos1, scratch);
+    meter.reset(snap.track_ids.len());
+    let current_ready =
+        render_snapshot_window(frames, &snap, pos0, pos1, scratch, Some(&mut *meter));
 
     if !current_ready && transition.fade_from_snapshot.is_none() {
         // 若后台预渲染激活，自动暂停播放（而非无限静音等待）。
@@ -534,47 +504,37 @@ fn mix_into_scratch_stereo(
             crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if bg_render {
             is_playing.store(false, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "[mix] auto-paused at pos={} — pending clip encountered during background render",
-                pos0
-            );
+            // stderr I/O must stay off the RT thread: record the position and
+            // let the meter thread log it.
+            bus.auto_pause_pos.store(pos0, Ordering::Relaxed);
         }
+        // Debug aid: report the pending clip via the meter thread as well.
+        bus.pending_pos.store(pos0, Ordering::Relaxed);
         // cursor 暂停，不推进 position，输出静音等待
-        // 调试：每隔约 1s 打印一次
-        static DEBUG_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *DEBUG_LOG.get_or_init(|| {
-            std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
-        }) {
-            static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let now = pos0 / 44100; // rough seconds
-            let last = LAST_LOG.load(Ordering::Relaxed);
-            if now != last {
-                LAST_LOG.store(now, Ordering::Relaxed);
-                for clip in snap.clips.iter() {
-                    if clip.needs_synthesis && clip.rendered_pcm.is_none() {
-                        let clip_end = clip.start_frame.saturating_add(clip.length_frames);
-                        if clip.start_frame < pos1 && clip_end > pos0 {
-                            eprintln!(
-                                "[mix] PENDING clip_id={} needs_synthesis=true rendered_pcm=None pos={}",
-                                clip.clip_id, pos0
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        return;
+        return Some(BlockRender { snapshot: snap });
     }
 
     if let Some(from_snapshot) = transition.fade_from_snapshot.as_ref() {
-        let from_ready =
-            render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from);
+        let from_ready = if current_ready {
+            render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from, None)
+        } else {
+            // Output this block comes from the fade-from snapshot; meter it.
+            meter.reset(from_snapshot.track_ids.len());
+            render_snapshot_window(
+                frames,
+                from_snapshot,
+                pos0,
+                pos1,
+                scratch_fade_from,
+                Some(&mut *meter),
+            )
+        };
 
         if from_ready && !current_ready {
             scratch.resize(scratch_fade_from.len(), 0.0);
             scratch.copy_from_slice(scratch_fade_from.as_slice());
             advance_playback_position(frames, is_playing, position_frames, duration_frames);
-            return;
+            return Some(BlockRender { snapshot: snap });
         }
 
         if from_ready && current_ready && transition.fade_remaining_frames > 0 {
@@ -598,6 +558,7 @@ fn mix_into_scratch_stereo(
     if current_ready || transition.fade_from_snapshot.is_some() {
         advance_playback_position(frames, is_playing, position_frames, duration_frames);
     }
+    Some(BlockRender { snapshot: snap })
 }
 
 pub(crate) fn render_callback_f32(
@@ -611,8 +572,7 @@ pub(crate) fn render_callback_f32(
     scratch_fade_from: &mut Vec<f32>,
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
-    meter_state: &Arc<Mutex<std::collections::HashMap<String, TrackMeterValue>>>,
-    meter_generation: &AtomicU64,
+    meter_bus: &TrackMeterBus,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -629,7 +589,7 @@ pub(crate) fn render_callback_f32(
         return;
     }
 
-    mix_into_scratch_stereo(
+    let block = mix_into_scratch_stereo(
         frames,
         snapshot,
         is_playing,
@@ -638,12 +598,16 @@ pub(crate) fn render_callback_f32(
         scratch,
         scratch_fade_from,
         transition,
+        &mut *meter_scratch,
+        meter_bus,
     );
-    let snap = snapshot.load_full();
-    let pos1 = position_frames.load(Ordering::Relaxed);
-    let pos0 = pos1.saturating_sub(frames as u64);
-    collect_track_meter_block(frames, &snap, pos0, pos1, meter_scratch);
-    update_track_meter_state(&snap, meter_scratch, meter_state, meter_generation);
+    if let Some(block) = block.as_ref() {
+        // Publish per-track peaks so meters always mirror the output. The
+        // peaks were zeroed by reset() inside mix_into_scratch_stereo before
+        // mixing, so a block muted while waiting on a pending render
+        // publishes zeros here — do NOT reset again or real peaks are lost.
+        meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
+    }
 
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);
@@ -672,8 +636,7 @@ pub(crate) fn render_callback_i16(
     scratch_fade_from: &mut Vec<f32>,
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
-    meter_state: &Arc<Mutex<std::collections::HashMap<String, TrackMeterValue>>>,
-    meter_generation: &AtomicU64,
+    meter_bus: &TrackMeterBus,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -689,7 +652,7 @@ pub(crate) fn render_callback_i16(
         return;
     }
 
-    mix_into_scratch_stereo(
+    let block = mix_into_scratch_stereo(
         frames,
         snapshot,
         is_playing,
@@ -698,23 +661,27 @@ pub(crate) fn render_callback_i16(
         scratch,
         scratch_fade_from,
         transition,
+        &mut *meter_scratch,
+        meter_bus,
     );
-    let snap = snapshot.load_full();
-    let pos1 = position_frames.load(Ordering::Relaxed);
-    let pos0 = pos1.saturating_sub(frames as u64);
-    collect_track_meter_block(frames, &snap, pos0, pos1, meter_scratch);
-    update_track_meter_state(&snap, meter_scratch, meter_state, meter_generation);
+    if let Some(block) = block.as_ref() {
+        // Publish per-track peaks so meters always mirror the output. The
+        // peaks were zeroed by reset() inside mix_into_scratch_stereo before
+        // mixing, so a block muted while waiting on a pending render
+        // publishes zeros here — do NOT reset again or real peaks are lost.
+        meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
+    }
 
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);
         let r = clamp11(scratch[f * 2 + 1]);
         if out_channels == 1 {
             let v = clamp11((l + r) * 0.5);
-            data[f] = (v * i16::MAX as f32) as i16;
+            data[f] = (v * i16::MAX as f32).round() as i16;
         } else {
             let base = f * out_channels;
-            data[base] = (l * i16::MAX as f32) as i16;
-            data[base + 1] = (r * i16::MAX as f32) as i16;
+            data[base] = (l * i16::MAX as f32).round() as i16;
+            data[base + 1] = (r * i16::MAX as f32).round() as i16;
             for ch in 2..out_channels {
                 data[base + ch] = 0;
             }
@@ -733,8 +700,7 @@ pub(crate) fn render_callback_u16(
     scratch_fade_from: &mut Vec<f32>,
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
-    meter_state: &Arc<Mutex<std::collections::HashMap<String, TrackMeterValue>>>,
-    meter_generation: &AtomicU64,
+    meter_bus: &TrackMeterBus,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -750,7 +716,7 @@ pub(crate) fn render_callback_u16(
         return;
     }
 
-    mix_into_scratch_stereo(
+    let block = mix_into_scratch_stereo(
         frames,
         snapshot,
         is_playing,
@@ -759,26 +725,29 @@ pub(crate) fn render_callback_u16(
         scratch,
         scratch_fade_from,
         transition,
+        &mut *meter_scratch,
+        meter_bus,
     );
-    let snap = snapshot.load_full();
-    let pos1 = position_frames.load(Ordering::Relaxed);
-    let pos0 = pos1.saturating_sub(frames as u64);
-    collect_track_meter_block(frames, &snap, pos0, pos1, meter_scratch);
-    update_track_meter_state(&snap, meter_scratch, meter_state, meter_generation);
+    if let Some(block) = block.as_ref() {
+        // Publish per-track peaks so meters always mirror the output. The
+        // peaks were zeroed by reset() inside mix_into_scratch_stereo before
+        // mixing, so a block muted while waiting on a pending render
+        // publishes zeros here — do NOT reset again or real peaks are lost.
+        meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
+    }
 
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);
         let r = clamp11(scratch[f * 2 + 1]);
         if out_channels == 1 {
             let v = clamp11((l + r) * 0.5);
-            // 用 Rust 自带的安全强转，不需要边界检测与 round 了
-            data[f] = ((v * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            data[f] = f32_to_u16(v);
         } else {
             let base = f * out_channels;
-            data[base] = ((l * 0.5 + 0.5) * u16::MAX as f32) as u16;
-            data[base + 1] = ((r * 0.5 + 0.5) * u16::MAX as f32) as u16;
+            data[base] = f32_to_u16(l);
+            data[base + 1] = f32_to_u16(r);
             for ch in 2..out_channels {
-                data[base + ch] = u16::MAX / 2;
+                data[base + ch] = U16_SILENCE;
             }
         }
     }

@@ -868,7 +868,21 @@ pub(super) fn open_project(
 ) -> crate::models::OpenProjectPayload {
     let path = PathBuf::from(&project_path);
     // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
-    let bytes = fs::read(&path).unwrap_or_default();
+    // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            let mut payload = get_timeline_state(state);
+            payload.ok = false;
+            return crate::models::OpenProjectPayload {
+                timeline: payload,
+                error: Some(format!("failed to read project file: {e}")),
+                project_version_too_new: None,
+                project_file_version: None,
+                current_project_file_version: None,
+            };
+        }
+    };
     // 先只读取版本号：即使未来版本工程因结构变化而无法完整解析，
     // 也能在尝试加载前给出明确的“可能不兼容”警告。
     let project_file_version = read_project_file_version(&bytes).unwrap_or(0);
@@ -877,6 +891,7 @@ pub(super) fn open_project(
         payload.ok = true;
         return crate::models::OpenProjectPayload {
             timeline: payload,
+            error: None,
             project_version_too_new: Some(true),
             project_file_version: Some(project_file_version),
             current_project_file_version: Some(CURRENT_PROJECT_FILE_VERSION),
@@ -885,10 +900,15 @@ pub(super) fn open_project(
 
     let parsed = load_project_file(&bytes);
     let Ok(mut pf) = parsed else {
+        let parse_error = parsed
+            .err()
+            .map(|e| format!("failed to parse project file: {e}"))
+            .unwrap_or_else(|| "failed to parse project file".to_string());
         let mut payload = get_timeline_state(state);
         payload.ok = false;
         return crate::models::OpenProjectPayload {
             timeline: payload,
+            error: Some(parse_error),
             project_version_too_new: None,
             project_file_version: None,
             current_project_file_version: None,
@@ -1033,6 +1053,7 @@ pub(super) fn open_project(
     }
     crate::models::OpenProjectPayload {
         timeline: payload,
+        error: None,
         project_version_too_new: None,
         project_file_version: None,
         current_project_file_version: None,

@@ -210,9 +210,23 @@ export default keybindingsSlice.reducer;
 
 // ─── Selectors ───────────────────────────────────────────────────
 
-/** 获取合并后的完整快捷键映射 */
+/**
+ * 获取合并后的完整快捷键映射。
+ *
+ * 必须按 `overrides` 引用做引用记忆化：该选择器被挂载在应用根组件与
+ * MenuBar 上，若每次调用都返回新对象（`{...DEFAULT, ...overrides}`），
+ * useSelector 的严格相等比较会判定"已变化"，任何 dispatch（包括播放时
+ * 33Hz 的轮询、电平表事件）都会级联重渲染整个应用。
+ */
+const selectMergedKeybindingsCache = { overrides: null as KeybindingOverrides | null, merged: null as KeybindingMap | null };
+
 export function selectMergedKeybindings(state: { keybindings: KeybindingsState }): KeybindingMap {
-    return mergeKeybindings(state.keybindings.overrides);
+    const overrides = state.keybindings.overrides;
+    if (selectMergedKeybindingsCache.merged === null || selectMergedKeybindingsCache.overrides !== overrides) {
+        selectMergedKeybindingsCache.overrides = overrides;
+        selectMergedKeybindingsCache.merged = mergeKeybindings(overrides);
+    }
+    return selectMergedKeybindingsCache.merged;
 }
 
 /** 获取某个操作的当前快捷键 */

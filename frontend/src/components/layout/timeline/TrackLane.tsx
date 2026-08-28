@@ -852,6 +852,11 @@ startEditDrag={startEditDrag}
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&
             prev.onToggleGroupDisabled === next.onToggleGroupDisabled &&
+            // 淡化 tooltip 的时间单位上下文：单位切换时必须重渲染，
+            // 否则 tooltip 一直显示旧单位（其 memo 仅在 5 个原始字段变化时重建）。
+            prev.fadeLengthFormatCtx === next.fadeLengthFormatCtx &&
+            prev.onFadeShapeCycleClick === next.onFadeShapeCycleClick &&
+            prev.onCrossfadeCycleClick === next.onCrossfadeCycleClick &&
             prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
             prev.multiSelectToggleKb === next.multiSelectToggleKb &&
             prev.rangeSelectKb === next.rangeSelectKb &&

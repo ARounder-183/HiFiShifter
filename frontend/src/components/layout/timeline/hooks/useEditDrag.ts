@@ -2100,6 +2100,11 @@ export function useEditDrag(deps: {
             const drag = editDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             editDragRef.current = null;
+            // 先解绑再走后续逻辑：任何早退分支（如目标 clip 已被删除）
+            // 都不能把 window 上的监听器泄漏成永久悬挂。
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", end);
+            window.removeEventListener("pointercancel", end);
             if (
                 drag.type === "trim_left" ||
                 drag.type === "trim_right" ||
@@ -2702,10 +2707,6 @@ export function useEditDrag(deps: {
                 }
                 dispatch(endInteraction());
             });
-
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", end);
-            window.removeEventListener("pointercancel", end);
         }
 
         window.addEventListener("pointermove", onMove);

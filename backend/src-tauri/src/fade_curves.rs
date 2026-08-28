@@ -11,7 +11,7 @@
 //! log2(e) = log2(p0) + k·(u − u0)。（详见 TS 侧模块文档。）
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// 指数安全范围（与 TS E_MIN/E_MAX 同步）。
 const E_MIN: f64 = 0.01;
@@ -27,7 +27,7 @@ fn power_anchor(base: i64) -> Option<(f64, f64, f64)> {
         // fast_end
         2 => Some((3.2, 1.0, 1.678_071_905_112_637_8)),
         // steep fast_start
-        3 => Some((0.10, -1.0, 3.321_928_094_887_362)),
+        3 => Some((0.10, -1.0, std::f64::consts::LOG2_10)),
         // steep fast_end
         4 => Some((8.0, 1.0, 3.0)),
         _ => None,
@@ -152,8 +152,9 @@ pub fn build_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Vec<f32> {
 }
 
 /// 进程内 LUT 缓存：按键为 (shape bits, dir bits, mode_out)。
+/// 条目以 `Arc` 共享：命中路径只做引用计数，不克隆整表。
 pub struct FadeLutCache {
-    entries: Mutex<HashMap<(u64, u64, bool), Vec<f32>>>,
+    entries: Mutex<HashMap<(u64, u64, bool), Arc<Vec<f32>>>>,
 }
 
 impl FadeLutCache {
@@ -163,23 +164,19 @@ impl FadeLutCache {
         }
     }
 
-    pub fn lut(&self, shape: f64, dir: f64, mode_out: bool) -> Vec<f32> {
-        let key = (
-            shape.to_bits(),
-            dir.to_bits(),
-            mode_out,
-        );
+    pub fn lut(&self, shape: f64, dir: f64, mode_out: bool) -> Arc<Vec<f32>> {
+        let key = (shape.to_bits(), dir.to_bits(), mode_out);
         if let Ok(map) = self.entries.lock() {
             if let Some(hit) = map.get(&key) {
                 return hit.clone();
             }
         }
-        let table = build_fade_lut(shape, dir, mode_out);
+        let table = Arc::new(build_fade_lut(shape, dir, mode_out));
         if let Ok(mut map) = self.entries.lock() {
             if map.len() > 256 {
                 map.clear();
             }
-            map.insert(key, table.clone());
+            map.insert(key, Arc::clone(&table));
         }
         table
     }
@@ -197,7 +194,7 @@ impl Default for FadeLutCache {
 /// - 淡入：索引 = 进度 × N；
 /// - 淡出：索引 = **剩余比例** × N（表的第 x 项对应"还剩 x 比例"时刻），
 ///   从而时间上从 g(x=1) 衰减到 g(x=0)，完成镜像而无需反转表。
-pub fn global_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Vec<f32> {
+pub fn global_fade_lut(shape: f64, dir: f64, mode_out: bool) -> Arc<Vec<f32>> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<FadeLutCache> = OnceLock::new();
     CACHE.get_or_init(FadeLutCache::new).lut(shape, dir, mode_out)
@@ -248,14 +245,18 @@ mod tests {
                     for step in 1..=200 {
                         let t = step as f64 / 200.0;
                         let g = fade_gain_signed(s, d, out, t);
-                        if !out {
+                        if out {
+                            assert!(
+                                g <= p + 1e-9,
+                                "out must be nonincreasing s={s} d={d} t={t}"
+                            );
+                        } else {
                             assert!(
                                 g >= p - 1e-9,
                                 "in must be nondecreasing s={s} d={d} t={t}"
                             );
                         }
-                        p = if out { g } else { g };
-                        let _ = p;
+                        p = g;
                     }
                 }
             }

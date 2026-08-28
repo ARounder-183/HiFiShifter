@@ -1,11 +1,9 @@
 use std::collections::HashSet;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use lru::LruCache;
-
+use super::byte_budget_cache::ByteBudgetCache;
 use super::io::decode_resampled_stereo;
 use super::types::{AudioKey, EngineCommand, ResampledStereo};
 
@@ -13,18 +11,23 @@ use super::types::{AudioKey, EngineCommand, ResampledStereo};
 /// Prevents unbounded RAM growth when many unique sources are loaded.
 const MAX_CACHE_ENTRIES: usize = 256;
 
+/// Shared decoded-PCM cache, bounded both by entry count and total bytes.
+///
+/// Entries are whole-file decoded + resampled stereo f32 buffers, so an
+/// entry-count bound alone could hold tens of GB; the byte budget from
+/// `HIFISHIFTER_PCM_CACHE_BUDGET_MB` (default 1 GB) keeps RAM in check.
+pub(crate) type DecodeCache = ByteBudgetCache<AudioKey, ResampledStereo>;
+
 pub(crate) struct ResourceManager {
-    cache: Arc<Mutex<LruCache<AudioKey, ResampledStereo>>>,
+    cache: Arc<Mutex<DecodeCache>>,
     inflight: Arc<Mutex<HashSet<AudioKey>>>,
     request_tx: mpsc::Sender<AudioKey>,
 }
 
 impl ResourceManager {
     pub(crate) fn new(engine_tx: mpsc::Sender<EngineCommand>) -> Self {
-        let cache: Arc<Mutex<LruCache<AudioKey, ResampledStereo>>> =
-            Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(MAX_CACHE_ENTRIES).expect("MAX_CACHE_ENTRIES must be non-zero"),
-            )));
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::from_env(MAX_CACHE_ENTRIES)));
         let inflight: Arc<Mutex<HashSet<AudioKey>>> = Arc::new(Mutex::new(HashSet::new()));
 
         let (request_tx, request_rx) = mpsc::channel::<AudioKey>();
@@ -41,9 +44,11 @@ impl ResourceManager {
                     let (path, out_rate) = key.clone();
                     let ok = decode_resampled_stereo(path.as_path(), out_rate)
                         .and_then(|v| {
+                            let pcm_bytes = v.pcm_bytes();
                             if let Ok(mut m) = cache_for_worker.lock() {
-                                // LruCache automatically evicts oldest entry when full.
-                                m.put(key.clone(), v);
+                                // ByteBudgetCache evicts LRU entries beyond the
+                                // entry capacity or the byte budget.
+                                m.insert(key.clone(), v, pcm_bytes);
                                 Some(())
                             } else {
                                 None
@@ -77,7 +82,7 @@ impl ResourceManager {
         }
     }
 
-    pub(crate) fn cache(&self) -> &Arc<Mutex<LruCache<AudioKey, ResampledStereo>>> {
+    pub(crate) fn cache(&self) -> &Arc<Mutex<DecodeCache>> {
         &self.cache
     }
 

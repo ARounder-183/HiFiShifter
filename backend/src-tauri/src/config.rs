@@ -950,13 +950,44 @@ fn load_config(config_dir: &Path) -> AppConfig {
     let Ok(data) = fs::read_to_string(&path) else {
         return AppConfig::default();
     };
-    serde_json::from_str::<AppConfig>(&data).unwrap_or_default()
+    match serde_json::from_str::<AppConfig>(&data) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // 解析失败不能无痕回退默认值：那会静默丢掉全部用户设置。
+            eprintln!("app_config.json parse failed ({e}); trying .bak fallback");
+            let bak = config_dir.join("app_config.json.bak");
+            if let Ok(bak_data) = fs::read_to_string(&bak) {
+                if let Ok(cfg) = serde_json::from_str::<AppConfig>(&bak_data) {
+                    return cfg;
+                }
+            }
+            AppConfig::default()
+        }
+    }
 }
 
 fn save_config(config_dir: &Path, cfg: &AppConfig) {
     let path = config_dir.join("app_config.json");
     if let Ok(data) = serde_json::to_string_pretty(cfg) {
-        let _ = fs::write(&path, data);
+        // 原子写：先写临时文件再替换，避免进程中断留下半截 JSON，
+        // 下次启动解析失败导致全部设置静默回退默认值。
+        let tmp = config_dir.join("app_config.json.tmp");
+        match fs::write(&tmp, &data).and_then(|()| {
+            // Windows 上 rename 不能覆盖已存在目标，先删旧文件。
+            if path.exists() {
+                let _ = fs::remove_file(&path);
+            }
+            fs::rename(&tmp, &path)
+        }) {
+            Ok(()) => {
+                // 保留上一份成功写入的副本，供解析失败时兜底恢复。
+                let _ = fs::write(config_dir.join("app_config.json.bak"), &data);
+            }
+            Err(e) => {
+                eprintln!("app_config.json save failed: {e}");
+                let _ = fs::remove_file(&tmp);
+            }
+        }
     }
 }
 

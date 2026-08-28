@@ -164,9 +164,8 @@ pub(super) fn import_project(
         let mut map_imported = false;
         let mut skipped = false;
         if let Some(mut points) = imported_tempo_map {
-            if place_at_playhead.unwrap_or(false) {
-                skipped = true;
-            } else if tl.tempo_map.is_some() {
+            // 三类跳过原因：放到播放头粘贴时、工程已有速度线、或用户关闭导入开关。
+            if place_at_playhead.unwrap_or(false) || tl.tempo_map.is_some() {
                 skipped = true;
             } else if import_tempo_map.unwrap_or(true) {
                 for point in &mut points {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
-use lru::LruCache;
+use super::byte_budget_cache::ByteBudgetCache;
 
 use crate::state::{Clip, TimelineState, Track};
 
@@ -117,7 +117,7 @@ pub(crate) fn schedule_stretch_jobs(
     out_rate: u32,
     stretch_tx: &mpsc::Sender<StretchJob>,
     inflight: &Mutex<HashSet<StretchKey>>,
-    stretch_cache: &Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
+    stretch_cache: &Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
     app_handle: Option<&tauri::AppHandle>,
 ) {
     // 计算 track_gain，删除了无用的 bpm 和冗余的 audible_tracks
@@ -231,8 +231,8 @@ pub(crate) fn schedule_stretch_jobs(
 pub(crate) fn build_snapshot(
     timeline: &TimelineState,
     out_rate: u32,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
-    stretch_cache: &Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
+    cache: &Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
+    stretch_cache: &Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
 ) -> EngineSnapshot {
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
     let stretch_algorithm = crate::time_stretch::resolved_user_external_stretch_algorithm();
@@ -340,7 +340,8 @@ pub(crate) fn build_snapshot(
                         Some(fresh) => {
                             let key = (path.to_path_buf(), out_rate);
                             if let Ok(mut map) = cache.lock() {
-                                map.put(key, fresh.clone());
+                                let pcm_bytes = fresh.pcm_bytes();
+                                map.insert(key, fresh.clone(), pcm_bytes);
                             }
                             fresh
                         }
@@ -579,7 +580,7 @@ pub(crate) fn build_snapshot(
                 key_end,
                 playback_rate,
             );
-            if let Ok(m) = stretch_cache.lock() {
+            if let Ok(mut m) = stretch_cache.lock() {
                 if let Some(stretched) = m.get(&key) {
                     src_render = stretched.clone();
                     src_start = 0;
@@ -601,20 +602,20 @@ pub(crate) fn build_snapshot(
             .max(0.0) as u64;
         // 形状化淡化查表：仅在对应长度有效时构建，混音端按 (shape,dir) 缓存命中。
         let fade_in_lut = if fade_in_frames > 0 {
-            Some(Arc::new(crate::fade_curves::global_fade_lut(
+            Some(crate::fade_curves::global_fade_lut(
                 clip.fade_in_shape,
                 clip.fade_in_dir,
                 false,
-            )))
+            ))
         } else {
             None
         };
         let fade_out_lut = if fade_out_frames > 0 {
-            Some(Arc::new(crate::fade_curves::global_fade_lut(
+            Some(crate::fade_curves::global_fade_lut(
                 clip.fade_out_shape,
                 clip.fade_out_dir,
                 true,
-            )))
+            ))
         } else {
             None
         };
@@ -681,7 +682,7 @@ pub(crate) fn build_snapshot(
             let needs_pitch_edit =
                 crate::pitch_editing::does_clip_need_processor_render(timeline, clip, start_sec);
 
-            eprintln!(
+            debug_eprintln!(
                 "[snapshot] clip_id={} needs_pitch_edit={}",
                 clip.id, needs_pitch_edit
             );
@@ -911,7 +912,7 @@ pub(crate) fn build_snapshot(
                                 );
                             }
                             if is_rendering || pitch_analysis_ready {
-                                eprintln!("[snapshot:WARN] clip_id={} hash={:#018x} cache_key found but rendered_pcm=None (rendering in progress, muting)", clip.id, key.param_hash);
+                                debug_eprintln!("[snapshot:WARN] clip_id={} hash={:#018x} cache_key found but rendered_pcm=None (rendering in progress, muting)", clip.id, key.param_hash);
                             }
                             (None, None, true)
                         }
@@ -1036,7 +1037,7 @@ pub(crate) fn build_snapshot_for_file(
     path: &Path,
     out_rate: u32,
     offset_sec: f64,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
 ) -> EngineSnapshot {
     let src = match get_resampled_stereo_cached(path, out_rate, cache) {
         Some(v) => v,

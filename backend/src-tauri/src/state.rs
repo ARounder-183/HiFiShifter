@@ -5247,6 +5247,41 @@ impl TimelineState {
         target_index: usize,
         parent_track_id: Option<String>,
     ) {
+        // 环与存在性校验：parent 必须存在，且不能是 track_id 自身或其后代。
+        // 否则后续按 parent 链的遍历（如导出排序的递归 DFS）会无限递归
+        // 直至栈溢出，且坏数据会随撤销历史/保存文件持久化。
+        if let Some(ref pid) = parent_track_id {
+            if pid == track_id {
+                return;
+            }
+            if !self.tracks.iter().any(|t| t.id == *pid) {
+                return;
+            }
+            let mut cursor = pid.clone();
+            let mut safety = 0;
+            loop {
+                let next = self
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == cursor)
+                    .and_then(|t| t.parent_id.clone());
+                match next {
+                    Some(p) => {
+                        if p == track_id {
+                            // pid 位于 track_id 的子树内 → 会成环，拒绝移动。
+                            return;
+                        }
+                        cursor = p;
+                    }
+                    None => break,
+                }
+                safety += 1;
+                if safety > self.tracks.len() {
+                    // 既有数据已存在环，同样拒绝移动。
+                    return;
+                }
+            }
+        }
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.parent_id = parent_track_id;
         }
@@ -6951,9 +6986,8 @@ impl TimelineState {
                 if clip.group_id.as_ref() != Some(gid) {
                     continue;
                 }
-                if new_ids.contains(&clip.id) {
-                    clip.group_id = Some(migrated_gid.clone());
-                } else if clip.start_sec >= split_sec - 1e-6 {
+                // 新右半必然进入新组；未被切开但完全位于切割点右侧的成员同样迁入。
+                if new_ids.contains(&clip.id) || clip.start_sec >= split_sec - 1e-6 {
                     clip.group_id = Some(migrated_gid.clone());
                 }
             }

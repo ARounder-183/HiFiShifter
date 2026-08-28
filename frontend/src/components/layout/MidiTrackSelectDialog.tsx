@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Dialog, Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { paramsApi } from "../../services/api/params";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
@@ -157,6 +158,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
     // 导入目标（统一弹窗用）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数
     const isReplaceMode = mode === "replaceMidi";
+    // BPM 数字输入的滚轮调值：内容可滚动时 preventDefault 必须用非被动
+    // 原生监听才生效（React 合成 onWheel 上的 preventDefault 是空操作）。
+    const specifiedBpmWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        const dir = e.deltaY < 0 ? 1 : -1;
+        const next = specifiedBpm + dir;
+        if (next >= 1 && next <= 999) onSpecifiedBpmChange?.(next);
+    });
     const resolveImportTarget = () =>
         (importTarget as "pitchRef" | "pitchParam") ?? defaultImportTarget ?? "pitchParam";
     const [currentTarget, setCurrentTarget] = useState<"pitchRef" | "pitchParam">(
@@ -1026,6 +1035,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     {noteBpmMode === "specified" && !importTempoMapEnabled && (
                                         <Flex gap="2" align="center" className="ml-5 mt-1">
                                             <input
+                                                ref={specifiedBpmWheelRef}
                                                 type="number"
                                                 className="w-20 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
                                                 value={specifiedBpm}
@@ -1044,13 +1054,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                                         if (next >= 1) onSpecifiedBpmChange?.(next);
                                                     }
                                                 }}
-                                                onWheel={(e) => {
-                                                    e.preventDefault();
-                                                    const dir = e.deltaY < 0 ? 1 : -1;
-                                                    const next = specifiedBpm + dir;
-                                                    if (next >= 1 && next <= 999)
-                                                        onSpecifiedBpmChange?.(next);
-                                                }}
                                                 onChange={(e) => {
                                                     const v = parseFloat(e.target.value);
                                                     if (!isNaN(v) && v > 0) {
@@ -1067,6 +1070,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             </RadioGroup.Root>
                         </Flex>
                     </>
+                )}
+
+                {/* 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本 */}
+                {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length === 0 && (
+                    <Flex justify="end" gap="2" mt="4">
+                        <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
+                            {tAny("kb_close")}
+                        </Button>
+                    </Flex>
                 )}
 
                 {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length > 0 && (

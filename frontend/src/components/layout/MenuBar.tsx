@@ -1123,7 +1123,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {tAny("import_dialog_title") || t("menu_import_media")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
-                                {menuImportMode.audioPaths.length} file(s) selected
+                                {(tAny("import_files_selected") || "").replace(
+                                    "{count}",
+                                    String(menuImportMode.audioPaths.length),
+                                )}
                             </div>
                         </div>
 

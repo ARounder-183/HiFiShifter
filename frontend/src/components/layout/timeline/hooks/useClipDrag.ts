@@ -393,7 +393,26 @@ export function useClipDrag(deps: {
         setVerticalTrackLockTrackId(null);
         scroller.setPointerCapture(e.pointerId);
 
+        // 指针事件频率（125-1000Hz）远高于显示刷新率；onMove 每次执行都含
+        // getBoundingClientRect + 吸附引擎 + N 个 dispatch。用 rAF 合并到
+        // 每帧一次（与 useEditDrag 的 ticking 模式一致）。
+        let moveRafPending = false;
+        let latestMoveEvent: PointerEvent | null = null;
+        function scheduleMove(ev: PointerEvent) {
+            latestMoveEvent = ev;
+            if (moveRafPending) return;
+            moveRafPending = true;
+            requestAnimationFrame(() => {
+                moveRafPending = false;
+                const pending = latestMoveEvent;
+                latestMoveEvent = null;
+                if (pending != null) onMove(pending);
+            });
+        }
+
         function onMove(ev: PointerEvent) {
+            // rAF 合并后 end() 可能已执行：drag 引用为空时直接丢弃积压事件。
+            if (!clipDragRef.current) return;
             const drag = clipDragRef.current;
             const el = scrollRef.current;
             if (!drag || drag.pointerId !== e.pointerId || !el) return;
@@ -610,7 +629,7 @@ export function useClipDrag(deps: {
                 if (drag.multiSelectToggleActive && onCtrlClick) {
                     onCtrlClick(drag.anchorClipId);
                 }
-                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointermove", scheduleMove);
                 window.removeEventListener("pointerup", end);
                 window.removeEventListener("pointercancel", end);
                 return;
@@ -969,7 +988,7 @@ export function useClipDrag(deps: {
                             dispatch(endInteraction());
                         }
                     })();
-                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointermove", scheduleMove);
                     window.removeEventListener("pointerup", end);
                     window.removeEventListener("pointercancel", end);
                     return;
@@ -1069,12 +1088,12 @@ export function useClipDrag(deps: {
                     })().catch(() => undefined);
                 }
             }
-            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointermove", scheduleMove);
             window.removeEventListener("pointerup", end);
             window.removeEventListener("pointercancel", end);
         }
 
-        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointermove", scheduleMove);
         window.addEventListener("pointerup", end);
         window.addEventListener("pointercancel", end);
     }

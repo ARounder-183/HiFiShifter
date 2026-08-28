@@ -76,15 +76,26 @@ PY
 )"
 
 ARCH="$(uname -m)"
+
+# tauri-bundler 的产物命名：AArch64 → "aarch64"，x86_64 → "x64"
+# （注意不是 uname 的 "arm64"，用错后缀会导致 DMG 路径永远匹配不到）。
 if [[ "$ARCH" == "arm64" ]]; then
-  ARCH_SUFFIX="arm64"
+  ARCH_SUFFIX="aarch64"
+  ARCH_SUFFIX_ALT="arm64"
 else
   ARCH_SUFFIX="x64"
+  ARCH_SUFFIX_ALT="x64"
 fi
 
-DMG_NAME="${PRODUCT_NAME}_${VERSION}_${ARCH_SUFFIX}.dmg"
 RELEASE_DIR="$TAURI_DIR/target/release"
-DMG_PATH="$RELEASE_DIR/bundle/dmg/$DMG_NAME"
+DMG_PATH="$RELEASE_DIR/bundle/dmg/${PRODUCT_NAME}_${VERSION}_${ARCH_SUFFIX}.dmg"
+# 兼容旧命名，找不到主路径时回退探测。
+if [[ ! -f "$DMG_PATH" ]]; then
+  ALT_PATH="$RELEASE_DIR/bundle/dmg/${PRODUCT_NAME}_${VERSION}_${ARCH_SUFFIX_ALT}.dmg"
+  if [[ -f "$ALT_PATH" ]]; then
+    DMG_PATH="$ALT_PATH"
+  fi
+fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "[mac-dmg] Building $PRODUCT_NAME $VERSION ($ARCH_SUFFIX) DMG"

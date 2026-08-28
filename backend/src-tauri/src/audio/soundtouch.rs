@@ -221,6 +221,10 @@ pub struct RealtimeStretcher {
     inner: SoundTouchState,
     channels: usize,
     out_buffer: Vec<f32>,
+    /// Read cursor into `out_buffer`; draining from the front of a large
+    /// buffer with `Vec::drain` is O(remaining) per chunk, so we advance a
+    /// cursor and only compact when the buffer is fully consumed.
+    out_read_pos: usize,
 }
 
 unsafe impl Send for RealtimeStretcher {}
@@ -241,12 +245,14 @@ impl RealtimeStretcher {
             inner,
             channels,
             out_buffer: Vec::with_capacity(4096),
+            out_read_pos: 0,
         })
     }
 
     #[allow(dead_code)]
     pub fn reset(&mut self, time_ratio: f64) -> Result<(), String> {
         self.out_buffer.clear();
+        self.out_read_pos = 0;
         self.inner.reset(time_ratio).map_err(|e| e.to_string())
     }
 
@@ -284,14 +290,20 @@ impl RealtimeStretcher {
         out_interleaved: &mut Vec<f32>,
         max_frames: usize,
     ) -> Result<usize, String> {
-        if self.out_buffer.is_empty() || max_frames == 0 {
+        let remaining = self.out_buffer.len() - self.out_read_pos;
+        if remaining == 0 || max_frames == 0 {
             return Ok(0);
         }
-        let avail_frames = self.out_buffer.len() / self.channels.max(1);
+        let avail_frames = remaining / self.channels.max(1);
         let take_frames = avail_frames.min(max_frames);
         let take_samples = take_frames * self.channels;
-        out_interleaved.extend_from_slice(&self.out_buffer[..take_samples]);
-        self.out_buffer.drain(..take_samples);
+        let end = self.out_read_pos + take_samples;
+        out_interleaved.extend_from_slice(&self.out_buffer[self.out_read_pos..end]);
+        self.out_read_pos = end;
+        if self.out_read_pos == self.out_buffer.len() {
+            self.out_buffer.clear();
+            self.out_read_pos = 0;
+        }
         Ok(take_frames)
     }
 }

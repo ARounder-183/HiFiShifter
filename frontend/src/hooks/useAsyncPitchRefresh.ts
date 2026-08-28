@@ -52,6 +52,16 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
     const debounceTimerRef = useRef<number | null>(null);
     const isRefreshingRef = useRef(false);
 
+    // 停止轮询并清空任务引用（完成/失败/过期/出错路径共用）。
+    const stopPoll = useCallback(() => {
+        if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+        }
+        latestTaskIdRef.current = null;
+        startTimeRef.current = null;
+    }, []);
+
     // Task 3.4: 实现轮询逻辑
     const pollStatus = useCallback(async (taskId: string) => {
         try {
@@ -64,9 +74,13 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
             const info = await coreApi.getPitchRefreshStatus(taskId);
 
             if (!info) {
+                // 任务已被后端回收（正常情况）：必须停止轮询，否则会以
+                // 500ms 周期无限查询已不存在的任务并反复写 error 状态。
+                stopPoll();
                 setState((prev) => ({
                     ...prev,
                     isLoading: false,
+                    taskId: null,
                     error: "Task expired or not found",
                 }));
                 return;
@@ -95,27 +109,24 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
                 info.status === "failed" ||
                 info.status === "cancelled"
             ) {
+                stopPoll();
                 setState((prev) => ({
                     ...prev,
                     isLoading: false,
                     taskId: null,
                 }));
-                latestTaskIdRef.current = null;
-                if (pollTimerRef.current) {
-                    clearInterval(pollTimerRef.current);
-                    pollTimerRef.current = null;
-                }
-                startTimeRef.current = null;
             }
         } catch (error) {
             console.error("[useAsyncPitchRefresh] Poll error:", error);
+            stopPoll();
             setState((prev) => ({
                 ...prev,
                 isLoading: false,
+                taskId: null,
                 error: error instanceof Error ? error.message : "Unknown error",
             }));
         }
-    }, []);
+    }, [stopPoll]);
 
     // Task 3.3: 实现 startRefresh() 函数
     const startRefresh = useCallback(

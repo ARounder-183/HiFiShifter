@@ -546,6 +546,26 @@ export function VibratoDialog({
     const [release, setRelease] = useState("50");
     const [phase, setPhase] = useState("0");
 
+    // 对话框常驻挂载（useState 初始值只在首挂载生效）：每次打开必须按
+    // 当前参数重置默认值，否则对 breath_gain 打开时仍显示 pitch 的 30。
+    useEffect(() => {
+        if (open) {
+            setAmplitude(defaultAmplitude);
+            setRate("5.5");
+            setAttack("50");
+            setRelease("50");
+            setPhase("0");
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 打开时按最新参数重置
+    }, [open, editParam, paramRange]);
+
+    // 兜底 NaN/Infinity 而不吞掉合法的 0（`Number(x) || default` 会把 0
+    // 替换成默认值——对幅度/速率/相位，0 都是合法输入）。
+    const parseNumberOr = (raw: string, fallback: number): number => {
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : fallback;
+    };
+
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
             <Dialog.Content style={{ maxWidth: 380 }} onKeyDown={(e) => e.stopPropagation()}>
@@ -631,11 +651,11 @@ export function VibratoDialog({
                     <Button
                         onClick={() => {
                             onConfirm?.(
-                                Number(amplitude) || 30,
-                                Number(rate) || 5.5,
-                                Number(attack) || 50,
-                                Number(release) || 50,
-                                Number(phase) || 0,
+                                parseNumberOr(amplitude, 30),
+                                parseNumberOr(rate, 5.5),
+                                parseNumberOr(attack, 50),
+                                parseNumberOr(release, 50),
+                                parseNumberOr(phase, 0),
                             );
                             onOpenChange(false);
                         }}

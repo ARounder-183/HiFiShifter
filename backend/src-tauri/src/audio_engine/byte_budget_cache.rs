@@ -66,12 +66,14 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
     /// If the entry already exists, it is updated (old weight is subtracted).
     /// After insertion, if total bytes exceeds budget, LRU entries are evicted.
     pub fn insert(&mut self, key: K, value: V, weight_bytes: u64) {
-        // If key already exists, subtract old weight first.
-        if let Some((_, old_weight)) = self.inner.peek(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(*old_weight);
+        // `push`（而非 `put`）会返回被顶掉的条目：key 已存在时是旧条目，
+        // 触及条目容量上限时是被 LRU 逐出的其他条目。两种情况的权重都必须
+        // 从累计值中扣除 —— `put` 会静默丢弃该条目，导致"幽灵字节"不断
+        // 累积，最终预算检查把整个缓存清空（历史 bug，见回归测试）。
+        let displaced = self.inner.push(key, (value, weight_bytes));
+        if let Some((_, (_, displaced_weight))) = displaced {
+            self.total_bytes = self.total_bytes.saturating_sub(displaced_weight);
         }
-
-        self.inner.put(key, (value, weight_bytes));
         self.total_bytes = self.total_bytes.saturating_add(weight_bytes);
 
         // Evict LRU entries until under budget.
@@ -167,5 +169,46 @@ impl<K: Eq + std::hash::Hash + Clone, V> ByteBudgetCache<K, V> {
         self.inner.resize(new_cap);
         // Recalculate total_bytes from remaining entries.
         self.total_bytes = self.inner.iter().map(|(_, (_, w))| *w).sum();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_capacity_eviction_keeps_total_bytes_accurate() {
+        let mut cache: ByteBudgetCache<u64, u64> = ByteBudgetCache::new(2, u64::MAX);
+
+        cache.insert(1, 1, 100);
+        cache.insert(2, 2, 100);
+        assert_eq!(cache.total_bytes(), 200);
+
+        // Capacity is 2: inserting key 3 must evict key 1 and drop its weight.
+        cache.insert(3, 3, 100);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.total_bytes(), 200);
+
+        // The byte budget is enforced after every insert, so a fill sequence
+        // never exceeds it mid-way: each insert beyond the budget immediately
+        // evicts the LRU entry down to the budget.
+        let mut budgeted: ByteBudgetCache<u64, u64> = ByteBudgetCache::new(8, 250);
+        for i in 0..8 {
+            budgeted.insert(i, i, 100);
+        }
+        assert_eq!(budgeted.total_bytes(), 200);
+        assert_eq!(budgeted.len(), 2);
+
+        // Capacity-pressure evictions (entry bound) must also keep the total
+        // accurate: inserting at capacity displaces the LRU weight, not adds
+        // a ghost copy of it.
+        budgeted.insert(100, 100, 100);
+        assert_eq!(budgeted.total_bytes(), 200);
+        assert_eq!(budgeted.len(), 2);
+
+        // Overwriting an existing key must not double-count its old weight:
+        // {7:100, 100:100} + overwrite 100 with weight 50 → 100 + 50.
+        budgeted.insert(100, 100, 50);
+        assert_eq!(budgeted.total_bytes(), 150);
     }
 }

@@ -43,6 +43,8 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
     private readonly program: WebGLProgram;
     private readonly buffer: WebGLBuffer;
     private readonly resolutionLocation: WebGLUniformLocation;
+    private readonly positionLocation: number;
+    private readonly colorLocation: number;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -101,6 +103,8 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         this.program = program;
         this.buffer = buffer;
         this.resolutionLocation = resolutionLocation;
+        this.positionLocation = gl.getAttribLocation(program, "a_position");
+        this.colorLocation = gl.getAttribLocation(program, "a_color");
     }
 
     render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void {
@@ -115,8 +119,8 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices, gl.DYNAMIC_DRAW);
 
         const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
-        const position = gl.getAttribLocation(this.program, "a_position");
-        const color = gl.getAttribLocation(this.program, "a_color");
+        const position = this.positionLocation;
+        const color = this.colorLocation;
         gl.enableVertexAttribArray(position);
         gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
         gl.enableVertexAttribArray(color);
@@ -159,17 +163,36 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
         back.clearRect(0, 0, widthPx, heightPx);
         back.lineWidth = 1;
         const vertices = geometry.vertices;
-        for (let offset = 0; offset + 11 < vertices.length; offset += 12) {
-            const red = Math.round((vertices[offset + 2] ?? 1) * 255);
-            const green = Math.round((vertices[offset + 3] ?? 1) * 255);
-            const blue = Math.round((vertices[offset + 4] ?? 1) * 255);
-            const alpha = vertices[offset + 5] ?? 1;
+        // 相邻段几乎总是同一颜色（逐像素 min/max 包络）：把同色段合并进
+        // 单个 path，把每帧数千次 beginPath/stroke 降为颜色变化次数级别。
+        // 一条 path 上的 moveTo 天然断开子路径，语义与逐段 stroke 一致。
+        const verticesEnd = vertices.length - (vertices.length % 12);
+        let batchStart = 0;
+        const segmentsMatch = (a: number, b: number): boolean =>
+            vertices[a + 2] === vertices[b + 2] &&
+            vertices[a + 3] === vertices[b + 3] &&
+            vertices[a + 4] === vertices[b + 4] &&
+            vertices[a + 5] === vertices[b + 5];
+        const strokeBatch = (start: number, end: number) => {
+            const red = Math.round((vertices[start + 2] ?? 1) * 255);
+            const green = Math.round((vertices[start + 3] ?? 1) * 255);
+            const blue = Math.round((vertices[start + 4] ?? 1) * 255);
+            const alpha = vertices[start + 5] ?? 1;
             back.strokeStyle = `rgba(${red},${green},${blue},${alpha})`;
             back.beginPath();
-            back.moveTo(vertices[offset] ?? 0, vertices[offset + 1] ?? 0);
-            back.lineTo(vertices[offset + 6] ?? 0, vertices[offset + 7] ?? 0);
+            for (let offset = start; offset < end; offset += 12) {
+                back.moveTo(vertices[offset] ?? 0, vertices[offset + 1] ?? 0);
+                back.lineTo(vertices[offset + 6] ?? 0, vertices[offset + 7] ?? 0);
+            }
             back.stroke();
+        };
+        for (let offset = 12; offset < verticesEnd; offset += 12) {
+            if (!segmentsMatch(batchStart, offset)) {
+                strokeBatch(batchStart, offset);
+                batchStart = offset;
+            }
         }
+        if (batchStart < verticesEnd) strokeBatch(batchStart, verticesEnd);
 
         visible.setTransform(1, 0, 0, 1, 0, 0);
         visible.clearRect(0, 0, internal.width, internal.height);

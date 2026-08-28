@@ -359,7 +359,7 @@ pub fn render_mixdown_wav(
                     return Err("export_cancelled".to_string());
                 }
                 let v = clamp11(s);
-                let i = (v * i16::MAX as f32) as i16;
+                let i = (v * i16::MAX as f32).round() as i16;
                 writer.write_sample(i).map_err(|e| e.to_string())?;
             }
         }
@@ -373,7 +373,7 @@ pub fn render_mixdown_wav(
                     return Err("export_cancelled".to_string());
                 }
                 let v = clamp11(s);
-                let i = (v * MAX24) as i32;
+                let i = (v * MAX24).round() as i32;
                 writer.write_sample(i).map_err(|e| e.to_string())?;
             }
         }
@@ -601,7 +601,9 @@ pub fn render_mixdown_interleaved(
                 .ceil()
                 .max(src_i0 as f64) as usize;
             let src_i1 = src_i1.min(in_frames);
-            if src_i1 <= src_i0 + 1 {
+            // Keep 1-frame slices audible (matches the real-time engine path);
+            // only drop truly empty source ranges.
+            if src_i1 <= src_i0 {
                 continue;
             }
             pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
@@ -859,13 +861,15 @@ pub fn render_mixdown_interleaved(
 
             let mut g = gain;
             if fade_in_frames > 0 && local_in_clip < fade_in_frames {
+                // Frame-centered fade-in (same as audio_engine/mix.rs) so the
+                // first frame is not hard-zeroed and export matches preview.
                 g *= match &fade_in_lut {
                     Some(lut) => crate::fade_curves::sample_fade_lut(
                         lut,
-                        (local_in_clip as f64 / fade_in_frames as f64)
+                        ((local_in_clip + 1) as f64 / fade_in_frames as f64)
                             * crate::fade_curves::FADE_LUT_SIZE as f64,
                     ),
-                    None => (local_in_clip as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
+                    None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
                 };
             }
             if fade_out_frames > 0 && local_in_clip + fade_out_frames > clip_total_frames {

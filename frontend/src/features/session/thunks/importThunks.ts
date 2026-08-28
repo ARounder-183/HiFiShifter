@@ -2,7 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { fileBrowserApi } from "../../../services/api";
 import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
-import type { SessionState } from "../sessionSlice";
+import { checkpointHistory, type SessionState } from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
 import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
@@ -433,7 +433,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
         }
 
         // Create a single undo checkpoint for the entire batch
-        dispatch({ type: "session/checkpointHistory" });
+        dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup();
         try {
@@ -630,7 +630,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             ).unwrap();
         }
 
-        dispatch({ type: "session/checkpointHistory" });
+        dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup();
         try {

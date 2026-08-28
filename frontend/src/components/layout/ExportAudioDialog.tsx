@@ -258,13 +258,25 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         [targetGroups],
     );
 
+    // 初始化只应在 open 变为 true 时执行一次。此前依赖数组里包含
+    // session.projectSec 与 targetGroups（随 tracks/clips 引用变化），
+    // 对话框打开期间任何后台更新（导入完成、录音入库、工程加载）都会
+    // 重跑该 effect，把用户已填写的输出目录/文件名/时间范围/目标选择
+    // 静默重置为硬编码回退值。projectSec 经 ref 读取打开瞬间的值。
+    const projectSecAtOpenRef = useRef(session.projectSec);
+    useEffect(() => {
+        if (open) {
+            projectSecAtOpenRef.current = session.projectSec;
+        }
+    }, [open, session.projectSec]);
+
     useEffect(() => {
         if (!open) return;
 
         setMode("project");
         setRangeKind("all");
         setCustomStartSec("0");
-        setCustomEndSec(String(Math.max(0, Math.ceil(session.projectSec))));
+        setCustomEndSec(String(Math.max(0, Math.ceil(projectSecAtOpenRef.current))));
         setProjectOutputDir("");
         setProjectFileName("<ProjectName>.wav");
         setSeparatedOutputDir("");
@@ -290,7 +302,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         });
         setSelectedTargetIds(defaultSelected);
         setErrorText("");
-    }, [open, session.projectSec, targetGroups]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开时重置一次表单
+    }, [open]);
 
     useEffect(() => {
         if (!open) return;
@@ -1022,7 +1035,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                                 <Flex gap="2" wrap="wrap" align="center">
                                     <Text size="1" color="gray">
-                                        占位符：
+                                        {tAny("export_pattern_placeholders")}
                                     </Text>
                                     {(["<ProjectName>", "<ProjectFolder>"] as const).map(
                                         (token) => (
@@ -1088,7 +1101,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                                 <Flex gap="2" wrap="wrap" align="center">
                                     <Text size="1" color="gray">
-                                        占位符：
+                                        {tAny("export_pattern_placeholders")}
                                     </Text>
                                     {[
                                         "<ExportIndex>",

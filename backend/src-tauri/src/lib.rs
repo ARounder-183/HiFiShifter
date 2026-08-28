@@ -1,3 +1,13 @@
+/// 仅在 Debug 模式下编译并执行打印。
+/// 定义在 crate 根，供所有子模块（引擎 worker、snapshot、pitch 等
+/// 热路径）使用，避免 release 下 stderr I/O 拖慢命令处理。
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        std::eprintln!($($arg)*);
+    }
+}
+
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
@@ -343,13 +353,19 @@ pub fn run() {
                 let mut y_opt = None;
                 let mut w_opt = None;
                 let mut h_opt = None;
+                // 统一保存为逻辑像素：outer_position()/inner_size() 返回物理
+                // 像素，而恢复端按 Logical 解释；在 125%/150% 缩放屏上若不换算，
+                // 每次重启窗口都会放大 scale 倍并持续漂移。
+                let scale = win.scale_factor().unwrap_or(1.0);
                 if let Ok(pos) = win.outer_position() {
-                    x_opt = Some(pos.x);
-                    y_opt = Some(pos.y);
+                    let logical: tauri::LogicalPosition<f64> = pos.to_logical(scale);
+                    x_opt = Some(logical.x.round() as i32);
+                    y_opt = Some(logical.y.round() as i32);
                 }
                 if let Ok(size) = win.inner_size() {
-                    w_opt = Some(size.width as f64);
-                    h_opt = Some(size.height as f64);
+                    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+                    w_opt = Some(logical.width);
+                    h_opt = Some(logical.height);
                 }
 
                 if let Some(cfg_dir) = win.app_handle().state::<state::AppState>().config_dir.get()

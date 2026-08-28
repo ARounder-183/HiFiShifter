@@ -39,6 +39,8 @@ export const zhCN = {
     export_dialog_project_file_name: "输出文件名称",
     export_dialog_browse: "浏览",
     export_dialog_name_pattern: "分轨命名格式",
+    export_pattern_placeholders: "占位符：",
+    import_files_selected: "已选择 {count} 个文件",
     export_dialog_targets: "分轨导出目标",
     export_dialog_select_all: "全选",
     export_dialog_select_exclude_muted: "排除静音",

@@ -57,6 +57,13 @@ pub(crate) struct ResampledStereo {
     pub(crate) pcm: Arc<Vec<f32>>,
 }
 
+impl ResampledStereo {
+    /// Approximate heap footprint of the interleaved PCM buffer.
+    pub(crate) fn pcm_bytes(&self) -> u64 {
+        self.pcm.len() as u64 * std::mem::size_of::<f32>() as u64
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EngineClip {
     pub(crate) clip_id: String,

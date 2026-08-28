@@ -402,7 +402,9 @@ export function useTimelineState(): TimelineStateResult {
     }, []);
 
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
-    function syncScrollLeft(next: number) {
+    // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
+    // 否则每个依赖它的 effect/prop 每次渲染都会失效重跑。
+    const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
             timelineViewportSync.setViewport({
@@ -432,15 +434,18 @@ export function useTimelineState(): TimelineStateResult {
                 setScrollLeft(scrollLeftRef.current);
             });
         }
-    }
+    }, []);
 
-    const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = (action) => {
-        const next =
-            typeof action === "function"
-                ? (action as (prev: number) => number)(scrollLeftRef.current)
-                : action;
-        syncScrollLeft(next);
-    };
+    const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
+        (action: React.SetStateAction<number>) => {
+            const next =
+                typeof action === "function"
+                    ? (action as (prev: number) => number)(scrollLeftRef.current)
+                    : action;
+            syncScrollLeft(next);
+        },
+        [syncScrollLeft],
+    );
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {

@@ -101,14 +101,33 @@ pub(crate) fn search_files_recursive(
 
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
-    collect_matching_files(path, &query_lower, &mut results, 500);
+    let mut visited = std::collections::HashSet::new();
+    collect_matching_files(path, &query_lower, &mut results, 500, &mut visited, 0);
 
     results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(results)
 }
 
-fn collect_matching_files(dir: &Path, query: &str, results: &mut Vec<FileEntry>, max: usize) {
-    if results.len() >= max {
+/// 递归深度上限：防止在极深目录树上无界遍历。
+const MAX_SEARCH_DEPTH: usize = 32;
+
+fn collect_matching_files(
+    dir: &Path,
+    query: &str,
+    results: &mut Vec<FileEntry>,
+    max: usize,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    depth: usize,
+) {
+    if results.len() >= max || depth >= MAX_SEARCH_DEPTH {
+        return;
+    }
+    // 环防护：junction/符号链接目录环会让无防护的递归栈溢出崩溃。
+    // canonicalize 把不同写法/链接指向同一物理目录的路径归一。
+    let Ok(dir_key) = dir.canonicalize() else {
+        return;
+    };
+    if !visited.insert(dir_key) {
         return;
     }
     let Ok(read_dir) = std::fs::read_dir(dir) else {
@@ -118,15 +137,16 @@ fn collect_matching_files(dir: &Path, query: &str, results: &mut Vec<FileEntry>,
         if results.len() >= max {
             break;
         }
-        let Ok(metadata) = entry.metadata() else {
+        // file_type() 不跟随符号链接/junction，避免把链接目录当作真实目录深入。
+        let Ok(file_type) = entry.file_type() else {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
             continue;
         }
-        if metadata.is_dir() {
-            collect_matching_files(&entry.path(), query, results, max);
+        if file_type.is_dir() {
+            collect_matching_files(&entry.path(), query, results, max, visited, depth + 1);
         } else {
             // 匹配文件名的 stem（不包含后缀），中间匹配、不区分大小写 → 忽略扩展名
             let path = entry.path();
@@ -139,16 +159,19 @@ fn collect_matching_files(dir: &Path, query: &str, results: &mut Vec<FileEntry>,
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase());
-                let modified_time = metadata.modified().ok().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs_f64())
+                let modified_time = entry.metadata().ok().and_then(|m| {
+                    m.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs_f64())
+                    })
                 });
+                let size = entry.metadata().ok().map(|m| m.len());
                 results.push(FileEntry {
                     name,
                     path: path.to_string_lossy().into_owned(),
                     is_dir: false,
-                    size: Some(metadata.len()),
+                    size,
                     extension,
                     modified_time,
                 });

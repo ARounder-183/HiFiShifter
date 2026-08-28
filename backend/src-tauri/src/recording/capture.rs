@@ -549,10 +549,17 @@ pub(super) fn convert_channels(
                         0.0
                     }
                 };
-                let left =
-                    get(0) + 0.7071 * get(2) + 0.7071 * get(4) + 0.7071 * get(6) + 0.5 * get(3);
-                let right =
-                    get(1) + 0.7071 * get(2) + 0.7071 * get(5) + 0.7071 * get(7) + 0.5 * get(3);
+                const SURROUND_ATTEN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let left = get(0)
+                    + SURROUND_ATTEN * get(2)
+                    + SURROUND_ATTEN * get(4)
+                    + SURROUND_ATTEN * get(6)
+                    + 0.5 * get(3);
+                let right = get(1)
+                    + SURROUND_ATTEN * get(2)
+                    + SURROUND_ATTEN * get(5)
+                    + SURROUND_ATTEN * get(7)
+                    + 0.5 * get(3);
                 out.push(left.clamp(-1.0, 1.0));
                 out.push(right.clamp(-1.0, 1.0));
             }

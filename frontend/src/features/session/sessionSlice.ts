@@ -518,6 +518,14 @@ export interface SessionState {
      * 不包含在 undo/redo 快照中。
      */
     _interactionLockCount: number;
+
+    /**
+     * 最近一次 undo/redo 请求的 requestId。快速连续撤销/重做会产生多个
+     * in-flight thunk；fulfilled/rejected 到达时与该字段比对，丢弃过期
+     * 响应，防止旧快照以 force 覆盖新状态（与 seekPlayhead 的乱序防护同理）。
+     * 不包含在 undo/redo 快照中。
+     */
+    _latestHistoryOpRequestId: string | null;
 }
 
 interface StateSnapshot {
@@ -1686,6 +1694,7 @@ const initialState: SessionState = {
     reaperSkippedFilesDialog: null,
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
+    _latestHistoryOpRequestId: null,
 };
 
 export {
@@ -1830,9 +1839,9 @@ const sessionSlice = createSlice({
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
         setToolMode(state, action: PayloadAction<ToolMode>) {
-            if (state.toolMode !== action.payload) {
-                pushHistory(state);
-            }
+            // 工具切换是纯视图状态：不修改工程内容。
+            // 不入 undo 历史（否则 Ctrl+Z 会先回退一次"不存在的内容变更"），
+            // 也不标记 project.dirty（否则仅切工具就会触发"未保存"退出确认）。
             state.toolMode = action.payload;
             if (action.payload === "select") {
                 state.toolModeGroup = "select";
@@ -3345,11 +3354,14 @@ const sessionSlice = createSlice({
                 });
             })
 
-            .addCase(undoRemote.pending, (state) => {
+            .addCase(undoRemote.pending, (state, action) => {
+                // 记录最新请求：乱序到达的旧响应在 fulfilled/rejected 中被丢弃。
+                state._latestHistoryOpRequestId = action.meta.requestId;
                 sessionSlice.caseReducers.undo(state);
             })
 
             .addCase(undoRemote.fulfilled, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -3363,15 +3375,18 @@ const sessionSlice = createSlice({
                 state.playheadSec = currentPlayheadSec;
             })
 
-            .addCase(undoRemote.rejected, (state) => {
+            .addCase(undoRemote.rejected, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 sessionSlice.caseReducers.redo(state);
             })
 
-            .addCase(redoRemote.pending, (state) => {
+            .addCase(redoRemote.pending, (state, action) => {
+                state._latestHistoryOpRequestId = action.meta.requestId;
                 sessionSlice.caseReducers.redo(state);
             })
 
             .addCase(redoRemote.fulfilled, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -3382,7 +3397,8 @@ const sessionSlice = createSlice({
                 state.playheadSec = currentPlayheadSec;
             })
 
-            .addCase(redoRemote.rejected, (state) => {
+            .addCase(redoRemote.rejected, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 sessionSlice.caseReducers.undo(state);
             })
 
@@ -3406,9 +3422,10 @@ const sessionSlice = createSlice({
                 const payload = action.payload as
                     | { ok: true; canceled: true }
                     | {
-                          ok: true;
+                          ok: boolean;
                           canceled: false;
-                          timeline: TimelineState;
+                          timeline?: TimelineState;
+                          error?: string;
                           projectVersionTooNew?: boolean;
                       };
                 if (!payload || (payload as any).canceled) {
@@ -3417,6 +3434,12 @@ const sessionSlice = createSlice({
                 }
                 if ((payload as { projectVersionTooNew?: boolean }).projectVersionTooNew) {
                     state.status = "Project version confirmation required";
+                    return;
+                }
+                if (payload.ok === false) {
+                    // 后端返回了明确的失败原因（文件不存在/解析失败等）。
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
                     return;
                 }
                 applyTimelineState(state, (payload as any).timeline, {
@@ -3438,9 +3461,14 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    error?: string;
                     projectVersionTooNew?: boolean;
                 } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
+                    return;
+                }
                 if (payload.projectVersionTooNew) {
                     state.status = "Project version confirmation required";
                     return;
@@ -3464,9 +3492,14 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    error?: string;
                     projectVersionTooNew?: boolean;
                 } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
+                    return;
+                }
                 if (payload.projectVersionTooNew) {
                     state.status = "Project version confirmation required";
                     return;

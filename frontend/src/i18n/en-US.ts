@@ -122,6 +122,8 @@ export const enUS = {
     export_dialog_bit_depth: "Bit Depth",
     export_dialog_browse: "Browse",
     export_dialog_name_pattern: "Track Name Pattern",
+    export_pattern_placeholders: "Placeholders:",
+    import_files_selected: "{count} file(s) selected",
     export_dialog_targets: "Separated Track Targets",
     export_dialog_select_all: "Select All",
     export_dialog_select_exclude_muted: "Exclude Muted",

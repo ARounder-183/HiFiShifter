@@ -40,6 +40,8 @@ export const zhTW = {
     export_dialog_project_file_name: "輸出檔案名稱",
     export_dialog_browse: "瀏覽",
     export_dialog_name_pattern: "分軌命名格式",
+    export_pattern_placeholders: "佔位符：",
+    import_files_selected: "已選擇 {count} 個檔案",
     export_dialog_targets: "分軌匯出目標",
     export_dialog_select_all: "全選",
     export_dialog_select_exclude_muted: "排除靜音",

@@ -62,6 +62,11 @@ pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
     // to the underlying object so `msg_send!` accepts it (e.g. `&T`).
     let raw_ptr: *const c_void = unsafe { msg_send![&*data, bytes] };
     let ptr = raw_ptr as *const u8;
+    // Objective-C 消息可能返回 nil（如数据被外部释放），
+    // 对 null 指针调用 from_raw_parts 是未定义行为，必须先判空。
+    if ptr.is_null() {
+        return Err("clipboard_data_unavailable".to_string());
+    }
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     Ok(bytes.to_vec())
 }
@@ -158,6 +163,11 @@ pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
     use std::ffi::c_void;
     let raw_ptr: *const c_void = unsafe { msg_send![&*data, bytes] };
     let ptr = raw_ptr as *const u8;
+    // Objective-C 消息可能返回 nil（如数据被外部释放），
+    // 对 null 指针调用 from_raw_parts 是未定义行为，必须先判空。
+    if ptr.is_null() {
+        return Err("clipboard_data_unavailable".to_string());
+    }
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     Ok(bytes.to_vec())
 }

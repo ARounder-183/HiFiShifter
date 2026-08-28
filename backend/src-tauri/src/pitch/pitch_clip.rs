@@ -388,14 +388,14 @@ pub fn schedule_clip_pitch_jobs(
     app_handle: Option<&tauri::AppHandle>,
     _out_rate: u32,
 ) {
-    eprintln!(
+    debug_eprintln!(
         "[pitch_clip] schedule_clip_pitch_jobs called, clips={}, app_handle={}",
         tl.clips.len(),
         app_handle.is_some()
     );
 
     if !crate::fcpe_onnx::is_available() {
-        eprintln!("[pitch_clip] FCPE not available, skipping");
+        debug_eprintln!("[pitch_clip] FCPE not available, skipping");
         return;
     }
 
@@ -420,12 +420,12 @@ pub fn schedule_clip_pitch_jobs(
         let source_path = match clip.source_path.as_deref() {
             Some(p) if !p.is_empty() => p,
             _ => {
-                eprintln!("[pitch_clip] clip '{}' skipped: no source_path", clip.id);
+                debug_eprintln!("[pitch_clip] clip '{}' skipped: no source_path", clip.id);
                 continue;
             }
         };
         if !file_exists_cached(Path::new(source_path)) {
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_clip] clip '{}' skipped: file not found: {}",
                 clip.id, source_path
             );
@@ -442,7 +442,7 @@ pub fn schedule_clip_pitch_jobs(
                 .map(|t| t.compose_enabled)
                 .unwrap_or(false);
             if !compose_enabled {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' skipped: compose_enabled=false for root '{}'",
                     clip.id, root_id
                 );
@@ -465,13 +465,13 @@ pub fn schedule_clip_pitch_jobs(
         {
             let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
             if cache.contains_key(&ck.key) {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) cache HIT (shared key), skipping",
                     clip.name, clip.id
                 );
                 continue;
             }
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_clip] clip '{}' ({}) cache MISS, will analyze",
                 clip.name, clip.id
             );
@@ -482,7 +482,7 @@ pub fn schedule_clip_pitch_jobs(
         let should_spawn = {
             let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
             if set.contains(&inflight_key) {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) already inflight, skipping",
                     clip.name, clip.id
                 );
@@ -509,10 +509,10 @@ pub fn schedule_clip_pitch_jobs(
     }
 
     if pending_jobs.is_empty() {
-        eprintln!("[pitch_clip] no pending jobs (all cached or inflight), nothing to do");
+        debug_eprintln!("[pitch_clip] no pending jobs (all cached or inflight), nothing to do");
         return;
     }
-    eprintln!("[pitch_clip] {} clip(s) need analysis", pending_jobs.len());
+    debug_eprintln!("[pitch_clip] {} clip(s) need analysis", pending_jobs.len());
 
     // ── 阶段2：重置全局进度状态，批量提交分析任务 ────────────────────────────
     let total = pending_jobs.len() as u32;
@@ -524,7 +524,7 @@ pub fn schedule_clip_pitch_jobs(
             .first()
             .map(|j| j.root_track_id.clone())
             .unwrap_or_default();
-        eprintln!(
+        debug_eprintln!(
             "[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'",
             root_track_id
         );

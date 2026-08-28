@@ -39,6 +39,8 @@ export const jaJP = {
     export_dialog_project_file_name: "出力ファイル名",
     export_dialog_browse: "参照",
     export_dialog_name_pattern: "分離トラック命名パターン",
+    export_pattern_placeholders: "プレースホルダー:",
+    import_files_selected: "{count} 件のファイルを選択中",
     export_dialog_targets: "分離トラックの出力対象",
     export_dialog_select_all: "すべて選択",
     export_dialog_select_exclude_muted: "ミュートを除外",

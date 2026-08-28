@@ -13,6 +13,7 @@ import React, { useMemo } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
@@ -133,11 +134,16 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         autoScrollEnabled,
         projectSec,
     } = props;
-    const transport = useAppSelector((state) => ({
-        playheadSec: state.session.playheadSec,
-        isPlaying: state.session.runtime.isPlaying,
-        playbackPositionSec: state.session.runtime.playbackPositionSec,
-    }));
+    const transport = useAppSelector(
+        (state) => ({
+            playheadSec: state.session.playheadSec,
+            isPlaying: state.session.runtime.isPlaying,
+            playbackPositionSec: state.session.runtime.playbackPositionSec,
+        }),
+        // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
+        // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
+        shallowEqual,
+    );
 
     const isTransportAdvancing = transport.isPlaying && transport.playbackPositionSec > 1e-4;
 
@@ -554,6 +560,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         handleTrackLaneRenameDone,
         commitTrackLaneGain,
     } = clipActions;
+    // 传给 React.memo 化的 TrackList / TrackLane 的回调必须引用稳定，
+    // 否则每次 TimelinePanel 渲染（播放头提交值、滚动、修饰键）都会击穿 memo。
+    const handleCopyTrack = React.useCallback(
+        (trackId: string) => {
+            void copyTracks([trackId]);
+        },
+        [copyTracks],
+    );
+    const handleCutTrack = React.useCallback(
+        (trackId: string) => {
+            cutTracks([trackId]);
+        },
+        [cutTracks],
+    );
+    const handleToggleGroupDisabled = React.useCallback(
+        (groupId: string) => {
+            toggleGroupDisabled(groupId);
+        },
+        [toggleGroupDisabled],
+    );
     const commitTrackLaneFormantMorph = React.useCallback(
         (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => {
             void dispatch(
@@ -1170,9 +1196,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }),
         [rowHeight, s.clips, s.tracks, timelineScrollTop, viewportEndSec, viewportStartSec],
     );
-    const visibleTracks = s.tracks.slice(
-        timelineRenderModel.startIndex,
-        timelineRenderModel.endIndex + 1,
+    // slice 每次渲染都会产生新引用；不缓存的话下游所有 useMemo 与
+    // 两块画布的 memo 会在每次无关更新（播放头/滚动/修饰键）时全量重算重绘。
+    const visibleTracks = React.useMemo(
+        () =>
+            s.tracks.slice(
+                timelineRenderModel.startIndex,
+                timelineRenderModel.endIndex + 1,
+            ),
+        [s.tracks, timelineRenderModel.startIndex, timelineRenderModel.endIndex],
     );
     const visibleTrackClipCacheRef = React.useRef<
         Record<
@@ -1299,8 +1331,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onAlgoChange={handleTrackAlgoChange}
                 onTrackNameChange={handleTrackNameChange}
                 onDuplicateTrack={handleDuplicateTrack}
-                onCopyTrack={(trackId) => void copyTracks([trackId])}
-                onCutTrack={(trackId) => cutTracks([trackId])}
+                onCopyTrack={handleCopyTrack}
+                onCutTrack={handleCutTrack}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
                 headerHeight={timeRulerHeightPx(
@@ -1310,6 +1342,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
             {/* Timeline View (Right) */}
             <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
+                {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
+                    playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
+                    真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
                 <TimeRuler
                     contentWidth={contentWidth}
                     scrollLeft={scrollLeft}
@@ -1318,7 +1353,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     pxPerSec={pxPerSec}
                     secPerBeat={secPerBeat}
                     viewportWidth={viewportWidth}
-                    playheadSec={Number(sessionRef.current.playheadSec ?? 0) || 0}
+                    playheadSec={s.playheadSec}
                     playheadLineRef={rulerPlayheadLineRef}
                     playheadHeadRef={rulerPlayheadHeadRef}
                     contentRef={rulerContentRef}
@@ -1849,9 +1884,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             onFormantMorphCommit={commitTrackLaneFormantMorph}
                                             activeGroupIds={activeGroupIds}
                                             disabledGroupIds={disabledGroupIds}
-                                            onToggleGroupDisabled={(groupId) => {
-                                                toggleGroupDisabled(groupId);
-                                            }}
+                                            onToggleGroupDisabled={handleToggleGroupDisabled}
                                         />
                                     );
                                 })}

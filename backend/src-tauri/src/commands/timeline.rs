@@ -134,6 +134,14 @@ fn schedule_clip_formant_rebuild(state: &AppState, clip: crate::state::Clip) {
 
 // ===================== dialogs / io =====================
 
+/// 构造 import 失败响应：ok=false + missing_files 携带错误原因（沿用既有约定）。
+fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayload {
+    let mut payload = crate::state::TimelineState::default().to_payload();
+    payload.ok = false;
+    payload.missing_files = Some(vec![message.to_string()]);
+    payload
+}
+
 pub(super) fn import_audio_bytes(
     state: State<'_, AppState>,
     file_name: String,
@@ -151,7 +159,17 @@ pub(super) fn import_audio_bytes(
         );
     }
     let engine = base64::engine::general_purpose::STANDARD;
-    let bytes = engine.decode(base64_data.as_bytes()).unwrap_or_default();
+    // 解码/写盘失败必须显式报错返回：静默降级会让用户拿到一个时长为 0、
+    // 指向不存在临时文件的坏 clip，且无任何提示可排查。
+    let bytes = match engine.decode(base64_data.as_bytes()) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => {
+            return import_audio_bytes_error("decoded audio payload is empty");
+        }
+        Err(e) => {
+            return import_audio_bytes_error(&format!("base64 decode failed: {e}"));
+        }
+    };
 
     let ext = Path::new(&file_name)
         .extension()
@@ -165,7 +183,11 @@ pub(super) fn import_audio_bytes(
         ext
     ));
 
-    let _ = fs::write(&path, &bytes);
+    if let Err(e) = fs::write(&path, &bytes) {
+        return import_audio_bytes_error(&format!(
+            "failed to write imported file to temp dir: {e}"
+        ));
+    }
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);

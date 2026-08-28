@@ -2401,7 +2401,10 @@ export const PianoRollPanel: React.FC = () => {
             pxPerSec: pxPerSecRef.current,
             scrollLeft: scrollLeftRef.current,
             secPerBeat,
-            playheadSec: s.playheadSec,
+            // 画布每帧重绘（onFrame invalidate），播放头必须用插值的视觉值：
+            // 用 Redux 提交值会让 60fps 的重绘画着同一个旧播放头（且与标尺
+            // 的 DOM 插值播放头节奏不一致、短暂错位）。
+            playheadSec: visualPlayheadSecRef.current,
             waveformColors,
             referencePitchOverlays,
             detectedPitchCurves,

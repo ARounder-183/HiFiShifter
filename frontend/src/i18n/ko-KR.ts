@@ -39,6 +39,8 @@ export const koKR = {
     export_dialog_project_file_name: "출력 파일 이름",
     export_dialog_browse: "찾아보기",
     export_dialog_name_pattern: "분리 트랙 이름 패턴",
+    export_pattern_placeholders: "플레이스홀더:",
+    import_files_selected: "{count}개 파일 선택됨",
     export_dialog_targets: "분리 트랙 출력 대상",
     export_dialog_select_all: "전체 선택",
     export_dialog_select_exclude_muted: "음소거 제외",
