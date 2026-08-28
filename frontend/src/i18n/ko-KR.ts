@@ -534,6 +534,7 @@ export const koKR = {
 
     gain_value_tooltip: "게인: {gain} dB",
     gain_value_tooltip_drag: "게인: {gain} dB ({delta} dB)",
+    clip_pitch_drag_tooltip: "피치 오프셋: {delta} ct",
     track_change_color: "트랙 색상 변경",
     track_clone: "트랙 복제",
     track_copy: "트랙 복사",
@@ -647,6 +648,7 @@ export const koKR = {
     kb_pianoroll_vibrato_drag_freq_decrease: "비브라토 드래그: 주파수 감소",
     kb_modifier_clip_multi_select_toggle: "다중 선택 전환 (누른 채 클릭)",
     kb_modifier_clip_range_select: "범위 선택 (누른 채 클릭, 앵커에서 확장)",
+    kb_modifier_clip_pitch_drag: "피치 조정 (누른 채 클립 웨이브폼을 수직으로 드래그)",
     kb_modifier_slip_edit: "Slip 편집 (클립 본체 드래그 중 누르기)",
     kb_modifier_stretch: "스트레치 (클립 가장자리 / 파라미터 선택 영역 가장자리 드래그 중 누르기)",
     kb_modifier_no_snap: "스냅 일시 전환 (클립 / 파라미터 선 / 템포 포인트 드래그 중 누르기)",

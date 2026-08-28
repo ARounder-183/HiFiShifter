@@ -62,6 +62,9 @@ import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement"
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
 import { webApi } from "../../services/webviewApi";
+import { useClipPitchDrag } from "./timeline/hooks/useClipPitchDrag";
+import { AppTooltipBubble } from "../AppTooltip";
+import { formatPitchDragCents } from "./timeline/clipPitchDrag";
 import { coreApi } from "../../services/api/core";
 import { paramsApi } from "../../services/api/params";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
@@ -346,6 +349,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        pitchDragKb,
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,
@@ -901,6 +905,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         beatFromClientX,
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
+    });
+
+    const formatClipPitchDragTooltip = React.useCallback(
+        (cents: number) => t("clip_pitch_drag_tooltip").replace("{delta}", formatPitchDragCents(cents)),
+        [t],
+    );
+    const { startClipPitchDrag, pitchDragTooltip } = useClipPitchDrag({
+        sessionRef,
+        dispatch,
+        fineAdjustKb: paramFineAdjustKb,
+        formatDragTooltip: formatClipPitchDragTooltip,
     });
 
     const {
@@ -1815,6 +1830,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             fadeShapeCycleKb={fadeShapeCycleKb}
                                             multiSelectToggleKb={clipMultiSelectToggleKb}
                                             rangeSelectKb={clipRangeSelectKb}
+                                            pitchDragKb={pitchDragKb}
+                                            onClipPitchDragStart={startClipPitchDrag}
                                             fadeLengthFormatCtx={fadeLengthFormatCtx}
                                             onFadeShapeCycleClick={handleFadeShapeCycleClick}
                                             onCrossfadeCycleClick={handleCrossfadeCycleClick}
@@ -2540,6 +2557,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimelineDisplaySettingsDialog
                     open={timeDisplaySettingsOpen}
                     onOpenChange={setTimeDisplaySettingsOpen}
+                />
+
+                {/* 音高拖拽悬浮 ToolTips：跟随指针展示 Clip 范围内音高变化量 */}
+                <AppTooltipBubble
+                    text={pitchDragTooltip?.text ?? null}
+                    position={pitchDragTooltip?.position ?? null}
                 />
             </Flex>
         </Flex>

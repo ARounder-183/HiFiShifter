@@ -444,6 +444,7 @@ export const zhTW = {
 
     gain_value_tooltip: "增益：{gain} dB",
     gain_value_tooltip_drag: "增益：{gain} dB【{delta} dB】",
+    clip_pitch_drag_tooltip: "音高偏移：{delta} ct",
     track_change_color: "變更軌道顏色",
     track_clone: "複製軌道",
     track_copy: "複製軌道",
@@ -562,6 +563,7 @@ export const zhTW = {
     kb_mode_vibrato_tool: "切換到直線/顫音工具",
     kb_modifier_clip_multi_select_toggle: "多選切換（按住並點擊音訊片段）",
     kb_modifier_clip_range_select: "範圍選取（按住並點擊音訊片段，從錨點擴展）",
+    kb_modifier_clip_pitch_drag: "音高調整（按住並上下拖拽音訊片段波形）",
     kb_modifier_slip_edit: "Slip 編輯（拖動音訊片段主體時按住）",
     kb_modifier_stretch: "拉伸（拖動音訊片段邊緣 / 參數選取區邊緣時按住）",
     kb_modifier_no_snap: "暫時切換吸附（拖動音訊片段 / 參數線 / 速度點時按住）",

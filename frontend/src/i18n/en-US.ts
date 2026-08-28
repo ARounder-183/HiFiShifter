@@ -540,6 +540,7 @@ export const enUS = {
 
     gain_value_tooltip: "Gain: {gain} dB",
     gain_value_tooltip_drag: "Gain: {gain} dB ({delta} dB)",
+    clip_pitch_drag_tooltip: "Pitch offset: {delta} ct",
     track_change_color: "Change track color",
     track_clone: "Clone Track",
     track_copy: "Copy Track",
@@ -648,6 +649,7 @@ export const enUS = {
     kb_pianoroll_vibrato_drag_freq_decrease: "Vibrato Drag: Decrease Frequency",
     kb_modifier_clip_multi_select_toggle: "Multi-Select Toggle (hold + click clip)",
     kb_modifier_clip_range_select: "Range Select (hold + click clip, extends from anchor)",
+    kb_modifier_clip_pitch_drag: "Pitch Adjust (hold + drag clip waveform vertically)",
     kb_modifier_slip_edit: "Slip Edit (hold while dragging clip body)",
     kb_modifier_stretch: "Stretch (hold while dragging clip edge / param selection edge)",
     kb_modifier_no_snap:

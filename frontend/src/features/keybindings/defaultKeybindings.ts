@@ -87,6 +87,14 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     },
     // 范围选择默认 Shift（按住并点击 = 从上次锚点到点击处范围选择）。
     "modifier.clipRangeSelect": { key: "shift", modifierOnly: true, shift: true },
+    // 音高调整默认 Alt+Shift：避免与 Slip/拉伸（Alt）、临时关吸附（Shift）
+    // 的单修饰键语义重叠，同时保留 Shift+点击范围选择/⌘+点击多选等点击行为。
+    "modifier.clipPitchDrag": {
+        key: "alt",
+        modifierOnly: true,
+        alt: true,
+        shift: true,
+    },
     "modifier.clipSlipEdit": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
@@ -299,6 +307,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modClip",
         modifierOperationType: "click",
         conflictScenes: ["clip.select"],
+    },
+    "modifier.clipPitchDrag": {
+        labelKey: "kb_modifier_clip_pitch_drag",
+        group: "modClip",
+        modifierOperationType: "drag",
+        conflictScenes: ["clip.move"],
     },
     "modifier.clipSlipEdit": {
         labelKey: "kb_modifier_slip_edit",

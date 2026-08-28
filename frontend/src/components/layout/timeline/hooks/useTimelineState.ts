@@ -191,6 +191,7 @@ export interface TimelineStateResult {
     verticalZoomKb: Keybinding;
     paramFineAdjustKb: Keybinding;
     slipEditKb: Keybinding;
+    pitchDragKb: Keybinding;
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
     crossfadeGripKb: Keybinding;
@@ -548,6 +549,7 @@ export function useTimelineState(): TimelineStateResult {
     // ── Keybindings ──────────────────────────────────────────
     const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
+    const pitchDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipPitchDrag"));
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
     const crossfadeGripKb = useAppSelector((state) =>
@@ -1085,6 +1087,7 @@ export function useTimelineState(): TimelineStateResult {
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        pitchDragKb,
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,

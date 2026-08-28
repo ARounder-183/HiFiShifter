@@ -73,6 +73,7 @@ export type ActionId =
     | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
     | "modifier.clipCopyDrag" // 拖动 clip 时进入复制模式
+    | "modifier.clipPitchDrag" // 按住并垂直拖拽 clip 波形：调整 Clip 范围内音高
     | "modifier.clipCrossfadeGrip" // 交叉点手柄拖拽时切换“反向缩放”模式
     | "modifier.fadeCurvatureDrag" // 按住并拖动淡入淡出包络线/交叉点时调整曲率
     | "modifier.fadeShapeCycleClick" // 按住左键点击包络线循环切换曲线类型

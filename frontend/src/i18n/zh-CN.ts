@@ -443,6 +443,7 @@ export const zhCN = {
 
     gain_value_tooltip: "增益：{gain} dB",
     gain_value_tooltip_drag: "增益：{gain} dB【{delta} dB】",
+    clip_pitch_drag_tooltip: "音高偏移：{delta} ct",
     track_change_color: "更改轨道颜色",
     track_clone: "克隆轨道",
     track_copy: "复制轨道",
@@ -561,6 +562,7 @@ export const zhCN = {
     kb_mode_vibrato_tool: "切换到直线/颤音工具",
     kb_modifier_clip_multi_select_toggle: "多选切换（按住并点击音频块）",
     kb_modifier_clip_range_select: "范围选择（按住并点击音频块，从锚点扩展）",
+    kb_modifier_clip_pitch_drag: "音高调整（按住并上下拖拽音频块波形）",
     kb_modifier_slip_edit: "Slip 编辑（拖动音频块主体时按住）",
     kb_modifier_stretch: "拉伸（拖动音频块边缘 / 参数选区边缘时按住）",
     kb_modifier_no_snap: "临时切换吸附（拖动音频块 / 参数线 / 速度点时按住）",

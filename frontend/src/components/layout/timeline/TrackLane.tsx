@@ -170,6 +170,10 @@ type TrackLaneProps = {
     multiSelectToggleKb?: Keybinding;
     /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
     rangeSelectKb?: Keybinding;
+    /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
+    pitchDragKb?: Keybinding;
+    /** 音高拖拽手势入口（useClipPitchDrag 提供） */
+    onClipPitchDragStart?: (e: React.PointerEvent<HTMLDivElement>, clipId: string) => void;
     /** 淡化长度 ToolTips 的相对时长时间上下文。 */
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
@@ -196,6 +200,8 @@ export const TrackLane = React.memo(
             fadeShapeCycleKb = null,
             multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
             rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+            pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
+            onClipPitchDragStart,
             fadeLengthFormatCtx,
             onFadeShapeCycleClick,
             onCrossfadeCycleClick,
@@ -731,6 +737,8 @@ export const TrackLane = React.memo(
                             fadeShapeCycleKb={fadeShapeCycleKb}
                             multiSelectToggleKb={multiSelectToggleKb}
                             rangeSelectKb={rangeSelectKb}
+                            pitchDragKb={pitchDragKb}
+                            onClipPitchDragStart={onClipPitchDragStart}
                             onFadeShapeCycleClick={onFadeShapeCycleClick}
                             fadeLengthFormatCtx={fadeLengthFormatCtx}
                         />
@@ -846,7 +854,9 @@ startEditDrag={startEditDrag}
             prev.onToggleGroupDisabled === next.onToggleGroupDisabled &&
             prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
             prev.multiSelectToggleKb === next.multiSelectToggleKb &&
-            prev.rangeSelectKb === next.rangeSelectKb
+            prev.rangeSelectKb === next.rangeSelectKb &&
+            prev.pitchDragKb === next.pitchDragKb &&
+            prev.onClipPitchDragStart === next.onClipPitchDragStart
             // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
             // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );

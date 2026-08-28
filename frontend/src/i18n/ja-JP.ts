@@ -460,6 +460,7 @@ export const jaJP = {
 
     gain_value_tooltip: "ゲイン：{gain} dB",
     gain_value_tooltip_drag: "ゲイン：{gain} dB（{delta} dB）",
+    clip_pitch_drag_tooltip: "ピッチオフセット：{delta} ct",
     track_change_color: "トラックの色を変更",
     track_clone: "トラックを複製",
     track_copy: "トラックをコピー",
@@ -573,6 +574,7 @@ export const jaJP = {
     kb_pianoroll_vibrato_drag_freq_decrease: "ビブラートドラッグ：周波数を減少",
     kb_modifier_clip_multi_select_toggle: "複数選択切替（押しながらクリック）",
     kb_modifier_clip_range_select: "範囲選択（押しながらクリック、アンカーから拡張）",
+    kb_modifier_clip_pitch_drag: "ピッチ調整（押しながらクリップ波形を上下にドラッグ）",
     kb_modifier_slip_edit: "Slip 編集（クリップ本体をドラッグ中に押す）",
     kb_modifier_stretch: "ストレッチ（クリップ端 / 選択範囲端をドラッグ中に押す）",
     kb_modifier_no_snap:

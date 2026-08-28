@@ -14,6 +14,7 @@ import React from "react";
 import { useAppSelector } from "../../../app/hooks";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
+import { isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import {
     buildSingleFadeInfoContent,
@@ -91,6 +92,8 @@ export const ClipItem = React.memo(function ClipItem({
     fadeShapeCycleKb = null,
     multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
     rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+    pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
+    onClipPitchDragStart,
     onFadeShapeCycleClick,
     fadeLengthFormatCtx,
 }: {
@@ -178,6 +181,10 @@ export const ClipItem = React.memo(function ClipItem({
     multiSelectToggleKb?: Keybinding;
     /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
     rangeSelectKb?: Keybinding;
+    /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
+    pitchDragKb?: Keybinding;
+    /** 音高拖拽手势入口（useClipPitchDrag 提供） */
+    onClipPitchDragStart?: (e: React.PointerEvent<HTMLDivElement>, clipId: string) => void;
     /** 淡化长度 ToolTips 的相对时长时间上下文。 */
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
@@ -491,6 +498,17 @@ export const ClipItem = React.memo(function ClipItem({
                 const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
                 const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const primedSelection = shouldPrimeSelection && !selected;
+
+                // 音高拖拽修饰键（默认 Alt+Shift）：按住并垂直拖拽波形 =
+                // 调整 Clip 范围内的音高。拦截在普通移动/Slip 之前；
+                // 选区预备语义与 Slip 拖拽一致（上方 primedSelection）。
+                if (isModifierActive(pitchDragKb, e)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearContextMenu();
+                    onClipPitchDragStart?.(e, clip.id);
+                    return;
+                }
 
                 // Inactive take 命中只接管“无移动、无编辑修饰键的 click”。
                 // 拖拽仍然进入下方正常 Clip move 流程；header/edge/fade/snap
