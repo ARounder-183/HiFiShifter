@@ -918,14 +918,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* Inference Device */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
-                            {`${t("menu_inference_device")}: ${s.ortEp === "auto" ? t("menu_inference_auto") : s.ortEp === "cpu" ? t("menu_inference_cpu") : `${t("menu_inference_gpu")} (${s.runtime.gpuBackend || "GPU"})`}`}
+                            {`${t("menu_inference_device")}: ${
+                                s.ortEp === "auto"
+                                    ? `${t("menu_inference_auto")}${s.runtime.gpuBackend ? ` (${s.runtime.gpuBackend})` : ""}`
+                                    : s.ortEp === "cpu"
+                                      ? t("menu_inference_cpu")
+                                      : `${t("menu_inference_gpu")} (${s.runtime.gpuBackend || "GPU"})`
+                            }`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             {(["auto", "cpu", "gpu"] as const).map((ep) => {
                                 const labels: Record<string, string> = {
                                     auto: t("menu_inference_auto"),
                                     cpu: t("menu_inference_cpu"),
-                                    gpu: `${t("menu_inference_gpu")} (${s.runtime.gpuBackend || "GPU"})`,
+                                    gpu: t("menu_inference_gpu"),
                                 };
                                 return (
                                     <DropdownMenu.Item

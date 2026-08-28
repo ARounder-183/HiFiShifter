@@ -8192,28 +8192,10 @@ impl AppState {
         let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         let pb = self.audio_engine.snapshot_state();
 
-        let gpu_backend = {
-            #[cfg(target_os = "windows")]
-            {
-                "DirectML"
-            }
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            {
-                "WebGPU"
-            }
-            #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
-            {
-                ""
-            }
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            {
-                "CoreML"
-            }
-            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-            {
-                ""
-            }
-        };
+        // Report the execution provider the live vocoder session actually runs
+        // on.  This used to be a compile-time constant, so the menu claimed
+        // "GPU (CoreML)" even when every session had fallen back to CPU.
+        let gpu_backend = crate::nsf_hifigan_onnx::active_backend_name();
 
         RuntimeInfoPayload {
             ok: true,

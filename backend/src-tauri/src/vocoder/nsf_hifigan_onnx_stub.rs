@@ -53,6 +53,12 @@ pub fn active_ep() -> String {
     "none".to_string()
 }
 
+/// 与 onnx 变体同名；无 onnx 构建下没有会话，因此返回空串（UI 不显示设备）。
+#[allow(dead_code)]
+pub fn active_backend_name() -> &'static str {
+    ""
+}
+
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
 
 pub fn drop_shared_session() {}

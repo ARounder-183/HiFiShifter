@@ -14,7 +14,11 @@ export interface RuntimeInfo {
     is_playing?: boolean;
     playback_target?: string | null;
     timeline?: TimelineState;
-    /** GPU backend name for this build: "DirectML", "WebGPU", "CoreML", or "". */
+    /**
+     * Backend the live vocoder session actually runs on: "CoreML", "WebGPU",
+     * "DirectML", "CPU", or "" while no session has been built yet.
+     * This reflects runtime reality, not the compiled-in default.
+     */
     gpuBackend: string;
 }
 
