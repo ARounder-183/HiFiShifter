@@ -603,9 +603,9 @@ export const zhCN = {
     midi_import: "导入 MIDI",
     midi_import_title: "导入 MIDI 到音高曲线",
     midi_import_desc: "选择 MIDI 轨道导入为音高曲线",
-    midi_import_clip_title: "导入 MIDI 为音高参考音频块",
-    midi_import_clip_desc: "选择 MIDI 轨道在时间线上创建音高参考音频块",
-    midi_create_clip: "创建音高参考音频块",
+    midi_import_clip_title: "导入 MIDI 为音高参考块",
+    midi_import_clip_desc: "选择 MIDI 轨道在时间线上创建音高参考块",
+    midi_create_clip: "创建音高参考块",
     midi_fill_gaps: "填补音符之间的空隙",
     midi_import_position: "导入位置",
     midi_import_position_start: "工程开头",
@@ -649,8 +649,9 @@ export const zhCN = {
 
     // MIDI 导入目标选择
     midi_import_target: "导入目标",
-    midi_import_target_pitch_block: "音高参考音频块",
+    midi_import_target_pitch_block: "音高参考块",
     midi_import_target_pitch_param: "音高参数",
+    param_editor_drop_midi_hint: "拖放以将 MIDI 导入到音高参数",
     midi_clipboard_midi_prefix: "剪贴板 MIDI：",
 
     // MIDI replace dialog
@@ -945,7 +946,7 @@ export const zhCN = {
 
     // Dialog field labels
     dlg_midi_note: "MIDI 音符",
-    clip_type_midi: "音高参考音频块",
+    clip_type_midi: "音高参考块",
     clip_type_midi_prefix: "[音高参考]",
     dlg_strength: "平滑度",
     dlg_smoothness: "平滑度",
@@ -1077,11 +1078,11 @@ export const zhCN = {
     appearance_color_meter_rail: "电平轨道",
     appearance_color_meter_well: "电平槽",
 
-    // 音高参考音频块
-    ctx_convert_to_pitch_ref: "转换为音高参考音频块",
+    // 音高参考块
+    ctx_convert_to_pitch_ref: "转换为音高参考块",
     ctx_update_pitch_ref: "更新音高",
     ctx_export_midi: "导出为 MIDI",
-    menu_save_as_pitch_ref: "保存为音高参考音频块",
+    menu_save_as_pitch_ref: "保存为音高参考块",
     menu_export_midi: "导出为 MIDI",
 
     // ── 推理设备 / GPU ──────────────────────────────────────────────────

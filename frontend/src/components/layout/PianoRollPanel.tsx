@@ -68,6 +68,7 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
+import { findFirstExternalPathAction } from "./timeline/dnd";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
     pasteReaperClipboard,
@@ -665,13 +666,9 @@ export const PianoRollPanel: React.FC = () => {
             }
             if (s?.midiImportTargetReaperClipboard != null) {
                 setImportTargetReaperClipboard(s.midiImportTargetReaperClipboard);
-            } else if (s?.midiImportTarget != null) {
-                setImportTargetReaperClipboard(s.midiImportTarget);
             }
             if (s?.midiImportTargetParamEditor != null) {
                 setImportTargetParamEditor(s.midiImportTargetParamEditor);
-            } else if (s?.midiImportTarget != null) {
-                setImportTargetParamEditor(s.midiImportTarget);
             }
         });
     }, []);
@@ -758,20 +755,166 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, [drawToolMenuOpen, pitchSnapMenuOpen]);
 
+    /** 打开“导入到参数编辑器”的 MIDI 导入对话框（编辑器按钮 / 拖放到编辑器内共用）。
+     *  midiPath 为 null 时由用户在文件选择器中挑选文件；非 null 时直接导入该文件。 */
+    const openParamEditorMidiImport = useCallback(
+        (midiPath: string | null) => {
+            midiDialogSourceRef.current = "paramEditor";
+            // 快照当前选区（拍为单位）
+            const sel = selectionRef.current;
+            setMidiDialogSelection(sel ? { ...sel } : null);
+            // 快照当前的 editParam 和 toolMode，保证异步加载轨道期间 selectionAvailable 不变
+            midiDialogOpenParamsRef.current = {
+                editParam: s.editParam,
+                toolMode: s.toolMode,
+            };
+            setMidiPath(midiPath);
+            setClipboardGuid(null);
+            setMidiDialogOpen(true);
+        },
+        [s.editParam, s.toolMode],
+    );
+
     const handleOpenMidiDialog = useCallback(() => {
-        midiDialogSourceRef.current = "paramEditor";
-        // 快照当前选区（拍为单位）
-        const sel = selectionRef.current;
-        setMidiDialogSelection(sel ? { ...sel } : null);
-        // 快照当前的 editParam 和 toolMode，保证异步加载轨道期间 selectionAvailable 不变
-        midiDialogOpenParamsRef.current = {
-            editParam: s.editParam,
-            toolMode: s.toolMode,
+        openParamEditorMidiImport(null);
+    }, [openParamEditorMidiImport]);
+
+    // ── MIDI 拖放到参数编辑器（文件浏览器拖拽 + Tauri 系统文件拖放）────────
+    // 与“导入 MIDI”按钮同属参数编辑器场景：导入目标默认 Pitch Param，并持久化
+    // 到 midiImportTargetParamEditor（与按钮共用同一设置项）。
+    const paramEditorRef = useRef<HTMLDivElement | null>(null);
+    const [paramEditorMidiDragOver, setParamEditorMidiDragOver] = useState(false);
+
+    const isPointOverParamEditor = useCallback((clientX: number, clientY: number) => {
+        const el = paramEditorRef.current;
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        return (
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom
+        );
+    }, []);
+
+    useEffect(() => {
+        // 从拖拽载荷中取第一个 MIDI 文件路径（无则 null）。
+        const firstMidiPath = (
+            paths: string[] | null | undefined,
+            primary: string | null | undefined,
+        ): string | null => {
+            const all = Array.isArray(paths) && paths.length > 0 ? paths : primary ? [primary] : [];
+            const found = findFirstExternalPathAction(all);
+            return found && found.kind === "importMidi" ? found.path : null;
         };
-        setMidiPath(null);
-        setClipboardGuid(null);
-        setMidiDialogOpen(true);
-    }, [s.editParam, s.toolMode]);
+
+        // 文件浏览器面板的自定义拖拽事件（无 leave/end 事件，drop 即结束）。
+        const onHifiFileDrag = (e: Event) => {
+            const detail = (e as CustomEvent).detail as {
+                type?: string;
+                filePath?: string;
+                filePaths?: string[];
+                clientX?: number;
+                clientY?: number;
+            } | null;
+            if (!detail) return;
+            const clientX = Number(detail.clientX);
+            const clientY = Number(detail.clientY);
+            const x = Number.isFinite(clientX) ? clientX : undefined;
+            const y = Number.isFinite(clientY) ? clientY : undefined;
+            const over = x !== undefined && y !== undefined && isPointOverParamEditor(x, y);
+            if (detail.type === "start" || detail.type === "move") {
+                setParamEditorMidiDragOver(
+                    Boolean(over && firstMidiPath(detail.filePaths, detail.filePath)),
+                );
+                return;
+            }
+            if (detail.type === "drop") {
+                const midiPath = firstMidiPath(detail.filePaths, detail.filePath);
+                setParamEditorMidiDragOver(false);
+                if (over && midiPath) {
+                    openParamEditorMidiImport(midiPath);
+                }
+            }
+        };
+        window.addEventListener("hifi-file-drag", onHifiFileDrag);
+
+        // Tauri 系统文件拖放：与时间轴的 useTimelineDragDrop 各自独立监听，
+        // 按坐标区域互斥处理（落在参数编辑器内的 MIDI 才在此导入）。
+        // ⚠️ 必须先持有 Window 实例再调用方法：onDragDropEvent 依赖 `this`
+        // （内部 this.listen），直接取方法引用会丢失绑定并静默失效。
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+        void import("@tauri-apps/api/window")
+            .then((mod) => mod.getCurrentWindow())
+            .then((win) =>
+                win.onDragDropEvent((event: unknown) => {
+                    if (disposed) return;
+                    const payload = (
+                        event && typeof event === "object" && "payload" in event
+                            ? (event as { payload?: unknown }).payload
+                            : event
+                    ) as
+                        | {
+                              type?: string;
+                              event?: string;
+                              paths?: string[];
+                              position?: { x?: number; y?: number };
+                              pos?: { x?: number; y?: number };
+                              cursorPosition?: { x?: number; y?: number };
+                          }
+                        | undefined;
+                    if (!payload) return;
+                    const type = String(payload.type ?? payload.event ?? "");
+                    const paths: string[] = Array.isArray(payload.paths) ? payload.paths : [];
+                    const pos = (payload.position ?? payload.pos ?? payload.cursorPosition) as
+                        | { x?: number; y?: number }
+                        | undefined;
+                    const dpr = window.devicePixelRatio || 1;
+                    const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
+                    const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
+                    const over =
+                        clientX !== undefined &&
+                        clientY !== undefined &&
+                        isPointOverParamEditor(clientX, clientY);
+                    if (type === "enter" || type === "over") {
+                        setParamEditorMidiDragOver(Boolean(over && firstMidiPath(paths, null)));
+                        return;
+                    }
+                    if (type === "leave") {
+                        setParamEditorMidiDragOver(false);
+                        return;
+                    }
+                    if (type === "drop") {
+                        const midiPath = firstMidiPath(paths, null);
+                        setParamEditorMidiDragOver(false);
+                        if (over && midiPath) {
+                            openParamEditorMidiImport(midiPath);
+                        }
+                    }
+                }),
+            )
+            .then((fn) => {
+                if (disposed) {
+                    // 卸载竞态兜底：注册完成后组件已卸载，立即解绑。
+                    fn();
+                    return;
+                }
+                unlisten = fn;
+            })
+            .catch((err) => {
+                console.warn(
+                    "[param-editor-midi-drop] Failed to attach Tauri drag-drop listener",
+                    err,
+                );
+            });
+
+        return () => {
+            disposed = true;
+            window.removeEventListener("hifi-file-drag", onHifiFileDrag);
+            if (unlisten) unlisten();
+        };
+    }, [isPointOverParamEditor, openParamEditorMidiImport]);
 
     const effectiveSelectedTrackId = useMemo(() => {
         if (s.selectedTrackId) return s.selectedTrackId;
@@ -4102,7 +4245,11 @@ export const PianoRollPanel: React.FC = () => {
     }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
 
     return (
-        <Flex direction="column" className="h-full w-full bg-qt-graph-bg border-t border-qt-border">
+        <Flex
+            ref={paramEditorRef}
+            direction="column"
+            className="relative h-full w-full bg-qt-graph-bg border-t border-qt-border"
+        >
             {/* Header / Parameter Switch */}
             <Flex
                 align="center"
@@ -5321,6 +5468,11 @@ export const PianoRollPanel: React.FC = () => {
                     </div>
                 </Flex>
             </Flex>
+            {paramEditorMidiDragOver ? (
+                <div className="pointer-events-none absolute left-1/2 top-10 z-40 -translate-x-1/2 rounded border border-qt-snap-source/70 bg-qt-panel/95 px-3 py-1.5 text-[12px] text-qt-text shadow-lg">
+                    {tAny("param_editor_drop_midi_hint")}
+                </div>
+            ) : null}
             <MidiTrackSelectDialog
                 open={midiDialogOpen}
                 onOpenChange={setMidiDialogOpen}

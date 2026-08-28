@@ -71,10 +71,22 @@ const AUDIO_EXTENSIONS = new Set([
     "rm",
     "rmvb",
 ]);
+/** 支持的 MIDI 文件扩展名（可拖拽导入到时间轴或参数编辑器） */
+const MIDI_EXTENSIONS = new Set(["mid", "midi"]);
+
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
+}
+
+function isMidiFile(entry: FileEntry): boolean {
+    return !entry.isDir && !!entry.extension && MIDI_EXTENSIONS.has(entry.extension);
+}
+
+/** 可拖拽的媒体文件：音频/视频（拖入时间轴）+ MIDI（拖入时间轴或参数编辑器）。 */
+function isDraggableFile(entry: FileEntry): boolean {
+    return isAudioFile(entry) || isMidiFile(entry);
 }
 
 const VIDEO_EXTENSIONS = new Set([
@@ -155,6 +167,21 @@ function AudioIcon({ className }: { className?: string }) {
     );
 }
 
+/** MIDI 文件图标 SVG（双音符） */
+function MidiIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <path
+                d="M5 2.5V9.5M5 9.5C5 8.39543 4.10457 7.5 3 7.5C1.89543 7.5 1 8.39543 1 9.5C1 10.6046 1.89543 11.5 3 11.5C4.10457 11.5 5 10.6046 5 9.5ZM12.5 3.5V9.5M12.5 9.5C12.5 8.39543 11.6046 7.5 10.5 7.5C9.39543 7.5 8.5 8.39543 8.5 9.5C8.5 10.6046 9.39543 11.5 10.5 11.5C11.6046 11.5 12.5 10.6046 12.5 9.5Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+            />
+            <path d="M5 2.5L12.5 1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+    );
+}
+
 export const FileBrowserPanel: React.FC = () => {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
@@ -217,7 +244,8 @@ export const FileBrowserPanel: React.FC = () => {
     // 音频过滤
     const audioFilteredEntries = useMemo(() => {
         if (!fb.audioOnly) return regexFilteredEntries;
-        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e));
+        // “仅显示媒体文件”：音频/视频 + MIDI（MIDI 可导入时间轴/参数编辑器）。
+        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e) || isMidiFile(e));
     }, [regexFilteredEntries, fb.audioOnly]);
 
     // 排序
@@ -819,6 +847,8 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         pathHint,
     }) => {
         const isAudio = isAudioFile(entry);
+        const isMidi = isMidiFile(entry);
+        const isDraggable = isDraggableFile(entry);
 
         return (
             <div
@@ -831,11 +861,11 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                           ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                           : "",
                     isDragging ? "opacity-50" : "",
-                    !entry.isDir && !isAudio ? "opacity-50" : "",
+                    !entry.isDir && !isDraggable ? "opacity-50" : "",
                 ]
                     .filter(Boolean)
                     .join(" ")}
-                onPointerDown={isAudio ? (e) => onPointerDownForDrag(e, entry) : undefined}
+                onPointerDown={isDraggable ? (e) => onPointerDownForDrag(e, entry) : undefined}
                 onDoubleClick={entry.isDir ? () => onDoubleClickDir(entry.path) : undefined}
                 onClick={isAudio ? (ev: React.MouseEvent) => onClickAudio(entry, ev) : undefined}
             >
@@ -851,6 +881,8 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         ) : (
                             <AudioIcon className="text-blue-400" />
                         )
+                    ) : isMidi ? (
+                        <MidiIcon className="text-qt-highlight" />
                     ) : (
                         <FileIcon width="12" height="12" className="text-qt-text-muted" />
                     )}

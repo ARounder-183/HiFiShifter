@@ -51,8 +51,6 @@ export interface UiSettings {
     smoothnessPercent?: number;
     /** 旧版边缘平滑字段名（读取兼容）。 */
     edgeSmoothnessPercent?: number;
-    /** 旧版 MIDI 导入目标字段名（读取兼容）。 */
-    midiImportTarget?: string;
     midiImportPosition?: string;
     midiFillGaps?: boolean;
     midiMultiTrackMerge?: boolean;

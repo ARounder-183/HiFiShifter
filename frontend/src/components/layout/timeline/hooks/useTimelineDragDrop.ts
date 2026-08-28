@@ -231,11 +231,25 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
                             setDropPreview(null);
-                            onMidiDrop?.({
-                                midiPath: externalAction.path,
-                                trackId,
-                                startSec: beat,
-                            });
+                            // 仅当落点位于时间轴区域内才在此导入 MIDI；落在其它区域
+                            //（如参数编辑器）时留给对应区域的拖放接收者处理，避免把
+                            // “拖到参数编辑器”误判为“拖到时间轴”（导入目标默认值
+                            // 也会因此选错场景）。
+                            const overTimeline =
+                                bounds != null &&
+                                clientX !== undefined &&
+                                clientY !== undefined &&
+                                clientX >= bounds.left &&
+                                clientX <= bounds.right &&
+                                clientY >= bounds.top &&
+                                clientY <= bounds.bottom;
+                            if (overTimeline) {
+                                onMidiDrop?.({
+                                    midiPath: externalAction.path,
+                                    trackId,
+                                    startSec: beat,
+                                });
+                            }
                             return;
                         }
                         if (externalAction && externalAction.kind !== "importAudio") {

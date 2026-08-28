@@ -745,6 +745,7 @@ export const koKR = {
     midi_import_target: "가져오기 대상",
     midi_import_target_pitch_block: "음높이 참조 블록",
     midi_import_target_pitch_param: "음높이 파라미터",
+    param_editor_drop_midi_hint: "드롭하여 MIDI를 음높이 파라미터로 가져오기",
     midi_clipboard_midi_prefix: "클립보드 MIDI：",
 
     // MIDI replace dialog

@@ -281,8 +281,19 @@ pub struct UiSettings {
     pub midi_specified_bpm: Option<f64>,
     #[serde(default = "default_true")]
     pub midi_close_leading_gap: bool,
-    #[serde(default = "default_midi_import_target")]
-    pub midi_import_target: String,
+    /// MIDI 导入目标（统一弹窗）：pitchRef = 创建音高参考块，pitchParam = 导入到音高参数。
+    /// 两个导入场景分别持久化、分别存储：
+    /// - 时间轴场景（文件菜单导入 / 拖拽到轨道视图）：默认 pitchRef；
+    /// - 参数编辑器场景（编辑器内导入按钮 / 拖拽到编辑器内）：默认 pitchParam。
+    /// （旧版单一字段 midiImportTarget 已移除，不再做读取兼容。）
+    #[serde(default = "default_midi_import_target_timeline")]
+    pub midi_import_target_menu: String,
+    #[serde(default = "default_midi_import_target_timeline")]
+    pub midi_import_target_drag_drop: String,
+    #[serde(default = "default_midi_import_target_param_editor")]
+    pub midi_import_target_param_editor: String,
+    #[serde(default = "default_midi_import_target_param_editor")]
+    pub midi_import_target_reaper_clipboard: String,
     /// MIDI 导入为 Tempo Map（默认关闭）。
     #[serde(default)]
     pub midi_import_as_tempo_map: bool,
@@ -718,7 +729,13 @@ fn default_midi_note_bpm_mode() -> String {
     "midi".to_string()
 }
 
-fn default_midi_import_target() -> String {
+/// 时间轴 MIDI 导入场景（文件菜单 / 拖拽到轨道视图）的默认导入目标。
+fn default_midi_import_target_timeline() -> String {
+    "pitchRef".to_string()
+}
+
+/// 参数编辑器 MIDI 导入场景（编辑器导入按钮 / 拖拽到编辑器内）的默认导入目标。
+fn default_midi_import_target_param_editor() -> String {
     "pitchParam".to_string()
 }
 
@@ -774,7 +791,10 @@ impl Default for UiSettings {
             midi_note_bpm_mode: default_midi_note_bpm_mode(),
             midi_specified_bpm: None,
             midi_close_leading_gap: true,
-            midi_import_target: default_midi_import_target(),
+            midi_import_target_menu: default_midi_import_target_timeline(),
+            midi_import_target_drag_drop: default_midi_import_target_timeline(),
+            midi_import_target_param_editor: default_midi_import_target_param_editor(),
+            midi_import_target_reaper_clipboard: default_midi_import_target_param_editor(),
             midi_import_as_tempo_map: false,
             midi_import_tempo_map_tempo: true,
             midi_import_tempo_map_time_signature: true,

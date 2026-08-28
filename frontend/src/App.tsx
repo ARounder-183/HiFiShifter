@@ -491,13 +491,9 @@ function AppInner() {
                 }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
-                } else if (s?.midiImportTarget != null) {
-                    setMidiImportTargetMenu(s.midiImportTarget);
                 }
                 if (s?.midiImportTargetDragDrop != null) {
                     setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-                } else if (s?.midiImportTarget != null) {
-                    setMidiImportTargetDragDrop(s.midiImportTarget);
                 }
                 if (typeof s?.autoReloadModifiedMedia === "boolean") {
                     setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);

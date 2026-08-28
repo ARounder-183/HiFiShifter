@@ -677,6 +677,7 @@ export const jaJP = {
     midi_import_target: "インポート対象",
     midi_import_target_pitch_block: "音高リファレンスブロック",
     midi_import_target_pitch_param: "音高パラメータ",
+    param_editor_drop_midi_hint: "ドロップで MIDI を音高パラメータにインポート",
     midi_clipboard_midi_prefix: "クリップボード MIDI：",
 
     // MIDI replace dialog

@@ -748,6 +748,7 @@ export const enUS = {
     midi_import_target: "Import Target",
     midi_import_target_pitch_block: "Pitch Reference Block",
     midi_import_target_pitch_param: "Pitch Parameter",
+    param_editor_drop_midi_hint: "Drop to import MIDI into the pitch parameter",
     midi_clipboard_midi_prefix: "Clipboard MIDI: ",
 
     // MIDI replace dialog
