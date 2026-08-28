@@ -1101,8 +1101,9 @@ pub fn get_param_frames(
     start_frame: u32,
     frame_count: u32,
     stride: Option<u32>,
+    binary: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride)
+    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride, binary)
 }
 
 #[tauri::command(rename_all = "camelCase")]

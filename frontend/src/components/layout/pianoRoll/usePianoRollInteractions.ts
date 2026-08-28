@@ -47,6 +47,13 @@ import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBoun
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
 import { transformSelectionByRightDrag } from "./selectionTransforms";
 import {
+    buildSelectionDragDense,
+    fetchFullResCurve,
+    readPvRange,
+    selectionDragRange,
+    uploadFullResCurve,
+} from "./selectionEditData";
+import {
     computeVibratoDragAdjustment,
     resolveVibratoDragKeyboardAdjustment,
 } from "./vibratoDragAdjust";
@@ -2844,7 +2851,9 @@ export function usePianoRollInteractions(args: {
                                     e.currentTarget as HTMLCanvasElement,
                                 );
 
-                                // 保存选区内曲线原始值
+                                // 选区帧范围 —— 注意这里**不**夹到 pv 的已加载窗口内。
+                                // 「全选」时选区覆盖整个工程，若按 pv 裁剪，后续只会改到
+                                // 显示范围内的参数，工程其余部分纹丝不动（本次修复的 bug）。
                                 const selStartSec = aBeat * secPerBeat;
                                 const selEndSec = bBeat * secPerBeat;
                                 const selStartFrame = Math.max(
@@ -2852,18 +2861,63 @@ export function usePianoRollInteractions(args: {
                                     Math.floor((selStartSec * 1000) / fp),
                                 );
                                 const selEndFrame = Math.max(0, Math.ceil((selEndSec * 1000) / fp));
-                                const stride = Math.max(1, pv.stride);
-                                const selStartIdx = Math.max(
-                                    0,
-                                    Math.round((selStartFrame - pv.startFrame) / stride),
-                                );
-                                const selEndIdx = Math.min(
-                                    pv.edit.length - 1,
-                                    Math.round((selEndFrame - pv.startFrame) / stride),
-                                );
-                                const origValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
+
+                                // 取选区的全分辨率原始值。
+                                // pv 在低缩放下按画布宽度做了降采样，直接拿去变换再回写
+                                // 会把全分辨率曲线覆盖掉，所以变换的输入必须是 stride=1
+                                // 的数据。pv 已以 stride=1 覆盖时零开销直接切片，行为与
+                                // 改动前一致；否则分块向后端拉取（不阻塞拖动）。
+                                const origCurvePromise = fetchFullResCurve({
+                                    trackId: rootTrackId ?? "",
+                                    param: editParam,
+                                    startFrame: selStartFrame,
+                                    endFrame: selEndFrame,
+                                    paramView: pv,
+                                });
+                                // 先用 pv 覆盖到的部分做即时预览；全分辨率数据到位后自动
+                                // 替换，之后的每一帧预览都基于无损数据。
+                                let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                let dragSettled = false;
+                                void origCurvePromise.then((curve) => {
+                                    if (dragSettled) return;
+                                    origValues = curve.values;
+                                });
+
+                                // 预览取数：从 pv 读当前值（pv 可能降采样，仅用于即时反馈）。
+                                const makePvSourceAt = (src: typeof pv) => {
+                                    const step = Math.max(1, Math.floor(src.stride));
+                                    return (frame: number) => {
+                                        const idx = Math.round((frame - src.startFrame) / step);
+                                        return idx >= 0 && idx < src.edit.length
+                                            ? src.edit[idx]
+                                            : 0;
+                                    };
+                                };
+
+                                // 逐帧变换。拖动过程中 `lastValueDelta` / `lastScaleStepDelta`
+                                // 会被 onMove 更新，这里读到的是最新值。
+                                const transformDragValue = (orig: number, frame: number) => {
+                                    if (
+                                        useScaleDegreeTranspose &&
+                                        editParam === "pitch" &&
+                                        dragAnchorScale
+                                    ) {
+                                        // 每个帧用其落地时刻的生效音阶做度数移调。
+                                        const frameScale =
+                                            scaleAtSec?.((frame * fp) / 1000) ?? dragAnchorScale;
+                                        return orig === 0
+                                            ? 0
+                                            : transposePitchByScaleSteps(
+                                                  orig,
+                                                  lastScaleStepDelta,
+                                                  frameScale,
+                                              );
+                                    }
+                                    return orig + lastValueDelta;
+                                };
+
                                 // Tempo Map 感知：度数差以拖动锚点帧的生效音阶计算。
-                                const dragAnchorFrame = pv.startFrame + selStartIdx * stride;
+                                const dragAnchorFrame = selStartFrame;
                                 const dragAnchorScale =
                                     scaleAtSec?.((dragAnchorFrame * fp) / 1000) ?? projectScale;
                                 ensureLiveEditBase(pv);
@@ -2961,109 +3015,40 @@ export function usePianoRollInteractions(args: {
                                     liveEditOverrideRef.current = null;
                                     ensureLiveEditBase(pvNow);
 
-                                    // 构造覆盖原选区 + 新位置的完整 dense 数组
-                                    const selLen = selEndIdx - selStartIdx + 1;
-                                    const origDenseStart = pv.startFrame + selStartIdx * stride;
+                                    // 构造覆盖原选区 + 新位置的 dense 数组（逐帧索引）。
+                                    // 预览阶段从 pv 取上下文 —— pv 只是显示数据，不会回写。
+                                    const selLen = origValues.length;
+                                    if (selLen === 0) return;
 
-                                    // 计算需要覆盖的帧范围：原选区 ∪ 新位置选区
-                                    const newDenseStart = origDenseStart + lastFrameDelta;
-                                    const overallMinFrame = Math.max(
-                                        0,
-                                        Math.min(origDenseStart, newDenseStart),
-                                    );
-                                    const origDenseEnd = origDenseStart + (selLen - 1) * stride;
-                                    const newDenseEnd = newDenseStart + (selLen - 1) * stride;
-                                    const overallMaxFrame = Math.max(origDenseEnd, newDenseEnd);
-
-                                    // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
+                                    // 边缘平滑度：扩展范围以包含选区边界外侧上下文
                                     // halfSpan 与 applyEdgeSmoothingToDense 内的计算保持一致
                                     const edgeSmoothStr = clamp(
                                         Number(edgeSmoothnessPercent) || 0,
                                         0,
                                         100,
                                     );
-                                    const edgeHalfSpanIdx = Math.ceil(
+                                    const extraEdgeFrames = Math.ceil(
                                         Math.round((edgeSmoothStr / 100) * Math.floor(selLen / 2)) /
                                             2,
                                     );
-                                    const extraEdgeFrames = edgeHalfSpanIdx * stride;
-                                    const overallMinFrameExt = Math.max(
-                                        0,
-                                        overallMinFrame - extraEdgeFrames,
-                                    );
-                                    const overallMaxFrameExt = overallMaxFrame + extraEdgeFrames;
 
-                                    const overallLen =
-                                        Math.floor(
-                                            (overallMaxFrameExt - overallMinFrameExt) / stride,
-                                        ) + 1;
-                                    const dense = new Array<number>(overallLen);
-
-                                    // 先用当前 edit 曲线填充整个范围（含扩展部分；选区外锚点应基于当前新值）
-                                    for (let i = 0; i < overallLen; i++) {
-                                        const globalIdx = Math.round(
-                                            (overallMinFrameExt + i * stride - pv.startFrame) /
-                                                stride,
-                                        );
-                                        dense[i] =
-                                            globalIdx >= 0 && globalIdx < pvNow.edit.length
-                                                ? pvNow.edit[globalIdx]
-                                                : 0;
-                                    }
-                                    const denseBefore = dense.slice();
-                                    // 再将选区值写入新位置（覆盖 orig）
-                                    for (let i = 0; i < selLen; i++) {
-                                        const targetFrame = newDenseStart + i * stride;
-                                        const denseIdx = Math.round(
-                                            (targetFrame - overallMinFrameExt) / stride,
-                                        );
-                                        if (denseIdx >= 0 && denseIdx < overallLen) {
-                                            const orig = origValues[i] ?? 0;
-                                            if (
-                                                useScaleDegreeTranspose &&
-                                                editParam === "pitch" &&
-                                                dragAnchorScale
-                                            ) {
-                                                // 每个帧用其落地时刻的生效音阶做度数移调。
-                                                const frameScale =
-                                                    scaleAtSec?.((targetFrame * fp) / 1000) ??
-                                                    dragAnchorScale;
-                                                dense[denseIdx] =
-                                                    orig === 0
-                                                        ? 0
-                                                        : transposePitchByScaleSteps(
-                                                              orig,
-                                                              lastScaleStepDelta,
-                                                              frameScale,
-                                                          );
-                                            } else {
-                                                dense[denseIdx] = orig + lastValueDelta;
-                                            }
-                                        }
-                                    }
-
-                                    const movedStartDenseIdx = Math.round(
-                                        (newDenseStart - overallMinFrameExt) / stride,
-                                    );
-                                    const changeFactor = computeSelectionChangeFactor(
-                                        denseBefore,
-                                        dense,
-                                        movedStartDenseIdx,
-                                        selLen,
-                                    );
-                                    applyEdgeSmoothingToDense(
-                                        dense,
-                                        movedStartDenseIdx,
-                                        selLen,
-                                        changeFactor,
-                                    );
+                                    const built = buildSelectionDragDense({
+                                        sourceAt: makePvSourceAt(pvNow),
+                                        origValues,
+                                        origStartFrame: selStartFrame,
+                                        frameDelta: lastFrameDelta,
+                                        extraEdgeFrames,
+                                        transform: (orig, frame) => transformDragValue(orig, frame),
+                                        computeChangeFactor: computeSelectionChangeFactor,
+                                        applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                    });
 
                                     applyDenseToLiveEdit(
                                         pvNow,
-                                        overallMinFrameExt,
-                                        dense,
-                                        overallMinFrameExt,
-                                        overallMaxFrameExt,
+                                        built.startFrame,
+                                        built.values,
+                                        built.startFrame,
+                                        built.endFrame,
                                         "draw",
                                     );
 
@@ -3100,155 +3085,116 @@ export function usePianoRollInteractions(args: {
                                     invalidate();
                                 };
 
-                                const onUp = () => {
+                                const onUp = async () => {
                                     window.removeEventListener("pointermove", onMove);
                                     window.removeEventListener("pointerup", onUp);
                                     window.removeEventListener("pointercancel", onUp);
                                     disposeFineAdjustedPointerState(finePointerState);
                                     clearActivePointerGestureEnd(onUp);
+                                    // 标记手势结束，避免已发出的取数请求再覆写 origValues
+                                    dragSettled = true;
 
                                     // 提交拖拽结果到后端
                                     const pvNow = paramViewRef.current;
                                     if (pvNow && rootTrackId) {
-                                        const selLen = selEndIdx - selStartIdx + 1;
-                                        const origDenseStart = pv.startFrame + selStartIdx * stride;
-                                        const newDenseStart = origDenseStart + lastFrameDelta;
-
-                                        const overallMinFrame = Math.max(
-                                            0,
-                                            Math.min(origDenseStart, newDenseStart),
-                                        );
-                                        const origDenseEnd = origDenseStart + (selLen - 1) * stride;
-                                        const newDenseEnd = newDenseStart + (selLen - 1) * stride;
-                                        const overallMaxFrame = Math.max(origDenseEnd, newDenseEnd);
-
-                                        // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
-                                        const edgeSmoothStrUp = clamp(
-                                            Number(edgeSmoothnessPercent) || 0,
-                                            0,
-                                            100,
-                                        );
-                                        const edgeHalfSpanIdxUp = Math.ceil(
-                                            Math.round(
-                                                (edgeSmoothStrUp / 100) * Math.floor(selLen / 2),
-                                            ) / 2,
-                                        );
-                                        const extraEdgeFramesUp = edgeHalfSpanIdxUp * stride;
-                                        const overallMinFrameExt = Math.max(
-                                            0,
-                                            overallMinFrame - extraEdgeFramesUp,
-                                        );
-                                        const overallMaxFrameExt =
-                                            overallMaxFrame + extraEdgeFramesUp;
-
-                                        const overallLen =
-                                            Math.floor(
-                                                (overallMaxFrameExt - overallMinFrameExt) / stride,
-                                            ) + 1;
-
-                                        // 构造最终提交的 dense 数组
-                                        const finalDense = new Array<number>(overallLen);
-
-                                        // 先用当前 edit 填充整个范围（含扩展部分；选区外锚点应基于当前新值）
-                                        for (let i = 0; i < overallLen; i++) {
-                                            const globalIdx = Math.round(
-                                                (overallMinFrameExt +
-                                                    i * stride -
-                                                    pvNow.startFrame) /
-                                                    stride,
+                                        // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
+                                        // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
+                                        origValues = (await origCurvePromise).values;
+                                        const selLen = origValues.length;
+                                        if (selLen > 0) {
+                                            // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
+                                            const edgeSmoothStrUp = clamp(
+                                                Number(edgeSmoothnessPercent) || 0,
+                                                0,
+                                                100,
                                             );
-                                            finalDense[i] =
-                                                globalIdx >= 0 && globalIdx < pvNow.edit.length
-                                                    ? pvNow.edit[globalIdx]
-                                                    : 0;
-                                        }
-                                        const finalDenseBefore = finalDense.slice();
-                                        // 再将偏移后的选区值写入新位置
-                                        for (let i = 0; i < selLen; i++) {
-                                            const targetFrame = newDenseStart + i * stride;
-                                            const denseIdx = Math.round(
-                                                (targetFrame - overallMinFrameExt) / stride,
+                                            const extraEdgeFramesUp = Math.ceil(
+                                                Math.round(
+                                                    (edgeSmoothStrUp / 100) *
+                                                        Math.floor(selLen / 2),
+                                                ) / 2,
                                             );
-                                            if (denseIdx >= 0 && denseIdx < overallLen) {
-                                                const orig = origValues[i] ?? 0;
-                                                if (
-                                                    useScaleDegreeTranspose &&
-                                                    editParam === "pitch" &&
-                                                    dragAnchorScale
-                                                ) {
-                                                    const frameScale =
-                                                        scaleAtSec?.((targetFrame * fp) / 1000) ??
-                                                        dragAnchorScale;
-                                                    finalDense[denseIdx] =
-                                                        orig === 0
-                                                            ? 0
-                                                            : transposePitchByScaleSteps(
-                                                                  orig,
-                                                                  lastScaleStepDelta,
-                                                                  frameScale,
-                                                              );
-                                                } else {
-                                                    finalDense[denseIdx] = orig + lastValueDelta;
+
+                                            // 提交前把整段范围的全分辨率数据拉下来作为基底。
+                                            // 这是「回写不失真」的关键：预览用的是可能降采样的
+                                            // pv，提交必须用 stride=1 的真实曲线，否则会把
+                                            // 降采样后的值写回后端、覆盖掉原始分辨率。
+                                            const upRange = selectionDragRange({
+                                                origStartFrame: selStartFrame,
+                                                origValuesLength: selLen,
+                                                frameDelta: lastFrameDelta,
+                                                extraEdgeFrames: extraEdgeFramesUp,
+                                            });
+                                            // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
+                                            // 否则分块拉取。pvNow.edit 是拖动前的值，正是回写
+                                            // 所需的「当前后端值」。
+                                            const commitBase = await fetchFullResCurve({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                startFrame: upRange.startFrame,
+                                                endFrame: upRange.endFrame,
+                                                paramView: pvNow,
+                                            });
+
+                                            const built = buildSelectionDragDense({
+                                                sourceAt: (frame) =>
+                                                    commitBase.values[
+                                                        frame - commitBase.startFrame
+                                                    ] ?? 0,
+                                                origValues,
+                                                origStartFrame: selStartFrame,
+                                                frameDelta: lastFrameDelta,
+                                                extraEdgeFrames: extraEdgeFramesUp,
+                                                transform: (orig, frame) =>
+                                                    transformDragValue(orig, frame),
+                                                computeChangeFactor: computeSelectionChangeFactor,
+                                                applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                            });
+                                            const finalDense = built.values;
+                                            const overallMinFrameExt = built.startFrame;
+
+                                            // 立即同步更新本地 paramView state（逐帧映射到 pv 的
+                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                            const nextEdit = pvNow.edit.slice();
+                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                            for (let i = 0; i < finalDense.length; i++) {
+                                                const globalIdx = Math.round(
+                                                    (overallMinFrameExt + i - pvNow.startFrame) /
+                                                        pvStepUp,
+                                                );
+                                                if (globalIdx >= 0 && globalIdx < nextEdit.length) {
+                                                    nextEdit[globalIdx] = finalDense[i];
                                                 }
                                             }
+                                            setParamView({
+                                                ...pvNow,
+                                                edit: nextEdit,
+                                            });
+                                            liveEditOverrideRef.current = null;
+
+                                            // 确保选区位置最终正确
+                                            const beatDeltaForSel =
+                                                (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                            selectionRef.current = {
+                                                aBeat: aBeat + beatDeltaForSel,
+                                                bBeat: bBeat + beatDeltaForSel,
+                                            };
+                                            updateSelectionUi(selectionRef.current);
+
+                                            // 分块回写：整段编辑只打一个撤销点，块之间让出
+                                            // 事件循环，超长工程也不会卡死界面。
+                                            void (async () => {
+                                                await uploadFullResCurve({
+                                                    trackId: rootTrackId,
+                                                    param: editParam,
+                                                    startFrame: overallMinFrameExt,
+                                                    values: finalDense,
+                                                });
+                                                if (liveEditActiveRef)
+                                                    liveEditActiveRef.current = false;
+                                                bumpRefreshToken();
+                                            })();
                                         }
-
-                                        const movedStartDenseIdx = Math.round(
-                                            (newDenseStart - overallMinFrameExt) / stride,
-                                        );
-                                        const changeFactor = computeSelectionChangeFactor(
-                                            finalDenseBefore,
-                                            finalDense,
-                                            movedStartDenseIdx,
-                                            selLen,
-                                        );
-                                        applyEdgeSmoothingToDense(
-                                            finalDense,
-                                            movedStartDenseIdx,
-                                            selLen,
-                                            changeFactor,
-                                        );
-
-                                        // 立即同步更新本地 paramView state
-                                        const nextEdit = pvNow.edit.slice();
-                                        for (let i = 0; i < overallLen; i++) {
-                                            const globalIdx = Math.round(
-                                                (overallMinFrameExt +
-                                                    i * stride -
-                                                    pvNow.startFrame) /
-                                                    stride,
-                                            );
-                                            if (globalIdx >= 0 && globalIdx < nextEdit.length) {
-                                                nextEdit[globalIdx] = finalDense[i];
-                                            }
-                                        }
-                                        setParamView({
-                                            ...pvNow,
-                                            edit: nextEdit,
-                                        });
-                                        liveEditOverrideRef.current = null;
-
-                                        // 确保选区位置最终正确
-                                        const beatDeltaForSel =
-                                            (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                        selectionRef.current = {
-                                            aBeat: aBeat + beatDeltaForSel,
-                                            bBeat: bBeat + beatDeltaForSel,
-                                        };
-                                        updateSelectionUi(selectionRef.current);
-
-                                        void (async () => {
-                                            await paramsApi.setParamFrames(
-                                                rootTrackId,
-                                                editParam,
-                                                overallMinFrameExt,
-                                                finalDense,
-                                                true,
-                                            );
-                                            if (liveEditActiveRef)
-                                                liveEditActiveRef.current = false;
-                                            bumpRefreshToken();
-                                        })();
                                     } else {
                                         if (liveEditActiveRef) liveEditActiveRef.current = false;
                                     }
