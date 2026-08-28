@@ -383,8 +383,6 @@ type TrackListProps = {
     onAlgoChange?: (trackId: string, algo: string) => void;
     onTrackNameChange?: (trackId: string, name: string) => void;
     onDuplicateTrack?: (trackId: string) => void;
-    onCopyTrack?: (trackId: string) => void;
-    onCutTrack?: (trackId: string) => void;
     onScrollTopChange?: (scrollTop: number) => void;
     /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚�?*/
     listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
@@ -418,8 +416,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onAlgoChange,
     onTrackNameChange,
     onDuplicateTrack,
-    onCopyTrack,
-    onCutTrack,
     onScrollTopChange,
     listScrollRef,
     headerHeight = 48,
@@ -1997,25 +1993,6 @@ const TrackListInner: React.FC<TrackListProps> = ({
                         }}
                     >
                         {t("track_clone")}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
-                        onClick={() => {
-                            onCopyTrack?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        {t("track_copy")}
-                    </button>
-                    <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
-                        disabled={isLastRootTrack(trackCtxMenu.trackId)}
-                        onClick={() => {
-                            onCutTrack?.(trackCtxMenu.trackId);
-                            setTrackCtxMenu(null);
-                        }}
-                    >
-                        {t("track_cut")}
                     </button>
                     <button
                         className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300"

@@ -546,8 +546,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clipboardAvailable,
         copyClips,
         cutClips,
-        copyTracks,
-        cutTracks,
         groupClips,
         ungroupClips,
         toggleGroupDisabled,
@@ -573,18 +571,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     } = clipActions;
     // 传给 React.memo 化的 TrackList / TrackLane 的回调必须引用稳定，
     // 否则每次 TimelinePanel 渲染（播放头提交值、滚动、修饰键）都会击穿 memo。
-    const handleCopyTrack = React.useCallback(
-        (trackId: string) => {
-            void copyTracks([trackId]);
-        },
-        [copyTracks],
-    );
-    const handleCutTrack = React.useCallback(
-        (trackId: string) => {
-            cutTracks([trackId]);
-        },
-        [cutTracks],
-    );
     const handleToggleGroupDisabled = React.useCallback(
         (groupId: string) => {
             toggleGroupDisabled(groupId);
@@ -1340,8 +1326,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onAlgoChange={handleTrackAlgoChange}
                 onTrackNameChange={handleTrackNameChange}
                 onDuplicateTrack={handleDuplicateTrack}
-                onCopyTrack={handleCopyTrack}
-                onCutTrack={handleCutTrack}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
                 headerHeight={timeRulerHeightPx(

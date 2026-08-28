@@ -16,7 +16,6 @@ import { useI18n } from "../../../../i18n/I18nProvider";
 import {
     pasteTimelineClipboardRemote,
     removeClipsRemote,
-    removeTrackRemote,
     selectClipRemote,
     setClipAutoFades,
     setClipGain,
@@ -126,8 +125,6 @@ export interface UseTimelineClipActionsResult {
     clipboardAvailable: boolean;
     copyClips: (ids: string[]) => Promise<boolean>;
     cutClips: (ids: string[]) => void;
-    copyTracks: (ids: string[]) => Promise<boolean>;
-    cutTracks: (ids: string[]) => void;
 
     // Clip operations
     groupClips: (ids: string[]) => void;
@@ -350,29 +347,6 @@ export function useTimelineClipActions(
             })();
         },
         [copyClips, dispatch, setMultiSelectedClipIds],
-    );
-
-    const copyTracks = React.useCallback(async (ids: string[]) => {
-        if (ids.length === 0) return false;
-        try {
-            const result = await webApi.copyTimelineTracks(ids);
-            setClipboardAvailable(Boolean(result?.ok));
-            return Boolean(result?.ok);
-        } catch {
-            setClipboardAvailable(false);
-            return false;
-        }
-    }, []);
-
-    const cutTracks = React.useCallback(
-        (ids: string[]) => {
-            void (async () => {
-                const copied = await copyTracks(ids);
-                if (!copied) return;
-                void dispatch(removeTrackRemote(ids[0]));
-            })();
-        },
-        [copyTracks, dispatch],
     );
 
     // ── normalizeClips ───────────────────────────────────────
@@ -908,8 +882,6 @@ export function useTimelineClipActions(
         clipboardAvailable,
         copyClips,
         cutClips,
-        copyTracks,
-        cutTracks,
 
         groupClips,
         ungroupClips,
