@@ -116,17 +116,22 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
-/// 仅供集成测试（tests/）使用的内部函数导出。
+/// Internal pure-function exports used by integration tests (tests/).
 ///
-/// lib 的单元测试 harness 在 Windows 上因缺少内嵌清单无法启动（tauri_build
-/// 只给 bin 目标嵌清单，见 build.rs / tests/smoke.rs 说明），因此需要真正
-/// 运行纯函数回归测试时，通过 `--features __test-internals` 走集成测试
-/// 目标执行。
+/// Gated behind the `__test-internals` feature, which is part of `default`
+/// so plain `cargo test` exercises the same code paths as CI
+/// (`cargo test --features __test-internals`).
+///
+/// NOTE: this module used to exist so pure-function regressions could run
+/// through integration targets because the lib unit-test harness could not
+/// start on Windows (no manifest link channel). That limitation is gone —
+/// `.cargo/config.toml` delay-loads comctl32.dll, so `cargo test --lib`
+/// runs natively; the re-exports are kept for the integration targets.
 #[cfg(feature = "__test-internals")]
 pub mod __test_internals {
     pub use crate::pitch_clip::trim_and_resample_midi;
-    // REAPER 导出往返：Windows 上 lib 单测 harness 无法启动（见模块注释），
-    // 速率/多 take 导出的关键回归经由集成测试执行。
+    // REAPER export round-trips: rate/multi-take export regressions run via
+    // the integration targets (loop_semantics / reaper_export_rates).
     pub use crate::reaper_export::build_reaper_clipboard;
     pub use crate::reaper_parser::parse_clipboard_bytes;
     pub use crate::state::{
@@ -134,17 +139,19 @@ pub mod __test_internals {
         TimelineState,
     };
 
-    /// 消费窗口模型（正放 [ss, ss+len·r) / 倒放 [se−len·r, se)）。
+    /// Consumed playback window (forward [ss, ss+len·r) / reverse [se−len·r, se)).
     pub fn playback_window_sec(c: &Clip) -> (f64, f64) {
         crate::state::clip_playback_window_sec(c)
     }
 
-    /// 方向性前导静音（正放看窗口起点、倒放看窗口终点越过媒体末端）。
+    /// Directional leading silence (forward: window start; reverse: window
+    /// end past the media end).
     pub fn leading_silence_sec(c: &Clip, media_total_sec: Option<f64>) -> f64 {
         crate::state::clip_leading_silence_sec(c, media_total_sec)
     }
 
-    /// trim_and_resample_midi 的窗口实参（非 Loop 倒放重定向到 [se−len·r, se]）。
+    /// Window arguments for trim_and_resample_midi (non-loop reverse is
+    /// redirected to [se−len·r, se]).
     pub fn pitch_trim_window_sec(c: &Clip) -> (f64, f64) {
         crate::state::clip_pitch_trim_window_sec(c)
     }
