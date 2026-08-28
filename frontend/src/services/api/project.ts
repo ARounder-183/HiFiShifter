@@ -156,10 +156,5 @@ export const projectApi = {
                 tempoMapImported?: boolean;
                 tempoMapSkipped?: boolean;
             }
-        >(
-            "import_project",
-            payload.projectPath,
-            payload.placeAtPlayhead,
-            payload.importTempoMap,
-        ),
+        >("import_project", payload.projectPath, payload.placeAtPlayhead, payload.importTempoMap),
 };

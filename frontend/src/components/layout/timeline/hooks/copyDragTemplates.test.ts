@@ -41,5 +41,4 @@ test("components/layout/timeline/hooks/copyDragTemplates.test.ts scripted checks
         true,
         "linked params kept",
     );
-
 });

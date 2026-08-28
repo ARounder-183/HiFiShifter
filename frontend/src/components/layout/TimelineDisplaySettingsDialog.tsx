@@ -104,9 +104,7 @@ export function TimelineDisplaySettingsDialog({ open, onOpenChange }: Props) {
                                         currentValue: s.secondaryTimeUnit,
                                         options: TIME_UNIT_CHOICES as readonly string[],
                                         onChange: (next) => {
-                                            dispatch(
-                                                setSecondaryTimeUnit(next as TimeUnitChoice),
-                                            );
+                                            dispatch(setSecondaryTimeUnit(next as TimeUnitChoice));
                                             void dispatch(persistUiSettings());
                                         },
                                     });

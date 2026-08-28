@@ -89,5 +89,4 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
         baseState.clipPitchCurves,
         "import keeps detected pitch curves stable",
     );
-
 });

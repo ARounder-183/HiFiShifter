@@ -1200,11 +1200,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // slice 每次渲染都会产生新引用；不缓存的话下游所有 useMemo 与
     // 两块画布的 memo 会在每次无关更新（播放头/滚动/修饰键）时全量重算重绘。
     const visibleTracks = React.useMemo(
-        () =>
-            s.tracks.slice(
-                timelineRenderModel.startIndex,
-                timelineRenderModel.endIndex + 1,
-            ),
+        () => s.tracks.slice(timelineRenderModel.startIndex, timelineRenderModel.endIndex + 1),
         [s.tracks, timelineRenderModel.startIndex, timelineRenderModel.endIndex],
     );
     const visibleTrackClipCacheRef = React.useRef<

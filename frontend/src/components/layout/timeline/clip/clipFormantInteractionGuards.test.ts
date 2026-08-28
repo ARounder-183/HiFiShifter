@@ -39,5 +39,4 @@ test("components/layout/timeline/clip/clipFormantInteractionGuards.test.ts scrip
         !formantChartPointerDownShouldPreventDefault({ disabled: true }),
         "disabled vowel chart should not claim drag prevention",
     );
-
 });

@@ -104,12 +104,7 @@ function coreAscending(spec: ShapeSpec, u: number, x: number): number {
  * @param mode  'in'（上升）/ 'out'（下降；内部完成时间镜像与 σ 符号归一）
  * @param t     该侧区间内的进度 [0,1]
  */
-export function fadeGainSigned(
-    shape: number,
-    dir: number,
-    mode: "in" | "out",
-    t: number,
-): number {
+export function fadeGainSigned(shape: number, dir: number, mode: "in" | "out", t: number): number {
     const clampedT = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
     if (!Number.isFinite(dir)) dir = 0;
     if (clampedT <= 0) return mode === "out" ? 1 : 0;
@@ -263,7 +258,6 @@ export function solveNearestCurveDir(args: {
     return { t: bestT, dir: bestDir, gain: fadeGainSigned(args.shape, bestDir, args.mode, bestT) };
 }
 
-
 /**
  * 曲率编辑的基础形状解析。
  *
@@ -323,8 +317,7 @@ export const DEFAULT_FADE_DIR_BY_SHAPE: Readonly<
 /** 形状 id → 该侧的重置曲率（UI 层便捷封装）。 */
 export function defaultFadeDirFor(shape: number, isOut: boolean): number {
     const normalized = Math.trunc(Number.isFinite(shape) ? shape : 0);
-    const preset =
-        FADE_PRESETS.find((entry) => entry.shape === normalized) ?? FADE_PRESETS[0];
+    const preset = FADE_PRESETS.find((entry) => entry.shape === normalized) ?? FADE_PRESETS[0];
     return isOut
         ? DEFAULT_FADE_DIR_BY_SHAPE[preset.id].out
         : DEFAULT_FADE_DIR_BY_SHAPE[preset.id].in_;

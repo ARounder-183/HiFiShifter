@@ -115,9 +115,7 @@ export function buildSingleFadeInfoContent(args: {
             "div",
             { key: index },
             row.map((part, partIndex) =>
-                typeof part === "string"
-                    ? createElement("span", { key: partIndex }, part)
-                    : part,
+                typeof part === "string" ? createElement("span", { key: partIndex }, part) : part,
             ),
         ),
     );
@@ -156,10 +154,7 @@ export function buildCrossfadeGripInfoContent(args: {
  * dispatch 的自定义事件同步送达 —— 注册表在下一次 pointerover/move 前
  * 必然就绪。
  */
-export function publishFadeRichTooltip(
-    element: Element | null,
-    content: ReactNode,
-): void {
+export function publishFadeRichTooltip(element: Element | null, content: ReactNode): void {
     if (!element || typeof window === "undefined") return;
     element.setAttribute("data-hs-rich-tooltip", "1");
     window.dispatchEvent(
@@ -180,8 +175,18 @@ export function buildCrossfadeGripInfoText(args: {
     t: FadeLabelLookup;
 }): string {
     return [
-        buildSingleFadeInfoText({ isOut: true, ...args.earlier, formatCtx: args.formatCtx, t: args.t }),
+        buildSingleFadeInfoText({
+            isOut: true,
+            ...args.earlier,
+            formatCtx: args.formatCtx,
+            t: args.t,
+        }),
         "",
-        buildSingleFadeInfoText({ isOut: false, ...args.later, formatCtx: args.formatCtx, t: args.t }),
+        buildSingleFadeInfoText({
+            isOut: false,
+            ...args.later,
+            formatCtx: args.formatCtx,
+            t: args.t,
+        }),
     ].join("\n");
 }

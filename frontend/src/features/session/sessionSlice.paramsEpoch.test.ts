@@ -19,5 +19,4 @@ test("features/session/sessionSlice.paramsEpoch.test.ts scripted checks", async 
         Number(base.paramsEpoch) + 1,
         "bumpParamsEpoch increments the parameter refresh epoch",
     );
-
 });

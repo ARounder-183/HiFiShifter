@@ -814,9 +814,9 @@ export function usePianoRollInteractions(args: {
             const framePeriodMs = paramViewRef.current?.framePeriodMs;
             const effectiveScale =
                 pitchSnapUnit === "scale"
-                    ? (frame != null && framePeriodMs != null
-                          ? (scaleAtSec?.((frame * framePeriodMs) / 1000) ?? projectScale)
-                          : projectScale)
+                    ? frame != null && framePeriodMs != null
+                        ? (scaleAtSec?.((frame * framePeriodMs) / 1000) ?? projectScale)
+                        : projectScale
                     : undefined;
             const snapped =
                 pitchSnapUnit === "scale" && effectiveScale
@@ -1850,8 +1850,7 @@ export function usePianoRollInteractions(args: {
                                   rawValue: rawPreviewValue,
                                   effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
                                   pitchSnapUnit,
-                                  projectScale:
-                                      scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
+                                  projectScale: scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
                                   pitchSnapToleranceCents,
                               })
                             : rawPreviewValue;
@@ -3357,8 +3356,7 @@ export function usePianoRollInteractions(args: {
                                 const nativeOffset = syncTimelineEnabled
                                     ? timelineOffsetRef.current
                                     : 0;
-                                const nativeMaxScrollLeft =
-                                    drawingMaxScrollLeft + nativeOffset;
+                                const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
                                 const nextScrollLeft = clamp(
                                     scroller.scrollLeft + deltaPx,
                                     0,

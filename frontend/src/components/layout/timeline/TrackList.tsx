@@ -253,10 +253,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
 
     if (!selector.show) return null;
     return (
-        <div
-            className="min-w-0 flex-1 flex justify-end"
-            data-playhead-sec={visualSec.toFixed(6)}
-        >
+        <div className="min-w-0 flex-1 flex justify-end" data-playhead-sec={visualSec.toFixed(6)}>
             <span
                 ref={maxLabelSpanRef}
                 aria-hidden
@@ -279,9 +276,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
                 selectable
                 className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
                 style={
-                    boxWidth != null
-                        ? { minWidth: boxWidth, display: "inline-block" }
-                        : undefined
+                    boxWidth != null ? { minWidth: boxWidth, display: "inline-block" } : undefined
                 }
                 tooltip={formatted.combined}
             />
@@ -1361,8 +1356,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             // “源轨道不剔除”的复制索引计算。
                                             const copyMode = Boolean(
                                                 copyDragKb &&
-                                                    isModifierActive(copyDragKb, ev) &&
-                                                    onDuplicateTrackTo,
+                                                isModifierActive(copyDragKb, ev) &&
+                                                onDuplicateTrackTo,
                                             );
                                             const spec = computeDropSpec(
                                                 drag.trackId,

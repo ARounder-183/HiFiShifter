@@ -81,31 +81,34 @@ export const TimelineScrollArea: React.FC<
         rowHeightRef.current = rowHeight;
     }, [rowHeight]);
 
-    const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
-        const next = scroller.scrollLeft;
-        if (applyingZoomRef.current) {
-            return;
-        }
-        const nextSnapshot = {
-            scrollLeft: next,
-            pxPerSec: pxPerSecRef.current,
-            viewportWidth: scroller.clientWidth,
-        };
-        if (
-            !shouldDispatchTimelineViewport({
-                previous: lastViewportDispatchRef.current,
-                next: nextSnapshot,
-            })
-        ) {
-            return;
-        }
-        lastViewportDispatchRef.current = nextSnapshot;
-        lastScrollLeftRef.current = next;
-        if (rulerContentRef.current) {
-            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
-        }
-        setScrollLeft(next);
-    }, [rulerContentRef, setScrollLeft]);
+    const syncScrollLeft = useCallback(
+        function syncScrollLeft(scroller: HTMLDivElement) {
+            const next = scroller.scrollLeft;
+            if (applyingZoomRef.current) {
+                return;
+            }
+            const nextSnapshot = {
+                scrollLeft: next,
+                pxPerSec: pxPerSecRef.current,
+                viewportWidth: scroller.clientWidth,
+            };
+            if (
+                !shouldDispatchTimelineViewport({
+                    previous: lastViewportDispatchRef.current,
+                    next: nextSnapshot,
+                })
+            ) {
+                return;
+            }
+            lastViewportDispatchRef.current = nextSnapshot;
+            lastScrollLeftRef.current = next;
+            if (rulerContentRef.current) {
+                rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+            }
+            setScrollLeft(next);
+        },
+        [rulerContentRef, setScrollLeft],
+    );
 
     useEffect(() => {
         const scroller = scrollRef.current;

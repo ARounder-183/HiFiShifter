@@ -1,11 +1,5 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import type {
-    ActionId,
-    ActionMeta,
-    Keybinding,
-    KeybindingMap,
-    KeybindingOverrides,
-} from "./types";
+import type { ActionId, ActionMeta, Keybinding, KeybindingMap, KeybindingOverrides } from "./types";
 import { DEFAULT_KEYBINDINGS, ACTION_META } from "./defaultKeybindings";
 import { loadKeybindingOverrides, saveKeybindingOverrides } from "./keybindingStorage";
 import { IS_MAC, isPrimaryModifierDown } from "../../utils/platform";
@@ -218,11 +212,17 @@ export default keybindingsSlice.reducer;
  * useSelector 的严格相等比较会判定"已变化"，任何 dispatch（包括播放时
  * 33Hz 的轮询、电平表事件）都会级联重渲染整个应用。
  */
-const selectMergedKeybindingsCache = { overrides: null as KeybindingOverrides | null, merged: null as KeybindingMap | null };
+const selectMergedKeybindingsCache = {
+    overrides: null as KeybindingOverrides | null,
+    merged: null as KeybindingMap | null,
+};
 
 export function selectMergedKeybindings(state: { keybindings: KeybindingsState }): KeybindingMap {
     const overrides = state.keybindings.overrides;
-    if (selectMergedKeybindingsCache.merged === null || selectMergedKeybindingsCache.overrides !== overrides) {
+    if (
+        selectMergedKeybindingsCache.merged === null ||
+        selectMergedKeybindingsCache.overrides !== overrides
+    ) {
         selectMergedKeybindingsCache.overrides = overrides;
         selectMergedKeybindingsCache.merged = mergeKeybindings(overrides);
     }
@@ -300,10 +300,7 @@ function isModifierMeta(meta?: ActionMeta): boolean {
 }
 
 /** 两个场景集合是否有交集；任一缺省时视为相交（保守提示冲突） */
-function scenesIntersect(
-    a?: readonly string[],
-    b?: readonly string[],
-): boolean {
+function scenesIntersect(a?: readonly string[], b?: readonly string[]): boolean {
     if (!a || !b) return true;
     return a.some((scene) => b.includes(scene));
 }

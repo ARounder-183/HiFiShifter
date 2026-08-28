@@ -121,5 +121,4 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(formatPlaybackRateLabel(2), "x2", "integer rates collapse to bare number");
     assertEqual(formatPlaybackRateLabel(0), "x1", "non-positive rates fall back to x1");
     assertEqual(formatPlaybackRateLabel(NaN), "x1", "non-finite rates fall back to x1");
-
 });

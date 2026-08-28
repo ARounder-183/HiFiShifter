@@ -146,8 +146,7 @@ export function useClipsPeaksForPianoRoll(args: {
                 sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
                 playbackRate: pr,
                 lengthSec: clip.lengthSec,
-                sourceEndSec:
-                    Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec,
+                sourceEndSec: Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec,
             });
 
             return {

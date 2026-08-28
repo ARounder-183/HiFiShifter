@@ -23,7 +23,9 @@ createRoot(document.getElementById("root")!).render(
         <Provider store={store}>
             <I18nProvider>
                 <AppThemeProvider>
-                    <AppTooltipProvider isSuppressedExternal={() => fadeToolTipSuppress.isSuppressed}>
+                    <AppTooltipProvider
+                        isSuppressedExternal={() => fadeToolTipSuppress.isSuppressed}
+                    >
                         <GlobalGestureServices />
                         <App />
                     </AppTooltipProvider>

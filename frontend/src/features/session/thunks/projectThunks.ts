@@ -99,7 +99,7 @@ export const saveProjectRemote = createAsyncThunk(
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;
         }
-        if (!res || ((res as { ok?: boolean }).ok === false)) {
+        if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_failed");
         }
         return res;
@@ -115,7 +115,7 @@ export const saveProjectAsRemote = createAsyncThunk(
         if (res && (res as SaveVersionConflict).versionConflict) {
             return res as SaveVersionConflict;
         }
-        if (!res || ((res as { ok?: boolean }).ok === false)) {
+        if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_as_failed");
         }
         return res;
@@ -129,7 +129,7 @@ export const saveProjectToPathRemote = createAsyncThunk(
         const state = getState() as any;
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
         const res: SaveProjectResponse = await webApi.saveProjectToPath(path, notesMarkdown, true);
-        if (!res || ((res as { ok?: boolean }).ok === false)) {
+        if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_failed");
         }
         return res;

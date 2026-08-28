@@ -33,8 +33,7 @@ function samplePolylinePoints(shape: number, dir: number, size: number): string 
     const pad = 2;
     const inner = size - pad * 2;
     // 基础 24 点；陡峭族加倍。再加两端各 8 个对数加密点。
-    const isSteep = Math.trunc(shape) === 3 || Math.trunc(shape) === 4 ||
-        Math.trunc(shape) === 6;
+    const isSteep = Math.trunc(shape) === 3 || Math.trunc(shape) === 4 || Math.trunc(shape) === 6;
     const baseSteps = isSteep ? 40 : 24;
 
     const ts: number[] = [];
@@ -60,9 +59,7 @@ function samplePolylinePoints(shape: number, dir: number, size: number): string 
 }
 
 export function FadeShapeIcon({ shape, size = 18, mirrored }: FadeShapeIconProps) {
-    const normalizedShape = Number.isFinite(shape)
-        ? Math.trunc(shape)
-        : 0;
+    const normalizedShape = Number.isFinite(shape) ? Math.trunc(shape) : 0;
     const presetId = PRESET_BY_SHAPE.get(normalizedShape) ?? "linear";
     // REAPER 语义：每个形状有自己的默认曲率（切换时重置到该值）；
     // 图标展示的就是这个"出厂形态"。

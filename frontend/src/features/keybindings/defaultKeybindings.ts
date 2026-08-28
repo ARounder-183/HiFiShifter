@@ -178,7 +178,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_timeline_zoom_out",
         group: "playback",
         scopedContext: "timelineFocus",
-    },    "edit.undo": { labelKey: "kb_edit_undo", group: "edit" },
+    },
+    "edit.undo": { labelKey: "kb_edit_undo", group: "edit" },
     "edit.redo": { labelKey: "kb_edit_redo", group: "edit" },
     "edit.selectAll": { labelKey: "kb_edit_select_all", group: "edit" },
     "edit.deselect": { labelKey: "kb_edit_deselect", group: "edit" },
@@ -226,7 +227,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_edit_mean_quantize",
         group: "paramEditor",
         scopedContext: "paramEditorSelect",
-    },    "edit.pasteVocalShifter": {
+    },
+    "edit.pasteVocalShifter": {
         labelKey: "kb_edit_paste_vocalshifter",
         group: "edit",
     },

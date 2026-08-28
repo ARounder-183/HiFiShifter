@@ -29,5 +29,4 @@ test("features/notebook/notebookSlice.test.ts scripted checks", async () => {
 
     state = reducer(state, openNotebook());
     assertEqual(state.visible, true, "openNotebook shows panel");
-
 });

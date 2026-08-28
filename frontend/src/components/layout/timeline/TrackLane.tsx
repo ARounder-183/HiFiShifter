@@ -240,7 +240,7 @@ export const TrackLane = React.memo(
             onActivateTake,
         } = props;
 
-// 淡变信息浮标与子层 i18n 文案。
+        // 淡变信息浮标与子层 i18n 文案。
         const { t } = useI18n();
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
@@ -368,7 +368,9 @@ export const TrackLane = React.memo(
                 const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
                 const allowSeek =
-                    !altKeyDown && !selectionMods.multiSelectToggleRaw && !selectionMods.rangeSelectRaw;
+                    !altKeyDown &&
+                    !selectionMods.multiSelectToggleRaw &&
+                    !selectionMods.rangeSelectRaw;
                 const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
@@ -545,7 +547,7 @@ export const TrackLane = React.memo(
                         const laneRect = laneEl.getBoundingClientRect();
                         const edgeSec =
                             edge === "trim_left"
-                                ? edgeClip?.startSec ?? 0
+                                ? (edgeClip?.startSec ?? 0)
                                 : (edgeClip?.startSec ?? 0) + (edgeClip?.lengthSec ?? 0);
                         seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
                     }
@@ -593,7 +595,13 @@ export const TrackLane = React.memo(
                 }
                 startSnapOffsetDrag?.(event, clip.id);
             },
-            [clearContextMenu, multiSelectToggleKb, rangeSelectKb, primeSelection, startSnapOffsetDrag],
+            [
+                clearContextMenu,
+                multiSelectToggleKb,
+                rangeSelectKb,
+                primeSelection,
+                startSnapOffsetDrag,
+            ],
         );
 
         return (
@@ -756,7 +764,7 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-startEditDrag={startEditDrag}
+                    startEditDrag={startEditDrag}
                     startSnapOffsetDrag={startSnapOffsetDrag}
                     seekFromClientX={seekFromClientX}
                     fadeLengthFormatCtx={fadeLengthFormatCtx}

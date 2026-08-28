@@ -822,5 +822,4 @@ test("utils/tempoMap.test.ts scripted checks", async () => {
             throw new Error(`grid density: strong lines bounded (got ${xs.strong.length})`);
         }
     }
-
 });

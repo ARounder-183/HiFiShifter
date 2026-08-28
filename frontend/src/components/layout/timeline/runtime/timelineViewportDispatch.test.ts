@@ -57,5 +57,4 @@ test("components/layout/timeline/runtime/timelineViewportDispatch.test.ts script
         true,
         "first viewport snapshot always dispatches",
     );
-
 });

@@ -516,9 +516,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                 <Text key={group} size="2" color="red">
                                     {tAny(GROUP_LABEL_KEYS[group])}：
                                     <strong>
-                                        {ids
-                                            .map((id) => tAny(ACTION_META[id].labelKey))
-                                            .join("、")}
+                                        {ids.map((id) => tAny(ACTION_META[id].labelKey)).join("、")}
                                     </strong>
                                 </Text>
                             ))}

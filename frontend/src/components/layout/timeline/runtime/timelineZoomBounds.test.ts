@@ -28,5 +28,4 @@ test("components/layout/timeline/runtime/timelineZoomBounds.test.ts scripted che
         4,
         "long projects keep the legacy minimum",
     );
-
 });

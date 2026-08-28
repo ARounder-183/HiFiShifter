@@ -115,7 +115,16 @@ export function buildFadeHitTargets(args: {
     clipXFrom?: number;
     clipXTo?: number;
 }): FadeHitTarget[] {
-    const { clipLeftPx, clipWidthPx, bodyTop, bodyHeight, fadeInShape, fadeInDir, fadeOutShape, fadeOutDir } = args;
+    const {
+        clipLeftPx,
+        clipWidthPx,
+        bodyTop,
+        bodyHeight,
+        fadeInShape,
+        fadeInDir,
+        fadeOutShape,
+        fadeOutDir,
+    } = args;
     const solidWidth = Math.max(1, clipWidthPx);
     const clipRightPx = clipLeftPx + solidWidth;
     const clipXFrom = args.clipXFrom ?? Number.NEGATIVE_INFINITY;

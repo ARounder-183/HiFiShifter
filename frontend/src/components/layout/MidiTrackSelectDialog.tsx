@@ -866,19 +866,29 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                 disabled={!midiHasBpm || importTempoMapEnabled}
                                 className="w-4 h-4"
                             />
-                            <Text size="1" color={midiHasBpm && !importTempoMapEnabled ? undefined : "gray"}>
+                            <Text
+                                size="1"
+                                color={midiHasBpm && !importTempoMapEnabled ? undefined : "gray"}
+                            >
                                 {tAny("midi_import_bpm_as_project")}
                             </Text>
                         </label>
 
                         {/* ── 导入为 Tempo Map（仅“音高参考块”目标显示） ── */}
                         {currentTarget === "pitchRef" && !isReplaceMode && (
-                            <Flex direction="column" gap="1" mt="3" className="rounded border border-qt-border p-2">
+                            <Flex
+                                direction="column"
+                                gap="1"
+                                mt="3"
+                                className="rounded border border-qt-border p-2"
+                            >
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input
                                         type="checkbox"
                                         checked={importTempoMapEnabled}
-                                        onChange={(e) => onImportTempoMapEnabledChange?.(e.target.checked)}
+                                        onChange={(e) =>
+                                            onImportTempoMapEnabledChange?.(e.target.checked)
+                                        }
                                         className="w-4 h-4"
                                     />
                                     <Text size="1" weight="medium">
@@ -905,7 +915,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         <Text
                                             size="1"
                                             color={
-                                                importTempoMapEnabled && midiHasBpm ? undefined : "gray"
+                                                importTempoMapEnabled && midiHasBpm
+                                                    ? undefined
+                                                    : "gray"
                                             }
                                         >
                                             {tAny("midi_import_tempo_map_tempo")}
@@ -925,9 +937,13 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             type="checkbox"
                                             checked={importTempoMapTimeSignature}
                                             onChange={(e) =>
-                                                onImportTempoMapTimeSignatureChange?.(e.target.checked)
+                                                onImportTempoMapTimeSignatureChange?.(
+                                                    e.target.checked,
+                                                )
                                             }
-                                            disabled={!importTempoMapEnabled || !midiHasTimeSignature}
+                                            disabled={
+                                                !importTempoMapEnabled || !midiHasTimeSignature
+                                            }
                                             className="w-4 h-4"
                                         />
                                         <Text
@@ -953,9 +969,13 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             type="checkbox"
                                             checked={importTempoMapKeySignature}
                                             onChange={(e) =>
-                                                onImportTempoMapKeySignatureChange?.(e.target.checked)
+                                                onImportTempoMapKeySignatureChange?.(
+                                                    e.target.checked,
+                                                )
                                             }
-                                            disabled={!importTempoMapEnabled || !midiHasKeySignature}
+                                            disabled={
+                                                !importTempoMapEnabled || !midiHasKeySignature
+                                            }
                                             className="w-4 h-4"
                                         />
                                         <Text
@@ -1003,7 +1023,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                         <Text
                                             size="1"
                                             color={
-                                                midiHasBpm && !importTempoMapEnabled ? undefined : "gray"
+                                                midiHasBpm && !importTempoMapEnabled
+                                                    ? undefined
+                                                    : "gray"
                                             }
                                         >
                                             {tAny("midi_note_bpm_midi")}
@@ -1014,8 +1036,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             importTempoMapEnabled ? "opacity-50" : "cursor-pointer"
                                         }`}
                                     >
-                                        <RadioGroup.Item value="project" disabled={importTempoMapEnabled} />
-                                        <Text size="1" color={importTempoMapEnabled ? "gray" : undefined}>
+                                        <RadioGroup.Item
+                                            value="project"
+                                            disabled={importTempoMapEnabled}
+                                        />
+                                        <Text
+                                            size="1"
+                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        >
                                             {tAny("midi_note_bpm_project")}
                                             {projectBpm != null
                                                 ? ` (${projectBpm.toFixed(2)} BPM)`
@@ -1027,8 +1055,14 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                             importTempoMapEnabled ? "opacity-50" : "cursor-pointer"
                                         }`}
                                     >
-                                        <RadioGroup.Item value="specified" disabled={importTempoMapEnabled} />
-                                        <Text size="1" color={importTempoMapEnabled ? "gray" : undefined}>
+                                        <RadioGroup.Item
+                                            value="specified"
+                                            disabled={importTempoMapEnabled}
+                                        />
+                                        <Text
+                                            size="1"
+                                            color={importTempoMapEnabled ? "gray" : undefined}
+                                        >
                                             {tAny("midi_note_bpm_specified")}
                                         </Text>
                                     </label>

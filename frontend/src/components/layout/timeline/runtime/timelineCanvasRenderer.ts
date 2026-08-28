@@ -43,8 +43,7 @@ function drawFadeCurveStroke(
     // 递归细分：弦中点到真实曲线的偏差超过 0.6px 就继续拆分，直到
     // 折线与真实曲线处处贴合。端点 t=0/1 始终包含（增益在两端被核心
     // 函数精确钳制），因此曲线必然精确落在左下/右上（或反向）边角上。
-    const gainAt = (t: number): number =>
-        fadeGainSigned(args.shape, args.dir, args.mode, t);
+    const gainAt = (t: number): number => fadeGainSigned(args.shape, args.dir, args.mode, t);
     const xAt = (t: number): number => args.leftPx + t * widthPx;
     const yAt = (t: number): number => args.topPx + heightPx * (1 - gainAt(t));
 
@@ -86,20 +85,21 @@ function drawFadeCurveStroke(
         const xq1 = xAt(tq1);
         const yq1 = yAt(tq1);
         const devMid = Math.hypot(xm - (x0 + x1) / 2, ym - (y0 + y1) / 2);
-        const devQ0 = Math.hypot(
-            xq0 - (x0 + (x1 - x0) * 0.25),
-            yq0 - (y0 + (y1 - y0) * 0.25),
-        );
-        const devQ1 = Math.hypot(
-            xq1 - (x0 + (x1 - x0) * 0.75),
-            yq1 - (y0 + (y1 - y0) * 0.75),
-        );
+        const devQ0 = Math.hypot(xq0 - (x0 + (x1 - x0) * 0.25), yq0 - (y0 + (y1 - y0) * 0.25));
+        const devQ1 = Math.hypot(xq1 - (x0 + (x1 - x0) * 0.75), yq1 - (y0 + (y1 - y0) * 0.75));
         const dev = Math.max(devMid, devQ0, devQ1);
         return { tm, xm, ym, dev };
     };
 
     const segments: Segment[] = [];
-    const pushSegment = (t0: number, t1: number, x0: number, y0: number, x1: number, y1: number) => {
+    const pushSegment = (
+        t0: number,
+        t1: number,
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+    ) => {
         const { tm, xm, ym, dev } = evaluateDeviation(t0, t1, x0, y0, x1, y1);
         segments.push({ t0, t1, x0, y0, x1, y1, dev, tm, xm, ym });
     };

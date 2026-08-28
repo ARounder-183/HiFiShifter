@@ -49,7 +49,6 @@ import {
 
 const LEADING_OVERLAP_ALPHA = 0.5;
 
-
 export const ClipItem = React.memo(function ClipItem({
     clip,
     rowHeight,
@@ -379,8 +378,7 @@ export const ClipItem = React.memo(function ClipItem({
                     // （OverlapEditLayer 抓手）仍按点击位置跳转。坐标用 **clip
                     // 根元素** rect 计算 —— hit 元素自身位于 clip 内部，取其
                     // rect 会多算一级偏移。
-                    const fadeSec =
-                        type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
+                    const fadeSec = type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
                     const innerEdgeSec =
                         type === "fade_in"
                             ? clip.startSec + fadeSec
@@ -759,9 +757,13 @@ export const ClipItem = React.memo(function ClipItem({
                                         ? Math.min(width, effectiveFadeOutSec * pxPerSec)
                                         : 0
                                 }
-                                fadeInShape={Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0}
+                                fadeInShape={
+                                    Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0
+                                }
                                 fadeInDir={clip.fadeInDir ?? 0}
-                                fadeOutShape={Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0}
+                                fadeOutShape={
+                                    Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0
+                                }
                                 fadeOutDir={clip.fadeOutDir ?? 0}
                                 zIndex={40}
                                 effectiveFadeInSec={effectiveFadeInSec}

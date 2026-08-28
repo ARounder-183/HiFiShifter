@@ -194,8 +194,7 @@ function computeAutoCrossfadeCore(
 
         // 每个被编辑 clip 的“本次编辑真正触碰的侧”（未提供时默认双侧，如整体移动/复制）。
         const defaultEdit = { fadeIn: true, fadeOut: true } as const;
-        const editFor = (id: string): CrossfadeAffectedClip =>
-            editSides?.[id] ?? defaultEdit;
+        const editFor = (id: string): CrossfadeAffectedClip => editSides?.[id] ?? defaultEdit;
 
         // 是否有“被编辑 clip”当前在本 clip 的某一侧与之重叠，且它的对应侧被本次编辑触碰。
         const movedCurrentlyTouchesSide = (side: "fadeIn" | "fadeOut"): boolean => {
@@ -395,12 +394,7 @@ export function applyDetachedAutoCrossfadeClears(
     affectedSides?: Record<string, CrossfadeAffectedClip>,
     editSides?: Record<string, CrossfadeAffectedClip>,
 ): Promise<void> {
-    const updates = computeDetachedAutoCrossfadeClears(
-        session,
-        movedIds,
-        affectedSides,
-        editSides,
-    );
+    const updates = computeDetachedAutoCrossfadeClears(session, movedIds, affectedSides, editSides);
 
     if (updates.length === 0) return Promise.resolve();
 
@@ -428,12 +422,7 @@ export function previewAutoCrossfade(
     affectedSides?: Record<string, CrossfadeAffectedClip>,
     editSides?: Record<string, CrossfadeAffectedClip>,
 ): void {
-    for (const u of computeAutoCrossfadeUpdates(
-        session,
-        movedIds,
-        affectedSides,
-        editSides,
-    )) {
+    for (const u of computeAutoCrossfadeUpdates(session, movedIds, affectedSides, editSides)) {
         dispatch(setClipAutoFades(u));
     }
 }

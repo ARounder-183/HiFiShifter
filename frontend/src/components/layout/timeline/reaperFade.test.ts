@@ -56,7 +56,7 @@ describe("fadeGainSigned", () => {
         expect(fadeGainSigned(2, 1, "in", 0.25)).toBeCloseTo(0.011841535675862483, 9);
         expect(fadeGainSigned(2, 0, "in", 0.25)).toBeCloseTo(0.25, 8); // 默认锚即线性点
         expect(fadeGainSigned(3, -1, "in", 0.25)).toBeCloseTo(0.8705505632961241, 9);
-        expect(fadeGainSigned(4, 1, "in", 0.25)).toBeCloseTo(1.52587890625e-05, 12);
+        expect(fadeGainSigned(4, 1, "in", 0.25)).toBeCloseTo(1.52587890625e-5, 12);
         expect(fadeGainSigned(0, -1, "in", 0.25)).toBeCloseTo(0.7690081847607293, 9); // 快起向
         expect(fadeGainSigned(0, 0, "in", 0.37)).toBeCloseTo(0.37, 12); // 直线
         expect(fadeGainSigned(5, 0, "in", 0.25)).toBeCloseTo(0.08188949557659113, 9);
@@ -66,9 +66,7 @@ describe("fadeGainSigned", () => {
 
     it("steep S-curve is visibly steeper than slight at midpoint", () => {
         const slopeOf = (shape: number) =>
-            (fadeGainSigned(shape, 0, "in", 0.501) -
-                fadeGainSigned(shape, 0, "in", 0.499)) /
-            0.002;
+            (fadeGainSigned(shape, 0, "in", 0.501) - fadeGainSigned(shape, 0, "in", 0.499)) / 0.002;
         expect(slopeOf(6)).toBeGreaterThan(slopeOf(5) * 2);
     });
 
@@ -155,9 +153,9 @@ describe("solveDirAt", () => {
                 const solved = solveDirAt(shape, "in", t, target, 0.5);
                 expect(solved).toBeGreaterThanOrEqual(-1);
                 expect(solved).toBeLessThanOrEqual(1);
-                expect(
-                    Math.abs(fadeGainSigned(shape, solved, "in", t) - target),
-                ).toBeLessThan(1e-3);
+                expect(Math.abs(fadeGainSigned(shape, solved, "in", t) - target)).toBeLessThan(
+                    1e-3,
+                );
             }
         }
     });

@@ -96,7 +96,11 @@ describe("findConflicts — 修饰键按场景检测", () => {
 describe("findConflicts — 键盘快捷键按作用域检测", () => {
     it("quickSearch 作用域内的绑定不与全局绑定冲突", () => {
         // quickSearch.confirm 默认 enter；playback.stop 默认也是 enter，但作用域不同
-        const conflicts = findConflicts({}, "quickSearch.confirm", DEFAULT_KEYBINDINGS["playback.stop"]);
+        const conflicts = findConflicts(
+            {},
+            "quickSearch.confirm",
+            DEFAULT_KEYBINDINGS["playback.stop"],
+        );
         expect(conflicts).not.toContain("playback.stop");
     });
 

@@ -49,5 +49,4 @@ test("components/layout/timeline/clip/clipFormantButtonStyle.test.ts scripted ch
         failedStyle.backgroundColor.includes("var(--qt-danger-bg)"),
         "failed state should use danger palette",
     );
-
 });

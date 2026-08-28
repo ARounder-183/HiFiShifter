@@ -107,10 +107,7 @@ const CurvatureSlider: React.FC<{
         const size = rect.width; // 正方形
         const pad = 2;
         const inner = Math.max(1, size - pad * 2);
-        const t = Math.min(
-            1,
-            Math.max(0, (clientX - rect.left - pad) / inner),
-        );
+        const t = Math.min(1, Math.max(0, (clientX - rect.left - pad) / inner));
         const yWithin = Math.min(inner, Math.max(0, clientY - rect.top - pad));
         const targetGain = 1 - yWithin / inner;
         const next = solveNearestCurveDir({
@@ -199,8 +196,7 @@ const ShapeRow: React.FC<{
     <div className="px-2 py-1.5 flex items-center gap-1">
         {FADE_PRESETS.map((preset) => {
             const key = SHAPE_LABEL_KEYS[preset.shape];
-            const selected =
-                Math.trunc(currentShape) === preset.shape;
+            const selected = Math.trunc(currentShape) === preset.shape;
             return (
                 <button
                     key={key}
@@ -269,13 +265,8 @@ export const FadeContextMenu: React.FC<{
         selectKeybinding(state, "modifier.fadeCurvatureDrag"),
     );
     const keysText =
-        curvatureKb && !isNoneBinding(curvatureKb)
-            ? formatKeybinding(curvatureKb, "")
-            : "";
-    const curvatureHint = (t("fade_menu_curvature_hint") as string).replace(
-        "{keys}",
-        keysText,
-    );
+        curvatureKb && !isNoneBinding(curvatureKb) ? formatKeybinding(curvatureKb, "") : "";
+    const curvatureHint = (t("fade_menu_curvature_hint") as string).replace("{keys}", keysText);
 
     // 视口夹紧（同 ClipContextMenu 规则）。
     useLayoutEffect(() => {
@@ -309,8 +300,7 @@ export const FadeContextMenu: React.FC<{
         };
     }, [onClose]);
 
-    const labelFor = (side: FadeContextSide) =>
-        side.isOut ? t("fade_out") : t("fade_in");
+    const labelFor = (side: FadeContextSide) => (side.isOut ? t("fade_out") : t("fade_in"));
 
     return createPortal(
         <div

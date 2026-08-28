@@ -7,23 +7,12 @@
  * - 所有候选按像素距离选择最近者；`snapToGridAnyDistance` 会让网格无条件胜出。
  * - `snapRelativeToGrid` 保留拖动起点相对网格的偏移（REAPER 语义）。
  */
-import type {
-    ClipInfo,
-    GridSize,
-    TimelineSnapSettings,
-} from "../features/session/sessionTypes";
+import type { ClipInfo, GridSize, TimelineSnapSettings } from "../features/session/sessionTypes";
 import type { TrackInfo } from "../features/session/sessionTypes";
 import type { TempoMap } from "./tempoMap";
-import {
-    pointIndexAtSec,
-    snapSecToTempoGrid,
-} from "./tempoMap";
+import { pointIndexAtSec, snapSecToTempoGrid } from "./tempoMap";
 import { gridStepBeats } from "../components/layout/timeline/grid";
-import {
-    modEuclid,
-    resolveClipContentDurationSec,
-    resolvePlaybackWindowSec,
-} from "./loopRender";
+import { modEuclid, resolveClipContentDurationSec, resolvePlaybackWindowSec } from "./loopRender";
 import { clearSnapHighlights } from "./snapHighlight";
 
 export type SnapObjectKind = "clip" | "selection" | "cursor";
@@ -223,9 +212,7 @@ function swingGridCandidatesAround(
         const currentSegStart = currentPoint.positionSec;
         // 接近变化点边界时把上一段最后几个候选也纳入，避免边界处漏掉更近的网格线。
         const segmentIndices =
-            idx > 0 && safeRaw - currentSegStart < currentStepSec * 3
-                ? [idx - 1, idx]
-                : [idx];
+            idx > 0 && safeRaw - currentSegStart < currentStepSec * 3 ? [idx - 1, idx] : [idx];
         for (const segmentIndex of segmentIndices) {
             const point = tempoMap.points[segmentIndex];
             const bpm = Math.max(1, point.bpm);
@@ -377,7 +364,13 @@ function addSelectionCandidates(
         const isSelected = selectedSet.has(clip.id);
         if (opts.excludeSelected && isSelected) continue;
         if (opts.includeSelection && !isSelected) {
-            out.push({ sec: clampSec(clip.startSec), kind: "selection", priority: 30, clipId: clip.id, trackId: clip.trackId });
+            out.push({
+                sec: clampSec(clip.startSec),
+                kind: "selection",
+                priority: 30,
+                clipId: clip.id,
+                trackId: clip.trackId,
+            });
         }
     }
 }
@@ -396,7 +389,13 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
     const { settings } = ctx;
     for (const clip of visibleClipsForSnap(ctx)) {
         if (settings.snapClipEdges) {
-            out.push({ sec: clampSec(clip.startSec), kind: "clipStart", priority: 20, clipId: clip.id, trackId: clip.trackId });
+            out.push({
+                sec: clampSec(clip.startSec),
+                kind: "clipStart",
+                priority: 20,
+                clipId: clip.id,
+                trackId: clip.trackId,
+            });
             out.push({
                 sec: clampSec(clip.startSec + Math.max(0, clip.lengthSec)),
                 kind: "clipEnd",
@@ -412,11 +411,7 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
             // 吸附到它会表现为"吸向空处"（幻影目标）。
             const offset = Number(clip.snapOffsetSec);
             const lengthSecRaw = Math.max(0, Number(clip.lengthSec) || 0);
-            if (
-                Number.isFinite(offset) &&
-                offset > 1e-9 &&
-                offset <= lengthSecRaw + 1e-6
-            ) {
+            if (Number.isFinite(offset) && offset > 1e-9 && offset <= lengthSecRaw + 1e-6) {
                 out.push({
                     sec: clipSnapOffsetSec(clip),
                     kind: "snapOffset",
@@ -459,7 +454,13 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
                 : startSec + (b - winStartSec) / rate;
             if (!Number.isFinite(sec)) return;
             if (sec < startSec - 1e-6 || sec > startSec + lengthSec + 1e-6) return;
-            out.push({ sec: clampSec(sec), kind, priority: 24, clipId: clip.id, trackId: clip.trackId });
+            out.push({
+                sec: clampSec(sec),
+                kind,
+                priority: 24,
+                clipId: clip.id,
+                trackId: clip.trackId,
+            });
         };
 
         if (!clip.loopEnabled) {
@@ -472,13 +473,18 @@ function addClipEdgeCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]) {
             // b∈{0,D} 两边界投影到同一 mod-D 相位族。
             const anchorSrc = clip.reversed ? Math.min(winEndSec, mediaDur) : winStartSec;
             const firstWrapLocal =
-                (clip.reversed
-                    ? modEuclid(anchorSrc, mediaDur)
-                    : modEuclid(-anchorSrc, mediaDur)) / rate;
+                (clip.reversed ? modEuclid(anchorSrc, mediaDur) : modEuclid(-anchorSrc, mediaDur)) /
+                rate;
             for (let k = 0; k <= 1; k += 1) {
                 const sec = startSec + firstWrapLocal + k * (mediaDur / rate);
                 if (sec < startSec - 1e-6 || sec > startSec + lengthSec + 1e-6) continue;
-                out.push({ sec, kind: k === 0 ? "sourceStart" : "sourceEnd", priority: 24, clipId: clip.id, trackId: clip.trackId });
+                out.push({
+                    sec,
+                    kind: k === 0 ? "sourceStart" : "sourceEnd",
+                    priority: 24,
+                    clipId: clip.id,
+                    trackId: clip.trackId,
+                });
             }
         }
     }
@@ -580,14 +586,23 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
     for (const candidate of candidates) {
         const distance = Math.abs(candidate.sec - safeRaw);
         if (distance > thresholdSec + 1e-12) continue;
-        if (distance < bestDistance - 1e-12 || (Math.abs(distance - bestDistance) <= 1e-12 && candidate.priority < (best?.priority ?? Infinity))) {
+        if (
+            distance < bestDistance - 1e-12 ||
+            (Math.abs(distance - bestDistance) <= 1e-12 &&
+                candidate.priority < (best?.priority ?? Infinity))
+        ) {
             best = candidate;
             bestDistance = distance;
         }
     }
 
     if (!best) {
-        return { sec: safeRaw, candidate: null, distancePx: thresholdSec * Math.max(1e-9, ctx.pxPerSec), snapped: false };
+        return {
+            sec: safeRaw,
+            candidate: null,
+            distancePx: thresholdSec * Math.max(1e-9, ctx.pxPerSec),
+            snapped: false,
+        };
     }
 
     return {
@@ -612,7 +627,13 @@ export function alignClipsToSwingGrid(args: {
     const step = snapStepBeats(args.settings, args.grid);
     const updates: Record<string, number> = {};
     for (const clip of args.clips) {
-        const next = snapToConfiguredGrid(clip.startSec, args.tempoMap, step, args.bpm, args.settings);
+        const next = snapToConfiguredGrid(
+            clip.startSec,
+            args.tempoMap,
+            step,
+            args.bpm,
+            args.settings,
+        );
         if (Math.abs(next - clip.startSec) > 1e-9) {
             updates[clip.id] = next;
         }
@@ -626,10 +647,7 @@ export function alignClipsToSwingGrid(args: {
  * "拖动时切换吸附"语义：修饰键按住时把吸附总开关临时取反。
  *   总开关开 + 修饰键 → 不吸附；总开关关 + 修饰键 → 吸附。
  */
-export function computeEffectiveSnap(
-    snapEnabled: boolean,
-    toggleModifierActive: boolean,
-): boolean {
+export function computeEffectiveSnap(snapEnabled: boolean, toggleModifierActive: boolean): boolean {
     return toggleModifierActive ? !snapEnabled : snapEnabled;
 }
 

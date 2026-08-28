@@ -116,17 +116,11 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                 // - 间距过近（放不下任何有意义的文本片段）时，完全隐藏本刻度文本，
                 //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
                 const nextTick = visibleTicks[index + 1];
-                const gapPx =
-                    nextTick != null ? (nextTick.sec - tick.sec) * pxPerSec : null;
+                const gapPx = nextTick != null ? (nextTick.sec - tick.sec) * pxPerSec : null;
                 const labelHidden = gapPx != null && gapPx < 26;
-                const labelMaxWidth =
-                    gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
+                const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
                 return (
-                    <div
-                        key={tick.beat}
-                        className="absolute top-0 bottom-0"
-                        style={{ left }}
-                    >
+                    <div key={tick.beat} className="absolute top-0 bottom-0" style={{ left }}>
                         <div
                             className="absolute top-0 bottom-0"
                             style={{
@@ -565,10 +559,7 @@ export const TimeRuler: React.FC<{
     onTempoMapCommit,
 }) => {
     void _pxPerBeat;
-    const tAny = useMemo(
-        () => t ?? ((key: string) => key),
-        [t],
-    );
+    const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
     const boundaryLeft = contentWidth - 1;
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
@@ -645,12 +636,7 @@ export const TimeRuler: React.FC<{
         const leftSec = Math.max(0, scrollLeft / Math.max(1e-9, pxPerSec));
         const idx = pointIndexAtSec(tempoMap, leftSec);
         const point = tempoMap.points[idx];
-        const cursor = formatCursorTime(
-            primaryUnit,
-            secondaryUnit,
-            point.positionSec,
-            timeContext,
-        );
+        const cursor = formatCursorTime(primaryUnit, secondaryUnit, point.positionSec, timeContext);
         const positionLine = cursor.secondaryLabel
             ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
             : cursor.primaryLabel;

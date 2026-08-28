@@ -19,5 +19,4 @@ test("components/layout/pianoRoll/referenceRootTrackTrigger.test.ts scripted che
         triggerProps.children === "参考轨道组 (2)",
         "reference root track trigger should keep label text",
     );
-
 });

@@ -31,7 +31,46 @@ import { applySelectWheelChange } from "../../utils/selectWheel";
 import { isPrimaryModifierDown } from "../../utils/platform";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
-const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr", "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb"]);
+const AUDIO_EXTENSIONS = new Set([
+    "wav",
+    "mp3",
+    "flac",
+    "ogg",
+    "oga",
+    "opus",
+    "aac",
+    "m4a",
+    "aif",
+    "aiff",
+    "wma",
+    "ac3",
+    "eac3",
+    "ape",
+    "wv",
+    "mp2",
+    "mpa",
+    "dts",
+    "amr",
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "webm",
+    "avi",
+    "flv",
+    "wmv",
+    "ts",
+    "mts",
+    "m2ts",
+    "vob",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "3g2",
+    "ogv",
+    "rm",
+    "rmvb",
+]);
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
@@ -39,8 +78,25 @@ function isAudioFile(entry: FileEntry): boolean {
 }
 
 const VIDEO_EXTENSIONS = new Set([
-    "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob",
-    "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb",
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "webm",
+    "avi",
+    "flv",
+    "wmv",
+    "ts",
+    "mts",
+    "m2ts",
+    "vob",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "3g2",
+    "ogv",
+    "rm",
+    "rmvb",
 ]);
 
 function isVideoFile(entry: FileEntry): boolean {
@@ -71,7 +127,15 @@ function FolderIcon({ className }: { className?: string }) {
 function VideoIcon({ className }: { className?: string }) {
     return (
         <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
-            <rect x="1.5" y="2.5" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+            <rect
+                x="1.5"
+                y="2.5"
+                width="12"
+                height="10"
+                rx="1.5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+            />
             <path d="M6 5.5V9.5L9.5 7.5L6 5.5Z" fill="currentColor" />
         </svg>
     );

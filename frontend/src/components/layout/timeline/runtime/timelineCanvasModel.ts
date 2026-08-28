@@ -139,7 +139,7 @@ export function buildSparseClipRenderModel(args: {
         (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
             trackId: clip.trackId,
-name: clipDisplayName(clip),
+            name: clipDisplayName(clip),
             leftPx: clip.startSec * args.pxPerSec,
             topPx: (args.startTrackIndex + visibleIndex) * args.rowHeight,
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),

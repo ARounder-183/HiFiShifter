@@ -73,7 +73,11 @@ export function useClipPitchDrag(deps: {
             if (!clip) return;
             const rootTrackId = resolveRootTrackId(session.tracks, clip.trackId);
             const rootTrack = session.tracks.find((tr) => tr.id === rootTrackId);
-            if (!rootTrackId || !rootTrack?.composeEnabled || rootTrack.pitchAnalysisAlgo === "none") {
+            if (
+                !rootTrackId ||
+                !rootTrack?.composeEnabled ||
+                rootTrack.pitchAnalysisAlgo === "none"
+            ) {
                 return;
             }
 
@@ -83,8 +87,14 @@ export function useClipPitchDrag(deps: {
             e.stopPropagation();
             (e.currentTarget as HTMLElement).setPointerCapture?.(pointerId);
 
-            const startFrame = Math.max(0, Math.floor((clip.startSec * 1000) / PITCH_DRAG_PROBE_FP_MS));
-            const frameCount = Math.max(1, Math.ceil((clip.lengthSec * 1000) / PITCH_DRAG_PROBE_FP_MS));
+            const startFrame = Math.max(
+                0,
+                Math.floor((clip.startSec * 1000) / PITCH_DRAG_PROBE_FP_MS),
+            );
+            const frameCount = Math.max(
+                1,
+                Math.ceil((clip.lengthSec * 1000) / PITCH_DRAG_PROBE_FP_MS),
+            );
 
             const state: ClipPitchDragState = {
                 pointerId,

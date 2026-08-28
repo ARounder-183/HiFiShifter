@@ -217,8 +217,7 @@ export function slipBoundaryAlignedSides(
         const phase = raw * rate;
         const tol = eps * rate;
         // 环绕距离：|floor_mod(phase − phi + d/2, d) − d/2|
-        const near = (phi: number) =>
-            Math.abs(floorMod(phase - phi + d / 2, d) - d / 2) <= tol;
+        const near = (phi: number) => Math.abs(floorMod(phase - phi + d / 2, d) - d / 2) <= tol;
         return { start: near(startPhi), end: near(endPhi) };
     }
 

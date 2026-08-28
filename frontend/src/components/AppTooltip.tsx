@@ -1,10 +1,4 @@
-import {
-    useEffect,
-    useRef,
-    useState,
-    type PropsWithChildren,
-    type ReactNode,
-} from "react";
+import { useEffect, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
 
 /**
  * 富内容注册事件：任意模块可以把某个元素的信息浮标设为 ReactNode
@@ -196,8 +190,7 @@ export function AppTooltipProvider({
             if (pinned) return;
             const target = event.target instanceof Element ? event.target : null;
             // 富内容元素可能没有 data-tooltip 属性 —— 容器带 data-hs-rich-tooltip 标记。
-            const element =
-                target?.closest?.("[data-tooltip], [data-hs-rich-tooltip]") ?? null;
+            const element = target?.closest?.("[data-tooltip], [data-hs-rich-tooltip]") ?? null;
 
             if (element !== currentElement) {
                 currentElement = element;
@@ -229,10 +222,7 @@ export function AppTooltipProvider({
                 return;
             }
             setTooltip((prev) =>
-                prev &&
-                prev.nodeKey === nodeKey &&
-                prev.text === content &&
-                nodeKey != null
+                prev && prev.nodeKey === nodeKey && prev.text === content && nodeKey != null
                     ? prev
                     : {
                           text: content,

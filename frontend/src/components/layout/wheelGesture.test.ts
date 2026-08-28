@@ -133,5 +133,4 @@ test("components/layout/wheelGesture.test.ts scripted checks", async () => {
         "vertical-zoom",
         "param editor ctrl wheel zooms vertically",
     );
-
 });

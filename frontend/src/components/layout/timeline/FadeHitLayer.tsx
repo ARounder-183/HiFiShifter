@@ -134,19 +134,14 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                     isOut: target.type === "fade_out",
                     shape: target.type === "fade_in" ? fadeInShape : fadeOutShape,
                     dir: target.type === "fade_in" ? fadeInDir : fadeOutDir,
-                    lengthSec:
-                        target.type === "fade_in"
-                            ? effectiveFadeInSec
-                            : effectiveFadeOutSec,
+                    lengthSec: target.type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec,
                     formatCtx,
                     t: t as unknown as FadeLabelLookup,
                 });
                 return (
                     <div
                         key={`${target.kind}-${target.type}-${index}`}
-                        ref={publishRef(
-                            target.type === "fade_in" ? richIn : richOut,
-                        )}
+                        ref={publishRef(target.type === "fade_in" ? richIn : richOut)}
                         className="absolute"
                         style={{
                             left: target.left,
@@ -154,8 +149,7 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                             width: target.width,
                             height: target.height,
                             zIndex,
-                            cursor:
-                                target.type === "fade_in" ? "nwse-resize" : "nesw-resize",
+                            cursor: target.type === "fade_in" ? "nwse-resize" : "nesw-resize",
                         }}
                         data-hs-fade-hit={target.type}
                         data-hs-fade-y={String(target.top)}
@@ -175,17 +169,10 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                                 clientX: e.clientX,
                                 clientY: e.clientY,
                                 primary: {
-                                    clipId:
-                                        e.currentTarget.dataset.hsClipId ?? "",
+                                    clipId: e.currentTarget.dataset.hsClipId ?? "",
                                     isOut: target.type === "fade_out",
-                                    shape:
-                                        target.type === "fade_in"
-                                            ? fadeInShape
-                                            : fadeOutShape,
-                                    dir:
-                                        target.type === "fade_in"
-                                            ? fadeInDir
-                                            : fadeOutDir,
+                                    shape: target.type === "fade_in" ? fadeInShape : fadeOutShape,
+                                    dir: target.type === "fade_in" ? fadeInDir : fadeOutDir,
                                     lengthSec:
                                         target.type === "fade_in"
                                             ? effectiveFadeInSec
@@ -219,11 +206,9 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                                     if (dx * dx + dy * dy < 9) return;
                                     dragStarted = true;
                                     // 意图 = 长度拖拽：交给原有淡变拖拽起手。
-                                    (
-                                        target.type === "fade_in"
-                                            ? onFadeInPointerDown
-                                            : onFadeOutPointerDown
-                                    )({
+                                    (target.type === "fade_in"
+                                        ? onFadeInPointerDown
+                                        : onFadeOutPointerDown)({
                                         button: 0,
                                         pointerId,
                                         clientX: ev.clientX,
@@ -259,8 +244,7 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                             if (
                                 isLine &&
                                 !cycleHeld &&
-                                noteFadeLinePointerDown(`${clipId}:${target.type}`) ===
-                                    "double"
+                                noteFadeLinePointerDown(`${clipId}:${target.type}`) === "double"
                             ) {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -284,12 +268,9 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
  * 的信号源；modifierWatcher 在手势全程持续自愈全局快照供后续帧使用。
  */
 function cycleModifierHeld(kb: Keybinding, event: PointerEvent): boolean {
-    const requiredCtrl =
-        kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
-    const requiredAlt =
-        kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
-    const requiredShift =
-        kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
+    const requiredCtrl = kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
+    const requiredAlt = kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
+    const requiredShift = kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
     return (
         (!requiredCtrl || event.ctrlKey || event.metaKey) &&
         (!requiredAlt || event.altKey) &&

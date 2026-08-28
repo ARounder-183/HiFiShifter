@@ -90,10 +90,7 @@ export function getSnapHighlightSnapshot(): SnapHighlightSnapshot {
 }
 
 /** 发布一组条目：整组替换 group 内的旧条目（entry.id 以 `${group}\0` 为前缀编码）。 */
-export function publishSnapHighlights(
-    group: string,
-    entries: readonly SnapHighlightEntry[],
-): void {
+export function publishSnapHighlights(group: string, entries: readonly SnapHighlightEntry[]): void {
     const prefix = `${group}\u0000`;
     const nextEntries = snapshot.entries.filter((entry) => !entry.id.startsWith(prefix));
     for (const entry of entries) {

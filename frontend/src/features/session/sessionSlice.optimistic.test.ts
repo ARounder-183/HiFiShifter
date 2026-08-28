@@ -235,5 +235,4 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         const next = reducer(createState(), undoRemote.pending("req-undo", undefined));
         assertEqual(next.clips[0].startSec, 1, "undo pending applies local snapshot immediately");
     }
-
 });

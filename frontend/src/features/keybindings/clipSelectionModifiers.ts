@@ -54,8 +54,7 @@ export function resolveClipSelectionModifiers(input: {
     const multiSelectToggleRaw = isModifierActive(input.multiSelectToggleKb, input.event);
     const rangeSelectRaw = isModifierActive(input.rangeSelectKb, input.event);
 
-    const multiSelectToggleActive =
-        multiSelectToggleRaw && !altKeyDown && !rangeSelectRaw;
+    const multiSelectToggleActive = multiSelectToggleRaw && !altKeyDown && !rangeSelectRaw;
     const rangeSelectActive = rangeSelectRaw && !altKeyDown && !multiSelectToggleRaw;
 
     return {

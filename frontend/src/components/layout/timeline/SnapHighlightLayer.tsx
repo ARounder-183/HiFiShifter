@@ -115,9 +115,7 @@ const SnapEntryGroup: React.FC<{
         maxBottom = Math.max(maxBottom, (idx + 1) * rowHeight);
     }
     const rangeTop = fullHeight ? 0 : Math.max(0, minTop);
-    const rangeBottom = fullHeight
-        ? contentHeight
-        : Math.min(contentHeight, maxBottom);
+    const rangeBottom = fullHeight ? contentHeight : Math.min(contentHeight, maxBottom);
     const rangeHeight = Math.max(0, rangeBottom - rangeTop);
     const color = KIND_COLOR_VAR[entry.kind];
 
@@ -140,7 +138,7 @@ const SnapEntryGroup: React.FC<{
             idx = trackCount;
         }
         if (idx == null) continue;
-        const key = `${Math.round((marker.sec * pxPerSec) * 2)}:${marker.trackId}`;
+        const key = `${Math.round(marker.sec * pxPerSec * 2)}:${marker.trackId}`;
         if (accentSeen.has(key)) continue;
         accentSeen.add(key);
         accents.push({

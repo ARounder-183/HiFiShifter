@@ -116,9 +116,7 @@ export const TempoMapCornerButton: React.FC = () => {
                         bpm: clampBpm(s.bpm || 120),
                         timeSignature: {
                             numerator: clampNumerator(s.beats || 4),
-                            denominator: clampDenominator(
-                                s.project.timeSignatureDenominator ?? 4,
-                            ),
+                            denominator: clampDenominator(s.project.timeSignatureDenominator ?? 4),
                         },
                         scale: scaleLikeToScaleData(
                             projectScaleLike ?? undefined,
@@ -172,8 +170,7 @@ export const TempoMapCornerButton: React.FC = () => {
                         "color-mix(in srgb, var(--qt-hover) 80%, transparent)";
                 }}
                 onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.backgroundColor =
-                        "transparent";
+                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
                 }}
                 onClick={(e) => {
                     e.stopPropagation();

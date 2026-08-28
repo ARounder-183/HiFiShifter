@@ -135,5 +135,4 @@ test("components/layout/timeline/runtime/timelineHitTest.test.ts scripted checks
         { trackId: "track-a", clipId: "clip-front", zone: "body" },
         "top-most overlapping clip wins",
     );
-
 });

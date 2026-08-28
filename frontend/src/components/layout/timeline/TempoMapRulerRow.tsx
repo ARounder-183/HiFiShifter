@@ -27,7 +27,12 @@ import {
 import type { TempoMap, TempoPoint, TempoMapScaleData } from "../../../utils/tempoMap";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat";
 import { formatCursorTime } from "./timeFormat";
-import { snapTimelinePosition, computeEffectiveSnap, beginSnapGesture, endSnapGesture } from "../../../utils/timelineSnapping";
+import {
+    snapTimelinePosition,
+    computeEffectiveSnap,
+    beginSnapGesture,
+    endSnapGesture,
+} from "../../../utils/timelineSnapping";
 import {
     SNAP_HIGHLIGHT_GROUP,
     buildCandidateHighlightEntry,
@@ -157,21 +162,17 @@ function TempoPointDialog({
     onDelete,
 }: TempoPointDialogProps) {
     // 对话框通过 key 重挂载来复位表单状态（打开新点时由父组件更换 key）。
-    const [bpmText, setBpmText] = useState(() =>
-        point ? formatTempoBpm(point.bpm) : "120",
-    );
+    const [bpmText, setBpmText] = useState(() => (point ? formatTempoBpm(point.bpm) : "120"));
     // 拍号：跟随之前的拍号时，输入框展示“上一变化点实际生效”的拍号（禁用态）。
     // 初始点即工程基准记录，必须显式携带拍号，不能跟随。
     const [sigFollow, setSigFollow] = useState(() =>
         point ? !isFirst && point.timeSignature == null : false,
     );
     const [numText, setNumText] = useState(() =>
-        point
-            ? String(point.timeSignature?.numerator ?? previousTimeSignature.numerator)
-            : "4",
+        point ? String(point.timeSignature?.numerator ?? previousTimeSignature.numerator) : "4",
     );
-    const [denominator, setDenominator] = useState(() =>
-        point?.timeSignature?.denominator ?? previousTimeSignature.denominator,
+    const [denominator, setDenominator] = useState(
+        () => point?.timeSignature?.denominator ?? previousTimeSignature.denominator,
     );
     const [scaleValue, setScaleValue] = useState(() => {
         if (!point?.scale) return "inherit";
@@ -185,8 +186,8 @@ function TempoPointDialog({
         );
         return preset ? `custom:${preset.id}` : "custom:temp";
     });
-    const [customNotes, setCustomNotes] = useState<number[] | null>(() =>
-        point?.scale?.notes ?? null,
+    const [customNotes, setCustomNotes] = useState<number[] | null>(
+        () => point?.scale?.notes ?? null,
     );
     const [customName, setCustomName] = useState(() => point?.scale?.name ?? "");
     const bpmRef = useRef<HTMLInputElement | null>(null);
@@ -280,7 +281,11 @@ function TempoPointDialog({
                 </Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     <Flex gap="2" align="center">
-                        <Text size="1" className="text-qt-text-muted shrink-0" style={{ width: 96 }}>
+                        <Text
+                            size="1"
+                            className="text-qt-text-muted shrink-0"
+                            style={{ width: 96 }}
+                        >
                             {t("bpm")}
                         </Text>
                         <TextField.Root
@@ -301,7 +306,11 @@ function TempoPointDialog({
                         </Text>
                     </Flex>
                     <Flex gap="2" align="center">
-                        <Text size="1" className="text-qt-text-muted shrink-0" style={{ width: 96 }}>
+                        <Text
+                            size="1"
+                            className="text-qt-text-muted shrink-0"
+                            style={{ width: 96 }}
+                        >
                             {t("tempo_map_time_signature")}
                         </Text>
                         <TextField.Root
@@ -366,7 +375,11 @@ function TempoPointDialog({
                         </Flex>
                     ) : null}
                     <Flex gap="2" align="center">
-                        <Text size="1" className="text-qt-text-muted shrink-0" style={{ width: 96 }}>
+                        <Text
+                            size="1"
+                            className="text-qt-text-muted shrink-0"
+                            style={{ width: 96 }}
+                        >
                             {t("tempo_map_scale")}
                         </Text>
                         <Select.Root
@@ -421,7 +434,10 @@ function TempoPointDialog({
                                     <Select.Group>
                                         <Select.Label>{t("scale_custom_group")}</Select.Label>
                                         {customScalePresets.map((preset) => (
-                                            <Select.Item key={preset.id} value={`custom:${preset.id}`}>
+                                            <Select.Item
+                                                key={preset.id}
+                                                value={`custom:${preset.id}`}
+                                            >
                                                 {preset.name || preset.id}
                                             </Select.Item>
                                         ))}
@@ -432,7 +448,13 @@ function TempoPointDialog({
                     </Flex>
                 </Flex>
                 <Flex justify="between" align="center" mt="4" gap="2">
-                    <Button variant="soft" color="red" size="1" disabled={isFirst} onClick={onDelete}>
+                    <Button
+                        variant="soft"
+                        color="red"
+                        size="1"
+                        disabled={isFirst}
+                        onClick={onDelete}
+                    >
                         {t("tempo_map_delete_point")}
                     </Button>
                     <Flex gap="2">
@@ -521,9 +543,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
               : [],
     );
     const playheadSec = useAppSelector((state) => state.session.playheadSec);
-    const noSnapKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.clipNoSnap"),
-    );
+    const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
 
     // 编辑对话框打开/关闭时通知父级（用于抑制标尺悬浮时间提示）。
     useEffect(() => {
@@ -584,8 +604,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     const baseFallbackOf = useCallback(
         (base: TempoMap | null) => {
             if (base && base.points.length > 0) {
-                const sig =
-                    base.points[0].timeSignature ?? { numerator: 4, denominator: 4 };
+                const sig = base.points[0].timeSignature ?? { numerator: 4, denominator: 4 };
                 return {
                     bpm: base.points[0].bpm,
                     beatsPerBar: sig.numerator,
@@ -721,13 +740,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         });
         queueMicrotask(() => {
             setSelectedId(point.id);
-            openDialogState(
-                point.id,
-                point,
-                map.points[0].id === point.id,
-                focus,
-                { positionSec: sec, baseMap: base },
-            );
+            openDialogState(point.id, point, map.points[0].id === point.id, focus, {
+                positionSec: sec,
+                baseMap: base,
+            });
         });
     }, [
         editRequest,
@@ -808,8 +824,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             }
             // 初始点（工程基准记录）不能“跟随之前的拍号”：输入未含拍号时保持原拍号。
             if (pointIndex === 0 && !parsed.timeSignature) {
-                parsed.timeSignature =
-                    point.timeSignature ?? { numerator: 4, denominator: 4 };
+                parsed.timeSignature = point.timeSignature ?? { numerator: 4, denominator: 4 };
             }
             const next = updateTempoPoint(tempoMap, id, parsed);
             if (commitNow) {
@@ -882,8 +897,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             };
             // 即便指针抬起时没有任何进一步移动，也要把“确认的编辑/新增”
             // 提交出去（否则仅停留在本地 Redux）。
-            dragDraftRef.current =
-                appliedMap ?? (pendingInlineAddRef.current ? tempoMap : null);
+            dragDraftRef.current = appliedMap ?? (pendingInlineAddRef.current ? tempoMap : null);
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
@@ -898,8 +912,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const margin = INLINE_DRAG_TO_MOVE_BOUNDARY_MARGIN_PX;
             const startClientX = e.clientX;
             const startClientY = e.clientY;
-            const hadSelection =
-                inputEl.selectionStart !== inputEl.selectionEnd;
+            const hadSelection = inputEl.selectionStart !== inputEl.selectionEnd;
             inlineDragArmedRef.current = false;
 
             const cleanup = () => {
@@ -995,10 +1008,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const base = tempoMap ?? null;
             const mapFallback = baseFallbackOf(base);
             // "拖动时切换吸附"同样作用于双击创建：修饰键取反吸附总开关。
-            const effSnap = computeEffectiveSnap(
-                snapEnabled,
-                isModifierActive(noSnapKb, e),
-            );
+            const effSnap = computeEffectiveSnap(snapEnabled, isModifierActive(noSnapKb, e));
             if (effSnap) {
                 sec = snapTempoPosition(sec, effSnap, base, mapFallback.bpm);
             }
@@ -1073,10 +1083,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const mapFallback = baseFallbackOf(drag.baseTempoMap);
             let sec = rawSec;
             // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
-            const effectiveSnap = computeEffectiveSnap(
-                snapEnabled,
-                isModifierActive(noSnapKb, e),
-            );
+            const effectiveSnap = computeEffectiveSnap(snapEnabled, isModifierActive(noSnapKb, e));
             if (effectiveSnap) {
                 sec = snapTempoPosition(
                     rawSec,
@@ -1098,8 +1105,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const minGapSec = 60 / Math.max(1, mapFallback.bpm) / 16;
             const idx = tempoMap.points.findIndex((p) => p.id === drag.pointId);
             if (idx >= 0) {
-                const prevSec =
-                    idx > 0 ? tempoMap.points[idx - 1].positionSec + minGapSec : 0;
+                const prevSec = idx > 0 ? tempoMap.points[idx - 1].positionSec + minGapSec : 0;
                 const nextSec =
                     idx + 1 < tempoMap.points.length
                         ? tempoMap.points[idx + 1].positionSec - minGapSec
@@ -1154,7 +1160,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         const bufferPx = Math.max(120, viewportWidth * 0.3);
         const leftPx = scrollLeft - bufferPx;
         const rightPx = scrollLeft + viewportWidth + bufferPx;
-        const flags: Array<{ point: TempoPoint; left: number; isFirst: boolean; index: number }> = [];
+        const flags: Array<{ point: TempoPoint; left: number; isFirst: boolean; index: number }> =
+            [];
         for (let i = 0; i < tempoMap.points.length; i += 1) {
             const left = tempoMap.points[i].positionSec * pxPerSec;
             if (left >= leftPx - 220 && left <= rightPx + 220) {
@@ -1264,8 +1271,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     const previousTimeSignatureLabelFor = useCallback(
-        (positionSec: number): string =>
-            formatTimeSignature(previousTimeSignatureFor(positionSec)),
+        (positionSec: number): string => formatTimeSignature(previousTimeSignatureFor(positionSec)),
         [previousTimeSignatureFor],
     );
 
@@ -1287,7 +1293,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
                 : cursor.primaryLabel;
             const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
-            const effScale = effectiveScaleAtSec(tempoMap, point.positionSec, projectScale ?? undefined);
+            const effScale = effectiveScaleAtSec(
+                tempoMap,
+                point.positionSec,
+                projectScale ?? undefined,
+            );
             const effScaleLabel = scaleLikeLabel(effScale, projectScaleName) ?? "—";
             return [
                 `${t("tempo_map_tooltip_position")}${positionLine}`,
@@ -1304,9 +1314,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         <input
             autoFocus
             value={editingText}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                setEditingText(e.target.value)
-            }
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditingText(e.target.value)}
             onFocus={(e) => e.target.select()}
             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                 e.stopPropagation();
@@ -1357,8 +1365,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 width: Math.max(40, editingText.length * 6 + 18),
                 padding: "0 4px",
                 height: 15,
-                boxShadow:
-                    "inset 0 0 0 1px color-mix(in srgb, var(--qt-border) 70%, transparent)",
+                boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--qt-border) 70%, transparent)",
             }}
         />
     );
@@ -1383,9 +1390,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                         : { numerator: 4, denominator: 4 }
                 }
                 previousScaleLabel={
-                    dialogState.point
-                        ? previousScaleLabelFor(dialogState.point.positionSec)
-                        : "—"
+                    dialogState.point ? previousScaleLabelFor(dialogState.point.positionSec) : "—"
                 }
                 customScalePresets={customScalePresets}
                 focus={dialogState.focus}
@@ -1444,12 +1449,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                 className="absolute top-0 bottom-0 flex items-center group select-none"
                                 style={{
                                     left,
-                                    cursor:
-                                        isFirst
-                                            ? "pointer"
-                                            : draggingId === point.id
-                                              ? "grabbing"
-                                              : "grab",
+                                    cursor: isFirst
+                                        ? "pointer"
+                                        : draggingId === point.id
+                                          ? "grabbing"
+                                          : "grab",
                                 }}
                                 onPointerDown={(e) => startFlagDrag(point, isFirst, e)}
                                 onDoubleClick={(e) => {
@@ -1510,8 +1514,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                         const offscreenFlag = visibleState.flags.find((f) => {
                             if (editingPointId !== f.point.id) return false;
                             return (
-                                f.left +
-                                    tempoFlagLabelWidthPx(tempoPointFlagLabel(f.point)) <
+                                f.left + tempoFlagLabelWidthPx(tempoPointFlagLabel(f.point)) <
                                 scrollLeft
                             );
                         });

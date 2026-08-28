@@ -201,12 +201,9 @@ type EditZone = {
  * 信号源；与 FadeHitLayer.cycleModifierHeld 同一套子集匹配规则）。
  */
 function cycleModifierHeld(kb: Keybinding, event: PointerEvent): boolean {
-    const requiredCtrl =
-        kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
-    const requiredAlt =
-        kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
-    const requiredShift =
-        kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
+    const requiredCtrl = kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
+    const requiredAlt = kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
+    const requiredShift = kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
     return (
         (!requiredCtrl || event.ctrlKey || event.metaKey) &&
         (!requiredAlt || event.altKey) &&
@@ -438,10 +435,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 key: `${earlier.id}:${later.id}:later-snap-offset`,
                 clipId: later.id,
                 type: "snap_offset",
-                leftPx:
-                    laterStartPx +
-                    snapOffsetHandleXPx(later.snapOffsetSec, pxPerSec) -
-                    4,
+                leftPx: laterStartPx + snapOffsetHandleXPx(later.snapOffsetSec, pxPerSec) - 4,
                 widthPx: SNAP_OFFSET_HANDLE_SIZE_PX + 5,
                 topPx: rowHeight - SNAP_OFFSET_HIT_HEIGHT_PX,
                 heightPx: SNAP_OFFSET_HIT_HEIGHT_PX,
@@ -523,9 +517,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             in: {
                                 clipId: later.id,
                                 isOut: false,
-                                shape: Number.isFinite(later.fadeInShape)
-                                    ? later.fadeInShape
-                                    : 0,
+                                shape: Number.isFinite(later.fadeInShape) ? later.fadeInShape : 0,
                                 dir: later.fadeInDir ?? 0,
                                 lengthSec: laterFadeInSec,
                             },
@@ -546,12 +538,9 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         event.preventDefault();
         event.stopPropagation();
 
-        const isInMultiSelect =
-            multiSelectedClipIds.length > 0 && multiSelectedSet.has(clipId);
+        const isInMultiSelect = multiSelectedClipIds.length > 0 && multiSelectedSet.has(clipId);
         const clipIsSelected =
-            multiSelectedClipIds.length > 0
-                ? isInMultiSelect
-                : selectedClipId === clipId;
+            multiSelectedClipIds.length > 0 ? isInMultiSelect : selectedClipId === clipId;
         if (!clipIsSelected) {
             if (!isInMultiSelect || multiSelectedClipIds.length > 1) {
                 ensureSelected(clipId);
@@ -576,12 +565,9 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         event.stopPropagation();
 
         // 选择/点选语义：按下时先确保该 clip 进入（多）选集合。
-        const isInMultiSelect =
-            multiSelectedClipIds.length > 0 && multiSelectedSet.has(clipId);
+        const isInMultiSelect = multiSelectedClipIds.length > 0 && multiSelectedSet.has(clipId);
         const clipIsSelected =
-            multiSelectedClipIds.length > 0
-                ? isInMultiSelect
-                : selectedClipId === clipId;
+            multiSelectedClipIds.length > 0 ? isInMultiSelect : selectedClipId === clipId;
         if (!clipIsSelected) {
             if (!isInMultiSelect || multiSelectedClipIds.length > 1) {
                 ensureSelected(clipId);
@@ -596,9 +582,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
         const currentTarget = event.currentTarget as HTMLElement;
         // 曲率拖拽环境：本层坐标即 lane 坐标，gain=1 基准线的客户 y =
         // 层容器 top + bodyTopPx；高度为行高推导的 body 高度。
-        let fadePointerEnv:
-            | { envTopClientY: number; bodyHeightPx: number }
-            | undefined;
+        let fadePointerEnv: { envTopClientY: number; bodyHeightPx: number } | undefined;
         {
             const layerRoot = currentTarget.closest("[data-hs-overlap-layer]");
             const hitTop = currentTarget.getBoundingClientRect().top;
@@ -609,10 +593,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                     : hitTop - (Number.isFinite(hitTopLocal) ? hitTopLocal : 0);
             fadePointerEnv = {
                 envTopClientY: baseTopClientY + CLIP_HEADER_HEIGHT,
-                bodyHeightPx: Math.max(
-                    1,
-                    rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
-                ),
+                bodyHeightPx: Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
             };
         }
         let dragStarted = false;
@@ -663,10 +644,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     };
 
     return (
-        <div
-            data-hs-overlap-layer="1"
-            className="absolute inset-0 z-[200] pointer-events-none"
-        >
+        <div data-hs-overlap-layer="1" className="absolute inset-0 z-[200] pointer-events-none">
             {zones.map((zone) => (
                 <div
                     key={zone.key}
@@ -696,28 +674,22 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             !isNoneBinding(shapeCycleKb) &&
                             cycleModifierHeld(shapeCycleKb, e.nativeEvent);
                         if (cycleHeld && zone.type !== "snap_offset") {
-                            startDeferredEdit(
-                                e,
-                                zone.clipId,
-                                zone.type,
-                                zone.partnerClipId,
-                                () => {
-                                    if (zone.crossfadeSides) {
-                                        onCrossfadeCycleClick?.([
-                                            {
-                                                clipId: zone.crossfadeSides.out.clipId,
-                                                isOut: true,
-                                            },
-                                            {
-                                                clipId: zone.crossfadeSides.in.clipId,
-                                                isOut: false,
-                                            },
-                                        ]);
-                                    } else if (zone.contextSide) {
-                                        onFadeShapeSingleCycle?.(zone.contextSide);
-                                    }
-                                },
-                            );
+                            startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId, () => {
+                                if (zone.crossfadeSides) {
+                                    onCrossfadeCycleClick?.([
+                                        {
+                                            clipId: zone.crossfadeSides.out.clipId,
+                                            isOut: true,
+                                        },
+                                        {
+                                            clipId: zone.crossfadeSides.in.clipId,
+                                            isOut: false,
+                                        },
+                                    ]);
+                                } else if (zone.contextSide) {
+                                    onFadeShapeSingleCycle?.(zone.contextSide);
+                                }
+                            });
                             return;
                         }
                         // 双击重置曲率：

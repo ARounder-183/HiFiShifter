@@ -15,15 +15,9 @@ import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { setClipFades } from "../../../features/session/sessionSlice";
 import { webApi } from "../../../services/webviewApi";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
-import {
-    defaultFadeDirFor,
-    FADE_PRESETS,
-} from "./reaperFade";
+import { defaultFadeDirFor, FADE_PRESETS } from "./reaperFade";
 import { FadeContextMenu, type FadeContextSide } from "./FadeContextMenu";
-import {
-    onFadeContextMenuRequest,
-    onFadeCurvatureReset,
-} from "./fadeContextMenuBus";
+import { onFadeContextMenuRequest, onFadeCurvatureReset } from "./fadeContextMenuBus";
 
 const remoteDebounceMs = 120;
 
@@ -38,14 +32,13 @@ type MenuState = {
 function extractSide(clip: ClipInfo | undefined, ref: SideRef): FadeContextSide | null {
     if (!clip) return null;
     const shape = Number.isFinite(ref.isOut ? clip.fadeOutShape : clip.fadeInShape)
-        ? (ref.isOut ? clip.fadeOutShape : clip.fadeInShape)
+        ? ref.isOut
+            ? clip.fadeOutShape
+            : clip.fadeInShape
         : 0;
     const dir = (ref.isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0;
-    const autoSec = ref.isOut ? clip.autoFadeOutSec ?? 0 : clip.autoFadeInSec ?? 0;
-    const manualSec = Math.max(
-        0,
-        ref.isOut ? clip.fadeOutSec ?? 0 : clip.fadeInSec ?? 0,
-    );
+    const autoSec = ref.isOut ? (clip.autoFadeOutSec ?? 0) : (clip.autoFadeInSec ?? 0);
+    const manualSec = Math.max(0, ref.isOut ? (clip.fadeOutSec ?? 0) : (clip.fadeInSec ?? 0));
     const lengthSec = autoSec > 0 ? autoSec : manualSec;
     return { clipId: ref.clipId, isOut: ref.isOut, shape, dir, lengthSec };
 }
@@ -85,9 +78,7 @@ export const FadeContextMenuHost: React.FC = () => {
                 dispatch(
                     setClipFades({
                         clipId: side.clipId,
-                        ...(side.isOut
-                            ? { fadeOutDir: dir }
-                            : { fadeInDir: dir }),
+                        ...(side.isOut ? { fadeOutDir: dir } : { fadeInDir: dir }),
                     }),
                 );
                 try {
@@ -108,8 +99,12 @@ export const FadeContextMenuHost: React.FC = () => {
     }, []);
 
     // 实时从 Redux 解析两侧的最新形态（菜单打开期间任何提交都会回流到这里）。
-    const primary =
-        menu ? extractSide(clips.find((c) => c.id === menu.primary.clipId), menu.primary) : null;
+    const primary = menu
+        ? extractSide(
+              clips.find((c) => c.id === menu.primary.clipId),
+              menu.primary,
+          )
+        : null;
     const secondaryRef = menu?.secondary ?? null;
     const secondary = secondaryRef
         ? extractSide(
@@ -155,9 +150,12 @@ export const FadeContextMenuHost: React.FC = () => {
             // 不节流 —— 保证撤销点外数值不残留旧曲率。
             const dir = defaultFadeDirFor(shape, isOut);
             dispatch(
-                setClipFades({ clipId, ...(isOut
-                    ? { fadeOutShape: shape, fadeOutDir: dir }
-                    : { fadeInShape: shape, fadeInDir: dir }) }),
+                setClipFades({
+                    clipId,
+                    ...(isOut
+                        ? { fadeOutShape: shape, fadeOutDir: dir }
+                        : { fadeInShape: shape, fadeInDir: dir }),
+                }),
             );
             try {
                 void webApi.setClipState({

@@ -7,7 +7,11 @@ import type { ActionId, Keybinding } from "./types";
 import { createModifierOnlyBinding } from "./keybindingsSlice";
 
 export type KeybindingPresetId =
-    "spaceReturnPlayhead" | "touchpad" | "reaper" | "vegasPro" | "vocalShifter";
+    | "spaceReturnPlayhead"
+    | "touchpad"
+    | "reaper"
+    | "vegasPro"
+    | "vocalShifter";
 
 export type KeybindingPresetSelectionId = "custom" | "default" | KeybindingPresetId;
 

@@ -15,7 +15,12 @@
  */
 
 import type { ScaleLike } from "./musicalScales.ts";
-import { SCALE_KEYS, SCALE_LABELS, isScaleKey, normalizeCustomScaleNotes } from "./musicalScales.ts";
+import {
+    SCALE_KEYS,
+    SCALE_LABELS,
+    isScaleKey,
+    normalizeCustomScaleNotes,
+} from "./musicalScales.ts";
 
 // ────────────────────────────────────────────────────────────────────────────
 // 类型
@@ -125,10 +130,15 @@ export function makeTimeSignature(numerator: number, denominator: number): Tempo
 }
 
 /** 从不可信数据构造拍号；分子/分母任一缺失或非法时返回 null。 */
-export function normalizeTimeSignature(value: {
-    numerator?: number | null;
-    denominator?: number | null;
-} | null | undefined): TempoTimeSignature | null {
+export function normalizeTimeSignature(
+    value:
+        | {
+              numerator?: number | null;
+              denominator?: number | null;
+          }
+        | null
+        | undefined,
+): TempoTimeSignature | null {
     if (!value) return null;
     const numerator = Number(value.numerator);
     const denominator = Number(value.denominator);
@@ -190,7 +200,10 @@ export function normalizeTempoMap(
     raw.sort((a, b) => a.positionSec - b.positionSec);
     const points: TempoPoint[] = [];
     for (const p of raw) {
-        if (points.length > 0 && Math.abs(points[points.length - 1].positionSec - p.positionSec) < 1e-6) {
+        if (
+            points.length > 0 &&
+            Math.abs(points[points.length - 1].positionSec - p.positionSec) < 1e-6
+        ) {
             continue;
         }
         points.push(p);
@@ -218,7 +231,9 @@ export function normalizeTempoMap(
     return { points };
 }
 
-export function normalizeScaleData(scale: TempoMapScaleData | null | undefined): TempoMapScaleData | null {
+export function normalizeScaleData(
+    scale: TempoMapScaleData | null | undefined,
+): TempoMapScaleData | null {
     if (!scale) return null;
     const key = typeof scale.key === "string" && isScaleKey(scale.key) ? scale.key : undefined;
     const notes = Array.isArray(scale.notes) ? normalizeCustomScaleNotes(scale.notes) : undefined;
@@ -285,9 +300,7 @@ export function fromBackendTempoMap(
  * 与后端 `set_timeline_tempo_map(tempoMap: Option<Vec<TempoPointPayload>>)` 参数一致。
  * 拍号跟随之前的拍号时 numerator/denominator 序列化为 null。
  */
-export function toBackendTempoMap(
-    map: TempoMap | null,
-): Array<{
+export function toBackendTempoMap(map: TempoMap | null): Array<{
     id: string;
     positionSec: number;
     bpm: number;
@@ -605,7 +618,10 @@ export function beatToBarBeat(
 ): BarBeat {
     const safeBeat = Math.max(0, beat);
     if (!map || map.points.length === 0) {
-        const bpb = Math.max(1, beatsPerBarOf({ numerator: fallbackBeatsPerBar || 4, denominator: 4 }));
+        const bpb = Math.max(
+            1,
+            beatsPerBarOf({ numerator: fallbackBeatsPerBar || 4, denominator: 4 }),
+        );
         const barIndex = Math.floor(safeBeat / bpb);
         const inBar = safeBeat - barIndex * bpb;
         const beatIndex = Math.floor(inBar);
@@ -758,7 +774,10 @@ export function buildTempoGridLines(args: {
             const beat = index * safeStep;
             add(beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index), false);
         }
-        const bpb = Math.max(1, beatsPerBarOf({ numerator: fallbackBeatsPerBar || 4, denominator: 4 }));
+        const bpb = Math.max(
+            1,
+            beatsPerBarOf({ numerator: fallbackBeatsPerBar || 4, denominator: 4 }),
+        );
         const firstBarIndex = Math.floor(startBeat / bpb + 1e-9);
         const lastBarIndex = Math.ceil(endBeat / bpb - 1e-9);
         for (let k = firstBarIndex; k <= lastBarIndex; k += 1) {
@@ -769,7 +788,10 @@ export function buildTempoGridLines(args: {
     }
 
     // ── Tempo Map 路径：逐段局部对齐 ──
-    const segments = tempoMapSegments(map, Math.max(endSec, map.points[map.points.length - 1].positionSec));
+    const segments = tempoMapSegments(
+        map,
+        Math.max(endSec, map.points[map.points.length - 1].positionSec),
+    );
     for (let i = 0; i < segments.length; i += 1) {
         const segment = segments[i];
         const segBpm = Math.max(1, segment.point.bpm);
@@ -787,10 +809,7 @@ export function buildTempoGridLines(args: {
         const lastWeak = Math.floor(localEndBeat / safeStep + 1e-9);
         for (let k = firstWeak; k <= lastWeak; k += 1) {
             if (k < 0) continue;
-            add(
-                segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k),
-                false,
-            );
+            add(segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k), false);
         }
 
         // 强网格线（段内小节边界；段起点本身也是对齐点）。
@@ -824,7 +843,11 @@ export function insertTempoPoint(map: TempoMap, point: TempoPoint): TempoMap {
     return { points };
 }
 
-export function updateTempoPoint(map: TempoMap, id: string, patch: Partial<Omit<TempoPoint, "id">>): TempoMap {
+export function updateTempoPoint(
+    map: TempoMap,
+    id: string,
+    patch: Partial<Omit<TempoPoint, "id">>,
+): TempoMap {
     const positionPatched = patch.positionSec !== undefined;
     const points = map.points.map((p) => {
         if (p.id !== id) return p;
@@ -838,7 +861,10 @@ export function updateTempoPoint(map: TempoMap, id: string, patch: Partial<Omit<
                     ? p.timeSignature
                     : patch.timeSignature == null
                       ? null
-                      : makeTimeSignature(patch.timeSignature.numerator, patch.timeSignature.denominator),
+                      : makeTimeSignature(
+                            patch.timeSignature.numerator,
+                            patch.timeSignature.denominator,
+                        ),
             scale: patch.scale === undefined ? p.scale : normalizeScaleData(patch.scale),
         };
     });
@@ -863,7 +889,10 @@ export function removeTempoPoint(map: TempoMap, id: string): TempoMap | null {
         points[0] = { ...points[0], positionSec: 0 };
         // 钉到 0 的点成为工程基准记录：必须显式携带拍号。
         if (!points[0].timeSignature) {
-            const sig = effectiveTimeSignatureAt(map, map.points.findIndex((p) => p.id === points[0].id));
+            const sig = effectiveTimeSignatureAt(
+                map,
+                map.points.findIndex((p) => p.id === points[0].id),
+            );
             points[0] = { ...points[0], timeSignature: sig };
         }
     }
@@ -1009,7 +1038,10 @@ export function buildTempoGridLineXsForViewport(args: {
         1,
         Math.min(
             160,
-            Math.floor((Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : 0) / Math.max(1, minSpacingPx)) || 160,
+            Math.floor(
+                (Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : 0) /
+                    Math.max(1, minSpacingPx),
+            ) || 160,
         ),
     );
     const MAX_WEAK = maxWeak;
@@ -1059,9 +1091,7 @@ export function buildTempoGridLineXsForViewport(args: {
             strongStride,
         });
     }
-    const weak = dedupeSorted(
-        weakLines.filter((l) => !l.isBar).map((l) => l.sec * pxPerSec),
-    );
+    const weak = dedupeSorted(weakLines.filter((l) => !l.isBar).map((l) => l.sec * pxPerSec));
     const strong = dedupeSorted(weakLines.filter((l) => l.isBar).map((l) => l.sec * pxPerSec));
     return { weak, strong };
 }
@@ -1102,7 +1132,9 @@ export function tempoPointFlagLabel(point: TempoPoint): string {
 }
 
 /** 变化点音阶的短标签（无音阶数据时返回 null）。 */
-export function tempoPointScaleShortLabel(scale: TempoMapScaleData | null | undefined): string | null {
+export function tempoPointScaleShortLabel(
+    scale: TempoMapScaleData | null | undefined,
+): string | null {
     if (!scale) return null;
     if (scale.key) {
         return SCALE_LABELS[scale.key as keyof typeof SCALE_LABELS] ?? scale.key;
@@ -1157,10 +1189,7 @@ export function computeTempoFloatingLabelState(args: {
     let blocked = false;
     for (const p of tempoMap.points) {
         const x = p.positionSec * safePx - scrollLeft;
-        if (
-            x < chipWidthEst + marginPx &&
-            x + tempoFlagLabelWidthPx(tempoPointFlagLabel(p)) > -2
-        ) {
+        if (x < chipWidthEst + marginPx && x + tempoFlagLabelWidthPx(tempoPointFlagLabel(p)) > -2) {
             blocked = true;
             break;
         }
@@ -1215,7 +1244,11 @@ export function tempoPointHitTest(
 export function parseTempoPointText(
     text: string,
     customPresets: ReadonlyArray<{ id: string | number; name: string; notes: number[] }>,
-): { bpm: number; timeSignature: TempoTimeSignature | null; scale: TempoMapScaleData | null } | null {
+): {
+    bpm: number;
+    timeSignature: TempoTimeSignature | null;
+    scale: TempoMapScaleData | null;
+} | null {
     const raw = text.trim();
     if (!raw) return null;
 
@@ -1236,7 +1269,10 @@ export function parseTempoPointText(
         if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return null;
         if (numerator < 1 || numerator > TEMPO_NUMERATOR_MAX) return null;
         if (!(TEMPO_DENOMINATORS as readonly number[]).includes(denominator)) return null;
-        timeSignature = { numerator: clampNumerator(numerator), denominator: clampDenominator(denominator) };
+        timeSignature = {
+            numerator: clampNumerator(numerator),
+            denominator: clampDenominator(denominator),
+        };
     }
 
     if (!scaleText) {
@@ -1344,7 +1380,10 @@ export function buildScaleSegments(
 }
 
 /** 两个音阶是否等价（内置键按名比较；自定义音阶按规范化音级集合比较）。 */
-export function scaleLikeEquals(a: ScaleLike | null | undefined, b: ScaleLike | null | undefined): boolean {
+export function scaleLikeEquals(
+    a: ScaleLike | null | undefined,
+    b: ScaleLike | null | undefined,
+): boolean {
     if (a === b) return true;
     if (!a || !b) return false;
     if (Array.isArray(a) && Array.isArray(b)) {

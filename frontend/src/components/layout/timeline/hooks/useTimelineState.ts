@@ -39,9 +39,7 @@ import {
     gridStepBeats,
 } from "../";
 import type { RulerTick } from "../timeFormat.js";
-import {
-    buildTempoGridLineXsForViewport,
-} from "../../../../utils/tempoMap.js";
+import { buildTempoGridLineXsForViewport } from "../../../../utils/tempoMap.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -608,14 +606,16 @@ export function useTimelineState(): TimelineStateResult {
     // ── Keybindings ──────────────────────────────────────────
     const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
-    const pitchDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipPitchDrag"));
+    const pitchDragKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipPitchDrag"),
+    );
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
     const crossfadeGripKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipCrossfadeGrip"),
     );
-    const fadeCurvatureKb = useAppSelector(
-        (state) => selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+    const fadeCurvatureKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
     );
     const scrollHorizontalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollHorizontal"),
@@ -729,7 +729,17 @@ export function useTimelineState(): TimelineStateResult {
             swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
             minSpacingPx: s.timelineSnap.gridMinSpacingPx,
         });
-    }, [s.tempoMap, s.bpm, s.beats, s.grid, s.timelineSnap, scrollLeft, viewportWidth, pxPerSec, dynamicProjectSec]);
+    }, [
+        s.tempoMap,
+        s.bpm,
+        s.beats,
+        s.grid,
+        s.timelineSnap,
+        scrollLeft,
+        viewportWidth,
+        pxPerSec,
+        dynamicProjectSec,
+    ]);
 
     // ── clipsByTrackId ───────────────────────────────────────
     const clipsByTrackId = useMemo(() => {
@@ -847,11 +857,7 @@ export function useTimelineState(): TimelineStateResult {
     // 由这里统一发布/清除“吸附竖线高亮”（目标 + 被吸附对象），保证所有
     // 拖拽路径共用同一套高亮语义。
     const snapTimelineDetailed = React.useCallback(
-        (
-            sec: number,
-            object: SnapObjectKind,
-            opts?: SnapTimelineOpts,
-        ): SnapResult => {
+        (sec: number, object: SnapObjectKind, opts?: SnapTimelineOpts): SnapResult => {
             const session = sessionRef.current;
             const snapCtx = {
                 settings: session.timelineSnap,

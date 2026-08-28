@@ -75,9 +75,7 @@ export function resolvePlaybackWindowSec(clip: {
     sourceEndSec: number;
 }): { winStartSec: number; winEndSec: number } {
     const rate =
-        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
-            ? clip.playbackRate
-            : 1;
+        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6 ? clip.playbackRate : 1;
     const span = Math.max(0, Number(clip.lengthSec) || 0) * rate;
     if (clip.loopEnabled) {
         return {
@@ -106,9 +104,7 @@ export function resolveLeadingSilenceSec(
 ): number {
     if (clip.loopEnabled) return 0;
     const rate =
-        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
-            ? clip.playbackRate
-            : 1;
+        Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6 ? clip.playbackRate : 1;
     if (clip.reversed) {
         if (!(mediaTotalSec != null && mediaTotalSec > 0)) return 0;
         const end = Number(clip.sourceEndSec) || 0;

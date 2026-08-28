@@ -27,10 +27,7 @@ function clampGain(raw: number): number {
     return Math.min(24, Math.max(-24, Math.round(raw * 10) / 10));
 }
 
-export function RecordingSettingsDialog({
-    open,
-    onOpenChange,
-}: RecordingSettingsDialogProps) {
+export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSettingsDialogProps) {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -56,7 +53,8 @@ export function RecordingSettingsDialog({
                 ...savedSettings,
                 // 保留用户正在输入但尚未保存的路径模板。
                 pathTemplate:
-                    prev.pathTemplate && prev.pathTemplate !== DEFAULT_RECORDING_SETTINGS.pathTemplate
+                    prev.pathTemplate &&
+                    prev.pathTemplate !== DEFAULT_RECORDING_SETTINGS.pathTemplate
                         ? prev.pathTemplate
                         : savedSettings.pathTemplate,
             }));

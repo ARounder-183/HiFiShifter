@@ -106,7 +106,11 @@ export function isMidiFilePath(path: string | null | undefined): boolean {
 }
 
 export type ExternalPathActionKind =
-    "openProject" | "importReaper" | "importVocalShifter" | "importAudio" | "importMidi";
+    | "openProject"
+    | "importReaper"
+    | "importVocalShifter"
+    | "importAudio"
+    | "importMidi";
 
 export function detectExternalPathAction(
     path: string | null | undefined,

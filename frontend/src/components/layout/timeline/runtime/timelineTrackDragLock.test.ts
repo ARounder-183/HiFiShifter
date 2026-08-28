@@ -67,5 +67,4 @@ test("components/layout/timeline/runtime/timelineTrackDragLock.test.ts scripted 
         },
         "large horizontal motion exits vertical track lock",
     );
-
 });

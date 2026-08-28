@@ -18,12 +18,7 @@ type VisibleClip = {
     snapOffsetSec?: number;
 };
 
-export type TimelineHitZone =
-    | "empty"
-    | "body"
-    | "trim_left"
-    | "trim_right"
-    | "snap_offset";
+export type TimelineHitZone = "empty" | "body" | "trim_left" | "trim_right" | "snap_offset";
 
 function compareVisibleClipRenderOrder(a: VisibleClip, b: VisibleClip): number {
     const delta = a.startSec - b.startSec;

@@ -199,7 +199,6 @@ const FadeShapeRow: React.FC<{
     </div>
 );
 
-
 // ── 主组件 ──────────────────────────────────────────────────────────────────
 export const ClipContextMenu: React.FC<{
     x: number;
@@ -776,7 +775,9 @@ export const ClipContextMenu: React.FC<{
                                     {effectiveFadeSecondsOf(fc).in > 0 && (
                                         <FadeShapeRow
                                             label={t("fade_in")}
-                                            current={Number.isFinite(fc.fadeInShape) ? fc.fadeInShape : 0}
+                                            current={
+                                                Number.isFinite(fc.fadeInShape) ? fc.fadeInShape : 0
+                                            }
                                             isOut={false}
                                             onSelect={(shape) => {
                                                 onFadeShapeChange?.(fc.id, "in", shape);
@@ -787,7 +788,11 @@ export const ClipContextMenu: React.FC<{
                                     {effectiveFadeSecondsOf(fc).out > 0 && (
                                         <FadeShapeRow
                                             label={t("fade_out")}
-                                            current={Number.isFinite(fc.fadeOutShape) ? fc.fadeOutShape : 0}
+                                            current={
+                                                Number.isFinite(fc.fadeOutShape)
+                                                    ? fc.fadeOutShape
+                                                    : 0
+                                            }
                                             isOut={true}
                                             onSelect={(shape) => {
                                                 onFadeShapeChange?.(fc.id, "out", shape);

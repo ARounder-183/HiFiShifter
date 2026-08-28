@@ -337,8 +337,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 {result.availableProviders.join(", ") || "unknown"}
                             </Text>
                             <Text size="1" style={{ color: "var(--gray-9)" }}>
-                                {t("benchmark_ort_info_label")}{" "}
-                                {result.ortBuildInfo || "unknown"}
+                                {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
                             </Text>
 
                             {/* GPU enumeration */}

@@ -94,13 +94,13 @@ test("waveform/geometry.test.ts scripted checks", async () => {
         color: "#ffffff",
         getPeaks: (sourcePath: string) =>
             sourcePath === "/tone.wav"
-              ? {
-                    min: new Float32Array([-1, 1]),
-                    max: new Float32Array([1, -1]),
-                    dataStartSec: 0,
-                    dataDurationSec: 1,
-                }
-              : null,
+                ? {
+                      min: new Float32Array([-1, 1]),
+                      max: new Float32Array([1, -1]),
+                      dataStartSec: 0,
+                      dataDurationSec: 1,
+                  }
+                : null,
     });
     assertEqual(partial.complete, false, "partial availability is reported as incomplete");
     assertEqual(partial.lineCount, 4, "available segments still render while missing data loads");

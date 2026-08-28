@@ -28,10 +28,7 @@ export const TIME_UNITS: readonly TimeUnit[] = [
     "clock",
 ] as const;
 
-export const TIME_UNIT_CHOICES: readonly TimeUnitChoice[] = [
-    "none",
-    ...TIME_UNITS,
-] as const;
+export const TIME_UNIT_CHOICES: readonly TimeUnitChoice[] = ["none", ...TIME_UNITS] as const;
 
 export interface TimeFormatContext {
     bpm: number;
@@ -222,19 +219,11 @@ export function formatTempoBarDivisionsLabel(
  * 将某个秒位置格式化为指定时间单位（Tempo Map 感知）。
  * 无 Tempo Map 时行为与 beat 版本完全一致。
  */
-export function formatTempoRulerTick(
-    unit: TimeUnit,
-    sec: number,
-    ctx: TimeFormatContext,
-): string {
+export function formatTempoRulerTick(unit: TimeUnit, sec: number, ctx: TimeFormatContext): string {
     switch (unit) {
         case "barBeats": {
             if (!ctx.tempoMap) {
-                return formatBarBeatsLabel(
-                    beatFromSec(sec, ctx.bpm),
-                    ctx.beatsPerBar,
-                    "ruler",
-                );
+                return formatBarBeatsLabel(beatFromSec(sec, ctx.bpm), ctx.beatsPerBar, "ruler");
             }
             const bbt = barBeatAtSec(ctx.tempoMap, sec, ctx.bpm, ctx.beatsPerBar);
             const tempo = segmentTempoAtSec(ctx.tempoMap, sec);
@@ -262,11 +251,7 @@ function segmentTempoAtSec(map: TempoMap, sec: number): { bpm: number; beatsPerB
     return { bpm: point.bpm, beatsPerBar: beatsPerBarOf(sig) };
 }
 
-export function formatTempoCursorUnit(
-    unit: TimeUnit,
-    sec: number,
-    ctx: TimeFormatContext,
-): string {
+export function formatTempoCursorUnit(unit: TimeUnit, sec: number, ctx: TimeFormatContext): string {
     switch (unit) {
         case "barBeats": {
             if (!ctx.tempoMap) {
@@ -446,17 +431,10 @@ export interface FadeLengthFormatContext {
  * 淡化长度 ToolTips 文本：`{主}/{副}`；副单位为"不使用"或与主单位相同时省略。
  * 主副单位通过 {@link formatDurationUnit} 分别按相对时长规则格式化。
  */
-export function formatFadeLengthTooltip(
-    durationSec: number,
-    ctx: FadeLengthFormatContext,
-): string {
+export function formatFadeLengthTooltip(durationSec: number, ctx: FadeLengthFormatContext): string {
     const main = formatDurationUnit(ctx.primaryTimeUnit, durationSec, ctx);
     if (ctx.secondaryTimeUnit !== "none" && ctx.secondaryTimeUnit !== ctx.primaryTimeUnit) {
-        const secondary = formatDurationUnit(
-            ctx.secondaryTimeUnit as TimeUnit,
-            durationSec,
-            ctx,
-        );
+        const secondary = formatDurationUnit(ctx.secondaryTimeUnit as TimeUnit, durationSec, ctx);
         return `${main} / ${secondary}`;
     }
     return main;
@@ -575,8 +553,7 @@ export function buildRulerTicks(args: {
     const bpb = normalizeBeatsPerBar(beatsPerBar);
     const secPerBeat = 60 / Math.max(1, bpm);
     const ctx: TimeFormatContext = { bpm, beatsPerBar: bpb, grid, tempoMap };
-    const showSecondary =
-        secondaryUnit !== "none" && secondaryUnit !== primaryUnit;
+    const showSecondary = secondaryUnit !== "none" && secondaryUnit !== primaryUnit;
     const bufferPx = Math.max(320, Math.max(0, viewportWidth) * 0.5);
     const leftPx = Math.max(0, scrollLeft - bufferPx);
     const rightPx = scrollLeft + Math.max(0, viewportWidth) + bufferPx;

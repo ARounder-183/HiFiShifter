@@ -19,9 +19,7 @@ export const setTempoMapRemote = createAsyncThunk(
             // 后端为权威来源：提交失败时回滚乐观更新 —— 重新拉取时间线快照，
             // 避免 UI 停留在“已编辑但未持久化”的 Tempo Map 上（与后端永久分叉）。
             void dispatch(fetchTimeline());
-            return rejectWithValue(
-                err instanceof Error ? err.message : "tempo_map_commit_failed",
-            );
+            return rejectWithValue(err instanceof Error ? err.message : "tempo_map_commit_failed");
         }
     },
 );

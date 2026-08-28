@@ -23,10 +23,7 @@
  *   彻底消除单一来源的漏报。
  */
 
-import {
-    getModifierFlags,
-    isNoneBinding,
-} from "../../../../features/keybindings/keybindingsSlice";
+import { getModifierFlags, isNoneBinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 
 export type ModifierName = "ctrl" | "shift" | "alt";

@@ -19,5 +19,4 @@ test("components/layout/timeline/runtime/timelinePerfProbe.test.ts scripted chec
     const snapshot = probe.getSnapshot();
     assertNear(snapshot.avgDrawMs, 10, "draw average");
     assertNear(snapshot.avgHitTestMs, 3, "hit-test average");
-
 });

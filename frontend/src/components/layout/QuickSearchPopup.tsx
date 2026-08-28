@@ -26,7 +26,46 @@ import {
 import { applySelectWheelChange } from "../../utils/selectWheel";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
-const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "oga", "opus", "aac", "m4a", "aif", "aiff", "wma", "ac3", "eac3", "ape", "wv", "mp2", "mpa", "dts", "amr", "mp4", "m4v", "mov", "mkv", "webm", "avi", "flv", "wmv", "ts", "mts", "m2ts", "vob", "mpg", "mpeg", "3gp", "3g2", "ogv", "rm", "rmvb"]);
+const AUDIO_EXTENSIONS = new Set([
+    "wav",
+    "mp3",
+    "flac",
+    "ogg",
+    "oga",
+    "opus",
+    "aac",
+    "m4a",
+    "aif",
+    "aiff",
+    "wma",
+    "ac3",
+    "eac3",
+    "ape",
+    "wv",
+    "mp2",
+    "mpa",
+    "dts",
+    "amr",
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "webm",
+    "avi",
+    "flv",
+    "wmv",
+    "ts",
+    "mts",
+    "m2ts",
+    "vob",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "3g2",
+    "ogv",
+    "rm",
+    "rmvb",
+]);
 const SORT_MODE_OPTIONS = ["name", "date", "size"] as const;
 
 function isAudioFile(entry: FileEntry): boolean {

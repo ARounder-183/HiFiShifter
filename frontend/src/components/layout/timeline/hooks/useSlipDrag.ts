@@ -11,7 +11,11 @@ import {
 import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
-import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec, slipBoundaryAlignedSides } from "../../../../utils/loopSnap";
+import {
+    loopSnapThresholdSec,
+    nearestBoundarySnapOffsetSec,
+    slipBoundaryAlignedSides,
+} from "../../../../utils/loopSnap";
 import {
     beginSnapGesture,
     computeEffectiveSnap,

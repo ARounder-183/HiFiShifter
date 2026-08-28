@@ -88,5 +88,4 @@ test("components/layout/pianoRoll/secondaryOverlaySelection.test.ts scripted che
         }),
         [7, 5, 6],
     );
-
 });

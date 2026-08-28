@@ -29,8 +29,7 @@ export const waveformApi = {
         sourcePath: string,
         revision: string,
         requests: WaveformTileRequest[],
-    ) =>
-        invoke<string>("get_waveform_tiles_binary", sourcePath, revision, requests),
+    ) => invoke<string>("get_waveform_tiles_binary", sourcePath, revision, requests),
 
     // ============== Mix 波形 API ==============
 

@@ -16,15 +16,12 @@ export function useRecordingListener(): void {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen<RecordingMeterPayload>(
-                    "recording-meter",
-                    (event) => {
-                        if (disposed) return;
-                        const payload = event.payload;
-                        if (!payload || typeof payload.elapsedSec !== "number") return;
-                        dispatch(updateMeter(payload));
-                    },
-                );
+                unlisten = await mod.listen<RecordingMeterPayload>("recording-meter", (event) => {
+                    if (disposed) return;
+                    const payload = event.payload;
+                    if (!payload || typeof payload.elapsedSec !== "number") return;
+                    dispatch(updateMeter(payload));
+                });
                 if (disposed && unlisten) {
                     unlisten();
                 }
@@ -41,4 +38,3 @@ export function useRecordingListener(): void {
         };
     }, [dispatch]);
 }
-

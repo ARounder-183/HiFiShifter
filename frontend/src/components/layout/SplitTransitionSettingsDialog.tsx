@@ -13,10 +13,7 @@ import {
     persistUiSettings,
 } from "../../features/session/sessionSlice";
 import type { FadeCurveType } from "../../features/session/sessionTypes";
-import {
-    isModifierActive,
-    selectKeybinding,
-} from "../../features/keybindings/keybindingsSlice";
+import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 
 interface Props {
@@ -79,10 +76,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                 onOpenChange(nextOpen);
             }}
         >
-            <Dialog.Content
-                style={{ maxWidth: 420 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
+            <Dialog.Content style={{ maxWidth: 420 }} onKeyDown={(e) => e.stopPropagation()}>
                 <Dialog.Title>{tAny("split_transition_settings_title")}</Dialog.Title>
 
                 <Flex direction="column" gap="3" mt="3">
@@ -110,9 +104,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                                         currentValue: splitTransitionMode,
                                         options: ["fade", "overlap"],
                                         onChange: (next) => {
-                                            dispatch(
-                                                setSplitTransitionMode(next),
-                                            );
+                                            dispatch(setSplitTransitionMode(next));
                                             void dispatch(persistUiSettings());
                                         },
                                     });
@@ -155,14 +147,10 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                                         currentValue: splitTransitionDurationUnit,
                                         options: ["seconds", "percent"],
                                         onChange: (next) => {
-                                            dispatch(
-                                                setSplitTransitionDurationUnit(next),
-                                            );
+                                            dispatch(setSplitTransitionDurationUnit(next));
                                             setDurationInput(
                                                 next === "percent"
-                                                    ? String(
-                                                          splitTransitionDurationPercent,
-                                                      )
+                                                    ? String(splitTransitionDurationPercent)
                                                     : String(splitTransitionDurationSec),
                                             );
                                             void dispatch(persistUiSettings());
@@ -197,26 +185,13 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             onWheel={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
-                                const percentUnit =
-                                    splitTransitionDurationUnit === "percent";
-                                const fine = isModifierActive(
-                                    paramFineAdjustKb,
-                                    e.nativeEvent,
-                                );
-                                const step = percentUnit
-                                    ? fine
-                                        ? 0.1
-                                        : 1
-                                    : fine
-                                      ? 0.001
-                                      : 0.01;
+                                const percentUnit = splitTransitionDurationUnit === "percent";
+                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+                                const step = percentUnit ? (fine ? 0.1 : 1) : fine ? 0.001 : 0.01;
                                 const current = Number(durationInput);
                                 if (!Number.isFinite(current)) return;
                                 const direction = e.deltaY < 0 ? 1 : -1;
-                                const notches = Math.max(
-                                    1,
-                                    Math.round(Math.abs(e.deltaY) / 100),
-                                );
+                                const notches = Math.max(1, Math.round(Math.abs(e.deltaY) / 100));
                                 const min = percentUnit ? 0.01 : 0.001;
                                 const max = percentUnit ? 100 : 10;
                                 const next = Math.max(
@@ -271,9 +246,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                                         currentValue: splitTransitionCurve,
                                         options: CURVE_OPTIONS.map((opt) => opt.value),
                                         onChange: (next) => {
-                                            dispatch(
-                                                setSplitTransitionCurve(next),
-                                            );
+                                            dispatch(setSplitTransitionCurve(next));
                                             void dispatch(persistUiSettings());
                                         },
                                     });
@@ -311,9 +284,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                                         currentValue: splitTransitionOverlapCrossfade,
                                         options: ["auto", "always"],
                                         onChange: (next) => {
-                                            dispatch(
-                                                setSplitTransitionOverlapCrossfade(next),
-                                            );
+                                            dispatch(setSplitTransitionOverlapCrossfade(next));
                                             void dispatch(persistUiSettings());
                                         },
                                     });

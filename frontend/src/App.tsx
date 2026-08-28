@@ -1,11 +1,4 @@
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-    type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
@@ -204,13 +197,7 @@ interface WheelSelectProps {
  * 监听原生 wheel 事件（非 passive），滚动时切换选项并阻止默认滚动传播，
  * 避免其所在的可滚动网格列表被一并滚动。
  */
-function WheelSelect({
-    value,
-    onValueChange,
-    disabled,
-    className,
-    children,
-}: WheelSelectProps) {
+function WheelSelect({ value, onValueChange, disabled, className, children }: WheelSelectProps) {
     const selectRef = useRef<HTMLSelectElement | null>(null);
 
     useEffect(() => {
@@ -364,9 +351,7 @@ function AppInner() {
     const recordingSettings = useAppSelector((state) => state.recording.settings);
     const recordingStartSec = useAppSelector((state) => state.recording.startSec);
     const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
-    const multiSelectedClipIds = useAppSelector(
-        (state) => state.session.multiSelectedClipIds,
-    );
+    const multiSelectedClipIds = useAppSelector((state) => state.session.multiSelectedClipIds);
     const sessionClips = useAppSelector((state) => state.session.clips);
     const playbackPositionSec = useAppSelector(
         (state) => state.session.runtime.playbackPositionSec,
@@ -499,14 +484,10 @@ function AppInner() {
                     setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
                 }
                 if (s?.midiImportTempoMapTimeSignature != null) {
-                    setImportTempoMapTimeSignature(
-                        Boolean(s.midiImportTempoMapTimeSignature),
-                    );
+                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
                 }
                 if (s?.midiImportTempoMapKeySignature != null) {
-                    setImportTempoMapKeySignature(
-                        Boolean(s.midiImportTempoMapKeySignature),
-                    );
+                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
                 }
                 if (s?.midiImportTargetMenu != null) {
                     setMidiImportTargetMenu(s.midiImportTargetMenu);
@@ -1366,9 +1347,9 @@ function AppInner() {
     const saveUnsavedAndContinue = useCallback(() => {
         void (async () => {
             try {
-                const result = await dispatch(
+                const result = (await dispatch(
                     projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap() as any;
+                ).unwrap()) as any;
                 // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
                 // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
                 if (result?.canceled || result?.versionConflict) {
@@ -1723,9 +1704,9 @@ function AppInner() {
                 const refreshed = (await webApi.checkSourceFilesChanged()) as
                     | { changed?: SourceFileChange[] }
                     | undefined;
-                const remaining = normalizeSourceFileChanges(
-                    refreshed?.changed ?? [],
-                ).filter((change) => !ignored.has(change.source_path));
+                const remaining = normalizeSourceFileChanges(refreshed?.changed ?? []).filter(
+                    (change) => !ignored.has(change.source_path),
+                );
 
                 if (remaining.length > 0) {
                     markMissingSourceFilesUnavailable(remaining);
@@ -2677,8 +2658,7 @@ function AppInner() {
     const sourceFileSearchExactTotal = sourceFileChangedDialog.changes.reduce(
         (total, item) =>
             item.action === "pending" || item.action === "failed"
-                ? total +
-                  (item.candidates?.filter((candidate) => candidate.exact_hash).length ?? 0)
+                ? total + (item.candidates?.filter((candidate) => candidate.exact_hash).length ?? 0)
                 : total,
         0,
     );
@@ -2867,11 +2847,7 @@ function AppInner() {
                                   )}
                     </Dialog.Description>
                     <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={cancelSaveVersionConflict}
-                        >
+                        <Button variant="soft" color="gray" onClick={cancelSaveVersionConflict}>
                             {t("progress_cancel")}
                         </Button>
                         <Button variant="soft" onClick={saveAsFromVersionConflict}>
@@ -2910,14 +2886,11 @@ function AppInner() {
                                     sourceFileAnyProcessing ||
                                     !sourceFileChangedDialog.changes.some(
                                         (item) =>
-                                            item.action === "pending" ||
-                                            item.action === "failed",
+                                            item.action === "pending" || item.action === "failed",
                                     )
                                 }
                                 onValueChange={(value) =>
-                                    setSourceFileSearchMode(
-                                        value as "file_name" | "extension_hash",
-                                    )
+                                    setSourceFileSearchMode(value as "file_name" | "extension_hash")
                                 }
                             >
                                 <option value="file_name">
@@ -2935,8 +2908,7 @@ function AppInner() {
                                     sourceFileAnyProcessing ||
                                     !sourceFileChangedDialog.changes.some(
                                         (item) =>
-                                            item.action === "pending" ||
-                                            item.action === "failed",
+                                            item.action === "pending" || item.action === "failed",
                                     )
                                 }
                                 onClick={() => void searchSourceFileReplacements()}
@@ -3030,9 +3002,7 @@ function AppInner() {
                                                 sourceFileAnyProcessing ||
                                                 sourceFileSelectedApplyTotal === 0
                                             }
-                                            onClick={() =>
-                                                void applyAllSelectedSourceFileMatches()
-                                            }
+                                            onClick={() => void applyAllSelectedSourceFileMatches()}
                                         >
                                             {t("recapture_missing_media_apply_all_selected")}
                                         </Button>
@@ -3048,8 +3018,12 @@ function AppInner() {
                             <div>{t("recapture_missing_media_col_file")}</div>
                             <div>{t("recapture_missing_media_col_process_status")}</div>
                             <div />
-                            <div className="text-right">{t("recapture_missing_media_col_action")}</div>
-                            <div className="text-right">{t("recapture_missing_media_reset_item")}</div>
+                            <div className="text-right">
+                                {t("recapture_missing_media_col_action")}
+                            </div>
+                            <div className="text-right">
+                                {t("recapture_missing_media_reset_item")}
+                            </div>
                         </div>
                         {sourceFileChangedDialog.changes.map((item) => {
                             const itemKey = `${item.clip_id}::${item.change}`;
@@ -3118,7 +3092,9 @@ function AppInner() {
                                                 <span className="shrink-0 font-semibold">
                                                     {item.action === "reloaded"
                                                         ? t("recapture_missing_media_reloaded_path")
-                                                        : t("recapture_missing_media_replaced_path")}
+                                                        : t(
+                                                              "recapture_missing_media_replaced_path",
+                                                          )}
                                                 </span>
                                                 <span className="truncate">
                                                     {item.reloadedPath}

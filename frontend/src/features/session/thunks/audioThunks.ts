@@ -93,10 +93,7 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
         const newClipIds = clips
             .map((c) => c.id)
             .filter((id): id is string => !!id && !beforeClipIds.has(id));
-        const pasteEndSec = await syncPastePlayheadToEnd(
-            clips as PasteEndClipLike[],
-            newClipIds,
-        );
+        const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
         return { ...result, newClipIds, pasteEndSec };
     },
 );
@@ -121,10 +118,7 @@ export const pasteReaperClipboard = createAsyncThunk(
         const newClipIds = clips
             .map((c) => c.id)
             .filter((id): id is string => !!id && !beforeClipIds.has(id));
-        const pasteEndSec = await syncPastePlayheadToEnd(
-            clips as PasteEndClipLike[],
-            newClipIds,
-        );
+        const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
         return {
             ok: true,
             timeline: result,

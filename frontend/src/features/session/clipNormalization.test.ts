@@ -59,5 +59,4 @@ test("features/session/clipNormalization.test.ts scripted checks", async () => {
     );
 
     assertEqual(released, true, "slice buffer is released");
-
 });

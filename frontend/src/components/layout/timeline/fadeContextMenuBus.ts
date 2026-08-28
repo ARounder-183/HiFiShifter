@@ -23,9 +23,7 @@ export const FADE_CONTEXT_MENU_OPEN_EVENT = "hs-fade-context-menu-open";
 
 export function requestOpenFadeContextMenu(request: FadeContextMenuRequest): void {
     if (typeof window === "undefined") return;
-    window.dispatchEvent(
-        new CustomEvent(FADE_CONTEXT_MENU_OPEN_EVENT, { detail: request }),
-    );
+    window.dispatchEvent(new CustomEvent(FADE_CONTEXT_MENU_OPEN_EVENT, { detail: request }));
 }
 
 export function onFadeContextMenuRequest(
@@ -51,9 +49,7 @@ export const FADE_CURVATURE_RESET_EVENT = "hs-fade-curvature-reset";
 /** 双击包络线/交叉点后：请求把指定侧的曲率重置为该形状默认值。 */
 export function requestResetFadeCurvature(request: FadeCurvatureResetRequest): void {
     if (typeof window === "undefined") return;
-    window.dispatchEvent(
-        new CustomEvent(FADE_CURVATURE_RESET_EVENT, { detail: request }),
-    );
+    window.dispatchEvent(new CustomEvent(FADE_CURVATURE_RESET_EVENT, { detail: request }));
 }
 
 export function onFadeCurvatureReset(

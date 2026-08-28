@@ -58,10 +58,7 @@ export function selectUniformGridStepBeats(args: {
     return Math.min(rulerStep, step);
 }
 
-export function selectStrongGridBarMultiple(
-    barStepPx: number,
-    minSpacingPx: number,
-): number {
+export function selectStrongGridBarMultiple(barStepPx: number, minSpacingPx: number): number {
     const stepPx = Math.max(1e-9, barStepPx);
     const spacing = Math.max(1, minSpacingPx);
     let multiple = 1;

@@ -44,10 +44,7 @@ export const SNAP_OFFSET_HIT_HEIGHT_PX = 12;
  * 回退钳制** —— 三角左侧竖直边必须严格对齐偏移实际值（与波形内橙色
  * 竖虚线同一 x）；越出 Clip 末尾的部分由绘制端按 Clip 矩形裁剪。
  */
-export function snapOffsetHandleXPx(
-    snapOffsetSec: number | undefined,
-    pxPerSec: number,
-): number {
+export function snapOffsetHandleXPx(snapOffsetSec: number | undefined, pxPerSec: number): number {
     const offset = Number(snapOffsetSec);
     return Number.isFinite(offset) && offset > 0 ? offset * pxPerSec : 0;
 }

@@ -15,10 +15,7 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
 import { detectExternalPathAction, findFirstExternalPathAction } from "../";
-import {
-    SNAP_HIGHLIGHT_GROUP,
-    clearSnapHighlights,
-} from "../../../../utils/snapHighlight";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineFn } from "./useTimelineState";
 
 export interface UseTimelineDragDropArgs {

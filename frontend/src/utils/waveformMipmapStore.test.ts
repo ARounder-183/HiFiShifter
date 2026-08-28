@@ -34,5 +34,4 @@ test("utils/waveformMipmapStore.test.ts scripted checks", async () => {
         2,
         "stable selector enters L2 at updated hysteresis boundary",
     );
-
 });

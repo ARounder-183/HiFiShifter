@@ -46,5 +46,4 @@ test("components/layout/timeline/quickExportSelection.test.ts scripted checks", 
         "quick_export.wav",
         "quick export file name falls back for empty project names",
     );
-
 });

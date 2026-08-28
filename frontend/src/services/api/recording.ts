@@ -79,24 +79,19 @@ export const DEFAULT_RECORDING_SETTINGS: RecordingSettings = {
     countdownSec: 0,
     autoNormalize: false,
     autoStopAtSelectionEnd: false,
-    pathTemplate:
-        "<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav",
+    pathTemplate: "<ProjectFolder>/HiFiShifter Record/%Y-%m-%d-%H-%M-%S.wav",
 };
 
 export const recordingApi = {
     getSettings: () => invoke<RecordingSettings>("get_recording_settings"),
 
     saveSettings: (settings: RecordingSettings) =>
-        invoke<{ ok: boolean; settings?: RecordingSettings }>(
-            "save_recording_settings",
-            settings,
-        ),
+        invoke<{ ok: boolean; settings?: RecordingSettings }>("save_recording_settings", settings),
 
     getDevices: () =>
         invoke<{ ok: boolean; devices?: RecordingDeviceInfo[] }>("get_recording_devices"),
 
-    getApps: () =>
-        invoke<{ ok: boolean; apps?: RecordingAppInfo[] }>("get_recording_apps"),
+    getApps: () => invoke<{ ok: boolean; apps?: RecordingAppInfo[] }>("get_recording_apps"),
 
     startRecording: (startSec: number) =>
         invoke<{
@@ -116,4 +111,3 @@ export const recordingApi = {
 
     getState: () => invoke<RecordingStatePayload>("get_recording_state"),
 };
-

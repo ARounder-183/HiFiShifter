@@ -93,5 +93,4 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
             "project start maps to negative drawing offset for alignment",
         );
     }
-
 });

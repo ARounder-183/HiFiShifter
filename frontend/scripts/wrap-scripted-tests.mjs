@@ -110,6 +110,4 @@ for (const file of listTestFiles(root)) {
     wrapped += 1;
 }
 
-console.log(
-    JSON.stringify({ wrapped, skippedAlreadyWrapped: skipped, failures }, null, 2),
-);
+console.log(JSON.stringify({ wrapped, skippedAlreadyWrapped: skipped, failures }, null, 2));

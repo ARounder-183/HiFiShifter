@@ -9,10 +9,7 @@ import {
     type RecordingSettings,
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
-import {
-    playOriginal,
-    stopAudioPlayback,
-} from "../session/thunks/transportThunks";
+import { playOriginal, stopAudioPlayback } from "../session/thunks/transportThunks";
 import { applyTimelinePayload, setPendingPlayheadReveal } from "../session/sessionSlice";
 
 const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));

@@ -90,9 +90,7 @@ function resolveLoopCycleDescriptor(args: {
 }): LoopCycleDescriptor | null {
     if (!args.loopEnabled) return null;
     const mediaDur = args.contentDurationSec ?? 0;
-    const windowSpan = Math.abs(
-        Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0),
-    );
+    const windowSpan = Math.abs(Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0));
     const cycleSec = mediaDur > 1e-9 ? mediaDur : windowSpan;
     if (!Number.isFinite(cycleSec) || cycleSec <= 1e-9) return null;
     const srcStart = Number(args.sourceStartSec ?? 0);
@@ -104,8 +102,7 @@ function resolveLoopCycleDescriptor(args: {
         // 倒放锚点只 clamp 到媒体时长上界、**不做 max(0)** —— 负 source_end
         // （slip/左延伸可达）由消费端的 modEuclid（floor_mod）统一环绕；
         // 此处若钳到 0 会让曲线/标记与音频出现恒定相位差。
-        revAnchorEndSec:
-            mediaDur > 1e-9 ? Math.min(srcEnd, mediaDur) : srcEnd,
+        revAnchorEndSec: mediaDur > 1e-9 ? Math.min(srcEnd, mediaDur) : srcEnd,
         cycleFromMedia: mediaDur > 1e-9,
     };
 }
@@ -150,16 +147,9 @@ function generateMidiCurveFromNotes(
             );
             const cycleFrames = Math.max(1, Math.round(((cycleSec / pr) * 1000) / fp));
             const noteValue = note.note;
-            for (
-                let cycleOffset = 0;
-                cycleOffset < targetFrames;
-                cycleOffset += cycleFrames
-            ) {
+            for (let cycleOffset = 0; cycleOffset < targetFrames; cycleOffset += cycleFrames) {
                 const writeStart = cycleOffset + firstStartFrame;
-                const writeEnd = Math.min(
-                    cycleOffset + firstStartFrame + lenFrames,
-                    targetFrames,
-                );
+                const writeEnd = Math.min(cycleOffset + firstStartFrame + lenFrames, targetFrames);
                 if (writeStart >= writeEnd) break;
                 for (let frame = writeStart; frame < writeEnd; frame++) {
                     if (noteValue > curve[frame] || curve[frame] <= 0) {
@@ -449,7 +439,8 @@ export const MidiPitchTrackCanvas = React.memo(
                     });
                     const curveWinStart =
                         !clip.loopEnabled && clip.reversed
-                            ? srcEnd - Math.max(0, clip.lengthSec) * Math.abs(Number(clip.playbackRate) || 1)
+                            ? srcEnd -
+                              Math.max(0, clip.lengthSec) * Math.abs(Number(clip.playbackRate) || 1)
                             : Number(clip.sourceStartSec) || 0;
                     const loopCycle = resolveLoopCycleDescriptor({
                         loopEnabled: Boolean(clip.loopEnabled),
@@ -562,9 +553,7 @@ export const MidiPitchTrackCanvas = React.memo(
                     Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
                         ? 1
                         : Math.abs(Number(clip.playbackRate ?? 1) || 1);
-                const markerBodyDur = markerCycle
-                    ? markerCycle.cycleSec / markerRate
-                    : 0;
+                const markerBodyDur = markerCycle ? markerCycle.cycleSec / markerRate : 0;
                 if (markerBodyDur > 0 && clip.lengthSec > markerBodyDur + 1e-6) {
                     // 标记必须锚定在**实际回绕点**：与 WaveformTrackCanvas 的
                     // 分段边界一致 ——
@@ -578,17 +567,16 @@ export const MidiPitchTrackCanvas = React.memo(
                     const headDur = !desc
                         ? 0
                         : desc.cycleFromMedia
-                          ? ((clip.reversed
+                          ? (clip.reversed
                                 ? desc.revAnchorEndSec
-                                : desc.cycleSec -
-                                  modEuclid(desc.fwdAnchorSec, desc.cycleSec)) /
-                              markerRate)
+                                : desc.cycleSec - modEuclid(desc.fwdAnchorSec, desc.cycleSec)) /
+                            markerRate
                           : markerBodyDur;
                     const markers: number[] = [];
                     {
                         // 直接跳到可视范围内的第一个回绕点：既避免从 clip 入口
                         // 逐周期空转数千次，也修复"深入长循环 clip 后标记消失"
-        //（旧实现受 guard<8192 限制，波形分段是直接寻址的）。
+                        //（旧实现受 guard<8192 限制，波形分段是直接寻址的）。
                         const visLocalStart =
                             viewportStartPx / Math.max(1e-9, currentPxPerSec) - clipStartSec;
                         const k0 = Math.max(
@@ -600,8 +588,7 @@ export const MidiPitchTrackCanvas = React.memo(
                             markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
                             markerT += markerBodyDur
                         ) {
-                            const mx =
-                                (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                            const mx = (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
                             if (mx > displayW + 8) break;
                             // 恰好在 clip 起点/终点的回绕点不绘制（loopRender 约定；
                             // 倒放整文件 Loop 的 revAnchor=D 时 headDur=0 会命中）。
@@ -632,8 +619,7 @@ export const MidiPitchTrackCanvas = React.memo(
                                 ? (srcEndResolved - b) / rate
                                 : (b - (Number(clip.sourceStartSec) || 0)) / rate;
                             if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
-                            const mx =
-                                (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
+                            const mx = (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
                             if (mx < -8 || mx > displayW + 8) continue;
                             markers.push(Math.round(mx * 2) / 2);
                         }

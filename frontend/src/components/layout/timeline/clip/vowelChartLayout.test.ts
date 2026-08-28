@@ -21,5 +21,4 @@ test("components/layout/timeline/clip/vowelChartLayout.test.ts scripted checks",
             assert(labels.has(label), `guide line references missing vowel ${label}`);
         }
     }
-
 });

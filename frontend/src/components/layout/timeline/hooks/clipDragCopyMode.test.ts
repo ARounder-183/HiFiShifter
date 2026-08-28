@@ -38,5 +38,4 @@ test("components/layout/timeline/hooks/clipDragCopyMode.test.ts scripted checks"
         false,
         "plain drag stays move drag",
     );
-
 });

@@ -1,10 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
-import {
-    clearGridRedrawHandler,
-    setGridRedrawHandler,
-} from "./gridRedrawBridge";
+import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -127,100 +124,100 @@ export const BackgroundGrid: React.FC<{
         lastDrawKeyRef.current = null;
     });
 
-    const draw = useCallback((nextScrollLeft?: number) => {
-        const svg = svgRef.current;
-        if (!svg) return;
-        const paths = svg.querySelectorAll<SVGPathElement>("path");
-        if (paths.length < 2) return;
+    const draw = useCallback(
+        (nextScrollLeft?: number) => {
+            const svg = svgRef.current;
+            if (!svg) return;
+            const paths = svg.querySelectorAll<SVGPathElement>("path");
+            if (paths.length < 2) return;
 
-        const latest = latestRef.current;
-        const sl = Number.isFinite(nextScrollLeft)
-            ? (nextScrollLeft as number)
-            : latest.scrollLeft;
-        const offset = latest.isSticky ? sl : 0;
-        const bufferPx = Math.max(240, latest.viewportWidth * 0.5);
-        const visibleStart = latest.isSticky ? 0 : Math.max(0, sl - bufferPx);
-        const visibleEnd = latest.isSticky
-            ? latest.width
-            : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
+            const latest = latestRef.current;
+            const sl = Number.isFinite(nextScrollLeft)
+                ? (nextScrollLeft as number)
+                : latest.scrollLeft;
+            const offset = latest.isSticky ? sl : 0;
+            const bufferPx = Math.max(240, latest.viewportWidth * 0.5);
+            const visibleStart = latest.isSticky ? 0 : Math.max(0, sl - bufferPx);
+            const visibleEnd = latest.isSticky
+                ? latest.width
+                : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
-        // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
-        // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
-        // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
-        const drawKey = [
-            sl,
-            latest.weakStepPx,
-            latest.strongStepPx,
-            latest.swingPercent,
-            explicitGridLinesKey(latest.weakLineXs),
-            explicitGridLinesKey(latest.strongLineXs),
-            latest.width,
-            latest.height,
-            latest.contentWidth,
-            latest.viewportWidth,
-            latest.isSticky,
-        ].join("|");
-        if (lastDrawKeyRef.current === drawKey) return;
-        lastDrawKeyRef.current = drawKey;
+            // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
+            // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
+            // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
+            const drawKey = [
+                sl,
+                latest.weakStepPx,
+                latest.strongStepPx,
+                latest.swingPercent,
+                explicitGridLinesKey(latest.weakLineXs),
+                explicitGridLinesKey(latest.strongLineXs),
+                latest.width,
+                latest.height,
+                latest.contentWidth,
+                latest.viewportWidth,
+                latest.isSticky,
+            ].join("|");
+            if (lastDrawKeyRef.current === drawKey) return;
+            lastDrawKeyRef.current = drawKey;
 
-        const buildUniformPath = (stepPx: number): string => {
-            if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
-            const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
-            const lastIndex = Math.max(
-                firstIndex,
-                Math.ceil((visibleEnd + offset) / stepPx),
-            );
-            const swingPx =
-                (Math.max(0, Math.min(100, latest.swingPercent)) / 100) * 0.5 * stepPx;
-            const parts: string[] = [];
-            for (let index = firstIndex; index <= lastIndex; index += 1) {
-                // Swing：奇数网格位置向右偏移（最大半步）。
-                const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
-                if (x < -1 || x > latest.width + 1) continue;
-                parts.push(`M${x} 0V${latest.height}`);
-            }
-            return parts.join("");
-        };
-
-        const buildExplicitPath = (lineXs: number[] | null): string => {
-            if (!lineXs || lineXs.length === 0) return "";
-            const parts: string[] = [];
-            // 二分定位可见范围
-            const lo = 0;
-            const hi = lineXs.length;
-            const lowerBound = (target: number) => {
-                let l = lo;
-                let h = hi;
-                while (l < h) {
-                    const mid = (l + h) >> 1;
-                    if (lineXs[mid] < target) l = mid + 1;
-                    else h = mid;
+            const buildUniformPath = (stepPx: number): string => {
+                if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
+                const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
+                const lastIndex = Math.max(firstIndex, Math.ceil((visibleEnd + offset) / stepPx));
+                const swingPx =
+                    (Math.max(0, Math.min(100, latest.swingPercent)) / 100) * 0.5 * stepPx;
+                const parts: string[] = [];
+                for (let index = firstIndex; index <= lastIndex; index += 1) {
+                    // Swing：奇数网格位置向右偏移（最大半步）。
+                    const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
+                    if (x < -1 || x > latest.width + 1) continue;
+                    parts.push(`M${x} 0V${latest.height}`);
                 }
-                return l;
+                return parts.join("");
             };
-            const start = lowerBound(visibleStart + offset);
-            for (let i = start; i < lineXs.length; i += 1) {
-                const x = lineXs[i] - offset;
-                if (x > latest.width + 1) break;
-                if (x < -1) continue;
-                parts.push(`M${x} 0V${latest.height}`);
-            }
-            return parts.join("");
-        };
 
-        paths[0].setAttribute(
-            "d",
-            useExplicitLines
-                ? buildExplicitPath(latest.weakLineXs)
-                : buildUniformPath(latest.weakStepPx),
-        );
-        paths[1].setAttribute(
-            "d",
-            useExplicitLines
-                ? buildExplicitPath(latest.strongLineXs)
-                : buildUniformPath(latest.strongStepPx),
-        );
-    }, [useExplicitLines]);
+            const buildExplicitPath = (lineXs: number[] | null): string => {
+                if (!lineXs || lineXs.length === 0) return "";
+                const parts: string[] = [];
+                // 二分定位可见范围
+                const lo = 0;
+                const hi = lineXs.length;
+                const lowerBound = (target: number) => {
+                    let l = lo;
+                    let h = hi;
+                    while (l < h) {
+                        const mid = (l + h) >> 1;
+                        if (lineXs[mid] < target) l = mid + 1;
+                        else h = mid;
+                    }
+                    return l;
+                };
+                const start = lowerBound(visibleStart + offset);
+                for (let i = start; i < lineXs.length; i += 1) {
+                    const x = lineXs[i] - offset;
+                    if (x > latest.width + 1) break;
+                    if (x < -1) continue;
+                    parts.push(`M${x} 0V${latest.height}`);
+                }
+                return parts.join("");
+            };
+
+            paths[0].setAttribute(
+                "d",
+                useExplicitLines
+                    ? buildExplicitPath(latest.weakLineXs)
+                    : buildUniformPath(latest.weakStepPx),
+            );
+            paths[1].setAttribute(
+                "d",
+                useExplicitLines
+                    ? buildExplicitPath(latest.strongLineXs)
+                    : buildUniformPath(latest.strongStepPx),
+            );
+        },
+        [useExplicitLines],
+    );
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
     // 随 pxPerBeat 变化，若走 passive useEffect 会在 DOM 重排后的下一帧才
@@ -254,9 +251,7 @@ export const BackgroundGrid: React.FC<{
         };
     }, [draw, layerRef]);
 
-    const boundaryLeft = isSticky
-        ? contentWidth - 1 - (scrollLeft as number)
-        : contentWidth - 1;
+    const boundaryLeft = isSticky ? contentWidth - 1 - (scrollLeft as number) : contentWidth - 1;
     const boundaryVisible =
         Number.isFinite(boundaryLeft) && boundaryLeft >= -2 && boundaryLeft <= width + 2;
     const manualViewportSync = isSticky && (layerRef != null || boundaryRef != null);

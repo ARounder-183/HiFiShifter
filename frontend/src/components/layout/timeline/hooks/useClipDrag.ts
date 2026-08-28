@@ -29,14 +29,8 @@ import {
     previewAutoCrossfade,
 } from "./autoCrossfade";
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
-import {
-    beginSnapGesture,
-    endSnapGesture,
-} from "../../../../utils/timelineSnapping";
-import {
-    SNAP_HIGHLIGHT_GROUP,
-    clearSnapHighlights,
-} from "../../../../utils/snapHighlight";
+import { beginSnapGesture, endSnapGesture } from "../../../../utils/timelineSnapping";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineOpts } from "./useTimelineState";
 import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
@@ -315,8 +309,10 @@ export function useClipDrag(deps: {
         for (const id of Object.keys(initialCrossfadeSides)) {
             xfadeAffectedIds.add(id);
         }
-        const initialAutoFadeById: Record<string, { autoFadeInSec: number; autoFadeOutSec: number }> =
-            {};
+        const initialAutoFadeById: Record<
+            string,
+            { autoFadeInSec: number; autoFadeOutSec: number }
+        > = {};
         for (const id of xfadeAffectedIds) {
             const c = sessionRef.current.clips.find((x) => x.id === id);
             if (!c) continue;
@@ -588,7 +584,11 @@ export function useClipDrag(deps: {
                     // 波纹（自动跟进）实时预览：后续剪辑随拖拽同步平移。
                     // 与后端“右缘位移”规则一致：同一拖拽位移量同时作用于所有跟随剪辑。
                     if (drag.rippleMode !== "off") {
-                        applyRippleFollowerShift(dispatch, drag.rippleFollowers, drag.lastDeltaBeat);
+                        applyRippleFollowerShift(
+                            dispatch,
+                            drag.rippleFollowers,
+                            drag.lastDeltaBeat,
+                        );
                     }
                     // 自动交叉淡化实时预览：按当前（乐观）位置计算重叠并实时更新自动 fade 包络。
                     // affectedSides = 拖拽前的每侧重叠关系（分开时仅清自动交叉淡化、保留手动 fade）。
@@ -945,9 +945,14 @@ export function useClipDrag(deps: {
                             }
                             if (autoCrossfadeEnabled) {
                                 const latestSession = sessionRef.current;
-                                await applyAutoCrossfade(latestSession, drag.editedXfadeClipIds, dispatch, {
-                                    affectedSides: drag.initialCrossfadeSides,
-                                });
+                                await applyAutoCrossfade(
+                                    latestSession,
+                                    drag.editedXfadeClipIds,
+                                    dispatch,
+                                    {
+                                        affectedSides: drag.initialCrossfadeSides,
+                                    },
+                                );
                             } else {
                                 // 开关关闭时只清理“已脱离重叠”的自动交叉淡化，
                                 // 保证导入/遗留的自动值不会盖住分离后应该恢复的手动 fade。
@@ -1049,9 +1054,14 @@ export function useClipDrag(deps: {
                         } finally {
                             if (autoCrossfadeEnabled) {
                                 const latestSession = sessionRef.current;
-                                await applyAutoCrossfade(latestSession, drag.editedXfadeClipIds, dispatch, {
-                                    affectedSides: drag.initialCrossfadeSides,
-                                });
+                                await applyAutoCrossfade(
+                                    latestSession,
+                                    drag.editedXfadeClipIds,
+                                    dispatch,
+                                    {
+                                        affectedSides: drag.initialCrossfadeSides,
+                                    },
+                                );
                             } else {
                                 const latestSession = sessionRef.current;
                                 await applyDetachedAutoCrossfadeClears(

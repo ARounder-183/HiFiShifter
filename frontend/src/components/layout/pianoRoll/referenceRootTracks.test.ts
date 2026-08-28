@@ -58,5 +58,4 @@ test("components/layout/pianoRoll/referenceRootTracks.test.ts scripted checks", 
         /^rgba\(\d+, \d+, \d+, 1\)$/,
         "highlighted reference pitch stroke color uses full alpha",
     );
-
 });

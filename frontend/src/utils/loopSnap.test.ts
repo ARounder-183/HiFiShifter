@@ -148,5 +148,4 @@ test("utils/loopSnap.test.ts scripted checks", async () => {
 
     // 阈值换算仍正常（回归）。
     assertTrue(loopSnapThresholdSec(40, 40) === 1, "threshold px/sec");
-
 });

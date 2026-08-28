@@ -82,8 +82,14 @@ function gainAtClipTime(
 let vertexScratch = new Float32Array(8192);
 let vertexScratchLength = 0;
 
-function createVertexSink():
-    (x: number, y: number, r: number, g: number, b: number, a: number) => void {
+function createVertexSink(): (
+    x: number,
+    y: number,
+    r: number,
+    g: number,
+    b: number,
+    a: number,
+) => void {
     return (x, y, r, g, b, a) => {
         if (vertexScratchLength + 6 > vertexScratch.length) {
             const next = new Float32Array(

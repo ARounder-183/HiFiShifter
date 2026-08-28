@@ -91,5 +91,4 @@ test("components/layout/timeline/hooks/bulkClipEdit.test.ts scripted checks", as
         ],
         "gain updates preserve per-clip relative delta",
     );
-
 });

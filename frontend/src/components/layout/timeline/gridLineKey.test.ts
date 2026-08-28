@@ -143,5 +143,4 @@ test("components/layout/timeline/gridLineKey.test.ts scripted checks", async () 
         explicitGridLinesKey([1, 2, 3, 4]) !== explicitGridLinesKey([1, 2, 4]),
         "length change changes the key",
     );
-
 });

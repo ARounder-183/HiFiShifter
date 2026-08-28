@@ -202,12 +202,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [
-        multiSelectedClipIds,
-        pasteClipsAtPlayhead,
-        sessionRef,
-        splitSelectedAtPlayhead,
-    ]);
+    }, [multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef, splitSelectedAtPlayhead]);
 
     // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
     useEffect(() => {
@@ -241,13 +236,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
         return () =>
             window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
-    }, [
-        copyClips,
-        cutClips,
-        multiSelectedClipIds,
-        pasteClipsAtPlayhead,
-        sessionRef,
-    ]);
+    }, [copyClips, cutClips, multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {

@@ -51,9 +51,7 @@ export type EditDragChannelOpts = {
 /** 曲率拖拽的指针→增益映射环境（由发起组件在按下瞬间快照）。 */
 type FadeCurvePointerEnv = NonNullable<EditDragChannelOpts["fadePointerEnv"]>;
 
-function sanitizeFadeEnv(
-    raw: EditDragChannelOpts["fadePointerEnv"],
-): FadeCurvePointerEnv | null {
+function sanitizeFadeEnv(raw: EditDragChannelOpts["fadePointerEnv"]): FadeCurvePointerEnv | null {
     if (!raw) return null;
     const top = Number(raw.envTopClientY);
     const height = Number(raw.bodyHeightPx);
@@ -807,9 +805,7 @@ export function useEditDrag(deps: {
             const curvatureBase = resolveCurvatureEditBase(rawShape);
             fadeCurveSide = {
                 leftSec:
-                    type === "fade_in"
-                        ? clip.startSec
-                        : clip.startSec + clip.lengthSec - widthSec,
+                    type === "fade_in" ? clip.startSec : clip.startSec + clip.lengthSec - widthSec,
                 widthSec,
                 shape: curvatureBase.shape,
                 baseDir:
@@ -819,18 +815,13 @@ export function useEditDrag(deps: {
         }
         let crossfadeCurveSides: EditDragState["crossfadeCurveSides"] = null;
         if (type === "crossfade_edges" && crossfadePartnerClip) {
-            const widthA = Math.max(
-                0,
-                Math.min(effectiveFadeOutSec, clip.lengthSec),
-            );
+            const widthA = Math.max(0, Math.min(effectiveFadeOutSec, clip.lengthSec));
             const widthB = Math.max(
                 0,
                 Math.min(crossfadePartnerFadeInSec, crossfadePartnerClip.lengthSec),
             );
             const baseA = resolveCurvatureEditBase(Number(clip.fadeOutShape) || 0);
-            const baseB = resolveCurvatureEditBase(
-                Number(crossfadePartnerClip.fadeInShape) || 0,
-            );
+            const baseB = resolveCurvatureEditBase(Number(crossfadePartnerClip.fadeInShape) || 0);
             crossfadeCurveSides = {
                 a: {
                     clipId: clip.id,
@@ -2459,28 +2450,28 @@ export function useEditDrag(deps: {
                     ];
                 }
             } else if (drag.type === "crossfade_edges") {
-                    const patches = drag.selectedClipIds
-                        .map((id) => {
-                            const now = sessionRef.current.clips.find((c) => c.id === id);
-                            if (!now) return null;
-                            return {
-                                clipId: id,
-                                startSec: now.startSec,
-                                lengthSec: now.lengthSec,
-                                sourceStartSec: now.sourceStartSec,
-                                sourceEndSec: now.sourceEndSec,
-                                fadeInSec: now.fadeInSec,
-                                fadeOutSec: now.fadeOutSec,
-                                autoFadeInSec: now.autoFadeInSec ?? 0,
-                                autoFadeOutSec: now.autoFadeOutSec ?? 0,
-                                // 交叉点曲率拖拽的最终落盘：随整份 patch 一并提交，
-                                // 避免 bulk/远端回灌丢掉拖拽期方向。
-                                fadeInShape: now.fadeInShape,
-                                fadeInDir: now.fadeInDir,
-                                fadeOutShape: now.fadeOutShape,
-                                fadeOutDir: now.fadeOutDir,
-                            };
-                        })
+                const patches = drag.selectedClipIds
+                    .map((id) => {
+                        const now = sessionRef.current.clips.find((c) => c.id === id);
+                        if (!now) return null;
+                        return {
+                            clipId: id,
+                            startSec: now.startSec,
+                            lengthSec: now.lengthSec,
+                            sourceStartSec: now.sourceStartSec,
+                            sourceEndSec: now.sourceEndSec,
+                            fadeInSec: now.fadeInSec,
+                            fadeOutSec: now.fadeOutSec,
+                            autoFadeInSec: now.autoFadeInSec ?? 0,
+                            autoFadeOutSec: now.autoFadeOutSec ?? 0,
+                            // 交叉点曲率拖拽的最终落盘：随整份 patch 一并提交，
+                            // 避免 bulk/远端回灌丢掉拖拽期方向。
+                            fadeInShape: now.fadeInShape,
+                            fadeInDir: now.fadeInDir,
+                            fadeOutShape: now.fadeOutShape,
+                            fadeOutDir: now.fadeOutDir,
+                        };
+                    })
                     .filter(
                         (
                             patch,
