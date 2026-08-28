@@ -36,7 +36,7 @@ HiFiShifter also supports the following operations to facilitate migration from 
 
 ### Layout
 
-HiFiShifter can be roughly divided into two functional areas: the upper track panel and the lower parameter panel. The track panel is mainly responsible for audio clip processing, while the parameter panel handles parameter adjustments.
+HiFiShifter can be roughly divided into two functional areas: the upper track panel and the lower parameter panel. The track panel is mainly responsible for editing and arranging audio clips, while the parameter panel handles parameter adjustments.
 
 ### Track Panel
 
@@ -63,7 +63,7 @@ HiFiShifter supports three ways to import media files. Video files automatically
 - **Copy Drag**: Hold `Ctrl` while dragging a clip to create a copy at the target position (the original clip remains unchanged; copying takes effect upon release).
 - **Glue**: Right-click a clip and select "Glue" (requires at least 2 clips on the same track).
 - **Split**: Select a clip and press `S` to split it at the playhead position.
-- **Copy/Paste**: Select a clip and press `Ctrl + C` to copy it to the application clipboard. `Ctrl + V` aligns the leftmost start of the selected clips to the playhead position, preserving relative spacing.
+- **Copy/Paste**: Select a clip and press `Ctrl + C` to copy it to the application clipboard. `Ctrl + V` aligns the leftmost start of the selected clips to the playhead position, preserving relative spacing. Copying also writes REAPERMedia data to the clipboard, so the selection can be pasted directly in REAPER.
 
 Note that tracks support nesting: you can drag a track under another track to form a track group, which will be very useful during parameter adjustment.
 
@@ -124,6 +124,8 @@ Because the official DLL only supports file I/O, processing takes longer compare
 | Delete Selected Clips               | Delete                                  |
 | Copy Selected Clips (app clipboard) | Ctrl + C                                |
 | Paste at Playhead                   | Ctrl + V                                |
+| Group / Ungroup                     | G / U                                   |
+| Cycle Take                          | T (Shift + T: previous)                 |
 | Copy Selection Curve (parameter)    | Ctrl + C (Select mode)                  |
 | Paste to Selection Start            | Ctrl + V (Select mode)                  |
 | Split Clip                          | S (splits selected clip at playhead)    |
@@ -290,7 +292,6 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 ## Documentation
 
 - [User Manual](USERMANUAL_en.md)
-- [Todo List](../../todo.md)
 
 ## Acknowledgements
 
