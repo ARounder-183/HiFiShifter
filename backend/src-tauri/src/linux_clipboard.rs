@@ -165,7 +165,7 @@ fn x11_owner() -> Result<&'static Mutex<X11Owner>, String> {
 
 fn write_x11_multi(formats: &[(&str, &[u8])]) -> Result<(), String> {
     let owner_guard = x11_owner()?;
-    let mut owner = owner_guard
+    let owner = owner_guard
         .lock()
         .map_err(|_| "clipboard_x11_lock_failed".to_string())?;
 
