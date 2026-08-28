@@ -891,6 +891,23 @@ export const PianoRollPanel: React.FC = () => {
             const store = timelineViewportSync.get();
             const offset = timelineOffsetRef.current;
             const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
+            // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——原生
+            // scroller、标尺/网格层（applyScrollLayers）与轨道视图同帧提交，
+            // 两个面板严丝合缝。state 仅作事后对齐（React 在绘制前提交）。
+            const scroller = scrollerRef.current;
+            if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
+                timelineSyncApplyingRef.current = true;
+                pxPerSecRef.current = store.pxPerSec;
+                scrollLeftRef.current = drawingScrollLeft;
+                lastScrollLeftRef.current = drawingScrollLeft;
+                scroller.scrollLeft = store.scrollLeft;
+                applyScrollLayers(drawingScrollLeft);
+                setScrollLeft(drawingScrollLeft);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
+            // 缩放（pxPerSec 变化）：内容宽度必须先按新 pxPerSec 重排，维持
+            // “先提交 state，再由 layout effect 落地”的既有路径。
             timelineSyncApplyingRef.current = true;
             pendingParamSyncViewportRef.current = {
                 nativeScrollLeft: store.scrollLeft,
@@ -1709,7 +1726,9 @@ export const PianoRollPanel: React.FC = () => {
                 left >= -2 && left <= viewSizeRef.current.w + 2 ? "0.9" : "0";
         }
 
-        invalidate();
+        // 同步绘制：滚动事件在绘制前触发，画布必须与标尺/网格（上方已同步
+        // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
+        drawRef.current();
     }
 
     function syncScrollLeft(scroller: HTMLDivElement) {

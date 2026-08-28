@@ -677,10 +677,11 @@ export const MidiPitchTrackCanvas = React.memo(
                 if (canvasRef.current) {
                     canvasRef.current.style.transform = `translate3d(${scrollLeft}px,0,0)`;
                 }
-                invalidate();
+                // 同步绘制：与原生滚动的 DOM 内容层同帧提交位移（见 timelineViewportBus 头注释）。
+                drawRef.current();
             });
             return unsub;
-        }, [invalidate]);
+        }, []);
 
         // 组件卸载时取消待执行的 rAF
         React.useEffect(() => {

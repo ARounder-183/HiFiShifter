@@ -1554,7 +1554,7 @@ const initialState: SessionState = {
     secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
     rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
     showPlayheadTimeInTrackHeader: true,
-    paramEditorSyncTimeline: false,
+    paramEditorSyncTimeline: true,
 
     autoCrossfadeEnabled: true,
     showAllTakes: true,
@@ -2227,11 +2227,7 @@ const sessionSlice = createSlice({
             // 有效速率 ÷ 倍率；乐观阶段同步镜像，否则拖拽期间 inactive lane
             // 按旧速率渲染、persist+fulfilled 才收敛（视觉瞬态失真）。
             if (state.syncEditsAcrossTakes && takes.length > 1) {
-                const mirrored = clamp(
-                    clip.playbackRate / getClipRateMultiplier(clip),
-                    0.1,
-                    10,
-                );
+                const mirrored = clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
                 for (const take of takes) {
                     take.playbackRate = mirrored;
                 }

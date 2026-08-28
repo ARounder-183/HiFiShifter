@@ -447,6 +447,21 @@ export function useTimelineState(): TimelineStateResult {
         if (!s.paramEditorSyncTimeline) return;
         const apply = () => {
             const store = timelineViewportSync.get();
+            const scroller = scrollRef.current;
+            // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——先写原生
+            // scroller（DOM 内容层随之移动），再走完整同步链（标尺/bus/共享
+            // 视口回写被 applying 标志抑制），两个面板严丝合缝。任何经
+            // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
+            if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
+                timelineSyncApplyingRef.current = true;
+                scroller.scrollLeft = store.scrollLeft;
+                syncScrollLeft(store.scrollLeft);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
+            // 缩放（pxPerSec 变化）：内容宽度必须先按新 pxPerSec 重排，否则
+            // 写 scroller.scrollLeft 会被浏览器按旧宽度钳制产生漂移；维持
+            // “先提交 state，再由 layout effect 落地”的既有路径。
             timelineSyncApplyingRef.current = true;
             pendingTimelineSyncViewportRef.current = {
                 scrollLeft: store.scrollLeft,

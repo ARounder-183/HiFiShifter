@@ -180,11 +180,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const source = props.viewportSource;
         if (!source) return;
         const apply = () => {
-            invalidate();
+            // 同步绘制：滚动事件在绘制前触发，波形面必须与原生滚动的 DOM
+            // 内容层在同一帧内提交位移（DAW 式无缝滚动），禁止 rAF 延迟。
+            drawRef.current();
         };
         apply();
         return source.subscribe(() => apply());
-    }, [invalidate, props.viewportSource]);
+    }, [props.viewportSource]);
 
     React.useEffect(
         () => () => {

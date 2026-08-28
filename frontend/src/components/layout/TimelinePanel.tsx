@@ -14,10 +14,7 @@ import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
 import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
-import {
-    defaultFadeDirFor,
-    FADE_PRESETS,
-} from "./timeline/reaperFade";
+import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
 import { createPortal } from "react-dom";
@@ -322,7 +319,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportWidthRef,
         rowHeightRef,
         scrollLeft,
-        setScrollLeftState,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
@@ -360,6 +356,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setClipDropNewTrack,
         pendingDropDurationPathRef,
         syncScrollLeft,
+        setScrollLeftAction,
         beatFromClientX,
         trackIdFromClientY,
         rowTopForTrackId,
@@ -908,7 +905,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     });
 
     const formatClipPitchDragTooltip = React.useCallback(
-        (cents: number) => t("clip_pitch_drag_tooltip").replace("{delta}", formatPitchDragCents(cents)),
+        (cents: number) =>
+            t("clip_pitch_drag_tooltip").replace("{delta}", formatPitchDragCents(cents)),
         [t],
     );
     const { startClipPitchDrag, pitchDragTooltip } = useClipPitchDrag({
@@ -1396,7 +1394,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     setPxPerSec={setPxPerSec}
                     rowHeight={rowHeight}
                     setRowHeight={setRowHeight}
-                    setScrollLeft={setScrollLeftState}
+                    setScrollLeft={setScrollLeftAction}
                     rulerContentRef={rulerContentRef}
                     scrollHorizontalKb={scrollHorizontalKb}
                     scrollVerticalKb={scrollVerticalKb}
@@ -2122,8 +2120,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     }
                                 }}
                             >
-                                {t("import_across_time") ||
-                                    "Import across time (same track)"}
+                                {t("import_across_time") || "Import across time (same track)"}
                             </button>
                             <button
                                 className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
@@ -2212,8 +2209,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                               currentPlayheadSec >= ctxClip.startSec &&
                               currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
 
-                          return (
-                              createPortal(
+                          return createPortal(
                               <ClipContextMenu
                                   x={contextMenu.x}
                                   y={contextMenu.y}
@@ -2399,40 +2395,41 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       );
                                   }}
                               />,
-                              document.body
-                          ));
+                              document.body,
+                          );
                       })()
                     : null}
 
                 {trackAreaMenu
                     ? createPortal(
-                    <TrackAreaContextMenu
-                        x={trackAreaMenu.x}
-                        y={trackAreaMenu.y}
-                        canPaste={clipboardAvailable}
-                        canSplit={(multiSelectedClipIds.length > 0
-                            ? multiSelectedClipIds
-                            : sessionRef.current.selectedClipId
-                              ? [sessionRef.current.selectedClipId]
-                              : []
-                        ).some((id) => {
-                            const clip = sessionRef.current.clips.find((c) => c.id === id);
-                            if (!clip) return false;
-                            const splitSec = Math.max(
-                                0,
-                                Number(sessionRef.current.playheadSec ?? 0) || 0,
-                            );
-                            return (
-                                splitSec >= clip.startSec &&
-                                splitSec <= clip.startSec + clip.lengthSec
-                            );
-                        })}
-                        onPaste={pasteClipsAtPlayhead}
-                        onSplit={splitSelectedAtPlayhead}
-                        onClose={() => setTrackAreaMenu(null)}
-                    />,
-                    document.body
-                ) : null}
+                          <TrackAreaContextMenu
+                              x={trackAreaMenu.x}
+                              y={trackAreaMenu.y}
+                              canPaste={clipboardAvailable}
+                              canSplit={(multiSelectedClipIds.length > 0
+                                  ? multiSelectedClipIds
+                                  : sessionRef.current.selectedClipId
+                                    ? [sessionRef.current.selectedClipId]
+                                    : []
+                              ).some((id) => {
+                                  const clip = sessionRef.current.clips.find((c) => c.id === id);
+                                  if (!clip) return false;
+                                  const splitSec = Math.max(
+                                      0,
+                                      Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                  );
+                                  return (
+                                      splitSec >= clip.startSec &&
+                                      splitSec <= clip.startSec + clip.lengthSec
+                                  );
+                              })}
+                              onPaste={pasteClipsAtPlayhead}
+                              onSplit={splitSelectedAtPlayhead}
+                              onClose={() => setTrackAreaMenu(null)}
+                          />,
+                          document.body,
+                      )
+                    : null}
 
                 <QuickClipExportDialog
                     open={quickExportDialog.open}
