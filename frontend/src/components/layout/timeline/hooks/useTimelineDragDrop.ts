@@ -396,7 +396,10 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
                     const moveAction = detectExternalPathAction(path);
                     if (moveAction !== "importAudio" && moveAction !== "importMidi") {
+                        // 非媒体文件不产生 drop 预览：snapDropBeat 已发布过吸附
+                        // 高亮，这里必须清除，否则悬停期间的高亮会残留。
                         setDropPreview(null);
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         return;
                     }
 
@@ -427,7 +430,6 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
             if (detail.type === "drop") {
                 setDropPreview(null);
-                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 if (isOverTimeline && scroller) {
                     const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
@@ -451,21 +453,23 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                 trackId,
                                 startSec: beat,
                             });
-                            return;
-                        }
-                        if (actionKind && actionKind !== "importAudio") {
+                        } else if (actionKind && actionKind !== "importAudio") {
                             emitExternalFileAction(actionKind, detail.filePath);
-                            return;
+                        } else {
+                            void dispatch(
+                                importAudioAtPosition({
+                                    audioPath: detail.filePath,
+                                    trackId,
+                                    startSec: beat,
+                                }),
+                            );
                         }
-                        void dispatch(
-                            importAudioAtPosition({
-                                audioPath: detail.filePath,
-                                trackId,
-                                startSec: beat,
-                            }),
-                        );
                     }
                 }
+                // drop 手势结束：上面的 snapDropBeat 在“导入位置恰好吸附”时会
+                // 再次发布吸附竖线高亮（先清除再计算会导致此结果），必须在手势
+                // 出口统一清除，否则导入完成后高亮会残留在画面上。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 return;
             }
         }
