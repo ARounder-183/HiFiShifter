@@ -44,8 +44,52 @@ import {
 } from "../../../../utils/tempoMap.js";
 import {
     snapTimelinePosition,
+    snapTimelineClipMove,
     type SnapObjectKind,
+    type SnapResult,
 } from "../../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildCandidateHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+    snapHighlightKindFromCandidate,
+    type SnapHighlightSourceSpec,
+} from "../../../../utils/snapHighlight";
+
+// ── 吸附入口类型 ─────────────────────────────────────────────────
+/** snapTimeline 附加选项。 */
+export interface SnapTimelineOpts {
+    originSec?: number;
+    anchorTrackId?: string | null;
+    excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 拖拽移动 Clip 的长度：提供时启用**多源吸附** —— 前缘、后缘（结束
+     * 位置）与自身吸附偏移点（moveSnapOffsetSec）同时作为被吸附对象参与
+     * 匹配，取更近者。返回 sec 为调整后的起点，竖线高亮的被吸附标记自动
+     * 落在命中位置。
+     */
+    moveLengthSec?: number;
+    /** 拖拽锚 Clip 的吸附偏移（秒）：与 moveLengthSec 搭配使用。 */
+    moveSnapOffsetSec?: number;
+    /**
+     * 吸附竖线高亮管理：
+     * - 字段存在（含 null）→ 本次调用负责高亮：命中吸附则发布目标+被吸附
+     *   对象的高亮条目，未命中/未吸附则清除该组；
+     * - 字段缺省 → 不触碰高亮状态（供无拖拽语境的调用复用）。
+     */
+    highlight?: {
+        /** 被吸附对象（正在操作的对象）的对齐边标记；播放光标等自明显对象可省略。 */
+        sources?: readonly SnapHighlightSourceSpec[];
+    } | null;
+}
+
+/** 吸附入口函数签名（各拖拽 hook 的 props 类型共用）。 */
+export type SnapTimelineFn = (
+    sec: number,
+    object: SnapObjectKind,
+    opts?: SnapTimelineOpts,
+) => number;
 
 // ── 返回类型 ─────────────────────────────────────────────────────
 type TimelineSessionSlice = Pick<
@@ -73,6 +117,7 @@ type TimelineSessionSlice = Pick<
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "showAllTakes"
     | "tempoMap"
     | "tempoMapVisible"
     | "trackMeters"
@@ -146,9 +191,11 @@ export interface TimelineStateResult {
     verticalZoomKb: Keybinding;
     paramFineAdjustKb: Keybinding;
     slipEditKb: Keybinding;
+    pitchDragKb: Keybinding;
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
     crossfadeGripKb: Keybinding;
+    fadeCurvatureKb: Keybinding;
 
     // Drop preview
     dropPreview: {
@@ -175,6 +222,9 @@ export interface TimelineStateResult {
     // Functions
     setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
+    /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
+    syncScrollTop: (next: number) => void;
+    scrollTopPxRef: React.MutableRefObject<number>;
     setScrollLeftAction: React.Dispatch<React.SetStateAction<number>>;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
@@ -182,16 +232,13 @@ export interface TimelineStateResult {
     rowTopForTrackId: (trackId: string | null) => number;
     ensureDropPreviewDuration: (path: string) => void;
     getDropPreviewWidthPx: (durationSec: number) => number;
-    /** 完整吸附引擎入口。 */
-    snapTimeline: (
+    /** 完整吸附引擎入口（返回完整结果，含候选信息；负责发布吸附竖线高亮）。 */
+    snapTimelineDetailed: (
         sec: number,
         object: SnapObjectKind,
-        opts?: {
-            originSec?: number;
-            anchorTrackId?: string | null;
-            excludeClipIds?: ReadonlySet<string>;
-        },
-    ) => number;
+        opts?: SnapTimelineOpts,
+    ) => SnapResult;
+    snapTimeline: SnapTimelineFn;
     isEditableTarget: (target: EventTarget | null) => boolean;
     isPointerOnNativeScrollbar: (
         scroller: HTMLDivElement,
@@ -225,6 +272,7 @@ export function useTimelineState(): TimelineStateResult {
     const s = useAppSelector(
         (state: RootState) => ({
             autoCrossfadeEnabled: state.session.autoCrossfadeEnabled,
+            showAllTakes: state.session.showAllTakes,
             autoScrollEnabled: state.session.autoScrollEnabled,
             beats: state.session.beats,
             bpm: state.session.bpm,
@@ -308,6 +356,9 @@ export function useTimelineState(): TimelineStateResult {
 
     const [viewportWidth, setViewportWidth] = useState(0);
     const viewportWidthRef = useRef(0);
+    // 竖直视口的帧紧来源：sticky 画布层从这里取 scrollTop（经总线），
+    // React state 仅驱动窗口化等非视觉更新。
+    const scrollTopPxRef = useRef(0);
     useEffect(() => {
         viewportWidthRef.current = viewportWidth;
     }, [viewportWidth]);
@@ -339,6 +390,18 @@ export function useTimelineState(): TimelineStateResult {
         };
 
         updateViewportWidth();
+        // 挂载/重挂载时对齐竖直基准（浏览器可能恢复了滚动位置），
+        // 保证 sticky 画布在首个滚动事件前就以正确偏移绘制。
+        if (Math.abs(scrollTopPxRef.current - scroller.scrollTop) > 1e-6) {
+            scrollTopPxRef.current = scroller.scrollTop;
+            timelineViewportBus.emit(
+                scroller.scrollLeft,
+                pxPerSecRef.current,
+                scroller.clientWidth || 0,
+                scroller.scrollTop,
+                rowHeightRef.current,
+            );
+        }
 
         if (typeof ResizeObserver !== "undefined") {
             const observer = new ResizeObserver(() => {
@@ -357,7 +420,9 @@ export function useTimelineState(): TimelineStateResult {
     }, []);
 
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
-    function syncScrollLeft(next: number) {
+    // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
+    // 否则每个依赖它的 effect/prop 每次渲染都会失效重跑。
+    const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
             timelineViewportSync.setViewport({
@@ -378,8 +443,14 @@ export function useTimelineState(): TimelineStateResult {
             rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
         }
         setNativeScrollLeft(next);
-        // ★ 立即广播视口变化 → WaveformTrackCanvas 直接 invalidate（绕过 React）
-        timelineViewportBus.emit(next, pxPerSecRef.current, viewportWidthRef.current);
+        // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
+        timelineViewportBus.emit(
+            next,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            scrollTopPxRef.current,
+            rowHeightRef.current,
+        );
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -387,21 +458,54 @@ export function useTimelineState(): TimelineStateResult {
                 setScrollLeft(scrollLeftRef.current);
             });
         }
-    }
+    }, []);
 
-    const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = (action) => {
-        const next =
-            typeof action === "function"
-                ? (action as (prev: number) => number)(scrollLeftRef.current)
-                : action;
-        syncScrollLeft(next);
-    };
+    // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
+    // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
+    // 必须与 DOM 内容层在同一帧内拿到新 scrollTop。滚动事件在绘制前触发，
+    // 这里同步 emit，任何经 React state 的延迟都会造成画布与 Clip 分层。
+    const syncScrollTop = React.useCallback((next: number) => {
+        scrollTopPxRef.current = next;
+        timelineViewportBus.emit(
+            scrollLeftRef.current,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            next,
+            rowHeightRef.current,
+        );
+    }, []);
+
+    const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
+        (action: React.SetStateAction<number>) => {
+            const next =
+                typeof action === "function"
+                    ? (action as (prev: number) => number)(scrollLeftRef.current)
+                    : action;
+            syncScrollLeft(next);
+        },
+        [syncScrollLeft],
+    );
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {
         if (!s.paramEditorSyncTimeline) return;
         const apply = () => {
             const store = timelineViewportSync.get();
+            const scroller = scrollRef.current;
+            // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——先写原生
+            // scroller（DOM 内容层随之移动），再走完整同步链（标尺/bus/共享
+            // 视口回写被 applying 标志抑制），两个面板严丝合缝。任何经
+            // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
+            if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
+                timelineSyncApplyingRef.current = true;
+                scroller.scrollLeft = store.scrollLeft;
+                syncScrollLeft(store.scrollLeft);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
+            // 缩放（pxPerSec 变化）：内容宽度必须先按新 pxPerSec 重排，否则
+            // 写 scroller.scrollLeft 会被浏览器按旧宽度钳制产生漂移；维持
+            // “先提交 state，再由 layout effect 落地”的既有路径。
             timelineSyncApplyingRef.current = true;
             pendingTimelineSyncViewportRef.current = {
                 scrollLeft: store.scrollLeft,
@@ -504,10 +608,14 @@ export function useTimelineState(): TimelineStateResult {
     // ── Keybindings ──────────────────────────────────────────
     const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
     const slipEditKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipSlipEdit"));
+    const pitchDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipPitchDrag"));
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
     const crossfadeGripKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipCrossfadeGrip"),
+    );
+    const fadeCurvatureKb = useAppSelector(
+        (state) => selectKeybinding(state, "modifier.fadeCurvatureDrag"),
     );
     const scrollHorizontalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollHorizontal"),
@@ -656,6 +764,14 @@ export function useTimelineState(): TimelineStateResult {
                 preloadedPathsRef.current.add(sp);
                 newPaths.push(sp);
             }
+            // inactive take 的波形同样预热，避免展开泳道后逐个懒加载闪烁。
+            for (const take of clip.takes ?? []) {
+                const tp = take.sourcePath;
+                if (tp && !preloadedPathsRef.current.has(tp)) {
+                    preloadedPathsRef.current.add(tp);
+                    newPaths.push(tp);
+                }
+            }
         }
         if (newPaths.length > 0) {
             void waveformMipmapStore.batchPreload(newPaths);
@@ -727,51 +843,96 @@ export function useTimelineState(): TimelineStateResult {
     }
 
     // ── snapTimeline ─────────────────────────────────────────
-    const snapTimeline = React.useCallback(
+    // snapTimelineDetailed 返回完整吸附结果；当调用方传入 highlight 选项时，
+    // 由这里统一发布/清除“吸附竖线高亮”（目标 + 被吸附对象），保证所有
+    // 拖拽路径共用同一套高亮语义。
+    const snapTimelineDetailed = React.useCallback(
         (
             sec: number,
             object: SnapObjectKind,
-            opts?: {
-                originSec?: number;
-                anchorTrackId?: string | null;
-                excludeClipIds?: ReadonlySet<string>;
-            },
-        ) => {
+            opts?: SnapTimelineOpts,
+        ): SnapResult => {
             const session = sessionRef.current;
-            const result = snapTimelinePosition(
-                {
-                    settings: session.timelineSnap,
-                    grid: session.grid,
-                    bpm: session.bpm,
-                    beatsPerBar: session.beats,
-                    tempoMap: session.tempoMap,
-                    pxPerSec: pxPerSecRef.current,
-                    clips: session.clips,
-                    tracks: session.tracks,
-                    selectedClipIds:
-                        session.multiSelectedClipIds.length > 0
-                            ? session.multiSelectedClipIds
-                            : session.selectedClipId
-                              ? [session.selectedClipId]
-                              : [],
-                    playheadSec: session.playheadSec,
-                    object,
-                    originSec: opts?.originSec,
-                    anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
-                    excludeClipIds: opts?.excludeClipIds,
-                },
-                sec,
-            );
-            return result.sec;
+            const snapCtx = {
+                settings: session.timelineSnap,
+                grid: session.grid,
+                bpm: session.bpm,
+                beatsPerBar: session.beats,
+                tempoMap: session.tempoMap,
+                pxPerSec: pxPerSecRef.current,
+                clips: session.clips,
+                tracks: session.tracks,
+                selectedClipIds:
+                    session.multiSelectedClipIds.length > 0
+                        ? session.multiSelectedClipIds
+                        : session.selectedClipId
+                          ? [session.selectedClipId]
+                          : [],
+                playheadSec: session.playheadSec,
+                object,
+                originSec: opts?.originSec,
+                anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
+                excludeClipIds: opts?.excludeClipIds,
+            };
+            // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
+            // 被吸附对象。
+            const moveLen = opts?.moveLengthSec;
+            const moveOffset = opts?.moveSnapOffsetSec ?? 0;
+            const result =
+                moveLen != null && moveLen >= 0 && object === "clip"
+                    ? snapTimelineClipMove(snapCtx, sec, moveLen, moveOffset)
+                    : snapTimelinePosition(snapCtx, sec);
+            if (opts && "highlight" in opts) {
+                if (result.snapped && result.candidate) {
+                    // 命中侧 → 实际对齐位置的位移：
+                    // start=0；end=长度；snap_offset=偏移。
+                    // ⚠️ 目标线必须画在实际对齐位置（alignedSec）——此前用
+                    // result.sec（新起点）导致后缘/偏移命中时目标线与被吸附
+                    // 标记分裂成两条，看起来像"两边同时高亮"。
+                    let alignedShift = 0;
+                    if ("edgeSide" in result) {
+                        if (result.edgeSide === "end") alignedShift = moveLen ?? 0;
+                        else if (result.edgeSide === "snap_offset") alignedShift = moveOffset;
+                    }
+                    const alignedSec = result.sec + alignedShift;
+                    publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                        buildCandidateHighlightEntry({
+                            kind: snapHighlightKindFromCandidate(result.candidate.kind),
+                            sec: alignedSec,
+                            targetTrackId: result.candidate.trackId ?? null,
+                            targetClipId: result.candidate.clipId ?? null,
+                            sources: (opts.highlight?.sources ?? []).map((source) => ({
+                                ...source,
+                                sec: source.sec ?? alignedSec,
+                            })),
+                        }),
+                    ]);
+                } else {
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                }
+            }
+            return result;
         },
         [],
+    );
+
+    const snapTimeline = React.useCallback<SnapTimelineFn>(
+        (sec, object, opts) => snapTimelineDetailed(sec, object, opts).sec,
+        [snapTimelineDetailed],
     );
 
     // ── Playhead helpers ─────────────────────────────────────
     const setPlayheadFromClientX = React.useCallback(
         (clientX: number, bounds: DOMRect, xScroll: number, commit: boolean) => {
             const rawBeat = beatFromClientX(clientX, bounds, xScroll);
-            const beat = snapTimeline(rawBeat, "cursor");
+            // 播放光标自身已足够醒目，不发布被吸附对象侧高亮；
+            // 但吸附到网格线/Clip 边缘等处时，仍高亮对应目标（仅拖拽期间，
+            // 即 commit=false；单击跳转完全不走高亮通道）。
+            const beat = snapTimelineDetailed(
+                rawBeat,
+                "cursor",
+                commit ? undefined : { highlight: { sources: [] } },
+            ).sec;
 
             if (commit) {
                 dispatch(setplayheadSec(beat));
@@ -786,7 +947,7 @@ export function useTimelineState(): TimelineStateResult {
             }
             return beat;
         },
-        [beatFromClientX, dispatch, snapTimeline],
+        [beatFromClientX, dispatch, snapTimelineDetailed],
     );
 
     const startDeferredPlayheadSeek = React.useCallback(
@@ -825,12 +986,16 @@ export function useTimelineState(): TimelineStateResult {
 
                 if (!moved) {
                     updateAt(ev.clientX, true);
+                    // 单击跳转不走高亮通道；兜底清理一次。
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                     return;
                 }
 
                 const sec = updateAt(ev.clientX, false);
                 const finalSec = sec == null ? lastSec : sec;
                 void dispatch(seekPlayhead(finalSec));
+                // 拖拽结束：最后一次 update 会发布高亮，必须在其后清除。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             };
 
             window.addEventListener("mousemove", onMove, true);
@@ -905,6 +1070,7 @@ export function useTimelineState(): TimelineStateResult {
             el.scrollLeft = pan.scrollLeft - (ev.clientX - pan.startX);
             el.scrollTop = pan.scrollTop - (ev.clientY - pan.startY);
             syncScrollLeft(el.scrollLeft);
+            syncScrollTop(el.scrollTop);
         }
 
         function end(ev: PointerEvent) {
@@ -981,9 +1147,11 @@ export function useTimelineState(): TimelineStateResult {
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        pitchDragKb,
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
 
         dropPreview,
         setDropPreview,
@@ -993,6 +1161,8 @@ export function useTimelineState(): TimelineStateResult {
         pendingDropDurationPathRef,
 
         syncScrollLeft,
+        syncScrollTop,
+        scrollTopPxRef,
         setScrollLeftAction,
         setScrollLeftState,
         secFromClientX,
@@ -1001,6 +1171,7 @@ export function useTimelineState(): TimelineStateResult {
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
+        snapTimelineDetailed,
         snapTimeline,
         isEditableTarget,
         isPointerOnNativeScrollbar,

@@ -278,12 +278,16 @@ export const setClipStateRemote = createAsyncThunk(
         sourceStartSec?: number;
         sourceEndSec?: number;
         playbackRate?: number;
+        clipPlaybackRate?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         formantMorph?: {
@@ -295,6 +299,67 @@ export const setClipStateRemote = createAsyncThunk(
         checkpoint?: boolean;
     }) => {
         return webApi.setClipState(payload);
+    },
+);
+
+export const setClipActiveTakeRemote = createAsyncThunk(
+    "session/setClipActiveTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.setClipActiveTake(payload);
+    },
+);
+
+export const cycleClipTakesRemote = createAsyncThunk(
+    "session/cycleClipTakesRemote",
+    async (payload: { clipIds: string[]; direction?: number; checkpoint?: boolean }) => {
+        return webApi.cycleClipTakes(payload);
+    },
+);
+
+export const packClipsIntoTakesRemote = createAsyncThunk(
+    "session/packClipsIntoTakesRemote",
+    async (payload: { clipIds: string[]; checkpoint?: boolean }) => {
+        return webApi.packClipsIntoTakes(payload);
+    },
+);
+
+export const explodeClipTakesRemote = createAsyncThunk(
+    "session/explodeClipTakesRemote",
+    async (payload: { clipId: string; checkpoint?: boolean }) => {
+        return webApi.explodeClipTakes(payload);
+    },
+);
+
+export const duplicateClipTakeRemote = createAsyncThunk(
+    "session/duplicateClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.duplicateClipTake(payload);
+    },
+);
+
+export const removeClipTakeRemote = createAsyncThunk(
+    "session/removeClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.removeClipTake(payload);
+    },
+);
+
+export const renameClipTakeRemote = createAsyncThunk(
+    "session/renameClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; name: string; checkpoint?: boolean }) => {
+        return webApi.renameClipTake(payload);
+    },
+);
+
+export const addClipTakeFromMediaRemote = createAsyncThunk(
+    "session/addClipTakeFromMediaRemote",
+    async (payload: {
+        clipId: string;
+        sourcePath: string;
+        name?: string;
+        checkpoint?: boolean;
+    }) => {
+        return webApi.addClipTakeFromMedia(payload);
     },
 );
 

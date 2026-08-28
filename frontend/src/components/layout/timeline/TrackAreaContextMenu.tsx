@@ -1,4 +1,5 @@
 import React, { useLayoutEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "../../../i18n/I18nProvider";
 
 const MenuItem: React.FC<{
@@ -47,11 +48,12 @@ export const TrackAreaContextMenu: React.FC<{
         }
     }, [x, y]);
 
-    return (
+    return createPortal(
         <div
             ref={menuRef}
             data-hs-context-menu="1"
-            className="fixed z-50 min-w-[150px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            data-hs-floating-menu="1"
+            className="fixed z-[999] min-w-[150px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >
@@ -71,6 +73,7 @@ export const TrackAreaContextMenu: React.FC<{
                     onClose();
                 }}
             />
-        </div>
+        </div>,
+        document.body,
     );
 };

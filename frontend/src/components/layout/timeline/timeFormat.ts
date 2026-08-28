@@ -383,6 +383,85 @@ export function formatCursorTime(
     };
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// 相对时长格式化（淡化长度等信息浮标使用）
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 把一段"相对时长"（如淡入/淡出的长度）格式化为指定时间单位。
+ *
+ * 与光标/标尺的根本区别：这里是**零基点的时长** —— 小节、节拍、时分秒都
+ * 从 0 起计，绝不附带工程原点偏移（绝对位置 1.1.000 对应的 0 长度显示
+ * 为 "0.0.000" 而不是 "1.1.000"）。因此只做 bpm × beatsPerBar 的静态折算，
+ * 不做 Tempo Map 分段积分（时长的音乐学定义依赖于它所在的起点，此处以
+ * 工程全局 BPM 近似，与其他相对长度 UI 一致）。
+ */
+export function formatDurationUnit(
+    unit: TimeUnit,
+    durationSec: number,
+    ctx: Pick<TimeFormatContext, "bpm" | "beatsPerBar" | "grid">,
+): string {
+    const safeSec = Math.max(0, Number.isFinite(durationSec) ? durationSec : 0);
+    switch (unit) {
+        case "seconds":
+            return formatSecondsCursor(safeSec);
+        case "clock":
+            // formatClockLabel 本身就是零基点（小时为 0 时省略），与时钟显示一致。
+            return formatClockLabel(safeSec);
+        case "barBeats": {
+            const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            const beatTotal = beatFromSec(safeSec, ctx.bpm);
+            const barIndex = Math.floor(beatTotal / bpb);
+            const inBarBeat = beatTotal - barIndex * bpb;
+            const beatIndex = Math.floor(inBarBeat);
+            const frac = inBarBeat - beatIndex;
+            const sub =
+                frac > 1 - 1e-9
+                    ? formatSubdivision(0, "cursor")
+                    : formatSubdivision(frac * 1000, "cursor");
+            return `${barIndex}.${beatIndex}.${sub}`;
+        }
+        case "barDivisions": {
+            const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            const step = Math.max(1e-9, gridStepBeats(ctx.grid));
+            const beatTotal = beatFromSec(safeSec, ctx.bpm);
+            const barIndex = Math.floor(beatTotal / bpb);
+            const inBarBeat = beatTotal - barIndex * bpb;
+            // 零基点切分：落在第几个网格区间内（无 +1 偏置）。
+            const index = Math.floor(inBarBeat / step + 1e-9);
+            return `${barIndex}.${index}/${formatDivisionCount(gridDivisionsPerBar(ctx.grid, bpb))}`;
+        }
+    }
+}
+
+export interface FadeLengthFormatContext {
+    primaryTimeUnit: TimeUnit;
+    secondaryTimeUnit: TimeUnitChoice;
+    bpm: number;
+    beatsPerBar: number;
+    grid: string;
+}
+
+/**
+ * 淡化长度 ToolTips 文本：`{主}/{副}`；副单位为"不使用"或与主单位相同时省略。
+ * 主副单位通过 {@link formatDurationUnit} 分别按相对时长规则格式化。
+ */
+export function formatFadeLengthTooltip(
+    durationSec: number,
+    ctx: FadeLengthFormatContext,
+): string {
+    const main = formatDurationUnit(ctx.primaryTimeUnit, durationSec, ctx);
+    if (ctx.secondaryTimeUnit !== "none" && ctx.secondaryTimeUnit !== ctx.primaryTimeUnit) {
+        const secondary = formatDurationUnit(
+            ctx.secondaryTimeUnit as TimeUnit,
+            durationSec,
+            ctx,
+        );
+        return `${main} / ${secondary}`;
+    }
+    return main;
+}
+
 /**
  * 候选标尺刻度步长（拍）。升序排列，始终包含小节步长。
  *

@@ -13,8 +13,8 @@
 //! 在 Linux/CI 等无此限制的环境下照常执行。
 
 use backend_lib::__test_internals::{
-    leading_silence_sec, pitch_trim_window_sec, playback_window_sec, trim_and_resample_midi,
-    Clip, SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions, TimelineState,
+    leading_silence_sec, pitch_trim_window_sec, playback_window_sec, trim_and_resample_midi, Clip,
+    SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions, TimelineState,
 };
 
 /// 构造一个最小 Clip（仅几何字段参与窗口模型）。
@@ -28,7 +28,13 @@ fn make_clip(
 ) -> Clip {
     let mut tl = TimelineState::default();
     let track_id = tl.tracks[0].id.clone();
-    let id = tl.add_clip(Some(track_id), Some("T".into()), Some(0.0), Some(length), None);
+    let id = tl.add_clip(
+        Some(track_id),
+        Some("T".into()),
+        Some(0.0),
+        Some(length),
+        None,
+    );
     {
         let c = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
         c.source_start_sec = start_src;
@@ -49,7 +55,13 @@ fn make_state_clip(
     reversed: bool,
 ) -> String {
     let track_id = tl.tracks[0].id.clone();
-    let id = tl.add_clip(Some(track_id), Some("T".into()), Some(0.0), Some(length), None);
+    let id = tl.add_clip(
+        Some(track_id),
+        Some("T".into()),
+        Some(0.0),
+        Some(length),
+        None,
+    );
     {
         let c = tl.clips.iter_mut().find(|c| c.id == id).unwrap();
         c.source_start_sec = start_src;
@@ -71,8 +83,19 @@ fn make_state_clip(
 fn split_reversed_nonloop_is_contiguous_and_anchor_correct() {
     let mut tl = TimelineState::default();
     // 用户工程同构：延伸窗倒放块（ss=5.53、se=9.25、len=10.41，媒体 10s）。
-    let id = make_state_clip(&mut tl, 10.40917863594724, 5.526592881691009, 9.253863715024345, true);
-    let (orig_ss, orig_se, orig_len) = (5.526592881691009f64, 9.253863715024345f64, 10.40917863594724f64);
+    let id = make_state_clip(
+        &mut tl,
+        10.40917863594724,
+        5.526592881691009,
+        9.253863715024345,
+        true,
+    );
+    // orig_ss 仅记录用户工程原始值；倒放窗口不消费 ss，故不参与断言。
+    let (_orig_ss, orig_se, orig_len) = (
+        5.526592881691009f64,
+        9.253863715024345f64,
+        10.40917863594724f64,
+    );
 
     let s = 8.10318f64;
     let right_id = tl.split_clip(&id, s).expect("split should succeed");
@@ -91,7 +114,11 @@ fn split_reversed_nonloop_is_contiguous_and_anchor_correct() {
     let right_len = orig_len - s;
     assert!((right.length_sec - right_len).abs() < 1e-9);
     let expect_right_se = orig_se - s;
-    assert!((right.source_end_sec - expect_right_se).abs() < 1e-9, "right anchor must advance by S, got {}", right.source_end_sec);
+    assert!(
+        (right.source_end_sec - expect_right_se).abs() < 1e-9,
+        "right anchor must advance by S, got {}",
+        right.source_end_sec
+    );
     assert!(
         (right.source_start_sec - (expect_right_se - right_len)).abs() < 1e-9,
         "right window start must equal original true window start"
@@ -120,7 +147,10 @@ fn split_forward_nonloop_derives_windows_without_stale_clamp() {
 
     assert!((left.length_sec - 4.0).abs() < 1e-9);
     assert!((left.source_start_sec - 0.0).abs() < 1e-9);
-    assert!((left.source_end_sec - 4.0).abs() < 1e-9, "left end must derive from start+len, not clamp to stale se");
+    assert!(
+        (left.source_end_sec - 4.0).abs() < 1e-9,
+        "left end must derive from start+len, not clamp to stale se"
+    );
     assert!((right.start_sec - 4.0).abs() < 1e-9);
     assert!((right.source_start_sec - 4.0).abs() < 1e-9);
     assert!((right.source_end_sec - 6.0).abs() < 1e-9);
@@ -178,9 +208,7 @@ fn loop_wrapped_window_without_media_duration_does_not_collapse_to_empty() {
     // 环绕窗口 [3.5, 3.0)（start > end），缓存曲线 100 帧（1s @10ms）。
     let full: Vec<f32> = (0..100).map(|i| i as f32).collect();
     let out = trim_and_resample_midi(
-        &full,
-        10.0,
-        3.5,  // source_start_sec（> end）
+        &full, 10.0, 3.5,  // source_start_sec（> end）
         3.0,  // source_end_sec
         1.0,  // playback_rate
         2.0,  // clip_timeline_len_sec → target = 200 帧
@@ -228,7 +256,10 @@ fn non_loop_derives_source_end_from_start_and_length() {
     let out = trim_and_resample_midi(&full, 10.0, 0.5, 1.5, 1.0, 2.0, false, None, false);
     assert_eq!(out.len(), 200, "derived end must heal the stale window");
     for (i, v) in out.iter().enumerate() {
-        assert!((v - full[50 + i]).abs() < 1e-6, "frame {i} content preserved");
+        assert!(
+            (v - full[50 + i]).abs() < 1e-6,
+            "frame {i} content preserved"
+        );
     }
 
     // 一致输入（se == start + len·rate）行为不变。
@@ -306,13 +337,7 @@ fn nonloop_pitch_curve_places_leading_silence_before_media_start() {
 fn split_reversed_tail_silence_right_piece_stays_below_media() {
     let mut tl = TimelineState::default();
     // 1_ori 同构：len=10.40918、ss=0、se=D=3.72727 → 消费窗口 [−6.68191, D]。
-    let id = make_state_clip(
-        &mut tl,
-        10.40917863594724,
-        0.0,
-        3.7272708333333338,
-        true,
-    );
+    let id = make_state_clip(&mut tl, 10.40917863594724, 0.0, 3.7272708333333338, true);
     let d = 3.7272708333333338f64;
     let orig_len = 10.40917863594724f64;
 
@@ -330,10 +355,20 @@ fn split_reversed_tail_silence_right_piece_stays_below_media() {
     assert!((right.start_sec - s).abs() < 1e-9);
     assert!((right.length_sec - (orig_len - s)).abs() < 1e-9);
     let expect_se = d - s;
-    assert!((right.source_end_sec - expect_se).abs() < 1e-9, "right anchor = {} must stay below media", right.source_end_sec);
-    assert!(right.source_end_sec < 0.0, "right anchor must remain in silent domain");
+    assert!(
+        (right.source_end_sec - expect_se).abs() < 1e-9,
+        "right anchor = {} must stay below media",
+        right.source_end_sec
+    );
+    assert!(
+        right.source_end_sec < 0.0,
+        "right anchor must remain in silent domain"
+    );
     let (rws, rwe) = playback_window_sec(right);
-    assert!(rwe < 0.0 && rws < rwe, "entire window must stay below media, got [{rws}, {rwe}]");
+    assert!(
+        rwe < 0.0 && rws < rwe,
+        "entire window must stay below media, got [{rws}, {rwe}]"
+    );
 
     // 无前导静音（锚点未越过媒体末端）；静音完全由"窗口在媒体外"表达。
     assert!(leading_silence_sec(right, Some(d)).abs() < 1e-12);

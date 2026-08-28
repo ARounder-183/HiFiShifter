@@ -1,8 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use lru::LruCache;
-
+use super::resource_manager::DecodeCache;
 use super::types::ResampledStereo;
 
 pub(crate) fn linear_resample_interleaved(
@@ -162,7 +161,7 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
 pub(crate) fn get_resampled_stereo_cached(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<DecodeCache>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
@@ -180,7 +179,7 @@ pub(crate) fn get_resampled_stereo_cached(
 pub(crate) fn get_resampled_stereo(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<DecodeCache>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
@@ -196,7 +195,8 @@ pub(crate) fn get_resampled_stereo(
     let v = decode_resampled_stereo(path, out_rate)?;
 
     if let Ok(mut map) = cache.lock() {
-        map.push(key, v.clone());
+        let pcm_bytes = v.pcm_bytes();
+        map.insert(key, v.clone(), pcm_bytes);
     }
 
     Some(v)

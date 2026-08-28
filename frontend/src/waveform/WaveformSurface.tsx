@@ -19,8 +19,16 @@ export interface WaveformSurfaceProps {
     color: string;
     className?: string;
     style?: React.CSSProperties;
+    /** 行 topPx 坐标系（内容绝对）到画布的竖直偏移（= scrollTopPx）。
+     * 仅在无 viewportSource（非总线驱动）时作为回退值。 */
+    viewportTopPx?: number;
     viewportSource?: {
-        getSnapshot(): { scrollLeft: number; pxPerSec: number; viewportWidth: number };
+        getSnapshot(): {
+            scrollLeft: number;
+            pxPerSec: number;
+            viewportWidth: number;
+            scrollTopPx?: number;
+        };
         subscribe(
             listener: (scrollLeft: number, pxPerSec: number, width: number) => void,
         ): () => void;
@@ -72,11 +80,16 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const viewportEndSec = liveViewport
             ? viewportStartSec + widthPx / Math.max(1e-9, pxPerSec)
             : props.viewportEndSec;
+        // 竖直锚点：行坐标是内容绝对值，滚动容器竖直滚动时必须同步平移，
+        // 否则波形与 DOM Clip 在竖直方向分层（scroll 事件在绘制前触发，
+        // 总线快照与 props 回退都能保证同帧取值）。
+        const viewportTopPx = liveViewport?.scrollTopPx ?? props.viewportTopPx ?? 0;
         const scene = buildWaveformScene({
             viewportStartSec,
             viewportEndSec,
             pxPerSec,
             widthPx,
+            viewportTopPx,
             rows: props.rows,
         });
         const geometry = buildWaveformGeometry({
@@ -180,11 +193,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const source = props.viewportSource;
         if (!source) return;
         const apply = () => {
-            invalidate();
+            // 同步绘制：滚动事件在绘制前触发，波形面必须与原生滚动的 DOM
+            // 内容层在同一帧内提交位移（DAW 式无缝滚动），禁止 rAF 延迟。
+            drawRef.current();
         };
         apply();
         return source.subscribe(() => apply());
-    }, [invalidate, props.viewportSource]);
+    }, [props.viewportSource]);
 
     React.useEffect(
         () => () => {

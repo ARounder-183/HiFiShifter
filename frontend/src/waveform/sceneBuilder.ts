@@ -1,4 +1,3 @@
-import type { FadeCurveType } from "../features/session/sessionTypes.ts";
 import {
     modEuclid,
     resolveLoopMediaDurationSec,
@@ -24,8 +23,12 @@ export interface WaveformSceneClip {
     fadeOutSec: number;
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
-    fadeInCurve: FadeCurveType;
-    fadeOutCurve: FadeCurveType;
+    /** REAPER 风格淡入形状 id（同 ClipInfo.fadeInShape，见 reaperFade.ts）。 */
+    fadeInShape: number;
+    fadeInDir: number;
+    /** REAPER 风格淡出形状 id（语义同 fadeInShape）。 */
+    fadeOutShape: number;
+    fadeOutDir: number;
 }
 
 export interface WaveformSceneRow {
@@ -50,8 +53,11 @@ export interface WaveformSceneSegment {
     gain: number;
     fadeInSec: number;
     fadeOutSec: number;
-    fadeInCurve: FadeCurveType;
-    fadeOutCurve: FadeCurveType;
+    /** REAPER 风格淡入形状 id（同 WaveformSceneClip，见 reaperFade.ts）。 */
+    fadeInShape: number;
+    fadeInDir: number;
+    fadeOutShape: number;
+    fadeOutDir: number;
     alpha: number;
 }
 
@@ -130,6 +136,10 @@ export function buildWaveformScene(args: {
     viewportEndSec: number;
     pxPerSec: number;
     widthPx: number;
+    /** 行 topPx 所在坐标系（内容绝对）到画布坐标系的竖直偏移
+     * （= scrollTopPx）。波形面画布视口锚定，须按此平移后才与 DOM
+     * 内容层在竖直滚动中同帧对齐。 */
+    viewportTopPx?: number;
     rows: readonly WaveformSceneRow[];
 }): WaveformScene {
     const segments: WaveformSceneSegment[] = [];
@@ -139,7 +149,11 @@ export function buildWaveformScene(args: {
     const viewportEndSec = Math.max(viewportStartSec, args.viewportEndSec);
     const widthPx = Math.max(1, args.widthPx);
 
+    const viewportTopPx = Number.isFinite(args.viewportTopPx) ? (args.viewportTopPx ?? 0) : 0;
+
     for (const row of args.rows) {
+        // 行 topPx 为内容绝对坐标：减去视口顶端得到画布坐标。
+        const rowTopCanvasPx = row.topPx - viewportTopPx;
         for (const clip of row.clips) {
             if (!clip.sourcePath || !(clip.lengthSec > 1e-9)) continue;
             const clipEndSec = clip.startSec + clip.lengthSec;
@@ -221,7 +235,7 @@ export function buildWaveformScene(args: {
                         clipId: clip.id,
                         timelineSec: clip.startSec + markerLocalSec,
                         xPx: (clip.startSec + markerLocalSec - viewportStartSec) * pxPerSec,
-                        yPx: row.topPx + row.waveformTopPx,
+                        yPx: rowTopCanvasPx + row.waveformTopPx,
                         heightPx: row.waveformHeightPx,
                         kind: "loop",
                     });
@@ -286,7 +300,7 @@ export function buildWaveformScene(args: {
                         clipTotalDurationSec: clip.lengthSec,
                         screenRect: {
                             x: clippedX,
-                            y: row.topPx + row.waveformTopPx,
+                            y: rowTopCanvasPx + row.waveformTopPx,
                             width: clippedRight - clippedX,
                             height: row.waveformHeightPx,
                         },
@@ -294,8 +308,10 @@ export function buildWaveformScene(args: {
                         gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
                         fadeInSec,
                         fadeOutSec,
-                        fadeInCurve: clip.fadeInCurve ?? "linear",
-                        fadeOutCurve: clip.fadeOutCurve ?? "linear",
+                        fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+                        fadeInDir: clip.fadeInDir ?? 0,
+                        fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+                        fadeOutDir: clip.fadeOutDir ?? 0,
                         alpha:
                             localStartSec < leadingOverlapSec - 1e-9 ? baseAlpha * 0.5 : baseAlpha,
                     });
@@ -319,7 +335,7 @@ export function buildWaveformScene(args: {
                         clipId: clip.id,
                         timelineSec: clip.startSec + localSec,
                         xPx: (clip.startSec + localSec - viewportStartSec) * pxPerSec,
-                        yPx: row.topPx + row.waveformTopPx,
+                        yPx: rowTopCanvasPx + row.waveformTopPx,
                         heightPx: row.waveformHeightPx,
                         kind: "media-boundary",
                     });

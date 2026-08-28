@@ -153,11 +153,7 @@ pub(super) fn import_reaper_project(
     // 更新工程元信息
     {
         let p = &mut *state.project.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(first) = result
-            .tempo_map
-            .as_ref()
-            .and_then(|points| points.first())
-        {
+        if let Some(first) = result.tempo_map.as_ref().and_then(|points| points.first()) {
             p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
             p.time_signature_denominator = first.denominator.unwrap_or(4);
         } else {
@@ -170,7 +166,15 @@ pub(super) fn import_reaper_project(
     let mut json = serde_json::to_value(&payload).unwrap_or_default();
 
     if !result.skipped_files.is_empty() {
-        json["skipped_files"] = serde_json::json!(result.skipped_files);
+        // 多 take item 的每个 take 都可能引用同一缺失文件；按导入端约定
+        // "同一提示只报一次"，在命令边界去重后返回（保持首次出现顺序）。
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<String> = result
+            .skipped_files
+            .into_iter()
+            .filter(|path| seen.insert(path.clone()))
+            .collect();
+        json["skipped_files"] = serde_json::json!(deduped);
     }
 
     json

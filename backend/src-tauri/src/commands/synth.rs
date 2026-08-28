@@ -1473,17 +1473,23 @@ fn build_display_track_order(tracks: &[crate::state::Track]) -> Vec<crate::state
         track: &crate::state::Track,
         by_parent: &HashMap<Option<String>, Vec<crate::state::Track>>,
         out: &mut Vec<crate::state::Track>,
+        visited: &mut HashSet<String>,
     ) {
+        // 环防护：历史工程/导入数据里若出现 parent 链环，递归会栈溢出崩溃。
+        if !visited.insert(track.id.clone()) {
+            return;
+        }
         out.push(track.clone());
         if let Some(children) = by_parent.get(&Some(track.id.clone())) {
             for child in children {
-                dfs(child, by_parent, out);
+                dfs(child, by_parent, out, visited);
             }
         }
     }
 
+    let mut visited: HashSet<String> = HashSet::new();
     for root in roots {
-        dfs(&root, &by_parent, &mut out);
+        dfs(&root, &by_parent, &mut out, &mut visited);
     }
 
     if out.len() != tracks.len() {

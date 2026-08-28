@@ -11,12 +11,18 @@ import {
 import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
-import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec } from "../../../../utils/loopSnap";
+import { loopSnapThresholdSec, nearestBoundarySnapOffsetSec, slipBoundaryAlignedSides } from "../../../../utils/loopSnap";
 import {
     beginSnapGesture,
     computeEffectiveSnap,
     endSnapGesture,
 } from "../../../../utils/timelineSnapping";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildLoopBoundaryHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+} from "../../../../utils/snapHighlight";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
@@ -255,7 +261,36 @@ export function useSlipDrag(deps: {
                             loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
                     ) {
                         desiredTotal = snappedW * dir;
+                        // 循环节命中：只高亮**真正对齐**的那一侧（媒体边界恰好
+                        // 落在 Clip 起点 → 高亮起点；落在终点 → 高亮终点；
+                        // len·r 恰为整周期等两侧同时对齐时才两缘同亮）。
+                        const anchorClip = sessionRef.current.clips.find(
+                            (c) => c.id === drag.anchorClipId,
+                        );
+                        if (anchorClip) {
+                            const aligned = slipBoundaryAlignedSides(a, snappedW);
+                            const clipStartSec = Math.max(0, Number(anchorClip.startSec) || 0);
+                            const clipLen = Math.max(0, Number(anchorClip.lengthSec) || 0);
+                            const secs: number[] = [];
+                            if (aligned.start) secs.push(clipStartSec);
+                            if (aligned.end) secs.push(clipStartSec + clipLen);
+                            if (secs.length > 0) {
+                                publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                                    buildLoopBoundaryHighlightEntry({
+                                        secs,
+                                        trackId: anchorClip.trackId,
+                                        clipId: drag.anchorClipId,
+                                    }),
+                                ]);
+                            } else {
+                                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                            }
+                        }
+                    } else {
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                     }
+                } else {
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 }
             }
 

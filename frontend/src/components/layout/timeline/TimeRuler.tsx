@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
 import type { RulerTick, TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
@@ -371,12 +372,13 @@ function TimeRulerContextMenu({
     }, [tempoMap, clickedSec, pxPerSec]);
     const hasMap = tempoMap != null && tempoMap.points.length > 0;
 
-    return (
+    return createPortal(
         <div
             ref={ref}
             data-time-ruler-context-menu
             data-hs-context-menu="1"
-            className="fixed z-50 min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+            data-hs-floating-menu="1"
+            className="fixed z-[999] min-w-[140px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
             onMouseDown={(e) => {
@@ -484,7 +486,8 @@ function TimeRulerContextMenu({
                     }}
                 />
             ) : null}
-        </div>
+        </div>,
+        document.body,
     );
 }
 

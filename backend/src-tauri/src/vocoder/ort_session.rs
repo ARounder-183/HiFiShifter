@@ -9,8 +9,8 @@
 //! back to CPU. This module centralizes EP registration so individual
 //! vocoder modules don't drift.
 
-use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -31,6 +31,7 @@ pub const COREML_FIXED_TIME_FRAMES: usize = 4096;
 /// Stores whether the most recently created CoreML session for each role is
 /// pinned to [`COREML_FIXED_TIME_FRAMES`].  Only the vocoder model requires
 /// the fixed dimension; FCPE/HNSEP keep their dynamic shapes.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = OnceLock::new();
 
 /// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
@@ -38,6 +39,7 @@ static COREML_PINNED_BY_ROLE: OnceLock<Mutex<Vec<(OrtSessionRole, bool)>>> = Onc
 /// hung CoreML inference can never block the benchmark or rendering again.
 static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn coreml_disabled() -> bool {
     COREML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
@@ -75,7 +77,10 @@ pub fn coreml_active(_role: OrtSessionRole) -> bool {
 /// so stale "coreml" state does not keep padding after switching to CPU).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn reset_coreml_pinned_state() {
-    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
         guard.clear();
     }
 }
@@ -86,7 +91,10 @@ pub fn reset_coreml_pinned_state() {}
 /// Record the CoreML pinned state for a role (macOS ARM64 only).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn set_coreml_pinned(role: OrtSessionRole, pinned: bool) {
-    if let Ok(mut guard) = COREML_PINNED_BY_ROLE.get_or_init(|| Mutex::new(Vec::new())).lock() {
+    if let Ok(mut guard) = COREML_PINNED_BY_ROLE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
         if let Some(entry) = guard.iter_mut().find(|(r, _)| *r == role) {
             entry.1 = pinned;
         } else {
@@ -96,6 +104,7 @@ fn set_coreml_pinned(role: OrtSessionRole, pinned: bool) {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[allow(dead_code)] // call sites live in macOS-only branches; kept for API symmetry
 fn set_coreml_pinned(_role: OrtSessionRole, _pinned: bool) {}
 
 /// Build a CoreML execution provider with the options that make the
@@ -168,7 +177,10 @@ pub fn set_runtime_ep_override(ep: Option<String>) {
 
 /// Set the runtime DirectML device ID override. Pass `None` to clear.
 pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
-    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID.get_or_init(|| Mutex::new(None)).lock() {
+    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
         *guard = device_id;
     }
 }
@@ -288,7 +300,10 @@ pub enum OrtSessionRole {
 /// Mesa's Lavapipe software renderer may work but with poor performance.
 /// The EP will gracefully fall back to CPU if Dawn cannot find a
 /// usable Vulkan device.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -351,9 +366,7 @@ fn try_register_webgpu_ep(
             Ok((b, "webgpu"))
         }
         Ok(Err(e)) => {
-            let msg = format!(
-                "WebGPU EP registration failed: {e}{wsl_note}"
-            );
+            let msg = format!("WebGPU EP registration failed: {e}{wsl_note}");
             eprintln!("ort_session: {msg}");
             Err(msg)
         }
@@ -371,7 +384,11 @@ fn try_register_webgpu_ep(
 
 /// Stub: WebGPU EP not compiled on this platform (Windows, Linux ARM64, macOS x86_64).
 /// On these platforms, DirectML (Windows) or CPU fallback is used instead.
-#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+#[allow(dead_code)] // call sites live in linux-x86_64 / macos-ARM64 branches only
 fn try_register_webgpu_ep(
     builder: ort::session::builder::SessionBuilder,
     _role: OrtSessionRole,
@@ -390,9 +407,7 @@ fn try_register_coreml_ep(
     builder: ort::session::builder::SessionBuilder,
     role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let build_result = std::panic::catch_unwind(|| {
-        build_coreml_ep(role).build()
-    });
+    let build_result = std::panic::catch_unwind(|| build_coreml_ep(role).build());
     let ep = match build_result {
         Ok(ep) => ep,
         Err(panic) => {
@@ -435,6 +450,7 @@ fn try_register_coreml_ep(
 /// Windows GPU driver provides D3D12/DirectX passthrough via /dev/dxg.
 /// Mesa's Lavapipe software renderer may be available but offers poor
 /// performance and limited SPIR-V feature support.
+#[allow(dead_code)] // call sites live in linux-x86_64-only branches
 fn is_wsl2() -> bool {
     if cfg!(target_os = "linux") {
         if let Ok(version) = std::fs::read_to_string("/proc/version") {
@@ -448,6 +464,7 @@ fn is_wsl2() -> bool {
 /// Emit diagnostic info about the Vulkan environment. Helps debug
 /// WebGPU/Dawn initialization failures, especially in WSL2 where
 /// Vulkan ICD availability is limited.
+#[allow(dead_code)] // call sites live in linux-x86_64-only branches
 fn log_vulkan_diagnostics() {
     // Check for Vulkan ICDs
     for icd_dir in ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"] {
@@ -489,9 +506,7 @@ fn try_register_directml_ep(
     let device_id = resolve_dml_device_id();
     let dml = if let Some(id) = device_id {
         eprintln!("ort_session[{role:?}]: DirectML device_id={id} (old API)");
-        ort::ep::DirectML::default()
-            .with_device_id(id)
-            .build()
+        ort::ep::DirectML::default().with_device_id(id).build()
     } else {
         // Last resort: no DXGI adapters found, fall back to DML2
         eprintln!("ort_session[{role:?}]: DirectML auto-select (DML2 fallback)");
@@ -532,7 +547,10 @@ fn try_register_directml_ep(
 /// GPU path since there is no DirectML alternative.
 ///
 /// Returns `(Session, selected_ep_name)`.
-pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Session, String), String> {
+pub fn build_ort_session(
+    onnx_path: &Path,
+    role: OrtSessionRole,
+) -> Result<(Session, String), String> {
     let choice = ep_choice_for_role(role);
 
     if choice == "cpu" || matches!(role, OrtSessionRole::Separator) {
@@ -570,18 +588,16 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if (choice == "auto" || choice == "webgpu" || choice == "gpu") && !is_wsl2() {
         match Session::builder() {
-            Ok(builder) => {
-                match try_register_webgpu_ep(builder, role) {
-                    Ok((b, ep)) => {
-                        let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
-                        return Ok((session, ep.to_string()));
-                    }
-                    Err(e) => {
-                        eprintln!("ort_session[{role:?}]: WebGPU unavailable — {e}");
-                        log_vulkan_diagnostics();
-                    }
+            Ok(builder) => match try_register_webgpu_ep(builder, role) {
+                Ok((b, ep)) => {
+                    let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
+                    return Ok((session, ep.to_string()));
                 }
-            }
+                Err(e) => {
+                    eprintln!("ort_session[{role:?}]: WebGPU unavailable — {e}");
+                    log_vulkan_diagnostics();
+                }
+            },
             Err(e) => {
                 eprintln!(
                     "ort_session[{role:?}]: failed to create session builder for WebGPU — {e}"
@@ -594,7 +610,12 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
     // ── Fallback: CPU ──────────────────────────────────────────────────
     // macOS ARM64: CoreML (Neural Engine/GPU) first, WebGPU fallback, then CPU.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if choice == "auto" || choice == "coreml" || choice == "webgpu" || choice == "gpu" || choice == "directml" {
+    if choice == "auto"
+        || choice == "coreml"
+        || choice == "webgpu"
+        || choice == "gpu"
+        || choice == "directml"
+    {
         // CoreML is the primary GPU path on Apple Silicon. An explicit
         // "webgpu" selection skips CoreML and goes straight to Dawn/Metal.
         if choice != "webgpu" && !coreml_disabled() {
@@ -636,22 +657,24 @@ pub fn build_ort_session(onnx_path: &Path, role: OrtSessionRole) -> Result<(Sess
                     }
                     Err(e) => eprintln!("ort_session[{role:?}]: CoreML unavailable: {e}"),
                 },
-                Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for CoreML: {e}"),
+                Err(e) => eprintln!(
+                    "ort_session[{role:?}]: failed to create session builder for CoreML: {e}"
+                ),
             }
         }
         match Session::builder() {
             Ok(builder) => match try_register_webgpu_ep(builder, role) {
-                Ok((b, ep)) => {
-                    match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
-                        Ok(session) => return Ok((session, ep.to_string())),
-                        Err(e) => eprintln!(
-                            "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
-                        ),
-                    }
-                }
+                Ok((b, ep)) => match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
+                    Ok(session) => return Ok((session, ep.to_string())),
+                    Err(e) => eprintln!(
+                        "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
+                    ),
+                },
                 Err(e) => eprintln!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
             },
-            Err(e) => eprintln!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"),
+            Err(e) => {
+                eprintln!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}")
+            }
         }
     }
 
@@ -768,17 +791,22 @@ fn smoke_test_gpu_session(
     }
 }
 
-
 /// Finalize a GPU session (CoreML / WebGPU) with appropriate optimization
 /// settings, then smoke-test it so broken GPU backends fall back to CPU early.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn build_gpu_session_finalize(
     mut builder: ort::session::builder::SessionBuilder,
     onnx_path: &Path,
     role: OrtSessionRole,
     ep_name: &str,
 ) -> Result<Session, String> {
-    let model_name = onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let model_name = onnx_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
     eprintln!(
         "ort_session[{role:?}]: model={model_name} ep={ep_name} (global_env={})",
         env_ep_choice(),
@@ -798,7 +826,9 @@ fn build_gpu_session_finalize(
         .map_err(|e| format!("set parallel execution failed: {e}"))?;
 
     let cores = std::thread::available_parallelism()
-        .map(|n| n.get()).unwrap_or(4).max(2);
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(2);
     let threads = if coreml_session {
         0
     } else {
@@ -813,15 +843,11 @@ fn build_gpu_session_finalize(
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
     let t_create = std::time::Instant::now();
-    let mut session = builder
-        .commit_from_file(onnx_path)
-        .map_err(|e| {
-            let msg = format!(
-                "load onnx into {ep_name} ort session failed: {e}"
-            );
-            eprintln!("ort_session[{role:?}]: {msg}");
-            msg
-        })?;
+    let mut session = builder.commit_from_file(onnx_path).map_err(|e| {
+        let msg = format!("load onnx into {ep_name} ort session failed: {e}");
+        eprintln!("ort_session[{role:?}]: {msg}");
+        msg
+    })?;
     let create_ms = t_create.elapsed().as_millis();
 
     eprintln!(
@@ -832,13 +858,17 @@ fn build_gpu_session_finalize(
     for input in session.inputs() {
         eprintln!(
             "ort_session[{:?}]:   input name='{}' dtype={:?}",
-            role, input.name(), input.dtype()
+            role,
+            input.name(),
+            input.dtype()
         );
     }
     for output in session.outputs() {
         eprintln!(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
-            role, output.name(), output.dtype()
+            role,
+            output.name(),
+            output.dtype()
         );
     }
 
@@ -867,7 +897,7 @@ fn build_dml_session_inner(
     choice: &str,
     strict: bool,
 ) -> Result<(Session, String), String> {
-    let mut builder =
+    let builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
     let (builder, selected) = try_register_directml_ep(builder, role)?;
@@ -950,13 +980,17 @@ fn build_dml_session_inner(
     for input in session.inputs() {
         eprintln!(
             "ort_session[{:?}]:   input name='{}' dtype={:?}",
-            role, input.name(), input.dtype()
+            role,
+            input.name(),
+            input.dtype()
         );
     }
     for output in session.outputs() {
         eprintln!(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
-            role, output.name(), output.dtype()
+            role,
+            output.name(),
+            output.dtype()
         );
     }
 
@@ -983,7 +1017,10 @@ fn build_cpu_session(
 
     eprintln!(
         "ort_session[{role:?}]: model={} ep=cpu (choice={choice}, global_env={})",
-        onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        onnx_path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
         env_ep_choice(),
     );
 
@@ -1050,7 +1087,10 @@ pub fn diagnose_available_providers() -> Vec<String> {
     // WebGPU — compiled on Linux x86_64 / macOS ARM64 only.
     // Excluded: Windows (Dawn/D3D12 crash risk), Linux ARM64 (no prebuilt binary),
     //           WSL2 (Vulkan not available; Dawn init hangs at shutdown).
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     if !is_wsl2() && probe_webgpu_ep_available() {
         providers.push("WebGpuExecutionProvider".to_string());
     }
@@ -1075,10 +1115,13 @@ pub fn diagnose_available_providers() -> Vec<String> {
 /// Wrapped in catch_unwind because Dawn native code (Vulkan init)
 /// can crash on some platforms. Only compiled on Linux/macOS ARM
 /// where Dawn/Vulkan and Dawn/Metal are stable backends.
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 fn probe_webgpu_ep_available() -> bool {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match Session::builder() {
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match Session::builder() {
             Ok(builder) => {
                 let wgpu = if cfg!(target_os = "linux") {
                     ort::ep::WebGPU::default()
@@ -1102,8 +1145,7 @@ fn probe_webgpu_ep_available() -> bool {
                 eprintln!("ort_session: probe_webgpu_ep — session builder failed: {e}");
                 false
             }
-        }
-    }));
+        }));
 
     match result {
         Ok(available) => available,
@@ -1120,8 +1162,8 @@ fn probe_webgpu_ep_available() -> bool {
 /// Returns true if CoreML EP is available in the loaded ORT binary.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn probe_coreml_ep_available() -> bool {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match Session::builder() {
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match Session::builder() {
             Ok(builder) => {
                 let ep = build_coreml_ep(OrtSessionRole::Vocoder).build();
                 match builder.with_execution_providers([ep]) {
@@ -1139,8 +1181,7 @@ fn probe_coreml_ep_available() -> bool {
                 eprintln!("ort_session: probe_coreml_ep - session builder failed: {e}");
                 false
             }
-        }
-    }));
+        }));
 
     match result {
         Ok(available) => available,

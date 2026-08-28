@@ -1,4 +1,5 @@
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
+import { clipDisplayName } from "../../../../features/session/sessionTypes";
 
 type SparseRenderClip = {
     id: string;
@@ -9,17 +10,22 @@ type SparseRenderClip = {
     gain: number;
     playbackRate: number;
     muted: boolean;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
     midiNoteCount?: number;
     groupId?: string;
     fadeInSec: number;
     fadeOutSec: number;
-    fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-    fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+    fadeInShape: number;
+    fadeOutShape: number;
+    fadeInDir: number;
+    fadeOutDir: number;
     /** 自动交叉淡化长度（可选；缺省 0），用于“有效 fade”显示。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
+    /** 吸附偏移（秒，相对 Clip 起点；缺省 0）—— 左下角 ◣ 标记。 */
+    snapOffsetSec?: number;
 };
-
 export type TimelineCanvasClipModel = {
     id: string;
     trackId: string;
@@ -31,8 +37,10 @@ export type TimelineCanvasClipModel = {
     headerHeightPx: number;
     fadeInPx: number;
     fadeOutPx: number;
-    fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-    fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+    fadeInShape: number;
+    fadeOutShape: number;
+    fadeInDir: number;
+    fadeOutDir: number;
     selected: boolean;
     muted: boolean;
     gain: number;
@@ -41,10 +49,15 @@ export type TimelineCanvasClipModel = {
     isMidiClip: boolean;
     trackColor?: string;
     isRenaming: boolean;
+    /** 吸附偏移（已换算为像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
+    snapOffsetPx: number;
 };
 
 export function buildSparseClipRenderModel(args: {
     visibleTracks: Array<{ id: string; color?: string }>;
+    /** 窗口首行的绝对轨道索引：clip body 画布使用内容绝对坐标绘制，
+     * 竖直滚动时由 scrollTopPx 统一平移（与 DOM 内容层同帧提交）。 */
+    startTrackIndex: number;
     visibleTrackClipsById: Record<string, SparseRenderClip[]>;
     pxPerSec: number;
     rowHeight: number;
@@ -126,9 +139,9 @@ export function buildSparseClipRenderModel(args: {
         (args.visibleTrackClipsById[track.id] ?? []).map((clip) => ({
             id: clip.id,
             trackId: clip.trackId,
-            name: clip.name,
+name: clipDisplayName(clip),
             leftPx: clip.startSec * args.pxPerSec,
-            topPx: visibleIndex * args.rowHeight,
+            topPx: (args.startTrackIndex + visibleIndex) * args.rowHeight,
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),
             heightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y),
             headerHeightPx: CLIP_HEADER_HEIGHT,
@@ -142,8 +155,10 @@ export function buildSparseClipRenderModel(args: {
                 ((clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec) *
                     args.pxPerSec,
             ),
-            fadeInCurve: clip.fadeInCurve,
-            fadeOutCurve: clip.fadeOutCurve,
+            fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+            fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+            fadeInDir: clip.fadeInDir ?? 0,
+            fadeOutDir: clip.fadeOutDir ?? 0,
             selected:
                 multiSelectedSet != null
                     ? multiSelectedSet.has(clip.id)
@@ -155,6 +170,7 @@ export function buildSparseClipRenderModel(args: {
             isMidiClip: clip.midiNoteCount != null,
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
+            snapOffsetPx: Math.max(0, Number(clip.snapOffsetSec) || 0) * args.pxPerSec,
         })),
     );
 

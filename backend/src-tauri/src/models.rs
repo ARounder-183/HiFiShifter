@@ -54,6 +54,71 @@ pub struct TimelineTrack {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct TimelineClipTake {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub gain: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path_relative: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_frames: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sample_rate: Option<u32>,
+    pub source_start_sec: f64,
+    pub source_end_sec: f64,
+    pub playback_rate: f32,
+    pub reversed: bool,
+    pub loop_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_note_data: Option<Vec<MidiNoteEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub midi_fill_gaps: Option<bool>,
+}
+
+impl TimelineClipTake {
+    /// 完整转换（含 MIDI 音符数据）—— 用于全量 payload。
+    pub fn from_take(take: &crate::state::ClipTake, include_midi: bool) -> Self {
+        Self {
+            id: take.id.clone(),
+            name: take.name.clone(),
+            gain: take.gain,
+            source_path: take.source_path.clone(),
+            source_path_relative: take.source_path_relative.clone(),
+            duration_sec: take.duration_sec,
+            duration_frames: take.duration_frames,
+            source_sample_rate: take.source_sample_rate,
+            source_start_sec: take.source_start_sec,
+            source_end_sec: take.source_end_sec,
+            playback_rate: take.playback_rate,
+            reversed: take.reversed,
+            loop_enabled: take.loop_enabled,
+            midi_note_data: if include_midi {
+                take.midi_note_data.clone()
+            } else {
+                None
+            },
+            midi_fill_gaps: if take.midi_note_data.is_some() {
+                Some(take.midi_fill_gaps)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+impl From<&crate::state::ClipTake> for TimelineClipTake {
+    fn from(take: &crate::state::ClipTake) -> Self {
+        Self::from_take(take, true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct TimelineClip {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +128,12 @@ pub struct TimelineClip {
     pub start_sec: f64,
     pub length_sec: f64,
     pub color: String,
+
+    /// 全部 take（active take 的缓存字段不含在此，避免重复传输波形等大数据）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<TimelineClipTake>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_take_id: Option<String>,
 
     pub source_path: Option<String>,
     pub source_path_relative: Option<String>,
@@ -77,14 +148,22 @@ pub struct TimelineClip {
     pub source_start_sec: Option<f64>,
     pub source_end_sec: Option<f64>,
     pub playback_rate: Option<f32>,
+    /// Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。
+    pub clip_playback_rate: Option<f32>,
     pub reversed: Option<bool>,
     /// Loop（循环源）属性：超出源媒体区间时按周期回绕产生循环内容。
     #[serde(default)]
     pub loop_enabled: bool,
+    /// 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失补齐为 0。
+    pub snap_offset_sec: Option<f64>,
     pub fade_in_sec: Option<f64>,
     pub fade_out_sec: Option<f64>,
-    pub fade_in_curve: Option<String>,
-    pub fade_out_curve: Option<String>,
+    /// REAPER 浮点形状 id（整数 0..6 为标准七预设；小数变体原样透传）。
+    pub fade_in_shape: Option<f64>,
+    pub fade_out_shape: Option<f64>,
+    /// 曲率（REAPER D_FADEINDIR），范围 [-1, 1]。
+    pub fade_in_dir: Option<f64>,
+    pub fade_out_dir: Option<f64>,
     /// 自动交叉淡化长度（秒），与手动 fade（fade_in_sec/fade_out_sec）分离存储。
     pub auto_fade_in_sec: Option<f64>,
     pub auto_fade_out_sec: Option<f64>,
@@ -224,6 +303,9 @@ pub struct TimelineStatePayload {
 pub struct OpenProjectPayload {
     #[serde(flatten)]
     pub timeline: TimelineStatePayload,
+    /// 打开失败的具体原因（文件不存在/无权限/解析失败等），前端用于展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_version_too_new: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5,12 +5,14 @@
  * - 右键按下后先进入待判定状态；
  * - 仅当拖拽超过阈值时，才启动框选并在抬起时提交选区；
  * - 未达到拖拽阈值时，不改动现有多选，让右键菜单正常弹出。
+ *
+ * 注意：右键框选**刻意不做吸附、也不显示吸附高亮** —— 它是 Clip 框选
+ * 手势，不与时间轴网格/候选直接交互（吸附仅服务于移动/编辑类拖拽）。
  */
 import { useRef, useState } from "react";
 import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
-import { snapTimelinePosition } from "../../../utils/timelineSnapping";
 import { isPrimaryModifierDown } from "../../../utils/platform";
 
 export function shouldStartTimelineSelectionRect(button: number): boolean {
@@ -53,7 +55,8 @@ export function computeTimelineRectSelection(params: {
 export function useTimelineSelectionRect(params: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
     sessionRef: React.RefObject<SessionState>;
-    pxPerBeat: number;
+    /** 内容坐标系使用的像素密度：秒 → px（不是 beat → px）。 */
+    pxPerSec: number;
     rowHeight: number;
 
     clearContextMenu: () => void;
@@ -63,7 +66,7 @@ export function useTimelineSelectionRect(params: {
     const {
         scrollRef,
         sessionRef,
-        pxPerBeat,
+        pxPerSec,
         rowHeight,
         clearContextMenu,
         setMultiSelectedClipIds,
@@ -72,6 +75,13 @@ export function useTimelineSelectionRect(params: {
 
     const selectionDragRef = useRef<{
         pointerId: number;
+        /** 指针按下时的客户端坐标：仅用于位移阈值判定（纯指针位移，
+         * 不受拖拽期间滚动/缩放影响 —— 否则按住右键后滚动容器也会
+         * 误触发框选、吞掉右键菜单）。 */
+        startClientX: number;
+        startClientY: number;
+        /** 世界（内容像素）坐标锚点：矩形与命中测试使用。
+         * 已知限制：拖拽期间变焦会使锚点的像素刻度失效（极低频）。 */
         startX: number;
         startY: number;
         curX: number;
@@ -93,34 +103,6 @@ export function useTimelineSelectionRect(params: {
         y2: number;
     } | null>(null);
 
-    /** 将框选矩形的水平像素边界吸附到当前网格/选区设置。 */
-    const snapSelectionX = (x: number): number => {
-        const session = sessionRef.current;
-        const snap = session.timelineSnap;
-        if (!snap.enabled) return x;
-        const pxPerSec = Math.max(1e-9, (pxPerBeat * Math.max(1, session.bpm)) / 60);
-        const rawSec = Math.max(0, x / pxPerSec);
-        const result = snapTimelinePosition(
-            {
-                settings: snap,
-                grid: session.grid,
-                bpm: session.bpm,
-                beatsPerBar: session.beats,
-                tempoMap: session.tempoMap,
-                pxPerSec,
-                clips: session.clips,
-                tracks: session.tracks,
-                selectedClipIds: [],
-                playheadSec: session.playheadSec,
-                object: "selection",
-                originSec: 0,
-                anchorTrackId: session.selectedTrackId,
-            },
-            rawSec,
-        );
-        return result.sec * pxPerSec;
-    };
-
     function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
         if (!shouldStartTimelineSelectionRect(e.button)) return;
         e.preventDefault();
@@ -138,6 +120,8 @@ export function useTimelineSelectionRect(params: {
                   : [];
         selectionDragRef.current = {
             pointerId: e.pointerId,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
             startX: x,
             startY: y,
             curX: x,
@@ -178,7 +162,14 @@ export function useTimelineSelectionRect(params: {
 
             if (
                 !drag.hasSelectionDrag &&
-                isTimelineSelectionDrag(drag.startX, drag.startY, drag.curX, drag.curY)
+                // 阈值按指针的客户端位移判定：与内容坐标系解耦，滚动/变焦
+                // 本身不会把"普通右键"误升级为框选手势。
+                isTimelineSelectionDrag(
+                    drag.startClientX,
+                    drag.startClientY,
+                    ev.clientX,
+                    ev.clientY,
+                )
             ) {
                 drag.hasSelectionDrag = true;
                 clearContextMenu();
@@ -186,12 +177,11 @@ export function useTimelineSelectionRect(params: {
 
             if (!drag.hasSelectionDrag) return;
 
-            const sx1 = snapSelectionX(Math.min(drag.startX, cx));
-            const sx2 = snapSelectionX(Math.max(drag.startX, cx));
+            // 右键框选不做吸附：矩形边界即原始指针位置。
             setSelectionRect({
-                x1: sx1,
+                x1: Math.min(drag.startX, cx),
                 y1: Math.min(drag.startY, cy),
-                x2: sx2,
+                x2: Math.max(drag.startX, cx),
                 y2: Math.max(drag.startY, cy),
             });
         }
@@ -208,12 +198,11 @@ export function useTimelineSelectionRect(params: {
 
             const hasSelectionDrag = drag.hasSelectionDrag;
 
-            const sx1 = snapSelectionX(Math.min(drag.startX, drag.curX));
-            const sx2 = snapSelectionX(Math.max(drag.startX, drag.curX));
+            // 右键框选不做吸附：提交矩形即原始指针位置。
             const rect = {
-                x1: sx1,
+                x1: Math.min(drag.startX, drag.curX),
                 y1: Math.min(drag.startY, drag.curY),
-                x2: sx2,
+                x2: Math.max(drag.startX, drag.curX),
                 y2: Math.max(drag.startY, drag.curY),
             };
             setSelectionRect(null);
@@ -248,12 +237,16 @@ export function useTimelineSelectionRect(params: {
             }
 
             const session = sessionRef.current;
+            // Clip 像素位置必须与矩形同一坐标系：两者都使用内容像素密度
+            // pxPerSec。不要从 pxPerBeat 反推；调用方曾误传 pxPerSec，
+            // 会在非 60 BPM 时造成水平命中偏移。
+            const contentPxPerSec = Math.max(1e-9, pxPerSec);
             const selectedInRect: string[] = [];
             for (const clip of session.clips) {
                 const trackIdx = session.tracks.findIndex((t) => t.id === clip.trackId);
                 if (trackIdx < 0) continue;
-                const cx1 = clip.startSec * pxPerBeat;
-                const cx2 = (clip.startSec + clip.lengthSec) * pxPerBeat;
+                const cx1 = clip.startSec * contentPxPerSec;
+                const cx2 = (clip.startSec + clip.lengthSec) * contentPxPerSec;
                 const cy1 = trackIdx * rowHeight;
                 const cy2 = cy1 + rowHeight;
                 const hit = cx2 >= rect.x1 && cx1 <= rect.x2 && cy2 >= rect.y1 && cy1 <= rect.y2;

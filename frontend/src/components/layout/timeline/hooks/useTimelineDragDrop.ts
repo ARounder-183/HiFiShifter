@@ -15,6 +15,11 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
 import { detectExternalPathAction, findFirstExternalPathAction } from "../";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    clearSnapHighlights,
+} from "../../../../utils/snapHighlight";
+import type { SnapTimelineFn } from "./useTimelineState";
 
 export interface UseTimelineDragDropArgs {
     dispatch: AppDispatch;
@@ -26,15 +31,7 @@ export interface UseTimelineDragDropArgs {
     pendingDropDurationPathRef: React.MutableRefObject<string | null>;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     /** 吸附引擎入口（媒体项目对象）。 */
-    snapTimeline?: (
-        sec: number,
-        object: "clip",
-        opts?: {
-            originSec?: number;
-            anchorTrackId?: string | null;
-            excludeClipIds?: ReadonlySet<string>;
-        },
-    ) => number;
+    snapTimeline?: SnapTimelineFn;
     trackIdFromClientY: (clientY: number) => string | null;
     rowTopForTrackId: (trackId: string | null) => number;
     setDropPreview: React.Dispatch<
@@ -157,6 +154,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             ? snapTimeline(rawBeat, "clip", {
                                   anchorTrackId: trackId,
                                   originSec: rawBeat,
+                                  // drop 预览左缘即被吸附边（无 clipId，行级高亮）。
+                                  highlight: { sources: [{ trackId }] },
                               })
                             : rawBeat;
 
@@ -211,10 +210,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     if (type === "leave") {
                         tauriDraggedPathRef.current = null;
                         setDropPreview(null);
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         return;
                     }
 
                     if (type === "drop") {
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         if (primaryPath) {
                             tauriDraggedPathRef.current = primaryPath;
                             tauriLastDropPathRef.current = primaryPath;
@@ -321,13 +322,18 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
     }, [dispatch, snapTimeline]);
 
     // ── 文件浏览器面板的自定义拖拽事件 ───────────────────────
-    const snapDropBeat = (rawBeat: number, trackId: string | null) =>
-        snapTimeline && sessionRef.current.timelineSnap.enabled
-            ? snapTimeline(rawBeat, "clip", {
-                  anchorTrackId: trackId,
-                  originSec: rawBeat,
-              })
-            : rawBeat;
+    const snapDropBeat = (rawBeat: number, trackId: string | null) => {
+        if (snapTimeline && sessionRef.current.timelineSnap.enabled) {
+            return snapTimeline(rawBeat, "clip", {
+                anchorTrackId: trackId,
+                originSec: rawBeat,
+                // drop 预览左缘即被吸附边（无 clipId，行级高亮）。
+                highlight: { sources: [{ trackId }] },
+            });
+        }
+        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+        return rawBeat;
+    };
 
     useEffect(() => {
         function onHifiFileDrag(e: Event) {
@@ -403,12 +409,14 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     });
                 } else {
                     setDropPreview(null);
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 }
                 return;
             }
 
             if (detail.type === "drop") {
                 setDropPreview(null);
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 if (isOverTimeline && scroller) {
                     const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);

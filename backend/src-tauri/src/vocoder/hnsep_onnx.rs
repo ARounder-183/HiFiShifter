@@ -115,7 +115,9 @@ pub fn selected_ep_name() -> Option<&'static str> {
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
     if let Some(ref session) = *guard {
         return Ok(Arc::clone(session));
     }
@@ -225,6 +227,21 @@ pub fn ensure_cache_capacity(min_capacity: usize) {
     }
 }
 
+/// 清空全部谐波/噪声分离缓存。
+///
+/// 缓存 key 是 `clip_id+采样率+样本数` 的单向哈希，无法按 clip 反查剔除；
+/// 而多 Take 切换后同一 clip_id 会对应不同源内容（等长 Take 尤其会命中
+/// 旧 Take 的 stem，造成气声路径串音）。Take 切换/增删属于低频用户操作，
+/// 直接整体清空、由后续渲染重建是正确且代价最小的失效策略。
+pub fn clear_separation_cache() {
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let cleared = cache.len();
+    cache.clear();
+    if cleared > 0 {
+        eprintln!("[hnsep] separation cache cleared ({cleared} entries)");
+    }
+}
+
 /// Compute a clip-level cache key using only identity fields (not audio content).
 ///
 /// Uses FNV-1a 64-bit for low overhead. The key is based on `clip_id` + `sample_rate` +
@@ -279,13 +296,8 @@ pub fn cache_separation(
     noise: Arc<Vec<f32>>,
 ) {
     let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
-    let entry = HnsepCacheEntry {
-        harmonic,
-        noise,
-    };
-    let mut cache = global_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let entry = HnsepCacheEntry { harmonic, noise };
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
 }
 

@@ -6,6 +6,8 @@ import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
 
 export const TimelineSurface = React.memo(function TimelineSurface(props: {
     tracks: readonly TrackInfo[];
+    /** 窗口首行的绝对轨道索引（供波形面内容绝对坐标使用）。 */
+    startTrackIndex: number;
     clipsByTrackId: Readonly<Record<string, readonly ClipInfo[]>>;
     rowHeight: number;
     widthPx: number;
@@ -49,6 +51,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             >
                 <TimelineWaveformSurface
                     tracks={props.tracks}
+                    startTrackIndex={props.startTrackIndex}
                     clipsByTrackId={props.clipsByTrackId}
                     rowHeight={props.rowHeight}
                     widthPx={props.widthPx}

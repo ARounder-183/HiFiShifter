@@ -12,6 +12,7 @@
  * - useKeyboardShortcuts 桥接
  */
 import { useEffect } from "react";
+import { flushSync } from "react-dom";
 import type { AppDispatch, RootState } from "../../../../app/store";
 import {
     seekPlayhead,
@@ -382,7 +383,12 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 nextScrollLeft: zoom.nextScrollLeft,
             };
             pxPerSecRef.current = zoom.nextPxPerSec;
-            setPxPerSec(zoom.nextPxPerSec);
+            // 原子缩放：flushSync 保证 DOM 按新缩放重排后，layout effect 在
+            // 同一绘制帧内写原生 scrollLeft 并同步重绘标尺与画布（与滚轮
+            // 缩放的 TimelineScrollArea 路径一致，避免画布先行的抽动）。
+            flushSync(() => {
+                setPxPerSec(zoom.nextPxPerSec);
+            });
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);

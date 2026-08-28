@@ -126,13 +126,18 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(onnx_path, crate::vocoder_ort_session::OrtSessionRole::PitchDetector)?;
+    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(
+        onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::PitchDetector,
+    )?;
     Ok(session)
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
     if let Some(ref session) = *guard {
         return Ok(Arc::clone(session));
     }
@@ -424,11 +429,7 @@ fn decode_model_output_to_f0_hz(
             let mut best_v = f32::NEG_INFINITY;
 
             for k in 0..c {
-                let idx = if btc_layout {
-                    ti * c + k
-                } else {
-                    k * t + ti
-                };
+                let idx = if btc_layout { ti * c + k } else { k * t + ti };
                 let v = data[idx];
                 if v > best_v {
                     best_v = v;
@@ -450,11 +451,7 @@ fn decode_model_output_to_f0_hz(
             let mut weight_sum = 0.0f64;
 
             for k in local_start..=local_end {
-                let idx = if btc_layout {
-                    ti * c + k
-                } else {
-                    k * t + ti
-                };
+                let idx = if btc_layout { ti * c + k } else { k * t + ti };
                 let v = data[idx] as f64;
                 weighted_sum += cent_table[k] * v;
                 weight_sum += v;

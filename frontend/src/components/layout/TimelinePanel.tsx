@@ -13,6 +13,12 @@ import React, { useMemo } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
+import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
+import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
+import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
+import { createPortal } from "react-dom";
 import {
     addTrackRemote,
     closeClipFormantToolWindow,
@@ -32,6 +38,7 @@ import {
     setClipStateRemote,
     setClipsStateBulkRemote,
     setClipFades,
+    setClipActiveTakeRemote,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
@@ -53,6 +60,9 @@ import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement"
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
 import { webApi } from "../../services/webviewApi";
+import { useClipPitchDrag } from "./timeline/hooks/useClipPitchDrag";
+import { AppTooltipBubble } from "../AppTooltip";
+import { formatPitchDragCents } from "./timeline/clipPitchDrag";
 import { coreApi } from "../../services/api/core";
 import { paramsApi } from "../../services/api/params";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
@@ -77,6 +87,9 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
+import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
+import { beginSnapGesture, endSnapGesture } from "../../utils/timelineSnapping";
 import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
@@ -87,6 +100,7 @@ import { useTimelineState } from "./timeline/hooks/useTimelineState";
 import { useTimelineDragDrop } from "./timeline/hooks/useTimelineDragDrop";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
+import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import {
@@ -120,11 +134,16 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         autoScrollEnabled,
         projectSec,
     } = props;
-    const transport = useAppSelector((state) => ({
-        playheadSec: state.session.playheadSec,
-        isPlaying: state.session.runtime.isPlaying,
-        playbackPositionSec: state.session.runtime.playbackPositionSec,
-    }));
+    const transport = useAppSelector(
+        (state) => ({
+            playheadSec: state.session.playheadSec,
+            isPlaying: state.session.runtime.isPlaying,
+            playbackPositionSec: state.session.runtime.playbackPositionSec,
+        }),
+        // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
+        // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
+        shallowEqual,
+    );
 
     const isTransportAdvancing = transport.isPlaying && transport.playbackPositionSec > 1e-4;
 
@@ -283,6 +302,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
+    // 面板卸载时清空吸附竖线高亮（拖拽手势异常中断的兜底）。
+    React.useEffect(() => {
+        return () => {
+            clearSnapHighlights();
+        };
+    }, []);
     const {
         dispatch,
         s,
@@ -296,11 +321,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dropPreviewRef,
         playheadDragRef,
         lastClickedClipIdRef,
+        syncScrollTop,
         pxPerSecRef,
         viewportWidthRef,
         rowHeightRef,
         scrollLeft,
-        setScrollLeftState,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
@@ -327,15 +352,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        pitchDragKb,
         noSnapKb,
         copyDragKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
         dropPreview,
         setDropPreview,
         clipDropNewTrack,
         setClipDropNewTrack,
         pendingDropDurationPathRef,
         syncScrollLeft,
+        setScrollLeftAction,
         beatFromClientX,
         trackIdFromClientY,
         rowTopForTrackId,
@@ -399,6 +427,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             tempoMap: s.tempoMap,
         }),
         [s.bpm, s.beats, s.grid, s.tempoMap],
+    );
+
+    // 淡化长度 ToolTips 的相对时长上下文：主/副时间单位 + 工程计时参数。
+    const fadeLengthFormatCtx = React.useMemo<FadeLengthFormatContext>(
+        () => ({
+            primaryTimeUnit: s.primaryTimeUnit,
+            secondaryTimeUnit: s.secondaryTimeUnit,
+            bpm: s.bpm,
+            beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
+            grid: s.grid,
+        }),
+        [s.primaryTimeUnit, s.secondaryTimeUnit, s.bpm, s.beats, s.grid],
     );
 
     const projectScale = React.useMemo<ScaleLike | null>(
@@ -521,6 +561,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         handleTrackLaneRenameDone,
         commitTrackLaneGain,
     } = clipActions;
+    // 传给 React.memo 化的 TrackList / TrackLane 的回调必须引用稳定，
+    // 否则每次 TimelinePanel 渲染（播放头提交值、滚动、修饰键）都会击穿 memo。
+    const handleCopyTrack = React.useCallback(
+        (trackId: string) => {
+            void copyTracks([trackId]);
+        },
+        [copyTracks],
+    );
+    const handleCutTrack = React.useCallback(
+        (trackId: string) => {
+            cutTracks([trackId]);
+        },
+        [cutTracks],
+    );
+    const handleToggleGroupDisabled = React.useCallback(
+        (groupId: string) => {
+            toggleGroupDisabled(groupId);
+        },
+        [toggleGroupDisabled],
+    );
     const commitTrackLaneFormantMorph = React.useCallback(
         (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => {
             void dispatch(
@@ -532,6 +592,73 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             );
         },
         [dispatch],
+    );
+    const activateTrackLaneTake = React.useCallback(
+        (clipId: string, takeId: string) => {
+            void dispatch(setClipActiveTakeRemote({ clipId, takeId }));
+        },
+        [dispatch],
+    );
+    // 淡化曲线循环点击：Ctrl（modifier.fadeShapeCycleClick）+左键点包络线
+    // → 顺序切换到下一个预设形状，并把该侧曲率重置为新形状的默认值。
+    const fadeShapeCycleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeShapeCycleClick"),
+    );
+    const clipMultiSelectToggleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipMultiSelectToggle"),
+    );
+    const clipRangeSelectKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipRangeSelect"),
+    );
+    /** 单侧循环到下一个形状并重置默认曲率。 */
+    const cycleOneFade = React.useCallback(
+        (clipId: string, side: "in" | "out") => {
+            const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
+            if (!clip) return;
+            const currentShape = Number.isFinite(
+                side === "in" ? clip.fadeInShape : clip.fadeOutShape,
+            )
+                ? Math.trunc(side === "in" ? clip.fadeInShape : clip.fadeOutShape)
+                : 0;
+            const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
+            const nextPreset =
+                FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
+            const nextDir = defaultFadeDirFor(nextPreset.shape, side === "out");
+            dispatch(
+                setClipFades({
+                    clipId,
+                    ...(side === "in"
+                        ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
+                        : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
+                }),
+            );
+            void dispatch(
+                setClipStateRemote({
+                    clipId,
+                    ...(side === "in"
+                        ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
+                        : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
+                }),
+            );
+        },
+        [dispatch, sessionRef],
+    );
+
+    // Ctrl+点击循环切换：普通包络线只切该线；交叉点抓手同时切换两侧
+    // （前者淡出 + 后者淡入）。
+    const handleFadeShapeCycleClick = React.useCallback(
+        (clipId: string, side: "in" | "out") => {
+            cycleOneFade(clipId, side);
+        },
+        [cycleOneFade],
+    );
+    const handleCrossfadeCycleClick = React.useCallback(
+        (sides: Array<{ clipId: string; isOut: boolean }>) => {
+            for (const side of sides) {
+                cycleOneFade(side.clipId, side.isOut ? "out" : "in");
+            }
+        },
+        [cycleOneFade],
     );
     const activeFormantToolClip = React.useMemo(
         () =>
@@ -768,7 +895,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dispatch,
         multiSelectedClipIds,
         multiSelectedSet,
-        snapTimeline,
+        snapTimelineDetailed: state.snapTimelineDetailed,
         beatFromClientX,
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
@@ -777,6 +904,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         ignoreGrouping,
         paramFineAdjustKb,
         crossfadeGripKb,
+        fadeCurvatureKb,
     });
 
     const startSlipDrag = useSlipDrag({
@@ -792,6 +920,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
     });
 
+    // SnapOffset 三角手柄拖拽（走完整吸附引擎与竖线高亮）。
+    const startSnapOffsetDrag = useSnapOffsetDrag({
+        scrollRef,
+        sessionRef,
+        dispatch,
+        snapTimelineDetailed: state.snapTimelineDetailed,
+        beatFromClientX,
+        noSnapKb,
+        snapEnabled: s.timelineSnap.enabled,
+    });
+
+    const formatClipPitchDragTooltip = React.useCallback(
+        (cents: number) =>
+            t("clip_pitch_drag_tooltip").replace("{delta}", formatPitchDragCents(cents)),
+        [t],
+    );
+    const { startClipPitchDrag, pitchDragTooltip } = useClipPitchDrag({
+        sessionRef,
+        dispatch,
+        fineAdjustKb: paramFineAdjustKb,
+        formatDragTooltip: formatClipPitchDragTooltip,
+    });
+
     const {
         clipDragRef: _clipDragRef,
         startClipDrag: _startClipDragInner,
@@ -805,7 +956,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedClipIds,
         multiSelectedSet,
         dispatch,
-        snapTimeline,
+        snapTimelineDetailed: state.snapTimelineDetailed,
         beatFromClientX,
         trackIdFromClientY,
         setClipDropNewTrack,
@@ -814,6 +965,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
         copyDragKb,
+        multiSelectToggleKb: clipMultiSelectToggleKb,
+        rangeSelectKb: clipRangeSelectKb,
         autoCrossfadeEnabled: s.autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick: toggleTrackLaneCtrlSelection,
@@ -1044,9 +1197,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }),
         [rowHeight, s.clips, s.tracks, timelineScrollTop, viewportEndSec, viewportStartSec],
     );
-    const visibleTracks = s.tracks.slice(
-        timelineRenderModel.startIndex,
-        timelineRenderModel.endIndex + 1,
+    // slice 每次渲染都会产生新引用；不缓存的话下游所有 useMemo 与
+    // 两块画布的 memo 会在每次无关更新（播放头/滚动/修饰键）时全量重算重绘。
+    const visibleTracks = React.useMemo(
+        () =>
+            s.tracks.slice(
+                timelineRenderModel.startIndex,
+                timelineRenderModel.endIndex + 1,
+            ),
+        [s.tracks, timelineRenderModel.startIndex, timelineRenderModel.endIndex],
     );
     const visibleTrackClipCacheRef = React.useRef<
         Record<
@@ -1111,6 +1270,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         () =>
             buildSparseClipRenderModel({
                 visibleTracks,
+                startTrackIndex: timelineRenderModel.startIndex,
                 visibleTrackClipsById,
                 pxPerSec,
                 rowHeight,
@@ -1125,6 +1285,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             renamingClipId,
             rowHeight,
             s.selectedClipId,
+            timelineRenderModel.startIndex,
             visibleTrackClipsById,
             visibleTracks,
         ],
@@ -1173,8 +1334,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onAlgoChange={handleTrackAlgoChange}
                 onTrackNameChange={handleTrackNameChange}
                 onDuplicateTrack={handleDuplicateTrack}
-                onCopyTrack={(trackId) => void copyTracks([trackId])}
-                onCutTrack={(trackId) => cutTracks([trackId])}
+                onCopyTrack={handleCopyTrack}
+                onCutTrack={handleCutTrack}
                 onCreateTrackBelow={handleCreateTrackBelow}
                 onScrollTopChange={handleTrackListScrollTopChange}
                 headerHeight={timeRulerHeightPx(
@@ -1184,6 +1345,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
             {/* Timeline View (Right) */}
             <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
+                {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
+                    playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
+                    真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
                 <TimeRuler
                     contentWidth={contentWidth}
                     scrollLeft={scrollLeft}
@@ -1192,7 +1356,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     pxPerSec={pxPerSec}
                     secPerBeat={secPerBeat}
                     viewportWidth={viewportWidth}
-                    playheadSec={Number(sessionRef.current.playheadSec ?? 0) || 0}
+                    playheadSec={s.playheadSec}
                     playheadLineRef={rulerPlayheadLineRef}
                     playheadHeadRef={rulerPlayheadHeadRef}
                     contentRef={rulerContentRef}
@@ -1268,7 +1432,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     setPxPerSec={setPxPerSec}
                     rowHeight={rowHeight}
                     setRowHeight={setRowHeight}
-                    setScrollLeft={setScrollLeftState}
+                    setScrollLeft={setScrollLeftAction}
                     rulerContentRef={rulerContentRef}
                     scrollHorizontalKb={scrollHorizontalKb}
                     scrollVerticalKb={scrollVerticalKb}
@@ -1288,6 +1452,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }}
                     onScroll={(e) => {
                         const el = e.currentTarget as HTMLDivElement;
+                        // 竖直轴同帧提交：sticky 画布层（clip 体/波形面）必须在
+                        // 绘制前拿到新 scrollTop（总线同步派发）；React state
+                        // 只驱动窗口化等非视觉更新。
+                        syncScrollTop(el.scrollTop);
                         setTimelineScrollTop(el.scrollTop);
                         if (trackListScrollRef.current) {
                             if (
@@ -1697,8 +1865,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             ghostDrag={ghostDrag}
                                             verticalTrackLockTrackId={verticalTrackLockTrackId}
                                             allClips={s.clips}
+                                            showAllTakes={s.showAllTakes}
+                                            onActivateTake={activateTrackLaneTake}
+                                            fadeShapeCycleKb={fadeShapeCycleKb}
+                                            multiSelectToggleKb={clipMultiSelectToggleKb}
+                                            rangeSelectKb={clipRangeSelectKb}
+                                            pitchDragKb={pitchDragKb}
+                                            onClipPitchDragStart={startClipPitchDrag}
+                                            fadeLengthFormatCtx={fadeLengthFormatCtx}
+                                            onFadeShapeCycleClick={handleFadeShapeCycleClick}
+                                            onCrossfadeCycleClick={handleCrossfadeCycleClick}
                                             startClipDrag={startClipDrag}
                                             startEditDrag={startEditDrag}
+                                            startSnapOffsetDrag={startSnapOffsetDrag}
                                             toggleClipMuted={toggleTrackLaneClipMuted}
                                             onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
                                             clearContextMenu={clearContextMenu}
@@ -1712,9 +1891,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             onFormantMorphCommit={commitTrackLaneFormantMorph}
                                             activeGroupIds={activeGroupIds}
                                             disabledGroupIds={disabledGroupIds}
-                                            onToggleGroupDisabled={(groupId) => {
-                                                toggleGroupDisabled(groupId);
-                                            }}
+                                            onToggleGroupDisabled={handleToggleGroupDisabled}
                                         />
                                     );
                                 })}
@@ -1742,6 +1919,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     strongLineXs={tempoGridLineXs?.strong ?? null}
                                 />
                             </div>
+
+                            {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
+                            <SnapHighlightLayer
+                                pxPerSec={pxPerSec}
+                                rowHeight={rowHeight}
+                                tracks={s.tracks}
+                                contentHeight={contentHeight}
+                            />
 
                             <div
                                 className="absolute left-0 right-0 pointer-events-none z-10"
@@ -1791,20 +1976,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 />
                             ) : null}
 
-                            {/* Playhead Cursor */}
+                            {/* Playhead Cursor
+                                交互等级最低：pointer-events-none 让播放头永远不
+                                拦截其它编辑目标（淡入淡出包络、Clip 边缘、Body 拖拽等）。
+                                视觉顺序不变 —— z-20 仍在 Clip 之上。播放头拖拽由
+                                轨道空白区（TrackLane 的 seek 手势）与标尺承接。 */}
                             <div
                                 ref={playheadRef}
-                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 cursor-ew-resize"
+                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 pointer-events-none"
                                 style={{
                                     left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
                                 }}
                                 onMouseDown={(e) => {
+                                    // pointer-events-none：此事件不会派发到播放头，
+                                    // 保留分支仅为与上方 pointerdown 的 ref 语义一致。
                                     if (!suppressPlayheadMouseDownRef.current) return;
                                     suppressPlayheadMouseDownRef.current = false;
                                     e.preventDefault();
                                     e.stopPropagation();
                                 }}
                                 onPointerDown={(e) => {
+                                    // pointer-events-none：播放头自身不再接收指针
+                                    // 事件，此分支不再执行（播放头拖拽改由轨道空白区
+                                    // 与标尺承接）。保留代码以避免清理相关 ref 时
+                                    // 波及双击重命名候选逻辑。
                                     if (e.button !== 0) return;
 
                                     // 双击名称的第二次点击：第一次点击已把播放头移到这里，
@@ -1844,6 +2039,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         pointerId: e.pointerId,
                                         lastBeat: initialSec,
                                     };
+                                    // 拖拽播放头同样登记吸附手势：拖动中高亮吸附目标
+                                    //（光标自身不重复高亮），工具栏吸附状态同步。
+                                    beginSnapGesture();
                                     (e.currentTarget as HTMLDivElement).setPointerCapture(
                                         e.pointerId,
                                     );
@@ -1887,6 +2085,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             );
                                         }
                                         void dispatch(seekPlayhead(drag.lastBeat));
+                                        // 拖拽结束：解除手势并清除吸附竖线高亮。
+                                        endSnapGesture();
+                                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                                         window.removeEventListener("pointermove", onPointerMove);
                                         window.removeEventListener("pointerup", endDrag);
                                         window.removeEventListener("pointercancel", endDrag);
@@ -1900,13 +2101,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         </div>
 
                         {viewportWidth > 0 ? (
+                            /* 画布锚定视口顶部（topPx=0），内容按绝对轨道坐标
+                               绘制并由总线 scrollTopPx 同帧平移——竖直滚动
+                               与 DOM 内容层严丝合缝。 */
                             <TimelineSurface
                                 tracks={visibleTracks}
+                                startTrackIndex={timelineRenderModel.startIndex}
                                 clipsByTrackId={visibleTrackClipsById}
                                 rowHeight={rowHeight}
                                 widthPx={Math.max(1, Math.ceil(viewportWidth))}
                                 heightPx={visibleTrackCanvasHeight}
-                                topPx={timelineRenderModel.startIndex * rowHeight}
+                                topPx={0}
                                 viewportStartSec={viewportStartSec}
                                 viewportEndSec={viewportEndSec}
                                 pxPerSec={pxPerSec}
@@ -1959,8 +2164,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     }
                                 }}
                             >
-                                {t("import_across_time" as any) ||
-                                    "Import across time (same track)"}
+                                {t("import_across_time") || "Import across time (same track)"}
                             </button>
                             <button
                                 className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
@@ -1987,13 +2191,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     }
                                 }}
                             >
-                                {t("import_across_tracks" as any) ||
-                                    "Import across tracks (one per track)"}
+                                {t("import_across_tracks")}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = importModeMenu;
+                                    setImportModeMenu(null);
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "as-takes",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
+                                }}
+                            >
+                                {t("import_as_takes")}
                             </button>
                         </div>
                     </div>
                 )}
 
+                <FadeContextMenuHost />
                 {contextMenu
                     ? (() => {
                           const ctxClip = sessionRef.current.clips.find(
@@ -2032,7 +2253,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                               currentPlayheadSec >= ctxClip.startSec &&
                               currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
 
-                          return (
+                          return createPortal(
                               <ClipContextMenu
                                   x={contextMenu.x}
                                   y={contextMenu.y}
@@ -2144,29 +2365,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       setContextMenu(null);
                                       void handleExportMidi(ids);
                                   }}
-                                  onFadeCurveChange={(clipId, target, curve) => {
+                                  onFadeShapeChange={(clipId, target, shape) => {
+                                      // 切换形状必须重置曲率（REAPER 语义：各形状的
+                                      // 默认曲率由形状自身定义，见 reaperFade 的
+                                      // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
+                                      const dir = defaultFadeDirFor(shape, target === "out");
                                       dispatch(
                                           setClipFades({
                                               clipId,
                                               ...(target === "in"
-                                                  ? {
-                                                        fadeInCurve: curve,
-                                                    }
-                                                  : {
-                                                        fadeOutCurve: curve,
-                                                    }),
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
                                           }),
                                       );
                                       void dispatch(
                                           setClipStateRemote({
                                               clipId,
                                               ...(target === "in"
-                                                  ? {
-                                                        fadeInCurve: curve,
-                                                    }
-                                                  : {
-                                                        fadeOutCurve: curve,
-                                                    }),
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
                                           }),
                                       );
                                   }}
@@ -2221,38 +2438,42 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           }),
                                       );
                                   }}
-                              />
+                              />,
+                              document.body,
                           );
                       })()
                     : null}
 
-                {trackAreaMenu ? (
-                    <TrackAreaContextMenu
-                        x={trackAreaMenu.x}
-                        y={trackAreaMenu.y}
-                        canPaste={clipboardAvailable}
-                        canSplit={(multiSelectedClipIds.length > 0
-                            ? multiSelectedClipIds
-                            : sessionRef.current.selectedClipId
-                              ? [sessionRef.current.selectedClipId]
-                              : []
-                        ).some((id) => {
-                            const clip = sessionRef.current.clips.find((c) => c.id === id);
-                            if (!clip) return false;
-                            const splitSec = Math.max(
-                                0,
-                                Number(sessionRef.current.playheadSec ?? 0) || 0,
-                            );
-                            return (
-                                splitSec >= clip.startSec &&
-                                splitSec <= clip.startSec + clip.lengthSec
-                            );
-                        })}
-                        onPaste={pasteClipsAtPlayhead}
-                        onSplit={splitSelectedAtPlayhead}
-                        onClose={() => setTrackAreaMenu(null)}
-                    />
-                ) : null}
+                {trackAreaMenu
+                    ? createPortal(
+                          <TrackAreaContextMenu
+                              x={trackAreaMenu.x}
+                              y={trackAreaMenu.y}
+                              canPaste={clipboardAvailable}
+                              canSplit={(multiSelectedClipIds.length > 0
+                                  ? multiSelectedClipIds
+                                  : sessionRef.current.selectedClipId
+                                    ? [sessionRef.current.selectedClipId]
+                                    : []
+                              ).some((id) => {
+                                  const clip = sessionRef.current.clips.find((c) => c.id === id);
+                                  if (!clip) return false;
+                                  const splitSec = Math.max(
+                                      0,
+                                      Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                  );
+                                  return (
+                                      splitSec >= clip.startSec &&
+                                      splitSec <= clip.startSec + clip.lengthSec
+                                  );
+                              })}
+                              onPaste={pasteClipsAtPlayhead}
+                              onSplit={splitSelectedAtPlayhead}
+                              onClose={() => setTrackAreaMenu(null)}
+                          />,
+                          document.body,
+                      )
+                    : null}
 
                 <QuickClipExportDialog
                     open={quickExportDialog.open}
@@ -2332,7 +2553,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <Dialog.Content maxWidth="480px">
                         <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
                         <Dialog.Description>
-                            <Text size="2">{t("clip_replace_same_source_confirm" as any)}</Text>
+                            <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
                         </Dialog.Description>
                         <Flex justify="end" gap="2" mt="4">
                             <Button
@@ -2377,6 +2598,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 <TimelineDisplaySettingsDialog
                     open={timeDisplaySettingsOpen}
                     onOpenChange={setTimeDisplaySettingsOpen}
+                />
+
+                {/* 音高拖拽悬浮 ToolTips：跟随指针展示 Clip 范围内音高变化量 */}
+                <AppTooltipBubble
+                    text={pitchDragTooltip?.text ?? null}
+                    position={pitchDragTooltip?.position ?? null}
                 />
             </Flex>
         </Flex>

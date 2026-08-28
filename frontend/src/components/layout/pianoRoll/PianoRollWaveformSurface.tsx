@@ -25,8 +25,10 @@ function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
         fadeOutSec: entry.fadeOutSec,
         autoFadeInSec: entry.autoFadeInSec,
         autoFadeOutSec: entry.autoFadeOutSec,
-        fadeInCurve: entry.fadeInCurve,
-        fadeOutCurve: entry.fadeOutCurve,
+        fadeInShape: entry.fadeInShape,
+        fadeInDir: entry.fadeInDir,
+        fadeOutShape: entry.fadeOutShape,
+        fadeOutDir: entry.fadeOutDir,
     };
 }
 

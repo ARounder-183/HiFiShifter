@@ -416,6 +416,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                         .map(std::sync::Arc::new),
                                     frames,
                                     sample_rate: clip_render_info.sr,
+                                    rendered_take_id: clip_render_info.clip.active_take_id.clone(),
                                 };
 
                                 // 现在存入缓存
@@ -758,6 +759,7 @@ fn ensure_hifigan_tension_cache(
         pcm_stereo: std::sync::Arc::new(tensioned),
         frames,
         sample_rate: out_rate,
+        rendered_take_id: clip.active_take_id.clone(),
     };
     let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
         .lock()
@@ -948,8 +950,9 @@ fn render_single_clip(
         (clip.source_start_sec * in_rate as f64).round() as i64
     };
     let segment: Vec<f32> = if loop_mode {
-        let out_source_frames =
-            ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0)) as usize;
+        let out_source_frames = ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64)
+            .ceil()
+            .max(2.0)) as usize;
         crate::mixdown::build_loop_tiled_segment(
             &pcm,
             in_channels_usize,
@@ -1004,9 +1007,9 @@ fn render_single_clip(
         // 同一条目互相投毒（get_or_compute 不校验长度/内容）。
         let (key_start_sec, key_end_sec) = if loop_mode {
             let total_frames = ((total_sec * in_rate as f64).round() as i64).max(1);
-            let consumed_frames =
-                ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64).ceil().max(2.0))
-                    as i64;
+            let consumed_frames = ((clip.length_sec.max(0.0) * playback_rate * in_rate as f64)
+                .ceil()
+                .max(2.0)) as i64;
             let start_frame = anchor_frame.rem_euclid(total_frames);
             (
                 start_frame as f64 / in_rate as f64,
@@ -1667,6 +1670,7 @@ fn render_background_pass(
                                 .map(std::sync::Arc::new),
                             frames,
                             sample_rate: clip_render_info.sr,
+                            rendered_take_id: clip_render_info.clip.active_take_id.clone(),
                         };
 
                         let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()

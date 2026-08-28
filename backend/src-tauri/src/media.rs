@@ -238,7 +238,6 @@ fn scan_track_duration_sec(
 }
 
 struct MediaHeader {
-    track: Track,
     audio_stream_index: usize,
     sample_rate: u32,
     channels: u16,
@@ -292,7 +291,6 @@ fn read_media_header(path: &Path, preferred_stream: Option<usize>) -> Result<Med
     });
 
     Ok(MediaHeader {
-        track,
         audio_stream_index,
         sample_rate: resolved_sample_rate,
         channels,

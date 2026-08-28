@@ -19,8 +19,7 @@
  * @module waveformRenderer
  */
 
-import type { FadeCurveType } from "../components/layout/timeline/paths";
-import { fadeCurveGain } from "../components/layout/timeline/paths";
+import { fadeGainSigned } from "../components/layout/timeline/reaperFade";
 import { wfDiag_poolAcquire, wfDiag_poolRelease, wfDiag_poolRegister } from "./waveformDebug";
 
 // ============================================================================
@@ -61,9 +60,11 @@ export interface WaveformRenderParams {
     /** 淡出时长（秒） */
     fadeOutSec: number;
     /** 淡入曲线类型 */
-    fadeInCurve: FadeCurveType;
+    fadeInShape: number;
+    fadeInDir: number;
     /** 淡出曲线类型 */
-    fadeOutCurve: FadeCurveType;
+    fadeOutShape: number;
+    fadeOutDir: number;
     /** 数据起始时间（秒，源文件坐标系） */
     dataStartSec?: number;
     /** 数据持续时间（秒） */
@@ -153,8 +154,10 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
         volumeGain,
         fadeInSec,
         fadeOutSec,
-        fadeInCurve,
-        fadeOutCurve,
+        fadeInShape,
+        fadeInDir,
+        fadeOutShape,
+        fadeOutDir,
         dataStartSec,
         dataDurationSec,
         clipTimeOffsetSec = 0,
@@ -217,12 +220,14 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
 
         // 淡入：时间 0 -> fadeInSec，增益 0 -> 1
         if (fadeInSec > 0 && time < fadeInSec) {
-            gain *= fadeCurveGain(time * invFadeInSec, fadeInCurve);
+            gain *= fadeGainSigned(fadeInShape, fadeInDir, "in", time * invFadeInSec);
         }
 
         // 淡出：时间 (clipDuration - fadeOutSec) -> clipDuration，增益 1 -> 0
         if (fadeOutSec > 0 && time > fadeOutStart) {
-            gain *= 1 - fadeCurveGain((time - fadeOutStart) * invFadeOutSec, fadeOutCurve);
+            // fadeGainSigned("out") 返回的就是该时刻的剩余响度增益（1→0 递减），
+            // 直接相乘；绝不能再套 1 - 补号 —— 那会把淡出反向成淡入。
+            gain *= fadeGainSigned(fadeOutShape, fadeOutDir, "out", (time - fadeOutStart) * invFadeOutSec);
         }
 
         // 应用增益

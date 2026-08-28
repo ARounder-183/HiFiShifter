@@ -73,6 +73,7 @@ pub(super) fn import_project(
     for clip in &mut timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
     }
+    timeline.sync_clip_takes_from_flat();
 
     let imported_notes = std::mem::take(&mut pf.notes_markdown);
     let imported_tempo_map = timeline.tempo_map.take();
@@ -102,7 +103,8 @@ pub(super) fn import_project(
             project.dirty = true;
             update_window_title(&window, &project.name, project.dirty);
         }
-        let mut json = serde_json::to_value(get_timeline_state_from_ref(&state)).unwrap_or_default();
+        let mut json =
+            serde_json::to_value(get_timeline_state_from_ref(&state)).unwrap_or_default();
         json["ok"] = serde_json::json!(true);
         json["empty"] = serde_json::json!(true);
         json["sourceProject"] = serde_json::json!(source_name);
@@ -162,9 +164,8 @@ pub(super) fn import_project(
         let mut map_imported = false;
         let mut skipped = false;
         if let Some(mut points) = imported_tempo_map {
-            if place_at_playhead.unwrap_or(false) {
-                skipped = true;
-            } else if tl.tempo_map.is_some() {
+            // 三类跳过原因：放到播放头粘贴时、工程已有速度线、或用户关闭导入开关。
+            if place_at_playhead.unwrap_or(false) || tl.tempo_map.is_some() {
                 skipped = true;
             } else if import_tempo_map.unwrap_or(true) {
                 for point in &mut points {

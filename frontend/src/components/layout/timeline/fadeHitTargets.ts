@@ -12,7 +12,7 @@
  * 几何与 timelineCanvasRenderer.drawFadeCurveStroke 完全一致（同一套
  * fadeCurveGain + bodyTop/bodyHeight 约定），保证"视觉画在哪、就能在哪抓住"。
  */
-import { fadeCurveGain, type FadeCurveType } from "./paths";
+import { fadeGainSigned } from "./reaperFade";
 
 /** 包络线命中块：边长（px）。 */
 export const FADE_LINE_HIT_SIZE = 16;
@@ -64,25 +64,31 @@ function sampleFadeLine(args: {
     right: number;
     bodyTop: number;
     bodyHeight: number;
-    curve: FadeCurveType;
+    shape: number;
+    dir: number;
     mode: "in" | "out";
     clipXFrom: number;
     clipXTo: number;
 }): Array<{ x: number; y: number }> {
-    const { left, right, bodyTop, bodyHeight, curve, mode, clipXFrom, clipXTo } = args;
+    const { left, right, bodyTop, bodyHeight, shape, dir, mode, clipXFrom, clipXTo } = args;
     const width = right - left;
     if (width <= 1e-6) return [];
     // 沿对角线按"弧长 = 目标步长"采样：保证相邻命中块沿 x 与沿 y 都彼此交叠，
     // 覆盖整条包络线（含陡峭短淡化与较长淡化），不产生间断。
     const arcLength = Math.hypot(width, bodyHeight);
-    const count = Math.max(2, Math.min(36, Math.ceil(arcLength / FADE_LINE_HIT_STEP_PX)));
+    // 密度跟随弧长：极端缩放下弧长可达数千像素，旧上限 36 会留下大片
+    // 无法命中的空隙。命中块 16px，步长 12px 保证相邻块交叠；上限 400
+    // 覆盖到 ~4800px 弧长（更高时按比例放宽间距，仍远小于旧行为）。
+    const count = Math.max(2, Math.min(400, Math.ceil(arcLength / 12)));
     const points: Array<{ x: number; y: number }> = [];
     for (let index = 0; index < count; index += 1) {
         const t = index / Math.max(1, count - 1);
         const x = left + t * width;
         if (x < clipXFrom || x > clipXTo) continue;
         const gain =
-            mode === "in" ? fadeCurveGain(t, curve) : fadeCurveGain(1 - t, curve);
+            mode === "in"
+                ? fadeGainSigned(shape, dir, "in", t)
+                : fadeGainSigned(shape, dir, "out", t);
         const y = bodyTop + bodyHeight * (1 - gain);
         points.push({ x, y });
     }
@@ -102,12 +108,14 @@ export function buildFadeHitTargets(args: {
     bodyHeight: number;
     fadeInPx: number;
     fadeOutPx: number;
-    fadeInCurve: FadeCurveType;
-    fadeOutCurve: FadeCurveType;
+    fadeInShape: number;
+    fadeInDir: number;
+    fadeOutShape: number;
+    fadeOutDir: number;
     clipXFrom?: number;
     clipXTo?: number;
 }): FadeHitTarget[] {
-    const { clipLeftPx, clipWidthPx, bodyTop, bodyHeight, fadeInCurve, fadeOutCurve } = args;
+    const { clipLeftPx, clipWidthPx, bodyTop, bodyHeight, fadeInShape, fadeInDir, fadeOutShape, fadeOutDir } = args;
     const solidWidth = Math.max(1, clipWidthPx);
     const clipRightPx = clipLeftPx + solidWidth;
     const clipXFrom = args.clipXFrom ?? Number.NEGATIVE_INFINITY;
@@ -125,7 +133,8 @@ export function buildFadeHitTargets(args: {
             right: regionRight,
             bodyTop,
             bodyHeight: bodyH,
-            curve: fadeInCurve,
+            shape: fadeInShape,
+            dir: fadeInDir,
             mode: "in",
             clipXFrom,
             clipXTo,
@@ -158,7 +167,8 @@ export function buildFadeHitTargets(args: {
             right: regionRight,
             bodyTop,
             bodyHeight: bodyH,
-            curve: fadeOutCurve,
+            shape: fadeOutShape,
+            dir: fadeOutDir,
             mode: "out",
             clipXFrom,
             clipXTo,

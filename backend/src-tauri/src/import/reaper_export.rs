@@ -4,7 +4,7 @@ use crate::reaper_parser::{
     ReaperData, ReaperIgnTempo, ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperSource,
     ReaperTrack,
 };
-use crate::state::{Clip, TimelineState};
+use crate::state::{Clip, ClipTake, TimelineState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default)]
@@ -15,43 +15,47 @@ pub struct ReaperExportResult {
     pub track_count: usize,
 }
 
-fn fade_shape(curve: &str) -> f64 {
-    match curve {
-        "linear" => 0.0,
-        "sine" => 1.0,
-        "exponential" => 2.0,
-        "logarithmic" => 3.0,
-        "scurve" => 4.0,
-        _ => 1.0,
-    }
-}
-
-fn fade_values(curve: &str, length_sec: f64) -> Vec<f64> {
+/// 写出 FADEIN/FADEOUT 数组。
+///
+/// 布局对照 REAPER 7.x 实测样本（详见 reaper_parser::reaper_fade_shape_dir）：
+/// `[shape, 手动长度, 自动交叉淡化长度, 取整形状(镜像槽), 自动selector, 曲率dir, 0]`。
+/// 索引 3 在官方样本中存放取整后的基础形状（如形状 1.1 时写 1），保持一致；
+/// 第二曲率参数（索引 6）语义未公开，固定写 0。
+/// 手动/自动分别来自 Clip 的 `fade_*_sec` 与 `auto_fade_*_sec`，
+/// 与应用内"有效 fade"模型一一对应，不再像旧实现那样合并成一个手动值。
+pub(crate) fn fade_values(
+    shape: f64,
+    dir: f64,
+    manual_length_sec: f64,
+    auto_length_sec: f64,
+) -> Vec<f64> {
+    let shape = if shape.is_finite() { shape } else { 0.0 };
+    let mirror_base = shape.trunc().clamp(0.0, 255.0);
     vec![
-        fade_shape(curve),
-        length_sec.max(0.0),
-        0.0,
-        1.0,
-        0.0,
-        0.0,
+        shape,
+        manual_length_sec.max(0.0),
+        auto_length_sec.max(0.0),
+        mirror_base,
+        if auto_length_sec > 1e-9 { 1.0 } else { 0.0 },
+        dir.clamp(-1.0, 1.0),
         0.0,
     ]
 }
 
-fn source_bounds(clip: &Clip) -> (f64, f64) {
+fn source_bounds(take: &ClipTake, clip_length_sec: f64) -> (f64, f64) {
     // 正放：保留负 source_start（导出为负 SOFFS = REAPER 左延伸 item 的前导静音）。
     // 倒放走 SECTION 域（RPP 的 SECTION STARTPOS 不能为负），钳制到 ≥0。
-    let start = if clip.reversed {
-        clip.source_start_sec.max(0.0)
+    let start = if take.reversed {
+        take.source_start_sec.max(0.0)
     } else {
-        clip.source_start_sec
+        take.source_start_sec
     };
-    let mut end = clip.source_end_sec.max(start);
+    let mut end = take.source_end_sec.max(start);
     if end <= start {
-        end = clip
+        end = take
             .duration_sec
             .filter(|duration| *duration > start)
-            .unwrap_or_else(|| start + clip.length_sec * clip.playback_rate.max(0.01) as f64);
+            .unwrap_or_else(|| start + clip_length_sec * take.playback_rate.max(0.01) as f64);
     }
     (start, end.max(start))
 }
@@ -76,11 +80,11 @@ fn reaper_source_type(path: &str) -> &'static str {
     }
 }
 
-fn audio_source(clip: &Clip, _rate: f64, source_span_sec: f64) -> ReaperSource {
-    let path = clip.source_path.clone().unwrap_or_default();
-    let (start, _) = source_bounds(clip);
+fn audio_source(take: &ClipTake, _rate: f64, source_span_sec: f64) -> ReaperSource {
+    let path = take.source_path.clone().unwrap_or_default();
+    let (start, _) = source_bounds(take, 0.0);
 
-    if clip.reversed {
+    if take.reversed {
         let mut source = ReaperSource::new();
         source.source_type = "SECTION".to_string();
         source.file_path = path.clone();
@@ -99,10 +103,10 @@ fn audio_source(clip: &Clip, _rate: f64, source_span_sec: f64) -> ReaperSource {
     }
 }
 
-fn midi_source(clip: &Clip, bpm: f64) -> ReaperSource {
+fn midi_source(take: &ClipTake, bpm: f64) -> ReaperSource {
     const PPQ: u32 = 960;
 
-    let notes = clip.midi_note_data.as_deref().unwrap_or(&[]);
+    let notes = take.midi_note_data.as_deref().unwrap_or(&[]);
     let mut events: Vec<ReaperMidiEvent> = Vec::new();
     let mut raw_events: Vec<(u64, u8, u8, u8)> = Vec::new();
 
@@ -146,89 +150,171 @@ fn midi_source(clip: &Clip, bpm: f64) -> ReaperSource {
     source
 }
 
-fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
-    let mut item = ReaperItem::default();
-    item.position = clip.start_sec.max(0.0);
-    item.length = clip.length_sec.max(0.001);
-    item.snap_offs = 0.0;
-    item.is_loop = false;
-    item.all_takes = false;
-    // 导出“有效 fade”（自动交叉淡化覆盖手动 fade），与渲染一致。
-    item.fade_in = fade_values(&clip.fade_in_curve, clip.effective_fade_in_sec());
-    item.fade_out = fade_values(&clip.fade_out_curve, clip.effective_fade_out_sec());
-    item.mute = vec![if clip.muted { 1 } else { 0 }, 0];
-    item.selected = false;
+fn fill_reaper_take(
+    dest: &mut crate::reaper_parser::ReaperTake,
+    take: &ClipTake,
+    clip_length_sec: f64,
+    bpm: f64,
+    is_item_default: bool,
+    output_playback_rate: f32,
+) -> bool {
+    let rate = output_playback_rate.max(0.01).min(100.0) as f64;
+    dest.name = take.name.clone();
+    // REAPER 的字段语义：
+    // - Item 默认 take：`VOLPAN <item trim> <pan> <take volume> <pan law>`。
+    // - 显式 take：`TAKEVOLPAN <pan> <take volume> <pan law>`，
+    //   默认值为 `0 1 -1`；不能沿用 Item 默认 take 的四元组写法。
+    dest.vol_pan = if is_item_default {
+        vec![1.0, 0.0, take.gain as f64, -1.0]
+    } else {
+        vec![0.0, take.gain as f64, -1.0]
+    };
+    dest.play_rate = vec![rate, 1.0, 0.0, -1.0, 0.0, 0.0025];
+    dest.chan_mode = 0;
 
-    let rate = clip.playback_rate.max(0.01).min(100.0) as f64;
-    let default_take = &mut item.default_take;
-    default_take.name = clip.name.clone();
-    default_take.vol_pan = vec![clip.gain as f64, 0.0, 1.0, -1.0];
-    default_take.play_rate = vec![rate, 1.0, 0.0, -1.0, 0.0, 0.0025];
-    default_take.chan_mode = 0;
-
-    if let Some(ref midi_data) = clip.midi_note_data {
+    if let Some(ref midi_data) = take.midi_note_data {
         if midi_data.is_empty() {
-            return None;
+            return false;
         }
-        default_take.s_offs = 0.0;
-        default_take.source = Some(midi_source(clip, bpm));
-        return Some(item);
+        dest.s_offs = 0.0;
+        dest.source = Some(midi_source(take, bpm));
+        return true;
     }
 
-    let source_path = clip.source_path.as_deref().unwrap_or("").trim();
+    let source_path = take.source_path.as_deref().unwrap_or("").trim();
     if source_path.is_empty() {
-        return None;
+        return false;
     }
 
-    // Loop（循环源）属性：以显式标志为准。未启用 Loop 时长度超过源窗口的
-    // 部分（右缘延伸产生的静音尾巴）是合法状态 —— 导出为更长的 LENGTH，
-    // REAPER 对 LOOP 0 item 的超出部分渲染静音，与 HiFiShifter 渲染一致；
-    // 不再按"长度>源窗口"推断 LOOP。
-    item.is_loop = clip.loop_enabled;
-
-    if clip.reversed && clip.loop_enabled {
+    if take.reversed && take.loop_enabled {
         // 倒放 + Loop：回绕发生在整个媒体文件上（与引擎及正放 Loop 的
-        // "循环原始音频文件"语义一致）。用覆盖全媒体的 SECTION 承载回绕域
-        //（SECTION 域不能取负起点），SOFFS 承载倒放相位锚点：
-        //   导入端倒放锚点 = 区间末端 − SOFFS；
-        //   引擎倒放锚点 φ = floor_mod(min(source_end, D), D)；
-        // ⇒ SOFFS = D − φ，往返后锚点保持一致。
-        let media_dur = crate::state::clip_source_media_duration_sec(clip)
-            .filter(|d| d.is_finite() && *d > 1e-9);
+        // "循环原始音频文件"语义一致）。用覆盖全媒体的 SECTION 承载回绕域，
+        // SOFFS 承载倒放相位锚点。
+        let media_dur = take
+            .duration_sec
+            .filter(|d| d.is_finite() && *d > 1e-9)
+            .or_else(|| {
+                take.duration_frames
+                    .zip(take.source_sample_rate)
+                    .filter(|(frames, sr)| *sr > 0 && *frames > 0)
+                    .map(|(frames, sr)| frames as f64 / sr as f64)
+            });
         if let Some(d) = media_dur {
-            let anchor = clip.source_end_sec.min(d).rem_euclid(d);
-            // 注意：必须用 SECTION 类型 —— 序列化器只对 SECTION 源写
-            // LENGTH/STARTPOS/MODE 行（push_reaper_source），其它类型会
-            // 静默丢失反向与窗口信息。
+            let anchor = take.source_end_sec.min(d).rem_euclid(d);
             let mut source = ReaperSource::new();
             source.source_type = "SECTION".to_string();
             source.file_path = source_path.to_string();
             source.section_mode = 1;
             source.section_start_sec = Some(0.0);
             source.section_length_sec = Some(d);
-            default_take.s_offs = (d - anchor).rem_euclid(d);
-            default_take.source = Some(source);
-            return Some(item);
+            dest.s_offs = (d - anchor).rem_euclid(d);
+            dest.source = Some(source);
+            return true;
         }
         // 媒体时长未知：退化为下方通用反向路径（尽力而为）。
     }
 
-    let (start, end) = source_bounds(clip);
+    let (start, end) = source_bounds(take, clip_length_sec);
     let source_span = (end - start).max(0.0);
 
-    let mut source = audio_source(clip, rate, source_span);
-    if clip.reversed {
+    let mut source = audio_source(take, rate, source_span);
+    if take.reversed {
         // 反向：SECTION MODE 1 承载源窗口，SOFFS 置 0。
-        default_take.s_offs = 0.0;
+        dest.s_offs = 0.0;
     } else {
         // 正向：plain SOURCE + SOFFS 承载进入锚点（可为负 = 前导静音）。
         // Loop 的回绕发生在整个媒体文件上（REAPER 原生 Loop source 语义），
         // 无需 SECTION；非 Loop 超出媒体的 LENGTH 部分由 REAPER 渲染静音。
         source.section_start_sec = None;
         source.section_length_sec = None;
-        default_take.s_offs = start;
+        dest.s_offs = start;
     }
-    default_take.source = Some(source);
+    dest.source = Some(source);
+    true
+}
+
+fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
+    let mut working = clip.clone();
+    working.normalize_takes();
+    if working.takes.is_empty() {
+        return None;
+    }
+    let active_idx = working.active_take_index().min(working.takes.len() - 1);
+
+    let mut item = ReaperItem::default();
+    item.position = working.start_sec.max(0.0);
+    item.length = working.length_sec.max(0.001);
+    // SnapOffset：相对 Clip 起点的偏移，与 REAPER SNAPOFFS 同语义直传。
+    item.snap_offs = working.snap_offset_sec.max(0.0);
+    // LOOP 是 REAPER 的 Item 级标志：多 take Clip 各 take 的 loop_enabled
+    // 不同时，往返只能保留 active take 的值（导入端也按 item 级读取并共享
+    // 给全部 take）。这是 RPP 格式的表达力边界，非实现遗漏。
+    item.is_loop = working.takes[active_idx].loop_enabled;
+    item.all_takes = false;
+    // 手动长度与自动交叉淡化长度分槽写出（REAPER 索引 1 / 索引 2 +
+    // selector），形状与曲率原样导出，保证 REAPER 渲染与应用一致。
+    item.fade_in = fade_values(
+        working.fade_in_shape,
+        working.fade_in_dir,
+        working.fade_in_sec,
+        working.auto_fade_in_sec,
+    );
+    item.fade_out = fade_values(
+        working.fade_out_shape,
+        working.fade_out_dir,
+        working.fade_out_sec,
+        working.auto_fade_out_sec,
+    );
+    item.mute = vec![if working.muted { 1 } else { 0 }, 0];
+    item.selected = false;
+
+    let active_take = working.takes[active_idx].clone();
+    // RPP 格式没有 Item 级 PLAYRATE 行：take 的 PLAYRATE 就是该 take 的
+    // 有效播放速率（导入端也按此读取）。因此：
+    // - default take（= active take）必须写 **组合有效速率**
+    //   `clip_rate × take_rate` —— 与 develop 单窗口时代导出
+    //   `clip.playback_rate` 的行为一致，否则带速率的 item 往返即丢速；
+    // - 显式 take 同样写各自组合速率，保证在 REAPER 里切换 take 时
+    //   听到的速度与 HiFiShifter 渲染一致。
+    let clip_rate = if working.clip_playback_rate.is_finite() && working.clip_playback_rate > 1e-6 {
+        working.clip_playback_rate
+    } else {
+        1.0
+    };
+    if !fill_reaper_take(
+        &mut item.default_take,
+        &active_take,
+        working.length_sec,
+        bpm,
+        true,
+        clip_rate * active_take.playback_rate,
+    ) {
+        return None;
+    }
+
+    // 显式 TAKE 块列出除 active 之外的全部 take（active 已由 default_take
+    // 承载）。此前实现固定 skip(1)：当 active 不是第一个 take 时会把
+    // active 重复写一份、而真正的第一个 take 被静默丢弃，再导入即得到
+    // 错误的 take 集合。所有显式 take 均不打 SEL 标记 —— 导入端在无 SEL
+    // 时回退到 default_take，恰好还原当前 active 选择。
+    for (idx, take) in working.takes.iter().enumerate() {
+        if idx == active_idx {
+            continue;
+        }
+        let mut dest = crate::reaper_parser::ReaperTake::default();
+        if fill_reaper_take(
+            &mut dest,
+            take,
+            working.length_sec,
+            bpm,
+            false,
+            clip_rate * take.playback_rate,
+        ) {
+            dest.selected = false;
+            item.takes.push(dest);
+        }
+    }
+
     Some(item)
 }
 
@@ -264,10 +350,7 @@ pub fn build_reaper_clipboard(
             skipped_clip_count += 1;
             continue;
         };
-        items_by_track
-            .entry(track_index)
-            .or_default()
-            .push(item);
+        items_by_track.entry(track_index).or_default().push(item);
     }
 
     if items_by_track.is_empty() {
@@ -330,6 +413,86 @@ mod tests {
     use crate::state::TimelineState;
 
     #[test]
+    fn multi_take_export_uses_reaper_takevolpan_layout() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Multi Take".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            // 直接写投影字段后必须 sync：takes 是磁盘/导出权威，
+            // 否则 normalize_takes 会用陈旧 Take 覆盖这些值。
+            let mut second = clip.active_take().clone();
+            second.id = crate::state::new_id("take");
+            second.name = "Second".to_string();
+            second.source_path = Some("C:/audio/b.wav".to_string());
+            clip.add_take(second);
+            clip.gain = 0.75;
+            clip.sync_take_from_flat();
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        // Item 默认 take：VOLPAN <trim> <pan> <take volume> <pan law>。
+        assert_eq!(item.default_take.vol_pan.len(), 4);
+        assert!((item.default_take.vol_pan[2] - 0.75).abs() < 1e-9);
+        // 显式 take：TAKEVOLPAN <pan> <take volume> <pan law>，默认音量 1。
+        assert_eq!(item.takes.len(), 1);
+        assert_eq!(item.takes[0].vol_pan.len(), 3);
+        assert_eq!(item.takes[0].vol_pan[0], 0.0);
+        assert_eq!(item.takes[0].vol_pan[1], 1.0);
+        assert_eq!(item.takes[0].vol_pan[2], -1.0);
+    }
+
+    #[test]
+    fn multi_take_export_preserves_rates_and_nonzero_active_index() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Rates".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            // takes = [Rates(1.0), Second(1.0)]；随后把 Clip 级倍率设为 2.0，
+            // 并给第二个 take 自身速率 1.5（组合有效速率 3.0），再把 active
+            // 切到第二个 take —— 覆盖“active 非首位 + 非 1 速率”的导出路径。
+            let mut second = clip.active_take().clone();
+            second.id = crate::state::new_id("take");
+            second.name = "Second".to_string();
+            second.source_path = Some("C:/audio/b.wav".to_string());
+            clip.add_take(second);
+            clip.clip_playback_rate = 2.0;
+            clip.playback_rate = 2.0;
+            clip.sync_take_from_flat();
+            let second_id = clip.takes[1].id.clone();
+            clip.switch_active_take(&second_id)
+                .expect("second take exists");
+            clip.takes[1].playback_rate = 1.5;
+        }
+
+        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        // active take（Second）作为 default take：PLAYRATE = clip 级 × take 自身。
+        assert_eq!(item.default_take.name, "Second");
+        assert!((item.default_take.play_rate[0] - 3.0).abs() < 1e-9);
+        // 显式 TAKE 块只含非 active 的第一个 take，且不打 SEL 标记：
+        // 导入端在无 SEL 时回退 default_take，恰好还原 active 选择。
+        assert_eq!(item.takes.len(), 1);
+        assert_eq!(item.takes[0].name, "Rates");
+        assert!((item.takes[0].play_rate[0] - 2.0).abs() < 1e-9);
+        assert!(!item.takes[0].selected);
+    }
+
+    #[test]
     fn audio_clip_roundtrips_through_reaper_clipboard() {
         let mut timeline = TimelineState::default();
         let track_id = timeline.tracks[0].id.clone();
@@ -347,6 +510,10 @@ mod tests {
             clip.gain = 0.8;
             clip.fade_in_sec = 0.01;
             clip.fade_out_sec = 0.02;
+            // 本测试考察普通裁剪 Clip 的往返，须显式关闭 add_clip 的
+            // 进程级默认 Loop；写完投影统一 sync 回 Take 权威数据。
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -358,7 +525,10 @@ mod tests {
         assert!((item.position - 1.5).abs() < 1e-9);
         assert!((item.length - 2.0).abs() < 1e-9);
         assert!((item.default_take.s_offs - 0.25).abs() < 1e-9);
-        assert_eq!(item.default_take.source.as_ref().unwrap().file_path, "C:/audio/test.wav");
+        assert_eq!(
+            item.default_take.source.as_ref().unwrap().file_path,
+            "C:/audio/test.wav"
+        );
     }
 
     fn source_type_for_path(path: &str) -> String {
@@ -415,6 +585,8 @@ mod tests {
                 channel: 0,
             }]);
             clip.source_path = None;
+            // MIDI 内容写在投影上，须 sync 回 Take 权威数据供导出读取。
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -464,6 +636,7 @@ mod tests {
             clip.source_end_sec = 3.0;
             clip.playback_rate = 1.0;
             clip.loop_enabled = true;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
@@ -485,6 +658,8 @@ mod tests {
                 .expect("clip exists");
             clip.loop_enabled = false;
             clip.length_sec = 2.0;
+            // 同步纪律：改写投影后必须写回 Take 权威数据。
+            clip.sync_take_from_flat();
         }
         let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
         let parsed2 = parse_for_test(&export2.bytes);
@@ -516,6 +691,7 @@ mod tests {
             clip.source_end_sec = 15.25232042998004;
             clip.playback_rate = 1.0;
             clip.loop_enabled = false;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -551,6 +727,7 @@ mod tests {
             // floor_mod(min(source_end, D), D) 取倒放锚点。
             clip.source_start_sec = 3.0;
             clip.source_end_sec = 1.0;
+            clip.sync_take_from_flat();
         }
 
         let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
@@ -558,10 +735,12 @@ mod tests {
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
         let source = item.default_take.source.as_ref().unwrap();
-        assert_eq!(source.section_mode, 1, "reversal must be expressed via SECTION MODE");
+        assert_eq!(
+            source.section_mode, 1,
+            "reversal must be expressed via SECTION MODE"
+        );
         assert!(
-            source.section_start_sec == Some(0.0)
-                && source.section_length_sec == Some(4.0),
+            source.section_start_sec == Some(0.0) && source.section_length_sec == Some(4.0),
             "SECTION must cover the whole media file, got {:?}..{:?}",
             source.section_start_sec,
             source.section_length_sec

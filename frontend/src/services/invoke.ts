@@ -111,7 +111,8 @@ function getTauriInvoke(): (<T>(cmd: string, args?: Record<string, unknown>) => 
 
 type BuildArgsResult = Record<string, unknown> | undefined | { __unwired: true };
 
-function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
+/** 位置参数 → Tauri 命名参数（按各命令的手写映射表）。导出供回归测试锁定。 */
+export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     // 注意：Tauri invoke uses a named-argument object; pywebview uses positional args.
     switch (method) {
         case "set_transport": {
@@ -237,23 +238,90 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],
                 playbackRate: args[8],
-                reversed: args[9],
-                loopEnabled: args[10],
-                fadeInSec: args[11],
-                fadeOutSec: args[12],
-                fadeInCurve: args[13],
-                fadeOutCurve: args[14],
-                autoFadeInSec: args[15],
-                autoFadeOutSec: args[16],
-                color: args[17],
-                formantMorph: args[18],
-                checkpoint: args[19],
+                clipPlaybackRate: args[9],
+                reversed: args[10],
+                loopEnabled: args[11],
+                snapOffsetSec: args[12],
+                fadeInSec: args[13],
+                fadeOutSec: args[14],
+                fadeInShape: args[15],
+                fadeOutShape: args[16],
+                fadeInDir: args[17],
+                fadeOutDir: args[18],
+                autoFadeInSec: args[19],
+                autoFadeOutSec: args[20],
+                color: args[21],
+                formantMorph: args[22],
+                checkpoint: args[23],
             };
 
         case "set_clips_state_bulk":
             return {
                 updates: args[0],
                 checkpoint: args[1],
+            };
+
+        case "set_clip_active_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "cycle_clip_takes":
+            return {
+                clipIds: args[0],
+                direction: args[1],
+                checkpoint: args[2],
+            };
+
+        case "pack_clips_into_takes":
+            return {
+                clipIds: args[0],
+                checkpoint: args[1],
+            };
+
+        case "explode_clip_takes":
+            return {
+                clipId: args[0],
+                checkpoint: args[1],
+            };
+
+        case "duplicate_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "remove_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "rename_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "add_clip_take_from_media":
+            return {
+                clipId: args[0],
+                sourcePath: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "import_media_files_as_takes":
+            return {
+                paths: args[0],
+                trackId: args[1],
+                startSec: args[2],
             };
 
         case "duplicate_clips_bulk":

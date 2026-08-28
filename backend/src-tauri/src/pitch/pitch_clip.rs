@@ -388,14 +388,14 @@ pub fn schedule_clip_pitch_jobs(
     app_handle: Option<&tauri::AppHandle>,
     _out_rate: u32,
 ) {
-    eprintln!(
+    debug_eprintln!(
         "[pitch_clip] schedule_clip_pitch_jobs called, clips={}, app_handle={}",
         tl.clips.len(),
         app_handle.is_some()
     );
 
     if !crate::fcpe_onnx::is_available() {
-        eprintln!("[pitch_clip] FCPE not available, skipping");
+        debug_eprintln!("[pitch_clip] FCPE not available, skipping");
         return;
     }
 
@@ -420,12 +420,12 @@ pub fn schedule_clip_pitch_jobs(
         let source_path = match clip.source_path.as_deref() {
             Some(p) if !p.is_empty() => p,
             _ => {
-                eprintln!("[pitch_clip] clip '{}' skipped: no source_path", clip.id);
+                debug_eprintln!("[pitch_clip] clip '{}' skipped: no source_path", clip.id);
                 continue;
             }
         };
         if !file_exists_cached(Path::new(source_path)) {
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_clip] clip '{}' skipped: file not found: {}",
                 clip.id, source_path
             );
@@ -442,7 +442,7 @@ pub fn schedule_clip_pitch_jobs(
                 .map(|t| t.compose_enabled)
                 .unwrap_or(false);
             if !compose_enabled {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' skipped: compose_enabled=false for root '{}'",
                     clip.id, root_id
                 );
@@ -465,13 +465,13 @@ pub fn schedule_clip_pitch_jobs(
         {
             let cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
             if cache.contains_key(&ck.key) {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) cache HIT (shared key), skipping",
                     clip.name, clip.id
                 );
                 continue;
             }
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_clip] clip '{}' ({}) cache MISS, will analyze",
                 clip.name, clip.id
             );
@@ -482,7 +482,7 @@ pub fn schedule_clip_pitch_jobs(
         let should_spawn = {
             let mut set = global_inflight().lock().unwrap_or_else(|e| e.into_inner());
             if set.contains(&inflight_key) {
-                eprintln!(
+                debug_eprintln!(
                     "[pitch_clip] clip '{}' ({}) already inflight, skipping",
                     clip.name, clip.id
                 );
@@ -509,10 +509,10 @@ pub fn schedule_clip_pitch_jobs(
     }
 
     if pending_jobs.is_empty() {
-        eprintln!("[pitch_clip] no pending jobs (all cached or inflight), nothing to do");
+        debug_eprintln!("[pitch_clip] no pending jobs (all cached or inflight), nothing to do");
         return;
     }
-    eprintln!("[pitch_clip] {} clip(s) need analysis", pending_jobs.len());
+    debug_eprintln!("[pitch_clip] {} clip(s) need analysis", pending_jobs.len());
 
     // ── 阶段2：重置全局进度状态，批量提交分析任务 ────────────────────────────
     let total = pending_jobs.len() as u32;
@@ -524,7 +524,7 @@ pub fn schedule_clip_pitch_jobs(
             .first()
             .map(|j| j.root_track_id.clone())
             .unwrap_or_default();
-        eprintln!(
+        debug_eprintln!(
             "[pitch_clip] emitting pitch_orig_analysis_started for root_track_id='{}'",
             root_track_id
         );
@@ -871,10 +871,8 @@ pub fn trim_and_resample_midi(
             let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
             // 倒放锚点与音频路径同约定：min(source_end, D) 后不做 max(0)，
             // 负 source_end 由 rem_euclid 统一环绕。
-            let anchor_r =
-                ((source_end_sec.min(total_sec)) * 1000.0 / fp).round() as i64;
-            let target_frames =
-                ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+            let anchor_r = ((source_end_sec.min(total_sec)) * 1000.0 / fp).round() as i64;
+            let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
             let mut out = Vec::with_capacity(target_frames);
             for i in 0..target_frames {
                 let consumed = (i as f64 * rate).round() as i64;
@@ -901,8 +899,7 @@ pub fn trim_and_resample_midi(
         let n = full_midi.len();
         let anchor_f = ((source_start_sec * 1000.0) / fp).round() as i64;
         let anchor_r = src_end_frame as i64;
-        let target_frames =
-            ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
+        let target_frames = ((clip_timeline_len_sec * 1000.0) / fp).round().max(1.0) as usize;
         let mut out = Vec::with_capacity(target_frames);
         for i in 0..target_frames {
             let consumed = (i as f64 * rate).round() as i64;
@@ -928,8 +925,9 @@ pub fn trim_and_resample_midi(
             || source_end_sec < 0.0
             || raw_end_frame_i64 > full_midi.len() as i64;
         if window_crosses_media {
-            let target_frames =
-                ((clip_timeline_len_sec.max(0.0) * 1000.0) / fp).round().max(1.0) as usize;
+            let target_frames = ((clip_timeline_len_sec.max(0.0) * 1000.0) / fp)
+                .round()
+                .max(1.0) as usize;
             return assemble_nonloop_pitch_from_window(
                 full_midi,
                 fp,
@@ -980,20 +978,17 @@ pub fn trim_and_resample_midi(
     // 防御性 clamp：当 playback_rate ≈ 1.0 时，target_frames 不应超过 trimmed 长度，
     // 避免前端 sourceEndSec 超出源文件实际时长导致曲线被不合理拉伸。
     let rate_near_one = (playback_rate - 1.0).abs() <= 0.01;
-    let target_frames = if !loop_enabled
-        && rate_near_one
-        && target_frames > trimmed.len()
-        && !trimmed.is_empty()
-    {
-        eprintln!(
+    let target_frames =
+        if !loop_enabled && rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
+            eprintln!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
             target_frames,
             trimmed.len(),
         );
-        trimmed.len()
-    } else {
-        target_frames
-    };
+            trimmed.len()
+        } else {
+            target_frames
+        };
 
     eprintln!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
@@ -1098,12 +1093,10 @@ mod tests {
         // 环绕窗口 [3.5, 3.0)（start > end），缓存曲线 100 帧（1s @10ms）。
         let full: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let out = trim_and_resample_midi(
-            &full,
-            10.0,
-            3.5, // source_start_sec（> end）
-            3.0, // source_end_sec
-            1.0, // playback_rate
-            2.0, // clip_timeline_len_sec → target = 200 帧
+            &full, 10.0, 3.5,  // source_start_sec（> end）
+            3.0,  // source_end_sec
+            1.0,  // playback_rate
+            2.0,  // clip_timeline_len_sec → target = 200 帧
             true, // loop_enabled
             None, // 媒体时长未知
             false,
@@ -1125,17 +1118,7 @@ mod tests {
     fn loop_with_media_duration_maps_per_frame_floor_mod() {
         // 媒体 1s（100 帧 @10ms），锚点 -0.25s（负值环绕到尾部一侧）。
         let full: Vec<f32> = (0..100).map(|i| (i * 7) as f32 % 13.0).collect();
-        let out = trim_and_resample_midi(
-            &full,
-            10.0,
-            -0.25,
-            1.0,
-            1.0,
-            1.5,
-            true,
-            Some(1.0),
-            false,
-        );
+        let out = trim_and_resample_midi(&full, 10.0, -0.25, 1.0, 1.0, 1.5, true, Some(1.0), false);
         assert_eq!(out.len(), 150);
         let anchor = ((-0.25f64 * 1000.0) / 10.0).round() as i64; // -25
         for (i, v) in out.iter().enumerate() {

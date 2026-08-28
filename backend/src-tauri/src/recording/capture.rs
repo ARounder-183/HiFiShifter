@@ -319,8 +319,7 @@ fn run_cpal_input(
     ctx: Arc<CaptureContext>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let (config, sample_format) =
-        pick_input_config(&device, sample_rate, channels, is_loopback)?;
+    let (config, sample_format) = pick_input_config(&device, sample_rate, channels, is_loopback)?;
     let channels_in = config.channels as usize;
     let channels_out = channels as usize;
     let resampler = if config.sample_rate.0 != sample_rate {
@@ -550,9 +549,16 @@ pub(super) fn convert_channels(
                         0.0
                     }
                 };
-                let left = get(0) + 0.7071 * get(2) + 0.7071 * get(4) + 0.7071 * get(6)
+                const SURROUND_ATTEN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+                let left = get(0)
+                    + SURROUND_ATTEN * get(2)
+                    + SURROUND_ATTEN * get(4)
+                    + SURROUND_ATTEN * get(6)
                     + 0.5 * get(3);
-                let right = get(1) + 0.7071 * get(2) + 0.7071 * get(5) + 0.7071 * get(7)
+                let right = get(1)
+                    + SURROUND_ATTEN * get(2)
+                    + SURROUND_ATTEN * get(5)
+                    + SURROUND_ATTEN * get(7)
                     + 0.5 * get(3);
                 out.push(left.clamp(-1.0, 1.0));
                 out.push(right.clamp(-1.0, 1.0));
@@ -677,7 +683,11 @@ fn fill_monitor_output<T: SizedSample + Sample + cpal::FromSample<f32>>(
         }
     }
     for (index, sample) in samples.iter_mut().enumerate() {
-        let value = if index < chunk.len() { chunk[index] } else { 0.0 };
+        let value = if index < chunk.len() {
+            chunk[index]
+        } else {
+            0.0
+        };
         *sample = <f32 as cpal::Sample>::to_sample(value);
     }
 }
@@ -727,7 +737,9 @@ fn build_monitor_stream(
     Ok(stream)
 }
 
-fn pick_monitor_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, SampleFormat), String> {
+fn pick_monitor_config(
+    device: &cpal::Device,
+) -> Result<(cpal::StreamConfig, SampleFormat), String> {
     if let Ok(ranges) = device.supported_output_configs() {
         for range in ranges {
             if range.sample_format() != SampleFormat::F32 {

@@ -1,9 +1,15 @@
 import { createSlice, current, type PayloadAction } from "@reduxjs/toolkit";
-import type { TimelineClip, TimelineState, TrackSummaryResult } from "../../types/api";
+import type {
+    TimelineClip,
+    TimelineClipTake,
+    TimelineState,
+    TrackSummaryResult,
+} from "../../types/api";
 import type {
     AutomationPoint,
     ClipInfo,
     ClipFormantMorph,
+    ClipTakeInfo,
     ClipTemplate,
     DrawToolMode,
     DragDirection,
@@ -33,6 +39,14 @@ import {
     updatePitchReferenceRemote,
     glueClipsRemote,
     groupClipsRemote,
+    setClipActiveTakeRemote,
+    cycleClipTakesRemote,
+    packClipsIntoTakesRemote,
+    explodeClipTakesRemote,
+    duplicateClipTakeRemote,
+    removeClipTakeRemote,
+    renameClipTakeRemote,
+    addClipTakeFromMediaRemote,
     ungroupClipsRemote,
     toggleGroupDisabledRemote,
     moveClipRemote,
@@ -151,12 +165,7 @@ const VALID_GRID_SIZES = new Set<GridSize>([
     "1/64t",
 ]);
 
-const VALID_TIME_UNITS = new Set<TimeUnit>([
-    "barBeats",
-    "barDivisions",
-    "seconds",
-    "clock",
-]);
+const VALID_TIME_UNITS = new Set<TimeUnit>(["barBeats", "barDivisions", "seconds", "clock"]);
 const DEFAULT_PRIMARY_TIME_UNIT: TimeUnit = "barBeats";
 const DEFAULT_SECONDARY_TIME_UNIT: TimeUnitChoice = "clock";
 const DEFAULT_RULER_LABEL_SPACING_PX = 110;
@@ -171,6 +180,7 @@ export function createDefaultTimelineSnapSettings(): TimelineSnapSettings {
         enabled: true,
         snapDistancePx: 4,
         snapRelativeToGrid: false,
+        snapHighlightEnabled: true,
         snapClipsToSelectionMarkersCursor: true,
         snapClipsToGrid: true,
         snapSelectionToSelectionMarkersCursor: true,
@@ -223,6 +233,7 @@ function normalizeTimelineSnapSettings(
         enabled: bool(patch.enabled, base.enabled),
         snapDistancePx: clampedPx(patch.snapDistancePx, base.snapDistancePx, 0, 200),
         snapRelativeToGrid: bool(patch.snapRelativeToGrid, base.snapRelativeToGrid),
+        snapHighlightEnabled: bool(patch.snapHighlightEnabled, base.snapHighlightEnabled),
         snapClipsToSelectionMarkersCursor: bool(
             patch.snapClipsToSelectionMarkersCursor,
             base.snapClipsToSelectionMarkersCursor,
@@ -242,48 +253,26 @@ function normalizeTimelineSnapSettings(
             patch.snapFollowsGridVisibility,
             base.snapFollowsGridVisibility,
         ),
-        snapToGridAnyDistance: bool(
-            patch.snapToGridAnyDistance,
-            base.snapToGridAnyDistance,
-        ),
+        snapToGridAnyDistance: bool(patch.snapToGridAnyDistance, base.snapToGridAnyDistance),
         useIndependentSnapSpacing: bool(
             patch.useIndependentSnapSpacing,
             base.useIndependentSnapSpacing,
         ),
         snapSpacing: grid(patch.snapSpacing ?? base.snapSpacing),
-        snapSpacingMinPx: clampedPx(
-            patch.snapSpacingMinPx,
-            base.snapSpacingMinPx,
-            2,
-            200,
-        ),
+        snapSpacingMinPx: clampedPx(patch.snapSpacingMinPx, base.snapSpacingMinPx, 2, 200),
         snapClipEdges: bool(patch.snapClipEdges, base.snapClipEdges),
         snapClipSnapOffset: bool(patch.snapClipSnapOffset, base.snapClipSnapOffset),
         snapAcrossTracks: bool(patch.snapAcrossTracks, base.snapAcrossTracks),
-        snapTrackDistance: clampedNum(
-            patch.snapTrackDistance,
-            base.snapTrackDistance,
-            0,
-            32,
-        ),
+        snapTrackDistance: clampedNum(patch.snapTrackDistance, base.snapTrackDistance, 0, 32),
         snapRazorEdits: bool(patch.snapRazorEdits, base.snapRazorEdits),
-        snapToProjectSampleRate: bool(
-            patch.snapToProjectSampleRate,
-            base.snapToProjectSampleRate,
-        ),
-        snapClipsToSourceMedia: bool(
-            patch.snapClipsToSourceMedia,
-            base.snapClipsToSourceMedia,
-        ),
+        snapToProjectSampleRate: bool(patch.snapToProjectSampleRate, base.snapToProjectSampleRate),
+        snapClipsToSourceMedia: bool(patch.snapClipsToSourceMedia, base.snapClipsToSourceMedia),
         forceSelectionsToMultiples: bool(
             patch.forceSelectionsToMultiples,
             base.forceSelectionsToMultiples,
         ),
         selectionMultiple: grid(patch.selectionMultiple ?? base.selectionMultiple),
-        syncArrangeAndMidiGrid: bool(
-            patch.syncArrangeAndMidiGrid,
-            base.syncArrangeAndMidiGrid,
-        ),
+        syncArrangeAndMidiGrid: bool(patch.syncArrangeAndMidiGrid, base.syncArrangeAndMidiGrid),
     };
 }
 
@@ -329,6 +318,10 @@ export interface SessionState {
     paramEditorSyncTimeline: boolean;
 
     autoCrossfadeEnabled: boolean;
+    /** 空间足够时显示 Clip 内全部 Take 波形。 */
+    showAllTakes: boolean;
+    /** 同步编辑所有 Take：内容级编辑同步到同一 Clip 的全部 Take。 */
+    syncEditsAcrossTakes: boolean;
     /** 为新的音频块启用循环（Loop / 循环源，默认开启；仅影响新建 Clip）。 */
     loopNewClipsEnabled: boolean;
     /** 分割过渡 */
@@ -525,6 +518,14 @@ export interface SessionState {
      * 不包含在 undo/redo 快照中。
      */
     _interactionLockCount: number;
+
+    /**
+     * 最近一次 undo/redo 请求的 requestId。快速连续撤销/重做会产生多个
+     * in-flight thunk；fulfilled/rejected 到达时与该字段比对，丢弃过期
+     * 响应，防止旧快照以 force 覆盖新状态（与 seekPlayhead 的乱序防护同理）。
+     * 不包含在 undo/redo 快照中。
+     */
+    _latestHistoryOpRequestId: string | null;
 }
 
 interface StateSnapshot {
@@ -642,12 +643,7 @@ function applyAutoCrossfadeInReducer(state: SessionState, movedIds: string[]) {
     const fadeInOverlaps = new Map<string, number>();
     const fadeOutOverlaps = new Map<string, number>();
 
-    const isContained = (
-        aStart: number,
-        aEnd: number,
-        bStart: number,
-        bEnd: number,
-    ): boolean => {
+    const isContained = (aStart: number, aEnd: number, bStart: number, bEnd: number): boolean => {
         const eps = 1e-9;
         return aStart >= bStart - eps && aEnd <= bEnd + eps;
     };
@@ -750,7 +746,10 @@ function applyTimelineTracksOnly(state: SessionState, timeline: TimelineState) {
 
 function applyTimelineStatePreservingPitchVisuals(state: SessionState, timeline: TimelineState) {
     const currentParamsEpoch = state.paramsEpoch;
-    const currentClipPitchCurves = state.clipPitchCurves;
+    // 必须捕获浅拷贝快照：在 Immer producer 内直接持有 state.clipPitchCurves
+    // 得到的是 draft 代理，applyTimelineState 随后的 prune（delete 缺失 clip）
+    // 会透过代理可见，"恢复"赋值等于把已删空的 draft 原样写回。
+    const currentClipPitchCurves = { ...state.clipPitchCurves };
     applyTimelineState(state, timeline, { force: true });
     state.paramsEpoch = currentParamsEpoch;
     state.clipPitchCurves = currentClipPitchCurves;
@@ -807,12 +806,16 @@ function applyOptimisticClipState(
         sourceStartSec?: number;
         sourceEndSec?: number;
         playbackRate?: number;
+        clipPlaybackRate?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
         autoFadeInSec?: number;
         autoFadeOutSec?: number;
         formantMorph?: ClipFormantMorph;
@@ -831,6 +834,11 @@ function applyOptimisticClipState(
     }
     if (payload.lengthSec !== undefined) {
         clip.lengthSec = Math.max(0, Number(payload.lengthSec) || 0);
+        // trim 改写长度而未携带 snapOffset 时同步下钳（与后端 patch_clip_state
+        // 口径一致），避免残留 offset > length 的"幻影吸附目标"。
+        if (payload.snapOffsetSec === undefined) {
+            clip.snapOffsetSec = Math.min(Math.max(0, clip.snapOffsetSec), clip.lengthSec);
+        }
     }
     if (payload.gain !== undefined) {
         clip.gain = clamp(Number(payload.gain), 0, 4);
@@ -850,11 +858,26 @@ function applyOptimisticClipState(
     if (payload.playbackRate !== undefined) {
         clip.playbackRate = clamp(Number(payload.playbackRate), 0.1, 10);
     }
+    if (payload.clipPlaybackRate !== undefined) {
+        const nextClipRate = clamp(Number(payload.clipPlaybackRate) || 1, 0.1, 10);
+        const takes = clip.takes ?? [];
+        const activeTake = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+        const previousTakeRate = activeTake
+            ? activeTake.playbackRate
+            : clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
+        clip.clipPlaybackRate = nextClipRate;
+        clip.playbackRate = clamp(nextClipRate * previousTakeRate, 0.1, 10);
+    }
     if (payload.reversed !== undefined) {
         clip.reversed = Boolean(payload.reversed);
     }
     if (payload.loopEnabled !== undefined) {
         clip.loopEnabled = Boolean(payload.loopEnabled);
+    }
+    if (payload.snapOffsetSec !== undefined) {
+        const offset = Math.max(0, Number(payload.snapOffsetSec) || 0);
+        // 与后端一致：偏移点必须落在 [0, length] 内才可见、可吸附。
+        clip.snapOffsetSec = Math.min(offset, clip.lengthSec);
     }
     if (payload.fadeInSec !== undefined) {
         clip.fadeInSec = Math.max(0, Number(payload.fadeInSec) || 0);
@@ -862,11 +885,17 @@ function applyOptimisticClipState(
     if (payload.fadeOutSec !== undefined) {
         clip.fadeOutSec = Math.max(0, Number(payload.fadeOutSec) || 0);
     }
-    if (payload.fadeInCurve !== undefined) {
-        clip.fadeInCurve = payload.fadeInCurve as FadeCurveType;
+    if (payload.fadeInShape !== undefined) {
+        clip.fadeInShape = payload.fadeInShape;
     }
-    if (payload.fadeOutCurve !== undefined) {
-        clip.fadeOutCurve = payload.fadeOutCurve as FadeCurveType;
+    if (payload.fadeOutShape !== undefined) {
+        clip.fadeOutShape = payload.fadeOutShape;
+    }
+    if (payload.fadeInDir !== undefined) {
+        clip.fadeInDir = Math.min(1, Math.max(-1, Number(payload.fadeInDir) || 0));
+    }
+    if (payload.fadeOutDir !== undefined) {
+        clip.fadeOutDir = Math.min(1, Math.max(-1, Number(payload.fadeOutDir) || 0));
     }
     if (payload.autoFadeInSec !== undefined) {
         clip.autoFadeInSec = Math.max(0, Number(payload.autoFadeInSec) || 0);
@@ -877,6 +906,7 @@ function applyOptimisticClipState(
     if (payload.formantMorph !== undefined) {
         clip.formantMorph = payload.formantMorph ? { ...payload.formantMorph } : undefined;
     }
+    updateTakesFromFlatWithSync(state, clip);
 
     const clipEnd = clip.startSec + clip.lengthSec;
     if (clipEnd > state.projectSec) {
@@ -927,6 +957,7 @@ function applyOptimisticBulkClipState(
         if (update.loopEnabled !== undefined) {
             clip.loopEnabled = Boolean(update.loopEnabled);
         }
+        updateTakesFromFlatWithSync(state, clip);
     }
 }
 
@@ -949,6 +980,219 @@ function parseSelectClipRemoteArg(
         clipId: arg,
         preserveTrackFocus: false,
     };
+}
+
+function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
+    return {
+        id: take.id,
+        name: take.name ?? "",
+        gain: clamp(Number(take.gain ?? 1), 0, 4),
+        sourcePath: take.source_path,
+        sourcePathRelative: take.source_path_relative,
+        durationSec: Number(take.duration_sec ?? 0) || undefined,
+        durationFrames: take.duration_frames,
+        sourceSampleRate: take.source_sample_rate,
+        sourceStartSec: Number(take.source_start_sec ?? 0) || 0,
+        sourceEndSec: Number.isFinite(Number(take.source_end_sec))
+            ? Number(take.source_end_sec)
+            : 0,
+        playbackRate: take.playback_rate != null ? clamp(Number(take.playback_rate), 0.1, 10) : 1,
+        reversed: Boolean(take.reversed),
+        loopEnabled: Boolean(take.loop_enabled),
+        midiNoteData: take.midi_note_data?.map((n) => ({
+            startSec: n.start_sec,
+            endSec: n.end_sec,
+            note: n.note,
+            velocity: n.velocity,
+            channel: n.channel ?? 0,
+        })),
+        midiFillGaps: take.midi_fill_gaps ?? false,
+    };
+}
+
+function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo[] {
+    if (Array.isArray(clip.takes) && clip.takes.length > 0) {
+        return clip.takes.map(parseTimelineClipTake);
+    }
+    // 旧后端/过渡载荷：用 flat 投影合成一个 take。
+    const clipRate = clamp(Number(clip.clip_playback_rate ?? 1) || 1, 0.1, 10);
+    return [
+        {
+            id: clip.active_take_id ?? `${clip.id}_take_1`,
+            name: flat.name,
+            gain: flat.gain,
+            sourcePath: flat.sourcePath,
+            sourcePathRelative: undefined,
+            durationSec: flat.durationSec,
+            durationFrames: flat.durationFrames,
+            sourceSampleRate: flat.sourceSampleRate,
+            sourceStartSec: flat.sourceStartSec,
+            sourceEndSec: flat.sourceEndSec,
+            playbackRate: clamp(flat.playbackRate / clipRate, 0.1, 10),
+            reversed: flat.reversed,
+            loopEnabled: flat.loopEnabled,
+            midiNoteData: flat.midiNoteData,
+            midiFillGaps: flat.midiFillGaps ?? false,
+        },
+    ];
+}
+
+function getClipRateMultiplier(clip: ClipInfo): number {
+    const rate = Number(clip.clipPlaybackRate ?? 1);
+    return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+
+function updateActiveTakeFromFlat(clip: ClipInfo): void {
+    const takes = clip.takes ?? [];
+    const take = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+    if (!take) return;
+    take.gain = clip.gain;
+    take.sourcePath = clip.sourcePath;
+    take.sourcePathRelative = clip.sourcePathRelative;
+    take.durationSec = clip.durationSec;
+    take.durationFrames = clip.durationFrames;
+    take.sourceSampleRate = clip.sourceSampleRate;
+    take.sourceStartSec = clip.sourceStartSec;
+    take.sourceEndSec = clip.sourceEndSec;
+    take.playbackRate = clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
+    take.reversed = clip.reversed;
+    take.loopEnabled = clip.loopEnabled;
+    take.midiNoteData = clip.midiNoteData;
+    take.midiFillGaps = clip.midiFillGaps;
+}
+
+/**
+ * 与后端 `patch_clip_state` 的“同步编辑所有 Take”语义对齐：开启该设置时，
+ * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop）需要镜像到全部 Take，
+ * 否则多 Take 展示下 inactive lane 的拖拽预览与后端口径短暂分叉
+ * （fulfilled 快照才会收敛）。`playbackRate` 平铺值是组合有效速率，
+ * 写入各 Take 前按倍率反推 —— 与后端 from_clip 口径一致。
+ */
+function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void {
+    updateActiveTakeFromFlat(clip);
+    if (!state.syncEditsAcrossTakes) return;
+    const takes = clip.takes ?? [];
+    if (takes.length <= 1) return;
+    const rateMultiplier = getClipRateMultiplier(clip);
+    for (const take of takes) {
+        take.gain = clip.gain;
+        take.sourceStartSec = clip.sourceStartSec;
+        take.sourceEndSec = clip.sourceEndSec;
+        take.playbackRate = clamp(clip.playbackRate / rateMultiplier, 0.1, 10);
+        take.reversed = clip.reversed;
+        take.loopEnabled = clip.loopEnabled;
+    }
+}
+
+function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
+    clip.gain = take.gain;
+    clip.sourcePath = take.sourcePath;
+    clip.sourcePathRelative = take.sourcePathRelative;
+    clip.durationSec = take.durationSec;
+    clip.durationFrames = take.durationFrames;
+    clip.sourceSampleRate = take.sourceSampleRate;
+    clip.sourceStartSec = take.sourceStartSec;
+    clip.sourceEndSec = take.sourceEndSec;
+    clip.playbackRate = getClipRateMultiplier(clip) * take.playbackRate;
+    clip.reversed = take.reversed;
+    clip.loopEnabled = take.loopEnabled;
+    clip.midiNoteData = take.midiNoteData;
+    clip.midiNoteCount = take.midiNoteData?.length;
+    clip.midiFillGaps = take.midiFillGaps ?? false;
+}
+
+/**
+ * 应用权威时间轴，但保留前端当前播放光标。
+ *
+ * 后端 `TimelineState.playhead_sec` 只在显式 seek / transport 操作时同步；
+ * 普通 take 管理命令返回的全量快照可能携带旧值。切换/管理 take 不应该
+ * 改变播放位置，因此这里在覆写后恢复本地光标。
+ */
+function applyTimelineStatePreservingPlayhead(state: SessionState, timeline: TimelineState): void {
+    const playheadSec = state.playheadSec;
+    applyTimelineState(state, timeline, { force: true });
+    state.playheadSec = Math.max(0, Number(playheadSec ?? 0) || 0);
+}
+
+// ── Take 乐观切换的回滚支持 ─────────────────────────────────────────────
+// pending 阶段会本地切换 activeTakeId 并物化平铺投影；后端失败（rejected 或
+// fulfilled ok:false）时若无回滚，UI 显示与音频引擎播放的内容将持续分裂，
+// 直到下一次全量 fetchTimeline。这里按 clipId 记录切换前快照供恢复。
+
+type TakeOptimisticFlat = Pick<
+    ClipInfo,
+    | "gain"
+    | "sourcePath"
+    | "sourcePathRelative"
+    | "durationSec"
+    | "durationFrames"
+    | "sourceSampleRate"
+    | "sourceStartSec"
+    | "sourceEndSec"
+    | "playbackRate"
+    | "clipPlaybackRate"
+    | "reversed"
+    | "loopEnabled"
+    | "midiNoteData"
+    | "midiNoteCount"
+    | "midiFillGaps"
+>;
+
+const pendingTakeRollbacks = new Map<
+    string,
+    { activeTakeId: string | undefined; flat: TakeOptimisticFlat }
+>();
+
+const TAKE_FLAT_KEYS = [
+    "gain",
+    "sourcePath",
+    "sourcePathRelative",
+    "durationSec",
+    "durationFrames",
+    "sourceSampleRate",
+    "sourceStartSec",
+    "sourceEndSec",
+    "playbackRate",
+    "clipPlaybackRate",
+    "reversed",
+    "loopEnabled",
+    "midiNoteData",
+    "midiNoteCount",
+    "midiFillGaps",
+] as const;
+
+function captureTakeRollback(state: SessionState, clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        const clip = state.clips.find((entry) => entry.id === clipId);
+        if (!clip) continue;
+        // 同一 clip 已有待回滚快照时保留**最早**的那份：快速连续切换两次且
+        // 都失败时，第二次失败后仍能回到最初的 take，而不是中间态。
+        if (pendingTakeRollbacks.has(clipId)) continue;
+        const flat = {} as TakeOptimisticFlat;
+        for (const key of TAKE_FLAT_KEYS) {
+            // @ts-expect-error -- 按同构键组浅拷贝，字段集合由类型约束保证一致
+            flat[key] = clip[key];
+        }
+        pendingTakeRollbacks.set(clipId, { activeTakeId: clip.activeTakeId, flat });
+    }
+}
+
+function restoreTakeRollback(state: SessionState, clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        const snapshot = pendingTakeRollbacks.get(clipId);
+        if (!snapshot) continue;
+        pendingTakeRollbacks.delete(clipId);
+        const clip = state.clips.find((entry) => entry.id === clipId);
+        if (!clip) continue;
+        clip.activeTakeId = snapshot.activeTakeId;
+        Object.assign(clip, snapshot.flat);
+    }
+}
+
+function clearTakeRollback(clipIds: readonly string[]): void {
+    for (const clipId of clipIds) {
+        pendingTakeRollbacks.delete(clipId);
+    }
 }
 
 /**
@@ -981,6 +1225,7 @@ function applyTimelineState(
             lengthSec: Math.max(0.0, Number(clip.length_sec ?? 1)),
             color: normalizeClipColor(clip.color),
             sourcePath: clip.source_path,
+            sourcePathRelative: clip.source_path_relative,
             durationSec: Number(clip.duration_sec ?? 0) || undefined,
             durationFrames: clip.duration_frames,
             sourceSampleRate: clip.source_sample_rate,
@@ -1009,12 +1254,22 @@ function applyTimelineState(
                 clip.playback_rate != null
                     ? clamp(Number(clip.playback_rate), 0.1, 10)
                     : (state.clips.find((c) => c.id === clip.id)?.playbackRate ?? 1),
+            clipPlaybackRate: clamp(Number(clip.clip_playback_rate ?? 1) || 1, 0.1, 10),
             reversed: Boolean(clip.reversed),
             loopEnabled: Boolean(clip.loop_enabled),
+            // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
+            snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
             fadeInSec: Math.max(0, Number(clip.fade_in_sec ?? 0)),
             fadeOutSec: Math.max(0, Number(clip.fade_out_sec ?? 0)),
-            fadeInCurve: (clip.fade_in_curve ?? "sine") as FadeCurveType,
-            fadeOutCurve: (clip.fade_out_curve ?? "sine") as FadeCurveType,
+            // 后端未提供形状字段时（极旧开发版载荷），与新建默认一致取快起。
+            fadeInShape: Number.isFinite(Number(clip.fade_in_shape))
+                ? Number(clip.fade_in_shape)
+                : 1,
+            fadeOutShape: Number.isFinite(Number(clip.fade_out_shape))
+                ? Number(clip.fade_out_shape)
+                : 1,
+            fadeInDir: Math.min(1, Math.max(-1, Number(clip.fade_in_dir ?? 0) || 0)),
+            fadeOutDir: Math.min(1, Math.max(-1, Number(clip.fade_out_dir ?? 0) || 0)),
             autoFadeInSec: Math.max(0, Number(clip.auto_fade_in_sec ?? 0) || 0),
             autoFadeOutSec: Math.max(0, Number(clip.auto_fade_out_sec ?? 0) || 0),
             formantMorph: clip.formant_morph
@@ -1045,7 +1300,15 @@ function applyTimelineState(
             groupId: clip.group_id ?? undefined,
         };
 
-        return parsed;
+        const takes = parseClipTakes(clip, parsed);
+        return {
+            ...parsed,
+            takes,
+            activeTakeId:
+                clip.active_take_id && takes.some((take) => take.id === clip.active_take_id)
+                    ? clip.active_take_id
+                    : (takes[0]?.id ?? `${clip.id}_take_1`),
+        };
     });
     state.clipFormantStatus = Object.fromEntries(
         Object.entries(state.clipFormantStatus).filter(([clipId]) =>
@@ -1101,9 +1364,9 @@ function applyTimelineState(
             1,
             32,
         );
-        const nextTimeSignatureDenominator = (
-            TEMPO_DENOMINATORS as readonly number[]
-        ).includes(Number(project.time_signature_denominator))
+        const nextTimeSignatureDenominator = (TEMPO_DENOMINATORS as readonly number[]).includes(
+            Number(project.time_signature_denominator),
+        )
             ? Number(project.time_signature_denominator)
             : clampDenominator(state.project.timeSignatureDenominator);
         const nextGridSizeRaw = String(project.grid_size ?? state.project.gridSize);
@@ -1162,9 +1425,7 @@ function applyTimelineState(
             state.bpm = clamp(first.bpm, 10, 960);
             const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
             state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
-            state.project.timeSignatureDenominator = clampDenominator(
-                firstSig.denominator,
-            );
+            state.project.timeSignatureDenominator = clampDenominator(firstSig.denominator);
         }
     }
 
@@ -1263,10 +1524,14 @@ function upsertImportedClip(
         // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
         //（默认开启；后端权威载荷返回后会覆盖该值）。
         loopEnabled: state.loopNewClipsEnabled !== false,
+        snapOffsetSec: 0,
         fadeInSec: 0,
         fadeOutSec: 0,
-        fadeInCurve: "sine" as FadeCurveType,
-        fadeOutCurve: "sine" as FadeCurveType,
+        // 新建默认曲线 = 快起（REAPER Fast Start；dir 锚点 0）。
+        fadeInShape: 1,
+        fadeOutShape: 1,
+        fadeInDir: 0,
+        fadeOutDir: 0,
     });
     state.selectedClipId = newClipId;
     state.playheadSec = startSec;
@@ -1297,9 +1562,11 @@ const initialState: SessionState = {
     secondaryTimeUnit: DEFAULT_SECONDARY_TIME_UNIT,
     rulerLabelSpacingPx: DEFAULT_RULER_LABEL_SPACING_PX,
     showPlayheadTimeInTrackHeader: true,
-    paramEditorSyncTimeline: false,
+    paramEditorSyncTimeline: true,
 
     autoCrossfadeEnabled: true,
+    showAllTakes: true,
+    syncEditsAcrossTakes: true,
     loopNewClipsEnabled: true,
     splitTransitionEnabled: true,
     splitTransitionMode: "overlap",
@@ -1427,6 +1694,7 @@ const initialState: SessionState = {
     reaperSkippedFilesDialog: null,
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
+    _latestHistoryOpRequestId: null,
 };
 
 export {
@@ -1478,6 +1746,14 @@ export {
     duplicateTrackRemote,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    setClipActiveTakeRemote,
+    cycleClipTakesRemote,
+    packClipsIntoTakesRemote,
+    explodeClipTakesRemote,
+    duplicateClipTakeRemote,
+    removeClipTakeRemote,
+    renameClipTakeRemote,
+    addClipTakeFromMediaRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
     splitClipRemote,
@@ -1563,9 +1839,9 @@ const sessionSlice = createSlice({
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
         setToolMode(state, action: PayloadAction<ToolMode>) {
-            if (state.toolMode !== action.payload) {
-                pushHistory(state);
-            }
+            // 工具切换是纯视图状态：不修改工程内容。
+            // 不入 undo 历史（否则 Ctrl+Z 会先回退一次"不存在的内容变更"），
+            // 也不标记 project.dirty（否则仅切工具就会触发"未保存"退出确认）。
             state.toolMode = action.payload;
             if (action.payload === "select") {
                 state.toolModeGroup = "select";
@@ -1613,45 +1889,31 @@ const sessionSlice = createSlice({
         toggleAutoCrossfade(state) {
             state.autoCrossfadeEnabled = !state.autoCrossfadeEnabled;
         },
+        toggleShowAllTakes(state) {
+            state.showAllTakes = !state.showAllTakes;
+        },
+        toggleSyncEditsAcrossTakes(state) {
+            state.syncEditsAcrossTakes = !state.syncEditsAcrossTakes;
+        },
         toggleSplitTransition(state) {
             state.splitTransitionEnabled = !state.splitTransitionEnabled;
         },
-        setSplitTransitionMode(
-            state,
-            action: PayloadAction<"fade" | "overlap">,
-        ) {
+        setSplitTransitionMode(state, action: PayloadAction<"fade" | "overlap">) {
             state.splitTransitionMode = action.payload;
         },
-        setSplitTransitionDurationUnit(
-            state,
-            action: PayloadAction<"seconds" | "percent">,
-        ) {
+        setSplitTransitionDurationUnit(state, action: PayloadAction<"seconds" | "percent">) {
             state.splitTransitionDurationUnit = action.payload;
         },
         setSplitTransitionDurationSec(state, action: PayloadAction<number>) {
-            state.splitTransitionDurationSec = clamp(
-                Number(action.payload) || 0.01,
-                0.001,
-                10,
-            );
+            state.splitTransitionDurationSec = clamp(Number(action.payload) || 0.01, 0.001, 10);
         },
         setSplitTransitionDurationPercent(state, action: PayloadAction<number>) {
-            state.splitTransitionDurationPercent = clamp(
-                Number(action.payload) || 1,
-                0.01,
-                100,
-            );
+            state.splitTransitionDurationPercent = clamp(Number(action.payload) || 1, 0.01, 100);
         },
-        setSplitTransitionCurve(
-            state,
-            action: PayloadAction<FadeCurveType>,
-        ) {
+        setSplitTransitionCurve(state, action: PayloadAction<FadeCurveType>) {
             state.splitTransitionCurve = action.payload;
         },
-        setSplitTransitionOverlapCrossfade(
-            state,
-            action: PayloadAction<"auto" | "always">,
-        ) {
+        setSplitTransitionOverlapCrossfade(state, action: PayloadAction<"auto" | "always">) {
             state.splitTransitionOverlapCrossfade = action.payload;
         },
         toggleSnap(state) {
@@ -1659,14 +1921,8 @@ const sessionSlice = createSlice({
             state.timelineSnap.enabled = next;
             state.snapEnabled = next;
         },
-        setTimelineSnapSettings(
-            state,
-            action: PayloadAction<Partial<TimelineSnapSettings>>,
-        ) {
-            state.timelineSnap = normalizeTimelineSnapSettings(
-                state.timelineSnap,
-                action.payload,
-            );
+        setTimelineSnapSettings(state, action: PayloadAction<Partial<TimelineSnapSettings>>) {
+            state.timelineSnap = normalizeTimelineSnapSettings(state.timelineSnap, action.payload);
             state.snapEnabled = state.timelineSnap.enabled;
         },
         togglePitchSnap(state) {
@@ -1705,9 +1961,7 @@ const sessionSlice = createSlice({
                 state.bpm = clamp(first.bpm, 10, 960);
                 const firstSig = first.timeSignature ?? { numerator: 4, denominator: 4 };
                 state.beats = Math.min(32, Math.max(1, Math.round(firstSig.numerator)));
-                state.project.timeSignatureDenominator = clampDenominator(
-                    firstSig.denominator,
-                );
+                state.project.timeSignatureDenominator = clampDenominator(firstSig.denominator);
             }
         },
         setTempoMapVisible(state, action: PayloadAction<boolean>) {
@@ -1798,11 +2052,7 @@ const sessionSlice = createSlice({
         /** 循环波纹编辑模式：off → track → all → off（对应 REAPER 波纹编辑按钮的三态切换）。 */
         cycleRippleMode(state) {
             state.rippleMode =
-                state.rippleMode === "off"
-                    ? "track"
-                    : state.rippleMode === "track"
-                      ? "all"
-                      : "off";
+                state.rippleMode === "off" ? "track" : state.rippleMode === "track" ? "all" : "off";
         },
         setRippleMode(state, action: PayloadAction<"off" | "track" | "all">) {
             if (
@@ -1961,13 +2211,36 @@ const sessionSlice = createSlice({
                 clip.lengthSec = Math.max(0.0, action.payload.lengthSec);
             }
         },
+        /** SnapOffset（吸附偏移）乐观更新：拖拽三角手柄实时预览。 */
+        setClipSnapOffset(state, action: PayloadAction<{ clipId: string; snapOffsetSec: number }>) {
+            const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
+            if (!clip) return;
+            // 与后端一致：偏移必须落在 [0, length] 内。
+            const offset = Math.max(0, Number(action.payload.snapOffsetSec) || 0);
+            clip.snapOffsetSec = Math.min(offset, clip.lengthSec);
+        },
         setClipPlaybackRate(
             state,
-            action: PayloadAction<{ clipId: string; playbackRate: number }>,
+            action: PayloadAction<{ clipId: string; clipPlaybackRate: number }>,
         ) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (!clip) return;
-            clip.playbackRate = clamp(action.payload.playbackRate, 0.1, 10);
+            const takes = clip.takes ?? [];
+            const activeTake = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+            const takeRate = activeTake
+                ? activeTake.playbackRate
+                : clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
+            clip.clipPlaybackRate = clamp(action.payload.clipPlaybackRate, 0.1, 10);
+            clip.playbackRate = clamp(clip.clipPlaybackRate * takeRate, 0.1, 10);
+            // "同步编辑所有 Take"开启时，后端会把全部 take 的速率统一为
+            // 有效速率 ÷ 倍率；乐观阶段同步镜像，否则拖拽期间 inactive lane
+            // 按旧速率渲染、persist+fulfilled 才收敛（视觉瞬态失真）。
+            if (state.syncEditsAcrossTakes && takes.length > 1) {
+                const mirrored = clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
+                for (const take of takes) {
+                    take.playbackRate = mirrored;
+                }
+            }
             state.playbackRateVersion = (Number(state.playbackRateVersion) || 0) + 1;
         },
         setClipSourceRange(
@@ -1991,6 +2264,20 @@ const sessionSlice = createSlice({
                 const value = Number(action.payload.sourceEndSec);
                 clip.sourceEndSec = Number.isFinite(value) ? value : clip.sourceEndSec;
             }
+
+            // Slip 的实时预览写在 active-take 投影上；展开全部 Take 时，
+            // 必须同步对应 lane，否则拖拽期间波形不会移动。
+            updateActiveTakeFromFlat(clip);
+            if (state.syncEditsAcrossTakes) {
+                for (const take of clip.takes ?? []) {
+                    if (action.payload.sourceStartSec !== undefined) {
+                        take.sourceStartSec = clip.sourceStartSec;
+                    }
+                    if (action.payload.sourceEndSec !== undefined) {
+                        take.sourceEndSec = clip.sourceEndSec;
+                    }
+                }
+            }
         },
         setClipFades(
             state,
@@ -1998,8 +2285,10 @@ const sessionSlice = createSlice({
                 clipId: string;
                 fadeInSec?: number;
                 fadeOutSec?: number;
-                fadeInCurve?: FadeCurveType;
-                fadeOutCurve?: FadeCurveType;
+                fadeInShape?: number;
+                fadeOutShape?: number;
+                fadeInDir?: number;
+                fadeOutDir?: number;
             }>,
         ) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
@@ -2010,11 +2299,18 @@ const sessionSlice = createSlice({
             if (action.payload.fadeOutSec !== undefined) {
                 clip.fadeOutSec = Math.max(0, action.payload.fadeOutSec);
             }
-            if (action.payload.fadeInCurve !== undefined) {
-                clip.fadeInCurve = action.payload.fadeInCurve;
+            // 形状原样透传（REAPER 允许小数变体）；曲率夹紧到 [-1, 1]。
+            if (action.payload.fadeInShape !== undefined) {
+                clip.fadeInShape = action.payload.fadeInShape;
             }
-            if (action.payload.fadeOutCurve !== undefined) {
-                clip.fadeOutCurve = action.payload.fadeOutCurve;
+            if (action.payload.fadeOutShape !== undefined) {
+                clip.fadeOutShape = action.payload.fadeOutShape;
+            }
+            if (action.payload.fadeInDir !== undefined) {
+                clip.fadeInDir = Math.min(1, Math.max(-1, action.payload.fadeInDir));
+            }
+            if (action.payload.fadeOutDir !== undefined) {
+                clip.fadeOutDir = Math.min(1, Math.max(-1, action.payload.fadeOutDir));
             }
         },
         /** 自动交叉淡化长度（与手动 fade 分离，见 autoCrossfade.ts 的模型说明）。 */
@@ -2088,10 +2384,13 @@ const sessionSlice = createSlice({
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: state.loopNewClipsEnabled !== false,
+                snapOffsetSec: 0,
                 fadeInSec: 0,
                 fadeOutSec: 0,
-                fadeInCurve: "sine" as FadeCurveType,
-                fadeOutCurve: "sine" as FadeCurveType,
+                fadeInShape: 1,
+                fadeOutShape: 1,
+                fadeInDir: 0,
+                fadeOutDir: 0,
             });
             state.selectedClipId = newClipId;
             state.selectedTrackId = action.payload.trackId;
@@ -2350,16 +2649,13 @@ const sessionSlice = createSlice({
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
+                state.showAllTakes = Boolean(s.showAllTakes ?? true);
+                state.syncEditsAcrossTakes = Boolean(s.syncEditsAcrossTakes ?? true);
                 state.loopNewClipsEnabled = s.loopNewClips ?? true;
-                state.splitTransitionEnabled = Boolean(
-                    s.splitTransitionEnabled ?? true,
-                );
-                state.splitTransitionMode =
-                    s.splitTransitionMode === "fade" ? "fade" : "overlap";
+                state.splitTransitionEnabled = Boolean(s.splitTransitionEnabled ?? true);
+                state.splitTransitionMode = s.splitTransitionMode === "fade" ? "fade" : "overlap";
                 state.splitTransitionDurationUnit =
-                    s.splitTransitionDurationUnit === "percent"
-                        ? "percent"
-                        : "seconds";
+                    s.splitTransitionDurationUnit === "percent" ? "percent" : "seconds";
                 const splitDuration = Number(s.splitTransitionDurationSec);
                 if (Number.isFinite(splitDuration)) {
                     state.splitTransitionDurationSec = clamp(splitDuration, 0.001, 10);
@@ -2370,18 +2666,13 @@ const sessionSlice = createSlice({
                 }
                 const splitCurve = s.splitTransitionCurve as string;
                 if (
-                    ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(
-                        splitCurve,
-                    )
+                    ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(splitCurve)
                 ) {
                     state.splitTransitionCurve = splitCurve as FadeCurveType;
                 }
                 state.splitTransitionOverlapCrossfade =
-                    s.splitTransitionOverlapCrossfade === "always"
-                        ? "always"
-                        : "auto";
-                const loadedSnapEnabled =
-                    s.snapEnabled ?? s.gridSnap ?? true;
+                    s.splitTransitionOverlapCrossfade === "always" ? "always" : "auto";
+                const loadedSnapEnabled = s.snapEnabled ?? s.gridSnap ?? true;
                 state.snapEnabled = loadedSnapEnabled;
                 if (s.timelineSnap && typeof s.timelineSnap === "object") {
                     state.timelineSnap = normalizeTimelineSnapSettings(
@@ -2413,9 +2704,7 @@ const sessionSlice = createSlice({
                     );
                 }
                 if (s.showPlayheadTimeInTrackHeader != null) {
-                    state.showPlayheadTimeInTrackHeader = Boolean(
-                        s.showPlayheadTimeInTrackHeader,
-                    );
+                    state.showPlayheadTimeInTrackHeader = Boolean(s.showPlayheadTimeInTrackHeader);
                 }
                 if (s.paramEditorSyncTimeline != null) {
                     state.paramEditorSyncTimeline = Boolean(s.paramEditorSyncTimeline);
@@ -2443,9 +2732,7 @@ const sessionSlice = createSlice({
                 state.playheadZoomEnabled = s.playheadZoom;
                 if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
                 if (s.paramEditorSeekPlayhead != null)
-                    state.paramEditorSeekPlayheadEnabled = Boolean(
-                        s.paramEditorSeekPlayhead,
-                    );
+                    state.paramEditorSeekPlayheadEnabled = Boolean(s.paramEditorSeekPlayhead);
                 if (s.paramEditorTimelineClickSelectTrack != null) {
                     state.paramEditorTimelineClickSelectTrackEnabled = Boolean(
                         s.paramEditorTimelineClickSelectTrack,
@@ -2457,8 +2744,7 @@ const sessionSlice = createSlice({
                     state.showParamValuePopup = Boolean(s.showParamValuePopup);
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
-                if (s.ignoreGrouping != null)
-                    state.ignoreGrouping = Boolean(s.ignoreGrouping);
+                if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
                 const loadedRippleMode = s.rippleMode;
                 if (loadedRippleMode === "track" || loadedRippleMode === "all") {
                     state.rippleMode = loadedRippleMode;
@@ -2468,9 +2754,7 @@ const sessionSlice = createSlice({
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
                 if (s.quickSearchAutoNormalize != null)
-                    state.quickSearchAutoNormalizeEnabled = Boolean(
-                        s.quickSearchAutoNormalize,
-                    );
+                    state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (Array.isArray(s.visibleReferenceRootTrackIds)) {
                     state.visibleReferenceRootTrackIds = s.visibleReferenceRootTrackIds
                         .filter((id: unknown): id is string => typeof id === "string")
@@ -2519,9 +2803,8 @@ const sessionSlice = createSlice({
                     state.edgeSmoothnessPercent = clamp(Number(smoothness) || 0, 0, 100);
                 }
                 if (Array.isArray(s.customScalePresets)) {
-                    state.customScalePresets = s.customScalePresets.map(
-                        (preset: unknown) =>
-                            sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
+                    state.customScalePresets = s.customScalePresets.map((preset: unknown) =>
+                        sanitizeCustomScalePreset(preset as Partial<CustomScalePreset>),
                     );
                 }
             })
@@ -3071,11 +3354,14 @@ const sessionSlice = createSlice({
                 });
             })
 
-            .addCase(undoRemote.pending, (state) => {
+            .addCase(undoRemote.pending, (state, action) => {
+                // 记录最新请求：乱序到达的旧响应在 fulfilled/rejected 中被丢弃。
+                state._latestHistoryOpRequestId = action.meta.requestId;
                 sessionSlice.caseReducers.undo(state);
             })
 
             .addCase(undoRemote.fulfilled, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -3089,15 +3375,18 @@ const sessionSlice = createSlice({
                 state.playheadSec = currentPlayheadSec;
             })
 
-            .addCase(undoRemote.rejected, (state) => {
+            .addCase(undoRemote.rejected, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 sessionSlice.caseReducers.redo(state);
             })
 
-            .addCase(redoRemote.pending, (state) => {
+            .addCase(redoRemote.pending, (state, action) => {
+                state._latestHistoryOpRequestId = action.meta.requestId;
                 sessionSlice.caseReducers.redo(state);
             })
 
             .addCase(redoRemote.fulfilled, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -3108,7 +3397,8 @@ const sessionSlice = createSlice({
                 state.playheadSec = currentPlayheadSec;
             })
 
-            .addCase(redoRemote.rejected, (state) => {
+            .addCase(redoRemote.rejected, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 sessionSlice.caseReducers.undo(state);
             })
 
@@ -3132,9 +3422,10 @@ const sessionSlice = createSlice({
                 const payload = action.payload as
                     | { ok: true; canceled: true }
                     | {
-                          ok: true;
+                          ok: boolean;
                           canceled: false;
-                          timeline: TimelineState;
+                          timeline?: TimelineState;
+                          error?: string;
                           projectVersionTooNew?: boolean;
                       };
                 if (!payload || (payload as any).canceled) {
@@ -3143,6 +3434,12 @@ const sessionSlice = createSlice({
                 }
                 if ((payload as { projectVersionTooNew?: boolean }).projectVersionTooNew) {
                     state.status = "Project version confirmation required";
+                    return;
+                }
+                if (payload.ok === false) {
+                    // 后端返回了明确的失败原因（文件不存在/解析失败等）。
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
                     return;
                 }
                 applyTimelineState(state, (payload as any).timeline, {
@@ -3164,9 +3461,14 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    error?: string;
                     projectVersionTooNew?: boolean;
                 } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
+                    return;
+                }
                 if (payload.projectVersionTooNew) {
                     state.status = "Project version confirmation required";
                     return;
@@ -3190,9 +3492,14 @@ const sessionSlice = createSlice({
                 state.busy = false;
                 const payload = action.payload as {
                     ok?: boolean;
+                    error?: string;
                     projectVersionTooNew?: boolean;
                 } & TimelineState;
-                if (!payload.ok) return;
+                if (!payload.ok) {
+                    state.error = payload.error ?? "Open project failed";
+                    state.status = "Open failed";
+                    return;
+                }
                 if (payload.projectVersionTooNew) {
                     state.status = "Project version confirmation required";
                     return;
@@ -3259,9 +3566,7 @@ const sessionSlice = createSlice({
             .addCase(importProjectFromPath.rejected, (state, action) => {
                 state.busy = false;
                 state.error =
-                    (action.payload as string) ??
-                    action.error?.message ??
-                    "Import project failed";
+                    (action.payload as string) ?? action.error?.message ?? "Import project failed";
                 state.status = "Import failed";
             })
 
@@ -3441,7 +3746,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -3490,7 +3796,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -3540,7 +3847,8 @@ const sessionSlice = createSlice({
                 // 保留播放头位置和音高曲线，避免 UI 跳变
                 const currentPlayheadSec = state.playheadSec;
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照：draft 代理会被 applyTimelineState 的 prune 透过修改（见 applyTimelineStatePreservingPitchVisuals）
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
 
                 if (payload?.ok && payload?.timeline?.ok) {
                     applyTimelineState(state, payload.timeline as TimelineState, { force: true });
@@ -3698,9 +4006,9 @@ const sessionSlice = createSlice({
                     return;
                 }
                 const beats = clamp(Number(payload.project?.beats_per_bar ?? state.beats), 1, 32);
-                const denominator = (
-                    TEMPO_DENOMINATORS as readonly number[]
-                ).includes(Number(payload.project?.time_signature_denominator))
+                const denominator = (TEMPO_DENOMINATORS as readonly number[]).includes(
+                    Number(payload.project?.time_signature_denominator),
+                )
                     ? Number(payload.project?.time_signature_denominator)
                     : clampDenominator(state.project.timeSignatureDenominator);
                 const gridRaw = String(payload.project?.grid_size ?? state.grid);
@@ -4022,6 +4330,135 @@ const sessionSlice = createSlice({
                 applyOptimisticBulkClipState(state, action.meta.arg.updates);
             })
 
+            .addCase(setClipActiveTakeRemote.pending, (state, action) => {
+                const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
+                if (!clip) return;
+                const takes = clip.takes ?? [];
+                const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
+                if (!take) return;
+                captureTakeRollback(state, [action.meta.arg.clipId]);
+                clip.activeTakeId = take.id;
+                applyActiveTakeToFlat(clip, take);
+            })
+            .addCase(setClipActiveTakeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    // 后端拒绝：回滚乐观切换并给出可见反馈。
+                    restoreTakeRollback(state, [action.meta.arg.clipId]);
+                    state.error = "Take switch rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                clearTakeRollback([action.meta.arg.clipId]);
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(setClipActiveTakeRemote.rejected, (state, action) => {
+                restoreTakeRollback(state, [action.meta.arg.clipId]);
+                setRejected(state, action);
+            })
+
+            .addCase(cycleClipTakesRemote.pending, (state, action) => {
+                for (const clipId of action.meta.arg.clipIds) {
+                    const clip = state.clips.find((entry) => entry.id === clipId);
+                    const takes = clip?.takes ?? [];
+                    if (!clip || takes.length <= 1) continue;
+                    const direction = action.meta.arg.direction ?? 1;
+                    const currentIndex = Math.max(
+                        0,
+                        takes.findIndex((take) => take.id === clip.activeTakeId),
+                    );
+                    const nextIndex =
+                        direction >= 0
+                            ? (currentIndex + 1) % takes.length
+                            : (currentIndex + takes.length - 1) % takes.length;
+                    const next = takes[nextIndex];
+                    captureTakeRollback(state, [clipId]);
+                    clip.activeTakeId = next.id;
+                    applyActiveTakeToFlat(clip, next);
+                }
+            })
+            .addCase(cycleClipTakesRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    restoreTakeRollback(state, action.meta.arg.clipIds);
+                    state.error = "Take cycle rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                clearTakeRollback(action.meta.arg.clipIds);
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(cycleClipTakesRemote.rejected, (state, action) => {
+                restoreTakeRollback(state, action.meta.arg.clipIds);
+                setRejected(state, action);
+            })
+
+            .addCase(packClipsIntoTakesRemote.rejected, setRejected)
+
+            .addCase(explodeClipTakesRemote.rejected, setRejected)
+
+            .addCase(duplicateClipTakeRemote.rejected, setRejected)
+            .addCase(removeClipTakeRemote.rejected, setRejected)
+            .addCase(renameClipTakeRemote.rejected, setRejected)
+            .addCase(addClipTakeFromMediaRemote.rejected, setRejected)
+
+            .addCase(packClipsIntoTakesRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Pack into takes failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+
+            .addCase(explodeClipTakesRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Explode takes failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+
+            .addCase(duplicateClipTakeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Duplicate take failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(removeClipTakeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Remove take failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(renameClipTakeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Rename take failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(addClipTakeFromMediaRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Add take from media failed";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+
             .addCase(replaceClipSourceRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -4096,7 +4533,8 @@ const sessionSlice = createSlice({
                 const currentPlayheadSec = state.playheadSec;
                 // 保留 paramsEpoch 和 clipPitchCurves，避免触发钢琴窗音高曲线重新渲染
                 const currentParamsEpoch = state.paramsEpoch;
-                const currentClipPitchCurves = state.clipPitchCurves;
+                // 浅拷贝快照，防止 draft 代理被后续 prune 透过修改
+                const currentClipPitchCurves = { ...state.clipPitchCurves };
                 applyTimelineTracksOnly(state, payload);
                 state.playheadSec = currentPlayheadSec;
                 state.paramsEpoch = currentParamsEpoch;
@@ -4246,6 +4684,8 @@ export const {
     setShowPlayheadTimeInTrackHeader,
     setParamEditorSyncTimeline,
     toggleAutoCrossfade,
+    toggleShowAllTakes,
+    toggleSyncEditsAcrossTakes,
     toggleSplitTransition,
     setSplitTransitionMode,
     setSplitTransitionDurationUnit,
@@ -4303,6 +4743,7 @@ export const {
     moveClipStart,
     moveClipTrack,
     setClipLength,
+    setClipSnapOffset,
     setClipPlaybackRate,
     setClipSourceRange,
     setClipFades,

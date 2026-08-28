@@ -24,7 +24,10 @@ export function buildTimelineRenderModel(args: {
         rowHeight: args.rowHeight,
         scrollTopPx: args.scrollTopPx,
         viewportHeightPx: args.viewportHeightPx,
-        overscanRows: 1,
+        // overscan 提升到 4 行：竖直滚动时 React state（窗口化）可能比
+        // 原生滚动晚一帧提交，足够的内容缓冲保证 sticky 画布（内容绝对
+        // 坐标 + scrollTopPx 同帧平移）在窗口更新前不缺行。
+        overscanRows: 4,
     });
 
     const visibleTrackIds = args.tracks

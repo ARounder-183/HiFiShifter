@@ -74,12 +74,15 @@ pub(crate) fn get_timeline_state_from_ref(state: &AppState) -> crate::models::Ti
 pub(super) fn get_timeline_state_lite(
     state: State<'_, AppState>,
 ) -> crate::models::TimelineStatePayload {
-    let tl = state
-        .timeline
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mut payload = tl.to_payload_lite();
+    // to_payload_lite 接受引用：直接在锁内构建 payload，
+    // 省掉整棵 TimelineState（含全部参数曲线）的深克隆。
+    let mut payload = {
+        let tl = state
+            .timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tl.to_payload_lite()
+    };
     payload.project = Some(state.project_meta_payload());
     payload
 }

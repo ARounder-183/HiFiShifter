@@ -801,18 +801,24 @@ impl WaveformPeakCache {
         self.total_bytes = 0;
     }
 
+    // Cache introspection accessors: used by unit tests and diagnostics;
+        // no callers in non-test builds.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
 
+    #[allow(dead_code)]
     pub fn budget_bytes(&self) -> u64 {
         self.budget_bytes
     }

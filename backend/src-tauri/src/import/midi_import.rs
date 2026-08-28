@@ -91,8 +91,10 @@ fn split_active_notes_on_channel(
     for note_idx in 0..128u8 {
         if let Some((start_sec, velocity, note_ch)) = active_notes[note_idx as usize] {
             if note_ch == channel && start_sec < split_time_sec {
-                let pb_semitones =
-                    raw_pb_to_semitones(channel_pb[channel as usize], channel_bend_range[channel as usize]);
+                let pb_semitones = raw_pb_to_semitones(
+                    channel_pb[channel as usize],
+                    channel_bend_range[channel as usize],
+                );
                 let adjusted_note = (note_idx as f32 + pb_semitones).clamp(0.0, 127.0);
                 notes.push(MidiNoteEvent {
                     start_sec,
@@ -258,8 +260,7 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                         channel_pb[note_ch as usize],
                                         channel_bend_range[note_ch as usize],
                                     );
-                                    let adjusted_note =
-                                        (raw_note + pb_semitones).clamp(0.0, 127.0);
+                                    let adjusted_note = (raw_note + pb_semitones).clamp(0.0, 127.0);
                                     notes.push(MidiNoteEvent {
                                         start_sec,
                                         end_sec: current_sec,
@@ -277,8 +278,7 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                         channel_pb[prev_ch as usize],
                                         channel_bend_range[prev_ch as usize],
                                     );
-                                    let adjusted_note =
-                                        (raw_note + pb_semitones).clamp(0.0, 127.0);
+                                    let adjusted_note = (raw_note + pb_semitones).clamp(0.0, 127.0);
                                     notes.push(MidiNoteEvent {
                                         start_sec,
                                         end_sec: current_sec,
@@ -287,8 +287,7 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                         channel: prev_ch,
                                     });
                                 }
-                                active_notes[raw_note as usize] =
-                                    Some((current_sec, velocity, ch));
+                                active_notes[raw_note as usize] = Some((current_sec, velocity, ch));
                             }
                         }
                         MidiMessage::NoteOff { key, .. } => {
@@ -296,15 +295,13 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                             if let Some((start_sec, start_vel, note_ch)) =
                                 active_notes[note as usize].take()
                             {
-                                let end_sec = tick_to_sec(
-                                    abs_tick, ticks_per_beat, &tempo_events, is_smpte,
-                                );
+                                let end_sec =
+                                    tick_to_sec(abs_tick, ticks_per_beat, &tempo_events, is_smpte);
                                 let pb_semitones = raw_pb_to_semitones(
                                     channel_pb[note_ch as usize],
                                     channel_bend_range[note_ch as usize],
                                 );
-                                let adjusted_note =
-                                    (note as f32 + pb_semitones).clamp(0.0, 127.0);
+                                let adjusted_note = (note as f32 + pb_semitones).clamp(0.0, 127.0);
                                 notes.push(MidiNoteEvent {
                                     start_sec,
                                     end_sec,
@@ -358,8 +355,7 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
                                 38 => {
                                     if rpn_msb[ch as usize] == 0 && rpn_lsb[ch as usize] == 0 {
                                         pending_bend_range_cents[ch as usize] = Some(val as f32);
-                                        let current_msb =
-                                            channel_bend_range[ch as usize].trunc();
+                                        let current_msb = channel_bend_range[ch as usize].trunc();
                                         channel_bend_range[ch as usize] =
                                             (current_msb + val as f32 / 100.0).max(0.0);
                                     }
@@ -402,9 +398,11 @@ fn parse_midi_data(data: &[u8], fallback_bpm: Option<f64>) -> Result<MidiParseRe
         let (min_note, max_note) = if notes.is_empty() {
             (0.0f32, 0.0f32)
         } else {
-            notes.iter().fold((127.0f32, 0.0f32), |(curr_min, curr_max), n| {
-                (curr_min.min(n.note), curr_max.max(n.note))
-            })
+            notes
+                .iter()
+                .fold((127.0f32, 0.0f32), |(curr_min, curr_max), n| {
+                    (curr_min.min(n.note), curr_max.max(n.note))
+                })
         };
 
         all_tracks.push(MidiTrackInfo {
@@ -478,7 +476,12 @@ pub fn build_tempo_map_points_from_midi(
         scale_key: Option<String>,
     }
     let to_sec = |tick: u64| -> f64 {
-        tick_to_sec(tick, result.ticks_per_beat, &result.tempo_events, result.is_smpte)
+        tick_to_sec(
+            tick,
+            result.ticks_per_beat,
+            &result.tempo_events,
+            result.is_smpte,
+        )
     };
 
     let mut events: Vec<Event> = Vec::new();
@@ -523,7 +526,11 @@ pub fn build_tempo_map_points_from_midi(
             }
         }
     }
-    events.sort_by(|a, b| a.sec.partial_cmp(&b.sec).unwrap_or(std::cmp::Ordering::Equal));
+    events.sort_by(|a, b| {
+        a.sec
+            .partial_cmp(&b.sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 逐事件合并到变化点（同一位置合并多个参数）。
     let mut merged: Vec<Event> = Vec::new();
@@ -572,17 +579,24 @@ pub fn build_tempo_map_points_from_midi(
             bpm: current_bpm,
             numerator: Some(current_num),
             denominator: Some(current_den),
-            scale: event.scale_key.as_ref().map(|key| crate::state::TempoScaleData {
-                key: Some(key.clone()),
-                name: None,
-                notes: None,
-            }),
+            scale: event
+                .scale_key
+                .as_ref()
+                .map(|key| crate::state::TempoScaleData {
+                    key: Some(key.clone()),
+                    name: None,
+                    notes: None,
+                }),
         });
         index += 1;
     }
 
     // 确保 0 位置点存在。
-    if points.first().map(|p| p.position_sec > 1e-9).unwrap_or(false) {
+    if points
+        .first()
+        .map(|p| p.position_sec > 1e-9)
+        .unwrap_or(false)
+    {
         points.insert(
             0,
             crate::state::TempoPointData {
@@ -774,9 +788,7 @@ fn tick_to_sec(tick: u64, ticks_per_beat: f64, tempo_events: &[(u64, f64)], is_s
 /// 音高高的音符优先分配到编号较小的组。
 ///
 /// 返回一个 Vec，每个元素是一组不重叠的音符。
-pub fn split_notes_into_non_overlapping_groups(
-    notes: &[MidiNoteEvent],
-) -> Vec<Vec<MidiNoteEvent>> {
+pub fn split_notes_into_non_overlapping_groups(notes: &[MidiNoteEvent]) -> Vec<Vec<MidiNoteEvent>> {
     if notes.is_empty() {
         return vec![];
     }
@@ -787,7 +799,11 @@ pub fn split_notes_into_non_overlapping_groups(
         a.start_sec
             .partial_cmp(&b.start_sec)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.note.partial_cmp(&a.note).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.note
+                    .partial_cmp(&a.note)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     let mut groups: Vec<Vec<MidiNoteEvent>> = vec![];

@@ -207,13 +207,16 @@ pub(crate) fn build_loop_tiled_segment(
             let start_frame = (idx + 1 - run) as usize;
             (start_frame * channels, (idx as usize + 1) * channels)
         } else {
-            ((idx as usize) * channels, (idx as usize + run as usize) * channels)
+            (
+                (idx as usize) * channels,
+                (idx as usize + run as usize) * channels,
+            )
         };
         out.extend_from_slice(&pcm[base..end_base]);
         if reversed {
             // 就地反转刚追加的 run 个帧的帧序（每帧 channels 个样本整体交换）。
             let len = out.len();
-            let block = &mut out[len - (run as usize) * channels ..];
+            let block = &mut out[len - (run as usize) * channels..];
             let half = run as usize / 2;
             for f in 0..half {
                 let a = f * channels;
@@ -356,7 +359,7 @@ pub fn render_mixdown_wav(
                     return Err("export_cancelled".to_string());
                 }
                 let v = clamp11(s);
-                let i = (v * i16::MAX as f32) as i16;
+                let i = (v * i16::MAX as f32).round() as i16;
                 writer.write_sample(i).map_err(|e| e.to_string())?;
             }
         }
@@ -370,7 +373,7 @@ pub fn render_mixdown_wav(
                     return Err("export_cancelled".to_string());
                 }
                 let v = clamp11(s);
-                let i = (v * MAX24) as i32;
+                let i = (v * MAX24).round() as i32;
                 writer.write_sample(i).map_err(|e| e.to_string())?;
             }
         }
@@ -557,8 +560,7 @@ pub fn render_mixdown_interleaved(
         let (loop_seg_local_start_sec, loop_seg_len_sec) = if loop_mode {
             let local_start = (start_sec - clip_start_sec).max(0.0);
             let local_end = (end_sec - clip_start_sec).min(clip_timeline_len_sec);
-            let q_start =
-                (local_start - local_start % LOOP_SEG_QUANTUM_SEC).max(0.0);
+            let q_start = (local_start - local_start % LOOP_SEG_QUANTUM_SEC).max(0.0);
             let q_end = ((local_end / LOOP_SEG_QUANTUM_SEC).ceil() * LOOP_SEG_QUANTUM_SEC)
                 .min(clip_timeline_len_sec.max(0.0));
             (q_start, (q_end - q_start).max(0.0))
@@ -576,9 +578,7 @@ pub fn render_mixdown_interleaved(
             } else {
                 anchor_frame + skip_src_frames
             };
-            let out_source_frames = ((loop_seg_len_sec.max(0.0)
-                * playback_rate
-                * in_rate as f64)
+            let out_source_frames = ((loop_seg_len_sec.max(0.0) * playback_rate * in_rate as f64)
                 .ceil()
                 .max(2.0)) as usize;
             (advanced_anchor, out_source_frames)
@@ -601,7 +601,9 @@ pub fn render_mixdown_interleaved(
                 .ceil()
                 .max(src_i0 as f64) as usize;
             let src_i1 = src_i1.min(in_frames);
-            if src_i1 <= src_i0 + 1 {
+            // Keep 1-frame slices audible (matches the real-time engine path);
+            // only drop truly empty source ranges.
+            if src_i1 <= src_i0 {
                 continue;
             }
             pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)].to_vec()
@@ -647,9 +649,8 @@ pub fn render_mixdown_interleaved(
             let (key_start_sec, key_end_sec) = if loop_mode {
                 // 与上方片段构建共享同一组几何数值（loop_advanced_anchor /
                 // loop_out_source_frames），键与 segment 内容严格对应。
-                let start_frame = loop_advanced_anchor.rem_euclid(
-                    ((total_sec * in_rate as f64).round() as i64).max(1),
-                );
+                let start_frame = loop_advanced_anchor
+                    .rem_euclid(((total_sec * in_rate as f64).round() as i64).max(1));
                 (
                     start_frame as f64 / in_rate as f64,
                     (start_frame + loop_out_source_frames as i64) as f64 / in_rate as f64,
@@ -672,8 +673,9 @@ pub fn render_mixdown_interleaved(
                 loop_mode,
                 params,
             );
-            match crate::formant_cache::get_or_compute_formant_audio(key, &segment, out_rate, params)
-            {
+            match crate::formant_cache::get_or_compute_formant_audio(
+                key, &segment, out_rate, params,
+            ) {
                 Ok(entry) => {
                     segment = entry.pcm_stereo.as_ref().clone();
                 }
@@ -717,8 +719,7 @@ pub fn render_mixdown_interleaved(
 
         // Apply pitch edit per-clip (v2) if enabled.
         if opts.apply_pitch_edit {
-            let seg_start_sec =
-                clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
+            let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
             let mut seg = segment;
             let applied = crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
                 timeline,
@@ -767,13 +768,32 @@ pub fn render_mixdown_interleaved(
                 })
                 .unwrap_or((None, 5.0, None, 5.0));
 
-        // Apply fades (linear) and gain (timeline-referenced).
+        // Apply fades and gain (timeline-referenced)。淡化按 REAPER 形状/曲率
+        // 查表求值（与实时引擎、画布渲染同一公式核心）。
         let fade_in_frames = (clip.effective_fade_in_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
         let fade_out_frames = (clip.effective_fade_out_sec().max(0.0) * out_rate as f64)
             .round()
             .max(0.0) as usize;
+        let fade_in_lut = if fade_in_frames > 0 {
+            Some(crate::fade_curves::global_fade_lut(
+                clip.fade_in_shape,
+                clip.fade_in_dir,
+                false,
+            ))
+        } else {
+            None
+        };
+        let fade_out_lut = if fade_out_frames > 0 {
+            Some(crate::fade_curves::global_fade_lut(
+                clip.fade_out_shape,
+                clip.fade_out_dir,
+                true,
+            ))
+        } else {
+            None
+        };
 
         let seg_frames = segment.len() / 2;
         let clip_total_frames = (clip_timeline_len_sec * out_rate as f64).round().max(1.0) as usize;
@@ -782,8 +802,7 @@ pub fn render_mixdown_interleaved(
         // Mix into output, considering overlap window.
         // The audio segment starts after pre_silence_sec (Loop：再叠加窗口
         // 起点的 clip 局部偏移 —— 平铺段只覆盖窗口交集，见上方) and lasts seg_frames/out_rate.
-        let seg_start_sec =
-            clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
+        let seg_start_sec = clip_start_sec + pre_silence_sec + loop_seg_local_start_sec;
         let seg_end_sec = seg_start_sec + (seg_frames as f64) / out_rate as f64;
 
         // Loop（循环源）：平铺段只覆盖【导出窗口 ∩ clip】，seg 内的帧偏移是
@@ -791,7 +810,9 @@ pub fn render_mixdown_interleaved(
         // 求值 —— 否则局部导出（后台预渲染、区间导出、波形 peaks）会在每个
         // 窗口边界重新触发 fade-in。非 Loop 时该偏移为 0，行为不变。
         let loop_local_offset_frames = if loop_mode {
-            ((loop_seg_local_start_sec * out_rate as f64).round().max(0.0)) as usize
+            ((loop_seg_local_start_sec * out_rate as f64)
+                .round()
+                .max(0.0)) as usize
         } else {
             0usize
         };
@@ -840,11 +861,29 @@ pub fn render_mixdown_interleaved(
 
             let mut g = gain;
             if fade_in_frames > 0 && local_in_clip < fade_in_frames {
-                g *= (local_in_clip as f32 / fade_in_frames as f32).clamp(0.0, 1.0);
+                // Frame-centered fade-in (same as audio_engine/mix.rs) so the
+                // first frame is not hard-zeroed and export matches preview.
+                g *= match &fade_in_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        ((local_in_clip + 1) as f64 / fade_in_frames as f64)
+                            * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if fade_out_frames > 0 && local_in_clip + fade_out_frames > clip_total_frames {
                 let remain = clip_total_frames.saturating_sub(local_in_clip);
-                g *= (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0);
+                // 淡出表按【区间内时间进度】下降采样（见 audio_engine/mix.rs
+                // 同一约定的注释）；用已消耗进度索引，避免把淡出反向。
+                let consumed = 1.0 - remain as f64 / fade_out_frames as f64;
+                g *= match &fade_out_lut {
+                    Some(lut) => crate::fade_curves::sample_fade_lut(
+                        lut,
+                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
+                    ),
+                    None => (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0),
+                };
             }
             if g <= 0.0 {
                 continue;

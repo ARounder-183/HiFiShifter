@@ -7,24 +7,7 @@ import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
-
-function leadingOverlaps(clips: readonly ClipInfo[]): Record<string, number> {
-    const sorted = [...clips].sort((a, b) => a.startSec - b.startSec || a.id.localeCompare(b.id));
-    const result: Record<string, number> = {};
-    for (let index = 0; index < sorted.length; index += 1) {
-        const clip = sorted[index];
-        let overlapEnd = clip.startSec;
-        for (let priorIndex = 0; priorIndex < index; priorIndex += 1) {
-            const prior = sorted[priorIndex];
-            overlapEnd = Math.max(
-                overlapEnd,
-                Math.min(clip.startSec + clip.lengthSec, prior.startSec + prior.lengthSec),
-            );
-        }
-        result[clip.id] = Math.max(0, overlapEnd - clip.startSec);
-    }
-    return result;
-}
+import { computeLeadingOverlapSecByClipId } from "./TrackLane";
 
 function toSceneClip(clip: ClipInfo): WaveformSceneClip | null {
     if (!clip.sourcePath) return null;
@@ -47,13 +30,18 @@ function toSceneClip(clip: ClipInfo): WaveformSceneClip | null {
         fadeOutSec: clip.fadeOutSec,
         autoFadeInSec: clip.autoFadeInSec,
         autoFadeOutSec: clip.autoFadeOutSec,
-        fadeInCurve: clip.fadeInCurve,
-        fadeOutCurve: clip.fadeOutCurve,
+        fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+        fadeInDir: clip.fadeInDir ?? 0,
+        fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+        fadeOutDir: clip.fadeOutDir ?? 0,
     };
 }
 
 export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurface(props: {
     tracks: readonly TrackInfo[];
+    /** 窗口首行的绝对轨道索引：行 topPx 使用内容绝对坐标，
+     * 竖直滚动时由总线 scrollTopPx 统一平移（与 DOM 内容层同帧提交）。 */
+    startTrackIndex: number;
     clipsByTrackId: Readonly<Record<string, readonly ClipInfo[]>>;
     rowHeight: number;
     widthPx: number;
@@ -69,7 +57,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             props.tracks.map((track, index) => {
                 const clips = props.clipsByTrackId[track.id] ?? [];
                 return {
-                    topPx: index * props.rowHeight,
+                    topPx: (props.startTrackIndex + index) * props.rowHeight,
                     waveformTopPx: CLIP_HEADER_HEIGHT,
                     waveformHeightPx: Math.max(
                         1,
@@ -78,10 +66,10 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
                     clips: clips
                         .map(toSceneClip)
                         .filter((clip): clip is WaveformSceneClip => clip != null),
-                    leadingOverlapSecByClipId: leadingOverlaps(clips),
+                    leadingOverlapSecByClipId: computeLeadingOverlapSecByClipId([...clips]),
                 };
             }),
-        [props.clipsByTrackId, props.rowHeight, props.tracks],
+        [props.clipsByTrackId, props.rowHeight, props.startTrackIndex, props.tracks],
     );
 
     return (
@@ -92,6 +80,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             viewportStartSec={props.viewportStartSec}
             viewportEndSec={props.viewportEndSec}
             pxPerSec={props.pxPerSec}
+            viewportTopPx={props.startTrackIndex * props.rowHeight}
             color={color}
             viewportSource={timelineViewportBus}
         />

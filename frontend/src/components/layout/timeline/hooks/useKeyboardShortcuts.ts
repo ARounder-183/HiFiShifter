@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import type { SessionState } from "../../../../features/session/sessionSlice";
-import { removeClipsRemote } from "../../../../features/session/sessionSlice";
+import { cycleClipTakesRemote, removeClipsRemote } from "../../../../features/session/sessionSlice";
 import { selectMergedKeybindings } from "../../../../features/keybindings/keybindingsSlice";
 import type { ActionId, Keybinding, KeybindingMap } from "../../../../features/keybindings/types";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
@@ -23,6 +23,8 @@ const CLIP_ACTIONS: ActionId[] = [
     "clip.normalize",
     "clip.group",
     "clip.ungroup",
+    "clip.cycleTake",
+    "clip.cycleTakePrev",
 ];
 /**
  * 判断 KeyboardEvent 是否匹配某个 Keybinding
@@ -304,6 +306,22 @@ export function useKeyboardShortcuts(deps: {
                     e.preventDefault();
                     e.stopPropagation();
                     onUngroup(selectedIds);
+                    return;
+                }
+
+                case "clip.cycleTake": {
+                    if (selectedIds.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void dispatch(cycleClipTakesRemote({ clipIds: selectedIds, direction: 1 }));
+                    return;
+                }
+
+                case "clip.cycleTakePrev": {
+                    if (selectedIds.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void dispatch(cycleClipTakesRemote({ clipIds: selectedIds, direction: -1 }));
                     return;
                 }
             }

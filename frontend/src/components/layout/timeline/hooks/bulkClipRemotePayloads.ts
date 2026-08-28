@@ -3,6 +3,12 @@ type BulkClipRemoteChange = {
     muted?: boolean;
     fadeInSec?: number;
     fadeOutSec?: number;
+    /** REAPER 形状 id / 曲率：拖拽期间的修改必须随最终提交一并落盘，
+     *  否则批量 fulfilled 的整份时间线回灌会把拖拽期修改丢弃（回退/无效）。 */
+    fadeInShape?: number;
+    fadeInDir?: number;
+    fadeOutShape?: number;
+    fadeOutDir?: number;
     /** 倒放开关（后端 ClipStatePatch 支持，乐观更新同步应用）。 */
     reversed?: boolean;
     /** Loop（循环源）开关。 */

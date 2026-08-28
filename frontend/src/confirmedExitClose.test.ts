@@ -1,45 +1,48 @@
+import { test } from "vitest";
+
 import { runConfirmedExitClose } from "./confirmedExitClose.js";
 
-function assertEqual<T>(actual: T, expected: T): void {
-    if (actual !== expected) {
-        throw new Error(`Expected ${String(expected)}, received ${String(actual)}`);
+test("confirmedExitClose.test.ts scripted checks", async () => {
+    function assertEqual<T>(actual: T, expected: T): void {
+        if (actual !== expected) {
+            throw new Error(`Expected ${String(expected)}, received ${String(actual)}`);
+        }
     }
-}
 
-async function main() {
-    const successCalls: string[] = [];
+    async function main() {
+        const successCalls: string[] = [];
 
-    await runConfirmedExitClose({
-        markAllowClose: () => {
-            successCalls.push("allow");
-        },
-        destroyWindow: async () => {
-            successCalls.push("destroy");
-        },
-        closeWindow: async () => {
-            successCalls.push("close");
-        },
-    });
+        await runConfirmedExitClose({
+            markAllowClose: () => {
+                successCalls.push("allow");
+            },
+            destroyWindow: async () => {
+                successCalls.push("destroy");
+            },
+            closeWindow: async () => {
+                successCalls.push("close");
+            },
+        });
 
-    assertEqual(successCalls.join(","), "allow,destroy");
+        assertEqual(successCalls.join(","), "allow,destroy");
 
-    const fallbackCalls: string[] = [];
+        const fallbackCalls: string[] = [];
 
-    await runConfirmedExitClose({
-        markAllowClose: () => {
-            fallbackCalls.push("allow");
-        },
-        destroyWindow: async () => {
-            fallbackCalls.push("destroy");
-            throw new Error("destroy failed");
-        },
-        closeWindow: async () => {
-            fallbackCalls.push("close");
-        },
-    });
+        await runConfirmedExitClose({
+            markAllowClose: () => {
+                fallbackCalls.push("allow");
+            },
+            destroyWindow: async () => {
+                fallbackCalls.push("destroy");
+                throw new Error("destroy failed");
+            },
+            closeWindow: async () => {
+                fallbackCalls.push("close");
+            },
+        });
 
-    assertEqual(fallbackCalls.join(","), "allow,destroy,allow,close");
-    console.log("confirmed exit close checks passed");
-}
+        assertEqual(fallbackCalls.join(","), "allow,destroy,allow,close");
+    }
 
-void main();
+    void main();
+});

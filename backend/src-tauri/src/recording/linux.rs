@@ -152,8 +152,7 @@ fn dump_audio_nodes() -> Option<Vec<Value>> {
         array
             .iter()
             .filter(|item| {
-                item.get("type").and_then(Value::as_str)
-                    == Some("PipeWire:Interface:Node")
+                item.get("type").and_then(Value::as_str) == Some("PipeWire:Interface:Node")
             })
             .cloned()
             .collect(),
@@ -175,11 +174,16 @@ fn node_process_id(node: &Value) -> Option<u32> {
 
 fn node_display_name(node: &Value) -> String {
     let props = node_props(node).unwrap_or_default();
-    ["application.name", "node.description", "application.process.binary", "node.name"]
-        .iter()
-        .find_map(|key| props.get(*key).and_then(Value::as_str))
-        .map(str::to_string)
-        .unwrap_or_else(|| "Application".to_string())
+    [
+        "application.name",
+        "node.description",
+        "application.process.binary",
+        "node.name",
+    ]
+    .iter()
+    .find_map(|key| props.get(*key).and_then(Value::as_str))
+    .map(str::to_string)
+    .unwrap_or_else(|| "Application".to_string())
 }
 
 fn node_process_binary(node: &Value) -> Option<String> {
@@ -219,5 +223,9 @@ fn node_target_name(node: &Value) -> Option<String> {
         .get("node.name")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| node.get("id").and_then(Value::as_u64).map(|id| id.to_string()))
+        .or_else(|| {
+            node.get("id")
+                .and_then(Value::as_u64)
+                .map(|id| id.to_string())
+        })
 }

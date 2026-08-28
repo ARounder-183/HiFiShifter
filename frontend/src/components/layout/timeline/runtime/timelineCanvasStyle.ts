@@ -351,9 +351,13 @@ export function buildTimelineClipVisualStyle(args: {
         headerFill: rgba(headerRgb, 0.95),
         bodyFill: rgba(bodyRgb, 0.74),
         borderStroke: args.selected
-            ? getComputedStyle(document.documentElement)
-                .getPropertyValue("--qt-clip-selected-border")
-                .trim() || rgba(borderRgb, 1)
+            ? // CSS 变量优先；无 DOM 运行时（Node/SSR 测试）回退到派生色，
+              // 与本文件其余路径的 typeof 守卫保持一致。
+              (typeof document !== "undefined"
+                  ? getComputedStyle(document.documentElement)
+                        .getPropertyValue("--qt-clip-selected-border")
+                        .trim()
+                  : "") || rgba(borderRgb, 1)
             : rgba(borderRgb, 0.74),
         borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(241, 245, 249, 0.94)",

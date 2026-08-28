@@ -39,7 +39,7 @@ impl ProjectFragment {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let fragment: Self =
             rmp_serde::from_slice(bytes).map_err(|e| format!("clipboard_parse_failed: {}", e))?;
-        if fragment.version != 1 {
+        if !matches!(fragment.version, 1 | 2) {
             return Err(format!(
                 "clipboard_parse_failed: unsupported version {}",
                 fragment.version
@@ -192,7 +192,7 @@ pub fn build_clip_fragment(
     fragment_timeline.clips = clips
         .into_iter()
         .map(|mut clip| {
-            clip.waveform_preview = None;
+            clip.clear_waveform_preview_caches();
             clip
         })
         .collect();
@@ -215,7 +215,7 @@ pub fn build_clip_fragment(
     }
 
     Ok(ProjectFragment {
-        version: 1,
+        version: 2,
         kind: ProjectFragmentKind::Clips,
         source_project_name,
         timeline: fragment_timeline,
@@ -246,7 +246,7 @@ pub fn build_track_fragment(
         .filter(|clip| selected_track_ids.contains(&clip.track_id))
         .cloned()
         .map(|mut clip| {
-            clip.waveform_preview = None;
+            clip.clear_waveform_preview_caches();
             clip
         })
         .collect();
@@ -262,7 +262,7 @@ pub fn build_track_fragment(
     }
 
     Ok(ProjectFragment {
-        version: 1,
+        version: 2,
         kind: ProjectFragmentKind::Tracks,
         source_project_name,
         timeline: fragment_timeline,
@@ -276,11 +276,11 @@ pub fn build_project_fragment(
 ) -> ProjectFragment {
     let mut fragment_timeline = timeline;
     for clip in &mut fragment_timeline.clips {
-        clip.waveform_preview = None;
+        clip.clear_waveform_preview_caches();
     }
     fragment_timeline.project_sec = max_clip_end_sec(&fragment_timeline).max(4.0).ceil();
     ProjectFragment {
-        version: 1,
+        version: 2,
         kind: ProjectFragmentKind::Project,
         source_project_name,
         timeline: fragment_timeline,
@@ -476,6 +476,7 @@ pub fn merge_project_fragment(
             continue;
         };
         let mut clip = source_clip.clone();
+        clip.reconcile_legacy_fade_fields();
         clip.id = new_id("clip");
         clip.track_id = mapped_track_id;
         clip.group_id = source_clip
@@ -483,7 +484,11 @@ pub fn merge_project_fragment(
             .as_ref()
             .map(|group| remap_group_id(&mut group_id_map, group));
         clip.start_sec = (clip.start_sec + time_offset_sec).max(0.0);
-        clip.waveform_preview = None;
+        // 先物化 Take → 投影，再统一清波形缓存；顺序颠倒会让 normalize_takes
+        // 把 Take 里残留的旧预览写回投影，清空失效并随片段携带大数据。
+        clip.normalize_takes();
+        clip.clear_waveform_preview_caches();
+        clip.remap_take_ids();
 
         let created_id = clip.id.clone();
         clip_id_map.insert(source_clip.id.clone(), created_id.clone());
@@ -577,6 +582,9 @@ mod tests {
     fn clip(name: &str, track_id: &str, start_sec: f64, length_sec: f64) -> Clip {
         Clip {
             id: format!("clip_{name}"),
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
             group_id: None,
             track_id: track_id.to_string(),
             name: name.to_string(),
@@ -600,10 +608,15 @@ mod tests {
             playback_rate: 1.0,
             reversed: false,
             loop_enabled: false,
+            snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
             auto_fade_in_sec: 0.0,
             auto_fade_out_sec: 0.0,
             extra_curves: None,
@@ -704,7 +717,8 @@ mod tests {
 
         let mut target = TimelineState::default();
         let target_root = target.tracks[0].id.clone();
-        let target_child = target.add_track(Some("Target Child".to_string()), Some(target_root), None);
+        let target_child =
+            target.add_track(Some("Target Child".to_string()), Some(target_root), None);
         target.selected_track_id = Some(target_child.clone());
         let track_count_before = target.tracks.len();
 
@@ -758,7 +772,9 @@ mod tests {
             .id
             .clone();
         let fragment = build_clip_fragment(&source, &[clip_id.clone()], "src".into()).unwrap();
-        assert!(!fragment.linked_params_by_clip[&clip_id].pitch_edit.is_empty());
+        assert!(!fragment.linked_params_by_clip[&clip_id]
+            .pitch_edit
+            .is_empty());
 
         let mut target = TimelineState::default();
         let target_root = target.tracks[0].id.clone();
@@ -773,7 +789,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(target.tracks.iter().find(|track| track.id == target_root).unwrap().compose_enabled);
+        assert!(
+            target
+                .tracks
+                .iter()
+                .find(|track| track.id == target_root)
+                .unwrap()
+                .compose_enabled
+        );
     }
 
     #[test]

@@ -25,7 +25,6 @@
 
 import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
-import type { FadeCurveType } from "../layout/timeline/paths";
 import { waveformMipmapStore } from "../../utils/waveformMipmapStore";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
 import {
@@ -40,6 +39,7 @@ import {
     resolveLoopMediaDurationSec,
     resolvePlaybackWindowSec,
 } from "../../utils/loopRender";
+import { resolveTakeLaneLayouts, type TakeLaneLayout } from "../layout/timeline/takeLanes";
 import {
     wfDiag_frameStart,
     wfDiag_frameEnd,
@@ -56,6 +56,49 @@ import {
 const _downsamplePool: Float32Array[] = [];
 const POOL_MAX = 8;
 const LEADING_OVERLAP_ALPHA = 0.5;
+
+/** darkenWaveformStroke 的结果缓存：绘制循环内每个 inactive lane 都会调用，
+ * 输入色板在会话内高度重复，按输入字符串缓存避免每帧正则解析。 */
+const _darkenCache = new Map<string, string>();
+
+/** 将 inactive take 的波形颜色压暗；支持常用 CSS 颜色格式。 */
+function darkenWaveformStroke(color: string): string {
+    const cached = _darkenCache.get(color);
+    if (cached !== undefined) return cached;
+    const result = computeDarkenedWaveformStroke(color);
+    if (_darkenCache.size > 64) _darkenCache.clear();
+    _darkenCache.set(color, result);
+    return result;
+}
+
+function computeDarkenedWaveformStroke(color: string): string {
+    const hex = color.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hex) {
+        let value = hex[1];
+        if (value.length === 3) {
+            value = value
+                .split("")
+                .map((ch) => ch + ch)
+                .join("");
+        }
+        const r = Math.round(Number.parseInt(value.slice(0, 2), 16) * 0.42);
+        const g = Math.round(Number.parseInt(value.slice(2, 4), 16) * 0.42);
+        const b = Math.round(Number.parseInt(value.slice(4, 6), 16) * 0.42);
+        return `rgba(${r}, ${g}, ${b}, 0.78)`;
+    }
+
+    const rgba = color.match(
+        /^rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*(?:,\s*([0-9.]+)\s*)?\)$/i,
+    );
+    if (rgba) {
+        const r = Math.round(Number(rgba[1]) * 0.42);
+        const g = Math.round(Number(rgba[2]) * 0.42);
+        const b = Math.round(Number(rgba[3]) * 0.42);
+        const a = rgba[4] == null ? 1 : Number(rgba[4]);
+        return `rgba(${r}, ${g}, ${b}, ${(a * 0.72).toFixed(3)})`;
+    }
+    return color;
+}
 
 function acquireDownsampleBuffer(minLen: number): Float32Array {
     for (let i = 0; i < _downsamplePool.length; i++) {
@@ -97,6 +140,79 @@ export interface WaveformTrackCanvasProps {
     strokeColor: string;
     /** 描边宽度 */
     strokeWidth?: number;
+    /** 在垂直空间足够时，显示一个 Clip 内的全部音频 Take。 */
+    showAllTakes?: boolean;
+    /** 多 Take lane 之间的分界线颜色。 */
+    takeSeparatorColor?: string;
+}
+
+type WaveformRenderClip = ClipInfo & {
+    __takeLane?: TakeLaneLayout;
+    /** 展开 lane 前的真实 Clip id（lane 的 id 带 `::take::` 后缀，不能用于
+     * leadingOverlapSecByClipId 等以真实 clip id 为键的查表）。 */
+    __originClipId?: string;
+};
+
+function expandClipsForTakeLanes(
+    clips: ClipInfo[],
+    showAllTakes: boolean,
+    availableHeightPx: number,
+): WaveformRenderClip[] {
+    const output: WaveformRenderClip[] = [];
+    for (const clip of clips) {
+        const layouts = resolveTakeLaneLayouts(clip, showAllTakes, availableHeightPx);
+        if (!layouts) {
+            output.push(clip);
+            continue;
+        }
+
+        for (const [index, take] of (clip.takes ?? [])
+            .filter((take) => Boolean(take.sourcePath))
+            .entries()) {
+            const layout = layouts[index];
+            if (!layout) continue;
+            const clipRate =
+                Number.isFinite(clip.clipPlaybackRate) && (clip.clipPlaybackRate ?? 0) > 0
+                    ? Number(clip.clipPlaybackRate)
+                    : 1;
+            // Slip / trim / gain 的乐观更新写在 Clip 的 active-take 投影上；
+            // 渲染 expanded lane 时必须让 active take 消费这份最新投影，
+            // 否则多 Take 展示下拖拽预览会停留在旧窗口/旧增益
+            // （增益拖拽逐帧只更新 flat clip.gain，不写 take.gain）。
+            const isActiveTake = take.id === clip.activeTakeId;
+            const effectiveTake = isActiveTake
+                ? {
+                      ...take,
+                      sourceStartSec: clip.sourceStartSec,
+                      sourceEndSec: clip.sourceEndSec,
+                      gain: clip.gain,
+                  }
+                : take;
+            output.push({
+                ...clip,
+                id: `${clip.id}::take::${take.id}`,
+                __originClipId: clip.id,
+                sourcePath: effectiveTake.sourcePath,
+                durationSec: effectiveTake.durationSec,
+                durationFrames: effectiveTake.durationFrames,
+                sourceSampleRate: effectiveTake.sourceSampleRate,
+                gain: effectiveTake.gain,
+                sourceStartSec: effectiveTake.sourceStartSec,
+                sourceEndSec: effectiveTake.sourceEndSec,
+                playbackRate:
+                    Number.isFinite(clipRate * effectiveTake.playbackRate) &&
+                    clipRate * effectiveTake.playbackRate > 0.1
+                        ? Math.min(10, clipRate * effectiveTake.playbackRate)
+                        : 1,
+                reversed: effectiveTake.reversed,
+                loopEnabled: effectiveTake.loopEnabled,
+                midiNoteData: undefined,
+                midiNoteCount: undefined,
+                __takeLane: layout,
+            });
+        }
+    }
+    return output;
 }
 
 export const WaveformTrackCanvas = React.memo(
@@ -108,6 +224,8 @@ export const WaveformTrackCanvas = React.memo(
             viewportWidthPx,
             strokeColor,
             strokeWidth = 1,
+            showAllTakes = true,
+            takeSeparatorColor,
         } = props;
 
         // ========================================
@@ -129,6 +247,15 @@ export const WaveformTrackCanvas = React.memo(
         const strokeColorRef = React.useRef(strokeColor);
         const strokeWidthRef = React.useRef(strokeWidth);
         const viewportWidthPxRef = React.useRef(viewportWidthPx);
+        const showAllTakesRef = React.useRef(showAllTakes);
+        const takeSeparatorColorRef = React.useRef(takeSeparatorColor);
+        /** take-lane 展开结果缓存：输入三元组未变时复用上一帧对象。 */
+        const expandedTakeLanesCacheRef = React.useRef<{
+            clips: ClipInfo[];
+            showAllTakes: boolean;
+            height: number;
+            result: WaveformRenderClip[];
+        } | null>(null);
 
         // 同步 ref
         pxPerSecRef.current = props.pxPerSec;
@@ -140,6 +267,8 @@ export const WaveformTrackCanvas = React.memo(
         strokeColorRef.current = strokeColor;
         strokeWidthRef.current = strokeWidth;
         viewportWidthPxRef.current = viewportWidthPx;
+        showAllTakesRef.current = showAllTakes;
+        takeSeparatorColorRef.current = takeSeparatorColor;
 
         // ========================================
         // invalidate + rAF 帧合并（与 PianoRoll 完全一致）
@@ -188,20 +317,50 @@ export const WaveformTrackCanvas = React.memo(
             const currentPxPerSec = pxPerSecRef.current;
             const currentViewportStartSec = viewportStartSecRef.current;
             const currentViewportEndSec = viewportEndSecRef.current;
-            const currentClips = clipsRef.current;
             const currentLeadingOverlapSecByClipId = leadingOverlapSecByClipIdRef.current;
             const currentWaveformHeight = waveformHeightRef.current;
             const currentStrokeColor = strokeColorRef.current;
             const currentStrokeWidth = strokeWidthRef.current;
             const currentViewportWidthPx = viewportWidthPxRef.current;
+            const currentShowAllTakes = showAllTakesRef.current;
+            // take-lane 展开是纯函数且开销随 clip×take 数增长；滚动/缩放时
+            // 每帧重算属于纯分配 churn。按输入三元组 memo 化（clips 数组引用
+            // 在 Redux 更新时才会变化，与数据一致性天然对齐）。
+            const expandedCache = expandedTakeLanesCacheRef.current;
+            let currentClips: WaveformRenderClip[];
+            if (
+                expandedCache !== null &&
+                expandedCache.clips === clipsRef.current &&
+                expandedCache.showAllTakes === currentShowAllTakes &&
+                expandedCache.height === currentWaveformHeight
+            ) {
+                currentClips = expandedCache.result;
+            } else {
+                currentClips = expandClipsForTakeLanes(
+                    clipsRef.current,
+                    currentShowAllTakes,
+                    currentWaveformHeight,
+                );
+                expandedTakeLanesCacheRef.current = {
+                    clips: clipsRef.current,
+                    showAllTakes: currentShowAllTakes,
+                    height: currentWaveformHeight,
+                    result: currentClips,
+                };
+            }
             const displayW = Math.max(1, Math.ceil(currentViewportWidthPx));
-            const displayH = currentWaveformHeight;
+            const baseDisplayHeight = currentWaveformHeight;
+            let displayH = baseDisplayHeight;
+            // 每帧解析一次主题相关的默认分界线颜色（避免循环内反复读 DOM）。
+            const defaultSeparatorColor = document.documentElement.classList.contains("dark")
+                ? "rgba(255, 255, 255, 0.16)"
+                : "rgba(0, 0, 0, 0.18)";
 
             // 取消限制 dpr 为 1
             const dpr = window.devicePixelRatio || 1;
             // 用 Math.round 代替 Math.floor，消除浮点累积误差导致的帧间尺寸振荡
             const internalW = Math.max(1, Math.round(displayW * dpr));
-            const internalH = Math.max(1, Math.round(displayH * dpr));
+            const internalH = Math.max(1, Math.round(baseDisplayHeight * dpr));
 
             // 仅当物理尺寸真正变化时才设置 canvas.width/height（设置即清空画布）
             const lastDims = lastCanvasDimsRef.current;
@@ -215,12 +374,10 @@ export const WaveformTrackCanvas = React.memo(
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
 
-            if (dimsChanged) {
-                // 尺寸变化后重设 scale
-                const scaleX = internalW / Math.max(1, displayW);
-                const scaleY = internalH / Math.max(1, displayH);
-                ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-            }
+            // 尺寸可能未变，但每个 take lane 需要独立的垂直变换。
+            const scaleX = internalW / Math.max(1, displayW);
+            const scaleY = internalH / Math.max(1, baseDisplayHeight);
+            ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
 
             ctx.clearRect(0, 0, displayW, displayH);
 
@@ -243,9 +400,15 @@ export const WaveformTrackCanvas = React.memo(
 
             if (__perfDebug) __tSetup = performance.now() - __t0;
 
-            for (const clip of currentClips) {
+            for (const rawClip of currentClips) {
+                const clip = rawClip as WaveformRenderClip;
+                const takeLane = clip.__takeLane;
+                displayH = takeLane?.height ?? baseDisplayHeight;
+                ctx.setTransform(scaleX, 0, 0, scaleY, 0, (takeLane?.top ?? 0) * scaleY);
+                const strokeColorForClip = takeLane?.inactive
+                    ? darkenWaveformStroke(currentStrokeColor)
+                    : currentStrokeColor;
                 if (!clip.sourcePath) continue;
-                // 媒体时长可用性按统一取值链（frames/sr 优先，durationSec 兜底）
                 // 判断：只带 durationFrames+sourceSampleRate 的 clip 同样可渲染，
                 // 与 piano-roll 消费端保持一致。mediaDur 同时作为后续所有
                 // "媒体时长"消费点的具体数值（替代旧 durationSec 守卫的收窄）。
@@ -368,8 +531,7 @@ export const WaveformTrackCanvas = React.memo(
                     // 否则 slip 出域的锚点会让波形相位与播放错位。
                     const anchorFwd = modEuclid(sourceStartSec, mediaDur);
                     const anchorRev = modEuclid(effSrcEnd, mediaDur);
-                    const headDur =
-                        (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
+                    const headDur = (clip.reversed ? anchorRev : mediaDur - anchorFwd) / pr;
                     const bodyDur = mediaDur / pr;
                     const visLocalStart = Math.max(0, visStartSec - clipStartSec);
                     const visLocalEnd = Math.min(clip.lengthSec, visEndSec - clipStartSec);
@@ -384,10 +546,7 @@ export const WaveformTrackCanvas = React.memo(
                         Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
                     );
                     const approxCount =
-                        2 +
-                        Math.ceil(
-                            (visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur,
-                        );
+                        2 + Math.ceil((visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur);
                     if (approxCount <= 4096) {
                         if (headDur > 1e-9 && visLocalStart < headDur) {
                             segmentsToRender.push({
@@ -397,8 +556,7 @@ export const WaveformTrackCanvas = React.memo(
                                 srcWinEnd: clip.reversed ? anchorRev : mediaDur,
                             });
                         }
-                        let segOffset =
-                            headDur + firstBodyIndex * bodyDur;
+                        let segOffset = headDur + firstBodyIndex * bodyDur;
                         for (
                             let guard = 0;
                             segOffset < visLocalEnd - 1e-9 && guard < 4096;
@@ -443,9 +601,7 @@ export const WaveformTrackCanvas = React.memo(
                 } | null = null;
                 const releaseFetchCache = () => {
                     if (fetchCacheResult) {
-                        waveformMipmapStore.releaseInterleaved(
-                            fetchCacheResult.interleaved,
-                        );
+                        waveformMipmapStore.releaseInterleaved(fetchCacheResult.interleaved);
                         fetchCacheResult = null;
                     }
                     fetchCacheKey = null;
@@ -494,8 +650,10 @@ export const WaveformTrackCanvas = React.memo(
                     // —— 长于一个周期的淡化横跨多段时包络保持连续。
                     fadeInSec: effectiveFadeInSec,
                     fadeOutSec: effectiveFadeOutSec,
-                    fadeInCurve: (clip.fadeInCurve as FadeCurveType) ?? "sine",
-                    fadeOutCurve: (clip.fadeOutCurve as FadeCurveType) ?? "sine",
+                    fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+                    fadeInDir: clip.fadeInDir ?? 0,
+                    fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+                    fadeOutDir: clip.fadeOutDir ?? 0,
                     dataStartSec: 0,
                     dataDurationSec: 0,
                     clipTimeOffsetSec: 0,
@@ -507,14 +665,8 @@ export const WaveformTrackCanvas = React.memo(
                 for (const seg of segmentsToRender) {
                     const tileLocalEndSec = seg.localStartSec + seg.durationSec;
                     // 该分段与可见区间、clip 长度的交集（clip 局部时间）
-                    const visClipStartSec = Math.max(
-                        seg.localStartSec,
-                        visStartSec - clipStartSec,
-                    );
-                    const visClipEndSec = Math.min(
-                        tileLocalEndSec,
-                        visEndSec - clipStartSec,
-                    );
+                    const visClipStartSec = Math.max(seg.localStartSec, visStartSec - clipStartSec);
+                    const visClipEndSec = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
                     if (visClipEndSec <= visClipStartSec) continue;
 
                     // 瓦片在主 Canvas 上的可见像素范围 —— 必须在取数/降采样
@@ -595,9 +747,7 @@ export const WaveformTrackCanvas = React.memo(
                     // 该瓦片可见部分的像素宽度（用于稳定的降采样目标）
                     const tileVisibleWidthPx = Math.max(
                         1,
-                        Math.ceil(
-                            (visClipEndSec - visClipStartSec) * currentPxPerSec - 1e-6,
-                        ),
+                        Math.ceil((visClipEndSec - visClipStartSec) * currentPxPerSec - 1e-6),
                     );
 
                     // ========================================
@@ -661,10 +811,7 @@ export const WaveformTrackCanvas = React.memo(
                     renderParams.dataDurationSec = result.dataDurationSec;
                     renderParams.clipPixelOffset =
                         Math.round((viewportStartPx - tileStartPx) * 2) / 2;
-                    renderParams.clipTotalWidthPx = Math.max(
-                        1,
-                        seg.durationSec * currentPxPerSec,
-                    );
+                    renderParams.clipTotalWidthPx = Math.max(1, seg.durationSec * currentPxPerSec);
                     const params = renderParams;
 
                     // 应用增益（音量 + 淡入淡出）
@@ -680,20 +827,28 @@ export const WaveformTrackCanvas = React.memo(
                     // ========================================
                     const __tRender0 = __perfDebug ? performance.now() : 0;
 
-                    const baseAlpha = clip.muted ? 0.4 : 1.0;
+                    const baseAlpha = (clip.muted ? 0.4 : 1.0) * (takeLane?.inactive ? 0.78 : 1);
                     // 前导重叠可视化仅作用于第一个分段（重叠区只在 clip 起始处）。
+                    // 查表必须用展开前的真实 Clip id：lane 的 id 带 `::take::`
+                    // 后缀，直接查会导致多 take 展示下重叠可视化静默丢失。
                     const leadingOverlapSec = Math.max(
                         0,
                         Math.min(
                             clip.lengthSec,
-                            Number(currentLeadingOverlapSecByClipId[clip.id] ?? 0) || 0,
+                            Number(
+                                currentLeadingOverlapSecByClipId[clip.__originClipId ?? clip.id] ??
+                                    0,
+                            ) || 0,
                         ),
                     );
                     const leadingOverlapRightPx =
                         (clipStartSec + leadingOverlapSec) * currentPxPerSec - viewportStartPx;
                     const leadingOverlapVisibleRight =
                         leadingOverlapSec > 1e-9 && seg.localStartSec <= leadingOverlapSec
-                            ? Math.min(tileVisRightPx, Math.max(tileVisLeftPx, leadingOverlapRightPx))
+                            ? Math.min(
+                                  tileVisRightPx,
+                                  Math.max(tileVisLeftPx, leadingOverlapRightPx),
+                              )
                             : tileVisLeftPx;
 
                     const drawSegment = (
@@ -712,7 +867,7 @@ export const WaveformTrackCanvas = React.memo(
                             ctx,
                             withGains,
                             params,
-                            currentStrokeColor,
+                            strokeColorForClip,
                             currentStrokeWidth,
                             "line",
                         );
@@ -793,15 +948,14 @@ export const WaveformTrackCanvas = React.memo(
                             markerT += bodyDur
                         ) {
                             if (markerT <= 1e-6) continue; // 起点回绕点不绘制
-                            const mx =
-                                (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                            const mx = (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
                             if (mx > displayW + 8) break;
                             if (mx < -8) continue;
                             markers.push(Math.round(mx * 2) / 2);
                         }
                     }
                     if (markers.length > 0) {
-                        drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
+                        drawLoopMarkers(ctx, markers, displayH, strokeColorForClip);
                     }
                 } else if (mediaDur > 1e-6) {
                     // ── 非 Loop：媒体边界标记（"循环节"的退化形式）──────
@@ -818,17 +972,57 @@ export const WaveformTrackCanvas = React.memo(
                             ? (winEndSec - b) / pr
                             : (b - winStartSec) / pr;
                         if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
-                        const mx =
-                            (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
+                        const mx = (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
                         if (mx < -8 || mx > displayW + 8) continue;
                         markers.push(Math.round(mx * 2) / 2);
                     }
                     if (markers.length > 0) {
-                        drawLoopMarkers(ctx, markers, displayH, currentStrokeColor);
+                        drawLoopMarkers(ctx, markers, displayH, strokeColorForClip);
                     }
                 }
-            }
 
+                // ── SnapOffset（吸附偏移）竖线 ─────────────────────
+                // SnapOffset 是 Clip 自身属性：相对 Clip 起点的偏移（秒，
+                // 与倒放无关）。非 0 时以黄色竖虚线标记其位置，x 与左下角
+                // ◣ 三角的左侧竖直边严格一致（含贴着 Clip 末端的情形）。
+                {
+                    const snapOffsetLocal = Math.max(0, Number(clip.snapOffsetSec) || 0);
+                    if (snapOffsetLocal > 1e-6 && snapOffsetLocal <= clip.lengthSec + 1e-6) {
+                        const mx =
+                            Math.round((clipStartSec + snapOffsetLocal) * currentPxPerSec * 2) / 2 -
+                            viewportStartPx;
+                        if (mx >= -1 && mx <= displayW + 1) {
+                            ctx.save();
+                            ctx.strokeStyle = "rgba(255, 214, 102, 0.9)";
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([4, 3]);
+                            ctx.beginPath();
+                            ctx.moveTo(mx, 1);
+                            ctx.lineTo(mx, displayH - 1);
+                            ctx.stroke();
+                            ctx.restore();
+                        }
+                    }
+                }
+
+                // 多 Take lane 分界线：只在 lane 顶部绘制（首条 lane 顶边
+                // 即 Clip header 边界，不重复画）。颜色与轨道边框一致地保持低对比。
+                // （主题色已在绘制帧开始时统一解析，见 defaultSeparatorColor。）
+                if (takeLane && takeLane.index > 0) {
+                    const separatorColor = takeSeparatorColorRef.current ?? defaultSeparatorColor;
+                    ctx.save();
+                    ctx.strokeStyle = separatorColor;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    const boundaryY = Math.max(0.5, Math.min(displayH - 0.5, 0.5));
+                    ctx.moveTo(visLeftPx, boundaryY);
+                    ctx.lineTo(visRightPx, boundaryY);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+            }
+            displayH = baseDisplayHeight;
+            ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
             if (ctx.globalAlpha !== 1) {
                 ctx.globalAlpha = 1;
             }
@@ -870,6 +1064,11 @@ export const WaveformTrackCanvas = React.memo(
             const neededPaths = new Set<string>();
             for (const clip of clips) {
                 if (clip.sourcePath) neededPaths.add(clip.sourcePath);
+                // 多 Take 泳道：inactive take 的源也要监听 —— 否则其 mipmap
+                // 异步加载完成后不触发重绘，泳道在界面静止时无限期空白。
+                for (const take of clip.takes ?? []) {
+                    if (take.sourcePath) neededPaths.add(take.sourcePath);
+                }
             }
 
             const unsub = waveformMipmapStore.addListener((sourcePath, status) => {
@@ -914,7 +1113,16 @@ export const WaveformTrackCanvas = React.memo(
         React.useEffect(() => {
             wfDiag_invalidateProps();
             invalidate();
-        }, [clips, waveformHeight, strokeColor, strokeWidth, viewportWidthPx, invalidate]);
+        }, [
+            clips,
+            waveformHeight,
+            strokeColor,
+            strokeWidth,
+            viewportWidthPx,
+            showAllTakes,
+            takeSeparatorColor,
+            invalidate,
+        ]);
 
         // 组件卸载时取消待执行的 rAF
         React.useEffect(() => {
@@ -955,7 +1163,9 @@ export const WaveformTrackCanvas = React.memo(
             prev.waveformHeight === next.waveformHeight &&
             prev.viewportWidthPx === next.viewportWidthPx &&
             prev.strokeColor === next.strokeColor &&
-            prev.strokeWidth === next.strokeWidth
+            prev.strokeWidth === next.strokeWidth &&
+            prev.showAllTakes === next.showAllTakes &&
+            prev.takeSeparatorColor === next.takeSeparatorColor
             // 故意不比较 pxPerSec / viewportStartSec / viewportEndSec
         );
     },

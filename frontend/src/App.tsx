@@ -1585,6 +1585,13 @@ function AppInner() {
         return () => clearTimeout(timer);
     }, [paramsEpoch, autoBackgroundRender]);
 
+    // consume 语义只应执行一次：依赖 handleExternalFileAction（其随
+    // projectDirty 翻转而重建）会让该 effect 在首次编辑后重复发起 IPC。
+    const consumeStartupProjectPathRef = useRef(handleExternalFileAction);
+    useEffect(() => {
+        consumeStartupProjectPathRef.current = handleExternalFileAction;
+    }, [handleExternalFileAction]);
+
     useEffect(() => {
         let canceled = false;
 
@@ -1594,7 +1601,7 @@ function AppInner() {
                 const startupPath = String(result?.path ?? "").trim();
                 const kind = detectExternalActionKindFromPath(startupPath);
                 if (!canceled && startupPath && kind) {
-                    handleExternalFileAction(kind, startupPath);
+                    consumeStartupProjectPathRef.current(kind, startupPath);
                 }
             } catch {
                 // no-op
@@ -1605,7 +1612,8 @@ function AppInner() {
         return () => {
             canceled = true;
         };
-    }, [handleExternalFileAction]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时执行一次
+    }, []);
 
     useEffect(() => {
         function onOpenProjectPath(event: Event) {

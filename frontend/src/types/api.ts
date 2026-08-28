@@ -33,6 +33,30 @@ export interface TimelineTrack {
     color: string;
 }
 
+export interface TimelineClipTake {
+    id: string;
+    name: string;
+    gain: number;
+    source_path?: string;
+    source_path_relative?: string;
+    duration_sec?: number;
+    duration_frames?: number;
+    source_sample_rate?: number;
+    source_start_sec: number;
+    source_end_sec: number;
+    playback_rate: number;
+    reversed: boolean;
+    loop_enabled: boolean;
+    midi_note_data?: Array<{
+        start_sec: number;
+        end_sec: number;
+        note: number;
+        velocity: number;
+        channel?: number;
+    }>;
+    midi_fill_gaps?: boolean;
+}
+
 export interface TimelineClip {
     id: string;
     group_id?: string;
@@ -41,6 +65,8 @@ export interface TimelineClip {
     start_sec: number;
     length_sec: number;
     color: string;
+    takes?: TimelineClipTake[];
+    active_take_id?: string;
     source_path?: string;
     source_path_relative?: string;
     duration_sec?: number;
@@ -56,13 +82,21 @@ export interface TimelineClip {
     source_start_sec?: number;
     source_end_sec?: number;
     playback_rate?: number;
+    /** Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。 */
+    clip_playback_rate?: number;
     reversed?: boolean;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;
+    /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
+    snap_offset_sec?: number;
     fade_in_sec?: number;
     fade_out_sec?: number;
-    fade_in_curve?: string;
-    fade_out_curve?: string;
+    /** REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传保存）。 */
+    fade_in_shape?: number;
+    fade_out_shape?: number;
+    /** 曲率（REAPER D_FADEINDIR/OUTDIR），范围 [-1, 1]。 */
+    fade_in_dir?: number;
+    fade_out_dir?: number;
     /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
     auto_fade_in_sec?: number;
     auto_fade_out_sec?: number;

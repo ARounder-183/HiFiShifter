@@ -29,8 +29,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::pitch_editing::PitchCurvesSnapshot;
 
 // 导入 clip 渲染状态管理器
-use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
+use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 
 // ─── 缓存容量 ──────────────────────────────────────────────────────────────────
 
@@ -329,6 +329,10 @@ pub struct RenderedClipCacheEntry {
     pub frames: u64,
     /// 采样率（Hz）。
     pub sample_rate: u32,
+    /// 渲染时该 Clip 的 active take id。用于垫音（fallback）查找时识别跨
+    /// Take 的旧渲染：undo 回退等场景下同 clip_id 换了 take，旧条目的内容
+    /// 与当前可听内容无关，不得作为垫音（None = 旧条目/未知，宽松放行）。
+    pub rendered_take_id: Option<String>,
 }
 
 /// 整 Clip 渲染结果的 byte-budgeted LRU 缓存。
@@ -554,7 +558,10 @@ pub fn compute_rendered_clip_hash(
     }
 
     // 混入 extra_curves，并且【只 Hash 当前时间切片的片段】，避免性能问题与错误缓存失效
-    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves.iter().map(|(k, v)| (k, v.as_slice())).collect();
+    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves
+        .iter()
+        .map(|(k, v)| (k, v.as_slice()))
+        .collect();
     sorted_curves.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted_curves {
         // 调用已定义好的过滤函数，防止后处理参数改变引发灾难级的底层重渲染
@@ -717,6 +724,9 @@ pub struct TensionRenderedClipCacheEntry {
     pub pcm_stereo: Arc<Vec<f32>>,
     pub frames: u64,
     pub sample_rate: u32,
+    /// 渲染时该 Clip 的 active take id；语义同
+    /// [`RenderedClipCacheEntry::rendered_take_id`]（垫音防跨 Take 复用）。
+    pub rendered_take_id: Option<String>,
 }
 
 pub struct TensionRenderedClipCache {
@@ -772,7 +782,10 @@ static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCac
 pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
     GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
         let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
-        Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity(), budget))
+        Mutex::new(TensionRenderedClipCache::new(
+            rendered_clip_capacity(),
+            budget,
+        ))
     })
 }
 
@@ -885,8 +898,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
-                clip_id,
-                before
+                clip_id, before
             );
         }
     }
@@ -977,28 +989,52 @@ pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
     // 注意：不要失效 RenderedClipCache，原因见上方文档注释。
 }
 
-/// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_rendered_pcm(clip_id: &str) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
+/// 垫音身份校验：条目与当前 Clip 的 active take 都已知时必须一致。
+/// 任一方未知（旧条目 / 无 take 工程）保持既有宽松行为，避免回归。
+fn take_identity_matches(entry_take: Option<&str>, active_take: Option<&str>) -> bool {
+    match (entry_take, active_take) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）。
+///
+/// `active_take_id` 为当前活跃 take：同 clip_id 换了 take 的旧渲染（undo
+/// 回退等场景）与当前可听内容无关，不得作为垫音。
+pub fn get_latest_rendered_pcm(
+    clip_id: &str,
+    active_take_id: Option<&str>,
+) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
     let cache = global_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let entry = cache
         .inner
         .iter()
-        .find(|(k, _)| k.clip_id == clip_id)
+        .find(|(k, v)| {
+            k.clip_id == clip_id
+                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+        })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
 }
 
 /// 获取指定 clip 最近一次成功的 Tension 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_tension_rendered_pcm(clip_id: &str) -> Option<Arc<Vec<f32>>> {
+pub fn get_latest_tension_rendered_pcm(
+    clip_id: &str,
+    active_take_id: Option<&str>,
+) -> Option<Arc<Vec<f32>>> {
     let cache = global_tension_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let entry = cache
         .inner
         .iter()
-        .find(|(k, _)| k.clip_id == clip_id)
+        .find(|(k, v)| {
+            k.clip_id == clip_id
+                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+        })
         .map(|(_, v)| v)?;
     Some(entry.pcm_stereo.clone())
 }

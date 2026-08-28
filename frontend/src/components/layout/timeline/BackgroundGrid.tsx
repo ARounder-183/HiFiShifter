@@ -222,7 +222,11 @@ export const BackgroundGrid: React.FC<{
         );
     }, [useExplicitLines]);
 
-    useEffect(() => {
+    // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
+    // 随 pxPerBeat 变化，若走 passive useEffect 会在 DOM 重排后的下一帧才
+    // 切换，与 Clip/标尺产生一帧错位。滚动仅影响窗口化（位置为内容坐标，
+    // 随原生滚动移动），同样受益于同帧提交。
+    useLayoutEffect(() => {
         draw(scrollLeft);
     }, [
         draw,

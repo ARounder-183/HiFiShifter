@@ -54,9 +54,10 @@ pub struct SignalsmithRealtimeStretcher {
     #[allow(dead_code)]
     time_ratio: f64,
 
-    #[allow(dead_code)]
     out_buffer: Vec<f32>,
-    #[allow(dead_code)]
+    /// Read cursor into `out_buffer` (avoids O(remaining) `Vec::drain` per
+    /// chunk on long offline stretches); compacts on append/consume-end.
+    out_read_pos: usize,
     temp_out: Vec<f32>,
 }
 
@@ -93,6 +94,7 @@ impl SignalsmithRealtimeStretcher {
             sample_rate: sample_rate.max(1),
             time_ratio,
             out_buffer: Vec::with_capacity(4096),
+            out_read_pos: 0,
             temp_out: Vec::with_capacity(4096),
         })
     }
@@ -105,6 +107,7 @@ impl SignalsmithRealtimeStretcher {
         };
         self.time_ratio = time_ratio;
         self.out_buffer.clear();
+        self.out_read_pos = 0;
         unsafe {
             sstretch_reset(self.state);
             sstretch_set_transpose_semitones(self.state, 0.0);
@@ -144,6 +147,10 @@ impl SignalsmithRealtimeStretcher {
             return Err("sstretch_process_interleaved failed".to_string());
         }
 
+        if self.out_read_pos > 0 {
+            self.out_buffer.drain(..self.out_read_pos);
+            self.out_read_pos = 0;
+        }
         self.out_buffer.extend_from_slice(&self.temp_out);
         Ok(())
     }
@@ -153,20 +160,25 @@ impl SignalsmithRealtimeStretcher {
         out_interleaved: &mut Vec<f32>,
         max_frames: usize,
     ) -> Result<usize, String> {
-        if self.out_buffer.is_empty() || max_frames == 0 {
+        let remaining = self.out_buffer.len() - self.out_read_pos;
+        if remaining == 0 || max_frames == 0 {
             return Ok(0);
         }
 
-        let avail_samples = self.out_buffer.len();
-        let avail_frames = avail_samples / self.channels.max(1);
+        let avail_frames = remaining / self.channels.max(1);
         let take_frames = avail_frames.min(max_frames);
         let take_samples = take_frames * self.channels;
         if take_samples == 0 {
             return Ok(0);
         }
 
-        out_interleaved.extend_from_slice(&self.out_buffer[..take_samples]);
-        self.out_buffer.drain(..take_samples);
+        let end = self.out_read_pos + take_samples;
+        out_interleaved.extend_from_slice(&self.out_buffer[self.out_read_pos..end]);
+        self.out_read_pos = end;
+        if self.out_read_pos == self.out_buffer.len() {
+            self.out_buffer.clear();
+            self.out_read_pos = 0;
+        }
         Ok(take_frames)
     }
 

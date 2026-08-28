@@ -519,61 +519,73 @@ fn save_project_archive_to_zip_inner(
     archive_logs.push(format!("Target zip: {}", zip_path.display()));
     archive_logs.push(format!("Embedded project file: {}", project_entry_name));
 
+    pf.timeline.sync_clip_takes_from_flat();
     for clip in pf.timeline.clips.iter_mut() {
-        let Some(source_path) = clip.source_path.clone() else {
-            continue;
-        };
-        if source_path.trim().is_empty() {
-            clip.source_path = None;
-            continue;
-        }
+        for take in &mut clip.takes {
+            let Some(source_path) = take.source_path.clone() else {
+                continue;
+            };
+            if source_path.trim().is_empty() {
+                take.source_path = None;
+                continue;
+            }
 
-        if let Some(existing) = source_to_entry.get(&source_path) {
-            clip.source_path_relative = Some(existing.clone());
-            clip.source_path = None;
-            continue;
-        }
+            if let Some(existing) = source_to_entry.get(&source_path) {
+                take.source_path_relative = Some(existing.clone());
+                take.source_path = None;
+                continue;
+            }
 
-        let abs_path = PathBuf::from(&source_path);
-        if !abs_path.is_absolute() || !abs_path.exists() {
+            let abs_path = PathBuf::from(&source_path);
+            if !abs_path.is_absolute() || !abs_path.exists() {
+                archive_logs.push(format!(
+                    "Skip missing or non-absolute source: {} (clip={}, take={})",
+                    source_path, clip.id, take.id
+                ));
+                take.source_path = None;
+                continue;
+            }
+
+            let relative_candidate = current_project_dir
+                .as_ref()
+                .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
+                .map(|p| p.to_string_lossy().replace('\\', "/"));
+
+            let desired_entry_path = if let Some(rel) = relative_candidate {
+                rel
+            } else {
+                let file_name = abs_path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("audio.wav");
+                format!("Archived/{}", file_name)
+            };
+
+            let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
+            if unique_entry != desired_entry_path {
+                archive_logs.push(format!(
+                    "Name collision resolved: {} -> {}",
+                    desired_entry_path, unique_entry
+                ));
+            }
+
+            source_to_entry.insert(source_path.clone(), unique_entry.clone());
+            take.source_path_relative = Some(unique_entry.clone());
+            take.source_path = None;
             archive_logs.push(format!(
-                "Skip missing or non-absolute source: {} (clip={})",
-                source_path, clip.id
-            ));
-            clip.source_path = None;
-            continue;
-        }
-
-        let relative_candidate = current_project_dir
-            .as_ref()
-            .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"));
-
-        let desired_entry_path = if let Some(rel) = relative_candidate {
-            rel
-        } else {
-            let file_name = abs_path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("audio.wav");
-            format!("Archived/{}", file_name)
-        };
-
-        let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
-        if unique_entry != desired_entry_path {
-            archive_logs.push(format!(
-                "Name collision resolved: {} -> {}",
-                desired_entry_path, unique_entry
+                "Archive source: {} -> {}",
+                source_path, unique_entry
             ));
         }
-
-        source_to_entry.insert(source_path.clone(), unique_entry.clone());
-        clip.source_path_relative = Some(unique_entry.clone());
-        clip.source_path = None;
-        archive_logs.push(format!(
-            "Archive source: {} -> {}",
-            source_path, unique_entry
-        ));
+        let active_take = clip
+            .active_take_id
+            .as_deref()
+            .and_then(|id| clip.takes.iter().find(|t| t.id == id))
+            .or_else(|| clip.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(clip);
+        }
     }
 
     let bytes = serialize_project_file_for_path(&pf, Path::new(&project_entry_name))?;
@@ -856,7 +868,21 @@ pub(super) fn open_project(
 ) -> crate::models::OpenProjectPayload {
     let path = PathBuf::from(&project_path);
     // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
-    let bytes = fs::read(&path).unwrap_or_default();
+    // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            let mut payload = get_timeline_state(state);
+            payload.ok = false;
+            return crate::models::OpenProjectPayload {
+                timeline: payload,
+                error: Some(format!("failed to read project file: {e}")),
+                project_version_too_new: None,
+                project_file_version: None,
+                current_project_file_version: None,
+            };
+        }
+    };
     // 先只读取版本号：即使未来版本工程因结构变化而无法完整解析，
     // 也能在尝试加载前给出明确的“可能不兼容”警告。
     let project_file_version = read_project_file_version(&bytes).unwrap_or(0);
@@ -865,6 +891,7 @@ pub(super) fn open_project(
         payload.ok = true;
         return crate::models::OpenProjectPayload {
             timeline: payload,
+            error: None,
             project_version_too_new: Some(true),
             project_file_version: Some(project_file_version),
             current_project_file_version: Some(CURRENT_PROJECT_FILE_VERSION),
@@ -873,10 +900,15 @@ pub(super) fn open_project(
 
     let parsed = load_project_file(&bytes);
     let Ok(mut pf) = parsed else {
+        let parse_error = parsed
+            .err()
+            .map(|e| format!("failed to parse project file: {e}"))
+            .unwrap_or_else(|| "failed to parse project file".to_string());
         let mut payload = get_timeline_state(state);
         payload.ok = false;
         return crate::models::OpenProjectPayload {
             timeline: payload,
+            error: Some(parse_error),
             project_version_too_new: None,
             project_file_version: None,
             current_project_file_version: None,
@@ -913,13 +945,21 @@ pub(super) fn open_project(
     // 非 Loop 存储窗口规范化（对**所有版本**生效）：使存储字段 == 消费
     // 窗口（正放 se:=ss+len·r；倒放 ss:=se−len·r），与消费端派生值一致、
     // 功能零变化 —— 用于自愈历史版本写入的陈旧/发散源窗口。
+    // 同一不变式也应用到全部 take（组合速率口径），避免 inactive take 的
+    // 陈旧窗口流向前端 take-lane 显示与 REAPER 导出。
     for clip in &mut pf.timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
     }
+    // 迁移/规范化都发生在 active take 内存投影上，写回 Take 权威数据。
+    pf.timeline.sync_clip_takes_from_flat();
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
     eprintln!("[open_project] Clearing all render caches before loading project...");
+    // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
+    // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
+    crate::hnsep_onnx::clear_separation_cache();
     for clip in &pf.timeline.clips {
         synth_clip_cache::invalidate_clip_all_caches(&clip.id);
     }
@@ -939,6 +979,7 @@ pub(super) fn open_project(
         for clip in &mut tl.clips {
             crate::state::TimelineState::populate_clip_file_metadata(clip);
         }
+        tl.sync_clip_takes_from_flat();
         let normalized_base_scale = normalize_scale_key(&pf.base_scale);
         let normalized_custom_scale = normalize_custom_scale(pf.custom_scale.clone());
         let normalized_use_custom_scale = pf.use_custom_scale && normalized_custom_scale.is_some();
@@ -1012,6 +1053,7 @@ pub(super) fn open_project(
     }
     crate::models::OpenProjectPayload {
         timeline: payload,
+        error: None,
         project_version_too_new: None,
         project_file_version: None,
         current_project_file_version: None,

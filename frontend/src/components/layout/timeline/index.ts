@@ -14,6 +14,7 @@ export * from "./TrackAreaContextMenu";
 export * from "./ClipItem";
 export * from "./TimelineScrollArea";
 export * from "./TrackLane";
+export * from "./SnapHighlightLayer";
 export * from "./TimelineCanvasViewport";
 export * from "./TimelineWaveformSurface";
 export * from "./TimelineSurface";

@@ -3,7 +3,8 @@ import {
     computeTimelineFadeShadeRange,
     resolveFontFamily,
 } from "./timelineCanvasStyle.js";
-import { fadeCurveGain } from "../paths.js";
+import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
+import { fadeGainSigned } from "../reaperFade.js";
 
 function drawFadeCurveStroke(
     ctx: CanvasRenderingContext2D,
@@ -12,25 +13,121 @@ function drawFadeCurveStroke(
         topPx: number;
         widthPx: number;
         heightPx: number;
-        curve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+        shape: number;
+        dir: number;
         mode: "in" | "out";
     },
 ): void {
     const widthPx = Math.max(1, args.widthPx);
     const heightPx = Math.max(1, args.heightPx);
-    const steps = Math.max(12, Math.min(48, Math.round(widthPx / 8)));
-    ctx.beginPath();
-    for (let index = 0; index < steps; index += 1) {
-        const t = index / Math.max(1, steps - 1);
-        const x = args.leftPx + t * widthPx;
-        const gain =
-            args.mode === "in" ? fadeCurveGain(t, args.curve) : fadeCurveGain(1 - t, args.curve);
-        const y = args.topPx + heightPx * (1 - gain);
-        if (index === 0) {
-            ctx.moveTo(x, y);
+    const shapeId = Math.trunc(Number.isFinite(args.shape) ? args.shape : 255);
+    if (shapeId === 0 && Math.abs(args.dir) < 1e-9) {
+        // 直线快路径。淡入 = 增益沿 x 上升（左下→右上）；淡出相反。
+        // y 轴向下：增益 1 → 屏幕上方（topPx）。
+        ctx.beginPath();
+        if (args.mode === "in") {
+            ctx.moveTo(args.leftPx, args.topPx + heightPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx);
         } else {
-            ctx.lineTo(x, y);
+            ctx.moveTo(args.leftPx, args.topPx);
+            ctx.lineTo(args.leftPx + widthPx, args.topPx + heightPx);
         }
+        ctx.stroke();
+        return;
+    }
+
+    // ── 偏差驱动的自适应细分 ────────────────────────────────────────
+    // 固定采样数（此前 ≤96 点且按宽度均分）在极端缩放下相邻采样点相距
+    // 几十甚至上百像素，陡峭预设的末段"爆发区"在两采样点之间会被画成
+    // 一条直弦——视觉上曲线"没接到角上"。这里改为按【屏幕空间偏差】
+    // 递归细分：弦中点到真实曲线的偏差超过 0.6px 就继续拆分，直到
+    // 折线与真实曲线处处贴合。端点 t=0/1 始终包含（增益在两端被核心
+    // 函数精确钳制），因此曲线必然精确落在左下/右上（或反向）边角上。
+    const gainAt = (t: number): number =>
+        fadeGainSigned(args.shape, args.dir, args.mode, t);
+    const xAt = (t: number): number => args.leftPx + t * widthPx;
+    const yAt = (t: number): number => args.topPx + heightPx * (1 - gainAt(t));
+
+    const MAX_POINTS = 1200;
+    const TOLERANCE_PX = 0.6;
+
+    interface Segment {
+        t0: number;
+        t1: number;
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+        dev: number;
+        tm: number;
+        xm: number;
+        ym: number;
+    }
+
+    const evaluateDeviation = (
+        t0: number,
+        t1: number,
+        x0: number,
+        y0: number,
+        x1: number,
+        y1: number,
+    ) => {
+        // 偏差度量使用【中点 + 两个四分点】联合探测：仅取弦中点 vs 曲线
+        // 中点时，点对称的 S 曲线（g(0.5)=0.5，g(t)+g(1-t)=1）偏差恒为 0，
+        // 会被误判为"足够平直"而画成直线 —— 正是"两类 S 曲线永远是直线"
+        // 的根因。多点探测对任何单调形状都可靠。
+        const tm = (t0 + t1) / 2;
+        const tq0 = t0 + (t1 - t0) * 0.25;
+        const tq1 = t0 + (t1 - t0) * 0.75;
+        const xm = xAt(tm);
+        const ym = yAt(tm);
+        const xq0 = xAt(tq0);
+        const yq0 = yAt(tq0);
+        const xq1 = xAt(tq1);
+        const yq1 = yAt(tq1);
+        const devMid = Math.hypot(xm - (x0 + x1) / 2, ym - (y0 + y1) / 2);
+        const devQ0 = Math.hypot(
+            xq0 - (x0 + (x1 - x0) * 0.25),
+            yq0 - (y0 + (y1 - y0) * 0.25),
+        );
+        const devQ1 = Math.hypot(
+            xq1 - (x0 + (x1 - x0) * 0.75),
+            yq1 - (y0 + (y1 - y0) * 0.75),
+        );
+        const dev = Math.max(devMid, devQ0, devQ1);
+        return { tm, xm, ym, dev };
+    };
+
+    const segments: Segment[] = [];
+    const pushSegment = (t0: number, t1: number, x0: number, y0: number, x1: number, y1: number) => {
+        const { tm, xm, ym, dev } = evaluateDeviation(t0, t1, x0, y0, x1, y1);
+        segments.push({ t0, t1, x0, y0, x1, y1, dev, tm, xm, ym });
+    };
+
+    pushSegment(0, 1, args.leftPx, yAt(0), args.leftPx + widthPx, yAt(1));
+
+    // 始终细分偏差最大的段；上限保护极端缩放下的工作量。
+    while (segments.length < MAX_POINTS) {
+        let worstIndex = -1;
+        let worstDev = TOLERANCE_PX;
+        for (let i = 0; i < segments.length; i += 1) {
+            if (segments[i].dev > worstDev) {
+                worstDev = segments[i].dev;
+                worstIndex = i;
+            }
+        }
+        if (worstIndex < 0) break;
+        const seg = segments[worstIndex];
+        segments.splice(worstIndex, 1);
+        pushSegment(seg.t0, seg.tm, seg.x0, seg.y0, seg.xm, seg.ym);
+        pushSegment(seg.tm, seg.t1, seg.xm, seg.ym, seg.x1, seg.y1);
+    }
+
+    segments.sort((a, b) => a.t0 - b.t0);
+    ctx.beginPath();
+    ctx.moveTo(segments[0].x0, segments[0].y0);
+    for (const seg of segments) {
+        ctx.lineTo(seg.x1, seg.y1);
     }
     ctx.stroke();
 }
@@ -49,8 +146,10 @@ export function drawTimelineCanvas(
             headerHeightPx: number;
             fadeInPx: number;
             fadeOutPx: number;
-            fadeInCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
-            fadeOutCurve: "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+            fadeInShape: number;
+            fadeOutShape: number;
+            fadeInDir: number;
+            fadeOutDir: number;
             selected: boolean;
             muted: boolean;
             gain: number;
@@ -60,6 +159,8 @@ export function drawTimelineCanvas(
             isMidiClip?: boolean;
             trackColor?: string;
             isRenaming?: boolean;
+            /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
+            snapOffsetPx?: number;
         }>;
         fontFamily?: string;
         activeGroupIds?: Set<string>;
@@ -301,10 +402,11 @@ export function drawTimelineCanvas(
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
-                topPx: bodyTop + 1,
+                topPx: bodyTop,
                 widthPx: Math.min(clipWidth, clip.fadeInPx),
-                heightPx: Math.max(1, bodyHeight - 2),
-                curve: clip.fadeInCurve,
+                heightPx: bodyHeight,
+                shape: clip.fadeInShape,
+                dir: clip.fadeInDir,
                 mode: "in",
             });
         }
@@ -320,12 +422,41 @@ export function drawTimelineCanvas(
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
-                topPx: bodyTop + 1,
+                topPx: bodyTop,
                 widthPx: Math.min(clipWidth, clip.fadeOutPx),
-                heightPx: Math.max(1, bodyHeight - 2),
-                curve: clip.fadeOutCurve,
+                heightPx: bodyHeight,
+                shape: clip.fadeOutShape,
+                dir: clip.fadeOutDir,
                 mode: "out",
             });
+        }
+
+        // ── SnapOffset（吸附偏移）三角标记 ────────────────────────
+        // 左下角等腰直角三角形（直角在左下，◣）。**左侧竖直边严格对齐
+        // 偏移位置**（与波形内橙色竖虚线同 x）—— 不做宽度回退钳制；
+        // 三角靠近/越过 Clip 末尾的部分按 Clip 矩形裁剪。offset=0 时
+        // 半透明贴在起点作为可发现性提示。
+        if (clipWidth >= 12 && clipHeight >= 14) {
+            const offsetPx = Math.max(0, Number(clip.snapOffsetPx) || 0);
+            const triX = clipLeft + offsetPx;
+            const triYBottom = clipTop + clipHeight;
+            const size = SNAP_OFFSET_HANDLE_SIZE_PX;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(clipLeft, clipTop, clipWidth, clipHeight);
+            ctx.clip();
+            ctx.globalAlpha *= offsetPx > 1e-9 ? 0.95 : 0.55;
+            ctx.beginPath();
+            ctx.moveTo(triX, triYBottom - size);
+            ctx.lineTo(triX, triYBottom);
+            ctx.lineTo(triX + size, triYBottom);
+            ctx.closePath();
+            ctx.fillStyle = "#fac03d";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.restore();
         }
 
         ctx.restore();

@@ -277,6 +277,16 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                             <Text size="2">{tAny("snap_enable_snapping")}</Text>
                         </Flex>
                         <Flex align="center" gap="2">
+                            <Checkbox
+                                checked={snap.snapHighlightEnabled}
+                                onCheckedChange={(v) => {
+                                    patch({ snapHighlightEnabled: Boolean(v) });
+                                    persist();
+                                }}
+                            />
+                            <Text size="2">{tAny("snap_show_highlight")}</Text>
+                        </Flex>
+                        <Flex align="center" gap="2">
                             <Text size="2" style={{ minWidth: 110 }}>
                                 {tAny("snap_distance_px")}
                             </Text>

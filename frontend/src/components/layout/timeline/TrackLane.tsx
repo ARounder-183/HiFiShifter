@@ -3,8 +3,12 @@
  */
 import React from "react";
 
-import { isPrimaryModifierDown } from "../../../utils/platform";
+import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
+import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
+import type { Keybinding } from "../../../features/keybindings/types";
+import { useI18n } from "../../../i18n/I18nProvider";
+import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
@@ -106,7 +110,20 @@ type TrackLaneProps = {
             | "fade_out"
             | "gain"
             | "crossfade_edges",
+        /** 延迟起手的类型化私有通道（与 useEditDrag.EditDragChannelOpts 一致）。 */
+        channel?:
+            | {
+                  dragStartClientX?: number;
+                  crossfadePartnerClipId?: string | null;
+                  fadePointerEnv?: {
+                      envTopClientY: number;
+                      bodyHeightPx: number;
+                  } | null;
+              }
+            | undefined,
     ) => void;
+    /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
+    startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
     onCtrlToggleSelect: (clipId: string) => void;
@@ -143,6 +160,28 @@ type TrackLaneProps = {
     verticalTrackLockTrackId?: string | null;
     /** 所有 clip 数据（用于跨轨道 ghost 查找） */
     allClips?: ClipInfo[];
+    /** 在空间足够时显示全部 Take 波形。 */
+    showAllTakes?: boolean;
+    /** 点击 inactive take 波形时切换 active take。 */
+    onActivateTake?: (clipId: string, takeId: string) => void;
+    /** 形状循环键绑定（modifier.fadeShapeCycleClick），透传给 ClipItem。 */
+    fadeShapeCycleKb?: Keybinding | null;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb?: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb?: Keybinding;
+    /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
+    pitchDragKb?: Keybinding;
+    /** 音高拖拽手势入口（useClipPitchDrag 提供） */
+    onClipPitchDragStart?: (e: React.PointerEvent<HTMLDivElement>, clipId: string) => void;
+    /** 淡化长度 ToolTips 的相对时长时间上下文。 */
+    fadeLengthFormatCtx: FadeLengthFormatContext;
+    /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
+    onFadeShapeCycleClick?: (clipId: string, side: "in" | "out") => void;
+    /** 抓手上的循环点击：同时切换交叉点两侧。 */
+    onCrossfadeCycleClick?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
+    /** 单条包络线上的循环点击（Ctrl+点击，非抓手）。 */
+    onFadeShapeSingleCycle?: (side: { clipId: string; isOut: boolean }) => void;
 };
 
 export const TrackLane = React.memo(
@@ -158,6 +197,14 @@ export const TrackLane = React.memo(
             viewportEndSec,
             overlayClipIds = [],
             altPressed,
+            fadeShapeCycleKb = null,
+            multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
+            rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+            pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
+            onClipPitchDragStart,
+            fadeLengthFormatCtx,
+            onFadeShapeCycleClick,
+            onCrossfadeCycleClick,
             selectedClipId,
             multiSelectedClipIds,
             multiSelectedSet,
@@ -168,6 +215,7 @@ export const TrackLane = React.memo(
             seekFromClientX,
             startClipDrag,
             startEditDrag,
+            startSnapOffsetDrag,
             toggleClipMuted,
             onCtrlToggleSelect,
             toggleMultiSelect,
@@ -188,8 +236,12 @@ export const TrackLane = React.memo(
             ghostDrag,
             verticalTrackLockTrackId,
             allClips,
+            showAllTakes = true,
+            onActivateTake,
         } = props;
 
+// 淡变信息浮标与子层 i18n 文案。
+        const { t } = useI18n();
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
@@ -244,6 +296,7 @@ export const TrackLane = React.memo(
                         trackId: clip.trackId,
                         startSec: clip.startSec,
                         lengthSec: clip.lengthSec,
+                        snapOffsetSec: clip.snapOffsetSec,
                     })),
                 }),
             [pxPerSec, rowHeight, track.id, trackClips],
@@ -306,15 +359,17 @@ export const TrackLane = React.memo(
                 // altPressed tracks the stretch modifier (configurable).
                 // For click-selection bypass, only check physical Alt key to avoid
                 // breaking Ctrl/Shift selection when those keys are stretch modifiers.
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const primaryModifierDown = isPrimaryModifierDown(event);
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const altKeyDown = selectionMods.altKeyDown;
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
-                const allowSeek = !altKeyDown && !primaryModifierDown && !event.shiftKey;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const allowSeek =
+                    !altKeyDown && !selectionMods.multiSelectToggleRaw && !selectionMods.rangeSelectRaw;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
                         ? multiSelectedSet.has(clip.id)
@@ -368,6 +423,8 @@ export const TrackLane = React.memo(
                 selectedClipId,
                 multiSelectedClipIds,
                 multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onShiftRangeSelect,
                 primeSelection,
                 rangeSelectAnchorClipId,
@@ -375,6 +432,38 @@ export const TrackLane = React.memo(
                 startClipDrag,
             ],
         );
+        /**
+         * 轨道空白区（无任何 clip 编辑目标）的播放头手势：交互等级最低的
+         * 播放头拖拽入口。按下立即提交一次 seek，拖动中视觉跟随（commit=false），
+         * 松开提交。与标尺行为一致；Clip / 淡变 / 边缘等更优目标会先行命中，
+         * 因此本手势永远不会与它们抢交互。
+         */
+        const beginBackgroundSeekInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const pointerId = event.pointerId;
+                seekFromClientX(event.clientX, true);
+
+                const onMove = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    seekFromClientX(ev.clientX, false);
+                };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    window.removeEventListener("pointermove", onMove, true);
+                    window.removeEventListener("pointerup", onEnd, true);
+                    window.removeEventListener("pointercancel", onEnd, true);
+                    seekFromClientX(ev.clientX, true);
+                };
+                window.addEventListener("pointermove", onMove, true);
+                window.addEventListener("pointerup", onEnd, true);
+                window.addEventListener("pointercancel", onEnd, true);
+            },
+            [seekFromClientX],
+        );
+
         const beginEdgeInteraction = React.useCallback(
             (
                 event: React.PointerEvent<HTMLDivElement>,
@@ -387,14 +476,15 @@ export const TrackLane = React.memo(
                 // for edit-mode selection (stretch vs trim). For click-selection
                 // bypass, only check the physical Alt key.
                 const stretchActive = altPressed;
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const primaryModifierDown = isPrimaryModifierDown(event);
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
                         ? multiSelectedSet.has(clipId)
@@ -411,6 +501,7 @@ export const TrackLane = React.memo(
                 const startX = event.clientX;
                 const startY = event.clientY;
                 const pointerId = event.pointerId;
+                const laneEl = event.currentTarget as HTMLElement;
                 let dragStarted = false;
 
                 event.preventDefault();
@@ -447,7 +538,16 @@ export const TrackLane = React.memo(
                         if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clipId, true, event.clientX);
                         }
-                        seekFromClientX(ev.clientX, true);
+                        // 单击 Clip 边缘（未拖动）→ 播放头跳到该边缘的准确位置。
+                        // lane 容器左缘即时间轴 0 秒的客户坐标；clip 左/右缘在
+                        // lane 内 = startSec（左缘）或 startSec+lengthSec（右缘）。
+                        const edgeClip = trackClips.find((entry) => entry.id === clipId);
+                        const laneRect = laneEl.getBoundingClientRect();
+                        const edgeSec =
+                            edge === "trim_left"
+                                ? edgeClip?.startSec ?? 0
+                                : (edgeClip?.startSec ?? 0) + (edgeClip?.lengthSec ?? 0);
+                        seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
                     }
                 };
 
@@ -461,6 +561,8 @@ export const TrackLane = React.memo(
                 selectedClipId,
                 multiSelectedClipIds,
                 multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onCtrlToggleSelect,
                 onShiftRangeSelect,
                 primeSelection,
@@ -468,6 +570,30 @@ export const TrackLane = React.memo(
                 seekFromClientX,
                 startEditDrag,
             ],
+        );
+        // SnapOffset（吸附偏移）角部手势：左下角 ◣ 处按下即进入偏移拖拽
+        // （内部走完整吸附引擎与竖线高亮）。选择预备语义与边缘交互一致。
+        const beginSnapOffsetInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>, clip: ClipInfo) => {
+                if (event.button !== 0) return;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+
+                event.preventDefault();
+                event.stopPropagation();
+                clearContextMenu();
+
+                if (!doShiftRangeSelect && !doCtrlToggleOnly) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
+                startSnapOffsetDrag?.(event, clip.id);
+            },
+            [clearContextMenu, multiSelectToggleKb, rangeSelectKb, primeSelection, startSnapOffsetDrag],
         );
 
         return (
@@ -514,10 +640,17 @@ export const TrackLane = React.memo(
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
                     if (!hit.clipId) {
+                        // 空白区 = 最低优先级播放头手势（播放头自身 pointer-events-none，
+                        // 拖拽/单击落点都在这里响应）。
+                        beginBackgroundSeekInteraction(event);
                         return;
                     }
                     const clip = trackClips.find((candidate) => candidate.id === hit.clipId);
                     if (!clip) {
+                        return;
+                    }
+                    if (hit.zone === "snap_offset") {
+                        beginSnapOffsetInteraction(event, clip);
                         return;
                     }
                     if (hit.zone === "trim_left" || hit.zone === "trim_right") {
@@ -580,6 +713,7 @@ export const TrackLane = React.memo(
                             seekFromClientX={seekFromClientX}
                             startClipDrag={startClipDrag}
                             startEditDrag={startEditDrag}
+                            startSnapOffsetDrag={startSnapOffsetDrag}
                             toggleClipMuted={toggleClipMuted}
                             onCtrlToggleSelect={onCtrlToggleSelect}
                             toggleMultiSelect={toggleMultiSelect}
@@ -598,6 +732,15 @@ export const TrackLane = React.memo(
                             disabledGroupIds={disabledGroupIds}
                             onToggleGroupDisabled={onToggleGroupDisabled}
                             hovered={hoveredClipId === clip.id}
+                            showAllTakes={showAllTakes}
+                            onActivateTake={onActivateTake}
+                            fadeShapeCycleKb={fadeShapeCycleKb}
+                            multiSelectToggleKb={multiSelectToggleKb}
+                            rangeSelectKb={rangeSelectKb}
+                            pitchDragKb={pitchDragKb}
+                            onClipPitchDragStart={onClipPitchDragStart}
+                            onFadeShapeCycleClick={onFadeShapeCycleClick}
+                            fadeLengthFormatCtx={fadeLengthFormatCtx}
                         />
                     );
                 })}
@@ -613,13 +756,16 @@ export const TrackLane = React.memo(
                     ensureSelected={ensureSelected}
                     selectClipRemote={selectClipRemote}
                     recordLastClickPosition={recordLastClickPosition}
-                    startEditDrag={
-                        startEditDrag as (
-                            e: React.PointerEvent,
-                            clipId: string,
-                            type: Parameters<typeof startEditDrag>[2],
-                        ) => void
+startEditDrag={startEditDrag}
+                    startSnapOffsetDrag={startSnapOffsetDrag}
+                    seekFromClientX={seekFromClientX}
+                    fadeLengthFormatCtx={fadeLengthFormatCtx}
+                    shapeCycleKb={fadeShapeCycleKb}
+                    onCrossfadeCycleClick={onCrossfadeCycleClick}
+                    onFadeShapeSingleCycle={({ clipId, isOut }) =>
+                        onFadeShapeCycleClick?.(clipId, isOut ? "out" : "in")
                     }
+                    t={(key) => t(key as Parameters<typeof t>[0])}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
@@ -682,6 +828,7 @@ export const TrackLane = React.memo(
             prev.seekFromClientX === next.seekFromClientX &&
             prev.startClipDrag === next.startClipDrag &&
             prev.startEditDrag === next.startEditDrag &&
+            prev.startSnapOffsetDrag === next.startSnapOffsetDrag &&
             prev.toggleClipMuted === next.toggleClipMuted &&
             prev.onCtrlToggleSelect === next.onCtrlToggleSelect &&
             prev.toggleMultiSelect === next.toggleMultiSelect &&
@@ -699,11 +846,23 @@ export const TrackLane = React.memo(
             prev.ghostDrag === next.ghostDrag &&
             prev.verticalTrackLockTrackId === next.verticalTrackLockTrackId &&
             prev.allClips === next.allClips &&
+            prev.showAllTakes === next.showAllTakes &&
+            prev.onActivateTake === next.onActivateTake &&
             sameStringArray(prev.overlayClipIds, next.overlayClipIds) &&
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&
-            prev.onToggleGroupDisabled === next.onToggleGroupDisabled
-            // viewportStartSec / viewportEndSec are consumed by WaveformTrackCanvas via the viewport bus
+            prev.onToggleGroupDisabled === next.onToggleGroupDisabled &&
+            // 淡化 tooltip 的时间单位上下文：单位切换时必须重渲染，
+            // 否则 tooltip 一直显示旧单位（其 memo 仅在 5 个原始字段变化时重建）。
+            prev.fadeLengthFormatCtx === next.fadeLengthFormatCtx &&
+            prev.onFadeShapeCycleClick === next.onFadeShapeCycleClick &&
+            prev.onCrossfadeCycleClick === next.onCrossfadeCycleClick &&
+            prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
+            prev.multiSelectToggleKb === next.multiSelectToggleKb &&
+            prev.rangeSelectKb === next.rangeSelectKb &&
+            prev.pitchDragKb === next.pitchDragKb &&
+            prev.onClipPitchDragStart === next.onClipPitchDragStart
+            // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
             // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );
     },

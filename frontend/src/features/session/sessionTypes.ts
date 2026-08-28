@@ -59,6 +59,11 @@ export interface TimelineSnapSettings {
     snapDistancePx: number;
     /** 吸附位置相对网格保留原偏移。 */
     snapRelativeToGrid: boolean;
+    /**
+     * 拖拽时显示吸附竖线高亮（同时标记吸附对象与被吸附对象的吸附处）。
+     * 纯视觉开关，不影响吸附行为本身；默认开启。
+     */
+    snapHighlightEnabled: boolean;
 
     // ── Snap targets / objects matrix ──
     /** Clip 吸附到 选择/标记/光标。 */
@@ -133,6 +138,24 @@ export interface TrackMeterInfo {
     clipped: boolean;
 }
 
+export interface ClipTakeInfo {
+    id: string;
+    name: string;
+    gain: number;
+    sourcePath?: string;
+    sourcePathRelative?: string;
+    durationSec?: number;
+    durationFrames?: number;
+    sourceSampleRate?: number;
+    sourceStartSec: number;
+    sourceEndSec: number;
+    playbackRate: number;
+    reversed: boolean;
+    loopEnabled: boolean;
+    midiNoteData?: MidiNoteEvent[];
+    midiFillGaps?: boolean;
+}
+
 export interface ClipInfo {
     id: string;
     trackId: string;
@@ -140,7 +163,11 @@ export interface ClipInfo {
     startSec: number;
     lengthSec: number;
     color: "blue" | "violet" | "emerald" | "amber" | "cyan";
+    /** 全部 take 元数据；active take 的媒体字段同时平铺在 ClipInfo 上。 */
+    takes?: ClipTakeInfo[];
+    activeTakeId?: string;
     sourcePath?: string;
+    sourcePathRelative?: string;
     durationSec?: number;
     durationFrames?: number; // 精确frame总数
     sourceSampleRate?: number; // 源文件采样率
@@ -151,13 +178,28 @@ export interface ClipInfo {
     sourceStartSec: number;
     sourceEndSec: number;
     playbackRate: number;
+    /** Clip 级播放倍率；playbackRate = clipPlaybackRate × activeTake.playbackRate。 */
+    clipPlaybackRate?: number;
     reversed: boolean;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
+    /**
+     * 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0。与倒放无关 ——
+     * 倒放时它依然表示"距 Clip 起点偏移 X"的位置（对标 REAPER/VEGAS
+     * 的 item snap offset）。作为其他拖拽的吸附目标参与匹配；
+     * Clip 被拉伸时按长度比例同步缩放。
+     */
+    snapOffsetSec: number;
     fadeInSec: number;
     fadeOutSec: number;
-    fadeInCurve: FadeCurveType;
-    fadeOutCurve: FadeCurveType;
+    /** 淡入形状：REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传）。 */
+    fadeInShape: number;
+    /** 淡出形状（语义同 fadeInShape）。 */
+    fadeOutShape: number;
+    /** 淡入曲率（REAPER D_FADEINDIR），范围 [-1, 1]。 */
+    fadeInDir: number;
+    /** 淡出曲率（REAPER D_FADEOUTDIR），范围 [-1, 1]。 */
+    fadeOutDir: number;
     /** 自动交叉淡化长度（秒），与手动 fade（fadeInSec/fadeOutSec）分离存储。 */
     autoFadeInSec?: number;
     autoFadeOutSec?: number;
@@ -175,6 +217,44 @@ export interface ClipFormantMorph {
 }
 
 export type WaveformPreview = number[] | { l: number[]; r: number[] };
+
+/**
+ * Clip 头部展示名：
+ * - 多 Take 时显示 active take 名称与序号（VEGAS 风格：`name (n / count)`）；
+ * - 单 Take 时只显示名称，不暴露 Take 计数。
+ */
+export function clipDisplayName(clip: {
+    name: string;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
+}): string {
+    const takes = clip.takes ?? [];
+    if (takes.length <= 1) return clip.name;
+    const index = Math.max(
+        0,
+        takes.findIndex((take) => take.id === clip.activeTakeId),
+    );
+    const take = takes[index];
+    const takeName = take?.name || clip.name;
+    return `${takeName} (${index + 1} / ${takes.length})`;
+}
+
+/** 当前可编辑的名称（改名输入框的预填值）。
+ *
+ * 路由规则与 commitTrackLaneRename 一致：多 Take（>1）时编辑 active take
+ * 名；单 Take / 无 takes 时展示名与提交目标都是容器 name —— 预填必须跟随
+ * 提交目标，否则"多 take 删到剩 1 个"后预填残留 take 名、提交却写容器名，
+ * 用户会看到"名字没变"。 */
+export function activeClipTakeName(clip: {
+    name: string;
+    takes?: Array<{ id: string; name: string }>;
+    activeTakeId?: string;
+}): string {
+    const takes = clip.takes ?? [];
+    if (takes.length <= 1) return clip.name;
+    const activeTake = takes.find((take) => take.id === clip.activeTakeId) ?? takes[0];
+    return activeTake?.name || clip.name;
+}
 
 export interface MidiNoteEvent {
     startSec: number;

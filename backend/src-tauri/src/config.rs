@@ -23,6 +23,9 @@ pub struct TimelineSnapSettings {
     pub snap_distance_px: u32,
     #[serde(default)]
     pub snap_relative_to_grid: bool,
+    /// 拖拽时显示吸附竖线高亮（纯视觉开关，不影响吸附行为）。
+    #[serde(default = "default_true")]
+    pub snap_highlight_enabled: bool,
     #[serde(default = "default_true")]
     pub snap_clips_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
@@ -35,7 +38,11 @@ pub struct TimelineSnapSettings {
     pub snap_cursor_to_selection_markers_cursor: bool,
     #[serde(default = "default_true")]
     pub snap_cursor_to_grid: bool,
-    #[serde(default = "default_true", alias = "gridSnapFollowsGridVisibility", alias = "grid_snap_follows_grid_visibility")]
+    #[serde(
+        default = "default_true",
+        alias = "gridSnapFollowsGridVisibility",
+        alias = "grid_snap_follows_grid_visibility"
+    )]
     pub snap_follows_grid_visibility: bool,
     #[serde(default)]
     pub snap_to_grid_any_distance: bool,
@@ -86,6 +93,7 @@ impl Default for TimelineSnapSettings {
             enabled: true,
             snap_distance_px: default_snap_distance_px(),
             snap_relative_to_grid: false,
+            snap_highlight_enabled: true,
             snap_clips_to_selection_markers_cursor: true,
             snap_clips_to_grid: true,
             snap_selection_to_selection_markers_cursor: true,
@@ -115,7 +123,8 @@ impl TimelineSnapSettings {
     fn valid_grid(value: &str) -> bool {
         matches!(
             value,
-            "1/1" | "1/2"
+            "1/1"
+                | "1/2"
                 | "1/4"
                 | "1/8"
                 | "1/16"
@@ -170,6 +179,9 @@ const MAX_COORD_ABS: i32 = 1_000_000;
 pub struct UiSettings {
     #[serde(default = "default_true")]
     pub auto_crossfade: bool,
+    /// 空间足够时在 Clip 内显示全部 Take 波形。
+    #[serde(default = "default_true")]
+    pub show_all_takes: bool,
     #[serde(default = "default_true")]
     pub split_transition_enabled: bool,
     #[serde(default = "default_split_transition_mode")]
@@ -317,6 +329,10 @@ pub struct UiSettings {
     /// - VocalShifter 等其他格式导入生成的音频 Clip 的默认值。
     #[serde(default = "default_true")]
     pub loop_new_clips: bool,
+    /// 同步编辑所有 Take：启用后，对 active Take 的内容级编辑
+    /// （源偏移、播放速率、倒放、Loop、增益）会尝试同步到同一 Clip 的其余 Take。
+    #[serde(default = "default_true")]
+    pub sync_edits_across_takes: bool,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -335,6 +351,18 @@ pub fn loop_new_clips_default() -> bool {
 /// 同步"新 Clip 默认 Loop 属性"的进程级生效值。
 pub fn set_loop_new_clips_default(enabled: bool) {
     LOOP_NEW_CLIPS_DEFAULT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// "同步编辑所有 Take"的进程级生效值（默认开启）。
+pub static SYNC_EDITS_ACROSS_TAKES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+pub fn sync_edits_across_takes() -> bool {
+    SYNC_EDITS_ACROSS_TAKES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_sync_edits_across_takes(enabled: bool) {
+    SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn default_ort_ep() -> String {
@@ -698,6 +726,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             auto_crossfade: true,
+            show_all_takes: true,
             split_transition_enabled: true,
             split_transition_mode: default_split_transition_mode(),
             split_transition_duration_unit: default_split_transition_duration_unit(),
@@ -755,6 +784,7 @@ impl Default for UiSettings {
             auto_background_render: true,
             auto_reload_modified_media: true,
             loop_new_clips: true,
+            sync_edits_across_takes: true,
         }
     }
 }
@@ -768,9 +798,8 @@ impl UiSettings {
         if !self.split_transition_duration_sec.is_finite() {
             self.split_transition_duration_sec = default_split_transition_duration_sec();
         } else {
-            self.split_transition_duration_sec = self
-                .split_transition_duration_sec
-                .clamp(0.001, 10.0);
+            self.split_transition_duration_sec =
+                self.split_transition_duration_sec.clamp(0.001, 10.0);
         }
         if !["seconds", "percent"].contains(&self.split_transition_duration_unit.as_str()) {
             self.split_transition_duration_unit = default_split_transition_duration_unit();
@@ -778,24 +807,16 @@ impl UiSettings {
         if !self.split_transition_duration_percent.is_finite() {
             self.split_transition_duration_percent = default_split_transition_duration_percent();
         } else {
-            self.split_transition_duration_percent = self
-                .split_transition_duration_percent
-                .clamp(0.01, 100.0);
+            self.split_transition_duration_percent =
+                self.split_transition_duration_percent.clamp(0.01, 100.0);
         }
-        if ![
-            "linear",
-            "sine",
-            "exponential",
-            "logarithmic",
-            "scurve",
-        ]
-        .contains(&self.split_transition_curve.as_str())
+        if !["linear", "sine", "exponential", "logarithmic", "scurve"]
+            .contains(&self.split_transition_curve.as_str())
         {
             self.split_transition_curve = default_split_transition_curve();
         }
         if !["auto", "always"].contains(&self.split_transition_overlap_crossfade.as_str()) {
-            self.split_transition_overlap_crossfade =
-                default_split_transition_overlap_crossfade();
+            self.split_transition_overlap_crossfade = default_split_transition_overlap_crossfade();
         }
         self.normalize_time_display();
         self.timeline_snap.normalize();
@@ -837,6 +858,7 @@ mod tests {
             UserStretchAlgorithm::Signalsmith
         );
         assert!(settings.default_hifigan_mel_stretch);
+        assert!(settings.sync_edits_across_takes);
         assert!(settings.split_transition_enabled);
         assert_eq!(settings.split_transition_mode, "overlap");
         assert_eq!(settings.split_transition_duration_unit, "seconds");
@@ -868,7 +890,7 @@ mod tests {
 
     #[test]
     fn ui_settings_normalizes_ripple_mode() {
-        let mut settings = UiSettings::default();
+        let settings = UiSettings::default();
         assert_eq!(settings.ripple_mode, "off");
 
         let mut bogus = UiSettings {
@@ -885,7 +907,6 @@ mod tests {
         track_mode.normalize_ripple_mode();
         assert_eq!(track_mode.ripple_mode, "track");
     }
-
 }
 
 /// 持久化配置根结构。
@@ -929,13 +950,44 @@ fn load_config(config_dir: &Path) -> AppConfig {
     let Ok(data) = fs::read_to_string(&path) else {
         return AppConfig::default();
     };
-    serde_json::from_str::<AppConfig>(&data).unwrap_or_default()
+    match serde_json::from_str::<AppConfig>(&data) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // 解析失败不能无痕回退默认值：那会静默丢掉全部用户设置。
+            eprintln!("app_config.json parse failed ({e}); trying .bak fallback");
+            let bak = config_dir.join("app_config.json.bak");
+            if let Ok(bak_data) = fs::read_to_string(&bak) {
+                if let Ok(cfg) = serde_json::from_str::<AppConfig>(&bak_data) {
+                    return cfg;
+                }
+            }
+            AppConfig::default()
+        }
+    }
 }
 
 fn save_config(config_dir: &Path, cfg: &AppConfig) {
     let path = config_dir.join("app_config.json");
     if let Ok(data) = serde_json::to_string_pretty(cfg) {
-        let _ = fs::write(&path, data);
+        // 原子写：先写临时文件再替换，避免进程中断留下半截 JSON，
+        // 下次启动解析失败导致全部设置静默回退默认值。
+        let tmp = config_dir.join("app_config.json.tmp");
+        match fs::write(&tmp, &data).and_then(|()| {
+            // Windows 上 rename 不能覆盖已存在目标，先删旧文件。
+            if path.exists() {
+                let _ = fs::remove_file(&path);
+            }
+            fs::rename(&tmp, &path)
+        }) {
+            Ok(()) => {
+                // 保留上一份成功写入的副本，供解析失败时兜底恢复。
+                let _ = fs::write(config_dir.join("app_config.json.bak"), &data);
+            }
+            Err(e) => {
+                eprintln!("app_config.json save failed: {e}");
+                let _ = fs::remove_file(&tmp);
+            }
+        }
     }
 }
 

@@ -40,7 +40,9 @@ pub enum StretchAlgorithm {
     SoundTouchDll,
 
     /// Desired: zplane Elastique (Soloist) time-stretch preserving pitch + formants.
-    /// This requires integrating the Elastique SDK (commercial).
+    /// This requires integrating the Elastique SDK (commercial) — deliberately
+    /// kept as a roadmap placeholder until that integration happens.
+    #[allow(dead_code)]
     ElastiqueSoloist,
 }
 
@@ -375,13 +377,7 @@ mod tests {
     #[test]
     fn soundtouch_fallback_keeps_requested_length() {
         let input = vec![0.0f32, 0.5, 0.25, -0.25];
-        let out = time_stretch_interleaved(
-            &input,
-            1,
-            44_100,
-            8,
-            StretchAlgorithm::SoundTouchDll,
-        );
+        let out = time_stretch_interleaved(&input, 1, 44_100, 8, StretchAlgorithm::SoundTouchDll);
         assert_eq!(out.len(), 8);
     }
 
@@ -395,7 +391,10 @@ mod tests {
     fn project_override_inherits_and_resolves_from_global_defaults() {
         update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
         let settings = current_runtime_stretch_settings();
-        assert_eq!(settings.effective_algorithm(), UserStretchAlgorithm::Signalsmith);
+        assert_eq!(
+            settings.effective_algorithm(),
+            UserStretchAlgorithm::Signalsmith
+        );
         assert!(settings.effective_hifigan_mel_stretch());
         assert!(matches!(
             resolved_external_stretch_algorithm(),

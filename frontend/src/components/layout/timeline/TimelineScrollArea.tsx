@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { flushSync } from "react-dom";
 
 import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "./constants";
 import { clamp } from "./math";
@@ -8,7 +9,6 @@ import { getTimelineWheelAction } from "../wheelGesture";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
 import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
-import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
@@ -295,19 +295,17 @@ export const TimelineScrollArea: React.FC<
                     zoomRafRef.current = null;
                     const pending = zoomPendingRef.current;
                     if (!pending) return;
-                zoomPendingRef.current = null;
-                pendingZoomRef.current = pending;
-                pxPerSecRef.current = pending.nextPxPerSec;
-                timelineViewportBus.emit(
-                    pending.nextScrollLeft,
-                    pending.nextPxPerSec,
-                    scroller.clientWidth,
-                );
-                if (rulerContentRef.current) {
-                    rulerContentRef.current.style.transform = `translateX(${-pending.nextScrollLeft}px)`;
-                }
-                setScrollLeft(pending.nextScrollLeft);
-                setPxPerSec(pending.nextPxPerSec);
+                    zoomPendingRef.current = null;
+                    pendingZoomRef.current = pending;
+                    pxPerSecRef.current = pending.nextPxPerSec;
+                    // 原子缩放：flushSync 让 DOM（Clip/网格/contentWidth）在本帧内
+                    // 按新缩放重排，layout effect 随即写原生 scrollLeft 并经
+                    // syncScrollLeft 同步重绘标尺与画布——全部发生在绘制前。
+                    // 若按旧路径先 emit 总线/改标尺、state 异步提交，画布会先于
+                    // DOM 一帧切换缩放、再跳一次滚动位置，产生可见抽动。
+                    flushSync(() => {
+                        setPxPerSec(pending.nextPxPerSec);
+                    });
                 });
             }
         };

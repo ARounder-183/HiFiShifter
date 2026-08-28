@@ -27,6 +27,7 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
     replaceClipSourceRemote,
+    renameClipTakeRemote,
     splitClipsAtRemote,
 } from "../../../../features/session/sessionSlice";
 import {
@@ -199,9 +200,9 @@ export function useTimelineClipActions(
         (state: RootState) => state.session.multiSelectedClipIds,
     );
     const selectedClipId = useAppSelector((state: RootState) => state.session.selectedClipId);
-    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<
-        string | null
-    >(null);
+    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<string | null>(
+        null,
+    );
     const updateRangeSelectAnchor = React.useCallback(
         (clipId: string | null) => {
             lastClickedClipIdRef.current = clipId;
@@ -297,7 +298,7 @@ export function useTimelineClipActions(
     const { selectionRect, onPointerDown: onSelectionRectPointerDown } = useTimelineSelectionRect({
         scrollRef,
         sessionRef,
-        pxPerBeat: pxPerSec,
+        pxPerSec,
         rowHeight,
         clearContextMenu,
         setMultiSelectedClipIds,
@@ -752,7 +753,7 @@ export function useTimelineClipActions(
                 !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
                 Boolean(
                     nextPrimaryClip &&
-                        nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
+                    nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
                 );
 
             void dispatch(
@@ -833,6 +834,19 @@ export function useTimelineClipActions(
 
     const commitTrackLaneRename = React.useCallback(
         (clipId: string, newName: string) => {
+            const clip = sessionRef.current?.clips.find((entry) => entry.id === clipId);
+            const takes = clip?.takes ?? [];
+            // 仅多 Take Clip 的改名写入 active take（UI 展示名此时取 take 名）。
+            // 单 Take / 无 takes 时展示名是容器 name，必须走容器改名 ——
+            // 后端 rename_take 不回写容器名，误路由会让重命名"看起来无效"。
+            if (takes.length > 1) {
+                const activeTake =
+                    takes.find((entry) => entry.id === clip?.activeTakeId) ?? takes[0];
+                void dispatch(
+                    renameClipTakeRemote({ clipId, takeId: activeTake.id, name: newName }),
+                );
+                return;
+            }
             void dispatch(
                 setClipStateRemote({
                     clipId,

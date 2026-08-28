@@ -1,3 +1,13 @@
+/// 仅在 Debug 模式下编译并执行打印。
+/// 定义在 crate 根，供所有子模块（引擎 worker、snapshot、pitch 等
+/// 热路径）使用，避免 release 下 stderr I/O 拖慢命令处理。
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        std::eprintln!($($arg)*);
+    }
+}
+
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
@@ -5,12 +15,13 @@ mod audio_utils;
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
 mod clip_rendering_state;
+mod fade_curves;
 pub(crate) mod commands;
-#[path = "audio/hifigan_tension.rs"]
-mod hifigan_tension;
+mod formant_cache;
 #[path = "audio/formant_morph.rs"]
 mod formant_morph;
-mod formant_cache;
+#[path = "audio/hifigan_tension.rs"]
+mod hifigan_tension;
 mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
@@ -24,8 +35,8 @@ mod pitch_config;
 mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
-mod renderer;
 mod recording;
+mod renderer;
 mod synth_clip_cache;
 
 #[cfg(feature = "onnx")]
@@ -94,14 +105,14 @@ mod reaper_export;
 mod reaper_import;
 #[path = "import/reaper_parser.rs"]
 mod reaper_parser;
-#[path = "audio/sstretch.rs"]
-mod sstretch;
 #[path = "audio/soundtouch.rs"]
 mod soundtouch;
+#[path = "audio/sstretch.rs"]
+mod sstretch;
 mod state;
-mod system_clipboard;
 #[path = "vocoder/streaming_world.rs"]
 mod streaming_world;
+mod system_clipboard;
 mod temp_manager;
 #[path = "audio/time_stretch.rs"]
 mod time_stretch;
@@ -115,31 +126,42 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
-/// 仅供集成测试（tests/）使用的内部函数导出。
+/// Internal pure-function exports used by integration tests (tests/).
 ///
-/// lib 的单元测试 harness 在 Windows 上因缺少内嵌清单无法启动（tauri_build
-/// 只给 bin 目标嵌清单，见 build.rs / tests/smoke.rs 说明），因此需要真正
-/// 运行纯函数回归测试时，通过 `--features __test-internals` 走集成测试
-/// 目标执行。
+/// Gated behind the `__test-internals` feature, which is part of `default`
+/// so plain `cargo test` exercises the same code paths as CI
+/// (`cargo test --features __test-internals`).
+///
+/// NOTE: this module used to exist so pure-function regressions could run
+/// through integration targets because the lib unit-test harness could not
+/// start on Windows (no manifest link channel). That limitation is gone —
+/// `.cargo/config.toml` delay-loads comctl32.dll, so `cargo test --lib`
+/// runs natively; the re-exports are kept for the integration targets.
 #[cfg(feature = "__test-internals")]
 pub mod __test_internals {
     pub use crate::pitch_clip::trim_and_resample_midi;
+    // REAPER export round-trips: rate/multi-take export regressions run via
+    // the integration targets (loop_semantics / reaper_export_rates).
+    pub use crate::reaper_export::build_reaper_clipboard;
+    pub use crate::reaper_parser::parse_clipboard_bytes;
     pub use crate::state::{
         Clip, SplitTransitionDurationUnit, SplitTransitionMode, SplitTransitionOptions,
         TimelineState,
     };
 
-    /// 消费窗口模型（正放 [ss, ss+len·r) / 倒放 [se−len·r, se)）。
+    /// Consumed playback window (forward [ss, ss+len·r) / reverse [se−len·r, se)).
     pub fn playback_window_sec(c: &Clip) -> (f64, f64) {
         crate::state::clip_playback_window_sec(c)
     }
 
-    /// 方向性前导静音（正放看窗口起点、倒放看窗口终点越过媒体末端）。
+    /// Directional leading silence (forward: window start; reverse: window
+    /// end past the media end).
     pub fn leading_silence_sec(c: &Clip, media_total_sec: Option<f64>) -> f64 {
         crate::state::clip_leading_silence_sec(c, media_total_sec)
     }
 
-    /// trim_and_resample_midi 的窗口实参（非 Loop 倒放重定向到 [se−len·r, se]）。
+    /// Window arguments for trim_and_resample_midi (non-loop reverse is
+    /// redirected to [se−len·r, se]).
     pub fn pitch_trim_window_sec(c: &Clip) -> (f64, f64) {
         crate::state::clip_pitch_trim_window_sec(c)
     }
@@ -281,6 +303,7 @@ pub fn run() {
             if let Some(cfg_dir) = state.config_dir.get() {
                 let ui = crate::config::load_ui_settings(cfg_dir);
                 crate::config::set_loop_new_clips_default(ui.loop_new_clips);
+                crate::config::set_sync_edits_across_takes(ui.sync_edits_across_takes);
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
@@ -330,13 +353,19 @@ pub fn run() {
                 let mut y_opt = None;
                 let mut w_opt = None;
                 let mut h_opt = None;
+                // 统一保存为逻辑像素：outer_position()/inner_size() 返回物理
+                // 像素，而恢复端按 Logical 解释；在 125%/150% 缩放屏上若不换算，
+                // 每次重启窗口都会放大 scale 倍并持续漂移。
+                let scale = win.scale_factor().unwrap_or(1.0);
                 if let Ok(pos) = win.outer_position() {
-                    x_opt = Some(pos.x);
-                    y_opt = Some(pos.y);
+                    let logical: tauri::LogicalPosition<f64> = pos.to_logical(scale);
+                    x_opt = Some(logical.x.round() as i32);
+                    y_opt = Some(logical.y.round() as i32);
                 }
                 if let Ok(size) = win.inner_size() {
-                    w_opt = Some(size.width as f64);
-                    h_opt = Some(size.height as f64);
+                    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+                    w_opt = Some(logical.width);
+                    h_opt = Some(logical.height);
                 }
 
                 if let Some(cfg_dir) = win.app_handle().state::<state::AppState>().config_dir.get()
@@ -430,6 +459,15 @@ pub fn run() {
             commands::apply_clip_linked_params,
             commands::set_clip_state,
             commands::set_clips_state_bulk,
+            commands::set_clip_active_take,
+            commands::cycle_clip_takes,
+            commands::pack_clips_into_takes,
+            commands::explode_clip_takes,
+            commands::duplicate_clip_take,
+            commands::remove_clip_take,
+            commands::rename_clip_take,
+            commands::add_clip_take_from_media,
+            commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,
             commands::replace_clip_source,
             commands::check_source_files_changed,

@@ -22,6 +22,8 @@ import {
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
     toggleAutoBackgroundRender,
+    toggleShowAllTakes,
+    toggleSyncEditsAcrossTakes,
     toggleClipboardPreview,
     toggleParamValuePopup,
     toggleTempoMapVisible,
@@ -37,8 +39,6 @@ import {
     getPianoRollSelection,
     subscribePianoRollSelection,
 } from "../../utils/pianoRollSelectionBus";
-
-
 
 import {
     importAudioAtPosition,
@@ -250,9 +250,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         // 选区并未真正受到影响。
         const changes = scaleChangesInRange(s.tempoMap, startSec, endSec);
         if (changes.length === 0) return null;
-        if (
-            changes.every((c) => scaleLikeEquals(c.scale, projectScale))
-        ) {
+        if (changes.every((c) => scaleLikeEquals(c.scale, projectScale))) {
             return null;
         }
         return tAny("project_scale_tempo_map_hint");
@@ -345,10 +343,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             document.body.getAttribute("data-hs-focus-window") === "timeline";
 
         if (
-            (op === "copy" ||
-                op === "cut" ||
-                op === "paste" ||
-                op === "pasteTracks") &&
+            (op === "copy" || op === "cut" || op === "paste" || op === "pasteTracks") &&
             inTimeline &&
             !inPianoRoll &&
             !inTrackHeader
@@ -657,9 +652,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     {/* Time Display */}
                     <DropdownMenu.Sub>
-                        <DropdownMenu.SubTrigger>
-                            {tAny("time_display")}
-                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubTrigger>{tAny("time_display")}</DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
                             <DropdownMenu.Sub>
                                 <DropdownMenu.SubTrigger>
@@ -995,6 +988,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {withCheck(s.autoBackgroundRender, tAny("menu_background_prerender"))}
                     </DropdownMenu.Item>
 
+                    {/* Take display / editing options */}
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleShowAllTakes());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleSyncEditsAcrossTakes());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.syncEditsAcrossTakes, tAny("sync_edits_across_takes"))}
+                    </DropdownMenu.Item>
+
                     {/* Auto-reload modified media — same level as Background Pre-render */}
                     <DropdownMenu.Item
                         onSelect={() => onAutoReloadModifiedMediaChange(!autoReloadModifiedMedia)}
@@ -1078,10 +1089,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setTimeDisplaySettingsOpen}
             />
 
-            <SnapGridSettingsDialog
-                open={snapSettingsOpen}
-                onOpenChange={setSnapSettingsOpen}
-            />
+            <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
 
             <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
 
@@ -1115,7 +1123,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {tAny("import_dialog_title") || t("menu_import_media")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
-                                {menuImportMode.audioPaths.length} file(s) selected
+                                {(tAny("import_files_selected") || "").replace(
+                                    "{count}",
+                                    String(menuImportMode.audioPaths.length),
+                                )}
                             </div>
                         </div>
 
@@ -1153,6 +1164,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 }}
                             >
                                 {t("import_across_tracks")}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-2 rounded-lg text-sm text-qt-text border border-qt-border hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = menuImportMode;
+                                    setMenuImportMode(null);
+                                    void dispatch(
+                                        importMultipleAudioAtPosition({
+                                            audioPaths: m.audioPaths,
+                                            mode: "as-takes",
+                                            trackId: m.trackId,
+                                            startSec: m.startSec,
+                                        }),
+                                    );
+                                }}
+                            >
+                                {t("import_as_takes")}
                             </button>
                         </div>
 

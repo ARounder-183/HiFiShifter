@@ -2,7 +2,7 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { fileBrowserApi } from "../../../services/api";
 import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
-import type { SessionState } from "../sessionSlice";
+import { checkpointHistory, type SessionState } from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
 import { computeAutoCrossfadeFromPayload } from "../../../components/layout/timeline/hooks/autoCrossfade";
@@ -144,9 +144,7 @@ export const importAudioFromPath = createAsyncThunk(
                 missing_files?: string[];
             };
             return rejectWithValue(
-                failure.error?.message ??
-                    failure.missing_files?.[0] ??
-                    "import_audio_item_failed",
+                failure.error?.message ?? failure.missing_files?.[0] ?? "import_audio_item_failed",
             );
         }
         const beforeClipIds = new Set(
@@ -404,16 +402,17 @@ export const importAudioFileAtPosition = createAsyncThunk(
 );
 
 /**
- * 多文件导入，支持两种模式:
+ * 多文件导入，支持三种模式:
  * - "across-time": 在同一轨道依次排列（按顺序首尾相连）
  * - "across-tracks": 每个文件分配到不同的新轨道，起始位置相同
+ * - "as-takes": 所有文件合并为一个 Clip 的多个 Take，长度取最长媒体
  */
 export const importMultipleAudioAtPosition = createAsyncThunk(
     "session/importMultipleAudioAtPosition",
     async (
         payload: {
             audioPaths: string[];
-            mode: "across-time" | "across-tracks";
+            mode: "across-time" | "across-tracks" | "as-takes";
             trackId?: string | null;
             startSec?: number;
         },
@@ -434,7 +433,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
         }
 
         // Create a single undo checkpoint for the entire batch
-        dispatch({ type: "session/checkpointHistory" });
+        dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup();
         try {
@@ -446,7 +445,27 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
             let firstImported: unknown = null;
             const accumulatedNewClipIds: string[] = [];
 
-            if (mode === "across-time") {
+            if (mode === "as-takes") {
+                const imported = await webApi.importMediaFilesAsTakes({
+                    paths: audioPaths,
+                    trackId: payload.trackId,
+                    startSec,
+                });
+                if ((imported as { ok?: boolean }).ok) {
+                    lastImported = imported;
+                    const result = imported as { clips?: Array<{ id?: string }> };
+                    for (const c of result.clips ?? []) {
+                        if (c.id) accumulatedNewClipIds.push(c.id);
+                    }
+                } else {
+                    // 单次全有全无调用：失败必须显式拒绝而不是返回 ok:true
+                    // 的空结果（missing_files 携带后端给出的具体原因）。
+                    const missing = (imported as { missing_files?: string[] }).missing_files;
+                    return rejectWithValue(
+                        missing?.join("; ") || "import_media_files_as_takes_failed",
+                    );
+                }
+            } else if (mode === "across-time") {
                 // Import files sequentially on the same track
                 let cursor = startSec;
                 let targetTrackId: string | undefined;
@@ -611,7 +630,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             ).unwrap();
         }
 
-        dispatch({ type: "session/checkpointHistory" });
+        dispatch(checkpointHistory());
 
         await webApi.beginUndoGroup();
         try {

@@ -1,4 +1,4 @@
-import { fadeCurveGain } from "../components/layout/timeline/paths.ts";
+import { fadeGainIn, fadeGainOut } from "../components/layout/timeline/paths.ts";
 import type { WaveformScene } from "./sceneBuilder.ts";
 
 export interface WaveformPeakView {
@@ -55,18 +55,52 @@ function gainAtClipTime(
     totalDurationSec: number,
     fadeInSec: number,
     fadeOutSec: number,
-    fadeInCurve: Parameters<typeof fadeCurveGain>[1],
-    fadeOutCurve: Parameters<typeof fadeCurveGain>[1],
+    fadeInShape: number,
+    fadeInDir: number,
+    fadeOutShape: number,
+    fadeOutDir: number,
 ): number {
     let gain = 1;
     if (fadeInSec > 0 && clipTimeSec < fadeInSec) {
-        gain *= fadeCurveGain(clamp01(clipTimeSec / fadeInSec), fadeInCurve);
+        gain *= fadeGainIn(fadeInShape, fadeInDir, clamp01(clipTimeSec / fadeInSec));
     }
     const fadeOutStart = totalDurationSec - fadeOutSec;
     if (fadeOutSec > 0 && clipTimeSec > fadeOutStart) {
-        gain *= 1 - fadeCurveGain(clamp01((clipTimeSec - fadeOutStart) / fadeOutSec), fadeOutCurve);
+        gain *= fadeGainOut(
+            fadeOutShape,
+            fadeOutDir,
+            clamp01((clipTimeSec - fadeOutStart) / fadeOutSec),
+        );
     }
     return gain;
+}
+
+// ── 顶点写入的模块级复用缓冲 ─────────────────────────────────────────
+// 滚动热路径上每帧构建几何：先写入可增长的 Float32Array（跨帧复用，
+// 稳态零分配），最后 slice 出独立副本返回，避免 number[] 装箱推送与
+// 逐帧新建大数组的 GC 压力。
+let vertexScratch = new Float32Array(8192);
+let vertexScratchLength = 0;
+
+function createVertexSink():
+    (x: number, y: number, r: number, g: number, b: number, a: number) => void {
+    return (x, y, r, g, b, a) => {
+        if (vertexScratchLength + 6 > vertexScratch.length) {
+            const next = new Float32Array(
+                Math.max(vertexScratch.length * 2, vertexScratchLength + 6),
+            );
+            next.set(vertexScratch.subarray(0, vertexScratchLength));
+            vertexScratch = next;
+        }
+        let i = vertexScratchLength;
+        vertexScratch[i] = x;
+        vertexScratch[i + 1] = y;
+        vertexScratch[i + 2] = r;
+        vertexScratch[i + 3] = g;
+        vertexScratch[i + 4] = b;
+        vertexScratch[i + 5] = a;
+        vertexScratchLength = i + 6;
+    };
 }
 
 export function buildWaveformGeometry(args: {
@@ -75,7 +109,7 @@ export function buildWaveformGeometry(args: {
     getPeaks: WaveformPeakResolver;
 }): WaveformGeometry {
     const [red, green, blue, colorAlpha] = parseWaveformColor(args.color);
-    const values: number[] = [];
+    const push = createVertexSink();
     let complete = true;
 
     for (const segment of args.scene.segments) {
@@ -142,15 +176,17 @@ export function buildWaveformGeometry(args: {
                     segment.clipTotalDurationSec,
                     segment.fadeInSec,
                     segment.fadeOutSec,
-                    segment.fadeInCurve,
-                    segment.fadeOutCurve,
+                    segment.fadeInShape,
+                    segment.fadeInDir,
+                    segment.fadeOutShape,
+                    segment.fadeOutDir,
                 );
             const yTop = centerY - peakMax * gain * halfHeight;
             const yBottom = centerY - peakMin * gain * halfHeight;
             const alpha = colorAlpha * segment.alpha;
 
-            values.push(x + 0.5, yTop, red, green, blue, alpha);
-            values.push(x + 0.5, yBottom, red, green, blue, alpha);
+            push(x + 0.5, yTop, red, green, blue, alpha);
+            push(x + 0.5, yBottom, red, green, blue, alpha);
         }
     }
 
@@ -160,17 +196,20 @@ export function buildWaveformGeometry(args: {
         const alpha = colorAlpha;
         const x = marker.xPx;
         const y = marker.yPx + 0.5;
-        values.push(x - halfWidth, y, red, green, blue, alpha);
-        values.push(x + halfWidth, y, red, green, blue, alpha);
-        values.push(x - halfWidth, y, red, green, blue, alpha);
-        values.push(x, y + size, red, green, blue, alpha);
-        values.push(x + halfWidth, y, red, green, blue, alpha);
-        values.push(x, y + size, red, green, blue, alpha);
+        push(x - halfWidth, y, red, green, blue, alpha);
+        push(x + halfWidth, y, red, green, blue, alpha);
+        push(x - halfWidth, y, red, green, blue, alpha);
+        push(x, y + size, red, green, blue, alpha);
+        push(x + halfWidth, y, red, green, blue, alpha);
+        push(x, y + size, red, green, blue, alpha);
     }
 
+    // 先取长度再清零：slice 出独立副本供 GPU/2D 渲染器安全持有。
+    const used = vertexScratchLength;
+    vertexScratchLength = 0;
     return {
-        vertices: new Float32Array(values),
-        lineCount: values.length / 12,
+        vertices: vertexScratch.slice(0, used),
+        lineCount: used / 12,
         complete,
     };
 }
