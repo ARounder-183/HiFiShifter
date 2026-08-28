@@ -19,7 +19,7 @@ import {
     endInteraction,
 } from "../../../../features/session/sessionSlice";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
-import { isPrimaryModifierDown } from "../../../../utils/platform";
+import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import {
     applyAutoCrossfade,
@@ -119,7 +119,7 @@ export type ClipDragState = {
     lastTrackId: string | null;
     lastDeltaBeat: number;
     copyMode: boolean;
-    ctrlSelectionToggle: boolean;
+    multiSelectToggleActive: boolean;
     startClientX: number;
     startClientY: number;
     hasMoved: boolean;
@@ -170,6 +170,10 @@ export function useClipDrag(deps: {
     snapEnabled: boolean;
     /** modifier.clipCopyDrag 绑定 */
     copyDragKb: Keybinding;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb: Keybinding;
     /** 自动交叉淡入淡出 */
     autoCrossfadeEnabled: boolean;
     /** 忽略编组 */
@@ -193,6 +197,8 @@ export function useClipDrag(deps: {
         noSnapKb,
         snapEnabled,
         copyDragKb,
+        multiSelectToggleKb,
+        rangeSelectKb,
         autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick,
@@ -368,9 +374,13 @@ export function useClipDrag(deps: {
             lastTrackId: targetTrackId,
             lastDeltaBeat: 0,
             copyMode: false,
-            // 主修饰键 + 点击（无拖动）多选切换标记；仅在未发生拖动时生效。
+            // 多选切换修饰键 + 点击（无拖动）标记；仅在未发生拖动时生效。
             // 拖动开始后此标记被清除，由拖拽逻辑接管（是否复制由复制拖动绑定决定）。
-            ctrlSelectionToggle: isPrimaryModifierDown(e),
+            multiSelectToggleActive: resolveClipSelectionModifiers({
+                event: e,
+                multiSelectToggleKb,
+                rangeSelectKb,
+            }).multiSelectToggleActive,
             startClientX: e.clientX,
             startClientY: e.clientY,
             hasMoved: false,
@@ -393,7 +403,7 @@ export function useClipDrag(deps: {
                 const dy = ev.clientY - drag.startClientY;
                 if (dx * dx + dy * dy < 9) return;
                 drag.hasMoved = true;
-                drag.ctrlSelectionToggle = false;
+                drag.multiSelectToggleActive = false;
                 // 拖动开始时根据当前按键状态决定是否为复制拖动
                 drag.copyMode = resolveClipDragCopyMode({
                     existingCopyMode: drag.copyMode,
@@ -597,7 +607,7 @@ export function useClipDrag(deps: {
 
             if (!drag.hasMoved) {
                 // 主修饰键 + 点击（未移动）：执行多选切换
-                if (drag.ctrlSelectionToggle && onCtrlClick) {
+                if (drag.multiSelectToggleActive && onCtrlClick) {
                     onCtrlClick(drag.anchorClipId);
                 }
                 window.removeEventListener("pointermove", onMove);

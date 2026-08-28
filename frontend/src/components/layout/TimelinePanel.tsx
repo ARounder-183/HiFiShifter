@@ -576,6 +576,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const fadeShapeCycleKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.fadeShapeCycleClick"),
     );
+    const clipMultiSelectToggleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipMultiSelectToggle"),
+    );
+    const clipRangeSelectKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipRangeSelect"),
+    );
     /** 单侧循环到下一个形状并重置默认曲率。 */
     const cycleOneFade = React.useCallback(
         (clipId: string, side: "in" | "out") => {
@@ -919,6 +925,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         noSnapKb,
         snapEnabled: s.timelineSnap.enabled,
         copyDragKb,
+        multiSelectToggleKb: clipMultiSelectToggleKb,
+        rangeSelectKb: clipRangeSelectKb,
         autoCrossfadeEnabled: s.autoCrossfadeEnabled,
         ignoreGrouping,
         onCtrlClick: toggleTrackLaneCtrlSelection,
@@ -1805,6 +1813,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             showAllTakes={s.showAllTakes}
                                             onActivateTake={activateTrackLaneTake}
                                             fadeShapeCycleKb={fadeShapeCycleKb}
+                                            multiSelectToggleKb={clipMultiSelectToggleKb}
+                                            rangeSelectKb={clipRangeSelectKb}
                                             fadeLengthFormatCtx={fadeLengthFormatCtx}
                                             onFadeShapeCycleClick={handleFadeShapeCycleClick}
                                             onCrossfadeCycleClick={handleCrossfadeCycleClick}

@@ -3,7 +3,8 @@
  */
 import React from "react";
 
-import { isPrimaryModifierDown } from "../../../utils/platform";
+import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
+import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { useI18n } from "../../../i18n/I18nProvider";
@@ -165,6 +166,10 @@ type TrackLaneProps = {
     onActivateTake?: (clipId: string, takeId: string) => void;
     /** 形状循环键绑定（modifier.fadeShapeCycleClick），透传给 ClipItem。 */
     fadeShapeCycleKb?: Keybinding | null;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb?: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb?: Keybinding;
     /** 淡化长度 ToolTips 的相对时长时间上下文。 */
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
@@ -189,6 +194,8 @@ export const TrackLane = React.memo(
             overlayClipIds = [],
             altPressed,
             fadeShapeCycleKb = null,
+            multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
+            rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
             fadeLengthFormatCtx,
             onFadeShapeCycleClick,
             onCrossfadeCycleClick,
@@ -346,15 +353,17 @@ export const TrackLane = React.memo(
                 // altPressed tracks the stretch modifier (configurable).
                 // For click-selection bypass, only check physical Alt key to avoid
                 // breaking Ctrl/Shift selection when those keys are stretch modifiers.
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const primaryModifierDown = isPrimaryModifierDown(event);
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const altKeyDown = selectionMods.altKeyDown;
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
-                const allowSeek = !altKeyDown && !primaryModifierDown && !event.shiftKey;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const allowSeek =
+                    !altKeyDown && !selectionMods.multiSelectToggleRaw && !selectionMods.rangeSelectRaw;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
                         ? multiSelectedSet.has(clip.id)
@@ -408,6 +417,8 @@ export const TrackLane = React.memo(
                 selectedClipId,
                 multiSelectedClipIds,
                 multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onShiftRangeSelect,
                 primeSelection,
                 rangeSelectAnchorClipId,
@@ -459,14 +470,15 @@ export const TrackLane = React.memo(
                 // for edit-mode selection (stretch vs trim). For click-selection
                 // bypass, only check the physical Alt key.
                 const stretchActive = altPressed;
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const primaryModifierDown = isPrimaryModifierDown(event);
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const clipIsSelected =
                     multiSelectedClipIds.length > 0
                         ? multiSelectedSet.has(clipId)
@@ -543,6 +555,8 @@ export const TrackLane = React.memo(
                 selectedClipId,
                 multiSelectedClipIds,
                 multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onCtrlToggleSelect,
                 onShiftRangeSelect,
                 primeSelection,
@@ -556,12 +570,13 @@ export const TrackLane = React.memo(
         const beginSnapOffsetInteraction = React.useCallback(
             (event: React.PointerEvent<HTMLDivElement>, clip: ClipInfo) => {
                 if (event.button !== 0) return;
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const primaryModifierDown = isPrimaryModifierDown(event);
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !primaryModifierDown;
-                const doCtrlToggleOnly = primaryModifierDown && !event.shiftKey && !altKeyDown;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
 
                 event.preventDefault();
                 event.stopPropagation();
@@ -572,7 +587,7 @@ export const TrackLane = React.memo(
                 }
                 startSnapOffsetDrag?.(event, clip.id);
             },
-            [clearContextMenu, primeSelection, startSnapOffsetDrag],
+            [clearContextMenu, multiSelectToggleKb, rangeSelectKb, primeSelection, startSnapOffsetDrag],
         );
 
         return (
@@ -714,6 +729,8 @@ export const TrackLane = React.memo(
                             showAllTakes={showAllTakes}
                             onActivateTake={onActivateTake}
                             fadeShapeCycleKb={fadeShapeCycleKb}
+                            multiSelectToggleKb={multiSelectToggleKb}
+                            rangeSelectKb={rangeSelectKb}
                             onFadeShapeCycleClick={onFadeShapeCycleClick}
                             fadeLengthFormatCtx={fadeLengthFormatCtx}
                         />
@@ -826,7 +843,10 @@ startEditDrag={startEditDrag}
             sameStringArray(prev.overlayClipIds, next.overlayClipIds) &&
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&
-            prev.onToggleGroupDisabled === next.onToggleGroupDisabled
+            prev.onToggleGroupDisabled === next.onToggleGroupDisabled &&
+            prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
+            prev.multiSelectToggleKb === next.multiSelectToggleKb &&
+            prev.rangeSelectKb === next.rangeSelectKb
             // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
             // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );

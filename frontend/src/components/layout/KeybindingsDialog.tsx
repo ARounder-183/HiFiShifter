@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, Flex, Text, Button, ScrollArea, Separator, Select } from "@radix-ui/themes";
+import { Dialog, Flex, Text, Button, ScrollArea, Separator, Select, Badge } from "@radix-ui/themes";
 import { Cross2Icon } from "@radix-ui/react-icons";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -18,9 +18,10 @@ import {
     DEFAULT_KEYBINDINGS,
     ACTION_META,
     ALL_ACTION_IDS,
+    ACTION_GROUP_ORDER,
     GROUP_LABEL_KEYS,
 } from "../../features/keybindings/defaultKeybindings";
-import type { ActionId, Keybinding } from "../../features/keybindings/types";
+import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
@@ -32,6 +33,17 @@ import {
 const NONE_BINDING: Keybinding = { key: "__none__" };
 
 type ModifierToken = "control" | "shift" | "alt";
+
+/** 修饰键手势徽章的 i18n key 与配色 */
+const GESTURE_BADGES: Record<
+    NonNullable<ActionMeta["modifierOperationType"]>,
+    { labelKey: string; color: "blue" | "orange" | "green" | "purple" }
+> = {
+    drag: { labelKey: "kb_gesture_drag", color: "blue" },
+    click: { labelKey: "kb_gesture_click", color: "orange" },
+    wheel: { labelKey: "kb_gesture_wheel", color: "green" },
+    hold: { labelKey: "kb_gesture_hold", color: "purple" },
+};
 
 function isPhysicalModifierKey(key: string): boolean {
     const lower = key.toLowerCase();
@@ -275,17 +287,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
 
     // 按分组组织操作
     const groups = React.useMemo(() => {
-        const groupOrder: Array<
-            | "playback"
-            | "edit"
-            | "project"
-            | "clip"
-            | "pianoRoll"
-            | "mode"
-            | "modifier"
-            | "quickSearch"
-        > = ["playback", "edit", "project", "clip", "pianoRoll", "mode", "modifier", "quickSearch"];
-        return groupOrder.map((group) => ({
+        return ACTION_GROUP_ORDER.map((group) => ({
             group,
             actions: ALL_ACTION_IDS.filter((id) => ACTION_META[id].group === group),
         }));
@@ -400,7 +402,29 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                                                 minHeight: 36,
                                             }}
                                         >
-                                            <Text size="2">{tAny(meta.labelKey)}</Text>
+                                            <Flex align="center" gap="2" minWidth="0">
+                                                {/* 修饰键手势徽章：区分拖拽 / 点击 / 滚轮 / 按住 */}
+                                                {meta.modifierOperationType && (
+                                                    <Badge
+                                                        size="1"
+                                                        variant="soft"
+                                                        color={
+                                                            GESTURE_BADGES[
+                                                                meta.modifierOperationType
+                                                            ].color
+                                                        }
+                                                    >
+                                                        {tAny(
+                                                            GESTURE_BADGES[
+                                                                meta.modifierOperationType
+                                                            ].labelKey,
+                                                        )}
+                                                    </Badge>
+                                                )}
+                                                <Text size="2" style={{ minWidth: 0 }}>
+                                                    {tAny(meta.labelKey)}
+                                                </Text>
+                                            </Flex>
                                             <Flex align="center" gap="2">
                                                 {/* 快捷键显示 / 录入按钮 */}
                                                 <Button
@@ -463,7 +487,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     </Flex>
                 </ScrollArea>
 
-                {/* 冲突提示 */}
+                {/* 冲突提示：按所属场景分组展示冲突项 */}
                 {conflict && (
                     <Flex
                         align="center"
@@ -476,14 +500,29 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                             marginTop: 8,
                         }}
                     >
-                        <Text size="2" color="red" style={{ flex: 1 }}>
-                            {tAny("kb_conflict_msg")}{" "}
-                            <strong>
-                                {conflict.conflictWith
-                                    .map((id) => tAny(ACTION_META[id].labelKey))
-                                    .join(", ")}
-                            </strong>
-                        </Text>
+                        <Flex direction="column" gap="1" style={{ flex: 1, minWidth: 0 }}>
+                            <Text size="2" color="red">
+                                {tAny("kb_conflict_msg")}
+                            </Text>
+                            {Array.from(
+                                conflict.conflictWith.reduce((map, id) => {
+                                    const group = ACTION_META[id].group;
+                                    const ids = map.get(group) ?? [];
+                                    ids.push(id);
+                                    map.set(group, ids);
+                                    return map;
+                                }, new Map<ActionMeta["group"], ActionId[]>()),
+                            ).map(([group, ids]) => (
+                                <Text key={group} size="2" color="red">
+                                    {tAny(GROUP_LABEL_KEYS[group])}：
+                                    <strong>
+                                        {ids
+                                            .map((id) => tAny(ACTION_META[id].labelKey))
+                                            .join("、")}
+                                    </strong>
+                                </Text>
+                            ))}
+                        </Flex>
                         <Button size="1" color="red" variant="soft" onClick={handleConfirmConflict}>
                             {tAny("kb_conflict_override")}
                         </Button>

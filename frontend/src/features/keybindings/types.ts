@@ -67,6 +67,8 @@ export type ActionId =
     | "mode.drawTool" // 切换到绘制工具
     | "mode.lineTool" // 切换到直线/颤音工具
     // 修饰键行为
+    | "modifier.clipMultiSelectToggle" // 按住并点击音频块：切换多选（macOS 为 ⌘）
+    | "modifier.clipRangeSelect" // 按住并点击音频块：从锚点范围选择
     | "modifier.clipSlipEdit" // 拖动 clip 时进入 slip edit
     | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
@@ -106,27 +108,82 @@ export interface Keybinding {
     modifierOnly?: boolean;
 }
 
+/**
+ * 修饰键冲突检测场景 ID。
+ *
+ * 场景 = 实际会同时消费这些修饰键的一次交互（拖拽目标 / 滚轮区域 / 点击目标）。
+ * 两个修饰键绑定只有当「修饰键组合相同 + 手势类型相同 + 场景有交集」时才会
+ * 互相干扰；同一修饰键出现在不同场景（如 Alt 同时用于音频块主体 Slip 与
+ * 淡化包络曲率）不构成冲突，与 DAW（REAPER 等）惯例一致。
+ */
+export type ModifierConflictScene =
+    // 时间轴：音频块主体拖拽（移动 / Slip / 复制拖动）
+    | "clip.move"
+    // 时间轴：音频块点击选择（多选切换 / 范围选择）
+    | "clip.select"
+    // 时间轴：音频块边缘 trim/stretch
+    | "clip.edge"
+    // 时间轴：音频块增益旋钮拖拽（微调）
+    | "clip.gain"
+    // 时间轴：交叉淡化手柄拖拽
+    | "clip.crossfade"
+    // 时间轴：淡入淡出包络拖拽 / 点击
+    | "clip.fade"
+    // 时间轴：速度标尺拖拽
+    | "tempo.ruler"
+    // 钢琴卷帘：参数线拖拽（绘制/整体移动）
+    | "roll.paramDrag"
+    // 钢琴卷帘：参数形变锚点拖拽
+    | "roll.morph"
+    // 钢琴卷帘：参数选区边缘拉伸
+    | "roll.paramEdge"
+    // 钢琴卷帘：直线/颤音拖拽期间的滚轮
+    | "roll.vibratoWheel"
+    // 时间轴画布滚轮
+    | "wheel.timeline"
+    // 钢琴卷帘画布滚轮
+    | "wheel.pianoRoll"
+    // 琴键区滚轮
+    | "wheel.pianoKeys"
+    // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
+    | "global.fine";
+
 /** 操作元信息（用于 UI 显示） */
 export interface ActionMeta {
     /** 国际化文本的 key（用于操作名称显示） */
     labelKey: string;
-    /** 分组（用于设置面板分组展示） */
+    /**
+     * 分组（用于设置面板分组展示）。
+     * 键盘快捷键按「全局 / 时间轴 / 钢琴卷帘」等使用场景划分；
+     * 修饰键（mod* 组）按其作用的交互场景划分。
+     */
     group:
         | "playback"
+        | "mode"
         | "edit"
         | "project"
         | "clip"
         | "pianoRoll"
-        | "mode"
-        | "modifier"
-        | "quickSearch";
+        | "paramEditor"
+        | "quickSearch"
+        | "modClip"
+        | "modFade"
+        | "modParam"
+        | "modWheel"
+        | "modFine";
     /**
-     * 修饰键操作类型（仅用于修饰键冲突检测）。
-     * 同类型的修饰键绑定才会提示冲突，不同类型不提示。
+     * 修饰键手势类型（存在即表示这是一个修饰键绑定）。
+     * 同一交互目标上「点击」与「拖拽」是可区分的手势，
+     * 因此类型不同的修饰键绑定不构成冲突。
      */
-    modifierOperationType?: "drag" | "wheel" | "click";
+    modifierOperationType?: "drag" | "click" | "wheel" | "hold";
     /**
-     * 作用域上下文（仅用于冲突检测）。
+     * 修饰键生效场景（见 ModifierConflictScene）。
+     * 仅用于冲突检测：与其它修饰键绑定的场景有交集时才可能冲突。
+     */
+    conflictScenes?: readonly ModifierConflictScene[];
+    /**
+     * 作用域上下文（仅用于键盘快捷键的冲突检测与事件路由）。
      * 具有不同 scopedContext 的绑定不会视为冲突，
      * 因为它们在不同的 UI 上下文中激活（如 quickSearch 弹窗中）。
      */

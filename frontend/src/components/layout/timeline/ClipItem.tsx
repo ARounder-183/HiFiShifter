@@ -13,6 +13,7 @@ import React from "react";
 
 import { useAppSelector } from "../../../app/hooks";
 import type { Keybinding } from "../../../features/keybindings/types";
+import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import {
     buildSingleFadeInfoContent,
@@ -21,7 +22,7 @@ import {
 } from "./fadeTooltipText";
 import { resolveCurvatureEditBase } from "./reaperFade";
 import { useI18n } from "../../../i18n/I18nProvider";
-import { isPrimaryModifierDown } from "../../../utils/platform";
+import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
@@ -88,6 +89,8 @@ export const ClipItem = React.memo(function ClipItem({
     showAllTakes = true,
     onActivateTake,
     fadeShapeCycleKb = null,
+    multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
+    rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
     onFadeShapeCycleClick,
     fadeLengthFormatCtx,
 }: {
@@ -171,6 +174,10 @@ export const ClipItem = React.memo(function ClipItem({
     onActivateTake?: (clipId: string, takeId: string) => void;
     /** 形状循环键绑定（无绑定时不启用点击切换）。 */
     fadeShapeCycleKb?: Keybinding | null;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb?: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb?: Keybinding;
     /** 淡化长度 ToolTips 的相对时长时间上下文。 */
     fadeLengthFormatCtx: FadeLengthFormatContext;
     /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
@@ -278,12 +285,15 @@ export const ClipItem = React.memo(function ClipItem({
             // Only check physical Alt key for click-selection bypass.
             // altPressed tracks the stretch modifier and must not interfere
             // with primary-modifier/Shift selection behavior.
-            const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-            const primaryModifierDown = isPrimaryModifierDown(e);
-            const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
+            const selectionMods = resolveClipSelectionModifiers({
+                event: e,
+                multiSelectToggleKb,
+                rangeSelectKb,
+            });
+            const doShiftRangeSelect = selectionMods.rangeSelectActive;
             const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-            const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
-            const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+            const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+            const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
             const primedSelection = shouldPrimeSelection && !selected;
 
             if (primedSelection) {
@@ -393,6 +403,8 @@ export const ClipItem = React.memo(function ClipItem({
             ensureSelected,
             isInMultiSelectedSet,
             multiSelectedCount,
+            multiSelectToggleKb,
+            rangeSelectKb,
             onCtrlToggleSelect,
             onShiftRangeSelect,
             rangeSelectAnchorClipId,
@@ -466,14 +478,18 @@ export const ClipItem = React.memo(function ClipItem({
                 // for edge-handle behavior. For click-selection bypass (slip-edit),
                 // we only check the physical Alt key to avoid breaking primary-modifier/Shift
                 // selection when those keys are configured as stretch modifiers.
-                const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                const primaryModifierDown = isPrimaryModifierDown(e);
+                const selectionMods = resolveClipSelectionModifiers({
+                    event: e,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const altKeyDown = selectionMods.altKeyDown;
 
                 // Shift+点击范围选择在 pointerup 时处理（避免阻止拖动）
-                const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
                 const primedSelection = shouldPrimeSelection && !selected;
 
                 // Inactive take 命中只接管“无移动、无编辑修饰键的 click”。
@@ -498,8 +514,8 @@ export const ClipItem = React.memo(function ClipItem({
                 // Track whether the pointer moved beyond a small deadzone.
                 const allowSeek =
                     !altKeyDown &&
-                    !primaryModifierDown &&
-                    !e.shiftKey &&
+                    !selectionMods.multiSelectToggleRaw &&
+                    !selectionMods.rangeSelectRaw &&
                     clickedInactiveTakeId == null;
                 const startX = e.clientX;
                 const startY = e.clientY;
@@ -578,6 +594,8 @@ export const ClipItem = React.memo(function ClipItem({
                     selectClipRemote={selectClipRemote}
                     onCtrlToggleSelect={onCtrlToggleSelect}
                     onShiftRangeSelect={onShiftRangeSelect}
+                    multiSelectToggleKb={multiSelectToggleKb}
+                    rangeSelectKb={rangeSelectKb}
                     rangeSelectAnchorClipId={rangeSelectAnchorClipId}
                     recordLastClickPosition={recordLastClickPosition}
                     seekFromClientX={seekFromClientX}

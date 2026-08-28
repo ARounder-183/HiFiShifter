@@ -1,5 +1,7 @@
 import React from "react";
-import { isPrimaryModifierDown } from "../../../../utils/platform";
+import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
+import { DEFAULT_KEYBINDINGS } from "../../../../features/keybindings/defaultKeybindings";
+import type { Keybinding } from "../../../../features/keybindings/types";
 import { FADE_CORNER_RESERVE_PX } from "../constants";
 
 export const ClipEdgeHandles: React.FC<{
@@ -10,6 +12,10 @@ export const ClipEdgeHandles: React.FC<{
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
     onCtrlToggleSelect: (clipId: string) => void;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb?: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb?: Keybinding;
     onShiftRangeSelect: (
         clipId: string,
         anchorClipIdOverride?: string | null,
@@ -31,6 +37,8 @@ export const ClipEdgeHandles: React.FC<{
     ensureSelected,
     selectClipRemote,
     onCtrlToggleSelect,
+    multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
+    rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
     onShiftRangeSelect,
     rangeSelectAnchorClipId,
     recordLastClickPosition,
@@ -65,14 +73,17 @@ export const ClipEdgeHandles: React.FC<{
                     // to avoid breaking Ctrl/Shift selection when those keys are
                     // configured as stretch modifiers.
                     const stretchActive = altPressed;
-                    const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                    const primaryModifierDown = isPrimaryModifierDown(e);
-                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
+                    const selectionMods = resolveClipSelectionModifiers({
+                        event: e,
+                        multiSelectToggleKb,
+                        rangeSelectKb,
+                    });
+                    const doShiftRangeSelect = selectionMods.rangeSelectActive;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
-                    const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                    const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                    const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
 
                     const startX = e.clientX;
                     const startY = e.clientY;
@@ -144,14 +155,17 @@ export const ClipEdgeHandles: React.FC<{
                     // Same separation as left edge: stretchActive for edit mode,
                     // altKeyDown for click-selection bypass only.
                     const stretchActive = altPressed;
-                    const altKeyDown = Boolean(e.altKey || e.nativeEvent.getModifierState?.("Alt"));
-                    const primaryModifierDown = isPrimaryModifierDown(e);
-                    const doShiftRangeSelect = e.shiftKey && !altKeyDown && !primaryModifierDown;
+                    const selectionMods = resolveClipSelectionModifiers({
+                        event: e,
+                        multiSelectToggleKb,
+                        rangeSelectKb,
+                    });
+                    const doShiftRangeSelect = selectionMods.rangeSelectActive;
                     const shiftRangeAnchorClipId = doShiftRangeSelect
                         ? rangeSelectAnchorClipId
                         : null;
-                    const doCtrlToggleOnly = primaryModifierDown && !e.shiftKey && !altKeyDown;
-                    const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                    const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                    const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
 
                     const startX = e.clientX;
                     const startY = e.clientY;
