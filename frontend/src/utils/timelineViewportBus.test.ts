@@ -14,15 +14,39 @@ describe("timelineViewportBus — 同帧提交契约", () => {
         const listener = vi.fn();
         const unsub = timelineViewportBus.subscribe(listener);
         try {
-            timelineViewportBus.emit(120, 150, 800);
+            timelineViewportBus.emit(120, 150, 800, 240, 80);
 
             expect(listener).toHaveBeenCalledTimes(1);
-            expect(listener).toHaveBeenCalledWith(120, 150, 800);
+            expect(listener).toHaveBeenCalledWith(120, 150, 800, 240, 80);
             expect(timelineViewportBus.getSnapshot()).toMatchObject({
                 scrollLeft: 120,
                 pxPerSec: 150,
                 viewportWidth: 800,
+                scrollTopPx: 240,
+                rowHeight: 80,
             });
+        } finally {
+            unsub();
+        }
+    });
+
+    it("省略竖直轴参数时沿用上一快照值（单轴更新）", () => {
+        const seen: Array<{ scrollLeft: number; scrollTopPx: number }> = [];
+        const unsub = timelineViewportBus.subscribe((scrollLeft, _px, _w, scrollTopPx) => {
+            seen.push({ scrollLeft, scrollTopPx });
+        });
+        try {
+            timelineViewportBus.emit(10, 150, 800, 96, 48);
+            timelineViewportBus.emit(20, 150, 800);
+            expect(seen).toEqual([
+                { scrollLeft: 10, scrollTopPx: 96 },
+                { scrollLeft: 20, scrollTopPx: 96 },
+            ]);
+            expect(timelineViewportBus.getSnapshot().scrollTopPx).toBe(96);
+            expect(timelineViewportBus.getSnapshot().rowHeight).toBe(48);
+
+            timelineViewportBus.emit(20, 150, 800, 144, 48);
+            expect(timelineViewportBus.getSnapshot().scrollTopPx).toBe(144);
         } finally {
             unsub();
         }

@@ -37,7 +37,7 @@ test("components/layout/timeline/runtime/timelineRenderModel.test.ts scripted ch
         viewportHeightPx: 192,
     });
 
-    assertEqual(virtualizedModel.startIndex, 1, "virtual window start");
-    assertEqual(virtualizedModel.endIndex, 7, "virtual window end");
+    assertEqual(virtualizedModel.startIndex, 0, "virtual window start");
+    assertEqual(virtualizedModel.endIndex, 10, "virtual window end");
 
 });

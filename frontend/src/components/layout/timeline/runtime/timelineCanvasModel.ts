@@ -55,6 +55,9 @@ export type TimelineCanvasClipModel = {
 
 export function buildSparseClipRenderModel(args: {
     visibleTracks: Array<{ id: string; color?: string }>;
+    /** 窗口首行的绝对轨道索引：clip body 画布使用内容绝对坐标绘制，
+     * 竖直滚动时由 scrollTopPx 统一平移（与 DOM 内容层同帧提交）。 */
+    startTrackIndex: number;
     visibleTrackClipsById: Record<string, SparseRenderClip[]>;
     pxPerSec: number;
     rowHeight: number;
@@ -138,7 +141,7 @@ export function buildSparseClipRenderModel(args: {
             trackId: clip.trackId,
 name: clipDisplayName(clip),
             leftPx: clip.startSec * args.pxPerSec,
-            topPx: visibleIndex * args.rowHeight,
+            topPx: (args.startTrackIndex + visibleIndex) * args.rowHeight,
             widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),
             heightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y),
             headerHeightPx: CLIP_HEADER_HEIGHT,

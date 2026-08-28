@@ -16,6 +16,7 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted ch
             { id: "track-a", color: "#ff7a00" },
             { id: "track-b", color: "#00a3ff" },
         ],
+        startTrackIndex: 0,
         visibleTrackClipsById: {
             "track-a": [
                 {

@@ -222,6 +222,9 @@ export interface TimelineStateResult {
     // Functions
     setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
+    /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
+    syncScrollTop: (next: number) => void;
+    scrollTopPxRef: React.MutableRefObject<number>;
     setScrollLeftAction: React.Dispatch<React.SetStateAction<number>>;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
@@ -353,6 +356,9 @@ export function useTimelineState(): TimelineStateResult {
 
     const [viewportWidth, setViewportWidth] = useState(0);
     const viewportWidthRef = useRef(0);
+    // 竖直视口的帧紧来源：sticky 画布层从这里取 scrollTop（经总线），
+    // React state 仅驱动窗口化等非视觉更新。
+    const scrollTopPxRef = useRef(0);
     useEffect(() => {
         viewportWidthRef.current = viewportWidth;
     }, [viewportWidth]);
@@ -384,6 +390,18 @@ export function useTimelineState(): TimelineStateResult {
         };
 
         updateViewportWidth();
+        // 挂载/重挂载时对齐竖直基准（浏览器可能恢复了滚动位置），
+        // 保证 sticky 画布在首个滚动事件前就以正确偏移绘制。
+        if (Math.abs(scrollTopPxRef.current - scroller.scrollTop) > 1e-6) {
+            scrollTopPxRef.current = scroller.scrollTop;
+            timelineViewportBus.emit(
+                scroller.scrollLeft,
+                pxPerSecRef.current,
+                scroller.clientWidth || 0,
+                scroller.scrollTop,
+                rowHeightRef.current,
+            );
+        }
 
         if (typeof ResizeObserver !== "undefined") {
             const observer = new ResizeObserver(() => {
@@ -425,8 +443,14 @@ export function useTimelineState(): TimelineStateResult {
             rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
         }
         setNativeScrollLeft(next);
-        // ★ 立即广播视口变化 → TimelineWaveformSurface 直接 invalidate（绕过 React）
-        timelineViewportBus.emit(next, pxPerSecRef.current, viewportWidthRef.current);
+        // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
+        timelineViewportBus.emit(
+            next,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            scrollTopPxRef.current,
+            rowHeightRef.current,
+        );
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -434,6 +458,21 @@ export function useTimelineState(): TimelineStateResult {
                 setScrollLeft(scrollLeftRef.current);
             });
         }
+    }, []);
+
+    // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
+    // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
+    // 必须与 DOM 内容层在同一帧内拿到新 scrollTop。滚动事件在绘制前触发，
+    // 这里同步 emit，任何经 React state 的延迟都会造成画布与 Clip 分层。
+    const syncScrollTop = React.useCallback((next: number) => {
+        scrollTopPxRef.current = next;
+        timelineViewportBus.emit(
+            scrollLeftRef.current,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            next,
+            rowHeightRef.current,
+        );
     }, []);
 
     const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
@@ -1031,6 +1070,7 @@ export function useTimelineState(): TimelineStateResult {
             el.scrollLeft = pan.scrollLeft - (ev.clientX - pan.startX);
             el.scrollTop = pan.scrollTop - (ev.clientY - pan.startY);
             syncScrollLeft(el.scrollLeft);
+            syncScrollTop(el.scrollTop);
         }
 
         function end(ev: PointerEvent) {
@@ -1121,6 +1161,8 @@ export function useTimelineState(): TimelineStateResult {
         pendingDropDurationPathRef,
 
         syncScrollLeft,
+        syncScrollTop,
+        scrollTopPxRef,
         setScrollLeftAction,
         setScrollLeftState,
         secFromClientX,

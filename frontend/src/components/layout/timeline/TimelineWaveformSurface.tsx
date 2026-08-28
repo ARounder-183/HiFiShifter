@@ -39,6 +39,9 @@ function toSceneClip(clip: ClipInfo): WaveformSceneClip | null {
 
 export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurface(props: {
     tracks: readonly TrackInfo[];
+    /** 窗口首行的绝对轨道索引：行 topPx 使用内容绝对坐标，
+     * 竖直滚动时由总线 scrollTopPx 统一平移（与 DOM 内容层同帧提交）。 */
+    startTrackIndex: number;
     clipsByTrackId: Readonly<Record<string, readonly ClipInfo[]>>;
     rowHeight: number;
     widthPx: number;
@@ -54,7 +57,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             props.tracks.map((track, index) => {
                 const clips = props.clipsByTrackId[track.id] ?? [];
                 return {
-                    topPx: index * props.rowHeight,
+                    topPx: (props.startTrackIndex + index) * props.rowHeight,
                     waveformTopPx: CLIP_HEADER_HEIGHT,
                     waveformHeightPx: Math.max(
                         1,
@@ -66,7 +69,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
                     leadingOverlapSecByClipId: computeLeadingOverlapSecByClipId([...clips]),
                 };
             }),
-        [props.clipsByTrackId, props.rowHeight, props.tracks],
+        [props.clipsByTrackId, props.rowHeight, props.startTrackIndex, props.tracks],
     );
 
     return (
@@ -77,6 +80,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             viewportStartSec={props.viewportStartSec}
             viewportEndSec={props.viewportEndSec}
             pxPerSec={props.pxPerSec}
+            viewportTopPx={props.startTrackIndex * props.rowHeight}
             color={color}
             viewportSource={timelineViewportBus}
         />

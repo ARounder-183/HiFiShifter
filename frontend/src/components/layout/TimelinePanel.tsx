@@ -321,6 +321,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dropPreviewRef,
         playheadDragRef,
         lastClickedClipIdRef,
+        syncScrollTop,
         pxPerSecRef,
         viewportWidthRef,
         rowHeightRef,
@@ -1269,6 +1270,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         () =>
             buildSparseClipRenderModel({
                 visibleTracks,
+                startTrackIndex: timelineRenderModel.startIndex,
                 visibleTrackClipsById,
                 pxPerSec,
                 rowHeight,
@@ -1283,6 +1285,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             renamingClipId,
             rowHeight,
             s.selectedClipId,
+            timelineRenderModel.startIndex,
             visibleTrackClipsById,
             visibleTracks,
         ],
@@ -1449,6 +1452,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }}
                     onScroll={(e) => {
                         const el = e.currentTarget as HTMLDivElement;
+                        // 竖直轴同帧提交：sticky 画布层（clip 体/波形面）必须在
+                        // 绘制前拿到新 scrollTop（总线同步派发）；React state
+                        // 只驱动窗口化等非视觉更新。
+                        syncScrollTop(el.scrollTop);
                         setTimelineScrollTop(el.scrollTop);
                         if (trackListScrollRef.current) {
                             if (
@@ -2094,13 +2101,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         </div>
 
                         {viewportWidth > 0 ? (
+                            /* 画布锚定视口顶部（topPx=0），内容按绝对轨道坐标
+                               绘制并由总线 scrollTopPx 同帧平移——竖直滚动
+                               与 DOM 内容层严丝合缝。 */
                             <TimelineSurface
                                 tracks={visibleTracks}
+                                startTrackIndex={timelineRenderModel.startIndex}
                                 clipsByTrackId={visibleTrackClipsById}
                                 rowHeight={rowHeight}
                                 widthPx={Math.max(1, Math.ceil(viewportWidth))}
                                 heightPx={visibleTrackCanvasHeight}
-                                topPx={timelineRenderModel.startIndex * rowHeight}
+                                topPx={0}
                                 viewportStartSec={viewportStartSec}
                                 viewportEndSec={viewportEndSec}
                                 pxPerSec={pxPerSec}

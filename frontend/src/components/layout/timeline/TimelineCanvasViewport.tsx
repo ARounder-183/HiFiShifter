@@ -44,7 +44,9 @@ export const TimelineCanvasViewport: React.FC<{
         if (!ctx) return;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, displayWidth, displayHeight);
-        ctx.translate(-viewportRef.current.scrollLeft, 0);
+        // 画布内容使用内容绝对坐标（与 DOM 内容层同一坐标系），
+        // 由视口偏移统一做水平/竖直平移——两个轴都随滚动同帧提交。
+        ctx.translate(-viewportRef.current.scrollLeft, -viewportRef.current.scrollTopPx);
         drawTimelineCanvas(ctx, {
             width: displayWidth,
             height: displayHeight,
@@ -60,10 +62,19 @@ export const TimelineCanvasViewport: React.FC<{
     }, [height, invalidate, model, width]);
 
     React.useEffect(() => {
-        return timelineViewportBus.subscribe((scrollLeft, pxPerSec, viewportWidth) => {
-            viewportRef.current = { scrollLeft, pxPerSec, viewportWidth, revision: 0 };
-            invalidate();
-        });
+        return timelineViewportBus.subscribe(
+            (scrollLeft, pxPerSec, viewportWidth, scrollTopPx, rowHeight) => {
+                viewportRef.current = {
+                    scrollLeft,
+                    pxPerSec,
+                    viewportWidth,
+                    scrollTopPx,
+                    rowHeight,
+                    revision: 0,
+                };
+                invalidate();
+            },
+        );
     }, [invalidate]);
 
     return <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />;
