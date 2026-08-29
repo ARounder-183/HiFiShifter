@@ -1,6 +1,78 @@
 import type { WaveformGeometry } from "./geometry.ts";
 import { rasterize } from "../components/layout/timeline/runtime/canvasRaster.ts";
 
+/**
+ * 波形描边宽度（CSS 像素）。
+ *
+ * 两条渲染路径的**覆盖宽度契约**：Canvas2D 回退在 `setTransform(dpr)` 下
+ * `lineWidth = 1` 是 1 CSS px；WebGL 端 `gl.LINES` 的 lineWidth 被所有主流
+ * 实现锁死为 1 **物理**像素，在 DPR > 1 的屏幕上每列只覆盖 `1/dpr` 的宽度，
+ * 亮色块从列间缝隙透出 —— 无论波形颜色多深，观感都是"浅"。因此 WebGL 端
+ * 必须把线段展开成等宽四边形（见 `expandLineSegmentsToQuads`）才能与
+ * Canvas2D 的覆盖严格一致。改颜色解决不了这个问题，宽度才是根因。
+ */
+export const WAVEFORM_STROKE_WIDTH_PX = 1;
+
+/**
+ * 把逐线段顶点（每段 2 顶点 × [x, y, r, g, b, a]）展开成逐段四边形
+ * （每段 6 顶点，TRIANGLES 两次绘制），沿线段法线方向各偏移 `widthPx / 2`。
+ *
+ * - 竖直包络列：法线为水平 → 恰好覆盖 1 CSS px 宽的整列；
+ * - 水平/斜线（take 标记）：法线为垂直/斜向 → 恒定 1 CSS px 视觉粗细；
+ * - 零长度段（数字静音列）：按 1 CSS px 高的水平条带处理（Canvas2D 对
+ *   零长度描边不绘制，这里选择显示一条细线，静音段在 DAW 中可见更合理）。
+ *
+ * 顶点颜色：A/D 沿用起点颜色，B/C 沿用终点颜色，GPU 内插值与原 LINES 一致。
+ * 返回模块级复用的 scratch 缓冲（容量按需倍增），调用方不得长期持有。
+ */
+export function expandLineSegmentsToQuads(vertices: Float32Array): Float32Array {
+    const segmentCount = Math.floor(vertices.length / 12);
+    const required = segmentCount * 36;
+    if (quadScratch === null || quadScratch.length < required) {
+        let capacity = Math.max(4096, required);
+        while (capacity < required) capacity *= 2;
+        quadScratch = new Float32Array(capacity);
+    }
+    const out = quadScratch;
+    const half = WAVEFORM_STROKE_WIDTH_PX / 2;
+    for (let segment = 0; segment < segmentCount; segment += 1) {
+        const base = segment * 12;
+        const x1 = vertices[base];
+        const y1 = vertices[base + 1];
+        const x2 = vertices[base + 6];
+        const y2 = vertices[base + 7];
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const length = Math.hypot(dx, dy);
+        const nx = length > 1e-9 ? (-dy / length) * half : 0;
+        const ny = length > 1e-9 ? (dx / length) * half : half;
+        const outBase = segment * 36;
+        // 四角：A = p1 + n, B = p2 + n, C = p2 - n, D = p1 - n
+        // 三角形 1: A B C；三角形 2: A C D
+        const corners = [
+            [x1 + nx, y1 + ny, base + 2], // A（起点色）
+            [x2 + nx, y2 + ny, base + 8], // B（终点色）
+            [x2 - nx, y2 - ny, base + 8], // C（终点色）
+            [x1 + nx, y1 + ny, base + 2], // A
+            [x2 - nx, y2 - ny, base + 8], // C
+            [x1 - nx, y1 - ny, base + 2], // D（起点色）
+        ] as const;
+        for (let corner = 0; corner < 6; corner += 1) {
+            const [cx, cy, colorBase] = corners[corner];
+            const o = outBase + corner * 6;
+            out[o] = cx;
+            out[o + 1] = cy;
+            out[o + 2] = vertices[colorBase];
+            out[o + 3] = vertices[colorBase + 1];
+            out[o + 4] = vertices[colorBase + 2];
+            out[o + 5] = vertices[colorBase + 3];
+        }
+    }
+    return out.subarray(0, required);
+}
+
+let quadScratch: Float32Array | null = null;
+
 export interface WaveformSurfaceRenderer {
     readonly kind: "webgl2" | "canvas2d";
     render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void;
@@ -103,7 +175,6 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         // clip / 网格产生随窗口宽度跳动的亚像素偏移。
         gl.uniform2f(this.resolutionLocation, target.resolutionWidth, target.resolutionHeight);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-        gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices, gl.DYNAMIC_DRAW);
 
         const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
         const position = this.positionLocation;
@@ -121,7 +192,11 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         );
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-        gl.drawArrays(gl.LINES, 0, geometry.vertices.length / 6);
+        // LINES 的 lineWidth 恒为 1 物理像素（DPR > 1 时覆盖不足，波形发浅），
+        // 改用展开后的 1 CSS px 等宽四边形，与 Canvas2D 回退路径覆盖一致。
+        const quads = expandLineSegmentsToQuads(geometry.vertices);
+        gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
+        gl.drawArrays(gl.TRIANGLES, 0, quads.length / 6);
     }
 
     dispose(): void {
