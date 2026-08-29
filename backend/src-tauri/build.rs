@@ -139,11 +139,12 @@ fn build_frontend() {
         return;
     }
 
-    // 当关键文件变更时重新触发 build.rs
-    println!("cargo:rerun-if-changed=../../frontend/src");
-    println!("cargo:rerun-if-changed=../../frontend/package.json");
-    println!("cargo:rerun-if-changed=../../frontend/vite.config.ts");
-    println!("cargo:rerun-if-changed=../../frontend/vite.config.js");
+    // NOTE: deliberately NO cargo:rerun-if-changed for frontend paths.
+    // The frontend is only (re)built when `dist` is missing (see below), so
+    // declaring e.g. ../../frontend/src would only re-run this build script —
+    // and with it the whole WORLD/Signalsmith/SoundTouch native rebuilds —
+    // on every frontend edit without ever rebuilding the frontend. That is
+    // pure build-time tax; keep the script out of the frontend watch set.
 
     // Allow CI to skip frontend build if artifact is provided.
     // Set HIFISHIFTER_SKIP_FRONTEND_BUILD=1 to skip building frontend here.
@@ -489,6 +490,10 @@ fn build_soundtouch() {
     println!("cargo:warning=[soundtouch] starting build_soundtouch...");
 
     let st_src = "third_party/soundtouch-static/soundtouch";
+
+    // Re-run this script only when the SoundTouch source tree changes
+    // (consistent with build_world_static / build_signalsmith_stretch).
+    println!("cargo:rerun-if-changed={}", st_src);
 
     // Verify SoundTouch source exists; auto-clone if missing
     let st_src_path = Path::new(st_src);
