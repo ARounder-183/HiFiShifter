@@ -113,6 +113,12 @@ export function buildSparseClipRenderModel(args: {
     renamingClipId: string | null;
     hoveredClipId?: string | null;
     disabledGroupIds?: string[];
+    /**
+     * 每个 clip 在"前导重叠区"（被同轨前一个 clip 压住的部分）的秒数。
+     * 渲染端据此在上 clip 重叠区画半透色块，让下 clip 的色块与波形都能看见——
+     * 否则两层不透明色块会"叠加"成脏色。
+     */
+    leadingOverlapSecByClipId?: Record<string, number>;
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
@@ -216,6 +222,10 @@ export function buildSparseClipRenderModel(args: {
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
             snapOffsetPx: secToSpanPx(args.axis, Number(clip.snapOffsetSec) || 0),
+            leadingOverlapPx: secToSpanPx(
+                args.axis,
+                args.leadingOverlapSecByClipId?.[clip.id] ?? 0,
+            ),
         })),
     );
 

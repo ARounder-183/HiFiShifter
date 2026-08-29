@@ -162,6 +162,8 @@ export function drawTimelineCanvas(
             isRenaming?: boolean;
             /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
             snapOffsetPx?: number;
+            /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
+            leadingOverlapPx?: number;
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -266,16 +268,42 @@ export function drawTimelineCanvas(
         ctx.roundRect(clipLeft, clipTop, clipWidth, clipHeight, radius);
         ctx.clip();
 
-        // header：轨道色提亮后的纯色带，clip 归属一眼可辨。
-        ctx.fillStyle = visualStyle.headerFill;
-        ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
+        // 前导重叠区（被同轨前一个 clip 压住的部分）宽度：上 clip 在该区
+        // 半透，让下 clip 的色块/波形透出，避免两层不透明色块叠加成脏色。
+        const leadingOverlapPx = Math.max(
+            0,
+            Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0),
+        );
+        const overlapStart = clipLeft + leadingOverlapPx;
 
-        // body：压暗的中性底，波形是视觉主角。
-        ctx.fillStyle = visualStyle.bodyFill;
-        ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
+        // header：色块头部带，与 body 同色稍压深。前导重叠区也用半透。
+        if (leadingOverlapPx > 0.5) {
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.globalAlpha *= 0.55;
+            ctx.fillRect(clipLeft, clipTop, leadingOverlapPx, headerHeight);
+            ctx.globalAlpha = visualStyle.mutedAlpha;
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.fillRect(overlapStart, clipTop, clipWidth - leadingOverlapPx, headerHeight);
+        } else {
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
+        }
+
+        // body：色块主体。前导重叠区半透。
+        if (leadingOverlapPx > 0.5) {
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.globalAlpha *= 0.55;
+            ctx.fillRect(clipLeft, bodyTop, leadingOverlapPx, bodyHeight);
+            ctx.globalAlpha = visualStyle.mutedAlpha;
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.fillRect(overlapStart, bodyTop, clipWidth - leadingOverlapPx, bodyHeight);
+        } else {
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
+        }
 
         if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.16)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
             ctx.fillRect(
                 clipLeft + fadeShadeRange.startPx,
                 bodyTop,
@@ -284,25 +312,25 @@ export function drawTimelineCanvas(
             );
         }
 
-        // header/body 分隔线：单条暗线，仅做分区提示。
-        ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+        // header/body 分隔线：亮色块上的细深线，仅做分区提示。
+        ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
         ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
 
         ctx.restore();
 
         // 选中/编组指示必须在 Clip 体画布内绘制：DOM 交互层的 box-shadow
         // 随原生滚动移动，会与 sticky 画布错帧；视觉状态统一由画布输出。
-        // 选中 = 亮色细描边（无发光）；编组激活 = 金色描边。
+        // 选中 = 深色细实线；编组激活 = 深金描边（亮色块上浅金看不清）。
         if (clip.selected || isGroupActive) {
             ctx.strokeStyle =
                 !clip.selected && isGroupActive
-                    ? "rgba(255, 200, 50, 0.60)"
+                    ? "rgba(146, 104, 10, 0.8)"
                     : visualStyle.borderStroke;
             ctx.lineWidth = clip.selected ? visualStyle.borderLineWidth : 1;
             borderRect();
             ctx.stroke();
             if (isGroupActive) {
-                ctx.strokeStyle = "rgba(255, 200, 50, 0.60)";
+                ctx.strokeStyle = "rgba(146, 104, 10, 0.8)";
                 ctx.lineWidth = 1;
                 ctx.strokeRect(
                     clipLeft - 1.5,
@@ -481,9 +509,9 @@ export function drawTimelineCanvas(
         }
 
         if (clip.fadeInPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.strokeStyle = "rgba(20, 24, 31, 0.62)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
@@ -496,14 +524,14 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
             ctx.fillRect(
                 clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 bodyTop,
                 Math.min(clipWidth, clip.fadeOutPx),
                 bodyHeight,
             );
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.strokeStyle = "rgba(20, 24, 31, 0.62)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),

@@ -25,7 +25,6 @@ import { resolveCurvatureEditBase } from "./reaperFade";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
     FADE_CORNER_CAP_HEIGHT_PX,
@@ -48,7 +47,8 @@ import {
     type ClipRenameController,
 } from "./clip/ClipHeader";
 
-const LEADING_OVERLAP_ALPHA = 0.5;
+/** 重叠遮罩：被压住的 Clip 以该不透明度透出。0.5 会把两个彩色块混成脏色。 */
+const LEADING_OVERLAP_ALPHA = 0.3;
 
 export const ClipItem = React.memo(function ClipItem({
     clip,
@@ -192,7 +192,6 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
     const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
-    const { mode: themeMode } = useAppTheme();
     const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
@@ -268,7 +267,7 @@ export const ClipItem = React.memo(function ClipItem({
             : undefined;
 
     const interactionHintBoxShadow =
-        hovered && clip.groupId == null ? "0 0 0 1px rgba(255, 255, 255, 0.24)" : undefined;
+        hovered && clip.groupId == null ? "0 0 0 1px rgba(0, 0, 0, 0.35)" : undefined;
 
     // Clip 总高：边缘所有权切分（淡化角控件 vs 裁短）依赖它，取单一来源。
     const clipHeightPx = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y);
@@ -794,10 +793,8 @@ export const ClipItem = React.memo(function ClipItem({
                         className="pointer-events-none absolute left-0 right-0 h-px"
                         style={{
                             top: CLIP_HEADER_HEIGHT + lane.top,
-                            backgroundColor:
-                                themeMode === "dark"
-                                    ? "rgba(255, 255, 255, 0.18)"
-                                    : "rgba(0, 0, 0, 0.2)",
+                            // 亮色块上一律深色分线（白线在彩色块上看不见）。
+                            backgroundColor: "rgba(0, 0, 0, 0.18)",
                         }}
                     />
                 ))}

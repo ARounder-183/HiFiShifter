@@ -19,21 +19,26 @@ export interface WaveformColors {
 }
 
 /**
- * 深色主题波形颜色
+ * 深色主题的时间线波形颜色。
+ *
+ * 时间线波形画在**饱和的轨道色块**上（timelineCanvasStyle 的色块方案），
+ * 因此波形必须是深色且足够实：alpha 提高以保证在彩色块上能"看穿"色块。
+ * 钢琴卷帘波形画在深色画布上，仍为浅色（见下方 pianoRoll 组）。两个
+ * surface 的对比方向相反，不可混用。
  */
 const darkTimelineWaveformColors: WaveformColors = {
-    fill: "rgba(228,234,240,0.62)",
-    stroke: "rgba(246,250,255,0.92)",
-    midiPitch: "rgba(34,211,238,0.78)",
+    fill: "rgba(14, 18, 26, 0.78)",
+    stroke: "rgba(8, 12, 20, 0.96)",
+    midiPitch: "rgba(8, 60, 100, 0.92)",
 };
 
 /**
- * 浅色主题波形颜色（蓝灰色调，避免纯黑过于刺眼）
+ * 浅色主题的时间线波形颜色（同为深色系：波形画在亮色块上，与主题无关）
  */
 const lightTimelineWaveformColors: WaveformColors = {
-    fill: "rgba(92,106,122,0.52)",
-    stroke: "rgba(56,70,86,0.86)",
-    midiPitch: "rgba(8,145,178,0.72)",
+    fill: "rgba(24, 28, 40, 0.72)",
+    stroke: "rgba(16, 20, 30, 0.94)",
+    midiPitch: "rgba(4, 72, 120, 0.9)",
 };
 
 const darkPianoRollWaveformColors: WaveformColors = {

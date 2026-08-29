@@ -14,7 +14,7 @@ export const MAX_ROW_HEIGHT = 192;
 export const TRACK_ADD_ROW_HEIGHT = 32;
 
 export const CLIP_HEADER_HEIGHT = 18;
-export const CLIP_BODY_PADDING_Y = 6;
+export const CLIP_BODY_PADDING_Y = 2;
 
 // ── 淡化角部手柄几何（左右边缘的垂直所有权切分）────────────────────
 //

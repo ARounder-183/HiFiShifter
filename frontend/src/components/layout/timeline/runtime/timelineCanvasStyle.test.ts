@@ -88,13 +88,12 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(selectedStyle.headerFill, style.headerFill, "selected header keeps default visual");
     assertEqual(selectedStyle.bodyFill, style.bodyFill, "selected body keeps default visual");
     // Selected 边框优先读 CSS 变量 --qt-clip-selected-border；无 DOM 环境
-    // （Node 测试）下回退为归一化轨道色的深色变体（#ff7a00 经 HSL 夹取 +
-    // 感知亮度校正后为 s .72 / l .44，再降 0.17 明度）—— 与非选中的 0.6
-    // alpha 有意区分。
+    // （Node 测试）下回退为固定深色实线 —— 亮色块上一律深描边（半透明白在
+    // 彩色块上发灰），与非选中的 0.18 alpha 淡收边有意区分。
     assertEqual(
         selectedStyle.borderStroke,
-        "rgba(110, 62, 18, 1)",
-        "selected border falls back to full-alpha deep track color without CSS variables",
+        "rgba(24, 28, 35, 0.95)",
+        "selected border falls back to a solid dark stroke without CSS variables",
     );
     assertEqual(selectedStyle.textFill, style.textFill, "selected text keeps default visual");
 
@@ -113,8 +112,8 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
 
     // ── 色块归一化：极端轨道色也必须落在安全亮度区间 ────────────────────────
     // 整块用色的前提：无论用户挑了多刺眼/多暗的轨道色，Clip 色块的感知亮度
-    // 都被 HSL 归一化收敛——白字（clip 名）与白波形在色块上永远有对比，
-    // 色块对深色轨道背景也永远有明度差。
+    // 都被 HSL 归一化收敛到**明亮带**——深色文字/深色波形在色块上永远有对比，
+    // 色块对深色轨道背景也永远有明度差（亮块 + 深前景是本方案的核心）。
     {
         const parseLuminance = (fill: string): number => {
             const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
@@ -135,9 +134,9 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
                 name: "x",
             });
             const lum = parseLuminance(extreme.bodyFill);
-            if (lum < 0.28 || lum > 0.6) {
+            if (lum < 0.35 || lum > 0.65) {
                 throw new Error(
-                    `trackColor ${color}: clip block luminance ${lum.toFixed(3)} outside the safe band [0.28, 0.60]`,
+                    `trackColor ${color}: clip block luminance ${lum.toFixed(3)} outside the REAPER band [0.35, 0.65]`,
                 );
             }
         }

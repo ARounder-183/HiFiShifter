@@ -108,6 +108,7 @@ import {
 } from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
+import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
 import { createTimelineAxis } from "./timeline/runtime/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
@@ -1277,8 +1278,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
     );
     const sparseClipRenderModel = useMemo(
-        () =>
-            buildSparseClipRenderModel({
+        () => {
+            // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
+            // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
+            // 不透明色块叠加成脏色。
+            const leadingOverlapSecByClipId: Record<string, number> = {};
+            for (const track of visibleTracks) {
+                const clips = visibleTrackClipsById[track.id] ?? [];
+                Object.assign(
+                    leadingOverlapSecByClipId,
+                    computeLeadingOverlapSecByClipId(clips),
+                );
+            }
+            return buildSparseClipRenderModel({
                 visibleTracks,
                 startTrackIndex: timelineRenderModel.startIndex,
                 visibleTrackClipsById,
@@ -1288,7 +1300,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 multiSelectedClipIds,
                 renamingClipId,
                 disabledGroupIds,
-            }),
+                leadingOverlapSecByClipId,
+            });
+        },
         [
             multiSelectedClipIds,
             timelineAxis,

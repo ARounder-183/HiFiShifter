@@ -16,6 +16,7 @@ import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
+import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 
 /** Color palette options shown when creating a new track. */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
@@ -1466,11 +1467,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         window.addEventListener("pointercancel", end);
                                     }}
                                 >
-                                    {/* Always-visible left accent bar (pinned to list edge) */}
+                                    {/* Always-visible left accent bar (pinned to list edge).
+                                        显示归一化轨道色：与时间线 Clip 色块同源，
+                                        挑的颜色与实际出现的颜色严格一致。 */}
                                     <div
                                         className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-80 group-hover:opacity-90"}`}
                                         style={{
-                                            backgroundColor: track.color || "var(--qt-highlight)",
+                                            backgroundColor:
+                                                track.color != null
+                                                    ? normalizedTrackColorCss(track.color)
+                                                    : "var(--qt-highlight)",
                                         }}
                                     />
 
@@ -1508,7 +1514,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-10 group-hover:opacity-30"}`}
                                             style={{
                                                 backgroundColor:
-                                                    track.color || "var(--qt-highlight)",
+                                                    track.color != null
+                                                        ? normalizedTrackColorCss(track.color)
+                                                        : "var(--qt-highlight)",
                                             }}
                                         />
 
