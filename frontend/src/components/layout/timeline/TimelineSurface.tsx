@@ -19,6 +19,7 @@ import React from "react";
 import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { BackgroundGrid } from "./BackgroundGrid";
+import { CLIP_HEADER_HEIGHT } from "./constants";
 import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
@@ -144,10 +145,11 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             <BackgroundGrid
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
-                // 叠加在 clip 之上的网格彻底关闭：clip 必须是 100% 不透明的
-                // 实心块，任何网格都不得从色块上透出（用户明确要求）。
-                // 网格可见性由空白区的 gridBack 层承担。
-                lineOpacity={0}
+                // 叠加网格：竖线按行分段 —— 出现在波形之上、clip header 之下
+                //（跳过每行 header 条带，header 不被网格穿过）。
+                lineOpacity={0.8}
+                rowSegmentHeightPx={props.rowHeight}
+                rowSegmentSkipPx={CLIP_HEADER_HEIGHT}
                 viewportBus={timelineViewportBus}
                 layerOrder={LAYER_ORDER.gridOverlay}
             />

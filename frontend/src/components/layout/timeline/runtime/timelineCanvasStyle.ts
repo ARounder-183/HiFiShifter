@@ -201,9 +201,9 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
 /** 默认轨道色：中性灰。未设色/异常色的轨道呈现安静的灰块。 */
 export const DEFAULT_TRACK_COLOR = "#8a9099";
 
-/** 色块的感知亮度目标带：统一的中等明度，所有轨道色视觉重量一致，
+/** 色块的感知亮度目标带：统一的中等偏亮明度，所有轨道色视觉重量一致，
  * 时间线整体安静、有序（Cubase 默认主题式"彩色灰"）。 */
-const CLIP_LUMINANCE_BAND = { min: 0.48, max: 0.58 } as const;
+const CLIP_LUMINANCE_BAND = { min: 0.54, max: 0.64 } as const;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -225,8 +225,9 @@ function normalizeTrackHsl(color: string): Hsl {
         h: base.h,
         // 克制的低饱和带：彩色只作为"身份提示"，不再主导画面。多轨同屏
         // 时色彩不相互嘶鸣，波形与文字始终保持视觉主角。
-        s: clamp(base.s, 0.16, 0.3),
-        l: clamp(base.l, 0.42, 0.56),
+        // （0.48-0.58 亮度带偏暗，用户要求提亮一档。）
+        s: clamp(base.s, 0.18, 0.34),
+        l: clamp(base.l, 0.48, 0.62),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));

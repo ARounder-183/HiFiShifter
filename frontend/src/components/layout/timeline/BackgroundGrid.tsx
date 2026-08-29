@@ -39,6 +39,9 @@ export const BackgroundGrid: React.FC<{
     minSpacingPx?: number;
     /** Swing 强度（0-100），仅作用于弱网格线的奇数格。 */
     swingPercent?: number;
+    /** 行分段竖线（叠加层）：见 rowSegmentHeightPx 注释。 */
+    rowSegmentHeightPx?: number;
+    rowSegmentSkipPx?: number;
     /**
      * Sticky 视口的竖直偏移（内容绝对坐标）。网格线从 -viewportTopPx
      * 处开始可见；垂直滚动时由命令式 draw(scrollLeft, scrollTopPx) 同步。
@@ -82,6 +85,8 @@ export const BackgroundGrid: React.FC<{
     visible = true,
     minSpacingPx,
     swingPercent = 0,
+    rowSegmentHeightPx,
+    rowSegmentSkipPx = 0,
     viewportTopPx = 0,
     contentBottomPx,
     weakLineXs = null,
@@ -153,6 +158,8 @@ export const BackgroundGrid: React.FC<{
         lineOpacity,
         viewportTopPx,
         contentBottomPx,
+        rowSegmentHeightPx,
+        rowSegmentSkipPx,
     });
 
     useLayoutEffect(() => {
@@ -174,6 +181,8 @@ export const BackgroundGrid: React.FC<{
             lineOpacity,
             viewportTopPx,
             contentBottomPx,
+            rowSegmentHeightPx,
+            rowSegmentSkipPx,
         };
     });
 
@@ -219,6 +228,23 @@ export const BackgroundGrid: React.FC<{
             // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
             // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
             // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
+            // 行分段（叠加层）：竖线只画在每行 [rowTop+skip, rowTop+rowH] 段内，
+            // 跳过 clip header 条带 —— 网格出现在波形之上、header 之下。
+            const ySegments: Array<[number, number]> = [];
+            if (latest.rowSegmentHeightPx != null && latest.rowSegmentHeightPx > 0) {
+                const rowH = latest.rowSegmentHeightPx;
+                const skip = Math.max(0, latest.rowSegmentSkipPx ?? 0);
+                const firstRow = Math.max(0, Math.floor((lineTop + vpTop) / rowH));
+                const lastRow = Math.ceil((lineBottom + vpTop) / rowH);
+                for (let row = firstRow; row <= lastRow; row += 1) {
+                    const segTop = Math.max(lineTop, row * rowH - vpTop + skip);
+                    const segBottom = Math.min(lineBottom, (row + 1) * rowH - vpTop);
+                    if (segBottom > segTop) ySegments.push([segTop, segBottom]);
+                }
+            } else {
+                ySegments.push([lineTop, lineBottom]);
+            }
+
             const drawKey = [
                 sl,
                 vpTop,
@@ -234,6 +260,8 @@ export const BackgroundGrid: React.FC<{
                 latest.isSticky,
                 latest.lineOpacity,
                 latest.contentBottomPx,
+                latest.rowSegmentHeightPx,
+                latest.rowSegmentSkipPx,
             ].join("|");
             if (lastDrawKeyRef.current === drawKey) return;
             lastDrawKeyRef.current = drawKey;
@@ -266,7 +294,9 @@ export const BackgroundGrid: React.FC<{
                     const x =
                         index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset + halfPixelOffset;
                     if (x < -1 || x > latest.width + 1) continue;
-                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
+                    for (const [segTop, segBottom] of ySegments) {
+                        parts.push(`M${x} ${segTop}V${segBottom}`);
+                    }
                 }
                 return parts.join("");
             };
@@ -295,7 +325,9 @@ export const BackgroundGrid: React.FC<{
                     const x = lineXs[i] - offset + halfPixelOffset;
                     if (x > latest.width + 1) break;
                     if (x < -1) continue;
-                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
+                    for (const [segTop, segBottom] of ySegments) {
+                        parts.push(`M${x} ${segTop}V${segBottom}`);
+                    }
                 }
                 return parts.join("");
             };
