@@ -70,7 +70,7 @@ jobs:
 
       - name: Run backend tests (lib unit tests + integration targets)
         working-directory: backend/src-tauri
-        run: cargo test --locked --features __test-internals --all-targets
+        run: cargo test --locked --all-targets
 
   backend:
     name: Build Backend (${{ matrix.name }})

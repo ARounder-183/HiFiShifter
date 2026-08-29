@@ -73,13 +73,9 @@ xcb = { version = "0.8", features = ["thread"] }
 wl-clipboard-rs = "0.9"
 
 [features]
-default = ["onnx", "vslib", "__test-internals"]
+default = ["onnx", "vslib"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
-# Exports lib-internal pure functions for tests/ integration targets (see src/lib.rs
-# __test_internals). Included in `default` so plain `cargo test` works everywhere;
-# CI passes it explicitly as well (idempotent).
-__test-internals = []
 
 # GPU providers are baked into the platform-specific ort dependency below.
 # `cargo tauri build` produces GPU-accelerated binaries without extra --features.

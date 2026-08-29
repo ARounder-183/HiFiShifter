@@ -1,16 +1,14 @@
-//! Loop（循环源）纯函数回归测试（集成测试目标）。
+//! Loop (looped-source) pure-function regression tests (integration target).
 //!
-//! 为什么放在 tests/ 而不是模块内 `#[cfg(test)]`：lib 单元测试 harness 在
-//! Windows 上因缺少内嵌 ComCtl32 v6 清单无法启动（tauri_build 只给 bin 目标
-//! 嵌清单）。本文件经由 build.rs 的 `/MANIFEST:EMBED` link-arg 获得清单，
-//! 可以在 Windows 上直接运行：
+//! Runs with plain `cargo test` (no feature flags); helpers come from the
+//! unconditional `backend_lib::__test_internals` export module.
 //!
 //! ```text
-//! cargo test --features __test-internals --test loop_semantics
+//! cargo test --test loop_semantics
 //! ```
 //!
-//! 同类单元测试也保留在 pitch_clip.rs / state.rs 的 `#[cfg(test)]` 模块中，
-//! 在 Linux/CI 等无此限制的环境下照常执行。
+//! Equivalent unit tests also live in `#[cfg(test)]` modules (pitch_clip.rs /
+//! state.rs) and keep running on every platform.
 
 use backend_lib::__test_internals::{
     leading_silence_sec, pitch_trim_window_sec, playback_window_sec, trim_and_resample_midi, Clip,

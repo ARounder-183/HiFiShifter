@@ -1,15 +1,15 @@
-//! “克隆轨道”排序回归测试（集成测试目标）。
-//!
-//! 运行方式（Windows 需要 build.rs 嵌入的清单，见 loop_semantics.rs 说明）：
+//! "Clone track" ordering regression tests (integration target). Runs with
+//! plain `cargo test` (helpers from `backend_lib::__test_internals`):
 //!
 //! ```text
-//! cargo test --features __test-internals --test track_duplicate
+//! cargo test --test track_duplicate
 //! ```
 //!
-//! 行为约定：克隆轨道必须**紧贴被克隆轨道之后**——
-//! - 子轨道：克隆成为源轨道的同级下一个兄弟；
-//! - 根轨道（含子树）：克隆子树整体插在源根轨道之后，
-//!   其余根轨道相对顺序保持不变。
+//! Behavioral contract: a cloned track must sit **immediately after the
+//! cloned source** —
+//! - child tracks: the clone becomes the next sibling of the source;
+//! - root tracks (with subtree): the cloned subtree is inserted right
+//!   after the source root track, preserving the other roots' order.
 
 use backend_lib::__test_internals::TimelineState;
 

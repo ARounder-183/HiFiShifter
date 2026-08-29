@@ -128,16 +128,10 @@ mod world_vocoder;
 
 /// Internal pure-function exports used by integration tests (tests/).
 ///
-/// Gated behind the `__test-internals` feature, which is part of `default`
-/// so plain `cargo test` exercises the same code paths as CI
-/// (`cargo test --features __test-internals`).
-///
-/// NOTE: this module used to exist so pure-function regressions could run
-/// through integration targets because the lib unit-test harness could not
-/// start on Windows (no manifest link channel). That limitation is gone —
-/// `.cargo/config.toml` delay-loads comctl32.dll, so `cargo test --lib`
-/// runs natively; the re-exports are kept for the integration targets.
-#[cfg(feature = "__test-internals")]
+/// Kept unconditional (no feature gate): comctl32.dll is delay-loaded via
+/// build.rs, so the lib unit-test harness runs natively on Windows and
+/// these helpers are only needed by the tests/ integration targets.
+#[doc(hidden)]
 pub mod __test_internals {
     pub use crate::pitch_clip::trim_and_resample_midi;
     // REAPER export round-trips: rate/multi-take export regressions run via

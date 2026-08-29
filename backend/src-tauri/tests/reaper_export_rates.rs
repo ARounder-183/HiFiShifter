@@ -1,17 +1,19 @@
-//! REAPER 导出的速率与多 Take 集合回归（集成测试目标）。
-//!
-//! 运行方式（Windows 需要 build.rs 嵌入的清单，见 loop_semantics.rs 说明）：
+//! REAPER export rate / multi-take collection regressions (integration
+//! target). Runs with plain `cargo test` (helpers from
+//! `backend_lib::__test_internals`):
 //!
 //! ```text
-//! cargo test --features __test-internals --test reaper_export_rates
+//! cargo test --test reaper_export_rates
 //! ```
 //!
-//! 行为约定：
-//! - RPP 没有 Item 级 PLAYRATE，take 的 PLAYRATE 即有效速率 ——
-//!   default take（= active take）必须写 **组合速率**（Clip 级 × Take 级），
-//!   否则带速度变化的 item 在 RPP → HiFiShifter → RPP 往返中丢速；
-//! - 显式 TAKE 块列出除 active 外的全部 take（active 已由 item 体承载），
-//!   且不打 SEL —— 导入端无 SEL 时回退 default take，恰好还原 active 选择。
+//! Behavioral contract:
+//! - RPP has no item-level PLAYRATE; the take PLAYRATE is the effective
+//!   rate — the default (active) take must carry the **combined rate**
+//!   (clip × take), otherwise rate-changing items lose speed in the
+//!   RPP → HiFiShifter → RPP round-trip;
+//! - Explicit TAKE blocks list every take except the active one (the item
+//!   body carries the active take) and omit SEL — the importer falls back
+//!   to the default take when SEL is absent, restoring the active choice.
 
 use backend_lib::__test_internals::{build_reaper_clipboard, parse_clipboard_bytes, TimelineState};
 
