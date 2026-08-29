@@ -198,9 +198,10 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
     return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
 }
 
-/** 色块的感知亮度目标带：参考 Studio One 暗色主题 —— 低饱和粉彩块，
- * 深色波形成为同色调"纹理"而非"黑洞"，整条时间线安静不发闷。 */
-const CLIP_LUMINANCE_BAND = { min: 0.52, max: 0.62 } as const;
+/** 色块的感知亮度目标带：参考 Ableton Live 暗色主题 —— 明亮粉彩块 + 深色
+ * 波形。上一版（0.52-0.62）配低饱和会发出"脏橄榄"调；明度再抬一档后
+ * 波形的深色轮廓与粉彩底同时清晰，是深底 DAW 的成熟观感。 */
+const CLIP_LUMINANCE_BAND = { min: 0.58, max: 0.68 } as const;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -215,10 +216,10 @@ function normalizeTrackHsl(color: string): Hsl {
     const base = rgbToHsl(parseHexColor(color) ?? { r: 104, g: 131, b: 157 });
     const hsl: Hsl = {
         h: base.h,
-        // 低饱和粉彩带：深底 UI 的现代惯例（Studio One / Ableton）。高饱和
-        // 糖果色在 #232323 上会相互嘶鸣，整体观感廉价且压过波形细节。
-        s: clamp(base.s, 0.32, 0.52),
-        l: clamp(base.l, 0.42, 0.60),
+        // 明亮粉彩带：饱和度适中（保色彩身份、不发闷），明度足够高让深色
+        // 波形成为清晰的"纹理"。完全低饱和会发出脏橄榄调（用户实测）。
+        s: clamp(base.s, 0.40, 0.58),
+        l: clamp(base.l, 0.48, 0.64),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));

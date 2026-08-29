@@ -30,9 +30,8 @@ export interface WaveformColors {
  */
 const darkTimelineWaveformColors: WaveformColors = {
     fill: "#04060c",
-    // 粉彩色块（低饱和、高明度）配 55% 黑：波形呈现为同色调的中灰纹理，
-    // 既保住轮廓对比又不会把粉彩底拖成"黑洞"。
-    stroke: "rgba(0, 0, 0, 0.55)",
+    // 粉彩色块配 73% 黑：包络保持清晰的深色轮廓（用户回调确认的版本）。
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#02203a",
 };
 
@@ -41,7 +40,7 @@ const darkTimelineWaveformColors: WaveformColors = {
  */
 const lightTimelineWaveformColors: WaveformColors = {
     fill: "#080b14",
-    stroke: "rgba(0, 0, 0, 0.55)",
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#002848",
 };
 
