@@ -362,6 +362,8 @@ export const enUS = {
     status_export_failed: "Export failed",
     status_export_separated_done: "Separated export completed",
     status_export_separated_failed: "Separated export failed",
+    status_clipboard_copy_failed: "Copy failed: the system clipboard is busy. Please try again.",
+    status_clipboard_cut_failed: "Cut failed: the system clipboard is busy. Please try again.",
     unsaved_changes_title: "Unsaved Changes",
     unsaved_changes_switch_desc:
         "The current project has unsaved changes. Save before switching projects?",

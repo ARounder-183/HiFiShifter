@@ -356,6 +356,8 @@ export const koKR = {
     status_export_failed: "내보내기에 실패했습니다",
     status_export_separated_done: "트랙별 내보내기 완료",
     status_export_separated_failed: "트랙별 내보내기에 실패했습니다",
+    status_clipboard_copy_failed: "복사 실패: 시스템 클립보드가 사용 중입니다. 다시 시도하세요.",
+    status_clipboard_cut_failed: "잘라내기 실패: 시스템 클립보드가 사용 중입니다. 다시 시도하세요.",
     unsaved_changes_title: "저장되지 않은 변경 사항",
     unsaved_changes_switch_desc:
         "현재 프로젝트에 저장되지 않은 변경 사항이 있습니다. 전환하기 전에 저장하시겠습니까?",

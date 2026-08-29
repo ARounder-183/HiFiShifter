@@ -18,23 +18,22 @@ use super::core::get_timeline_state_from_ref;
 /// Windows: 通过 clipboard-win 读取自定义格式 "REAPERMedia"。
 #[cfg(target_os = "windows")]
 pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
-    use clipboard_win::{register_format, Clipboard};
-
-    let _clipboard =
-        Clipboard::new_attempts(10).map_err(|e| format!("clipboard_open_failed: {}", e))?;
+    use clipboard_win::{raw, register_format};
 
     let format =
         register_format("REAPERMedia").ok_or_else(|| "clipboard_format_not_found".to_string())?;
 
-    let size =
-        clipboard_win::raw::size(format.get()).ok_or_else(|| "clipboard_empty".to_string())?;
+    crate::system_clipboard::clipboard_session(|_clip| {
+        let size =
+            raw::size(format.get()).ok_or_else(|| "clipboard_empty".to_string())?;
 
-    let mut buf = vec![0u8; size.get()];
-    let bytes_read = clipboard_win::raw::get(format.get(), &mut buf)
-        .map_err(|e| format!("clipboard_read_failed: {}", e))?;
+        let mut buf = vec![0u8; size.get()];
+        let bytes_read = raw::get(format.get(), &mut buf)
+            .map_err(|e| format!("clipboard_read_failed: {}", e))?;
 
-    buf.truncate(bytes_read);
-    Ok(buf)
+        buf.truncate(bytes_read);
+        Ok(buf)
+    })
 }
 
 /// macOS: 通过 NSPasteboard 读取自定义类型 "REAPERMedia"。
@@ -124,23 +123,22 @@ pub(super) fn read_reaper_clipboard() -> Result<Vec<u8>, String> {
 /// Windows: 通过 clipboard-win 读取自定义格式 "Standard MIDI File"。
 #[cfg(target_os = "windows")]
 pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
-    use clipboard_win::{register_format, Clipboard};
-
-    let _clipboard =
-        Clipboard::new_attempts(10).map_err(|e| format!("clipboard_open_failed: {}", e))?;
+    use clipboard_win::{raw, register_format};
 
     let format = register_format("Standard MIDI File")
         .ok_or_else(|| "midi_clipboard_format_not_found".to_string())?;
 
-    let size =
-        clipboard_win::raw::size(format.get()).ok_or_else(|| "midi_clipboard_empty".to_string())?;
+    crate::system_clipboard::clipboard_session(|_clip| {
+        let size =
+            raw::size(format.get()).ok_or_else(|| "midi_clipboard_empty".to_string())?;
 
-    let mut buf = vec![0u8; size.get()];
-    let bytes_read = clipboard_win::raw::get(format.get(), &mut buf)
-        .map_err(|e| format!("midi_clipboard_read_failed: {}", e))?;
+        let mut buf = vec![0u8; size.get()];
+        let bytes_read = raw::get(format.get(), &mut buf)
+            .map_err(|e| format!("midi_clipboard_read_failed: {}", e))?;
 
-    buf.truncate(bytes_read);
-    Ok(buf)
+        buf.truncate(bytes_read);
+        Ok(buf)
+    })
 }
 
 /// macOS: 通过 NSPasteboard 读取自定义类型 "Standard MIDI File"。
@@ -220,6 +218,10 @@ pub(crate) fn read_midi_clipboard() -> Result<Vec<u8>, String> {
 
 /// 系统剪贴板中是否存在可解析的 "REAPERMedia" 数据。
 pub(super) fn has_reaper_clipboard() -> bool {
+    // 序列号未变化时用缓存应答，避免重复打开系统剪贴板。
+    if let Some(cache) = crate::system_clipboard::read_clipboard_cache_if_current() {
+        return cache.reaper_available;
+    }
     read_reaper_clipboard().is_ok()
 }
 

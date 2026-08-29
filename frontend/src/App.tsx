@@ -103,6 +103,8 @@ const statusKey: Record<string, string> = {
     "Export failed": "status_export_failed",
     "Export separated done": "status_export_separated_done",
     "Export separated failed": "status_export_separated_failed",
+    "Clipboard copy failed": "status_clipboard_copy_failed",
+    "Clipboard cut failed": "status_clipboard_cut_failed",
     "VocalShifter imported with skipped files": "vs_import_skipped_header",
 };
 

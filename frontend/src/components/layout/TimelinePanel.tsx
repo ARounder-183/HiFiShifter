@@ -871,7 +871,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setPxPerSec,
         commitScrollLeftState: setScrollLeftState,
         rowHeight,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
         copyClips,
         cutClips,

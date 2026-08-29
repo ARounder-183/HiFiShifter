@@ -10,7 +10,7 @@ use crate::project_fragment::{
     FragmentTrackPlacement, ProjectFragment, ProjectFragmentKind,
 };
 use crate::state::AppState;
-use crate::system_clipboard;
+use crate::system_clipboard::{self, ClipboardCacheEntry};
 use serde_json::json;
 
 fn current_project_name(state: &AppState) -> String {
@@ -55,6 +55,32 @@ fn fragment_summary_with_reaper(
         }
     }
     summary
+}
+
+/// Record the OS clipboard state right after a successful HiFiShifter
+/// write, so `has_timeline_clipboard` can answer without reopening the
+/// clipboard while the sequence number is unchanged.
+fn record_written_clipboard(
+    kind: ProjectFragmentKind,
+    clip_count: usize,
+    track_count: usize,
+    source_project_name: &str,
+    reaper_available: bool,
+) {
+    if let Some(seq) = system_clipboard::clipboard_seq_num() {
+        system_clipboard::write_clipboard_cache(ClipboardCacheEntry {
+            seq,
+            hifi_kind: Some(match kind {
+                ProjectFragmentKind::Clips => "clips".to_string(),
+                ProjectFragmentKind::Tracks => "tracks".to_string(),
+                ProjectFragmentKind::Project => "project".to_string(),
+            }),
+            hifi_clip_count: clip_count as u64,
+            hifi_track_count: track_count as u64,
+            hifi_source_project: Some(source_project_name.to_string()),
+            reaper_available,
+        });
+    }
 }
 
 fn build_reaper_clipboard(
@@ -202,15 +228,24 @@ pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> se
     drop(timeline);
 
     match write_fragment(&fragment, reaper.as_ref()) {
-        Ok(()) => json!({
-            "ok": true,
-            "kind": fragment.kind,
-            "clipCount": fragment.timeline.clips.len(),
-            "trackCount": fragment.timeline.tracks.len(),
-            "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
-            "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
-            "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
-        }),
+        Ok(()) => {
+            record_written_clipboard(
+                fragment.kind,
+                fragment.timeline.clips.len(),
+                fragment.timeline.tracks.len(),
+                &fragment.source_project_name,
+                reaper.is_some(),
+            );
+            json!({
+                "ok": true,
+                "kind": fragment.kind,
+                "clipCount": fragment.timeline.clips.len(),
+                "trackCount": fragment.timeline.tracks.len(),
+                "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
+                "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
+                "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
+            })
+        }
         Err(error) => json!({ "ok": false, "error": error }),
     }
 }
@@ -237,15 +272,24 @@ pub(super) fn copy_timeline_tracks(state: &AppState, track_ids: Vec<String>) -> 
     drop(timeline);
 
     match write_fragment(&fragment, reaper.as_ref()) {
-        Ok(()) => json!({
-            "ok": true,
-            "kind": "tracks",
-            "clipCount": fragment.timeline.clips.len(),
-            "trackCount": fragment.timeline.tracks.len(),
-            "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
-            "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
-            "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
-        }),
+        Ok(()) => {
+            record_written_clipboard(
+                fragment.kind,
+                fragment.timeline.clips.len(),
+                fragment.timeline.tracks.len(),
+                &fragment.source_project_name,
+                reaper.is_some(),
+            );
+            json!({
+                "ok": true,
+                "kind": "tracks",
+                "clipCount": fragment.timeline.clips.len(),
+                "trackCount": fragment.timeline.tracks.len(),
+                "reaperExportedClipCount": reaper.as_ref().map_or(0, |r| r.exported_clip_count),
+                "reaperSkippedClipCount": reaper.as_ref().map_or(0, |r| r.skipped_clip_count),
+                "reaperTrackCount": reaper.as_ref().map_or(0, |r| r.track_count),
+            })
+        }
         Err(error) => json!({ "ok": false, "error": error }),
     }
 }
@@ -273,17 +317,67 @@ pub(super) fn paste_timeline_clipboard(
 }
 
 pub(super) fn has_timeline_clipboard() -> serde_json::Value {
+    // 剪贴板序列号未变化时用本进程缓存应答：避免前端每 2 秒的可用性轮询
+    // 反复打开系统剪贴板（打开是全局独占操作，会放大与剪贴板管理器、
+    // RDP、其它应用乃至复制/剪切写入之间的竞争窗口，正是 Clip 复制/剪切
+    // 随机失败的来源之一）。
+    if let Some(cache) = system_clipboard::read_clipboard_cache_if_current() {
+        if cache.hifi_clip_count > 0 || cache.hifi_track_count > 0 {
+            return json!({
+                "ok": true,
+                "available": true,
+                "kind": cache.hifi_kind,
+                "clipCount": cache.hifi_clip_count,
+                "trackCount": cache.hifi_track_count,
+                "sourceProject": cache.hifi_source_project,
+            });
+        }
+        if cache.reaper_available {
+            return json!({ "ok": true, "available": true, "kind": "reaper" });
+        }
+        return json!({ "ok": true, "available": false });
+    }
+
     match read_fragment() {
-        Ok(fragment) => json!({
-            "ok": true,
-            "available": true,
-            "kind": fragment.kind,
-            "clipCount": fragment.timeline.clips.len(),
-            "trackCount": fragment.timeline.tracks.len(),
-            "sourceProject": fragment.source_project_name,
-        }),
+        Ok(fragment) => {
+            if let Some(seq) = system_clipboard::clipboard_seq_num() {
+                system_clipboard::write_clipboard_cache(ClipboardCacheEntry {
+                    seq,
+                    hifi_kind: Some(match fragment.kind {
+                        ProjectFragmentKind::Clips => "clips".to_string(),
+                        ProjectFragmentKind::Tracks => "tracks".to_string(),
+                        ProjectFragmentKind::Project => "project".to_string(),
+                    }),
+                    hifi_clip_count: fragment.timeline.clips.len() as u64,
+                    hifi_track_count: fragment.timeline.tracks.len() as u64,
+                    hifi_source_project: Some(fragment.source_project_name.clone()),
+                    // 其它 HiFiShifter 进程的复制可能同时带 REAPERMedia，
+                    // 用真实探测保证缓存标志准确。
+                    reaper_available: system_clipboard::has_reaper_format(),
+                });
+            }
+            json!({
+                "ok": true,
+                "available": true,
+                "kind": fragment.kind,
+                "clipCount": fragment.timeline.clips.len(),
+                "trackCount": fragment.timeline.tracks.len(),
+                "sourceProject": fragment.source_project_name,
+            })
+        }
         Err(_) => {
-            if super::reaper_clipboard::has_reaper_clipboard() {
+            let reaper = super::reaper_clipboard::has_reaper_clipboard();
+            if let Some(seq) = system_clipboard::clipboard_seq_num() {
+                system_clipboard::write_clipboard_cache(ClipboardCacheEntry {
+                    seq,
+                    hifi_kind: None,
+                    hifi_clip_count: 0,
+                    hifi_track_count: 0,
+                    hifi_source_project: None,
+                    reaper_available: reaper,
+                });
+            }
+            if reaper {
                 json!({ "ok": true, "available": true, "kind": "reaper" })
             } else {
                 json!({ "ok": true, "available": false })

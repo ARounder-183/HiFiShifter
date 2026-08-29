@@ -11,7 +11,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
-import { useAppSelector } from "../../../../app/hooks";
+import { useAppSelector, useAppStore } from "../../../../app/hooks";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import {
     pasteTimelineClipboardRemote,
@@ -22,6 +22,7 @@ import {
     setClipMuted,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    setClipboardOperationFailed,
     setMultiSelectedClipIds as setMultiSelectedClipIdsAction,
     setSelectedClip,
     setSelectedClipPreservingTrack,
@@ -191,6 +192,9 @@ export function useTimelineClipActions(
     } = args;
 
     const { t } = useI18n();
+    // 实时 store：copy/cut 时以 store 最新状态过滤失效 Clip id，
+    // 避免闭包/ref 里的过期选区把死 id 传给后端。
+    const store = useAppStore();
 
     // ── multiSelectedClipIds ─────────────────────────────────
     const multiSelectedClipIds = useAppSelector(
@@ -325,22 +329,51 @@ export function useTimelineClipActions(
         };
     }, []);
 
-    const copyClips = React.useCallback(async (ids: string[]) => {
-        if (ids.length === 0) return false;
-        try {
-            const result = await webApi.copyTimelineClips(ids);
-            setClipboardAvailable(Boolean(result?.ok));
-            return Boolean(result?.ok);
-        } catch {
-            setClipboardAvailable(false);
-            return false;
-        }
-    }, []);
+    const copyClips = React.useCallback(
+        async (ids: string[], op: "copy" | "cut" = "copy"): Promise<boolean> => {
+            // 只复制当前仍存在的 Clip：失效 id（删除/胶合/拆分替换后的残留）
+            // 会被过滤，避免后端 no_clips_selected 静默失败。
+            const currentClips = store.getState().session.clips;
+            const liveIds = ids.filter((id) => currentClips.some((clip) => clip.id === id));
+            if (liveIds.length === 0) return false;
+
+            const attempt = async (): Promise<boolean> => {
+                try {
+                    const result = await webApi.copyTimelineClips(liveIds);
+                    if (!result?.ok) {
+                        setClipboardAvailable(false);
+                        return false;
+                    }
+                    setClipboardAvailable(true);
+                    return true;
+                } catch {
+                    setClipboardAvailable(false);
+                    return false;
+                }
+            };
+
+            let copied = await attempt();
+            if (!copied) {
+                // 系统剪贴板瞬时被占用（剪贴板管理器 / RDP / 其它进程的延迟
+                // 渲染等）时自动重试一次，让“第一次失败、立刻重试成功”的场景
+                // 无需用户手动反复重试。
+                await new Promise((resolve) => window.setTimeout(resolve, 300));
+                copied = await attempt();
+            }
+            if (!copied) {
+                // 最终失败：状态栏给出可见反馈（此前是静默失败，用户无法区分
+                // “快捷键没触发”与“操作失败”，只能靠反复重选+重试碰运气）。
+                dispatch(setClipboardOperationFailed({ op }));
+            }
+            return copied;
+        },
+        [dispatch, store],
+    );
 
     const cutClips = React.useCallback(
         (ids: string[]) => {
             void (async () => {
-                const copied = await copyClips(ids);
+                const copied = await copyClips(ids, "cut");
                 if (!copied) return;
                 setMultiSelectedClipIds([]);
                 void dispatch(removeClipsRemote(ids));

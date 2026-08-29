@@ -2188,6 +2188,16 @@ const sessionSlice = createSlice({
         setMultiSelectedClipIds(state, action: PayloadAction<string[]>) {
             state.multiSelectedClipIds = action.payload;
         },
+        /** 复制/剪切失败（系统剪贴板被占用等）时在状态栏给出可见反馈。 */
+        setClipboardOperationFailed(
+            state,
+            action: PayloadAction<{ op: "copy" | "cut" }>,
+        ) {
+            state.status =
+                action.payload.op === "cut"
+                    ? "Clipboard cut failed"
+                    : "Clipboard copy failed";
+        },
         moveClipStart(state, action: PayloadAction<{ clipId: string; startSec: number }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (clip) {
@@ -4740,6 +4750,7 @@ export const {
     setSelectedClip,
     setSelectedClipPreservingTrack,
     setMultiSelectedClipIds,
+    setClipboardOperationFailed,
     moveClipStart,
     moveClipTrack,
     setClipLength,

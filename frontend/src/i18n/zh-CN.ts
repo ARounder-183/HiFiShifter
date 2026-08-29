@@ -268,6 +268,8 @@ export const zhCN = {
     status_export_failed: "导出失败",
     status_export_separated_done: "分轨导出完成",
     status_export_separated_failed: "分轨导出失败",
+    status_clipboard_copy_failed: "复制失败：系统剪贴板正被占用，请重试。",
+    status_clipboard_cut_failed: "剪切失败：系统剪贴板正被占用，请重试。",
     unsaved_changes_title: "未保存更改",
     unsaved_changes_switch_desc: "当前工程有未保存的更改。切换工程前是否先保存？",
     unsaved_changes_exit_desc: "当前工程有未保存的更改。关闭应用前是否先保存？",

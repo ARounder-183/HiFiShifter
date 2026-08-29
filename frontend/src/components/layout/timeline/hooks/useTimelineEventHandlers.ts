@@ -14,6 +14,7 @@
 import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import type { AppDispatch, RootState } from "../../../../app/store";
+import { useAppStore } from "../../../../app/hooks";
 import {
     seekPlayhead,
     selectTrackRemote,
@@ -51,7 +52,6 @@ export interface UseTimelineEventHandlersArgs {
     rowHeight: number;
 
     // multi-select
-    multiSelectedClipIds: string[];
     setMultiSelectedClipIds: (ids: string[] | ((prev: string[]) => string[])) => void;
 
     // clipboard
@@ -114,7 +114,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         setPxPerSec,
         commitScrollLeftState,
         rowHeight,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
         copyClips,
         cutClips,
@@ -132,11 +131,12 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         dynamicProjectSec,
     } = args;
 
+    // 实时 store（事件监听器内同步读取，避免闭包捕获过期选区/状态）
+    const store = useAppStore();
+
     // ── useKeyboardShortcuts 桥接 ────────────────────────────
     useKeyboardShortcuts({
-        sessionRef,
         dispatch,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
         copyClips,
         cutClips,
@@ -206,26 +206,32 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef, splitSelectedAtPlayhead]);
+    }, [pasteClipsAtPlayhead, sessionRef, splitSelectedAtPlayhead]);
 
     // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
     useEffect(() => {
         function onTimelineEditOp(e: Event) {
             const op = (e as CustomEvent<{ op?: string }>).detail?.op;
-            const selectedIds =
-                multiSelectedClipIds.length > 0
-                    ? [...multiSelectedClipIds]
-                    : sessionRef.current.selectedClipId
-                      ? [sessionRef.current.selectedClipId]
+            // 实时读取 store（同步、权威）：菜单打开的时机与鼠标点击选择之间可能
+            // 隔着未提交的渲染，闭包里的 multiSelectedClipIds 是旧选区，会
+            // 让复制/剪切作用到过期 Clip 上而静默失败。
+            const session = store.getState().session;
+            const rawSelectedIds =
+                session.multiSelectedClipIds.length > 0
+                    ? [...session.multiSelectedClipIds]
+                    : session.selectedClipId
+                      ? [session.selectedClipId]
                       : [];
+            const selectedIds = rawSelectedIds.filter((id) =>
+                session.clips.some((clip) => clip.id === id),
+            );
             if (op === "copy" || op === "cut") {
                 if (selectedIds.length === 0) return;
-                const s = sessionRef.current;
                 const expandedIds = expandClipIdsWithGroups(
                     selectedIds,
-                    s.clips,
-                    s.ignoreGrouping,
-                    s.disabledGroupIds,
+                    session.clips,
+                    session.ignoreGrouping,
+                    session.disabledGroupIds,
                 );
                 if (op === "copy") void copyClips(expandedIds);
                 else cutClips(expandedIds);
@@ -240,7 +246,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
         return () =>
             window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
-    }, [copyClips, cutClips, multiSelectedClipIds, pasteClipsAtPlayhead, sessionRef]);
+    }, [store, copyClips, cutClips, pasteClipsAtPlayhead]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {

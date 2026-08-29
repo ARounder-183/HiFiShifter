@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
-import { useAppSelector } from "../../../../app/hooks";
-import type { SessionState } from "../../../../features/session/sessionSlice";
+import { useAppSelector, useAppStore } from "../../../../app/hooks";
 import { cycleClipTakesRemote, removeClipsRemote } from "../../../../features/session/sessionSlice";
 import { selectMergedKeybindings } from "../../../../features/keybindings/keybindingsSlice";
 import type { ActionId, Keybinding, KeybindingMap } from "../../../../features/keybindings/types";
@@ -64,9 +63,7 @@ function matchClipAction(e: KeyboardEvent, keybindings: KeybindingMap): ActionId
 }
 
 export function useKeyboardShortcuts(deps: {
-    sessionRef: React.RefObject<SessionState>;
     dispatch: AppDispatch;
-    multiSelectedClipIds: string[];
     setMultiSelectedClipIds: (ids: string[]) => void;
     copyClips: (ids: string[]) => Promise<boolean>;
     cutClips: (ids: string[]) => void;
@@ -78,9 +75,7 @@ export function useKeyboardShortcuts(deps: {
     onUngroup: (ids: string[]) => void;
 }) {
     const {
-        sessionRef,
         dispatch,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
         copyClips,
         cutClips,
@@ -93,6 +88,11 @@ export function useKeyboardShortcuts(deps: {
     } = deps;
 
     const keybindings = useAppSelector(selectMergedKeybindings);
+    // 从 store 实时读取会话状态：事件监听器里的 Redux store 是同步、权威的
+    // 最新状态，而闭包捕获的 props / sessionRef 要等渲染+effect 提交后才会
+    // 更新 —— 点击 Clip 后立刻按 Ctrl+C/X 时，后者仍是旧选区，导致复制/剪切
+    // 作用到过期（甚至已删除）的 Clip 上而静默失败。
+    const store = useAppStore();
 
     // ── 长按重复粘贴（clip.paste 专用）────────────────────────
     const holdPasteRef = useRef<{
@@ -180,13 +180,21 @@ export function useKeyboardShortcuts(deps: {
             // 先拦截 actionId
             const actionId = matchClipAction(e, keybindings);
             if (!actionId) return;
-            const s = sessionRef.current;
-            const selectedIds =
-                multiSelectedClipIds.length > 0
-                    ? [...multiSelectedClipIds]
+            // 实时读取 store 中的会话状态（同步、权威）：闭包里的 props /
+            // sessionRef 在渲染+effect 提交前是旧值，会导致"刚点选就按
+            // Ctrl+C/X"时复制/剪切落到过期选区上而静默失败。
+            const s = store.getState().session;
+            const rawSelectedIds =
+                s.multiSelectedClipIds.length > 0
+                    ? [...s.multiSelectedClipIds]
                     : s.selectedClipId
                       ? [s.selectedClipId]
                       : [];
+            // 过滤已删除/已不存在的 Clip id：让失效选区（如删除、胶合、
+            // 拆分替换 id 后的残留）不再把死 id 传给后端造成静默失败。
+            const selectedIds = rawSelectedIds.filter((id) =>
+                s.clips.some((clip) => clip.id === id),
+            );
 
             const active = document.activeElement as HTMLElement | null;
             const inPianoRoll = Boolean(
@@ -241,7 +249,6 @@ export function useKeyboardShortcuts(deps: {
                     if (selectedIds.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    const s = sessionRef.current;
                     const expandedIds = expandClipIdsWithGroups(
                         selectedIds,
                         s.clips,
@@ -256,7 +263,6 @@ export function useKeyboardShortcuts(deps: {
                     if (selectedIds.length === 0) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    const s = sessionRef.current;
                     const expandedIds = expandClipIdsWithGroups(
                         selectedIds,
                         s.clips,
@@ -333,8 +339,7 @@ export function useKeyboardShortcuts(deps: {
         return () => window.removeEventListener("keydown", onKeyDown, true);
     }, [
         dispatch,
-        multiSelectedClipIds,
-        sessionRef,
+        store,
         setMultiSelectedClipIds,
         copyClips,
         cutClips,

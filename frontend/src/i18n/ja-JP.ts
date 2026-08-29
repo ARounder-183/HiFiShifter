@@ -282,6 +282,8 @@ export const jaJP = {
     status_export_failed: "エクスポートに失敗しました",
     status_export_separated_done: "トラック別エクスポート完了",
     status_export_separated_failed: "トラック別エクスポートに失敗しました",
+    status_clipboard_copy_failed: "コピーに失敗しました：システムクリップボードが使用中のため、もう一度お試しください。",
+    status_clipboard_cut_failed: "カットに失敗しました：システムクリップボードが使用中のため、もう一度お試しください。",
     unsaved_changes_title: "未保存の変更",
     unsaved_changes_switch_desc:
         "現在のプロジェクトには未保存の変更があります。切り替え前に保存しますか？",

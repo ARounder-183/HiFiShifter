@@ -269,6 +269,8 @@ export const zhTW = {
     status_export_failed: "匯出失敗",
     status_export_separated_done: "分軌匯出完成",
     status_export_separated_failed: "分軌匯出失敗",
+    status_clipboard_copy_failed: "複製失敗：系統剪貼簿正被占用，請重試。",
+    status_clipboard_cut_failed: "剪下失敗：系統剪貼簿正被占用，請重試。",
     unsaved_changes_title: "未儲存的變更",
     unsaved_changes_switch_desc: "目前專案有未儲存的變更。切換專案前是否先儲存？",
     unsaved_changes_exit_desc: "目前專案有未儲存的變更。關閉應用程式前是否先儲存？",
