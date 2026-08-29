@@ -793,6 +793,11 @@ fn handle_stop(s: &mut EngineWorkerState) {
     s.is_playing.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
     s.base_frames.store(0, Ordering::Relaxed);
+    // position_frames 一并归零：停止后 base+position 不再代表可听位置。
+    // 若保留旧值，停止后的杂散 get_playback_state 会让前端把
+    // runtime.playbackPositionSec 恢复成陈旧的已播放时长，
+    // 使下一次 stop 误判"曾处于播放中"并跳回锚点/0。
+    s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // 播放停止时清空渲染线程传递的 cache_key 映射

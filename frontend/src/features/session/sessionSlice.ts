@@ -1196,11 +1196,15 @@ function clearTakeRollback(clipIds: readonly string[]): void {
  *               前端乐观更新导致的 UI 闪烁。
  *               对于"权威操作"（open/new/import/undo/redo/save/fetchTimeline 等），
  *               应传 `force: true` 以确保状态一定被应用。
+ *               `adoptPlayhead: true` 时采纳载荷的 playhead_sec —— 仅限工程生命
+ *               周期载入（打开/新建/导入）与后端直接导入等播放头权威流程。
+ *               编辑类命令不得传入：它们携带的 playhead_sec 是编辑未触及的
+ *               旧值（播放期间停留在本次播放的起始位置），采纳会让光标跳变。
  */
 function applyTimelineState(
     state: SessionState,
     timeline: TimelineState,
-    opts?: { force?: boolean; preserveProjectNotes?: boolean },
+    opts?: { force?: boolean; preserveProjectNotes?: boolean; adoptPlayhead?: boolean },
 ) {
     // 交互锁守卫：拖动/滑动期间跳过非强制的全量覆写
     if (state._interactionLockCount > 0 && !opts?.force) {
@@ -1320,12 +1324,13 @@ function applyTimelineState(
     state.selectedClipId = timeline.selected_clip_id;
     // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
     state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 960);
-    // 播放中光标由 30Hz 轮询（引擎 base+position）驱动；后端快照的
-    // playhead_sec 只在显式 seek/transport 时同步，播放期间停留在本次播放
-    // 的起始位置，采纳它会把播放头瞬时拉回起点。暂停/停止后后端已在
-    // stop_audio 中把暂停点写回，此处采纳即为准确值。需要移动光标的操作
-    // （如粘贴跳转 pasteEndSec）在本函数之后显式设置，不受影响。
-    if (!state.runtime.isPlaying) {
+    // 播放头归传输层（轮询 / seek / stop_audio / 显式跳转）所有。编辑命令
+    // 返回的全量快照携带的 playhead_sec 是编辑未触及的旧值（播放期间停留
+    // 在本次播放的起始位置），无条件采纳会让光标跳回起点——尤其在播放中
+    // 编辑、或引擎等待重渲染短暂报告未播放时。只有显式 opt-in 的
+    // 工程生命周期载入流程才采纳。需要移动光标的操作（如粘贴跳转
+    // pasteEndSec）在本函数之后显式设置，不受影响。
+    if (opts?.adoptPlayhead) {
         state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
     }
     state.projectSec = Math.max(4, Number(timeline.project_sec ?? state.projectSec));
@@ -1837,7 +1842,8 @@ const sessionSlice = createSlice({
         },
         /** 供录音等后端直接导入时间轴的命令同步完整快照。 */
         applyTimelinePayload(state, action: PayloadAction<TimelineState>) {
-            applyTimelineState(state, action.payload, { force: true });
+            // 后端直接导入的权威快照（如录音导入）：采纳其后端播放头。
+            applyTimelineState(state, action.payload, { force: true, adoptPlayhead: true });
         },
         bumpParamsEpoch(state) {
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
@@ -3322,6 +3328,12 @@ const sessionSlice = createSlice({
                 if (nextIsPlaying) {
                     const absSec = (payload.base_sec ?? 0) + nextPositionSec;
                     nextplayheadSec = Math.max(0, absSec);
+                } else if (state.runtime.isPlaying) {
+                    // 播放→停止跃迁（音频自然结束 / 引擎等待重渲染时自动暂停）：
+                    // 引擎的 position 冻结在真实停止点，而本地光标还停留在最后
+                    // 一次轮询采样（略落后）。对齐一次，保证视觉位置 = 真实
+                    // 位置；此后的轮询（is_playing=false 分支）不再改写光标。
+                    nextplayheadSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
                 }
 
                 const shouldUpdatePlaybackFields =
@@ -3329,7 +3341,7 @@ const sessionSlice = createSlice({
                     nextTarget !== state.runtime.playbackTarget ||
                     Math.abs(nextPositionSec - state.runtime.playbackPositionSec) > EPS_SEC ||
                     Math.abs(nextDurationSec - state.runtime.playbackDurationSec) > EPS_SEC ||
-                    (nextIsPlaying && Math.abs(nextplayheadSec - state.playheadSec) > EPS_SEC);
+                    Math.abs(nextplayheadSec - state.playheadSec) > EPS_SEC;
 
                 if (!shouldUpdatePlaybackFields) {
                     // No state change needed.
@@ -3341,9 +3353,10 @@ const sessionSlice = createSlice({
                 state.runtime.playbackPositionSec = nextPositionSec;
                 state.runtime.playbackDurationSec = nextDurationSec;
 
-                if (nextIsPlaying) {
+                if (nextIsPlaying || nextplayheadSec !== state.playheadSec) {
                     state.playheadSec = nextplayheadSec;
-                } else {
+                }
+                if (!nextIsPlaying) {
                     state.playbackClipId = null;
                 }
             })
@@ -3358,6 +3371,9 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
+                    // 启动同步采纳后端播放头；播放中的回滚式重取（如 Tempo Map
+                    // 提交失败）保留本地播放头，避免跳回旧的起始位置。
+                    adoptPlayhead: !state.runtime.isPlaying,
                 });
             })
 
@@ -3421,6 +3437,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 state.status = "New project";
             })
@@ -3456,6 +3473,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, (payload as any).timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 state.status = "Project opened";
             })
@@ -3487,6 +3505,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 state.status = "Project opened";
             })
@@ -3518,6 +3537,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 state.status = "Project opened";
             })
@@ -3566,6 +3586,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
@@ -3601,6 +3622,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, (payload as any).timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 const newClipIds = (payload as any).newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
@@ -3641,6 +3663,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, (payload as any).timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 const newClipIds = (payload as any).newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
@@ -3681,6 +3704,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, (payload as any).timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 const newClipIds = (payload as any).newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
@@ -3719,6 +3743,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, (payload as any).timeline, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: true,
                 });
                 const newClipIds = (payload as any).newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
