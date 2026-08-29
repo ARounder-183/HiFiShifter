@@ -31,7 +31,7 @@ import {
     FADE_CORNER_CAP_HEIGHT_PX,
     FADE_CORNER_CAP_WIDTH_PX,
     FADE_CORNER_EDGE_WIDTH_PX,
-    FADE_CORNER_RESERVE_PX,
+    fadeCornerReservePx,
     CLIP_BODY_PADDING_Y,
     CLIP_HEADER_HEIGHT,
     SNAP_OFFSET_HANDLE_SIZE_PX,
@@ -270,6 +270,11 @@ export const ClipItem = React.memo(function ClipItem({
     const interactionHintBoxShadow =
         hovered && clip.groupId == null ? "0 0 0 1px rgba(255, 255, 255, 0.24)" : undefined;
 
+    // Clip 总高：边缘所有权切分（淡化角控件 vs 裁短）依赖它，取单一来源。
+    const clipHeightPx = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y);
+    /** 顶部让给淡化角控件的高度；其下沿以下全部归裁短/拉伸。 */
+    const fadeCornerReserve = fadeCornerReservePx(clipHeightPx);
+
     const startDeferredFadeEditDrag = React.useCallback(
         (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {
             e.preventDefault();
@@ -442,7 +447,7 @@ export const ClipItem = React.memo(function ClipItem({
                 left,
                 width,
                 top: 0,
-                height: rowHeight - CLIP_BODY_PADDING_Y,
+                height: clipHeightPx,
                 boxShadow: interactionHintBoxShadow,
                 // 名称编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
                 // 否则 Canvas 中的原始名称会把输入框盖住。
@@ -596,6 +601,7 @@ export const ClipItem = React.memo(function ClipItem({
             >
                 <ClipEdgeHandles
                     clipId={clip.id}
+                    clipHeightPx={clipHeightPx}
                     altPressed={altPressed}
                     isInMultiSelectedSet={isInMultiSelectedSet}
                     multiSelectedCount={multiSelectedCount}
@@ -613,8 +619,9 @@ export const ClipItem = React.memo(function ClipItem({
 
                 {/* Fade 角落创建/编辑手柄（L 形）：真左上/右上边角 —— 顶部横帽
                     覆盖 header 带与 body 上沿，左右竖条覆盖边缘上部直至
-                    FADE_CORNER_RESERVE_PX；此高度带以下才是 EdgeHandles 的
-                    裁短/延长区（constants 中做了所有权切分，不靠 z 竞争）。
+                    fadeCornerReserve；此高度带以下才是 EdgeHandles 的
+                    裁短/延长区（几何切分，不靠 z 竞争）。保留高度随 Clip
+                    高度自适应，避免矮 Clip 上裁短手势无处下手。
                     悬停信息为富内容三行淡变 ToolTips（首行为内联曲线图标，
                     经 publishFadeRichTooltip 注册）；长度显示当前有效值
                     （未创建时为 0）。z 高于 SnapOffset 握把不影响：互不相交。 */}
@@ -637,7 +644,7 @@ export const ClipItem = React.memo(function ClipItem({
                     style={{
                         top: FADE_CORNER_CAP_HEIGHT_PX,
                         width: FADE_CORNER_EDGE_WIDTH_PX,
-                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        height: Math.max(0, fadeCornerReserve - FADE_CORNER_CAP_HEIGHT_PX),
                         cursor: "ew-resize",
                     }}
                     onPointerDown={(e) => {
@@ -664,7 +671,7 @@ export const ClipItem = React.memo(function ClipItem({
                     style={{
                         top: FADE_CORNER_CAP_HEIGHT_PX,
                         width: FADE_CORNER_EDGE_WIDTH_PX,
-                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        height: Math.max(0, fadeCornerReserve - FADE_CORNER_CAP_HEIGHT_PX),
                         cursor: "ew-resize",
                     }}
                     onPointerDown={(e) => {

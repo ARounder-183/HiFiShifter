@@ -14,12 +14,26 @@
  */
 import { fadeGainSigned } from "./reaperFade";
 
-/** 包络线命中块：边长（px）。 */
-export const FADE_LINE_HIT_SIZE = 16;
-/** 包络线采样目标弧长步长（px）。沿对角线按等弧长采样，保证命中块连续覆盖整条线。 */
+/**
+ * 包络线命中块：边长（px）。
+ *
+ * 12px 是"能稳定抓住 1.2px 曲线"与"不吃掉太多 Clip 内部"之间的平衡。原为
+ * 16px，在矮 Clip 上沿对角线铺开会盖住大半个淡化区，且与裁短/移动手势争地。
+ */
+export const FADE_LINE_HIT_SIZE = 12;
+/**
+ * 包络线采样目标弧长步长（px）。沿对角线按等弧长采样。
+ * 必须 **小于** FADE_LINE_HIT_SIZE，否则相邻命中块之间会留下空隙。
+ */
 export const FADE_LINE_HIT_STEP_PX = 10;
+/**
+ * 采样点数量上限。步长 × 上限 = 可覆盖的最大弧长（10 × 480 ≈ 4800px），
+ * 与命中块改为 12px 之前的覆盖能力一致；命中块是真实 DOM 节点，上限即
+ * 单个 Clip 的 DOM 开销上限，不随缩放无限增长。
+ */
+export const FADE_LINE_HIT_MAX_COUNT = 480;
 /** 区域边缘竖线命中条宽度（px）。 */
-export const FADE_EDGE_HIT_WIDTH = 8;
+export const FADE_EDGE_HIT_WIDTH = 6;
 
 export type FadeHitType = "fade_in" | "fade_out";
 
@@ -76,10 +90,13 @@ function sampleFadeLine(args: {
     // 沿对角线按"弧长 = 目标步长"采样：保证相邻命中块沿 x 与沿 y 都彼此交叠，
     // 覆盖整条包络线（含陡峭短淡化与较长淡化），不产生间断。
     const arcLength = Math.hypot(width, bodyHeight);
-    // 密度跟随弧长：极端缩放下弧长可达数千像素，旧上限 36 会留下大片
-    // 无法命中的空隙。命中块 16px，步长 12px 保证相邻块交叠；上限 400
-    // 覆盖到 ~4800px 弧长（更高时按比例放宽间距，仍远小于旧行为）。
-    const count = Math.max(2, Math.min(400, Math.ceil(arcLength / 12)));
+    // 密度跟随弧长：极端缩放下弧长可达数千像素，点数下限 2、上限
+    // FADE_LINE_HIT_MAX_COUNT。步长必须小于命中块边长（FADE_LINE_HIT_SIZE），
+    // 否则相邻块之间会留下无法命中的空隙。
+    const count = Math.max(
+        2,
+        Math.min(FADE_LINE_HIT_MAX_COUNT, Math.ceil(arcLength / FADE_LINE_HIT_STEP_PX)),
+    );
     const points: Array<{ x: number; y: number }> = [];
     for (let index = 0; index < count; index += 1) {
         const t = index / Math.max(1, count - 1);

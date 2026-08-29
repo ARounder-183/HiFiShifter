@@ -152,6 +152,29 @@ function rgba(rgb: { r: number; g: number; b: number }, alpha: number): string {
     return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
 }
 
+/**
+ * Clip 圆角半径（px）。
+ *
+ * 参考 Ableton Live / REAPER：Clip 近乎直角 —— 边界即命中边界，用户对
+ * "边缘在哪、能不能抓"的判断不被圆角干扰。保留 1.5px 只为消除直角的
+ * 像素锯齿，视觉上不可辨。绘制端按 Clip 实际尺寸再收敛一次。
+ */
+export const CLIP_CORNER_RADIUS_PX = 1.5;
+
+/** 把颜色按感知加权去饱和（muted 态用：变灰但不至于彻底消失）。 */
+function desaturateRgb(
+    rgb: { r: number; g: number; b: number },
+    ratio: number,
+): { r: number; g: number; b: number } {
+    const t = clamp(ratio, 0, 1);
+    const gray = Math.round(rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114);
+    return {
+        r: Math.round(rgb.r * (1 - t) + gray * t),
+        g: Math.round(rgb.g * (1 - t) + gray * t),
+        b: Math.round(rgb.b * (1 - t) + gray * t),
+    };
+}
+
 function ellipsizeText(text: string, maxChars: number): string {
     if (maxChars <= 0) return "";
     if (text.length <= maxChars) return text;
@@ -190,6 +213,21 @@ export function buildTimelineClipVisualStyle(args: {
 }): {
     headerFill: string;
     bodyFill: string;
+    /**
+     * 竖直渐变停靠点。header / body 各给"上亮下暗"两端，绘制端用
+     * createLinearGradient 输出——纯色平涂缺少体积感，密集轨道里 Clip 之间
+     * 的分界不够清晰。
+     */
+    headerFillTop: string;
+    headerFillBottom: string;
+    bodyFillTop: string;
+    bodyFillBottom: string;
+    /** 顶缘内侧 1px 高光（微弱玻璃质感）。 */
+    topHighlightFill: string;
+    /** header/body 分隔线下方的 1px 亮线，与上方暗线构成"刻线"。 */
+    separatorHighlightFill: string;
+    /** 选中态外发光颜色（无 DOM 时回退到派生色）。 */
+    glowColor: string;
     borderStroke: string;
     textFill: string;
     muteBadgeFill: string;
@@ -249,6 +287,32 @@ export function buildTimelineClipVisualStyle(args: {
     const knobRgb = mixHexColor(trackColor, { r: 205, g: 212, b: 220 }, 0.24);
     const controlRgb = mixHexColor(trackColor, { r: 40, g: 46, b: 55 }, 0.52);
     const controlActiveRgb = mixHexColor(trackColor, { r: 120, g: 64, b: 69 }, 0.4);
+
+    // ── 竖直渐变停靠点 ────────────────────────────────────────────
+    // 参考 Ableton Live：标题带用**高饱和的轨道原色**（识别 Clip 归属的第一
+    // 信号），只在上下两端做轻微明暗，而不是往灰里混 —— 混灰会让轨道色失去
+    // 辨识度。body 反其道而行：压暗压灰，让波形成为视觉主角。
+    //
+    // muted 时整体去饱和：仅靠降低 alpha（旧的 0.29）会让 Clip 几乎融进背景，
+    // 连"这里有个 Clip"都看不出来；去饱和保留了轮廓与波形可读性。
+    const muteSaturation = args.muted ? 0.62 : 0;
+    const headerTopRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 255, g: 255, b: 255 }, 0.1),
+        muteSaturation,
+    );
+    const headerBottomRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 30, g: 34, b: 42 }, 0.18),
+        muteSaturation,
+    );
+    const bodyTopRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 66, g: 72, b: 86 }, 0.66),
+        muteSaturation,
+    );
+    const bodyBottomRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 22, g: 26, b: 34 }, 0.78),
+        muteSaturation,
+    );
+
     const isPitchAdj = args.isPitchAdjustment === true;
     const {
         showChain,
@@ -347,18 +411,25 @@ export function buildTimelineClipVisualStyle(args: {
         Math.floor((args.widthPx - textStartPx - trailingReservePx) / avgCharWidth),
     );
 
+    // 选中边框：CSS 变量优先，无 DOM 时回退到轨道色全不透明变体（既有行为）。
+    const selectedBorder =
+        (typeof document !== "undefined"
+            ? getComputedStyle(document.documentElement)
+                  .getPropertyValue("--qt-clip-selected-border")
+                  .trim()
+            : "") || rgba(borderRgb, 1);
+
     return {
         headerFill: rgba(headerRgb, 0.95),
         bodyFill: rgba(bodyRgb, 0.74),
-        borderStroke: args.selected
-            ? // CSS 变量优先；无 DOM 运行时（Node/SSR 测试）回退到派生色，
-              // 与本文件其余路径的 typeof 守卫保持一致。
-              (typeof document !== "undefined"
-                  ? getComputedStyle(document.documentElement)
-                        .getPropertyValue("--qt-clip-selected-border")
-                        .trim()
-                  : "") || rgba(borderRgb, 1)
-            : rgba(borderRgb, 0.74),
+        headerFillTop: rgba(headerTopRgb, 0.97),
+        headerFillBottom: rgba(headerBottomRgb, 0.95),
+        bodyFillTop: rgba(bodyTopRgb, 0.8),
+        bodyFillBottom: rgba(bodyBottomRgb, 0.88),
+        topHighlightFill: "rgba(255, 255, 255, 0.10)",
+        separatorHighlightFill: "rgba(255, 255, 255, 0.05)",
+        glowColor: selectedBorder,
+        borderStroke: args.selected ? selectedBorder : rgba(borderRgb, 0.62),
         borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(241, 245, 249, 0.94)",
         muteBadgeFill: rgba(args.muted ? controlActiveRgb : controlRgb, args.muted ? 0.96 : 0.9),
@@ -404,7 +475,9 @@ export function buildTimelineClipVisualStyle(args: {
         playbackRateLabel,
         gainLabel,
         displayName: ellipsizeText(args.name, maxChars),
-        mutedAlpha: args.muted ? 0.29 : 1,
+        // 0.29 会让 Clip 几乎融进背景（连轮廓都看不清）。提高到 0.46，配合
+        // 上面的去饱和，既明确表达"已静音"，又保留波形与轮廓的可读性。
+        mutedAlpha: args.muted ? 0.46 : 1,
         leadingControlsWidth,
         trailingReservePx,
         showMuteBadge: showMute,
