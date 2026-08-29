@@ -1060,6 +1060,47 @@ function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
  * 普通 take 管理命令返回的全量快照可能携带旧值。切换/管理 take 不应该
  * 改变播放位置，因此这里在覆写后恢复本地光标。
  */
+/**
+ * DAW 惯例：分割后选中右段、取消左段。
+ *
+ * 左段继承被分割 clip 的原 id（选择因此"残留"在左段上），右段为后端新建
+ * clip，经 payload.created_clip_ids 按输入顺序返回。这里把单选/多选迁移到
+ * 右段：
+ * - 多选中未被分割的成员保持选中；
+ * - 原单选若属于被分割的 clip，则映射到其对应右段（输入与右段按顺序
+ *   一一对应；数量不一致时回退到第一个右段）。
+ */
+function applySplitSelection(
+    state: SessionState,
+    action: { meta: { arg: { clipId?: string; clipIds?: string[] } } },
+    payload: { created_clip_ids?: string[] | null } & TimelineState,
+) {
+    const prevSelectedClipId = state.selectedClipId;
+    const prevMultiSelectedClipIds = state.multiSelectedClipIds;
+    applyTimelineState(state, payload, { force: true });
+
+    const arg = action.meta.arg ?? {};
+    const argIds = arg.clipIds ?? (arg.clipId ? [arg.clipId] : []);
+    const splitOriginals = new Set(argIds);
+    const rightIds = (payload.created_clip_ids ?? []).filter((id) =>
+        state.clips.some((clip) => clip.id === id),
+    );
+    if (rightIds.length === 0) {
+        return;
+    }
+    state.multiSelectedClipIds = [
+        ...prevMultiSelectedClipIds.filter((id) => !splitOriginals.has(id)),
+        ...rightIds,
+    ];
+    if (prevSelectedClipId && splitOriginals.has(prevSelectedClipId)) {
+        const selectedIndex = argIds.indexOf(prevSelectedClipId);
+        state.selectedClipId =
+            selectedIndex >= 0 && argIds.length === rightIds.length
+                ? rightIds[selectedIndex]
+                : rightIds[0];
+    }
+}
+
 function applyTimelineStatePreservingPlayhead(state: SessionState, timeline: TimelineState): void {
     const playheadSec = state.playheadSec;
     applyTimelineState(state, timeline, { force: true });
@@ -4170,21 +4211,23 @@ const sessionSlice = createSlice({
             .addCase(splitClipRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    created_clip_ids?: string[] | null;
                 } & TimelineState;
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload, { force: true });
+                applySplitSelection(state, action, payload);
             })
 
             .addCase(splitClipsAtRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
+                    created_clip_ids?: string[] | null;
                 } & TimelineState;
                 if (!payload.ok) {
                     return;
                 }
-                applyTimelineState(state, payload, { force: true });
+                applySplitSelection(state, action, payload);
             })
 
             .addCase(glueClipsRemote.fulfilled, (state, action) => {

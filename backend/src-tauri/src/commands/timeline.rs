@@ -1833,9 +1833,17 @@ pub(super) fn split_clip(
         .map(|c| c.track_id.clone())
         .and_then(|tid| tl.resolve_root_track_id(&tid));
     let options = split_transition_options(&state);
-    let _ = tl.split_clip_with_transition(&clip_id, split_sec, &options);
+    // DAW 惯例：分割后选中右段（左段继承原 clip id，右段为新建 clip）。
+    // 单选权威在后端这里更新；多选的精确调整由前端 fulfilled 完成。
+    let right_id = tl.split_clip_with_transition(&clip_id, split_sec, &options);
+    if let Some(right_id) = &right_id {
+        tl.selected_clip_id = Some(right_id.clone());
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
+    if let Some(right_id) = &right_id {
+        payload.created_clip_ids = Some(vec![right_id.clone()]);
+    }
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     if let Some(root_id) = root_track_id {
@@ -1860,9 +1868,24 @@ pub(super) fn split_clips_at(
         .into_iter()
         .collect();
     let options = split_transition_options(&state);
+    let before_ids: HashSet<String> = tl.clips.iter().map(|c| c.id.clone()).collect();
     tl.split_clips_at_with_transition(&clip_ids, split_sec, &options);
+    // 新建的右段按创建顺序收集（分割按输入顺序处理，故与输入顺序一致）。
+    let right_ids: Vec<String> = tl
+        .clips
+        .iter()
+        .map(|c| c.id.clone())
+        .filter(|id| !before_ids.contains(id))
+        .collect();
+    if let Some(first_right) = right_ids.first() {
+        // DAW 惯例：分割后选中右段。多选的精确调整由前端 fulfilled 完成。
+        tl.selected_clip_id = Some(first_right.clone());
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
+    if !right_ids.is_empty() {
+        payload.created_clip_ids = Some(right_ids);
+    }
     payload.project = Some(state.project_meta_payload());
     drop(tl);
     for root_id in root_ids {
