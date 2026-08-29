@@ -378,7 +378,7 @@ export function buildTimelineClipVisualStyle(args: {
     const clipHsl: Hsl = args.muted
         ? { h: baseHsl.h, s: 0.06, l: Math.max(0.08, baseHsl.l - 0.12) }
         : args.selected
-          ? shadeHsl(baseHsl, 0.08)
+          ? shadeHsl(baseHsl, 0.04)
           : baseHsl;
     const bodyRgb = hslToRgb(clipHsl);
     const headerRgb = hslToRgb(shadeHsl(clipHsl, -0.05));
@@ -488,7 +488,7 @@ export function buildTimelineClipVisualStyle(args: {
         // 未选中 = 同色调深描边 —— 纯黑低透明描边在深底上不可见，同色相
         // 加深的描边让色块边缘"闭合"且与色块同调。
         borderStroke: args.selected
-            ? "rgba(255, 255, 255, 0.92)"
+            ? "rgba(255, 255, 255, 0.6)"
             : rgba(headerRgb, 0.55),
         borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(28, 32, 40, 0.92)",

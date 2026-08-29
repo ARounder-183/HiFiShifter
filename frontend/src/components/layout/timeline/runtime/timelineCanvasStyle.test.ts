@@ -94,8 +94,8 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     // 选中 = 白色 2px 描边 + 色块提亮；未选中 = 淡收边 1px。
     assertEqual(
         selectedStyle.borderStroke,
-        "rgba(255, 255, 255, 0.92)",
-        "selected clip uses a bright white 2px stroke",
+        "rgba(255, 255, 255, 0.6)",
+        "selected clip uses a subdued white 2px stroke",
     );
     assertEqual(selectedStyle.borderLineWidth, 2, "selected border is 2px");
     assertEqual(style.borderLineWidth, 1, "unselected border is 1px");
