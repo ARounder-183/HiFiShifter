@@ -214,7 +214,7 @@ pub struct UiSettings {
     pub ruler_label_spacing_px: u32,
     #[serde(default = "default_true")]
     pub show_playhead_time_in_track_header: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub param_editor_sync_timeline: bool,
     #[serde(default = "default_true")]
     pub param_editor_timeline_click_select_track: bool,
@@ -224,6 +224,9 @@ pub struct UiSettings {
     pub pitch_snap_unit: String,
     #[serde(default)]
     pub pitch_snap_tolerance_cents: u32,
+    /// 音阶吸附使用的音阶（默认 C）。与前端 pitchSnapScale 对应。
+    #[serde(default = "default_pitch_snap_scale")]
+    pub pitch_snap_scale: String,
     #[serde(default)]
     pub playhead_zoom: bool,
     #[serde(default)]
@@ -277,7 +280,8 @@ pub struct UiSettings {
     pub midi_import_bpm_as_project: bool,
     #[serde(default = "default_midi_note_bpm_mode")]
     pub midi_note_bpm_mode: String,
-    #[serde(default)]
+    /// 指定 BPM 模式使用的 BPM 值（默认 120，与前端输入框初始值一致）。
+    #[serde(default = "default_midi_specified_bpm")]
     pub midi_specified_bpm: Option<f64>,
     #[serde(default = "default_true")]
     pub midi_close_leading_gap: bool,
@@ -317,6 +321,9 @@ pub struct UiSettings {
     /// GPU adapter indices are 0-based and match DXGI adapter enumeration order.
     #[serde(default)]
     pub ort_device_id: Option<i32>,
+    /// GPU 设备 ID（对应前端 gpuDeviceId，0 表示默认）。
+    #[serde(default)]
+    pub gpu_device_id: i32,
     /// 后台预渲染：启用后，当编辑操作使渲染缓存失效时，
     /// 立即在后台启动预渲染，而不是等到用户按下播放时才渲染。
     /// 用户可在渲染进行中随时开始播放已渲染完成的部分。
@@ -324,12 +331,12 @@ pub struct UiSettings {
     /// rendering in the background after editing invalidates the
     /// render cache. Users can play already-rendered content
     /// at any time during rendering.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_background_render: bool,
     /// 自动重新加载已修改的媒体文件（默认开启）。
     /// 启用后，窗口重新获得焦点并检测到媒体内容变化时，
     /// 后端会在后台直接重新加载原路径，无需弹出确认窗口。
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_reload_modified_media: bool,
     /// 为新的音频块启用循环（Loop / 循环源，默认开启）。
     ///
@@ -666,6 +673,9 @@ fn default_true() -> bool {
 fn default_pitch_snap_unit() -> String {
     "semitone".to_string()
 }
+fn default_pitch_snap_scale() -> String {
+    "C".to_string()
+}
 fn default_grid_size() -> String {
     "1/4".to_string()
 }
@@ -729,6 +739,11 @@ fn default_midi_note_bpm_mode() -> String {
     "midi".to_string()
 }
 
+/// 指定 BPM 模式的默认值（与前端输入框初始值一致）。
+fn default_midi_specified_bpm() -> Option<f64> {
+    Some(120.0)
+}
+
 /// 时间轴 MIDI 导入场景（文件菜单 / 拖拽到轨道视图）的默认导入目标。
 fn default_midi_import_target_timeline() -> String {
     "pitchRef".to_string()
@@ -759,11 +774,12 @@ impl Default for UiSettings {
             secondary_time_unit: default_secondary_time_unit(),
             ruler_label_spacing_px: default_ruler_label_spacing_px(),
             show_playhead_time_in_track_header: true,
-            param_editor_sync_timeline: false,
+            param_editor_sync_timeline: true,
             param_editor_timeline_click_select_track: true,
             pitch_snap: false,
             pitch_snap_unit: default_pitch_snap_unit(),
             pitch_snap_tolerance_cents: 0,
+            pitch_snap_scale: default_pitch_snap_scale(),
             playhead_zoom: false,
             auto_scroll: false,
             param_editor_seek_playhead: true,
@@ -789,7 +805,7 @@ impl Default for UiSettings {
             midi_multi_track_merge: true,
             midi_import_bpm_as_project: false,
             midi_note_bpm_mode: default_midi_note_bpm_mode(),
-            midi_specified_bpm: None,
+            midi_specified_bpm: default_midi_specified_bpm(),
             midi_close_leading_gap: true,
             midi_import_target_menu: default_midi_import_target_timeline(),
             midi_import_target_drag_drop: default_midi_import_target_timeline(),
@@ -801,6 +817,7 @@ impl Default for UiSettings {
             midi_import_tempo_map_key_signature: false,
             ort_ep: default_ort_ep(),
             ort_device_id: None,
+            gpu_device_id: 0,
             auto_background_render: true,
             auto_reload_modified_media: true,
             loop_new_clips: true,

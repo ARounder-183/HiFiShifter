@@ -55,6 +55,7 @@ export const persistUiSettings = createAsyncThunk(
             paramEditorTimelineClickSelectTrack: s.paramEditorTimelineClickSelectTrackEnabled,
             pitchSnap: s.pitchSnapEnabled,
             pitchSnapUnit: s.pitchSnapUnit,
+            pitchSnapScale: s.pitchSnapScale,
             pitchSnapToleranceCents: s.pitchSnapToleranceCents,
             scaleHighlightMode: s.scaleHighlightMode,
             ignoreGrouping: s.ignoreGrouping,
