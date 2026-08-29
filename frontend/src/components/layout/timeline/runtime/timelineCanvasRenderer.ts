@@ -303,7 +303,7 @@ export function drawTimelineCanvas(
         }
 
         if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
             ctx.fillRect(
                 clipLeft + fadeShadeRange.startPx,
                 bodyTop,
