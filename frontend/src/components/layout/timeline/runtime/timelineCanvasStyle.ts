@@ -362,7 +362,13 @@ export function buildTimelineClipVisualStyle(args: {
     // muted：饱和度压到近灰、明度不动 —— 亮灰块一眼可辨，不靠降 alpha
     // （降 alpha 会透出背景、显脏）。
     const baseHsl = normalizeTrackHsl(trackColor);
-    const clipHsl: Hsl = args.muted ? { h: baseHsl.h, s: 0.06, l: baseHsl.l } : baseHsl;
+    // 选中 = 色块提亮（Ableton 式），不画边框 —— 深色描边压在饱和色块上
+    // 显得突兀。+0.10 明度在归一化后的亮度带内足够醒目。
+    const clipHsl: Hsl = args.muted
+        ? { h: baseHsl.h, s: 0.06, l: baseHsl.l }
+        : args.selected
+          ? shadeHsl(baseHsl, 0.1)
+          : baseHsl;
     const bodyRgb = hslToRgb(clipHsl);
     const headerRgb = hslToRgb(shadeHsl(clipHsl, -0.05));
 
@@ -464,21 +470,13 @@ export function buildTimelineClipVisualStyle(args: {
         Math.floor((args.widthPx - textStartPx - trailingReservePx) / avgCharWidth),
     );
 
-    // 选中边框：CSS 变量优先；无 DOM 时回退为固定深色（亮色块上一律深描边）。
-    const selectedBorder =
-        (typeof document !== "undefined"
-            ? getComputedStyle(document.documentElement)
-                  .getPropertyValue("--qt-clip-selected-border")
-                  .trim()
-            : "") || "rgba(24, 28, 35, 0.95)";
-
     return {
         headerFill: rgba(headerRgb, 1),
         bodyFill: rgba(bodyRgb, 1),
-        // 亮色块的边界由明度差天然成立；未选中描边是极淡的深色收边，
-        // 选中是清晰的深色实线（半透明白描边在彩色块上会发灰，不要）。
-        borderStroke: args.selected ? selectedBorder : "rgba(0, 0, 0, 0.18)",
-        borderLineWidth: args.selected ? 1.5 : 1,
+        // 亮色块的边界由明度差天然成立；描边只是极淡的深色收边。
+        // 选中不画边框 —— 由色块提亮表达（见 clipHsl 的 selected 分支）。
+        borderStroke: "rgba(0, 0, 0, 0.18)",
+        borderLineWidth: 1,
         textFill: "rgba(28, 32, 40, 0.92)",
         muteBadgeFill: args.muted ? "rgba(189, 54, 54, 0.95)" : "rgba(0, 0, 0, 0.16)",
         muteBadgeStroke: args.muted ? "rgba(120, 22, 22, 0.8)" : "rgba(0, 0, 0, 0.28)",

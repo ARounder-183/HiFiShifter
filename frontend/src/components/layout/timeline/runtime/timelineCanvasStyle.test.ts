@@ -85,16 +85,34 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(style.formantBadgeWidth, 20, "formant badge matches mute width");
     assertEqual(style.gainKnobRadius, 7, "gain knob is enlarged");
     assertEqual(style.gainKnobCenterOffsetX, 15, "gain knob sits at the far left of the header");
-    assertEqual(selectedStyle.headerFill, style.headerFill, "selected header keeps default visual");
-    assertEqual(selectedStyle.bodyFill, style.bodyFill, "selected body keeps default visual");
-    // Selected 边框优先读 CSS 变量 --qt-clip-selected-border；无 DOM 环境
-    // （Node 测试）下回退为固定深色实线 —— 亮色块上一律深描边（半透明白在
-    // 彩色块上发灰），与非选中的 0.18 alpha 淡收边有意区分。
+    // 选中 = 整块提亮（header + body 一起），不再保持默认色。
+    assertEqual(
+        selectedStyle.headerFill === style.headerFill,
+        false,
+        "selected header is brightened (selection expressed by lightness, not border)",
+    );
+    // 选中不再画边框 —— 由色块提亮表达（Ableton 式）。边框统一为淡收边。
     assertEqual(
         selectedStyle.borderStroke,
-        "rgba(24, 28, 35, 0.95)",
-        "selected border falls back to a solid dark stroke without CSS variables",
+        style.borderStroke,
+        "selected uses the same subtle edge stroke (selection is expressed by brightening)",
     );
+    {
+        const parseLum = (fill: string): number => {
+            const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
+            if (!m) throw new Error(`unparseable fill: ${fill}`);
+            return (
+                (Number(m[1]) * 0.299 + Number(m[2]) * 0.587 + Number(m[3]) * 0.114) / 255
+            );
+        };
+        const selectedLum = parseLum(selectedStyle.bodyFill);
+        const normalLum = parseLum(style.bodyFill);
+        if (selectedLum <= normalLum) {
+            throw new Error(
+                `selected clip must be brighter than normal (selected=${selectedLum.toFixed(3)}, normal=${normalLum.toFixed(3)})`,
+            );
+        }
+    }
     assertEqual(selectedStyle.textFill, style.textFill, "selected text keeps default visual");
 
     assertEqual(

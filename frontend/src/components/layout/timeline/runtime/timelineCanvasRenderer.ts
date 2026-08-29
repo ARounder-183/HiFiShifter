@@ -318,29 +318,22 @@ export function drawTimelineCanvas(
 
         ctx.restore();
 
-        // 选中/编组指示必须在 Clip 体画布内绘制：DOM 交互层的 box-shadow
-        // 随原生滚动移动，会与 sticky 画布错帧；视觉状态统一由画布输出。
-        // 选中 = 深色细实线；编组激活 = 深金描边（亮色块上浅金看不清）。
-        if (clip.selected || isGroupActive) {
-            ctx.strokeStyle =
-                !clip.selected && isGroupActive
-                    ? "rgba(146, 104, 10, 0.8)"
-                    : visualStyle.borderStroke;
-            ctx.lineWidth = clip.selected ? visualStyle.borderLineWidth : 1;
+        // 编组激活 = 深金描边 + 外圈（编组语义，非选中语义）。
+        // 选中不画边框 —— 由色块提亮表达（Ableton 式，见 style 的 selected 分支）；
+        // 未选中画极淡的深色收边，帮助在深背景上定界。
+        if (isGroupActive) {
+            ctx.strokeStyle = "rgba(146, 104, 10, 0.8)";
+            ctx.lineWidth = 1;
             borderRect();
             ctx.stroke();
-            if (isGroupActive) {
-                ctx.strokeStyle = "rgba(146, 104, 10, 0.8)";
-                ctx.lineWidth = 1;
-                ctx.strokeRect(
-                    clipLeft - 1.5,
-                    clipTop - 1.5,
-                    Math.max(0, clipWidth + 3),
-                    Math.max(0, clipHeight + 3),
-                );
-            }
-        } else {
-            // 整个 Clip 一圈描边（含 header）：此前只描 body，标题带没有轮廓。
+            ctx.strokeRect(
+                clipLeft - 1.5,
+                clipTop - 1.5,
+                Math.max(0, clipWidth + 3),
+                Math.max(0, clipHeight + 3),
+            );
+        }
+        if (!clip.selected) {
             ctx.strokeStyle = visualStyle.borderStroke;
             ctx.lineWidth = visualStyle.borderLineWidth;
             borderRect();
