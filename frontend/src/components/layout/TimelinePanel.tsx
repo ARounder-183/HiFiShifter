@@ -154,9 +154,34 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
-                if (playheadRef.current) {
+
+                // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
+                // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧
+                // 会在"视觉位置"与"同步位置"之间跳动（自动滚屏抽搐的根因）。
+                // 滚动先行、播放头定位收尾，最终写入获胜。
+                if (autoScrollEnabled && transport.isPlaying) {
                     const scroller = scrollRef.current;
-                    const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                    if (scroller) {
+                        const next = computeAutoFollowScrollLeft({
+                            playheadSec: visualPlayheadSec,
+                            pxPerSec: pxPerSecRef.current,
+                            viewportWidth: scroller.clientWidth,
+                            contentWidth: projectSec * pxPerSecRef.current,
+                        });
+                        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
+                            // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近
+                            // 工程右端时请求值可能被钳制，画布层必须与原生 DOM
+                            // 层使用同一偏移。
+                            const applied = applyNativeScrollLeft(scroller, next);
+                            syncScrollLeft(applied);
+                        }
+                    }
+                }
+
+                // 播放头定位（在自动滚动之后，用最新 scrollLeft + 视觉插值）。
+                const scroller = scrollRef.current;
+                const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                if (playheadRef.current) {
                     playheadRef.current.style.left = `${screenLeft}px`;
                 }
                 if (rulerPlayheadLineRef.current) {
@@ -165,20 +190,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 if (rulerPlayheadHeadRef.current) {
                     rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
                 }
-                if (!autoScrollEnabled || !transport.isPlaying) return;
-                const scroller = scrollRef.current;
-                if (!scroller) return;
-                const next = computeAutoFollowScrollLeft({
-                    playheadSec: visualPlayheadSec,
-                    pxPerSec: pxPerSecRef.current,
-                    viewportWidth: scroller.clientWidth,
-                    contentWidth: projectSec * pxPerSecRef.current,
-                });
-                if (Math.abs(scroller.scrollLeft - next) <= 0.5) return;
-                // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近工程右端时
-                // 请求值可能被钳制，画布层必须与原生 DOM 层使用同一偏移。
-                const applied = applyNativeScrollLeft(scroller, next);
-                syncScrollLeft(applied);
             },
             [
                 autoScrollEnabled,

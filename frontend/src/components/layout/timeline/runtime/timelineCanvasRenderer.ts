@@ -333,12 +333,11 @@ export function drawTimelineCanvas(
                 Math.max(0, clipHeight + 3),
             );
         }
-        if (!clip.selected) {
-            ctx.strokeStyle = visualStyle.borderStroke;
-            ctx.lineWidth = visualStyle.borderLineWidth;
-            borderRect();
-            ctx.stroke();
-        }
+        // 描边：选中 = 白色 2px；未选中 = 淡收边 1px（值随选中态切换）。
+        ctx.strokeStyle = visualStyle.borderStroke;
+        ctx.lineWidth = visualStyle.borderLineWidth;
+        borderRect();
+        ctx.stroke();
 
         if (visualStyle.showGainKnob) {
             const knobCenterX = clipLeft + visualStyle.gainKnobCenterOffsetX;

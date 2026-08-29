@@ -473,10 +473,10 @@ export function buildTimelineClipVisualStyle(args: {
     return {
         headerFill: rgba(headerRgb, 1),
         bodyFill: rgba(bodyRgb, 1),
-        // 亮色块的边界由明度差天然成立；描边只是极淡的深色收边。
-        // 选中不画边框 —— 由色块提亮表达（见 clipHsl 的 selected 分支）。
-        borderStroke: "rgba(0, 0, 0, 0.18)",
-        borderLineWidth: 1,
+        // 描边：选中 = 白色 2px（在提亮的色块上清晰醒目，REAPER 惯例）；
+        // 未选中 = 极淡深色收边 1px（帮助在深背景上定界）。
+        borderStroke: args.selected ? "rgba(255, 255, 255, 0.92)" : "rgba(0, 0, 0, 0.18)",
+        borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(28, 32, 40, 0.92)",
         muteBadgeFill: args.muted ? "rgba(189, 54, 54, 0.95)" : "rgba(0, 0, 0, 0.16)",
         muteBadgeStroke: args.muted ? "rgba(120, 22, 22, 0.8)" : "rgba(0, 0, 0, 0.28)",

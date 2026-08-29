@@ -91,12 +91,14 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
         false,
         "selected header is brightened (selection expressed by lightness, not border)",
     );
-    // 选中不再画边框 —— 由色块提亮表达（Ableton 式）。边框统一为淡收边。
+    // 选中 = 白色 2px 描边 + 色块提亮；未选中 = 淡收边 1px。
     assertEqual(
         selectedStyle.borderStroke,
-        style.borderStroke,
-        "selected uses the same subtle edge stroke (selection is expressed by brightening)",
+        "rgba(255, 255, 255, 0.92)",
+        "selected clip uses a bright white 2px stroke",
     );
+    assertEqual(selectedStyle.borderLineWidth, 2, "selected border is 2px");
+    assertEqual(style.borderLineWidth, 1, "unselected border is 1px");
     {
         const parseLum = (fill: string): number => {
             const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
