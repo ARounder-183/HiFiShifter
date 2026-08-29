@@ -223,7 +223,7 @@ export const WaveformTrackCanvas = React.memo(
             waveformHeight,
             viewportWidthPx,
             strokeColor,
-            strokeWidth = 3,
+            strokeWidth = 1,
             showAllTakes = true,
             takeSeparatorColor,
         } = props;

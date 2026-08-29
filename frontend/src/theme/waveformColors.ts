@@ -68,21 +68,22 @@ export function getWaveformColors(
     mode: ThemeMode,
     surface: "timeline" | "piano-roll" = "timeline",
 ): WaveformColors {
-    // 尝试从自定义主题读取波形颜色
-    try {
-        const appearance = loadAppearance();
-        if (appearance.activeCustomThemeId) {
-            const themes = loadCustomThemes();
-            const active = themes.find((t) => t.id === appearance.activeCustomThemeId);
-            if (active?.waveformColors) {
-                return active.waveformColors;
-            }
-        }
-    } catch {
-        // fallthrough to default
-    }
-
+    // 时间线波形颜色与 Clip 色块**强耦合**（亮色块配深波形），不能被自定义
+    // 主题覆盖——否则色块改了波形没跟着改，对比度会失调。
+    // 自定义主题只允许覆盖钢琴卷帘波形（画在深色画布上，与色块无关）。
     if (surface === "piano-roll") {
+        try {
+            const appearance = loadAppearance();
+            if (appearance.activeCustomThemeId) {
+                const themes = loadCustomThemes();
+                const active = themes.find((t) => t.id === appearance.activeCustomThemeId);
+                if (active?.waveformColors) {
+                    return active.waveformColors;
+                }
+            }
+        } catch {
+            // fallthrough to default
+        }
         return mode === "dark" ? darkPianoRollWaveformColors : lightPianoRollWaveformColors;
     }
     return mode === "dark" ? darkTimelineWaveformColors : lightTimelineWaveformColors;
