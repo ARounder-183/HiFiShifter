@@ -37,11 +37,10 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
     TRACK_ADD_ROW_HEIGHT,
-    buildRulerTicks,
-    gridStepBeats,
 } from "../";
-import type { RulerTick } from "../timeFormat.js";
-import { buildTempoGridLineXsForViewport } from "../../../../utils/tempoMap.js";
+import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
+import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
+import { createTimelineAxis } from "../runtime/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -178,9 +177,8 @@ export interface TimelineStateResult {
     contentWidth: number;
     contentHeight: number;
     dynamicProjectSec: number;
-    ticks: RulerTick[];
-    /** Tempo Map 显式网格线（内容坐标 x）；无 Tempo Map 时为 null。 */
-    tempoGridLineXs: { weak: number[]; strong: number[] } | null;
+    /** 统一刻度源：标尺刻度与背景网格线共用（由 buildTimelineTicks 生成）。 */
+    timelineTicks: TimelineTick[];
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -730,20 +728,27 @@ export function useTimelineState(): TimelineStateResult {
         (dropPreview && !dropPreview.trackId ? 1 : 0) + (clipDropNewTrack ? 1 : 0);
     const contentHeight = (s.tracks.length + dropExtraRows) * rowHeight + TRACK_ADD_ROW_HEIGHT;
 
-    // ── ticks（自适应标尺刻度）──────────────────────────────────
-    const ticks = useMemo(() => {
+    // ── 统一刻度源（标尺刻度 + 背景网格线）────────────────────────
+    // 网格与标尺消费同一份 tick，标尺只渲染其中 showLabel 的部分，因此标尺
+    // 刻度天然是网格线的子集，两者不可能错位（此前两者各用一套步长选择：
+    // 网格走 resolveGridLineSamplingPlan、标尺走 buildRulerTicks，Tempo Map
+    // 下 beat 与像素非线性，必然分叉）。
+    const timelineTicks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        return buildRulerTicks({
-            pxPerSec,
-            scrollLeft,
-            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
-            projectSec: dynamicProjectSec,
+        return buildTimelineTicks({
+            axis: createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                viewportWidthPx: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            }),
             bpm: s.bpm,
             beatsPerBar,
             grid: s.grid,
             primaryUnit: s.primaryTimeUnit,
             secondaryUnit: s.secondaryTimeUnit,
             minLabelSpacingPx: s.rulerLabelSpacingPx,
+            minGridSpacingPx: s.timelineSnap.gridMinSpacingPx,
+            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
             tempoMap: s.tempoMap,
         });
     }, [
@@ -753,37 +758,11 @@ export function useTimelineState(): TimelineStateResult {
         s.primaryTimeUnit,
         s.secondaryTimeUnit,
         s.rulerLabelSpacingPx,
-        s.tempoMap,
-        dynamicProjectSec,
-        viewportWidth,
-        pxPerSec,
-        scrollLeft,
-    ]);
-
-    // ── Tempo Map 显式网格线（供 BackgroundGrid 使用）──────────
-    const tempoGridLineXs = useMemo(() => {
-        return buildTempoGridLineXsForViewport({
-            tempoMap: s.tempoMap,
-            scrollLeft,
-            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
-            pxPerSec,
-            projectSec: dynamicProjectSec,
-            stepBeats: gridStepBeats(s.grid),
-            fallbackBpm: s.bpm,
-            fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
-            minSpacingPx: s.timelineSnap.gridMinSpacingPx,
-        });
-    }, [
-        s.tempoMap,
-        s.bpm,
-        s.beats,
-        s.grid,
         s.timelineSnap,
-        scrollLeft,
+        s.tempoMap,
         viewportWidth,
         pxPerSec,
-        dynamicProjectSec,
+        scrollLeft,
     ]);
 
     // ── clipsByTrackId ───────────────────────────────────────
@@ -1196,8 +1175,7 @@ export function useTimelineState(): TimelineStateResult {
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        ticks,
-        tempoGridLineXs,
+        timelineTicks,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,

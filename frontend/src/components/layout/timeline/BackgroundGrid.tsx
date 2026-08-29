@@ -3,6 +3,7 @@ import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
 import type { TimelineAxis } from "./runtime/timelineAxis";
+import type { TimelineTick } from "./runtime/buildTimelineTicks";
 import type { TimelineLayer } from "./runtime/timelineFrameCommitter";
 
 /**
@@ -61,6 +62,12 @@ export const BackgroundGrid: React.FC<{
     };
     /** 在统一帧提交中的绘制顺序，取 LAYER_ORDER 中的值；需与 viewportBus 同传。 */
     layerOrder?: number;
+    /**
+     * 统一刻度源（推荐）：提供时网格线直接画在刻度的内容坐标上，与标尺严格
+     * 同源。不提供时退化到按 pxPerBeat 自行采样——仅供尚未接入 axis 的调用方
+     * （参数编辑器）过渡使用。
+     */
+    ticks?: readonly TimelineTick[] | null;
 }> = ({
     contentWidth,
     contentHeight,
@@ -81,8 +88,21 @@ export const BackgroundGrid: React.FC<{
     strongLineXs = null,
     viewportBus,
     layerOrder,
+    ticks = null,
 }) => {
     const svgRef = useRef<SVGSVGElement | null>(null);
+
+    // 统一刻度源：拆成弱线/强线两组内容坐标，复用"显式线"绘制路径。
+    // Swing 与小节抽取已在 buildTimelineTicks 内完成，这里只负责画。
+    const tickLineXs = React.useMemo(() => {
+        if (!ticks || ticks.length === 0) return null;
+        const weak: number[] = [];
+        const strong: number[] = [];
+        for (const tick of ticks) {
+            (tick.isStrongGridLine ? strong : weak).push(tick.contentPx);
+        }
+        return { weak, strong };
+    }, [ticks]);
 
     const useViewport =
         viewportWidth != null &&
@@ -92,7 +112,11 @@ export const BackgroundGrid: React.FC<{
         Number.isFinite(scrollLeft);
     const isSticky = sticky && useViewport;
 
-    const useExplicitLines = weakLineXs != null && Array.isArray(weakLineXs);
+    // 统一刻度源优先：网格线与标尺同源。退化路径用调用方显式传入的数组
+    // （参数编辑器尚未接入 axis 时的过渡形态）。
+    const effectiveWeakXs = weakLineXs ?? tickLineXs?.weak ?? null;
+    const effectiveStrongXs = strongLineXs ?? tickLineXs?.strong ?? null;
+    const useExplicitLines = effectiveWeakXs != null && Array.isArray(effectiveWeakXs);
 
     const samplingViewportWidth =
         viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
@@ -115,8 +139,8 @@ export const BackgroundGrid: React.FC<{
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
         swingPercent: Math.max(0, Math.min(100, swingPercent)),
-        weakLineXs: weakLineXs,
-        strongLineXs: strongLineXs,
+        weakLineXs: effectiveWeakXs,
+        strongLineXs: effectiveStrongXs,
         width,
         height,
         contentWidth,
@@ -136,8 +160,8 @@ export const BackgroundGrid: React.FC<{
             weakStepPx: samplingPlan.weakStepPx,
             strongStepPx: samplingPlan.strongStepPx,
             swingPercent: Math.max(0, Math.min(100, swingPercent)),
-            weakLineXs,
-            strongLineXs,
+            weakLineXs: effectiveWeakXs,
+            strongLineXs: effectiveStrongXs,
             width,
             height,
             contentWidth,
@@ -291,8 +315,8 @@ export const BackgroundGrid: React.FC<{
         samplingPlan.weakStepPx,
         samplingPlan.strongStepPx,
         swingPercent,
-        weakLineXs,
-        strongLineXs,
+        effectiveWeakXs,
+        effectiveStrongXs,
         width,
         height,
         contentWidth,

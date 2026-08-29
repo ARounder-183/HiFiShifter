@@ -351,13 +351,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sameSourceConfirmOpen,
         setSameSourceConfirmOpen,
         sameSourceConfirmResolverRef,
-        secPerBeat,
         pxPerBeat,
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        ticks,
-        tempoGridLineXs,
+        timelineTicks,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -1360,10 +1358,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
                 <TimeRuler
                     scrollLeft={scrollLeft}
-                    ticks={ticks}
+                    ticks={timelineTicks}
                     pxPerBeat={pxPerBeat}
                     pxPerSec={pxPerSec}
-                    secPerBeat={secPerBeat}
                     viewportWidth={viewportWidth}
                     playheadSec={s.playheadSec}
                     playheadLineRef={rulerPlayheadLineRef}
@@ -2000,8 +1997,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 gridSwingPercent={
                                     s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
                                 }
-                                gridWeakLineXs={tempoGridLineXs?.weak ?? null}
-                                gridStrongLineXs={tempoGridLineXs?.strong ?? null}
+                                ticks={timelineTicks}
                                 gridBottomPx={trackGridHeight}
                                 gridLayerRef={trackGridLayerRef}
                                 gridOverlayLayerRef={trackGridOverlayLayerRef}

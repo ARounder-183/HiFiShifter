@@ -24,6 +24,7 @@ import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
 import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter.js";
+import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 
 export const TimelineSurface = React.memo(function TimelineSurface(props: {
     tracks: readonly TrackInfo[];
@@ -50,8 +51,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     gridVisible: boolean;
     gridMinSpacingPx?: number;
     gridSwingPercent?: number;
-    gridWeakLineXs?: number[] | null;
-    gridStrongLineXs?: number[] | null;
+    /** 统一刻度源：网格线与标尺刻度同源（由 buildTimelineTicks 生成）。 */
+    ticks: readonly TimelineTick[];
     /** 网格内容底部边界（内容绝对坐标 y，通常为最后一条轨道底边）。 */
     gridBottomPx: number;
     gridLayerRef: React.RefObject<HTMLDivElement | null>;
@@ -70,8 +71,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         visible: props.gridVisible,
         minSpacingPx: props.gridMinSpacingPx,
         swingPercent: props.gridSwingPercent,
-        weakLineXs: props.gridWeakLineXs ?? null,
-        strongLineXs: props.gridStrongLineXs ?? null,
+        ticks: props.ticks,
         sticky: true,
         viewportTopPx: 0,
         contentBottomPx: props.gridBottomPx,

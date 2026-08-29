@@ -81,21 +81,15 @@ import {
     MAX_PX_PER_SEC,
     MIN_PX_PER_SEC,
     TimeRuler,
-    buildRulerTicks,
     clamp,
     formatCursorTime,
-    gridStepBeats,
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
-import {
-    buildScaleSegments,
-    buildTempoGridLineXsForViewport,
-    effectiveScaleAtSec,
-} from "../../utils/tempoMap";
+import { buildScaleSegments, effectiveScaleAtSec } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
 import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
@@ -116,6 +110,8 @@ import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
+import { createTimelineAxis } from "./timeline/runtime/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
@@ -4131,32 +4127,37 @@ export const PianoRollPanel: React.FC = () => {
 
     const currentDrawToolIcon = currentDrawTool === "vibrato" ? vibratoToolIcon : <Pencil1Icon />;
 
-    const timeRulerTicks = useMemo(
+    // 统一刻度源：标尺刻度与背景网格线共用，与时间线侧同一实现，
+    // 保证两个面板的网格/标尺位置严格同源于 axis 投影。
+    const timelineTicks = useMemo(
         () =>
-            buildRulerTicks({
-                pxPerSec,
-                scrollLeft,
-                viewportWidth: viewSize.w,
-                projectSec: dynamicProjectSec,
+            buildTimelineTicks({
+                axis: createTimelineAxis({
+                    pxPerSec,
+                    scrollLeftPx: scrollLeft,
+                    viewportWidthPx: viewSize.w,
+                }),
                 bpm: s.bpm,
                 beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
                 grid: s.grid,
                 primaryUnit: s.primaryTimeUnit,
                 secondaryUnit: s.secondaryTimeUnit,
                 minLabelSpacingPx: s.rulerLabelSpacingPx,
+                minGridSpacingPx: s.timelineSnap.gridMinSpacingPx,
+                swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
                 tempoMap: s.tempoMap,
             }),
         [
             pxPerSec,
             scrollLeft,
             viewSize.w,
-            dynamicProjectSec,
             s.bpm,
             s.beats,
             s.grid,
             s.primaryTimeUnit,
             s.secondaryTimeUnit,
             s.rulerLabelSpacingPx,
+            s.timelineSnap,
             s.tempoMap,
         ],
     );
@@ -4170,33 +4171,6 @@ export const PianoRollPanel: React.FC = () => {
         [s.bpm, s.beats, s.grid, s.tempoMap],
     );
 
-    // ── Tempo Map 显式网格线（参数编辑器背景网格）─────────────
-    const tempoGridLineXs = useMemo(
-        () =>
-            buildTempoGridLineXsForViewport({
-                tempoMap: s.tempoMap,
-                scrollLeft,
-                viewportWidth: viewSize.w,
-                pxPerSec,
-                projectSec: dynamicProjectSec,
-                stepBeats: gridStepBeats(s.grid),
-                fallbackBpm: s.bpm,
-                fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-                swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
-                minSpacingPx: s.timelineSnap.gridMinSpacingPx,
-            }),
-        [
-            s.tempoMap,
-            s.bpm,
-            s.beats,
-            s.grid,
-            s.timelineSnap,
-            scrollLeft,
-            viewSize.w,
-            pxPerSec,
-            dynamicProjectSec,
-        ],
-    );
     const handlePrimaryUnitChange = useCallback(
         (unit: TimeUnit) => {
             dispatch(setPrimaryTimeUnit(unit));
@@ -5323,10 +5297,9 @@ export const PianoRollPanel: React.FC = () => {
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
                     <TimeRuler
                         scrollLeft={scrollLeft}
-                        ticks={timeRulerTicks}
+                        ticks={timelineTicks}
                         pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
-                        secPerBeat={secPerBeat}
                         viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}
                         playheadLineRef={rulerPlayheadLineRef}
@@ -5401,8 +5374,7 @@ export const PianoRollPanel: React.FC = () => {
                                             : 0
                                     }
                                     layerRef={gridLayerRef}
-                                    weakLineXs={tempoGridLineXs?.weak ?? null}
-                                    strongLineXs={tempoGridLineXs?.strong ?? null}
+                                    ticks={timelineTicks}
                                     sticky
                                 />
 
