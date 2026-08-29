@@ -169,20 +169,21 @@ test("waveform/geometry.test.ts scripted checks", async () => {
         "gain-boosted envelope clamps to the waveform rect (flat-top display)",
     );
 
-    // gain = 1 时钳制不影响正常包络（回归保护）。
+    // gain = 1 时钳制不影响正常包络（回归保护）。峰值取 ±0.5 保证精确：
+    // 中心 50 ± 0.5×50 → 25 / 75。
     const unity = buildWaveformGeometry({
         scene,
         color: "#ffffff",
         getPeaks: () => ({
-            min: new Float32Array([-0.4]),
-            max: new Float32Array([0.6]),
+            min: new Float32Array([-0.5]),
+            max: new Float32Array([0.5]),
             dataStartSec: 0,
             dataDurationSec: 1,
         }),
     });
     assertEqual(
         [unity.vertices[1], unity.vertices[7]],
-        [20, 70],
+        [25, 75],
         "unity gain envelope is untouched by the clamp",
     );
 });
