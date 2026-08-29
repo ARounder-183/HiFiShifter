@@ -458,6 +458,7 @@ export const zhCN = {
     color_magenta: "洋红",
     color_yellow: "黄",
     color_red: "红",
+    color_gray: "灰",
 
     progress_est_remaining: "预计剩余 {time}",
     progress_cancel: "取消",

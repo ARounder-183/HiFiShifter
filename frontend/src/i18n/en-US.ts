@@ -555,6 +555,7 @@ export const enUS = {
     color_magenta: "Magenta",
     color_yellow: "Yellow",
     color_red: "Red",
+    color_gray: "Gray",
 
     progress_est_remaining: "Est. {time} remaining",
     progress_cancel: "Cancel",
