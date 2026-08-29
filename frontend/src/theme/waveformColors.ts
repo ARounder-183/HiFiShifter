@@ -22,7 +22,7 @@ export interface WaveformColors {
  * 深色主题的时间线波形颜色。
  *
  * 时间线波形画在**饱和的轨道色块**上（timelineCanvasStyle 的色块方案），
- * 采用半透明深黑：不透明度 ~0.70 叠在色块上呈现"深色调波形"（REAPER 式），
+ * 采用半透明深黑：不透明度 ~0.73 叠在色块上呈现"深色调波形"（REAPER 式），
  * 轨道色仍从波形中透出，既保证对比度又不至于把色块完全盖死（全不透明
  * 纯黑会吞掉整个色块，见用户实测反馈）。
  * 钢琴卷帘波形画在深色画布上，仍为浅色（见下方 pianoRoll 组）。两个
@@ -30,7 +30,7 @@ export interface WaveformColors {
  */
 const darkTimelineWaveformColors: WaveformColors = {
     fill: "#04060c",
-    stroke: "rgba(0, 0, 0, 0.70)",
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#02203a",
 };
 
@@ -39,7 +39,7 @@ const darkTimelineWaveformColors: WaveformColors = {
  */
 const lightTimelineWaveformColors: WaveformColors = {
     fill: "#080b14",
-    stroke: "rgba(0, 0, 0, 0.70)",
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#002848",
 };
 
