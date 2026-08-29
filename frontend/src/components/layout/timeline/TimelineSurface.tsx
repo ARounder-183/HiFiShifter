@@ -23,6 +23,7 @@ import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
 import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
+import { LAYER_ORDER } from "./runtime/timelineFrameCommitter.js";
 
 export const TimelineSurface = React.memo(function TimelineSurface(props: {
     tracks: readonly TrackInfo[];
@@ -79,16 +80,12 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     // 挂载时按总线快照立即同步一次网格：恢复滚动位置时 React 的 scrollLeft
     // state 可能仍是 rAF 前值，不能让网格与 Clip 体画布在首帧分叉。
     React.useLayoutEffect(() => {
-        const viewport = timelineViewportBus.getSnapshot();
-        invokeGridRedrawHandler(
-            props.gridLayerRef.current,
-            viewport.scrollLeft,
-            viewport.scrollTopPx,
-        );
+        const axis = timelineViewportBus.getAxis();
+        invokeGridRedrawHandler(props.gridLayerRef.current, axis.scrollLeftPx, axis.scrollTopPx);
         invokeGridRedrawHandler(
             props.gridOverlayLayerRef.current,
-            viewport.scrollLeft,
-            viewport.scrollTopPx,
+            axis.scrollLeftPx,
+            axis.scrollTopPx,
         );
     }, [props.gridLayerRef, props.gridOverlayLayerRef, props.gridVisible]);
 
@@ -97,7 +94,12 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             className="sticky left-0 top-0 pointer-events-none"
             style={{ width: props.widthPx, zIndex: 1 }}
         >
-            <BackgroundGrid {...gridBaseProps} layerRef={props.gridLayerRef} />
+            <BackgroundGrid
+                {...gridBaseProps}
+                layerRef={props.gridLayerRef}
+                viewportBus={timelineViewportBus}
+                layerOrder={LAYER_ORDER.gridBack}
+            />
             <div
                 className="absolute pointer-events-none"
                 style={{
@@ -139,6 +141,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
                 lineOpacity={0.38}
+                viewportBus={timelineViewportBus}
+                layerOrder={LAYER_ORDER.gridOverlay}
             />
             <div
                 ref={props.playheadLineRef}

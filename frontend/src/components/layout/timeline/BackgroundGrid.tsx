@@ -1,7 +1,9 @@
-import React, { useCallback, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
+import type { TimelineAxis } from "./runtime/timelineAxis";
+import type { TimelineLayer } from "./runtime/timelineFrameCommitter";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -49,6 +51,16 @@ export const BackgroundGrid: React.FC<{
     /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
     weakLineXs?: number[] | null;
     strongLineXs?: number[] | null;
+    /**
+     * 视口总线：提供时本网格会注册为统一帧提交的图层，由提交器保证与 clip 体
+     * / 波形的绘制顺序固定。不提供时仍走 gridRedrawBridge 的命令式调用。
+     */
+    viewportBus?: {
+        getAxis(): TimelineAxis;
+        register(layer: TimelineLayer, order: number): () => void;
+    };
+    /** 在统一帧提交中的绘制顺序，取 LAYER_ORDER 中的值；需与 viewportBus 同传。 */
+    layerOrder?: number;
 }> = ({
     contentWidth,
     contentHeight,
@@ -67,6 +79,8 @@ export const BackgroundGrid: React.FC<{
     contentBottomPx,
     weakLineXs = null,
     strongLineXs = null,
+    viewportBus,
+    layerOrder,
 }) => {
     const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -300,6 +314,20 @@ export const BackgroundGrid: React.FC<{
             }
         };
     }, [draw, layerRef]);
+
+    // 注册为统一帧提交的图层：滚动 / 缩放时由提交器按固定顺序调用，无需调用
+    // 方记得单独通知网格（历史上漏通知会造成网格与 Clip/波形分层）。
+    useEffect(() => {
+        const bus = viewportBus;
+        if (!bus || layerOrder == null) return;
+        return bus.register(
+            {
+                name: `grid-${layerOrder}`,
+                paint: (axis) => draw(axis.scrollLeftPx, axis.scrollTopPx),
+            },
+            layerOrder,
+        );
+    }, [draw, layerOrder, viewportBus]);
 
     if (!visible) return null;
 

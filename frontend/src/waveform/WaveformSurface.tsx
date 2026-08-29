@@ -19,7 +19,8 @@ import React from "react";
 
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
 import type { TimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
-import { withAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
+import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
+import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import { buildWaveformGeometry } from "./geometry";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
@@ -44,16 +45,13 @@ export interface WaveformSurfaceProps {
      * 仅在无 viewportSource（非总线驱动）时作为回退值；总线驱动时一律以
      * axis.scrollTopPx 为准。 */
     viewportTopPx?: number;
+    /**
+     * 视口来源（时间线或参数编辑器的总线）。
+     * 提供时由总线的统一帧提交器驱动本图层的同步重绘。
+     */
     viewportSource?: {
-        getSnapshot(): {
-            scrollLeft: number;
-            pxPerSec: number;
-            viewportWidth: number;
-            scrollTopPx?: number;
-        };
-        subscribe(
-            listener: (scrollLeft: number, pxPerSec: number, width: number) => void,
-        ): () => void;
+        getAxis(): TimelineAxis;
+        register(layer: TimelineLayer, order: number): () => void;
     };
 }
 
@@ -104,22 +102,15 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      * 反算），以保证与 clip 体画布、网格、标尺严格同源。
      */
     const draw = React.useCallback(() => {
-        const liveViewport = props.viewportSource?.getSnapshot();
-        // 滚动事件在绘制前触发：总线快照优先，保证 sticky 波形面与原生滚动的
-        // DOM 内容层在同一帧提交位移（DAW 式无缝滚动）。
-        const axis = liveViewport
-            ? withAxis(props.axis, {
-                  pxPerSec: liveViewport.pxPerSec,
-                  scrollLeftPx: liveViewport.scrollLeft,
-                  viewportWidthPx: liveViewport.viewportWidth,
-                  scrollTopPx: liveViewport.scrollTopPx,
-              })
-            : props.axis;
+        // 总线驱动时以总线投影为准：滚动事件在绘制前触发，sticky 波形面必须与
+        // 原生滚动的 DOM 内容层在同一帧提交位移（DAW 式无缝滚动）。
+        const source = props.viewportSource;
+        const axis = source ? source.getAxis() : props.axis;
         const pxPerSec = axis.pxPerSec;
         const widthPx = axis.viewportWidthPx;
         // 竖直锚点：行坐标是内容绝对值，滚动容器竖直滚动时必须同步平移，
         // 否则波形与 DOM Clip 在竖直方向分层。
-        const viewportTopPx = liveViewport ? axis.scrollTopPx : (props.viewportTopPx ?? 0);
+        const viewportTopPx = source ? axis.scrollTopPx : (props.viewportTopPx ?? 0);
         const scene = buildWaveformScene({
             axis,
             widthPx,
@@ -255,7 +246,9 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             drawRef.current();
         };
         apply();
-        return source.subscribe(() => apply());
+        // 注册到统一帧提交器：由它保证本图层与网格 / clip 体的绘制顺序固定，
+        // 且同一帧内重复的视口提交只触发一次重绘。
+        return source.register({ name: "waveform", paint: apply }, LAYER_ORDER.waveform);
     }, [props.viewportSource]);
 
     React.useEffect(

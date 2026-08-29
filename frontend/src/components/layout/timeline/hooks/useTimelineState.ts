@@ -20,7 +20,6 @@ import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
-import { invokeGridRedrawHandler } from "../gridRedrawBridge";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
@@ -459,11 +458,9 @@ export function useTimelineState(): TimelineStateResult {
             scrollTopPxRef.current,
             rowHeightRef.current,
         );
-        // 背景网格走同一条同步链：滚动事件在 paint 前触发，
-        // 网格、Clip 体、波形必须在同一帧提交，禁止等 React state/rAF。
-        // 同时携带 scrollTop：sticky 网格需要据此裁剪出轨道区底边。
-        invokeGridRedrawHandler(trackGridLayerRef.current, next, scrollTopPxRef.current);
-        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, next, scrollTopPxRef.current);
+        // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
+        // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
+        // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -487,9 +484,6 @@ export function useTimelineState(): TimelineStateResult {
             next,
             rowHeightRef.current,
         );
-        // 竖直滚动同样要在 paint 前重画网格，以裁剪轨道区底边。
-        invokeGridRedrawHandler(trackGridLayerRef.current, scrollLeftRef.current, next);
-        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, scrollLeftRef.current, next);
     }, []);
 
     const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(

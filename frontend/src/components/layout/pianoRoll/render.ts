@@ -13,6 +13,7 @@
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { clamp } from "../timeline";
+import { rasterize } from "../timeline/runtime/canvasRaster";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime, timeToPixel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
@@ -433,17 +434,10 @@ export function drawPianoRoll(args: {
         if (ctx) {
             const h = viewSize.h;
             const w = AXIS_W;
-            const dpr = Math.max(1, window.devicePixelRatio || 1);
-            const cw = Math.max(1, Math.floor(w * dpr));
-            const ch = Math.max(1, Math.floor(h * dpr));
-            if (axisCanvas.width !== cw || axisCanvas.height !== ch) {
-                axisCanvas.width = cw;
-                axisCanvas.height = ch;
-                axisCanvas.style.width = `${w}px`;
-                axisCanvas.style.height = `${h}px`;
-            }
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            ctx.clearRect(0, 0, w, h);
+            // 统一光栅化契约：与时间线画布、波形面共用同一套取整规则。
+            const target = rasterize(axisCanvas, w, h, window.devicePixelRatio || 1);
+            ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+            ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
 
             ctx.strokeStyle = colors.axisBorder;
             ctx.beginPath();
@@ -647,18 +641,11 @@ export function drawPianoRoll(args: {
     if (!ctx) return;
 
     const { w, h } = viewSize;
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const cw = Math.max(1, Math.floor(w * dpr));
-    const ch = Math.max(1, Math.floor(h * dpr));
-    if (canvas.width !== cw || canvas.height !== ch) {
-        canvas.width = cw;
-        canvas.height = ch;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-    }
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
+    // 统一光栅化契约：此前这里用 Math.floor，而波形面用 Math.round，两者在
+    // 半像素 DPR 下会差一整个物理像素；现在全部收敛到 rasterize()。
+    const target = rasterize(canvas, w, h, window.devicePixelRatio || 1);
+    ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+    ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
 
     // 统一用 sec 坐标系：所有 x 坐标 = timeSec * pxPerSec - scrollLeft
     const visibleStartSec = scrollLeft / Math.max(1e-9, pxPerSec);

@@ -1,26 +1,10 @@
 import type { WaveformGeometry } from "./geometry.ts";
+import { rasterize } from "../components/layout/timeline/runtime/canvasRaster.ts";
 
 export interface WaveformSurfaceRenderer {
     readonly kind: "webgl2" | "canvas2d";
     render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void;
     dispose(): void;
-}
-
-function resizeCanvas(
-    canvas: HTMLCanvasElement,
-    widthPx: number,
-    heightPx: number,
-    dpr: number,
-): { width: number; height: number } {
-    const width = Math.max(1, Math.round(widthPx * dpr));
-    const height = Math.max(1, Math.round(heightPx * dpr));
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-    const cssWidth = `${Math.max(1, widthPx)}px`;
-    const cssHeight = `${Math.max(1, heightPx)}px`;
-    if (canvas.style.width !== cssWidth) canvas.style.width = cssWidth;
-    if (canvas.style.height !== cssHeight) canvas.style.height = cssHeight;
-    return { width, height };
 }
 
 function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
@@ -109,12 +93,15 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
 
     render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void {
         const gl = this.gl;
-        const internal = resizeCanvas(this.canvas, widthPx, heightPx, dpr);
-        gl.viewport(0, 0, internal.width, internal.height);
+        const target = rasterize(this.canvas, widthPx, heightPx, dpr);
+        gl.viewport(0, 0, target.physicalWidth, target.physicalHeight);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(this.program);
-        gl.uniform2f(this.resolutionLocation, widthPx, heightPx);
+        // u_resolution 必须传 physical/dpr：传 CSS 尺寸会让 NDC 被拉伸到
+        // physical 个像素，实际缩放比变成 physical/css（≠ dpr），波形会相对
+        // clip / 网格产生随窗口宽度跳动的亚像素偏移。
+        gl.uniform2f(this.resolutionLocation, target.resolutionWidth, target.resolutionHeight);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
         gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices, gl.DYNAMIC_DRAW);
 
@@ -153,14 +140,14 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
     }
 
     render(geometry: WaveformGeometry, widthPx: number, heightPx: number, dpr: number): void {
-        const internal = resizeCanvas(this.canvas, widthPx, heightPx, dpr);
-        resizeCanvas(this.backCanvas, widthPx, heightPx, dpr);
+        const target = rasterize(this.canvas, widthPx, heightPx, dpr);
+        rasterize(this.backCanvas, widthPx, heightPx, dpr);
         const back = this.backCanvas.getContext("2d");
         const visible = this.canvas.getContext("2d");
         if (!back || !visible) throw new Error("Canvas 2D is unavailable");
 
-        back.setTransform(dpr, 0, 0, dpr, 0, 0);
-        back.clearRect(0, 0, widthPx, heightPx);
+        back.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+        back.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
         back.lineWidth = 1;
         const vertices = geometry.vertices;
         // 相邻段几乎总是同一颜色（逐像素 min/max 包络）：把同色段合并进
@@ -195,7 +182,7 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
         if (batchStart < verticesEnd) strokeBatch(batchStart, verticesEnd);
 
         visible.setTransform(1, 0, 0, 1, 0, 0);
-        visible.clearRect(0, 0, internal.width, internal.height);
+        visible.clearRect(0, 0, target.physicalWidth, target.physicalHeight);
         visible.drawImage(this.backCanvas, 0, 0);
     }
 
