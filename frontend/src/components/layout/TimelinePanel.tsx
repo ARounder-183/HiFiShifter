@@ -1909,15 +1909,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 contentHeight={contentHeight}
                             />
 
-                            <div
-                                className="absolute left-0 right-0 pointer-events-none z-10"
-                                style={{
-                                    top: contentHeight - TRACK_ADD_ROW_HEIGHT,
-                                    height: TRACK_ADD_ROW_HEIGHT,
-                                    backgroundColor: "var(--qt-graph-bg)",
-                                }}
-                            />
-
                             {/* Drop preview (ghost item) */}
                             {dropPreview ? (
                                 <div

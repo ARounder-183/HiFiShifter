@@ -167,6 +167,8 @@ export function drawTimelineCanvas(
             startTrackIndex: number;
             rowCount: number;
             rowHeight: number;
+            /** 轨道内容底部边界；与网格使用同一个 trackGridHeight。 */
+            contentBottomPx?: number;
         };
         /** 当前视口水平/竖直偏移（内容坐标），供分界线横跨可见区域。 */
         viewportLeft?: number;
@@ -183,11 +185,14 @@ export function drawTimelineCanvas(
     // 轨道横向分界线由 sticky 画布统一绘制：工程末尾之后的空白区也要有
     // 同样的分界线，且滚动/缩放时与 Clip 体同帧同步。
     if (args.rowGuides && args.rowGuides.rowCount > 0) {
-        const { startTrackIndex, rowCount, rowHeight } = args.rowGuides;
+        const { startTrackIndex, rowCount, rowHeight, contentBottomPx } = args.rowGuides;
         const viewportLeft = Number.isFinite(args.viewportLeft) ? (args.viewportLeft as number) : 0;
         const viewportTopPx = Number.isFinite(args.viewportTopPx)
             ? (args.viewportTopPx as number)
             : 0;
+        const bottomPx = Number.isFinite(contentBottomPx)
+            ? (contentBottomPx as number)
+            : Number.POSITIVE_INFINITY;
         const borderColor =
             (typeof document !== "undefined"
                 ? getComputedStyle(document.documentElement).getPropertyValue("--qt-border").trim()
@@ -198,6 +203,9 @@ export function drawTimelineCanvas(
         for (let index = 1; index <= rowCount; index += 1) {
             const y = (startTrackIndex + index) * rowHeight;
             if (y < viewportTopPx - 1 || y > viewportTopPx + args.height + 1) continue;
+            // 和网格使用完全相同的轨道内容底边：正常区域与工程末尾延长段落
+            // 都不会在轨道区下方画线，也不需要额外 DOM 遮挡。
+            if (y > bottomPx + 1e-6) continue;
             ctx.beginPath();
             ctx.moveTo(viewportLeft, y);
             ctx.lineTo(viewportLeft + args.width, y);

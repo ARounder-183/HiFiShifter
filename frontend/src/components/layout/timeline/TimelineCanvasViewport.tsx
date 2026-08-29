@@ -18,6 +18,8 @@ export const TimelineCanvasViewport: React.FC<{
         startTrackIndex: number;
         rowCount: number;
         rowHeight: number;
+        /** 轨道内容底部边界，与网格相同；分界线只画到该边界。 */
+        contentBottomPx?: number;
     };
 }> = ({ width, height, model, rowGuides }) => {
     const canvasRef = React.useRef<HTMLCanvasElement | null>(null);

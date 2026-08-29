@@ -99,6 +99,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                         startTrackIndex: props.startTrackIndex,
                         rowCount: props.tracks.length,
                         rowHeight: props.rowHeight,
+                        contentBottomPx: props.gridBottomPx,
                     }}
                 />
             </div>
