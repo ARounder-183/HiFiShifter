@@ -73,6 +73,30 @@ export const paramsApi = {
             checkpoint,
         ),
 
+    /**
+     * "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。
+     *
+     * 由后端一次性完成 pitch（用户编辑过时）/ tension / 所有已存在的自动化
+     * 曲线的批量映射与旧范围恢复——曲线清单只能由后端枚举，前端旧实现只
+     * 覆盖 pitch+tension，导致其余参数线在拉伸后遗留在旧位置。
+     */
+    stretchTrackLinkedParams: (
+        trackId: string,
+        mappings: Array<{
+            oldStartSec: number;
+            oldLengthSec: number;
+            newStartSec: number;
+            newLengthSec: number;
+        }>,
+        checkpoint?: boolean,
+    ) =>
+        invoke<{ ok: boolean }>(
+            "stretch_track_linked_params",
+            trackId,
+            mappings,
+            checkpoint,
+        ),
+
     getStaticParam: (trackId: string, param: string) =>
         invoke<StaticParamValuePayload>("get_static_param", trackId, param),
 

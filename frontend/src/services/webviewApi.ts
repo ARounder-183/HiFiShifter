@@ -92,6 +92,7 @@ export const webApi = {
     getParamFrames: paramsApi.getParamFrames,
     setParamFrames: paramsApi.setParamFrames,
     restoreParamFrames: paramsApi.restoreParamFrames,
+    stretchTrackLinkedParams: paramsApi.stretchTrackLinkedParams,
     pasteVocalShifterClipboard: paramsApi.pasteVocalShifterClipboard,
     pasteReaperClipboard: paramsApi.pasteReaperClipboard,
 

@@ -139,22 +139,20 @@ function wrapIntoMediaDomain(
     return v;
 }
 
-export function resolveStretchParamTypes(
-    pitchEditUserModified: boolean | null | undefined,
-): Array<"pitch" | "tension"> {
-    // 未手动编辑的 pitch 曲线由后端根据 clip 几何自动重建，
-    // 前端若再次映射会造成“二次拉伸”。
-    if (pitchEditUserModified === false) {
-        return ["tension"];
-    }
-    return ["pitch", "tension"];
-}
+type StretchRangeMapping = {
+    oldStartSec: number;
+    oldLengthSec: number;
+    newStartSec: number;
+    newLengthSec: number;
+};
 
 /**
  * 拉伸后对参数线进行时域映射（拉伸或压缩）。
- * 将旧范围 [oldStartSec, oldStartSec+oldLengthSec] 内的参数值，
- * 线性重映射到新范围 [newStartSec, newStartSec+newLengthSec]，
- * 并将不再被音频块覆盖的旧帧恢复为原始值。
+ *
+ * 映射由后端 `stretch_track_linked_params` 一次性完成：pitch（用户编辑过时）、
+ * tension 以及该根轨道上所有已存在的自动化曲线（volume/气声/子轨道偏移等，
+ * 无论参数是否在 UI 中激活或有数据）。旧的前端实现只映射 pitch+tension，
+ * 导致其余参数线在拉伸后遗留在旧位置，剪辑新范围内表现为被初始化。
  */
 async function stretchLinkedParams(
     trackId: string,
@@ -169,242 +167,23 @@ async function stretchLinkedParams(
     ) {
         return;
     }
-
-    // 获取帧周期（通过最小量探针请求）。
-    // 同时读取 pitch_edit_user_modified 以决定是否应手动映射 pitch。
-    const probe = await paramsApi.getParamFrames(trackId, "pitch", 0, 1, 1);
-    if (!probe?.ok) return;
-    const fp = Math.max(1, Number(probe.frame_period_ms) || 5);
-    const stretchParams = resolveStretchParamTypes(probe.pitch_edit_user_modified);
-
-    const oldStartFrame = Math.round((oldStartSec * 1000) / fp);
-    const oldEndFrame = Math.round(((oldStartSec + oldLengthSec) * 1000) / fp);
-    const oldFrameCount = Math.max(1, oldEndFrame - oldStartFrame);
-
-    const newStartFrame = Math.round((newStartSec * 1000) / fp);
-    const newEndFrame = Math.round(((newStartSec + newLengthSec) * 1000) / fp);
-    const newFrameCount = Math.max(1, newEndFrame - newStartFrame);
-
-    for (const paramType of stretchParams) {
-        const res = await paramsApi.getParamFrames(
-            trackId,
-            paramType,
-            oldStartFrame,
-            oldFrameCount,
-            1,
-        );
-        if (!res?.ok) continue;
-        const oldValues = (res.edit ?? []).map((v) => Number(v) || 0);
-        if (oldValues.length === 0) continue;
-
-        // 线性插值时域映射：用旧帧值填充新帧
-        const newValues = new Array<number>(newFrameCount);
-        const oldMaxIdx = oldValues.length - 1;
-        const newMaxIdx = newFrameCount > 1 ? newFrameCount - 1 : 1;
-        const ratio = oldMaxIdx / newMaxIdx;
-
-        for (let i = 0; i < newFrameCount; i++) {
-            const oldIdxF = i * ratio;
-            const lo = oldIdxF | 0;
-            const hi = lo < oldMaxIdx ? lo + 1 : oldMaxIdx;
-            const frac = oldIdxF - lo;
-            const loVal = oldValues[lo] ?? 0;
-            const hiVal = oldValues[hi] ?? 0;
-            if (paramType === "pitch") {
-                // pitch=0 表示无效（无声）帧，保留 0
-                if (loVal === 0 && hiVal === 0) {
-                    newValues[i] = 0;
-                } else if (loVal === 0) {
-                    newValues[i] = 0;
-                } else if (hiVal === 0) {
-                    newValues[i] = frac < 0.5 ? loVal : 0;
-                } else {
-                    newValues[i] = loVal + (hiVal - loVal) * frac;
-                }
-            } else {
-                newValues[i] = loVal + (hiVal - loVal) * frac;
-            }
-        }
-
-        // 将重映射后的值写入新范围
-        await paramsApi.setParamFrames(trackId, paramType, newStartFrame, newValues, false);
-
-        // 恢复旧范围中不再被新音频块覆盖的帧（还原到原始值）
-        const newRangeMax = newStartFrame + newFrameCount - 1;
-        const oldRangeMax = oldStartFrame + oldFrameCount - 1;
-
-        if (oldStartFrame < newStartFrame) {
-            const clearLen = newStartFrame - oldStartFrame;
-            void paramsApi.restoreParamFrames(trackId, paramType, oldStartFrame, clearLen, false);
-        }
-        if (oldRangeMax > newRangeMax) {
-            const clearFrom = newRangeMax + 1;
-            const clearLen = oldRangeMax - newRangeMax;
-            void paramsApi.restoreParamFrames(trackId, paramType, clearFrom, clearLen, false);
-        }
-    }
-}
-
-type StretchRangeMapping = {
-    oldStartSec: number;
-    oldLengthSec: number;
-    newStartSec: number;
-    newLengthSec: number;
-};
-
-function buildMappedParamValues(
-    oldValues: number[],
-    paramType: "pitch" | "tension",
-    newFrameCount: number,
-): number[] {
-    const newValues = new Array<number>(newFrameCount);
-    const oldMaxIdx = oldValues.length - 1;
-    const newMaxIdx = newFrameCount > 1 ? newFrameCount - 1 : 1;
-    const ratio = oldMaxIdx / newMaxIdx;
-
-    for (let i = 0; i < newFrameCount; i++) {
-        const oldIdxF = i * ratio;
-        const lo = oldIdxF | 0;
-        const hi = lo < oldMaxIdx ? lo + 1 : oldMaxIdx;
-        const frac = oldIdxF - lo;
-        const loVal = oldValues[lo] ?? 0;
-        const hiVal = oldValues[hi] ?? 0;
-        if (paramType === "pitch") {
-            if (loVal === 0 && hiVal === 0) {
-                newValues[i] = 0;
-            } else if (loVal === 0) {
-                newValues[i] = 0;
-            } else if (hiVal === 0) {
-                newValues[i] = frac < 0.5 ? loVal : 0;
-            } else {
-                newValues[i] = loVal + (hiVal - loVal) * frac;
-            }
-        } else {
-            newValues[i] = loVal + (hiVal - loVal) * frac;
-        }
-    }
-
-    return newValues;
-}
-
-function subtractIntervals(
-    range: { start: number; end: number },
-    excluded: Array<{ start: number; end: number }>,
-): Array<{ start: number; end: number }> {
-    const sorted = excluded
-        .filter((item) => item.end >= range.start && item.start <= range.end)
-        .sort((a, b) => a.start - b.start);
-    const result: Array<{ start: number; end: number }> = [];
-    let cursor = range.start;
-
-    for (const item of sorted) {
-        if (cursor < item.start) {
-            result.push({
-                start: cursor,
-                end: Math.min(item.start - 1, range.end),
-            });
-        }
-        cursor = Math.max(cursor, item.end + 1);
-        if (cursor > range.end) break;
-    }
-
-    if (cursor <= range.end) {
-        result.push({ start: cursor, end: range.end });
-    }
-
-    return result;
+    await stretchTrackLinkedParams(trackId, [
+        { oldStartSec, oldLengthSec, newStartSec, newLengthSec },
+    ]);
 }
 
 /**
- * Stretch parameter lines for several clips on the same track as one batch.
- *
- * Per-clip independent writes were racing with per-clip restores: the old
- * range of one clip can overlap the new range of a neighbouring clip, so a
- * restore could erase freshly written mapped values. This version writes all
- * new ranges first, then only restores old-range parts that are not covered
- * by any new range on that track.
+ * Stretch parameter lines for several clips on the same root track as one
+ * batch. The backend writes all new ranges first, then restores old-range
+ * parts not covered by any new range, so neighbouring clips cannot erase
+ * each other's freshly written values.
  */
 async function stretchTrackLinkedParams(
     trackId: string,
     mappings: StretchRangeMapping[],
 ): Promise<void> {
     if (mappings.length === 0) return;
-
-    const probe = await paramsApi.getParamFrames(trackId, "pitch", 0, 1, 1);
-    if (!probe?.ok) return;
-    const fp = Math.max(1, Number(probe.frame_period_ms) || 5);
-    const stretchParams = resolveStretchParamTypes(probe.pitch_edit_user_modified);
-
-    const frameMappings = mappings.map((mapping) => {
-        const oldStartFrame = Math.round((mapping.oldStartSec * 1000) / fp);
-        const oldEndFrame = Math.round(((mapping.oldStartSec + mapping.oldLengthSec) * 1000) / fp);
-        const oldFrameCount = Math.max(1, oldEndFrame - oldStartFrame);
-
-        const newStartFrame = Math.round((mapping.newStartSec * 1000) / fp);
-        const newEndFrame = Math.round(((mapping.newStartSec + mapping.newLengthSec) * 1000) / fp);
-        const newFrameCount = Math.max(1, newEndFrame - newStartFrame);
-
-        return { oldStartFrame, oldFrameCount, newStartFrame, newFrameCount };
-    });
-
-    const newRanges = frameMappings.map((mapping) => ({
-        start: mapping.newStartFrame,
-        end: mapping.newStartFrame + mapping.newFrameCount - 1,
-    }));
-
-    for (const paramType of stretchParams) {
-        const fetched = await Promise.all(
-            frameMappings.map(async (mapping) => {
-                const res = await paramsApi.getParamFrames(
-                    trackId,
-                    paramType,
-                    mapping.oldStartFrame,
-                    mapping.oldFrameCount,
-                    1,
-                );
-                if (!res?.ok) return null;
-                return {
-                    mapping,
-                    values: (res.edit ?? []).map((value) => Number(value) || 0),
-                };
-            }),
-        );
-
-        // Write every new range first so no restore can clobber a fresh write.
-        for (const item of fetched) {
-            if (!item || item.values.length === 0) continue;
-            const newValues = buildMappedParamValues(
-                item.values,
-                paramType,
-                item.mapping.newFrameCount,
-            );
-            await paramsApi.setParamFrames(
-                trackId,
-                paramType,
-                item.mapping.newStartFrame,
-                newValues,
-                false,
-            );
-        }
-
-        // Restore only old-range parts not covered by any new range.
-        for (const mapping of frameMappings) {
-            const oldEndFrame = mapping.oldStartFrame + mapping.oldFrameCount - 1;
-            const restoreSegments = subtractIntervals(
-                { start: mapping.oldStartFrame, end: oldEndFrame },
-                newRanges,
-            );
-            for (const segment of restoreSegments) {
-                await paramsApi.restoreParamFrames(
-                    trackId,
-                    paramType,
-                    segment.start,
-                    segment.end - segment.start + 1,
-                    false,
-                );
-            }
-        }
-    }
+    await paramsApi.stretchTrackLinkedParams(trackId, mappings, false);
 }
 
 /**

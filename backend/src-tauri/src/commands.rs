@@ -1150,6 +1150,16 @@ pub fn set_static_param(
     params::set_static_param(state, track_id, param, value, checkpoint)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn stretch_track_linked_params(
+    state: State<'_, AppState>,
+    track_id: String,
+    mappings: Vec<crate::state::StretchLinkedRangeSec>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    params::stretch_track_linked_params(state, track_id, mappings, checkpoint)
+}
+
 // ===================== synth =====================
 
 #[tauri::command(rename_all = "camelCase")]

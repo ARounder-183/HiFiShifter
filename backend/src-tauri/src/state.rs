@@ -569,6 +569,16 @@ pub struct LinkedParamCurvesPayload {
     pub extra_curves: HashMap<String, Vec<f32>>,
 }
 
+/// 单个剪辑拉伸前后的几何范围（秒），用于"锁定参数线"的时域映射。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StretchLinkedRangeSec {
+    pub old_start_sec: f64,
+    pub old_length_sec: f64,
+    pub new_start_sec: f64,
+    pub new_length_sec: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipFormantMorph {
@@ -1684,29 +1694,33 @@ impl TimelineState {
         let frame_period_ms = self.frame_period_ms().max(0.1);
         let (start_frame, end_frame) =
             self.clip_frame_bounds(start_sec, length_sec, frame_period_ms);
+        let kind = self.root_track_kind(root_track_id);
         let entry = self.params_by_root_track.get(root_track_id)?;
 
+        // ⚠ 必须用带填充的切片，禁止 `get(start..end)`：
+        // extra_curves 不是工程长度 —— set_param_frames 只把它增长到最后一次
+        // 写入的帧，`ensure_params_for_root` 也不补齐它们。因此当剪辑范围
+        // 超出曲线数组末尾（即剪辑包含该参数的最后一个有效点、其后全是
+        // 默认值）时，`get()` 返回 None → 提取出空曲线 → 移动/复制时旧范围
+        // 被清除而新范围什么都没写，用户数据被整体销毁（表现为"被初始化"）。
+        // pitch/tension 始终保持工程长度所以未受影响；这里统一改为
+        // 不足处补参考值（pitch/tension 补 0，extra 补参数默认值）。
+        let frame_count = end_frame.saturating_sub(start_frame);
         let pitch_edit = if entry.pitch_edit_user_modified {
-            entry
-                .pitch_edit
-                .get(start_frame..end_frame)
-                .unwrap_or(&[])
-                .to_vec()
+            Self::curve_slice(&entry.pitch_edit, start_frame, frame_count, 0.0)
         } else {
             Vec::new()
         };
-        let tension_edit = entry
-            .tension_edit
-            .get(start_frame..end_frame)
-            .unwrap_or(&[])
-            .to_vec();
+        let tension_edit = Self::curve_slice(&entry.tension_edit, start_frame, frame_count, 0.0);
         let extra_curves = entry
             .extra_curves
             .iter()
             .map(|(param, curve)| {
+                let default_value =
+                    crate::renderer::automation_curve_default_value(kind, param).unwrap_or(0.0);
                 (
                     param.clone(),
-                    curve.get(start_frame..end_frame).unwrap_or(&[]).to_vec(),
+                    Self::curve_slice(curve, start_frame, frame_count, default_value),
                 )
             })
             .collect();
@@ -1894,6 +1908,297 @@ impl TimelineState {
         };
         self.apply_linked_params_to_root_range(&root_track_id, clip.start_sec, linked_params);
         true
+    }
+
+    /// 把旧范围内的曲线段取出（不足处补 pad 值），与 get_param_frames 的
+    /// 越界回退语义一致。
+    fn curve_slice(curve: &[f32], start: usize, count: usize, pad: f32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(count);
+        for offset in 0..count {
+            out.push(curve.get(start.saturating_add(offset)).copied().unwrap_or(pad));
+        }
+        out
+    }
+
+    /// 线性时域重采样。`pitch_zero_semantics` 时 0 视为"无声帧"，
+    /// 不跨 0 插值（与前端旧 stretchLinkedParams 的行为逐位一致）。
+    fn resample_curve(values: &[f32], target_len: usize, pitch_zero_semantics: bool) -> Vec<f32> {
+        let mut out = vec![0.0f32; target_len];
+        if values.is_empty() || target_len == 0 {
+            return out;
+        }
+        let old_max_idx = values.len() - 1;
+        let new_max_idx: f32 = if target_len > 1 { (target_len - 1) as f32 } else { 1.0 };
+        let ratio = old_max_idx as f32 / new_max_idx;
+        for (i, slot) in out.iter_mut().enumerate() {
+            let old_idxf = i as f32 * ratio;
+            let lo = (old_idxf as usize).min(old_max_idx);
+            let hi = if lo < old_max_idx { lo + 1 } else { old_max_idx };
+            let frac = old_idxf - lo as f32;
+            let lo_val = values[lo];
+            let hi_val = values[hi];
+            *slot = if pitch_zero_semantics {
+                if lo_val == 0.0 && hi_val == 0.0 {
+                    0.0
+                } else if lo_val == 0.0 {
+                    0.0
+                } else if hi_val == 0.0 {
+                    if frac < 0.5 {
+                        lo_val
+                    } else {
+                        0.0
+                    }
+                } else {
+                    lo_val + (hi_val - lo_val) * frac
+                }
+            } else {
+                lo_val + (hi_val - lo_val) * frac
+            };
+        }
+        out
+    }
+
+    /// 计算"旧范围中不被任何新范围覆盖"的帧段（闭区间），用于恢复参考值。
+    /// 与前端旧 subtractIntervals 的批量语义一致：先写全部新范围，再恢复
+    /// 未被覆盖的旧帧，避免相邻剪辑的恢复互相擦除新写入的值。
+    fn uncovered_old_segments(
+        mappings: &[(usize, usize, usize, usize)],
+    ) -> Vec<(usize, usize)> {
+        // (old_start, old_count, new_start, new_count)
+        let mut segments: Vec<(usize, usize)> = Vec::new();
+        for &(old_start, old_count, _, _) in mappings {
+            let old_end = old_start.saturating_add(old_count).saturating_sub(1);
+            let mut excluded: Vec<(usize, usize)> = mappings
+                .iter()
+                .map(|&(_, _, new_start, new_count)| {
+                    (new_start, new_start.saturating_add(new_count).saturating_sub(1))
+                })
+                .filter(|&(s, e)| e >= old_start && s <= old_end)
+                .collect();
+            excluded.sort_unstable();
+            let mut cursor = old_start;
+            for (s, e) in excluded {
+                if cursor > old_end {
+                    break;
+                }
+                if s > cursor {
+                    let end = (s - 1).min(old_end);
+                    if end >= cursor {
+                        segments.push((cursor, end));
+                    }
+                }
+                cursor = cursor.max(e.saturating_add(1));
+            }
+            if cursor <= old_end {
+                segments.push((cursor, old_end));
+            }
+        }
+        segments
+    }
+
+    /// "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。
+    ///
+    /// 支持该剪辑范围涉及到的**所有**参数曲线——无论参数是否在 UI 中被
+    /// 激活、是否有描述符、是否已有用户数据：
+    /// - `pitch`：仅当用户手动编辑过时映射（否则由后端按剪辑几何重建）；
+    /// - `tension`：始终映射；
+    /// - `extra_curves`：映射所有已存在的曲线（volume/pan/气声/子轨道偏移等）。
+    ///
+    /// 批量语义：先写全部新范围，再把不被任何新范围覆盖的旧范围帧恢复为
+    /// 参考值（pitch → pitch_orig；tension/extra → 参数默认值）。
+    pub(crate) fn stretch_linked_params_in_root_range(
+        &mut self,
+        root_track_id: &str,
+        mappings: &[StretchLinkedRangeSec],
+    ) {
+        if mappings.is_empty() {
+            return;
+        }
+        self.ensure_params_for_root(root_track_id);
+        let fp = self.frame_period_ms().max(0.1);
+
+        // 秒 → 帧；跳过几何没有变化的映射。
+        let mut frame_mappings: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for m in mappings {
+            let (old_start_sec, old_len, new_start_sec, new_len) =
+                (m.old_start_sec, m.old_length_sec, m.new_start_sec, m.new_length_sec);
+            if !old_len.is_finite() || !new_len.is_finite() {
+                continue;
+            }
+            let old_start = (old_start_sec.max(0.0) * 1000.0 / fp).round() as usize;
+            let old_end =
+                ((old_start_sec.max(0.0) + old_len.max(0.0)) * 1000.0 / fp).round() as usize;
+            let new_start = (new_start_sec.max(0.0) * 1000.0 / fp).round() as usize;
+            let new_end =
+                ((new_start_sec.max(0.0) + new_len.max(0.0)) * 1000.0 / fp).round() as usize;
+            let old_count = old_end.saturating_sub(old_start).max(1);
+            let new_count = new_end.saturating_sub(new_start).max(1);
+            if old_start == new_start && old_count == new_count {
+                continue;
+            }
+            frame_mappings.push((old_start, old_count, new_start, new_count));
+        }
+        if frame_mappings.is_empty() {
+            return;
+        }
+
+        let max_new_end = frame_mappings
+            .iter()
+            .map(|&(_, _, new_start, new_count)| new_start.saturating_add(new_count))
+            .max()
+            .unwrap_or(0);
+        let kind = self.root_track_kind(root_track_id);
+        let pitch_user_modified = self
+            .params_by_root_track
+            .get(root_track_id)
+            .map(|entry| entry.pitch_edit_user_modified)
+            .unwrap_or(false);
+
+        let Some(entry) = self.params_by_root_track.get_mut(root_track_id) else {
+            return;
+        };
+
+        // 写入前先取出旧范围快照，避免写/读互相覆盖。
+        let pitch_sources: Vec<Vec<f32>> = if pitch_user_modified {
+            frame_mappings
+                .iter()
+                .map(|&(old_start, old_count, _, _)| {
+                    Self::curve_slice(&entry.pitch_edit, old_start, old_count, 0.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tension_sources: Vec<Vec<f32>> = frame_mappings
+            .iter()
+            .map(|&(old_start, old_count, _, _)| {
+                Self::curve_slice(&entry.tension_edit, old_start, old_count, 0.0)
+            })
+            .collect();
+        let extra_keys: Vec<String> = entry.extra_curves.keys().cloned().collect();
+        let extra_sources: Vec<(String, f32, Vec<Vec<f32>>)> = extra_keys
+            .iter()
+            .map(|key| {
+                let default_value =
+                    crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                let slices = frame_mappings
+                    .iter()
+                    .map(|&(old_start, old_count, _, _)| {
+                        entry
+                            .extra_curves
+                            .get(key)
+                            .map(|curve| {
+                                Self::curve_slice(curve, old_start, old_count, default_value)
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                (key.clone(), default_value, slices)
+            })
+            .collect();
+
+        let required_len = entry
+            .pitch_edit
+            .len()
+            .max(entry.tension_edit.len())
+            .max(max_new_end);
+
+        // 写入阶段：先把所有新范围写满，恢复阶段才不会擦掉新值。
+        if pitch_user_modified {
+            if entry.pitch_edit.len() < required_len {
+                entry.pitch_edit.resize(required_len, 0.0);
+            }
+            for (slice, &(.., new_start, new_count)) in
+                pitch_sources.iter().zip(frame_mappings.iter())
+            {
+                let values = Self::resample_curve(slice, new_count, true);
+                for (offset, value) in values.into_iter().enumerate() {
+                    entry.pitch_edit[new_start.saturating_add(offset)] = value;
+                }
+            }
+        }
+        if entry.tension_edit.len() < required_len {
+            entry.tension_edit.resize(required_len, 0.0);
+        }
+        for (slice, &(.., new_start, new_count)) in
+            tension_sources.iter().zip(frame_mappings.iter())
+        {
+            let values = Self::resample_curve(slice, new_count, false);
+            for (offset, value) in values.into_iter().enumerate() {
+                entry.tension_edit[new_start.saturating_add(offset)] = value;
+            }
+        }
+        for (key, default_value, slices) in &extra_sources {
+            let curve = entry
+                .extra_curves
+                .entry(key.clone())
+                .or_insert_with(|| vec![*default_value; required_len]);
+            if curve.len() < required_len {
+                curve.resize(required_len, *default_value);
+            }
+            for (slice, &(.., new_start, new_count)) in slices.iter().zip(frame_mappings.iter()) {
+                let values = Self::resample_curve(slice, new_count, false);
+                for (offset, value) in values.into_iter().enumerate() {
+                    curve[new_start.saturating_add(offset)] = value;
+                }
+            }
+        }
+
+        // 恢复阶段：旧范围中不被任何新范围覆盖的帧还原为参考值。
+        let segments = Self::uncovered_old_segments(&frame_mappings);
+        if pitch_user_modified {
+            for (start, end) in &segments {
+                for idx in *start..=*end {
+                    if idx >= entry.pitch_edit.len() {
+                        break;
+                    }
+                    entry.pitch_edit[idx] = entry.pitch_orig.get(idx).copied().unwrap_or(0.0);
+                }
+            }
+        }
+        for (start, end) in &segments {
+            for idx in *start..=(*end).min(entry.tension_edit.len().saturating_sub(1)) {
+                entry.tension_edit[idx] = 0.0;
+            }
+        }
+        for (key, default_value, _) in &extra_sources {
+            if let Some(curve) = entry.extra_curves.get_mut(key) {
+                for (start, end) in &segments {
+                    for idx in *start..=(*end).min(curve.len().saturating_sub(1)) {
+                        curve[idx] = *default_value;
+                    }
+                }
+            }
+        }
+
+        // 与 restore_param_frames 一致：恢复后重算用户编辑标记。
+        if pitch_user_modified {
+            let len = entry.pitch_orig.len().min(entry.pitch_edit.len());
+            let mut modified = false;
+            for i in 0..len {
+                let o = entry.pitch_orig[i];
+                let e = entry.pitch_edit[i];
+                if (e.is_finite() && e > 0.0)
+                    && (!(o.is_finite() && o > 0.0) || (e - o).abs() > 1e-3)
+                {
+                    modified = true;
+                    break;
+                }
+            }
+            entry.pitch_edit_user_modified = modified;
+        }
+
+        // 与 apply_linked_params_to_root_range 一致：写入了用户 pitch 数据时，
+        // 根轨道必须处于合成模式，否则曲线不会参与渲染。
+        if pitch_user_modified {
+            if let Some(track) = self
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == root_track_id)
+            {
+                track.compose_enabled = true;
+            }
+        }
     }
 
     pub fn resolve_root_track_id(&self, track_id: &str) -> Option<String> {
@@ -4568,6 +4873,377 @@ mod tests {
 
         let _ = std::fs::remove_file(&test_path);
     }
+
+    /// 验证"锁定参数线"移动剪辑时，pitch / tension / 自动化曲线（extra curves）
+    /// 都必须搬运到新位置，旧位置恢复默认。
+    #[test]
+    fn move_clips_linked_params_carry_all_curves() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("MoveLinked".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 构造：用户编辑过的 pitch、非默认 tension、非默认 volume 自动化曲线。
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let frames = (2.0f64 * 1000.0 / 5.0).ceil() as usize; // 2s @ 5ms = 400 帧
+            for i in 0..frames {
+                entry.pitch_edit[i] = 60.0 + (i as f32) * 0.1;
+                entry.tension_edit[i] = 10.0 + (i as f32) * 0.05;
+            }
+            entry
+                .extra_curves
+                .insert("volume".to_string(), vec![0.8; frames]);
+            entry.pitch_edit_user_modified = true;
+        }
+
+        // 向右移动 1 秒（锁定参数线开启）。
+        tl.move_clips(
+            &[MoveClipPayload {
+                clip_id: clip_id.clone(),
+                start_sec: 1.0,
+                track_id: None,
+            }],
+            true,
+        );
+
+        let fp = 5.0f64;
+        let old_start = 0.0f64;
+        let new_start = 1.0f64;
+        let frames = (2.0 * 1000.0 / fp).ceil() as usize;
+        let old_idx = (old_start * 1000.0 / fp) as usize; // 0
+        let new_idx = (new_start * 1000.0 / fp) as usize; // 200
+
+        let entry = tl.params_by_root_track.get(&root_track_id).unwrap();
+
+        // 新范围：pitch / tension / volume 都应搬运到位。
+        assert!(
+            (entry.pitch_edit[new_idx] - 60.0).abs() < 1e-4,
+            "pitch must follow the clip, got {}",
+            entry.pitch_edit[new_idx]
+        );
+        assert!(
+            (entry.tension_edit[new_idx] - 10.0).abs() < 1e-4,
+            "tension must follow the clip, got {}",
+            entry.tension_edit[new_idx]
+        );
+        let volume = entry
+            .extra_curves
+            .get("volume")
+            .expect("volume curve must exist");
+        assert!(
+            (volume[new_idx] - 0.8).abs() < 1e-4,
+            "volume curve must follow the clip, got {}",
+            volume[new_idx]
+        );
+
+        // 旧范围：应恢复默认（tension=0、volume 默认值；pitch 在用户编辑过时被清 0）。
+        assert!(
+            entry.pitch_edit[old_idx] == 0.0,
+            "vacated pitch range must be cleared, got {}",
+            entry.pitch_edit[old_idx]
+        );
+        assert!(
+            entry.tension_edit[old_idx] == 0.0,
+            "vacated tension range must be cleared, got {}",
+            entry.tension_edit[old_idx]
+        );
+        assert!(
+            (volume[old_idx] - 1.0).abs() < 1e-4,
+            "vacated volume range must be restored to default 1.0, got {}",
+            volume[old_idx]
+        );
+
+        let _ = frames;
+    }
+
+    /// 验证"锁定参数线"拉伸剪辑时，pitch / tension / 自动化曲线都被时域映射
+    /// 到新范围，且旧范围中不再被新范围覆盖的帧恢复为参考值。
+    /// 回归背景：旧前端实现只映射 pitch+tension，其余自动化曲线遗留在旧位置。
+    #[test]
+    fn stretch_linked_params_maps_all_curves() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let _clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("StretchLinked".into()),
+            Some(1.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        // 在 1~3s（帧 200..600）写入非默认曲线：pitch=60+0.1i、tension=10、volume=0.8。
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            let start_f = 200usize;
+            for i in 0..400usize {
+                entry.pitch_edit[start_f + i] = 60.0 + (i as f32) * 0.1;
+                entry.tension_edit[start_f + i] = 10.0;
+            }
+            let mut volume = vec![1.0f32; entry.pitch_edit.len()];
+            for value in &mut volume[start_f..start_f + 400] {
+                *value = 0.8;
+            }
+            entry.extra_curves.insert("volume".to_string(), volume);
+            entry.pitch_edit_user_modified = true;
+        }
+
+        // 拉伸并左移：[1.0s, 3.0s) → [0.0s, 1.0s)。
+        tl.stretch_linked_params_in_root_range(
+            &root_track_id,
+            &[StretchLinkedRangeSec {
+                old_start_sec: 1.0,
+                old_length_sec: 2.0,
+                new_start_sec: 0.0,
+                new_length_sec: 1.0,
+            }],
+        );
+
+        let entry = tl.params_by_root_track.get(&root_track_id).unwrap();
+        // 新范围帧 0..200 应有映射后的值；旧范围帧 200..600 中不再被覆盖的
+        // 部分应恢复参考值（tension→0、volume→1.0、pitch→pitch_orig=0）。
+        assert!(
+            (entry.tension_edit[0] - 10.0).abs() < 1e-4 && (entry.tension_edit[100] - 10.0).abs() < 1e-4,
+            "tension must follow the stretched clip"
+        );
+        assert!(
+            entry.tension_edit[250] == 0.0,
+            "vacated tension range must be reset, got {}",
+            entry.tension_edit[250]
+        );
+
+        let volume = entry
+            .extra_curves
+            .get("volume")
+            .expect("volume curve must exist");
+        assert!(
+            (volume[0] - 0.8).abs() < 1e-4 && (volume[100] - 0.8).abs() < 1e-4,
+            "volume curve must follow the stretched clip"
+        );
+        assert!(
+            (volume[250] - 1.0).abs() < 1e-4,
+            "vacated volume range must be restored to default, got {}",
+            volume[250]
+        );
+
+        assert!(
+            (entry.pitch_edit[0] - 60.0).abs() < 1e-4,
+            "pitch must follow the stretched clip, got {}",
+            entry.pitch_edit[0]
+        );
+        assert!(
+            entry.pitch_edit[250] == 0.0,
+            "vacated pitch range must be restored to orig, got {}",
+            entry.pitch_edit[250]
+        );
+        assert!(
+            entry.pitch_edit_user_modified,
+            "mapped pitch edits must keep the user-modified flag"
+        );
+
+        // 没有数据的参数不应被映射过程物化出来。
+        assert!(
+            !entry.extra_curves.contains_key("breath_gain"),
+            "stretch mapping must not materialize curves for untouched params"
+        );
+    }
+
+    /// 跨根轨道移动：曲线必须从旧 root 搬到新 root（旧 root 恢复默认）。
+    #[test]
+    fn move_clips_linked_params_cross_root_track() {
+        let mut tl = TimelineState::default();
+        let track_a = tl.tracks[0].id.clone();
+        let track_b = tl.add_track(Some("B".to_string()), None, None);
+        let clip_id = tl.add_clip(
+            Some(track_a.clone()),
+            Some("CrossRoot".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+
+        let root_a = tl.resolve_root_track_id(&track_a).unwrap();
+        let root_b = tl.resolve_root_track_id(&track_b).unwrap();
+        tl.ensure_params_for_root(&root_a);
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_a).unwrap();
+            for i in 0..400usize {
+                entry.tension_edit[i] = 10.0;
+            }
+            entry
+                .extra_curves
+                .insert("volume".to_string(), vec![0.8; 400]);
+        }
+
+        tl.move_clips(
+            &[MoveClipPayload {
+                clip_id: clip_id.clone(),
+                start_sec: 0.0,
+                track_id: Some(track_b.clone()),
+            }],
+            true,
+        );
+
+        let entry_a = tl.params_by_root_track.get(&root_a).unwrap();
+        let entry_b = tl.params_by_root_track.get(&root_b).unwrap();
+        assert!(
+            (entry_b.tension_edit[0] - 10.0).abs() < 1e-4,
+            "tension must follow the clip to the new root track"
+        );
+        assert!(
+            (entry_b
+                .extra_curves
+                .get("volume")
+                .expect("volume must exist on new root")[0]
+                - 0.8)
+                .abs()
+                < 1e-4,
+            "volume must follow the clip to the new root track"
+        );
+        assert!(
+            entry_a.tension_edit[0] == 0.0,
+            "old root range must be cleared after cross-root move"
+        );
+    }
+
+    /// 拖拽复制（copyLinkedParams）：副本必须携带全部曲线，且不影响源曲线。
+    #[test]
+    fn duplicate_clips_bulk_copies_all_linked_curves() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("DupLinked".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let root = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root);
+        {
+            let entry = tl.params_by_root_track.get_mut(&root).unwrap();
+            for i in 0..400usize {
+                entry.tension_edit[i] = 10.0;
+            }
+            entry
+                .extra_curves
+                .insert("volume".to_string(), vec![0.8; 400]);
+        }
+
+        let created = tl.duplicate_clips_bulk(&DuplicateClipsBulkPayload {
+            source_clip_ids: vec![clip_id],
+            delta_sec: 3.0,
+            track_mode: DuplicateClipsTrackMode::SameTrack,
+            copy_linked_params: true,
+            select_created_clips: true,
+            apply_auto_crossfade: false,
+            place_on_selected_track: false,
+            rename_copies: None,
+        });
+        assert_eq!(created.len(), 1);
+
+        let entry = tl.params_by_root_track.get(&root).unwrap();
+        // 源范围保持不变。
+        assert!((entry.tension_edit[0] - 10.0).abs() < 1e-4, "source tension intact");
+        // 新范围（3s → 帧 600）携带副本曲线。
+        assert!(
+            (entry.tension_edit[600] - 10.0).abs() < 1e-4,
+            "duplicate must carry tension, got {}",
+            entry.tension_edit[600]
+        );
+        assert!(
+            (entry
+                .extra_curves
+                .get("volume")
+                .expect("volume must exist")[600]
+                - 0.8)
+                .abs()
+                < 1e-4,
+            "duplicate must carry volume curve"
+        );
+    }
+
+    /// ⭐ 核心回归（用户实测场景）：extra 曲线不是工程长度 ——
+    /// `set_param_frames` 只把它增长到最后一次写入的帧。当剪辑范围超出
+    /// 曲线数组末尾（剪辑包含该参数的最后一个有效点、其后全是默认值）时，
+    /// 旧实现的 `get(start..end)` 返回 None → 提取为空 → 移动时旧范围被
+    /// 清除而新范围什么都没写，曲线被整体销毁（表现为"被初始化"）。
+    #[test]
+    fn move_clips_survives_extra_curve_shorter_than_clip_range() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("ShortCurve".into()),
+            Some(0.0),
+            Some(2.0), // 剪辑 [0s, 2s) = 帧 0..400
+            Some("C:/audio/a.wav".into()),
+        );
+        let root_track_id = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root_track_id);
+
+        {
+            let entry = tl.params_by_root_track.get_mut(&root_track_id).unwrap();
+            // tension 是工程长度曲线：整个剪辑范围都有数据。
+            for value in entry.tension_edit.iter_mut().take(400) {
+                *value = 10.0;
+            }
+            // volume 模拟 set_param_frames 的增长语义：只写到 0..1s（帧 0..200），
+            // 数组长度 = 200。剪辑后半段（200..400）超出数组 = 默认值 1.0，
+            // 且 200 就是"最后一个有效参数点"之后的数组末尾。
+            entry
+                .extra_curves
+                .insert("volume".to_string(), vec![0.5; 200]);
+        }
+
+        // 向右移动 1s：剪辑 [1s, 3s) = 帧 200..600。
+        tl.move_clips(
+            &[MoveClipPayload {
+                clip_id: clip_id.clone(),
+                start_sec: 1.0,
+                track_id: None,
+            }],
+            true,
+        );
+
+        let entry = tl.params_by_root_track.get(&root_track_id).unwrap();
+        // 有效数据搬运到新范围前半段（帧 200..400）。
+        let volume = entry
+            .extra_curves
+            .get("volume")
+            .expect("volume curve must exist");
+        assert!(
+            (volume[200] - 0.5).abs() < 1e-4 && (volume[399] - 0.5).abs() < 1e-4,
+            "drawn volume data must survive the move, got {}..{}",
+            volume[200],
+            volume[399]
+        );
+        // 剪辑内有效点之后的部分仍是默认值（帧 400..600）。
+        assert!(
+            (volume[500] - 1.0).abs() < 1e-4,
+            "frames past the last valid point must stay default, got {}",
+            volume[500]
+        );
+        // 旧范围恢复默认。
+        assert!(
+            (volume[0] - 1.0).abs() < 1e-4 && (volume[100] - 1.0).abs() < 1e-4,
+            "vacated range must be restored to default"
+        );
+        // tension 照常搬运。
+        assert!(
+            (entry.tension_edit[200] - 10.0).abs() < 1e-4,
+            "tension must follow the clip"
+        );
+    }
 }
 
 pub(crate) fn new_id(prefix: &str) -> String {
@@ -6375,8 +7051,28 @@ impl TimelineState {
             }
         }
 
+        // 在改动曲线之前一次性预提取全部源剪辑的联动参数线：应用某个副本的
+        // 曲线会写入目标范围，若与后续源剪辑的范围重叠，串行"提取→应用"会
+        // 让后续提取读到被覆盖后的值。
+        let mut linked_params_by_index: Vec<Option<LinkedParamCurvesPayload>> =
+            Vec::with_capacity(source_clips.len());
+        for source in &source_clips {
+            let linked = if payload.copy_linked_params && source.length_sec > 0.0 {
+                self.resolve_root_track_id(&source.track_id).and_then(|root_track_id| {
+                    self.extract_linked_params_from_root_range(
+                        &root_track_id,
+                        source.start_sec,
+                        source.length_sec,
+                    )
+                })
+            } else {
+                None
+            };
+            linked_params_by_index.push(linked);
+        }
+
         let mut created_clip_ids = Vec::new();
-        for source in source_clips {
+        for (source_index, source) in source_clips.into_iter().enumerate() {
             let target_track_id = if let Some(mapped) = explicit_mapping.get(&source.track_id) {
                 mapped.clone()
             } else {
@@ -6406,19 +7102,8 @@ impl TimelineState {
                 }
             };
 
-            let old_root_track_id = self.resolve_root_track_id(&source.track_id);
             let new_root_track_id = self.resolve_root_track_id(&target_track_id);
-            let linked_params = if payload.copy_linked_params && source.length_sec > 0.0 {
-                old_root_track_id.as_ref().and_then(|root_track_id| {
-                    self.extract_linked_params_from_root_range(
-                        root_track_id,
-                        source.start_sec,
-                        source.length_sec,
-                    )
-                })
-            } else {
-                None
-            };
+            let linked_params = linked_params_by_index[source_index].take();
 
             let mut duplicated = source.clone();
             duplicated.id = new_id("clip");

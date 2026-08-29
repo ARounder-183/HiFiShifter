@@ -546,6 +546,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[4],
             };
 
+        case "stretch_track_linked_params":
+            return {
+                trackId: args[0],
+                mappings: args[1],
+                checkpoint: args[2],
+            };
+
         case "get_static_param":
             return {
                 trackId: args[0],

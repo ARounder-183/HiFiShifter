@@ -441,6 +441,7 @@ pub fn run() {
             commands::get_param_frames,
             commands::set_param_frames,
             commands::restore_param_frames,
+            commands::stretch_track_linked_params,
             commands::add_clip,
             commands::create_clips_bulk,
             commands::get_static_param,

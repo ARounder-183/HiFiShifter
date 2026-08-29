@@ -683,3 +683,33 @@ pub(super) fn set_static_param(
 
     serde_json::json!({"ok": true})
 }
+
+/// "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。
+///
+/// 后端一次性完成 pitch（用户编辑过时）/ tension / 所有已存在的自动化曲线
+/// （无论参数是否在 UI 激活）的批量映射，取代旧前端逐参数 get/set/restore
+/// 的多请求流程（旧流程只覆盖 pitch+tension，遗漏其余全部参数曲线）。
+///
+/// 默认不产生独立撤销检查点：曲线映射与剪辑几何变更合并为同一撤销步
+/// （与旧前端 set/restore(checkpoint=false) 的流程保持一致）。
+pub(super) fn stretch_track_linked_params(
+    state: State<'_, AppState>,
+    track_id: String,
+    mappings: Vec<crate::state::StretchLinkedRangeSec>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(false) {
+        state.checkpoint_timeline(&tl);
+    }
+
+    let Some(root) = tl.resolve_root_track_id(&track_id) else {
+        return serde_json::json!({"ok": false});
+    };
+    tl.stretch_linked_params_in_root_range(&root, &mappings);
+
+    // Ensure realtime playback reflects edits immediately.
+    state.audio_engine.update_timeline(tl.clone());
+
+    serde_json::json!({"ok": true})
+}
