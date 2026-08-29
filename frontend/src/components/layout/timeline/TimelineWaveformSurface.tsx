@@ -1,5 +1,6 @@
 import React from "react";
 
+import { useAppSelector } from "../../../app/hooks";
 import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../../theme/waveformColors";
@@ -8,34 +9,7 @@ import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
 import { computeLeadingOverlapSecByClipId } from "./TrackLane";
-
-function toSceneClip(clip: ClipInfo): WaveformSceneClip | null {
-    if (!clip.sourcePath) return null;
-    return {
-        id: clip.id,
-        sourcePath: clip.sourcePath,
-        startSec: clip.startSec,
-        lengthSec: clip.lengthSec,
-        sourceStartSec: clip.sourceStartSec,
-        sourceEndSec: clip.sourceEndSec,
-        durationSec: clip.durationSec,
-        durationFrames: clip.durationFrames,
-        sourceSampleRate: clip.sourceSampleRate,
-        playbackRate: clip.playbackRate,
-        reversed: clip.reversed,
-        loopEnabled: clip.loopEnabled,
-        gain: clip.gain,
-        muted: clip.muted,
-        fadeInSec: clip.fadeInSec,
-        fadeOutSec: clip.fadeOutSec,
-        autoFadeInSec: clip.autoFadeInSec,
-        autoFadeOutSec: clip.autoFadeOutSec,
-        fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
-        fadeInDir: clip.fadeInDir ?? 0,
-        fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
-        fadeOutDir: clip.fadeOutDir ?? 0,
-    };
-}
+import { clipToSceneClip, expandClipToTakeSceneClips } from "./takeLanes";
 
 export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurface(props: {
     tracks: readonly TrackInfo[];
@@ -51,25 +25,49 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     pxPerSec: number;
 }) {
     const { mode } = useAppTheme();
+    // 与 DOM 交互层（ClipItem/TrackLane）同一份持久化设置：开关切换即重建场景。
+    const showAllTakes = useAppSelector((state) => state.session.showAllTakes);
     const color = React.useMemo(() => getWaveformColors(mode, "timeline").stroke, [mode]);
     const rows = React.useMemo<WaveformSceneRow[]>(
         () =>
             props.tracks.map((track, index) => {
                 const clips = props.clipsByTrackId[track.id] ?? [];
+                const waveformHeightPx = Math.max(
+                    1,
+                    props.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                );
+                // 多 Take clip 展开为每音频 Take 一个 lane 场景 clip；空间不足
+                // 或开关关闭时回退为单 active-take 投影（与 DOM 命中区同套
+                // takeLanes 数学，lane 边界逐像素一致）。
+                const sceneClips: WaveformSceneClip[] = [];
+                for (const clip of clips) {
+                    const laneClips = expandClipToTakeSceneClips(
+                        clip,
+                        showAllTakes,
+                        waveformHeightPx,
+                    );
+                    if (laneClips) {
+                        sceneClips.push(...laneClips);
+                        continue;
+                    }
+                    const base = clipToSceneClip(clip);
+                    if (base) sceneClips.push(base);
+                }
                 return {
                     topPx: (props.startTrackIndex + index) * props.rowHeight,
                     waveformTopPx: CLIP_HEADER_HEIGHT,
-                    waveformHeightPx: Math.max(
-                        1,
-                        props.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
-                    ),
-                    clips: clips
-                        .map(toSceneClip)
-                        .filter((clip): clip is WaveformSceneClip => clip != null),
+                    waveformHeightPx,
+                    clips: sceneClips,
                     leadingOverlapSecByClipId: computeLeadingOverlapSecByClipId([...clips]),
                 };
             }),
-        [props.clipsByTrackId, props.rowHeight, props.startTrackIndex, props.tracks],
+        [
+            props.clipsByTrackId,
+            props.rowHeight,
+            props.startTrackIndex,
+            props.tracks,
+            showAllTakes,
+        ],
     );
 
     return (

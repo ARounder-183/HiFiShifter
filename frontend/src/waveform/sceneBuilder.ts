@@ -29,6 +29,12 @@ export interface WaveformSceneClip {
     /** REAPER 风格淡出形状 id（语义同 fadeInShape）。 */
     fadeOutShape: number;
     fadeOutDir: number;
+    /** 多 Take 展开：该 lane 相对行波形带（body）顶部的竖直偏移；未设置时用行波形带。 */
+    laneTopPx?: number;
+    /** 多 Take 展开：该 lane 的高度；未设置时用行波形带高度。 */
+    laneHeightPx?: number;
+    /** inactive take lane：波形整体压暗（几何层按此调暗颜色与透明度）。 */
+    inactive?: boolean;
 }
 
 export interface WaveformSceneRow {
@@ -59,6 +65,8 @@ export interface WaveformSceneSegment {
     fadeOutShape: number;
     fadeOutDir: number;
     alpha: number;
+    /** inactive take lane：几何层据此压暗顶点颜色。 */
+    inactive?: boolean;
 }
 
 export interface WaveformSceneMarker {
@@ -68,6 +76,8 @@ export interface WaveformSceneMarker {
     yPx: number;
     heightPx: number;
     kind: "loop" | "media-boundary";
+    /** inactive take lane：几何层据此压暗标记颜色。 */
+    inactive?: boolean;
 }
 
 export interface WaveformScene {
@@ -81,6 +91,16 @@ interface SourceTile {
     sourceStartSec: number;
     sourceEndSec: number;
 }
+
+/**
+ * inactive take lane 的压暗合成（复刻旧 Canvas 多 Take 实现的两段系数）：
+ * 场景层先把 segment alpha 乘 LANE_ALPHA，几何层再把顶点颜色 rgb 乘
+ * RGB_SCALE、颜色 alpha 乘 COLOR_ALPHA —— 总透明度 ≈ 0.61，与旧
+ * darkenWaveformStroke + globalAlpha 的叠加观感一致。
+ */
+export const INACTIVE_TAKE_LANE_ALPHA = 0.78;
+export const INACTIVE_TAKE_RGB_SCALE = 0.42;
+export const INACTIVE_TAKE_COLOR_ALPHA = 0.78;
 
 function finitePositive(value: number, fallback: number): number {
     return Number.isFinite(value) && value > 1e-6 ? value : fallback;
@@ -178,6 +198,10 @@ export function buildWaveformScene(args: {
             });
             const visibleLocalStartSec = visibleStartSec - clip.startSec;
             const visibleLocalEndSec = visibleEndSec - clip.startSec;
+            // 多 Take lane 覆盖：laneTopPx 相对行波形带（body）顶部；未展开的
+            // clip 两个覆盖都缺省，正好退回行波形带。
+            const bandTopPx = row.waveformTopPx + (clip.laneTopPx ?? 0);
+            const bandHeightPx = Math.max(1, clip.laneHeightPx ?? row.waveformHeightPx);
             const tiles: SourceTile[] = [];
 
             if (!loopEnabled) {
@@ -235,9 +259,10 @@ export function buildWaveformScene(args: {
                         clipId: clip.id,
                         timelineSec: clip.startSec + markerLocalSec,
                         xPx: (clip.startSec + markerLocalSec - viewportStartSec) * pxPerSec,
-                        yPx: rowTopCanvasPx + row.waveformTopPx,
-                        heightPx: row.waveformHeightPx,
+                        yPx: rowTopCanvasPx + bandTopPx,
+                        heightPx: bandHeightPx,
                         kind: "loop",
+                        inactive: Boolean(clip.inactive),
                     });
                 }
             }
@@ -249,7 +274,8 @@ export function buildWaveformScene(args: {
                     Number(row.leadingOverlapSecByClipId?.[clip.id] ?? 0) || 0,
                 ),
             );
-            const baseAlpha = clip.muted ? 0.4 : 1;
+            const baseAlpha =
+                (clip.muted ? 0.4 : 1) * (clip.inactive ? INACTIVE_TAKE_LANE_ALPHA : 1);
             const fadeInSec = effectiveFade(clip.autoFadeInSec, clip.fadeInSec);
             const fadeOutSec = effectiveFade(clip.autoFadeOutSec, clip.fadeOutSec);
 
@@ -300,9 +326,9 @@ export function buildWaveformScene(args: {
                         clipTotalDurationSec: clip.lengthSec,
                         screenRect: {
                             x: clippedX,
-                            y: rowTopCanvasPx + row.waveformTopPx,
+                            y: rowTopCanvasPx + bandTopPx,
                             width: clippedRight - clippedX,
-                            height: row.waveformHeightPx,
+                            height: bandHeightPx,
                         },
                         reversed,
                         gain: Number.isFinite(clip.gain) ? Math.max(0, clip.gain) : 1,
@@ -314,6 +340,7 @@ export function buildWaveformScene(args: {
                         fadeOutDir: clip.fadeOutDir ?? 0,
                         alpha:
                             localStartSec < leadingOverlapSec - 1e-9 ? baseAlpha * 0.5 : baseAlpha,
+                        inactive: Boolean(clip.inactive),
                     });
                 }
             }
@@ -335,9 +362,10 @@ export function buildWaveformScene(args: {
                         clipId: clip.id,
                         timelineSec: clip.startSec + localSec,
                         xPx: (clip.startSec + localSec - viewportStartSec) * pxPerSec,
-                        yPx: rowTopCanvasPx + row.waveformTopPx,
-                        heightPx: row.waveformHeightPx,
+                        yPx: rowTopCanvasPx + bandTopPx,
+                        heightPx: bandHeightPx,
                         kind: "media-boundary",
+                        inactive: Boolean(clip.inactive),
                     });
                 }
             }

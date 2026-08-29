@@ -25,6 +25,7 @@ import { resolveCurvatureEditBase } from "./reaperFade";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
     FADE_CORNER_CAP_HEIGHT_PX,
@@ -39,7 +40,7 @@ import {
 } from "./constants";
 import { FadeHitLayer } from "./FadeHitLayer";
 import { modifierWatcher } from "./hooks/modifierWatcher";
-import { hitInactiveTakeLane } from "./takeLanes";
+import { hitInactiveTakeLane, resolveTakeLaneLayouts } from "./takeLanes";
 import { ClipEdgeHandles } from "./clip/ClipEdgeHandles";
 import {
     ClipHeader,
@@ -191,6 +192,7 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
     const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
+    const { mode: themeMode } = useAppTheme();
     const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
@@ -201,6 +203,9 @@ export const ClipItem = React.memo(function ClipItem({
     const width = Math.max(1, clip.lengthSec * pxPerSec);
     // body 区高度（与 WaveformTrackCanvas 一致）：轨道高 - 上下 padding - 头部高。
     const bodyHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
+    // 多 Take lane 布局与波形面/点击命中共用同一套 takeLanes 数学：分隔线、
+    // 可点击区与 WebGL 渲染的 lane 边界逐像素一致。
+    const takeLaneLayouts = resolveTakeLaneLayouts(clip, showAllTakes, bodyHeight);
     // 有效 fade = 自动交叉淡化（>0 时覆盖）否则手动 fade（对齐 REAPER 分离存储模型）。
     const effectiveFadeInSec =
         (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : (clip.fadeInSec ?? 0);
@@ -771,6 +776,24 @@ export const ClipItem = React.memo(function ClipItem({
                         {/* 波形由 TimelineWaveformSurface（共享 WebGL2 波形面）统一渲染，此处不再包含波形内容 */}
                     </div>
                 </div>
+
+                {/* 多 Take lane 分界线：与波形面/点击命中共用同一套 takeLanes 布局，
+                    首 lane 顶边即 header 边界不画。放在 mask 容器之外 —— 前导重叠
+                    的 DOM 渐隐只作用于交互层视觉，不淡化分界线（对齐旧 Canvas
+                    多 Take 实现）；pointer-events-none 不参与任何手势。 */}
+                {(takeLaneLayouts ?? []).slice(1).map((lane) => (
+                    <div
+                        key={`take-lane-separator-${lane.index}`}
+                        className="pointer-events-none absolute left-0 right-0 h-px"
+                        style={{
+                            top: CLIP_HEADER_HEIGHT + lane.top,
+                            backgroundColor:
+                                themeMode === "dark"
+                                    ? "rgba(255, 255, 255, 0.18)"
+                                    : "rgba(0, 0, 0, 0.2)",
+                        }}
+                    />
+                ))}
             </div>
         </div>
     );

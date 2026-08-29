@@ -1,5 +1,9 @@
 import { fadeGainIn, fadeGainOut } from "../components/layout/timeline/paths.ts";
-import type { WaveformScene } from "./sceneBuilder.ts";
+import {
+    INACTIVE_TAKE_COLOR_ALPHA,
+    INACTIVE_TAKE_RGB_SCALE,
+    type WaveformScene,
+} from "./sceneBuilder.ts";
 
 export interface WaveformPeakView {
     min: Float32Array;
@@ -121,6 +125,12 @@ export function buildWaveformGeometry(args: {
     for (const segment of args.scene.segments) {
         const sourceDurationSec = segment.sourceEndSec - segment.sourceStartSec;
         if (!(sourceDurationSec > 1e-9) || segment.screenRect.width <= 0) continue;
+        // inactive take lane：颜色整体压暗（rgb × RGB_SCALE），与场景层已乘入
+        // segment.alpha 的 LANE_ALPHA 叠加，复刻旧 Canvas 多 Take 的观感。
+        const inactive = Boolean(segment.inactive);
+        const segmentRed = inactive ? red * INACTIVE_TAKE_RGB_SCALE : red;
+        const segmentGreen = inactive ? green * INACTIVE_TAKE_RGB_SCALE : green;
+        const segmentBlue = inactive ? blue * INACTIVE_TAKE_RGB_SCALE : blue;
         const peaks = args.getPeaks(
             segment.sourcePath,
             segment.sourceSampleRate,
@@ -189,25 +199,30 @@ export function buildWaveformGeometry(args: {
                 );
             const yTop = centerY - peakMax * gain * halfHeight;
             const yBottom = centerY - peakMin * gain * halfHeight;
-            const alpha = colorAlpha * segment.alpha;
+            const alpha =
+                colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
 
-            push(x + 0.5, yTop, red, green, blue, alpha);
-            push(x + 0.5, yBottom, red, green, blue, alpha);
+            push(x + 0.5, yTop, segmentRed, segmentGreen, segmentBlue, alpha);
+            push(x + 0.5, yBottom, segmentRed, segmentGreen, segmentBlue, alpha);
         }
     }
 
     for (const marker of args.scene.markers) {
         const size = Math.min(7, Math.max(4.5, marker.heightPx * 0.16));
         const halfWidth = size * 0.62;
-        const alpha = colorAlpha;
+        const inactive = Boolean(marker.inactive);
+        const markerRed = inactive ? red * INACTIVE_TAKE_RGB_SCALE : red;
+        const markerGreen = inactive ? green * INACTIVE_TAKE_RGB_SCALE : green;
+        const markerBlue = inactive ? blue * INACTIVE_TAKE_RGB_SCALE : blue;
+        const alpha = colorAlpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
         const x = marker.xPx;
         const y = marker.yPx + 0.5;
-        push(x - halfWidth, y, red, green, blue, alpha);
-        push(x + halfWidth, y, red, green, blue, alpha);
-        push(x - halfWidth, y, red, green, blue, alpha);
-        push(x, y + size, red, green, blue, alpha);
-        push(x + halfWidth, y, red, green, blue, alpha);
-        push(x, y + size, red, green, blue, alpha);
+        push(x - halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
+        push(x + halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
+        push(x - halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
+        push(x, y + size, markerRed, markerGreen, markerBlue, alpha);
+        push(x + halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
+        push(x, y + size, markerRed, markerGreen, markerBlue, alpha);
     }
 
     // 先取长度再清零：slice 出独立副本供 GPU/2D 渲染器安全持有。

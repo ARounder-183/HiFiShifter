@@ -104,4 +104,49 @@ test("waveform/geometry.test.ts scripted checks", async () => {
     });
     assertEqual(partial.complete, false, "partial availability is reported as incomplete");
     assertEqual(partial.lineCount, 4, "available segments still render while missing data loads");
+
+    const dimmed = buildWaveformGeometry({
+        scene: { segments: [{ ...scene.segments[0], inactive: true }], markers: [] },
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-1]),
+            max: new Float32Array([1]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+    });
+    assertEqual(
+        Array.from(dimmed.vertices.slice(2, 6)),
+        [Math.fround(0.42), Math.fround(0.42), Math.fround(0.42), Math.fround(0.78)],
+        "inactive take lanes darken rgb and color alpha",
+    );
+
+    const dimmedMarker = buildWaveformGeometry({
+        scene: {
+            segments: [],
+            markers: [
+                {
+                    clipId: "clip",
+                    timelineSec: 1,
+                    xPx: 10,
+                    yPx: 20,
+                    heightPx: 100,
+                    kind: "loop",
+                    inactive: true,
+                },
+            ],
+        },
+        color: "#ffffff",
+        getPeaks: () => null,
+    });
+    assertEqual(
+        dimmedMarker.vertices.length,
+        36,
+        "inactive marker still emits its triangle lines",
+    );
+    assertEqual(
+        Array.from(dimmedMarker.vertices.slice(2, 6)),
+        [Math.fround(0.42), Math.fround(0.42), Math.fround(0.42), Math.fround(0.78)],
+        "inactive markers darken too",
+    );
 });

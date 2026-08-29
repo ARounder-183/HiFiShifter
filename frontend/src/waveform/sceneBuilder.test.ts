@@ -173,4 +173,80 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
         );
         assertEqual(scene.segments[0]?.fadeInSec, 1, "automatic fade overrides manual fade");
     }
+
+    {
+        const scene = buildWaveformScene({
+            viewportStartSec: 0,
+            viewportEndSec: 10,
+            pxPerSec: 100,
+            widthPx: 1000,
+            rows: [
+                {
+                    topPx: 40,
+                    waveformTopPx: 18,
+                    waveformHeightPx: 72,
+                    clips: [
+                        clip({
+                            laneTopPx: 20,
+                            laneHeightPx: 10,
+                            inactive: true,
+                        }),
+                    ],
+                },
+            ],
+        });
+
+        assertEqual(
+            scene.segments.map((segment) => segment.screenRect),
+            [{ x: 0, y: 78, width: 500, height: 10 }],
+            "take lanes override the row waveform band relative to the body top",
+        );
+        assertEqual(
+            scene.segments.map((segment) => [segment.alpha, segment.inactive]),
+            [[0.78, true]],
+            "inactive lanes dim segment alpha and carry the flag to geometry",
+        );
+    }
+
+    {
+        const scene = buildWaveformScene({
+            viewportStartSec: 0,
+            viewportEndSec: 15,
+            pxPerSec: 10,
+            widthPx: 150,
+            rows: [
+                {
+                    topPx: 0,
+                    waveformTopPx: 18,
+                    waveformHeightPx: 72,
+                    clips: [
+                        clip({
+                            lengthSec: 15,
+                            sourceStartSec: 8,
+                            sourceEndSec: 10,
+                            loopEnabled: true,
+                            muted: true,
+                            laneTopPx: 6,
+                            laneHeightPx: 24,
+                            inactive: true,
+                        }),
+                    ],
+                },
+            ],
+        });
+
+        assertEqual(
+            scene.markers.map((marker) => [marker.yPx, marker.heightPx, marker.inactive]),
+            [
+                [24, 24, true],
+                [24, 24, true],
+            ],
+            "loop markers follow the take lane band and carry the dim flag",
+        );
+        assertEqual(
+            scene.segments.map((segment) => segment.alpha),
+            [0.4 * 0.78, 0.4 * 0.78, 0.4 * 0.78],
+            "muted and inactive dim factors compose multiplicatively",
+        );
+    }
 });
