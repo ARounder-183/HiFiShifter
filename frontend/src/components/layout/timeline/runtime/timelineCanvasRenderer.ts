@@ -502,7 +502,8 @@ export function drawTimelineCanvas(
         }
 
         if (clip.fadeInPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+            // 淡入区压暗：音量从 0 爬升，视觉上"还没到全响"就该更暗。
+            ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
             ctx.strokeStyle = "rgba(20, 24, 31, 0.62)";
             ctx.lineWidth = 1.2;
@@ -517,7 +518,7 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
             ctx.fillRect(
                 clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 bodyTop,
