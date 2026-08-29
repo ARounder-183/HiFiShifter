@@ -142,7 +142,10 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             <BackgroundGrid
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
-                lineOpacity={0.38}
+                // 叠加在 clip 之上的网格：低不透明度只做节拍参考，不把色块
+                // 蒙灰（用户反馈"半透明有点脏"）。空白区的背景网格由
+                // gridBack 层（0.9）负责，不受影响。
+                lineOpacity={0.15}
                 viewportBus={timelineViewportBus}
                 layerOrder={LAYER_ORDER.gridOverlay}
             />
