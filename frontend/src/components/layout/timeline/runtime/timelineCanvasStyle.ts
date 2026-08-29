@@ -198,9 +198,12 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
     return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
 }
 
-/** 色块的感知亮度目标带：参考 REAPER Hazy 主题 —— 饱和宝石色（紫/品红/
- * 绯红/青），中等明度配近纯黑波形，轮廓锐利、色彩浓郁。 */
-const CLIP_LUMINANCE_BAND = { min: 0.45, max: 0.56 } as const;
+/** 默认轨道色：中性灰。未设色/异常色的轨道呈现安静的灰块。 */
+export const DEFAULT_TRACK_COLOR = "#8a9099";
+
+/** 色块的感知亮度目标带：统一的中等明度，所有轨道色视觉重量一致，
+ * 时间线整体安静、有序（Cubase 默认主题式"彩色灰"）。 */
+const CLIP_LUMINANCE_BAND = { min: 0.48, max: 0.58 } as const;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -212,13 +215,18 @@ const CLIP_LUMINANCE_BAND = { min: 0.45, max: 0.56 } as const;
  *    微调 l，把任意色相的色块都收敛到同一视觉明度带，时间线才整齐。
  */
 function normalizeTrackHsl(color: string): Hsl {
-    const base = rgbToHsl(parseHexColor(color) ?? { r: 104, g: 131, b: 157 });
+    const base = rgbToHsl(parseHexColor(color) ?? { r: 138, g: 144, b: 153 });
+    // 中性灰直通：默认轨道色是灰色，不能被强行拉成彩色 —— 低饱和输入
+    // 只做明度归一，保持无彩。
+    if (base.s < 0.1) {
+        return { h: base.h, s: 0, l: clamp(base.l, 0.48, 0.6) };
+    }
     const hsl: Hsl = {
         h: base.h,
-        // 宝石色带（参考 REAPER Hazy）：高饱和保住浓郁的色彩身份，明度
-        // 中等让近纯黑的波形既锐利又不把色块拖成黑洞。
-        s: clamp(base.s, 0.52, 0.72),
-        l: clamp(base.l, 0.38, 0.58),
+        // 克制的低饱和带：彩色只作为"身份提示"，不再主导画面。多轨同屏
+        // 时色彩不相互嘶鸣，波形与文字始终保持视觉主角。
+        s: clamp(base.s, 0.16, 0.3),
+        l: clamp(base.l, 0.42, 0.56),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));
@@ -240,7 +248,7 @@ function normalizeTrackHsl(color: string): Hsl {
  * 否则"挑的颜色"和"时间线上实际出现的颜色"对不上，用户会以为取色器坏了。
  */
 export function normalizedTrackColorCss(color: string | undefined | null): string {
-    const rgb = hslToRgb(normalizeTrackHsl(color ?? "#68839d"));
+    const rgb = hslToRgb(normalizeTrackHsl(color ?? DEFAULT_TRACK_COLOR));
     return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
 }
 
@@ -356,7 +364,7 @@ export function buildTimelineClipVisualStyle(args: {
     borderLineWidth: number;
 } {
     const fontFamily = args.fontFamily || resolveFontFamily();
-    const trackColor = args.trackColor ?? "#68839d";
+    const trackColor = args.trackColor ?? DEFAULT_TRACK_COLOR;
     // ── 色块配色（Ableton 式"亮色块 + 深色前景"）──────────────────
     // Clip 主体 = 归一化后的明亮轨道色；header 是同色轻微压深的一条带。
     // 文字 / 波形 / 徽章 / 旋钮全部用**深色**画在亮块上 —— 对比方向与旧方案

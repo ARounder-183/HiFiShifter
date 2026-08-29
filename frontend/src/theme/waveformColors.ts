@@ -30,8 +30,8 @@ export interface WaveformColors {
  */
 const darkTimelineWaveformColors: WaveformColors = {
     fill: "#04060c",
-    // 宝石色块配 85% 黑：接近 REAPER 参考主题的锐利黑色波形。
-    stroke: "rgba(0, 0, 0, 0.85)",
+    // 低饱和色块配 73% 黑：用户确认的最终版本。
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#02203a",
 };
 
@@ -40,7 +40,7 @@ const darkTimelineWaveformColors: WaveformColors = {
  */
 const lightTimelineWaveformColors: WaveformColors = {
     fill: "#080b14",
-    stroke: "rgba(0, 0, 0, 0.85)",
+    stroke: "rgba(0, 0, 0, 0.73)",
     midiPitch: "#002848",
 };
 
