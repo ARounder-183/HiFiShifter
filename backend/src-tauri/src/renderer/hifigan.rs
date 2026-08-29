@@ -203,6 +203,13 @@ impl HiFiGanRenderer {
                 return 0.0;
             }
             let i0 = idx_f.floor().max(0.0) as usize;
+            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
+            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
+            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
+            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
+            if i0 >= curve.len() {
+                return 0.0;
+            }
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
             let a = curve.get(i0).copied().unwrap_or(0.0);
@@ -357,6 +364,13 @@ impl HiFiGanRenderer {
                 return 0.0;
             }
             let i0 = idx_f.floor().max(0.0) as usize;
+            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
+            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
+            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
+            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
+            if i0 >= curve.len() {
+                return 0.0;
+            }
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
             let a = curve.get(i0).copied().unwrap_or(0.0);

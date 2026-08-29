@@ -192,6 +192,13 @@ fn curve_at_abs_sec(curve: Option<&[f32]>, abs_sec: f64, frame_period_ms: f64) -
         return None;
     }
     let i0 = idx_f.floor() as usize;
+    // 越界（超出曲线末点）返回 None：调用方保留 vslib 控制点的默认值，
+    // 而不是钳制到最后一个元素 —— 否则最后一个参数点之后的 formant /
+    // volume / pan / breathiness 会被末值污染（Bug 复现：共振峰偏移点
+    // 之后本应回退 0，却持续被 359.15 污染到 clip 末尾）。
+    if i0 >= c.len() {
+        return None;
+    }
     let i1 = (i0 + 1).min(c.len().saturating_sub(1));
     let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
     let a = c.get(i0).copied().unwrap_or_else(|| *c.last().unwrap());
@@ -814,4 +821,43 @@ impl ClipProcessor for VslibProcessor {
 #[allow(dead_code)]
 pub fn vslib_param_descriptors() -> &'static [ParamDescriptor] {
     VSLIB_PARAMS
+}
+
+#[cfg(all(test, feature = "vslib"))]
+mod tests {
+    #[test]
+    fn curve_at_abs_sec_beyond_end_returns_none() {
+        // 回归：末点之后必须返回 None（调用方保留控制点默认值），
+        // 而不是钳制到最后一个元素 —— 否则共振峰偏移点之后的音频
+        // 会被末值（如 359.15）持续污染到 clip 末尾。
+        let curve = vec![0.0f32, 0.0, 0.0, 359.15]; // 末点 359.15 @ idx 3
+        let fp = 5.0;
+        // idx 3.0（末点本身）→ Some(359.15)
+        let at_last = super::curve_at_abs_sec(Some(&curve), 3.0 * fp / 1000.0, fp);
+        assert_eq!(at_last, Some(359.15f32));
+        // idx ∈ [3.0, 4.0)：最后一个元素的保持区间 → 仍为末值
+        let hold = super::curve_at_abs_sec(Some(&curve), 3.5 * fp / 1000.0, fp);
+        assert_eq!(hold, Some(359.15f32));
+        // idx >= 4.0（超出数组末尾）→ None（修复前为 Some(359.15)）
+        assert_eq!(
+            super::curve_at_abs_sec(Some(&curve), 4.5 * fp / 1000.0, fp),
+            None
+        );
+        assert_eq!(super::curve_at_abs_sec(Some(&curve), 100.0, fp), None);
+        // 空曲线 / None → None
+        assert_eq!(super::curve_at_abs_sec(Some(&[]), 1.0, fp), None);
+        assert_eq!(super::curve_at_abs_sec(None, 1.0, fp), None);
+    }
+
+    #[test]
+    fn curve_at_abs_sec_interpolates_within_range() {
+        let curve = vec![0.0f32, 100.0, 200.0];
+        let fp = 5.0;
+        // idx 0.5 → 50
+        let mid = super::curve_at_abs_sec(Some(&curve), 0.5 * fp / 1000.0, fp);
+        assert!((mid.unwrap() - 50.0).abs() < 1e-4);
+        // 负时间 → idx 0 → 第一个元素
+        let neg = super::curve_at_abs_sec(Some(&curve), -2.0, fp);
+        assert_eq!(neg, Some(0.0f32));
+    }
 }

@@ -199,6 +199,12 @@ fn sample_curve_at_abs_sec(
         return default_value;
     }
     let i0 = idx_f.floor().max(0.0) as usize;
+    // 越界（超出曲线末点）直接返回默认值：i1 会被钳制到最后一个元素，
+    // 若继续插值会得到 default 与末值之间的错误衰减/振荡值（与
+    // hifigan / vslib 的末点越界修复保持一致）。
+    if i0 >= curve.len() {
+        return default_value;
+    }
     let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
     let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
     let a = curve.get(i0).copied().unwrap_or(default_value);
@@ -453,5 +459,42 @@ mod tests {
         assert!(super::resample_noise_to_len(&[0.5], 0).is_empty());
         // 单样本输入：按常数填充，不得 panic
         assert_eq!(super::resample_noise_to_len(&[0.5], 3), vec![0.5, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn sample_curve_beyond_end_returns_default() {
+        // 回归：末点之后必须回退 default，而不是与末值插值出 0..末值 的振荡。
+        // 复现场景 = 共振峰偏移点 359.15 画在曲线末点（fp=5ms，idx 6470），
+        // 之后任意采样都应得到默认值 0。
+        let curve = vec![0.0f32, 0.0, 0.0, 359.15]; // 末点 359.15 @ idx 3
+        let fp = 5.0;
+        // idx 3.0（末点本身）→ 359.15
+        let at_last = super::sample_curve_at_abs_sec(Some(&curve), 3.0 * fp / 1000.0, fp, 0.0);
+        assert!((at_last - 359.15).abs() < 1e-4);
+        // idx ∈ [3.0, 4.0)：最后一个元素的保持区间（i0=3 在界内，
+        // i1 钳到自身）→ 仍为末值，与 pitch 采样语义一致
+        let hold = super::sample_curve_at_abs_sec(Some(&curve), 3.5 * fp / 1000.0, fp, 0.0);
+        assert!((hold - 359.15).abs() < 1e-4);
+        // idx >= 4.0（超出数组末尾）→ default 0.0（修复前为 0..末值 的振荡）
+        let frac_beyond = super::sample_curve_at_abs_sec(Some(&curve), 4.5 * fp / 1000.0, fp, 0.0);
+        assert_eq!(frac_beyond, 0.0);
+        // 大越界同样归零（修复前 frac 小数部分导致任意非零值）
+        let far = super::sample_curve_at_abs_sec(Some(&curve), 100.0, fp, 0.0);
+        assert_eq!(far, 0.0);
+        // 空曲线 / None → default
+        assert_eq!(super::sample_curve_at_abs_sec(Some(&[]), 1.0, fp, 0.0), 0.0);
+        assert_eq!(super::sample_curve_at_abs_sec(None, 1.0, fp, 0.0), 0.0);
+    }
+
+    #[test]
+    fn sample_curve_interpolates_within_range() {
+        let curve = vec![0.0f32, 100.0, 200.0];
+        let fp = 5.0;
+        // idx 0.5 → 50
+        let mid = super::sample_curve_at_abs_sec(Some(&curve), 0.5 * fp / 1000.0, fp, 0.0);
+        assert!((mid - 50.0).abs() < 1e-4);
+        // 负时间 → idx 0 → 第一个元素
+        let neg = super::sample_curve_at_abs_sec(Some(&curve), -2.0, fp, 0.0);
+        assert_eq!(neg, 0.0);
     }
 }
