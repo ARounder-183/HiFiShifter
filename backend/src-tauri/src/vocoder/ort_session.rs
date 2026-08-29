@@ -150,6 +150,9 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
 /// Ada Lovelace (RTX 4060) GPUs despite passing HighPerformance hints.
 /// The old API with explicit device_id performs consistently across
 /// all GPU architectures tested (Ampere, Ada, Pascal).
+// DirectML 是 Windows-only EP：唯一调用方是下方 Windows 版
+// try_register_directml_ep，非 Windows 目标不编译（否则 CI 上是死代码）。
+#[cfg(target_os = "windows")]
 fn resolve_dml_device_id() -> Option<i32> {
     // 1. Runtime override (set via UI/settings) — user explicitly chose
     if let Some(id) = RUNTIME_DML_DEVICE_ID
@@ -497,15 +500,6 @@ fn try_register_directml_ep(
         .with_execution_providers([dml])
         .map(|b| (b, "directml"))
         .map_err(|e| format!("enable DirectML EP failed: {e}"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn try_register_directml_ep(
-    builder: ort::session::builder::SessionBuilder,
-    _role: OrtSessionRole,
-) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let _ = (builder, _role);
-    Err("DirectML EP not compiled in this build".to_string())
 }
 
 /// Build an ORT session with the full optimization policy.
