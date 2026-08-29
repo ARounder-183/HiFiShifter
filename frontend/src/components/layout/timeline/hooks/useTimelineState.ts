@@ -27,6 +27,7 @@ import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessi
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import {
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
@@ -484,6 +485,36 @@ export function useTimelineState(): TimelineStateResult {
         [syncScrollLeft],
     );
 
+    // ── 视口自愈对账（每帧）─────────────────────────────────────
+    // 原生 scroller 是滚动/缩放视口的唯一事实源；sticky 画布层（Clip 体/波形）
+    // 经视口总线跟随同步出去的值。任何代码路径只要漏发或迟发了总线（写入被
+    // 浏览器钳制/量化/锚定修正、异常中断的缩放事务……），画布就会与原生 DOM
+    // 内容层错位，表现为 Clip 偏离其选中框。这里每帧以原生值对账一次，发现
+    // 失步立即重发总线——绝大多数帧只是两次数值比较，空闲时开销可忽略。
+    useEffect(() => {
+        let raf = 0;
+        const reconcile = () => {
+            raf = requestAnimationFrame(reconcile);
+            const scroller = scrollRef.current;
+            if (!scroller) return;
+            const snap = timelineViewportBus.getSnapshot();
+            const scrollLeft = scroller.scrollLeft;
+            const scrollTop = scroller.scrollTop;
+            const pxPerSec = pxPerSecRef.current;
+            if (
+                Math.abs(snap.scrollLeft - scrollLeft) <= 0.25 &&
+                Math.abs(snap.scrollTopPx - scrollTop) <= 0.25 &&
+                Math.abs(snap.pxPerSec - pxPerSec) <= 1e-9
+            ) {
+                return;
+            }
+            scrollTopPxRef.current = scrollTop;
+            syncScrollLeft(scrollLeft);
+        };
+        raf = requestAnimationFrame(reconcile);
+        return () => cancelAnimationFrame(raf);
+    }, [syncScrollLeft]);
+
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {
         if (!s.paramEditorSyncTimeline) return;
@@ -496,8 +527,8 @@ export function useTimelineState(): TimelineStateResult {
             // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
             if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
                 timelineSyncApplyingRef.current = true;
-                scroller.scrollLeft = store.scrollLeft;
-                syncScrollLeft(store.scrollLeft);
+                const applied = applyNativeScrollLeft(scroller, store.scrollLeft);
+                syncScrollLeft(applied);
                 timelineSyncApplyingRef.current = false;
                 return;
             }
@@ -544,8 +575,8 @@ export function useTimelineState(): TimelineStateResult {
         if (!scroller) return;
 
         timelineSyncApplyingRef.current = true;
-        scroller.scrollLeft = pending.scrollLeft;
-        syncScrollLeft(pending.scrollLeft);
+        const applied = applyNativeScrollLeft(scroller, pending.scrollLeft);
+        syncScrollLeft(applied);
         timelineSyncApplyingRef.current = false;
     }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline]);
 
@@ -558,8 +589,10 @@ export function useTimelineState(): TimelineStateResult {
         if (!scroller) return;
 
         keyboardZoomPendingRef.current = null;
-        scroller.scrollLeft = pending.nextScrollLeft;
-        syncScrollLeft(pending.nextScrollLeft);
+        // 写后回读浏览器实际接受的偏移再广播（钳制/量化/锚定都可能修正请求值），
+        // 画布层与原生 DOM 层不允许以“请求值”为准失步。
+        const applied = applyNativeScrollLeft(scroller, pending.nextScrollLeft);
+        syncScrollLeft(applied);
     }, [pxPerSec]);
 
     // ── pxPerBeat / secPerBeat ───────────────────────────────

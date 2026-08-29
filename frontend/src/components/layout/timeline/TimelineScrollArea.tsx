@@ -8,6 +8,7 @@ import type { Keybinding } from "../../../features/keybindings/types";
 import { getTimelineWheelAction } from "../wheelGesture";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
+import { applyNativeScrollLeft } from "./runtime/nativeScrollApply";
 import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
 
 export const TimelineScrollArea: React.FC<
@@ -45,20 +46,25 @@ export const TimelineScrollArea: React.FC<
     playheadZoomEnabled,
     ...divProps
 }) => {
-    const lastScrollLeftRef = useRef<number | null>(null);
     const lastViewportDispatchRef = useRef<{
         scrollLeft: number;
         pxPerSec: number;
         viewportWidth: number;
     } | null>(null);
     const pxPerSecRef = useRef(pxPerSec);
+    // 滚轮缩放路径会在 flushSync 前手动刷新此 ref（见下方 wheel handler），
+    // 其余路径由被动 effect 兜底，供 dispatch 去重快照使用。
+    useEffect(() => {
+        pxPerSecRef.current = pxPerSec;
+    }, [pxPerSec]);
     const zoomRafRef = useRef<number | null>(null);
     const zoomPendingRef = useRef<{
         nextPxPerSec: number;
         nextScrollLeft: number;
     } | null>(null);
 
-    // zoom 中心点以秒为基准
+    // zoom 中心点以秒为基准：rAF 提交的待落地缩放（含目标滚动偏移），
+    // 由 pxPerSec 提交后的 useLayoutEffect 消费。
     const pendingZoomRef = useRef<{
         nextPxPerSec: number;
         nextScrollLeft: number;
@@ -71,11 +77,6 @@ export const TimelineScrollArea: React.FC<
         nextRowHeight: number;
         nextScrollTop: number;
     } | null>(null);
-    const applyingZoomRef = useRef(false);
-
-    useEffect(() => {
-        pxPerSecRef.current = pxPerSec;
-    }, [pxPerSec]);
 
     useEffect(() => {
         rowHeightRef.current = rowHeight;
@@ -84,9 +85,6 @@ export const TimelineScrollArea: React.FC<
     const syncScrollLeft = useCallback(
         function syncScrollLeft(scroller: HTMLDivElement) {
             const next = scroller.scrollLeft;
-            if (applyingZoomRef.current) {
-                return;
-            }
             const nextSnapshot = {
                 scrollLeft: next,
                 pxPerSec: pxPerSecRef.current,
@@ -101,7 +99,6 @@ export const TimelineScrollArea: React.FC<
                 return;
             }
             lastViewportDispatchRef.current = nextSnapshot;
-            lastScrollLeftRef.current = next;
             if (rulerContentRef.current) {
                 rulerContentRef.current.style.transform = `translateX(${-next}px)`;
             }
@@ -115,10 +112,6 @@ export const TimelineScrollArea: React.FC<
         if (!scroller) return;
         syncScrollLeft(scroller);
     }, [scrollRef, syncScrollLeft]);
-
-    useEffect(() => {
-        return () => {};
-    }, []);
 
     useEffect(() => {
         return () => {
@@ -136,21 +129,16 @@ export const TimelineScrollArea: React.FC<
         if (!scroller || !pending) return;
         if (Math.abs(pending.nextPxPerSec - pxPerSec) > 1e-9) return;
 
-        applyingZoomRef.current = true;
-        scroller.scrollLeft = pending.nextScrollLeft;
-        // Native scrollLeft is quantized and may fire transitionary clamped
-        // scroll events before the new padded width is fully laid out. Keep the
-        // transaction open until the target offset is actually accepted.
-        if (Math.abs(scroller.scrollLeft - pending.nextScrollLeft) <= 0.5) {
-            applyingZoomRef.current = false;
-            pendingZoomRef.current = null;
-            scroller.scrollLeft = pending.nextScrollLeft;
-            syncScrollLeft(scroller);
-            if (rulerContentRef.current) {
-                rulerContentRef.current.style.transform = `translateX(${-pending.nextScrollLeft}px)`;
-            }
-            return;
-        }
+        // flushSync 已让 DOM（含 paddedContentWidth）按新缩放完成提交，这里
+        // 写原生 scrollLeft 不会再被旧宽度钳制。事务在同一布局 effect 内闭合，
+        // 绝不跨帧保持打开：写后回读浏览器实际接受的偏移（钳制/量化/锚定
+        // 都可能修正请求值），并一律以回读值为准同步标尺、React state 与
+        // 视口总线。此前“接受失败则保持事务打开、吞掉后续滚动事件”的设计
+        // 一旦命中拒绝分支就无法恢复，画布层会冻结在旧偏移上，Clip 与其
+        // 选中框从此错位。
+        pendingZoomRef.current = null;
+        applyNativeScrollLeft(scroller, pending.nextScrollLeft);
+        syncScrollLeft(scroller);
     }, [projectSec, pxPerSec, scrollRef, syncScrollLeft]);
 
     useLayoutEffect(() => {
@@ -262,11 +250,12 @@ export const TimelineScrollArea: React.FC<
             const dir = e.deltaY < 0 ? 1 : -1;
             const factor = dir > 0 ? 1.1 : 0.9;
 
+            // 连续滚动帧内的缩放链：以本帧已请求但未落地的偏移为基准；
+            // 否则以原生 scrollLeft（浏览器实际接受的偏移）为基准。缩放
+            // 事务在布局 effect 内同帧闭合，不存在“已请求但长期未落地”的
+            // 状态，因此无需再回退读取待落地事务。
             const basePxPerSec = zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
-            const baseScrollLeft =
-                zoomPendingRef.current?.nextScrollLeft ??
-                pendingZoomRef.current?.nextScrollLeft ??
-                scroller.scrollLeft;
+            const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
 
             const totalSec = Math.max(0, projectSec);
             const minPxPerSec = resolveTimelineMinPxPerSec({
@@ -336,6 +325,7 @@ export const TimelineScrollArea: React.FC<
         <div
             {...divProps}
             ref={scrollRef}
+            style={{ overflowAnchor: "none", ...(divProps.style ?? {}) }}
             onScroll={(e) => {
                 syncScrollLeft(e.currentTarget as HTMLDivElement);
                 onScroll?.(e);

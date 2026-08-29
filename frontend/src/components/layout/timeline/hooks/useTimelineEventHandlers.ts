@@ -22,6 +22,7 @@ import {
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
+import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
@@ -414,8 +415,10 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 pxPerSec,
                 contentWidth: dynamicProjectSec * pxPerSec,
             });
-            scroller.scrollLeft = next;
-            syncScrollLeft(next);
+            // 写后回读浏览器实际接受的偏移再广播：请求值可能被钳制/量化/锚定
+            // 修正，sticky 画布层必须与原生 DOM 层使用同一偏移。
+            const applied = applyNativeScrollLeft(scroller, next);
+            syncScrollLeft(applied);
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);

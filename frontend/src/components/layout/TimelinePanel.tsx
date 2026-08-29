@@ -94,6 +94,7 @@ import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
+import { applyNativeScrollLeft } from "./timeline/runtime/nativeScrollApply";
 
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
@@ -172,8 +173,10 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                     contentWidth: projectSec * pxPerSecRef.current,
                 });
                 if (Math.abs(scroller.scrollLeft - next) <= 0.5) return;
-                scroller.scrollLeft = next;
-                syncScrollLeft(next);
+                // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近工程右端时
+                // 请求值可能被钳制，画布层必须与原生 DOM 层使用同一偏移。
+                const applied = applyNativeScrollLeft(scroller, next);
+                syncScrollLeft(applied);
             },
             [
                 autoScrollEnabled,
@@ -416,8 +419,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             contentWidth: dynamicProjectSec * pxPerSec,
         });
         if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-            scroller.scrollLeft = next;
-            syncScrollLeft(next);
+            const applied = applyNativeScrollLeft(scroller, next);
+            syncScrollLeft(applied);
         }
         dispatch(setPendingPlayheadReveal(null));
     }, [
