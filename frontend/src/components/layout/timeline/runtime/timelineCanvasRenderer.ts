@@ -362,7 +362,7 @@ export function drawTimelineCanvas(
             const indicatorInnerY = knobCenterY + Math.sin(angle) * 1.6;
             ctx.beginPath();
             ctx.strokeStyle = visualStyle.gainKnobIndicator;
-            ctx.lineWidth = 1.7;
+            ctx.lineWidth = 1.2;
             ctx.moveTo(indicatorInnerX, indicatorInnerY);
             ctx.lineTo(indicatorOuterX, indicatorOuterY);
             ctx.stroke();
