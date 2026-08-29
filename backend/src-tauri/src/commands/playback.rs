@@ -4,7 +4,7 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
-use super::common::{guard_json_command, ok_bool, PlaybackRenderingStateEvent};
+use super::common::{guard_json_command, PlaybackRenderingStateEvent};
 
 /// 全局后台渲染激活标志。
 /// 当用户在"选项→推理设备"中启用"后台预渲染"后，编辑操作会触发
