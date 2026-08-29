@@ -175,7 +175,8 @@ export const coreApi = {
     playOriginal: (startSec = 0) =>
         invoke<{ ok: boolean; playing?: string; start_sec?: number }>("play_original", startSec),
 
-    stopAudio: () => invoke<{ ok: boolean }>("stop_audio"),
+    /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
+    stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),
 
     // Pitch analysis progress
     getPitchAnalysisProgress: () =>

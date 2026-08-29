@@ -1413,16 +1413,23 @@ pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
     // 必须在 stop() 之前取快照，且仅在确实在播放时写入——否则未播放时的
     // stop 调用（如录音收尾）会把 0 写进播放头。仅改字段、不做撤销检查点
     // （与 set_transport 的 playhead 分支一致：播放头不参与撤销）。
+    //
+    // 前端轮询存在至多一个周期（~33ms）+ 往返的滞后：最后一次采样之后音频
+    // 仍在前进。因此把引擎的精确停止位置随响应返回（stopped_at_sec），
+    // 前端在暂停时把视觉光标同步到该位置——否则视觉位置与后端记录的暂停点
+    // 不一致，后续任何编辑回灌快照都会让光标再次右跳到真实位置。
     let pb = state.audio_engine.snapshot_state();
+    let mut stopped_at_sec: Option<f64> = None;
     if pb.is_playing {
         let paused_sec = pb.base_sec + pb.position_sec;
         if paused_sec.is_finite() && paused_sec >= 0.0 {
             let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
             tl.playhead_sec = paused_sec;
+            stopped_at_sec = Some(paused_sec);
         }
     }
     state.audio_engine.stop();
-    ok_bool()
+    serde_json::json!({ "ok": true, "stopped_at_sec": stopped_at_sec })
 }
 
 pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePayload {

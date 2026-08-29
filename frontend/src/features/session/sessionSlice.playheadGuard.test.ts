@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import reducer from "./sessionSlice.ts";
 import { moveClipRemote } from "./thunks/timelineThunks.ts";
+import { stopAudioPlayback } from "./thunks/transportThunks.ts";
 
 /**
  * "暂停后光标原地"回归测试：
@@ -65,5 +66,69 @@ test("features/session/sessionSlice.playheadGuard.test.ts applyTimelineState pla
             }),
         );
         assertEqual(next.playheadSec, 50, "playing state preserves polled playhead");
+    }
+});
+
+/**
+ * 暂停位置对齐回归：前端轮询存在至多一个周期（~33ms）+ 往返的滞后，暂停
+ * 时后端 stop_audio 记录的精确停止位置（stopped_at_sec）领先于最后一次
+ * 采样的视觉位置。暂停必须把视觉光标对齐到该精确位置——否则视觉位置与
+ * 后端记录的暂停点不一致，后续任何编辑回灌快照都会让光标再次右跳。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts pause aligns the playhead to the exact stop position", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function initState(playheadSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return { ...base, playheadSec };
+    }
+
+    // 暂停（无锚点恢复）：视觉光标对齐到引擎的精确停止位置。
+    {
+        const next = reducer(
+            initState(42.3),
+            stopAudioPlayback.fulfilled(
+                { ok: true, stopped_at_sec: 42.5, restoreAnchor: false, wasPlaying: true, anchorSec: 40 },
+                "req",
+                undefined,
+            ),
+        );
+        assertEqual(next.playheadSec, 42.5, "pause adopts the exact stop position");
+    }
+
+    // 停止（恢复锚点）：锚点优先，不采用停止位置。
+    {
+        const next = reducer(
+            initState(42.3),
+            stopAudioPlayback.fulfilled(
+                {
+                    ok: true,
+                    stopped_at_sec: 42.5,
+                    restoreAnchor: true,
+                    wasPlaying: true,
+                    anchorSec: 10,
+                },
+                "req",
+                { restoreAnchor: true },
+            ),
+        );
+        assertEqual(next.playheadSec, 10, "stop restores the anchor position");
+    }
+
+    // 引擎本就未在播放（如录音收尾的 stop）：无停止位置，光标原地不动。
+    {
+        const next = reducer(
+            initState(42.3),
+            stopAudioPlayback.fulfilled(
+                { ok: true, stopped_at_sec: null, restoreAnchor: false, wasPlaying: false, anchorSec: 0 },
+                "req",
+                undefined,
+            ),
+        );
+        assertEqual(next.playheadSec, 42.3, "idle stop leaves the playhead untouched");
     }
 });

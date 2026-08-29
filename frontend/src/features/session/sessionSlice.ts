@@ -3266,6 +3266,7 @@ const sessionSlice = createSlice({
                     restoreAnchor?: boolean;
                     wasPlaying?: boolean;
                     anchorSec?: number | null;
+                    stopped_at_sec?: number | null;
                 };
                 // If restoreAnchor is set (Play/Stop action), restore playhead to anchor position
                 if (
@@ -3275,6 +3276,16 @@ const sessionSlice = createSlice({
                     Number.isFinite(payload.anchorSec)
                 ) {
                     state.playheadSec = Math.max(0, payload.anchorSec);
+                } else if (
+                    typeof payload.stopped_at_sec === "number" &&
+                    Number.isFinite(payload.stopped_at_sec)
+                ) {
+                    // 暂停：把视觉光标对齐到引擎的实际停止位置。轮询存在至多
+                    // 一个周期（~33ms）+ 往返的滞后，最后一次采样后音频仍在
+                    // 前进；后端记录的暂停点是这个精确位置。若不同步，视觉
+                    // 位置会落后于真实位置，后续任何编辑回灌快照都会让光标
+                    // 再次右跳。
+                    state.playheadSec = Math.max(0, payload.stopped_at_sec);
                 }
                 state.runtime.isPlaying = false;
                 state.runtime.playbackTarget = null;
