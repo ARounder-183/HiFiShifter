@@ -8,22 +8,9 @@ use serde::Deserialize;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-
-/// Returns the mel-frame length the current ORT session is pinned to, when
-/// the CoreML EP is active on macOS ARM64.  On other platforms / EPs the
-/// session keeps the model's dynamic `time` axis and no padding is needed.
-fn session_time_frames() -> Option<usize> {
-    if crate::vocoder_ort_session::coreml_active(
-        crate::vocoder_ort_session::OrtSessionRole::Vocoder,
-    ) {
-        Some(crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES)
-    } else {
-        None
-    }
-}
 
 #[derive(Debug)]
 enum ModelRunError {
@@ -121,15 +108,46 @@ fn emit_chunk_progress(_local: f64) {
     }
 }
 
-/// Tracks which execution provider was actually selected during session creation.
-static ACTIVE_EP: OnceLock<String> = OnceLock::new();
+/// Tracks which execution provider the live session actually uses.
+///
+/// Backed by an `RwLock` rather than a `OnceLock`: the EP can change while the
+/// process is running (`update_ort_ep()` rebuilds the session when the user
+/// switches device in the UI), and a `OnceLock` would keep reporting the very
+/// first EP forever.
+static ACTIVE_EP: OnceLock<RwLock<String>> = OnceLock::new();
 
-/// Returns the EP that was actually used for the live session (e.g. "directml", "webgpu", "cpu").
+/// Record the EP a freshly built session actually ended up on.
+fn set_active_ep(ep: &str) {
+    let slot = ACTIVE_EP.get_or_init(|| RwLock::new("unknown".to_string()));
+    if let Ok(mut guard) = slot.write() {
+        *guard = ep.to_string();
+    }
+}
+
+/// Returns the EP the live session actually uses — e.g. `"coreml"` on macOS
+/// ARM64, `"directml"` on Windows, `"webgpu"`, or `"cpu"`.  Returns
+/// `"unknown"` before the first session has been built.
 pub fn active_ep() -> String {
     ACTIVE_EP
         .get()
-        .cloned()
+        .and_then(|slot| slot.read().ok().map(|g| g.clone()))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Human-readable display name for [`active_ep`], for the UI's device readout.
+///
+/// `"CoreML"` / `"WebGPU"` / `"DirectML"` / `"CPU"`, or `""` when no session
+/// has been built yet.  This must stay a runtime value — a hard-coded
+/// compile-time backend name is what made the menu claim "GPU (CoreML)" while
+/// inference was actually falling back to CPU.
+pub fn active_backend_name() -> &'static str {
+    match active_ep().as_str() {
+        "coreml" => "CoreML",
+        "webgpu" => "WebGPU",
+        "directml" => "DirectML",
+        "cpu" => "CPU",
+        _ => "",
+    }
 }
 
 fn ensure_ort_init() -> Result<(), String> {
@@ -162,7 +180,7 @@ fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
         onnx_path,
         crate::vocoder_ort_session::OrtSessionRole::Vocoder,
     )?;
-    let _ = ACTIVE_EP.set(ep);
+    set_active_ep(&ep);
     Ok(session)
 }
 
@@ -672,7 +690,6 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     crate::vocoder_ort_session::set_runtime_ep_override(Some(ep_str));
     // 写入 DirectML 设备 ID 覆盖
     crate::vocoder_ort_session::set_runtime_dml_device_id(device_id);
-    crate::vocoder_ort_session::reset_coreml_pinned_state();
 
     // 重置全局 Session，下一次渲染请求时将自动使用新 EP 重新创建
     if let Some(mutex) = SHARED_SESSION.get() {
@@ -684,9 +701,9 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     // 更新 Epoch，这会告知所有的 TLS 缓存将他们的本地 NsfHifiganOnnx 实例作废并重新载入
     SESSION_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // 清除全局 Active EP 状态
-    // 我们必须允许 ACTIVE_EP 被重置。但是 OnceLock 无法被重写。
-    // 在 active_ep() 中我们将利用动态逻辑或仅读取它。
+    // 清空 Active EP：会话是惰性重建的，在下一次渲染真正把新会话建起来之前
+    // 不能继续上报旧 EP（那正是菜单里"显示 GPU 但实际在跑 CPU"的原因）。
+    set_active_ep("unknown");
 }
 
 pub struct NsfHifiganOnnx {
@@ -906,54 +923,32 @@ impl NsfHifiganOnnx {
             .filter(|v| *v > 0)
     }
 
+    /// Run the vocoder on one mel/f0 pair covering `t` mel frames.
+    ///
+    /// Sessions keep the model's dynamic `time` axis on every platform, so the
+    /// inputs go through verbatim and the output needs no trimming.  The
+    /// Windows DirectML builder still pins `time` for shader specialisation,
+    /// but a dimension override only drives graph specialisation — the session
+    /// accepts any runtime length, and this path never padded for it.
     fn run_model(&mut self, mel: Vec<f32>, f0: Vec<f32>, t: usize) -> Result<Vec<f32>, String> {
         let n_mels = self.cfg.num_mels;
-        let fixed_t = session_time_frames();
-        let (mel_buf, f0_buf) = match fixed_t {
-            Some(fixed) if fixed > t => {
-                let mut padded_mel = vec![0.0f32; n_mels * fixed];
-                for m in 0..n_mels {
-                    padded_mel[m * fixed..m * fixed + t].copy_from_slice(&mel[m * t..(m + 1) * t]);
-                }
-                let mut padded_f0 = vec![0.0f32; fixed];
-                padded_f0[..t].copy_from_slice(&f0[..t]);
-                (padded_mel, padded_f0)
-            }
-            _ => (mel, f0),
-        };
-        self.run_model_impl(mel_buf, f0_buf, t, fixed_t.unwrap_or(t))
-    }
+        let timeout = std::time::Duration::from_secs(120);
 
-    fn run_model_impl(
-        &mut self,
-        mel_buf: Vec<f32>,
-        f0_buf: Vec<f32>,
-        original_t: usize,
-        shape_t: usize,
-    ) -> Result<Vec<f32>, String> {
-        let n_mels = self.cfg.num_mels;
-        let timeout = if session_time_frames().is_some() {
-            std::time::Duration::from_secs(30)
-        } else {
-            std::time::Duration::from_secs(120)
-        };
+        // Clone the inputs before the first attempt.  If a GPU EP hangs, the
+        // first attempt owns the original buffers on its worker thread and we
+        // need fresh copies for the automatic EP-fallback retry.
+        let retry_mel = mel.clone();
+        let retry_f0 = f0.clone();
 
-        // Clone the inputs before the first attempt.  If CoreML/WebGPU hangs,
-        // the first attempt owns the original buffers on its worker thread and
-        // we need fresh copies for the automatic EP-fallback retry.
-        let retry_mel = mel_buf.clone();
-        let retry_f0 = f0_buf.clone();
-
-        let first = run_session_once(&self.session, n_mels, mel_buf, f0_buf, shape_t, timeout);
-        let data = match first {
-            Ok(data) => data,
-            Err(ModelRunError::Message(e)) => return Err(e),
+        let first = run_session_once(&self.session, n_mels, mel, f0, t, timeout);
+        match first {
+            Ok(data) => Ok(data),
+            Err(ModelRunError::Message(e)) => Err(e),
             Err(ModelRunError::TimedOut) => {
                 eprintln!(
                     "[nsf_hifigan] model inference timed out after {timeout:?}; disabling the hung EP and retrying with a fresh session"
                 );
                 crate::vocoder_ort_session::disable_coreml("vocoder inference timed out");
-                crate::vocoder_ort_session::reset_coreml_pinned_state();
                 reset_shared_session();
                 self.session = get_or_init_shared_session()?;
 
@@ -962,25 +957,16 @@ impl NsfHifiganOnnx {
                     n_mels,
                     retry_mel,
                     retry_f0,
-                    shape_t,
+                    t,
                     std::time::Duration::from_secs(120),
                 ) {
-                    Ok(data) => data,
-                    Err(ModelRunError::Message(e)) => return Err(e),
-                    Err(ModelRunError::TimedOut) => {
-                        return Err(format!(
-                            "model inference timed out again after EP fallback ({shape_t} frames)"
-                        ));
-                    }
+                    Ok(data) => Ok(data),
+                    Err(ModelRunError::Message(e)) => Err(e),
+                    Err(ModelRunError::TimedOut) => Err(format!(
+                        "model inference timed out again after EP fallback ({t} frames)"
+                    )),
                 }
             }
-        };
-
-        if shape_t != original_t {
-            let expected_len = original_t.saturating_mul(self.cfg.hop_size);
-            Ok(data.into_iter().take(expected_len).collect())
-        } else {
-            Ok(data)
         }
     }
 
@@ -997,11 +983,21 @@ impl NsfHifiganOnnx {
             let (mel, f0, t) = &items[0];
             return self.run_model(mel.clone(), f0.clone(), *t).map(|v| vec![v]);
         }
-        // CoreML and DirectML sessions are compiled with batch=1 pinned
-        // (dynamic batch is a known CoreML EP crash/hang source; DirectML is
-        // explicitly built with batch=1), so a batch of >1 items must be
-        // executed one item at a time.
-        if session_time_frames().is_some() || self.batch_pinned_to_one {
+        let n = items.len();
+        // Every item is zero-padded up to the longest one so the batch shares
+        // a single rectangular tensor; results are trimmed back afterwards.
+        let max_t = items.iter().map(|(_, _, t)| *t).max().unwrap_or(1);
+
+        // Batched inference is only exact when no item needs padding.  The
+        // model's f0 source-generator subgraph runs across the whole time
+        // axis, so feeding a chunk zero-padded to a longer length changes the
+        // audio in the *valid* region too (measured rel_l2 up to ~8% for a
+        // 256-frame chunk padded to 1024 — and identically on CPU and CoreML,
+        // so this is a property of the model, not of the execution provider).
+        // Items of unequal length therefore run one at a time, which is also
+        // what DirectML requires because its builder pins batch=1.
+        let uniform_length = items.iter().all(|(_, _, t)| *t == max_t);
+        if self.batch_pinned_to_one || !uniform_length {
             let mut results = Vec::with_capacity(items.len());
             for (mel, f0, t) in items {
                 results.push(self.run_model(mel.clone(), f0.clone(), *t)?);
@@ -1009,12 +1005,6 @@ impl NsfHifiganOnnx {
             return Ok(results);
         }
 
-        let n = items.len();
-        // CoreML sessions are compiled with a fixed `time` dimension: pad the
-        // batch to that length so every item matches the compiled shape.
-        let max_t = session_time_frames()
-            .map(|fixed| fixed.max(items.iter().map(|(_, _, t)| *t).max().unwrap_or(1)))
-            .unwrap_or_else(|| items.iter().map(|(_, _, t)| *t).max().unwrap_or(1));
         let n_mels = self.cfg.num_mels;
         let hop = self.cfg.hop_size;
 
@@ -1971,18 +1961,152 @@ fn timed_session_run(
     }
 }
 
+/// Mel frames fed to the model by the built-in benchmark.
+///
+/// Sessions keep the model's dynamic `time` axis on every platform, so a
+/// single budget works everywhere.  1024 frames (~11.9 s of audio at hop 512
+/// / 44.1 kHz) keeps one CPU run under a second while still being large
+/// enough to amortise GPU dispatch overhead.
+const BENCHMARK_FRAMES: usize = 1024;
+
+/// The GPU execution providers the benchmark should try, in priority order.
+///
+/// This is deliberately not derived from `diagnose_available_providers()`
+/// alone: that helper only reports whether an EP *registers*, and the macOS
+/// WebGPU EP registers fine yet fails every inference.  Ordering matters too
+/// — on Apple Silicon CoreML is the primary GPU path and must be tried before
+/// Dawn/Metal.  Windows is excluded because DirectML is benchmarked
+/// separately (see the `dml_*` result fields).
+fn gpu_ep_candidates() -> Vec<&'static str> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return vec!["coreml", "webgpu"];
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return vec!["webgpu"];
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    )))]
+    return vec![];
+}
+
+/// True when ORT's runtime probe reported `provider` as usable.
+fn provider_probed_available(available_providers: &[String], provider: &str) -> bool {
+    match provider {
+        "coreml" => available_providers
+            .iter()
+            .any(|p| p == "CoreMLExecutionProvider"),
+        "webgpu" => available_providers
+            .iter()
+            .any(|p| p == "WebGpuExecutionProvider"),
+        _ => false,
+    }
+}
+
+/// Benchmark a single GPU execution provider for the vocoder.
+///
+/// Returns `(median_ms, rt_factor, ep_name)` when the EP both registered and
+/// completed every timed run, otherwise a human-readable reason why it could
+/// not be measured.  A hung CoreML EP is disabled process-wide so it cannot
+/// stall a later render.
+fn benchmark_gpu_ep(
+    onnx_path: &Path,
+    frames: usize,
+    audio_sec: f64,
+    runs: usize,
+    gpu_ep_choice: &str,
+) -> Result<(f64, f64, String), String> {
+    let gpu_session_res = {
+        let _guard = crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
+        crate::vocoder_ort_session::build_ort_session(
+            onnx_path,
+            crate::vocoder_ort_session::OrtSessionRole::Vocoder,
+        )
+    };
+
+    let (gpu_session, ep) = gpu_session_res.map_err(|e| {
+        eprintln!("[benchmark] GPU session creation FAILED for '{gpu_ep_choice}': {e}");
+        e
+    })?;
+
+    if ep != gpu_ep_choice {
+        return Err(format!(
+            "GPU session creation fell back to CPU (requested {gpu_ep_choice}, got {ep}). \
+             Check the application log for the detailed error."
+        ));
+    }
+
+    eprintln!("[benchmark] GPU session created: ep={ep}");
+    let gpu_session = Arc::new(Mutex::new(gpu_session));
+    let timeout = std::time::Duration::from_secs(120);
+
+    // Warmup on a helper thread (same execution model as the session smoke
+    // test) so a hung EP inference can never freeze the benchmark.
+    {
+        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
+        let inputs = build_benchmark_inputs(&guard, frames)?;
+        drop(guard);
+        match timed_session_run(&gpu_session, inputs, timeout) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let msg = format!("{ep} warmup inference timed out after {timeout:?}");
+                eprintln!("[benchmark] WARNING: {msg}");
+                if ep == "coreml" {
+                    crate::vocoder_ort_session::disable_coreml("benchmark warmup timed out");
+                }
+                return Err(msg);
+            }
+            Err(e) => {
+                let msg = format!("{ep} warmup inference failed: {e}");
+                eprintln!("[benchmark] WARNING: {msg}");
+                return Err(msg);
+            }
+        }
+    }
+
+    let mut gpu_times = Vec::new();
+    for _ in 0..runs {
+        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
+        let inputs = build_benchmark_inputs(&guard, frames)?;
+        drop(guard);
+        match timed_session_run(&gpu_session, inputs, timeout) {
+            Ok(Some(ms)) => gpu_times.push(ms),
+            Ok(None) => {
+                let msg = format!("{ep} inference timed out after {timeout:?}");
+                eprintln!("[benchmark] WARNING: {msg}");
+                if ep == "coreml" {
+                    crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
+                }
+                return Err(msg);
+            }
+            Err(e) => {
+                let msg = format!("{ep} inference failed: {e}");
+                eprintln!("[benchmark] WARNING: {msg}");
+                return Err(msg);
+            }
+        }
+    }
+
+    if gpu_times.len() < 2 {
+        return Err(format!("{ep} did not complete any timed run"));
+    }
+
+    gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = gpu_times[gpu_times.len() / 2];
+    let rtf = audio_sec / (median / 1000.0);
+    eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x");
+    Ok((median, rtf, ep))
+}
+
 pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     ensure_ort_init()?;
     let (onnx_path, cfg_path) = resolve_model_paths()?;
     let cfg = read_config(&cfg_path)?;
 
-    // CoreML sessions on macOS ARM64 are compiled with a fixed `time`
-    // dimension, so the benchmark must use that length there.  Other
-    // platforms keep the 1024-frame budget.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let frames = crate::vocoder_ort_session::COREML_FIXED_TIME_FRAMES;
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    let frames = 1024usize;
+    // Sessions keep the model's dynamic `time` axis on every platform, so the
+    // benchmark is free to pick a single frame budget for all of them.  1024
+    // frames (~11.9 s of audio at hop 512 / 44.1 kHz) keeps one run well under
+    // a second on CPU while staying large enough to amortise GPU dispatch.
+    let frames = BENCHMARK_FRAMES;
     let audio_sec = (frames as f64) * (cfg.hop_size as f64) / (cfg.sampling_rate as f64);
     let runs = 5;
 
@@ -1991,12 +2115,15 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     let gpu_device_id = crate::vocoder_ort_session::diagnose_gpu().gpu_device_id;
     let ort_build_info = std::panic::catch_unwind(|| ort::info().to_string())
         .unwrap_or_else(|_| "ort::info() unavailable".to_string());
-    // Report WebGPU availability from the actual runtime probe rather than the
-    // compile-time target: the probe can fail on unsupported drivers/WSL2 even
-    // when WebGPU is compiled in.
-    let gpu_available = available_providers
+    // A GPU EP counts as available only when this platform has a candidate
+    // for it AND ORT's runtime probe reported it.  Deriving this from
+    // `available_providers` alone was wrong: the list is platform-agnostic, so
+    // a machine with working CoreML but a failing WebGPU probe used to skip
+    // the GPU benchmark entirely.
+    let gpu_candidates = gpu_ep_candidates();
+    let gpu_available = gpu_candidates
         .iter()
-        .any(|provider| provider == "WebGpuExecutionProvider");
+        .any(|ep| provider_probed_available(&available_providers, ep));
     let gpu_devices = crate::gpu_info::enumerate_gpus().devices;
     let dml_adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     let cpu_cores = std::thread::available_parallelism()
@@ -2066,119 +2193,31 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         cpu_times
     );
 
-    // 2. Benchmark GPU (CoreML on macOS, WebGPU elsewhere) if available
+    // 2. Benchmark GPU.  Candidates come from `gpu_ep_candidates()` so the
+    // platform's primary GPU EP is tried first and a broken secondary EP
+    // (macOS WebGPU registers but cannot infer) never masks a working one.
     let mut gpu_median = None;
     let mut gpu_rt_factor = None;
     let mut gpu_actually_working = false;
     let mut gpu_ep_name = String::new();
     let mut gpu_error: Option<String> = None;
 
-    // Always attempt the GPU benchmark on supported platforms. On Windows we
-    // don't auto-probe WebGPU (Dawn/D3D12 can crash), but the benchmark
-    // explicitly forces the GPU EP choice which is safe because it only
-    // triggers EP init within the benchmark's controlled scope.
     if gpu_available {
-        let gpu_ep_choice = if cfg!(target_os = "macos") {
-            "coreml"
-        } else {
-            "webgpu"
-        };
-        let gpu_session_res = {
-            let _guard =
-                crate::vocoder_ort_session::EpOverrideGuard::new(gpu_ep_choice.to_string());
-            crate::vocoder_ort_session::build_ort_session(
-                &onnx_path,
-                crate::vocoder_ort_session::OrtSessionRole::Vocoder,
-            )
-        };
-
-        if let Ok((gpu_session, ep)) = gpu_session_res {
-            if ep == "webgpu" || ep == "coreml" {
-                gpu_ep_name = ep.to_string();
-                eprintln!("[benchmark] GPU session created: ep={ep}");
-                let gpu_session = Arc::new(Mutex::new(gpu_session));
-                let timeout = std::time::Duration::from_secs(120);
-
-                // Warmup on a helper thread (same execution model as the
-                // session smoke test) so a hung CoreML/WebGPU inference can
-                // never freeze the benchmark.
-                let warmup_ok = {
-                    let guard = gpu_session.lock().map_err(|e| e.to_string())?;
-                    let inputs = build_benchmark_inputs(&guard, frames)?;
-                    drop(guard);
-                    match timed_session_run(&gpu_session, inputs, timeout) {
-                        Ok(Some(_)) => true,
-                        Ok(None) => {
-                            gpu_error =
-                                Some(format!("{ep} warmup inference timed out after {timeout:?}"));
-                            eprintln!("[benchmark] WARNING: {ep} warmup inference TIMED OUT");
-                            if ep == "coreml" {
-                                crate::vocoder_ort_session::disable_coreml(
-                                    "benchmark warmup inference timed out",
-                                );
-                            }
-                            false
-                        }
-                        Err(e) => {
-                            gpu_error = Some(format!("{ep} warmup inference failed: {e}"));
-                            eprintln!("[benchmark] WARNING: {ep} warmup inference FAILED: {e}");
-                            false
-                        }
-                    }
-                };
-
-                if warmup_ok {
+        for candidate in &gpu_candidates {
+            match benchmark_gpu_ep(&onnx_path, frames, audio_sec, runs, candidate) {
+                Ok((median, rtf, ep)) => {
+                    gpu_median = Some(median);
+                    gpu_rt_factor = Some(rtf);
+                    gpu_ep_name = ep;
                     gpu_actually_working = true;
-                    let mut gpu_times = Vec::new();
-                    for _ in 0..runs {
-                        let guard = gpu_session.lock().map_err(|e| e.to_string())?;
-                        let inputs = build_benchmark_inputs(&guard, frames)?;
-                        drop(guard);
-                        match timed_session_run(&gpu_session, inputs, timeout) {
-                            Ok(Some(ms)) => gpu_times.push(ms),
-                            Ok(None) => {
-                                gpu_error =
-                                    Some(format!("{ep} inference timed out after {timeout:?}"));
-                                eprintln!("[benchmark] WARNING: {ep} inference TIMED OUT");
-                                if ep == "coreml" {
-                                    crate::vocoder_ort_session::disable_coreml(
-                                        "benchmark inference timed out",
-                                    );
-                                }
-                                break;
-                            }
-                            Err(e) => {
-                                gpu_error = Some(format!("{ep} inference failed: {e}"));
-                                eprintln!("[benchmark] WARNING: {ep} inference FAILED: {e}");
-                                break;
-                            }
-                        }
-                    }
-                    if gpu_times.len() >= 2 {
-                        gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        let median = gpu_times[gpu_times.len() / 2];
-                        gpu_median = Some(median);
-                        gpu_rt_factor = Some(audio_sec / (median / 1000.0));
-                        eprintln!(
-                            "[benchmark] GPU({ep}): median={median:.1}ms rtf={:.3}x",
-                            audio_sec / (median / 1000.0)
-                        );
-                    } else if gpu_error.is_none() {
-                        gpu_error = Some(format!("{ep} did not complete any timed run"));
-                    }
+                    gpu_error = None;
+                    break;
                 }
-            } else {
-                gpu_error = Some(format!(
-                    "GPU session creation fell back to CPU (requested {gpu_ep_choice}, got {ep}). \
-                     Check the application log for the detailed CoreML/WebGPU error."
-                ));
+                Err(e) => {
+                    eprintln!("[benchmark] GPU candidate '{candidate}' unusable: {e}");
+                    gpu_error = Some(e);
+                }
             }
-        } else {
-            let err = gpu_session_res
-                .err()
-                .unwrap_or_else(|| "unknown error".to_string());
-            gpu_error = Some(err.clone());
-            eprintln!("[benchmark] GPU session creation FAILED: {err}");
         }
     }
 

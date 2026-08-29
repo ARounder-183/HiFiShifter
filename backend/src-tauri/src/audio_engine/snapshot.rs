@@ -1010,6 +1010,14 @@ pub(crate) fn build_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use super::build_snapshot;
+    use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
+    use crate::audio_engine::resource_manager::DecodeCache;
+    use crate::audio_engine::types::{ResampledStereo, StretchKey};
+    use crate::state::Clip;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
     #[test]
     fn make_stretch_key_distinguishes_algorithm() {
         let path = std::path::Path::new("demo.wav");
@@ -1031,6 +1039,109 @@ mod tests {
         );
         assert_ne!(linear, soundtouch);
     }
+
+    fn timeline_with_volume_curve() -> crate::state::TimelineState {
+        let mut tl = crate::state::TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+        tl.clips.push(Clip {
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
+            id: "clip-volume".to_string(),
+            track_id: root.clone(),
+            name: "volume clip".to_string(),
+            start_sec: 0.0,
+            length_sec: 0.5,
+            color: "#ffffff".to_string(),
+            source_path: Some("/tmp/hifishifter-volume-test.aiff".to_string()),
+            source_path_relative: None,
+            duration_sec: Some(0.5),
+            duration_frames: Some(22_050),
+            source_sample_rate: Some(44_100),
+            source_file_mtime: None,
+            source_file_size: None,
+            source_file_fingerprint: None,
+            waveform_preview: None,
+            pitch_range: None,
+            gain: 1.0,
+            muted: false,
+            source_start_sec: 0.0,
+            source_end_sec: 0.5,
+            playback_rate: 1.0,
+            reversed: false,
+            loop_enabled: false,
+            snap_offset_sec: 0.0,
+            fade_in_sec: 0.0,
+            fade_out_sec: 0.0,
+            fade_in_curve: "sine".to_string(),
+            fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
+            extra_curves: None,
+            extra_params: None,
+            formant_morph: None,
+            group_id: None,
+            midi_fill_gaps: false,
+            midi_note_data: None,
+        });
+        let params = tl
+            .params_by_root_track
+            .entry(root)
+            .or_default();
+        params.extra_curves.insert("volume".to_string(), vec![0.25f32; 10]);
+        tl
+    }
+
+    #[test]
+    fn build_snapshot_attaches_volume_curve_to_rendered_and_raw_clips() {
+        let tl = timeline_with_volume_curve();
+        let out_rate = 44_100;
+        let path = PathBuf::from("/tmp/hifishifter-volume-test.aiff");
+        let source_path = path.clone();
+        std::fs::write(&source_path, b"stub").expect("create source stub");
+
+        // 预填充解码缓存，绕过磁盘 I/O；build_snapshot 只读缓存。
+        // 缓冲至少覆盖 1s；测试 clip 只消费 0.5s。
+        let pcm = vec![0.5f32; 44_100 * 2];
+        let decoded = ResampledStereo {
+            sample_rate: out_rate,
+            frames: pcm.len() / 2,
+            pcm: Arc::new(pcm),
+        };
+        let cache: Arc<Mutex<DecodeCache>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+        cache
+            .lock()
+            .unwrap()
+            .insert((path.clone(), out_rate), decoded, 44_100 * 2 * 4);
+        let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
+            Arc::new(Mutex::new(ByteBudgetCache::new(4, u64::MAX)));
+
+        let snap = build_snapshot(&tl, out_rate, &cache, &stretch_cache);
+        std::fs::remove_file(&source_path).ok();
+        assert_eq!(snap.clips.len(), 1);
+        let engine_clip = &snap.clips[0];
+
+        let volume = engine_clip
+            .volume_curve
+            .as_ref()
+            .expect("volume curve must be attached");
+        assert_eq!(volume.as_slice(), &[0.25f32; 10]);
+        let fp = engine_clip.volume_curve_frame_period_ms;
+        assert!(fp > 0.0 && fp.is_finite(), "invalid frame period {fp}");
+        // volume 是混音级参数：即使 clip 不需要合成，也必须实时生效。
+        assert!(!engine_clip.needs_synthesis, "plain clip should use source PCM");
+        assert!(
+            engine_clip.breath_curve.is_none(),
+            "breath should not hijack plain clip volume"
+        );
+    }
+
 }
 
 pub(crate) fn build_snapshot_for_file(

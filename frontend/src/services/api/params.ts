@@ -6,14 +6,28 @@ import type {
 } from "../../types/api";
 
 import { invoke } from "../invoke";
+import {
+    decodeParamFramesFromBase64,
+    paramFramesBinaryToArrays,
+} from "../../components/layout/pianoRoll/paramFramesBinaryCodec";
 
 export const paramsApi = {
+    /**
+     * 取参数曲线段。
+     *
+     * `binary=true` 时后端把 orig/edit 编码成 Base64 二进制（见
+     * `pianoRoll/paramFramesBinaryCodec.ts`），返回体里 `orig`/`edit` 为空数组、
+     * `binary` 为编码串。相比 JSON number[] 体积约缩小 4 倍，解析不再阻塞主线程。
+     *
+     * 默认开启二进制：调用方拿到的 payload 已带解码后的 `orig`/`edit`。
+     */
     getParamFrames: (
         trackId: string,
         param: string,
         startFrame: number,
         frameCount: number,
         stride?: number,
+        binary = true,
     ) =>
         invoke<ParamFramesPayload>(
             "get_param_frames",
@@ -22,7 +36,17 @@ export const paramsApi = {
             startFrame,
             frameCount,
             stride,
-        ),
+            binary,
+        ).then((res) => {
+            // 在 API 层统一解码：调用方拿到的 payload 与二进制模式开启前结构一致，
+            // 六处取数点无需感知传输格式。
+            const encoded = res?.binary;
+            if (!res || !encoded) return res;
+            const decoded = decodeParamFramesFromBase64(encoded);
+            if (!decoded) return res; // 解码失败 → 回退空数组，调用方按 not-ok 处理
+            const { orig, edit } = paramFramesBinaryToArrays(decoded);
+            return { ...res, orig, edit, binary: undefined };
+        }),
 
     setParamFrames: (
         trackId: string,

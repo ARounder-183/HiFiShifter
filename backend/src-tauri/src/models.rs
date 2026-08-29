@@ -325,7 +325,10 @@ pub struct RuntimeInfoPayload {
     pub is_playing: Option<bool>,
     pub playback_target: Option<String>,
     pub timeline: Option<TimelineStatePayload>,
-    /// The GPU backend name for this build, e.g. "DirectML", "WebGPU", "CoreML", or "".
+    /// Display name of the execution provider the live vocoder session is
+    /// actually running on, e.g. "CoreML", "WebGPU", "DirectML" or "CPU".
+    /// Empty until the first session has been built (or after an EP switch
+    /// that has not been picked up by a render yet).
     pub gpu_backend: String,
 }
 
@@ -401,6 +404,12 @@ pub struct ParamFramesPayload {
     pub start_frame: u32,
     pub orig: Vec<f32>,
     pub edit: Vec<f32>,
+    /// 二进制编码的曲线数据（请求带 `binary=true` 时返回）。
+    ///
+    /// 协议见 `commands/params.rs::encode_param_frames_binary`，与前端
+    /// `paramFramesBinaryCodec.ts` 配套。启用时 `orig`/`edit` 为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
     pub reference_kind: ParamReferenceKind,
 
     #[serde(skip_serializing_if = "Option::is_none")]

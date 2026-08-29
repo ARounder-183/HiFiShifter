@@ -525,6 +525,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 startFrame: args[2],
                 frameCount: args[3],
                 stride: args[4],
+                binary: args[5],
             };
 
         case "set_param_frames":

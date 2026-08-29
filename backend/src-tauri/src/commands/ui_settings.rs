@@ -1,6 +1,45 @@
+// 管理 UI 设置（主题、推理设备、默认拉伸算法等）的读写命令。
+//
+// 推理设备（ORT Execution Provider）相关的两个函数是本文件的重点：
+// `get_ui_settings`（读路径）和 `save_ui_settings`（写路径）都会把
+// `ort_ep` / `ort_device_id` 下发给三个 ONNX 模型模块。下发会销毁并重建
+// 全部 ORT 会话，成本很高（CoreML 单个模型重编译就要 0.4~1.2s），因此这里
+// 用 `apply_ort_ep_settings()` 做去重，只在取值真正变化时重建。
+
 use crate::config::UiSettings;
 use crate::state::AppState;
+use std::sync::{Mutex, OnceLock};
 use tauri::State;
+
+/// Last `(ort_ep, ort_device_id)` pair pushed down to the ONNX modules.
+///
+/// `get_ui_settings()` is a *read* path and is invoked often (app start,
+/// settings panel mounts).  Re-applying the EP settings unconditionally tore
+/// down all three ORT sessions on every read, forcing a full model reload.
+static APPLIED_EP: OnceLock<Mutex<Option<(String, Option<i32>)>>> = OnceLock::new();
+
+/// Push the EP settings down to the three ONNX model modules, but only when
+/// they differ from what is already applied.
+///
+/// Returns `true` when the sessions were invalidated (i.e. the caller may need
+/// to invalidate render caches).  Dropping a session forces a rebuild; on
+/// CoreML that means recompiling the model, so this must not happen on every
+/// settings read.
+fn apply_ort_ep_settings(ep: &str, device_id: Option<i32>) -> bool {
+    let slot = APPLIED_EP.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (ep.to_string(), device_id);
+    if guard.as_ref() == Some(&key) {
+        return false;
+    }
+    *guard = Some(key);
+    drop(guard);
+
+    crate::nsf_hifigan_onnx::update_ort_ep(ep, device_id);
+    crate::hnsep_onnx::update_ort_ep(ep, device_id);
+    crate::fcpe_onnx::update_ort_ep(ep, device_id);
+    true
+}
 
 pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     let mut settings = if let Some(dir) = state.config_dir.get() {
@@ -14,10 +53,9 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
     );
-    // Apply EP settings on load — all three ONNX models
-    crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-    crate::hnsep_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-    crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
+    // Apply EP settings on load — all three ONNX models.  No-op when the
+    // values are unchanged, so repeated settings reads do not rebuild sessions.
+    apply_ort_ep_settings(&settings.ort_ep, settings.ort_device_id);
     // Sync background render setting
     crate::commands::playback::AUTO_BG_RENDER_ENABLED.store(
         settings.auto_background_render,
@@ -93,7 +131,10 @@ pub(super) fn save_ui_settings(
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
 
-    let ep_changed = prev_ep != settings.ort_ep;
+    // Both fields matter: changing only the DirectML device ID must also
+    // rebuild the sessions, otherwise the new device is silently ignored.
+    let ep_changed =
+        prev_ep != settings.ort_ep || prev_settings.ort_device_id != settings.ort_device_id;
 
     // Changing the global stretch defaults only affects the current project when
     // the project inherits the corresponding setting. Compute the effective value
@@ -116,9 +157,7 @@ pub(super) fn save_ui_settings(
     };
 
     if ep_changed {
-        crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-        crate::hnsep_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
-        crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, settings.ort_device_id);
+        apply_ort_ep_settings(&settings.ort_ep, settings.ort_device_id);
     }
 
     if ep_changed || effective_stretch_changed {

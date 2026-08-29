@@ -87,6 +87,21 @@ test("services/invoke.test.ts scripted checks", async () => {
     assertEqual(mapped.fadeOutSec, 0.2, "fadeOutSec value");
     assertEqual(mapped.checkpoint, false, "checkpoint value");
 
+    // get_param_frames 的 binary 参数曾漏映射：前端默认请求二进制，但 Tauri
+    // 后端实际收到 false，返回 JSON；API 层又按二进制协议解码，破坏取数约定。
+    assertEqual(
+        buildTauriArgs("get_param_frames", ["track-1", "volume", 100, 200, 2, true]),
+        {
+            trackId: "track-1",
+            param: "volume",
+            startFrame: 100,
+            frameCount: 200,
+            stride: 2,
+            binary: true,
+        },
+        "get_param_frames binary mapping",
+    );
+
     // Take 相关命令映射：这些命令曾经漏映射，导致前端乐观更新生效但后端调用
     // 抛 "method not wired yet"，任何后续权威时间轴刷新都会回滚 Take 切换。
     assertEqual(

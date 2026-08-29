@@ -172,13 +172,16 @@ pub(super) fn get_param_frames(
     start_frame: u32,
     frame_count: u32,
     stride: Option<u32>,
+    binary: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         eprintln!(
-            "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?})",
-            track_id, param, start_frame, frame_count, stride
+            "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
+            track_id, param, start_frame, frame_count, stride, binary
         );
     }
+    // 二进制模式：orig/edit 以 Base64 单条返回，JSON 里不再展开成 number[]。
+    let binary = binary.unwrap_or(false);
     let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -193,6 +196,7 @@ pub(super) fn get_param_frames(
                     start_frame,
                     orig: vec![],
                     edit: vec![],
+                    binary: None,
                     reference_kind: resolve_param_reference_kind("pitch"),
                     analysis_pending: None,
                     analysis_progress: None,
@@ -259,6 +263,7 @@ pub(super) fn get_param_frames(
             start_frame,
             orig: vec![],
             edit: vec![],
+            binary: None,
             reference_kind: resolve_param_reference_kind("pitch"),
             analysis_pending: None,
             analysis_progress: None,
@@ -328,8 +333,9 @@ pub(super) fn get_param_frames(
         param: param.clone(),
         frame_period_ms: fp,
         start_frame,
-        orig,
-        edit,
+        binary: binary.then(|| encode_param_frames_binary(&orig, &edit)),
+        orig: if binary { Vec::new() } else { orig },
+        edit: if binary { Vec::new() } else { edit },
         reference_kind: resolve_param_reference_kind(&param),
         analysis_pending,
         analysis_progress: None,
@@ -337,6 +343,35 @@ pub(super) fn get_param_frames(
         pitch_edit_backend_available,
     }
 }
+/// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。
+///
+/// 协议：`[Header 8B][orig f32[count]][edit f32[count]]`，小端序。
+///   - Header: magic `"PFB1"`（4B）+ count（u32 LE，两组长度相同）
+///
+/// 注意布局是**平面**（先整个 orig、再整个 edit），而不是 orig/edit 交错。
+/// 平面布局下前端可以用 `new Float32Array(buffer, offset, count)` 直接建零拷贝
+/// 视图，无需逐元素反交错。与前端 `paramFramesBinaryCodec.ts` 配套，
+/// 改动任一侧必须同步另一侧。
+fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
+    use base64::Engine as _;
+
+    debug_assert_eq!(orig.len(), edit.len(), "orig/edit length mismatch");
+    let count = orig.len().min(edit.len());
+    let orig = &orig[..count];
+    let edit = &edit[..count];
+
+    let mut bytes = Vec::with_capacity(8 + count * 8);
+    bytes.extend_from_slice(b"PFB1");
+    bytes.extend_from_slice(&(count as u32).to_le_bytes());
+    for v in orig {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in edit {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 
 pub(super) fn set_param_frames(
     state: State<'_, AppState>,

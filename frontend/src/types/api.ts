@@ -14,7 +14,11 @@ export interface RuntimeInfo {
     is_playing?: boolean;
     playback_target?: string | null;
     timeline?: TimelineState;
-    /** GPU backend name for this build: "DirectML", "WebGPU", "CoreML", or "". */
+    /**
+     * Backend the live vocoder session actually runs on: "CoreML", "WebGPU",
+     * "DirectML", "CPU", or "" while no session has been built yet.
+     * This reflects runtime reality, not the compiled-in default.
+     */
     gpuBackend: string;
 }
 
@@ -307,6 +311,12 @@ export interface ParamFramesPayload {
     start_frame: number;
     orig: number[];
     edit: number[];
+    /**
+     * 二进制编码的曲线数据（Base64）。`paramsApi.getParamFrames` 默认请求二进制
+     * 并在 API 层解码成 `orig`/`edit`，正常情况下调用方不会见到该字段有值。
+     * 协议见 `pianoRoll/paramFramesBinaryCodec.ts`。
+     */
+    binary?: string | null;
     reference_kind: ParamReferenceKind;
 
     analysis_pending?: boolean;
