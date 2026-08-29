@@ -137,16 +137,19 @@ ort = { version = "2.0.0-rc.13", optional = true, default-features = false, feat
 ort-tract = { version = "0.4.0", optional = true }
 
 [profile.release]
-# Thin LTO for every release artifact (all CI/scripts build with --release).
-# NOTE: codegen-units stays at 16 — setting it to 1 serialized LLVM codegen
-# for the whole crate and made release builds ~2.3x slower (751s vs 330s
-# full build on a 400-crate graph). Thin LTO still applies at link time,
-# so shipped binaries keep the size/speed win without the compile tax.
-lto = "thin"
+# Regular release builds: no LTO so local builds/scripts stay fast.
 codegen-units = 16
 strip = true
 opt-level = 3
 panic = "abort"
+
+# Distribution builds: full-fat LTO for the best final-artifact
+# optimization. Used ONLY by the CI pipeline (`cargo tauri build
+# -- --profile dist`), never by local scripts.
+[profile.dist]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
 
 # Fast iteration profile: opt-level=2 for ORT/GPU, no LTO, fast compile
 [profile.dev-opt]
