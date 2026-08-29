@@ -1,7 +1,10 @@
-import React, { useCallback, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
+import type { TimelineAxis } from "./runtime/timelineAxis";
+import type { TimelineTick } from "./runtime/buildTimelineTicks";
+import type { TimelineLayer } from "./runtime/timelineFrameCommitter";
 
 /**
  * Grid lines are drawn as SVG paths computed directly from beat positions.
@@ -36,6 +39,9 @@ export const BackgroundGrid: React.FC<{
     minSpacingPx?: number;
     /** Swing 强度（0-100），仅作用于弱网格线的奇数格。 */
     swingPercent?: number;
+    /** 行分段竖线（叠加层）：见 rowSegmentHeightPx 注释。 */
+    rowSegmentHeightPx?: number;
+    rowSegmentSkipPx?: number;
     /**
      * Sticky 视口的竖直偏移（内容绝对坐标）。网格线从 -viewportTopPx
      * 处开始可见；垂直滚动时由命令式 draw(scrollLeft, scrollTopPx) 同步。
@@ -49,6 +55,22 @@ export const BackgroundGrid: React.FC<{
     /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
     weakLineXs?: number[] | null;
     strongLineXs?: number[] | null;
+    /**
+     * 视口总线：提供时本网格会注册为统一帧提交的图层，由提交器保证与 clip 体
+     * / 波形的绘制顺序固定。不提供时仍走 gridRedrawBridge 的命令式调用。
+     */
+    viewportBus?: {
+        getAxis(): TimelineAxis;
+        register(layer: TimelineLayer, order: number): () => void;
+    };
+    /** 在统一帧提交中的绘制顺序，取 LAYER_ORDER 中的值；需与 viewportBus 同传。 */
+    layerOrder?: number;
+    /**
+     * 统一刻度源（推荐）：提供时网格线直接画在刻度的内容坐标上，与标尺严格
+     * 同源。不提供时退化到按 pxPerBeat 自行采样——仅供尚未接入 axis 的调用方
+     * （参数编辑器）过渡使用。
+     */
+    ticks?: readonly TimelineTick[] | null;
 }> = ({
     contentWidth,
     contentHeight,
@@ -63,12 +85,29 @@ export const BackgroundGrid: React.FC<{
     visible = true,
     minSpacingPx,
     swingPercent = 0,
+    rowSegmentHeightPx,
+    rowSegmentSkipPx = 0,
     viewportTopPx = 0,
     contentBottomPx,
     weakLineXs = null,
     strongLineXs = null,
+    viewportBus,
+    layerOrder,
+    ticks = null,
 }) => {
     const svgRef = useRef<SVGSVGElement | null>(null);
+
+    // 统一刻度源：拆成弱线/强线两组内容坐标，复用"显式线"绘制路径。
+    // Swing 与小节抽取已在 buildTimelineTicks 内完成，这里只负责画。
+    const tickLineXs = React.useMemo(() => {
+        if (!ticks || ticks.length === 0) return null;
+        const weak: number[] = [];
+        const strong: number[] = [];
+        for (const tick of ticks) {
+            (tick.isStrongGridLine ? strong : weak).push(tick.contentPx);
+        }
+        return { weak, strong };
+    }, [ticks]);
 
     const useViewport =
         viewportWidth != null &&
@@ -78,7 +117,11 @@ export const BackgroundGrid: React.FC<{
         Number.isFinite(scrollLeft);
     const isSticky = sticky && useViewport;
 
-    const useExplicitLines = weakLineXs != null && Array.isArray(weakLineXs);
+    // 统一刻度源优先：网格线与标尺同源。退化路径用调用方显式传入的数组
+    // （参数编辑器尚未接入 axis 时的过渡形态）。
+    const effectiveWeakXs = weakLineXs ?? tickLineXs?.weak ?? null;
+    const effectiveStrongXs = strongLineXs ?? tickLineXs?.strong ?? null;
+    const useExplicitLines = effectiveWeakXs != null && Array.isArray(effectiveWeakXs);
 
     const samplingViewportWidth =
         viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
@@ -101,8 +144,8 @@ export const BackgroundGrid: React.FC<{
         weakStepPx: samplingPlan.weakStepPx,
         strongStepPx: samplingPlan.strongStepPx,
         swingPercent: Math.max(0, Math.min(100, swingPercent)),
-        weakLineXs: weakLineXs,
-        strongLineXs: strongLineXs,
+        weakLineXs: effectiveWeakXs,
+        strongLineXs: effectiveStrongXs,
         width,
         height,
         contentWidth,
@@ -115,6 +158,8 @@ export const BackgroundGrid: React.FC<{
         lineOpacity,
         viewportTopPx,
         contentBottomPx,
+        rowSegmentHeightPx,
+        rowSegmentSkipPx,
     });
 
     useLayoutEffect(() => {
@@ -122,8 +167,8 @@ export const BackgroundGrid: React.FC<{
             weakStepPx: samplingPlan.weakStepPx,
             strongStepPx: samplingPlan.strongStepPx,
             swingPercent: Math.max(0, Math.min(100, swingPercent)),
-            weakLineXs,
-            strongLineXs,
+            weakLineXs: effectiveWeakXs,
+            strongLineXs: effectiveStrongXs,
             width,
             height,
             contentWidth,
@@ -136,6 +181,8 @@ export const BackgroundGrid: React.FC<{
             lineOpacity,
             viewportTopPx,
             contentBottomPx,
+            rowSegmentHeightPx,
+            rowSegmentSkipPx,
         };
     });
 
@@ -181,6 +228,23 @@ export const BackgroundGrid: React.FC<{
             // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
             // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
             // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
+            // 行分段（叠加层）：竖线只画在每行 [rowTop+skip, rowTop+rowH] 段内，
+            // 跳过 clip header 条带 —— 网格出现在波形之上、header 之下。
+            const ySegments: Array<[number, number]> = [];
+            if (latest.rowSegmentHeightPx != null && latest.rowSegmentHeightPx > 0) {
+                const rowH = latest.rowSegmentHeightPx;
+                const skip = Math.max(0, latest.rowSegmentSkipPx ?? 0);
+                const firstRow = Math.max(0, Math.floor((lineTop + vpTop) / rowH));
+                const lastRow = Math.ceil((lineBottom + vpTop) / rowH);
+                for (let row = firstRow; row <= lastRow; row += 1) {
+                    const segTop = Math.max(lineTop, row * rowH - vpTop + skip);
+                    const segBottom = Math.min(lineBottom, (row + 1) * rowH - vpTop);
+                    if (segBottom > segTop) ySegments.push([segTop, segBottom]);
+                }
+            } else {
+                ySegments.push([lineTop, lineBottom]);
+            }
+
             const drawKey = [
                 sl,
                 vpTop,
@@ -196,6 +260,8 @@ export const BackgroundGrid: React.FC<{
                 latest.isSticky,
                 latest.lineOpacity,
                 latest.contentBottomPx,
+                latest.rowSegmentHeightPx,
+                latest.rowSegmentSkipPx,
             ].join("|");
             if (lastDrawKeyRef.current === drawKey) return;
             lastDrawKeyRef.current = drawKey;
@@ -206,7 +272,17 @@ export const BackgroundGrid: React.FC<{
                 return;
             }
 
-            const buildUniformPath = (stepPx: number): string => {
+            /**
+             * 竖线的落笔 x。
+             *
+             * SVG 的描边以路径为中心向两侧展开，而标尺用 DOM 盒子绘制：
+             * - 1px 弱线：标尺是 `left: 0; width: 1`（占据 [x, x+1]），网格若画在
+             *   x 则会变成 [x-0.5, x+0.5]，两者相差半个像素。因此弱线落笔要
+             *   右移 0.5，使线体正好覆盖 [x, x+1]。
+             * - 2px 强线：标尺是 `left: -1; width: 2`（占据 [x-1, x+1]），与描边
+             *   居中一致，无需偏移。
+             */
+            const buildUniformPath = (stepPx: number, halfPixelOffset: number): string => {
                 if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
                 const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
                 const lastIndex = Math.max(firstIndex, Math.ceil((visibleEnd + offset) / stepPx));
@@ -215,14 +291,20 @@ export const BackgroundGrid: React.FC<{
                 const parts: string[] = [];
                 for (let index = firstIndex; index <= lastIndex; index += 1) {
                     // Swing：奇数网格位置向右偏移（最大半步）。
-                    const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
+                    const x =
+                        index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset + halfPixelOffset;
                     if (x < -1 || x > latest.width + 1) continue;
-                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
+                    for (const [segTop, segBottom] of ySegments) {
+                        parts.push(`M${x} ${segTop}V${segBottom}`);
+                    }
                 }
                 return parts.join("");
             };
 
-            const buildExplicitPath = (lineXs: number[] | null): string => {
+            const buildExplicitPath = (
+                lineXs: number[] | null,
+                halfPixelOffset: number,
+            ): string => {
                 if (!lineXs || lineXs.length === 0) return "";
                 const parts: string[] = [];
                 // 二分定位可见范围
@@ -240,25 +322,29 @@ export const BackgroundGrid: React.FC<{
                 };
                 const start = lowerBound(visibleStart + offset);
                 for (let i = start; i < lineXs.length; i += 1) {
-                    const x = lineXs[i] - offset;
+                    const x = lineXs[i] - offset + halfPixelOffset;
                     if (x > latest.width + 1) break;
                     if (x < -1) continue;
-                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
+                    for (const [segTop, segBottom] of ySegments) {
+                        parts.push(`M${x} ${segTop}V${segBottom}`);
+                    }
                 }
                 return parts.join("");
             };
 
+            // 弱线 1px：右移半像素与标尺的 DOM 盒子对齐（见 buildUniformPath 注释）；
+            // 强线 2px：描边天然居中，与标尺的 left:-1/width:2 一致，不偏移。
             paths[0].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.weakLineXs)
-                    : buildUniformPath(latest.weakStepPx),
+                    ? buildExplicitPath(latest.weakLineXs, 0.5)
+                    : buildUniformPath(latest.weakStepPx, 0.5),
             );
             paths[1].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.strongLineXs)
-                    : buildUniformPath(latest.strongStepPx),
+                    ? buildExplicitPath(latest.strongLineXs, 0)
+                    : buildUniformPath(latest.strongStepPx, 0),
             );
         },
         [useExplicitLines],
@@ -277,8 +363,8 @@ export const BackgroundGrid: React.FC<{
         samplingPlan.weakStepPx,
         samplingPlan.strongStepPx,
         swingPercent,
-        weakLineXs,
-        strongLineXs,
+        effectiveWeakXs,
+        effectiveStrongXs,
         width,
         height,
         contentWidth,
@@ -300,6 +386,20 @@ export const BackgroundGrid: React.FC<{
             }
         };
     }, [draw, layerRef]);
+
+    // 注册为统一帧提交的图层：滚动 / 缩放时由提交器按固定顺序调用，无需调用
+    // 方记得单独通知网格（历史上漏通知会造成网格与 Clip/波形分层）。
+    useEffect(() => {
+        const bus = viewportBus;
+        if (!bus || layerOrder == null) return;
+        return bus.register(
+            {
+                name: `grid-${layerOrder}`,
+                paint: (axis) => draw(axis.scrollLeftPx, axis.scrollTopPx),
+            },
+            layerOrder,
+        );
+    }, [draw, layerOrder, viewportBus]);
 
     if (!visible) return null;
 

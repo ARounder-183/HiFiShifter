@@ -239,6 +239,8 @@ export const ClipHeader: React.FC<{
                         setGainHovered(false);
                     }}
                     onPointerDown={(e) => {
+                        // 仅左键触发音量旋钮手势/提示：中键不得启动 gain 拖拽。
+                        if (e.button !== 0) return;
                         e.preventDefault();
                         e.stopPropagation();
                         setGainHovered(true);

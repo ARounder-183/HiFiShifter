@@ -551,6 +551,7 @@ export const koKR = {
     color_magenta: "마젠타",
     color_yellow: "노랑",
     color_red: "빨강",
+    color_gray: "회색",
 
     progress_est_remaining: "약 {time} 남음",
     progress_cancel: "취소",

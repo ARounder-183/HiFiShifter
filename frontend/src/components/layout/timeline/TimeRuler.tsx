@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
-import type { RulerTick, TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
+import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
 import type { ScaleLike } from "../../../utils/musicalScales.ts";
@@ -25,6 +25,7 @@ import {
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
+import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 
 function unitLabelKey(unit: TimeUnit): string {
     switch (unit) {
@@ -66,55 +67,57 @@ function ContextMenuItem({
 
 const ContextDivider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
 
+/**
+ * 标尺刻度。
+ *
+ * 只渲染统一刻度源中标记了 `showLabel` 的刻度与小节起点，其余刻度由背景网格
+ * 绘制——两者消费同一份数据，因此标尺刻度必然落在网格线上。
+ */
 const TimeRulerMarks = React.memo(function TimeRulerMarks({
     ticks,
-    secPerBeat: _secPerBeat,
-    pxPerSec,
     scrollLeft,
     viewportWidth,
 }: {
-    ticks: RulerTick[];
-    secPerBeat: number;
-    pxPerSec: number;
+    ticks: readonly TimelineTick[];
     scrollLeft: number;
     viewportWidth?: number;
 }) {
-    void _secPerBeat;
     const visibleTicks = React.useMemo(() => {
+        // 只渲染带标签的刻度：网格负责画出全部刻度（含无标签的小节线），
+        // 标尺若连无标签的一起渲染，缩小时会留下一堆没有文字的竖线。
+        const labeled = ticks.filter((tick) => tick.showLabel);
         if (!Number.isFinite(viewportWidth) || viewportWidth == null || viewportWidth <= 0) {
-            return ticks;
+            return labeled;
         }
         const bufferPx = Math.max(320, viewportWidth * 0.5);
         const leftPx = Math.max(0, scrollLeft - bufferPx);
         const rightPx = scrollLeft + viewportWidth + bufferPx;
-        const leftSec = leftPx / Math.max(1e-9, pxPerSec);
-        const rightSec = rightPx / Math.max(1e-9, pxPerSec);
-        // 按 sec 二分（Tempo Map 下 beat 与 px 不再线性，必须用 sec 判断可见性）。
+        // 按内容坐标二分：坐标已由 axis 投影好，Tempo Map 下也无需再换算。
         const lowerBound = (target: number) => {
             let lo = 0;
-            let hi = ticks.length;
+            let hi = labeled.length;
             while (lo < hi) {
                 const mid = (lo + hi) >> 1;
-                if (ticks[mid].sec < target) lo = mid + 1;
+                if (labeled[mid].contentPx < target) lo = mid + 1;
                 else hi = mid;
             }
             return lo;
         };
-        const start = Math.max(0, lowerBound(leftSec) - 1);
-        const end = Math.min(ticks.length, lowerBound(rightSec + 1e-6) + 1);
-        return ticks.slice(start, end);
-    }, [ticks, pxPerSec, scrollLeft, viewportWidth]);
+        const start = Math.max(0, lowerBound(leftPx) - 1);
+        const end = Math.min(labeled.length, lowerBound(rightPx) + 1);
+        return labeled.slice(start, end);
+    }, [ticks, scrollLeft, viewportWidth]);
 
     return (
         <>
             {visibleTicks.map((tick, index) => {
-                const left = tick.sec * pxPerSec;
+                const left = tick.contentPx;
                 // 每个刻度文本的显示区域限定在“到下一刻度”的间距内：
                 // - 间距足够时，文本右侧裁切到下一刻度之前（主/副单位与分隔线一起裁切）；
                 // - 间距过近（放不下任何有意义的文本片段）时，完全隐藏本刻度文本，
                 //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
                 const nextTick = visibleTicks[index + 1];
-                const gapPx = nextTick != null ? (nextTick.sec - tick.sec) * pxPerSec : null;
+                const gapPx = nextTick != null ? nextTick.contentPx - tick.contentPx : null;
                 const labelHidden = gapPx != null && gapPx < 26;
                 const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
                 return (
@@ -474,10 +477,9 @@ function TimeRulerContextMenu({
 
 export const TimeRuler: React.FC<{
     scrollLeft: number;
-    ticks: RulerTick[];
+    ticks: readonly TimelineTick[];
     pxPerBeat: number;
     pxPerSec: number;
-    secPerBeat: number;
     viewportWidth?: number;
     playheadSec: number;
     playheadLineRef?: React.Ref<HTMLDivElement>;
@@ -514,7 +516,6 @@ export const TimeRuler: React.FC<{
     ticks,
     pxPerBeat: _pxPerBeat,
     pxPerSec,
-    secPerBeat,
     viewportWidth,
     playheadSec,
     playheadLineRef,
@@ -789,8 +790,6 @@ export const TimeRuler: React.FC<{
                 <div className="absolute inset-x-0 top-0" style={{ height: RULER_BASE_HEIGHT_PX }}>
                     <TimeRulerMarks
                         ticks={ticks}
-                        secPerBeat={secPerBeat}
-                        pxPerSec={pxPerSec}
                         scrollLeft={scrollLeft}
                         viewportWidth={viewportWidth}
                     />

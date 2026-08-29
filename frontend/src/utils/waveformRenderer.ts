@@ -437,13 +437,16 @@ export function renderWaveform(
 
         if (pixelMin === Infinity) continue;
 
+        // 超过 0dB 的峰值截断到画布内：不 clamp 会画出 body 区、盖住 header。
+        const clampY = (y: number): number => Math.max(0, Math.min(canvasHeight, y));
+
         if (mode === "jitter") {
             // ========================================
             // 抖动线模式
             // ========================================
             const t = px & 1 ? 0.75 : 0.25;
             const value = pixelMax + (pixelMin - pixelMax) * t;
-            const y = centerY - value * amplitudeScale;
+            const y = clampY(centerY - value * amplitudeScale);
 
             if (!jitterStarted) {
                 ctx.moveTo(px, y);
@@ -452,8 +455,8 @@ export function renderWaveform(
                 ctx.lineTo(px, y);
             }
         } else {
-            const yTop = centerY - pixelMax * amplitudeScale;
-            const yBot = centerY - pixelMin * amplitudeScale;
+            const yTop = clampY(centerY - pixelMax * amplitudeScale);
+            const yBot = clampY(centerY - pixelMin * amplitudeScale);
 
             // 确保静音段至少有最小可见高度（0.5px）
             if (yBot - yTop < 0.5) {

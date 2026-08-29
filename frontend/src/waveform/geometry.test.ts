@@ -149,4 +149,41 @@ test("waveform/geometry.test.ts scripted checks", async () => {
         [Math.fround(0.42), Math.fround(0.42), Math.fround(0.42), Math.fround(0.78)],
         "inactive markers darken too",
     );
+
+    // 音量增益 > 1 时包络按 gain 放大，必须被钳制在波形矩形内（削顶显示），
+    // 不能溢出 clip 上下边界。
+    const boosted = buildWaveformGeometry({
+        scene: { segments: [{ ...scene.segments[0], gain: 3 }], markers: [] },
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-1]),
+            max: new Float32Array([1]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+    });
+    // 高度 100，中心 50，±1 峰值 × gain 3 → 名义 ±150，钳制后恰好 0 / 100。
+    assertEqual(
+        [boosted.vertices[1], boosted.vertices[7]],
+        [0, 100],
+        "gain-boosted envelope clamps to the waveform rect (flat-top display)",
+    );
+
+    // gain = 1 时钳制不影响正常包络（回归保护）。峰值取 ±0.5 保证精确：
+    // 中心 50 ± 0.5×50 → 25 / 75。
+    const unity = buildWaveformGeometry({
+        scene,
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-0.5]),
+            max: new Float32Array([0.5]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+    });
+    assertEqual(
+        [unity.vertices[1], unity.vertices[7]],
+        [25, 75],
+        "unity gain envelope is untouched by the clamp",
+    );
 });

@@ -1,5 +1,29 @@
+/**
+ * Clip 体画布的稀疏渲染模型。
+ *
+ * 【主要内容】把窗口内可见的 clip 元数据转换为画布绘制所需的像素几何
+ * （`TimelineCanvasClipModel[]`），并判定哪些 clip 需要额外的 DOM 覆盖层。
+ *
+ * 【作用】clip **本体**由 canvas 绘制（数量多、重绘频繁），只有选中/悬停/
+ * 重命名/重叠的 clip 才额外渲染 DOM 覆盖层以获得交互手柄。本文件负责这条
+ * 分工的判定与几何产出。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`TimelinePanel` 在渲染期调用 `buildSparseClipRenderModel()`，结果
+ *   交给 `TimelineCanvasViewport` 绘制、交给 `TrackLane` 决定 DOM 覆盖层。
+ * - 横向：所有时间↔像素换算一律走 `timelineAxis.ts`，本文件不得自行
+ *   执行 `sec * pxPerSec`，否则会与波形、网格产生错位。
+ * - 下游：`runtime/timelineCanvasRenderer.ts` 消费 `drawClips`。
+ */
+
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
 import { clipDisplayName } from "../../../../features/session/sessionTypes";
+import {
+    durationToWidthPx,
+    secToContentPx,
+    secToSpanPx,
+    type TimelineAxis,
+} from "./timelineAxis.js";
 
 type SparseRenderClip = {
     id: string;
@@ -53,19 +77,48 @@ export type TimelineCanvasClipModel = {
     snapOffsetPx: number;
 };
 
+/**
+ * 构建 clip 体画布的稀疏渲染模型。
+ *
+ * 流程：
+ * 1. 判定需要 DOM 覆盖层的 clip（重命名中 / 悬停 / 选中 / 同组 / 同轨重叠）；
+ * 2. 把每个可见 clip 的秒级字段经 `TimelineAxis` 投影为像素几何。
+ *
+ * 特殊说明：
+ * - 输出的是**内容绝对坐标**（原点为工程 0 秒），竖直滚动由画布统一
+ *   `translate` 平移，因此这里不减 scrollTopPx。
+ * - 宽度与淡入淡出必须分别用 `durationToWidthPx` / `secToSpanPx`：
+ *   前者带最小宽度下限（保证可命中），后者可为 0（0 淡入不应出现角标）。
+ *
+ * @param args.axis 统一坐标投影（唯一的时间↔像素来源）。
+ * @param args.visibleTracks 窗口内可见轨道，决定绘制顺序与轨道配色。
+ * @param args.startTrackIndex 窗口首行的绝对轨道索引，用于算竖直内容坐标。
+ * @param args.visibleTrackClipsById 各轨道的可见 clip。
+ * @param args.rowHeight 轨道行高（CSS 像素）。
+ * @param args.selectedClipId / multiSelectedClipIds / renamingClipId /
+ *        hoveredClipId / disabledGroupIds 决定 DOM 覆盖层的归属。
+ * @returns `drawClips` 供 canvas 绘制；`overlayClipIdsByTrackId` 供
+ *          `TrackLane` 决定哪些 clip 额外挂 DOM 交互层。
+ */
 export function buildSparseClipRenderModel(args: {
     visibleTracks: Array<{ id: string; color?: string }>;
     /** 窗口首行的绝对轨道索引：clip body 画布使用内容绝对坐标绘制，
      * 竖直滚动时由 scrollTopPx 统一平移（与 DOM 内容层同帧提交）。 */
     startTrackIndex: number;
     visibleTrackClipsById: Record<string, SparseRenderClip[]>;
-    pxPerSec: number;
+    axis: TimelineAxis;
     rowHeight: number;
     selectedClipId: string | null;
     multiSelectedClipIds: string[];
     renamingClipId: string | null;
     hoveredClipId?: string | null;
     disabledGroupIds?: string[];
+    /**
+     * 每个 clip 在"前导重叠区"（被同轨前一个 clip 压住的部分）的秒数。
+     * 渲染端据此在上 clip 重叠区画半透色块，让下 clip 的色块与波形都能看见——
+     * 否则两层不透明色块会"叠加"成脏色。
+     */
+    leadingOverlapSecByClipId?: Record<string, number>;
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
@@ -140,20 +193,18 @@ export function buildSparseClipRenderModel(args: {
             id: clip.id,
             trackId: clip.trackId,
             name: clipDisplayName(clip),
-            leftPx: clip.startSec * args.pxPerSec,
+            leftPx: secToContentPx(args.axis, clip.startSec),
             topPx: (args.startTrackIndex + visibleIndex) * args.rowHeight,
-            widthPx: Math.max(1, clip.lengthSec * args.pxPerSec),
+            widthPx: durationToWidthPx(args.axis, clip.lengthSec),
             heightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y),
             headerHeightPx: CLIP_HEADER_HEIGHT,
-            fadeInPx: Math.max(
-                0,
-                ((clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : clip.fadeInSec) *
-                    args.pxPerSec,
+            fadeInPx: secToSpanPx(
+                args.axis,
+                (clip.autoFadeInSec ?? 0) > 0 ? clip.autoFadeInSec! : clip.fadeInSec,
             ),
-            fadeOutPx: Math.max(
-                0,
-                ((clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec) *
-                    args.pxPerSec,
+            fadeOutPx: secToSpanPx(
+                args.axis,
+                (clip.autoFadeOutSec ?? 0) > 0 ? clip.autoFadeOutSec! : clip.fadeOutSec,
             ),
             fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
             fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
@@ -170,7 +221,11 @@ export function buildSparseClipRenderModel(args: {
             isMidiClip: clip.midiNoteCount != null,
             trackColor: track.color,
             isRenaming: clip.id === args.renamingClipId,
-            snapOffsetPx: Math.max(0, Number(clip.snapOffsetSec) || 0) * args.pxPerSec,
+            snapOffsetPx: secToSpanPx(args.axis, Number(clip.snapOffsetSec) || 0),
+            leadingOverlapPx: secToSpanPx(
+                args.axis,
+                args.leadingOverlapSecByClipId?.[clip.id] ?? 0,
+            ),
         })),
     );
 

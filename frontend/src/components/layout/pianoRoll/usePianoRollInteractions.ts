@@ -67,6 +67,11 @@ import {
     writeSystemClipboardObject,
 } from "../../../utils/systemClipboard";
 import { secFromViewportClientX } from "./seekPlayheadMapping";
+import {
+    createTimelineAxis,
+    secToViewportPx,
+    viewportPxToSec,
+} from "../timeline/runtime/timelineAxis.js";
 
 type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 
@@ -322,6 +327,33 @@ export function usePianoRollInteractions(args: {
         onMorphOverlayChange,
         currentParamRange,
     } = args;
+
+    /**
+     * 由滚动 ref 构造当前投影。
+     *
+     * 用 ref 而非 React state：滚动事件中 ref 同步更新，state 要到下一帧才落地，
+     * 命中测试若用 state 会比画面慢一帧。
+     */
+    const axisFromRefs = useCallback(
+        () =>
+            createTimelineAxis({
+                pxPerSec: pxPerSecRef.current,
+                scrollLeftPx: scrollLeftRef.current,
+            }),
+        [pxPerSecRef, scrollLeftRef],
+    );
+
+    /**
+     * beat → 视口 x。
+     *
+     * 此前写作 `beat * pxPerBeat - scrollLeft`（pxPerBeat = pxPerSec * secPerBeat），
+     * 与主画布的曲线投影分属两条算式。现在统一为「beat 先转 sec，再走
+     * `secToViewportPx`」，与时间线侧和 `render.ts` 同源。
+     */
+    const beatToViewportPx = useCallback(
+        (beat: number) => secToViewportPx(axisFromRefs(), beat * secPerBeat),
+        [axisFromRefs, secPerBeat],
+    );
 
     const PARAM_FINE_WHEEL_SCALE = 0.1;
 
@@ -1165,12 +1197,11 @@ export function usePianoRollInteractions(args: {
             const canvas = canvasRef.current;
             if (!canvas) return 0;
             const rect = canvas.getBoundingClientRect();
-            const x = clientX - rect.left;
-            const sl = scrollLeftRef.current;
-            const ppb = pxPerBeatRef.current;
-            return (sl + x) / Math.max(1e-9, ppb);
+            // 视口 x → sec → beat：逆投影走 axis，与 pointerSec 同源。
+            // 此前写作 `(scrollLeft + x) / pxPerBeat`，是又一套独立算式。
+            return viewportPxToSec(axisFromRefs(), clientX - rect.left) / secPerBeat;
         },
-        [canvasRef, scrollLeftRef, pxPerBeatRef],
+        [canvasRef, axisFromRefs, secPerBeat],
     );
 
     const pointerSec = useCallback(
@@ -1181,8 +1212,10 @@ export function usePianoRollInteractions(args: {
             return secFromViewportClientX({
                 clientX,
                 viewportLeft: rect.left,
-                scrollLeft: scrollLeftRef.current,
-                pxPerSec: pxPerSecRef.current,
+                axis: createTimelineAxis({
+                    pxPerSec: pxPerSecRef.current,
+                    scrollLeftPx: scrollLeftRef.current,
+                }),
             });
         },
         [canvasRef, scrollLeftRef, pxPerSecRef],
@@ -1215,8 +1248,10 @@ export function usePianoRollInteractions(args: {
                     secFromViewportClientX({
                         clientX,
                         viewportLeft: bounds.left,
-                        scrollLeft: scrollLeftRef.current,
-                        pxPerSec: pxPerSecRef.current,
+                        axis: createTimelineAxis({
+                            pxPerSec: pxPerSecRef.current,
+                            scrollLeftPx: scrollLeftRef.current,
+                        }),
                     }),
                     0,
                     1e12,
@@ -1835,13 +1870,13 @@ export function usePianoRollInteractions(args: {
             const aBeat = Math.min(sel.aBeat, sel.bBeat);
             const bBeat = Math.max(sel.aBeat, sel.bBeat);
             const rect = canvas.getBoundingClientRect();
-            const leftX = aBeat * pxPerBeatRef.current - scrollLeftRef.current;
-            const rightX = bBeat * pxPerBeatRef.current - scrollLeftRef.current;
+            const leftX = beatToViewportPx(aBeat);
+            const rightX = beatToViewportPx(bBeat);
             const localX = e.clientX - rect.left;
             const edgeHitPx = 8;
             return Math.abs(localX - leftX) <= edgeHitPx || Math.abs(localX - rightX) <= edgeHitPx;
         },
-        [toolMode, paramStretchKb, selectionRef, canvasRef, pxPerBeatRef, scrollLeftRef],
+        [toolMode, paramStretchKb, selectionRef, canvasRef, beatToViewportPx],
     );
 
     const onCanvasPointerMove = useCallback(
@@ -2041,8 +2076,7 @@ export function usePianoRollInteractions(args: {
                     const stride = Math.max(1, pvForMorph.stride);
                     const hit = existingMorph.points.find((p) => {
                         const sec = (p.frame * fp) / 1000;
-                        const beat = sec / secPerBeat;
-                        const x = beat * pxPerBeatRef.current - scrollLeftRef.current;
+                        const x = secToViewportPx(axisFromRefs(), sec);
                         const mapped = editParam === "pitch" ? p.value + 0.5 : p.value;
                         const y = valueToY(editParam, mapped, h);
                         return (
@@ -2201,8 +2235,8 @@ export function usePianoRollInteractions(args: {
                         const canvas = canvasRef.current;
                         if (canvas) {
                             const rect = canvas.getBoundingClientRect();
-                            const leftX = aBeat * pxPerBeatRef.current - scrollLeftRef.current;
-                            const rightX = bBeat * pxPerBeatRef.current - scrollLeftRef.current;
+                            const leftX = beatToViewportPx(aBeat);
+                            const rightX = beatToViewportPx(bBeat);
                             const localX = e.clientX - rect.left;
                             const EDGE_HIT_PX = 8;
                             const hitLeft = Math.abs(localX - leftX) <= EDGE_HIT_PX;
@@ -3740,6 +3774,8 @@ export function usePianoRollInteractions(args: {
             ensureLiveEditBase,
             paramView?.framePeriodMs,
             secPerBeat,
+            axisFromRefs,
+            beatToViewportPx,
             pointerValue,
             strokeRef,
             applyDenseToLiveEdit,
