@@ -817,6 +817,8 @@ pub(super) fn new_project(
     state: State<'_, AppState>,
     window: Window,
 ) -> crate::models::TimelineStatePayload {
+    // 切换/新建工程前必须中断旧工程的后台预渲染，避免旧渲染继续写入缓存。
+    let _ = crate::commands::playback::cancel_background_render();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = crate::state::TimelineState::default();
@@ -866,6 +868,9 @@ pub(super) fn open_project(
     project_path: String,
     force: Option<bool>,
 ) -> crate::models::OpenProjectPayload {
+    // 打开新工程前先取消旧工程的后台预渲染，防止旧渲染在替换 timeline/清缓存
+    // 期间继续执行并污染新工程的缓存。
+    let _ = crate::commands::playback::cancel_background_render();
     let path = PathBuf::from(&project_path);
     // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
     // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。

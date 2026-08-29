@@ -1926,6 +1926,11 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
 pub(super) fn cancel_background_render() -> serde_json::Value {
     use std::sync::atomic::Ordering;
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
+    // 让正在运行的渲染循环在下一个 clip 边界立刻退出，而不是继续把旧工程
+    // 渲染完。同时清除重启标记，避免取消后被错误地按旧渲染状态自动重启。
+    BG_RENDER_CANCEL.store(true, Ordering::Release);
+    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+    BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
     eprintln!("[bg_render] cancel requested, was_active={was_active}");
     serde_json::json!({"ok": true, "was_active": was_active})
 }

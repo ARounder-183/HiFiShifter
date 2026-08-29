@@ -1,5 +1,6 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
+import { coreApi } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
 
 export interface ProjectVersionConfirmation {
@@ -33,6 +34,8 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
 });
 
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
+    // 新建工程前先取消旧工程的后台预渲染，避免旧渲染继续占用资源。
+    await coreApi.cancelBackgroundRender();
     return webApi.newProject();
 });
 
@@ -44,6 +47,8 @@ export const openProjectFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
+        // 打开新工程前先取消旧工程的后台预渲染。
+        await coreApi.cancelBackgroundRender();
         const timeline = await webApi.openProject(picked.path);
         if (timeline.project_version_too_new) {
             return {
@@ -62,6 +67,7 @@ export const openProjectFromDialog = createAsyncThunk(
 export const openProjectFromPath = createAsyncThunk(
     "session/openProjectFromPath",
     async (projectPath: string) => {
+        await coreApi.cancelBackgroundRender();
         const timeline = await webApi.openProject(projectPath);
         if (timeline.project_version_too_new) {
             return {
@@ -81,6 +87,7 @@ export const openProjectFromPath = createAsyncThunk(
 export const openProjectFromPathForced = createAsyncThunk(
     "session/openProjectFromPathForced",
     async (projectPath: string) => {
+        await coreApi.cancelBackgroundRender();
         return webApi.openProject(projectPath, true);
     },
 );
