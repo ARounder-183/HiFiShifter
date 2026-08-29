@@ -795,6 +795,10 @@ export const TrackLane = React.memo(
                                 width: ghostWidth,
                                 top: 0,
                                 height: rowHeight - CLIP_BODY_PADDING_Y,
+                                // 抬到 TimelineSurface（zIndex:1，含不透明 clip body
+                                // 画布）之上：clip body 改为不透明后，z 序低于画布的
+                                // ghost 会被完全盖住。
+                                zIndex: 2,
                             }}
                         >
                             {/* Ghost header 条：与真实 Clip 同用归一化轨道色 */}
