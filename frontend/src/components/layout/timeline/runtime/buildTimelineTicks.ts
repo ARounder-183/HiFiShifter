@@ -219,14 +219,21 @@ export function buildTimelineTicks(args: {
     }
 
     // ── 3. 标签步长与格式化 ────────────────────────────────────────
+    // Tempo Map 下 beat 是分段折算值（非均匀），不能用均匀 beat 域选出的
+    // labelStepBeats 去做整除判定——旧 buildRulerTicks 的 Tempo Map 路径正是
+    // 逐段局部对齐生成刻度的。这里改用时间域步长：用 fallback BPM 把 beat 步长
+    // 折算为秒，再按 sec 判定是否落在标签位置。
     const labelStepBeats = selectRulerStep({
         pxPerBeat,
         grid,
         beatsPerBar,
         minLabelSpacingPx: args.minLabelSpacingPx,
     });
+    /** 时间域标签步长（秒）。Tempo Map 下用它判定，均匀网格下等价于 beat 域。 */
+    const labelStepSec = labelStepBeats * secPerBeat;
     const ctx: TimeFormatContext = { bpm, beatsPerBar, grid, tempoMap };
-    const showSecondary = args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
+    const showSecondary =
+        args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
 
     // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
     // 单个刻度、小节样式优先。不去重的后果是标尺出现间距为 0 的相邻刻度，
@@ -249,7 +256,14 @@ export function buildTimelineTicks(args: {
         // 缩小时小节间距会小到放不下标签，标尺便会只剩一堆没有文字的竖线。
         // 小节通过 isBarStart 影响刻度样式（2px 强线 + 加粗文字），而不是额外
         // 增加刻度数量——与旧 buildRulerTicks 的语义一致。
-        const stepsFromOrigin = beat / labelStepBeats;
+        //
+        // Tempo Map 下必须用时间域判定：beat 是分段折算值（非均匀），而
+        // labelStepBeats 是在均匀 beat 域选出的，两者不在同一坐标系。用 sec 域
+        // 的 labelStepSec（= labelStepBeats * fallbackSecPerBeat）做整除，与旧
+        // buildRulerTicks Tempo Map 路径的逐段局部对齐语义一致。
+        const stepsFromOrigin = hasTempoMap
+            ? entry.sec / labelStepSec
+            : beat / labelStepBeats;
         const onLabelStep = Math.abs(stepsFromOrigin - Math.round(stepsFromOrigin)) < 1e-6;
         ticks.push({
             sec: entry.sec,
