@@ -16,9 +16,9 @@ const NEW_TRACK_DEFAULT_COLOR = "#8a9099";
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
     async (payload: { name?: string; parentTrackId?: string | null }, { getState }) => {
-        const beforeIds = new Set(
-            (getState() as SessionState).tracks.map((track) => track.id),
-        );
+        // getState() 返回根 state，session 切片在 .session 下。
+        const state = getState() as { session: SessionState };
+        const beforeIds = new Set(state.session.tracks.map((track) => track.id));
         const result = await webApi.addTrackNested(payload);
         const snapshot = result as {
             ok?: boolean;
