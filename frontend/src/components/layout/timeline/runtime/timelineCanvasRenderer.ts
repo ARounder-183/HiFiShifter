@@ -258,26 +258,20 @@ export function drawTimelineCanvas(
             );
         };
 
-        // 主体填色统一裁剪到圆角矩形内：内部各段仍按矩形平涂，填色分区逻辑
-        // 完全不变，只是四角被一起收圆。此前是直角，密集轨道里相邻 Clip 容易
-        // 糊成一片、边界生硬。
+        // 主体填色统一裁剪到圆角矩形内：内部各段纯色平涂，四角被一起收圆。
+        // 简洁风（参考 Ableton / REAPER）：不用渐变、高光、发光 —— 平涂的
+        // 边界最清晰，密集轨道里不糊，渲染也最便宜。
         ctx.save();
         ctx.beginPath();
         ctx.roundRect(clipLeft, clipTop, clipWidth, clipHeight, radius);
         ctx.clip();
 
-        // header：上亮下暗的竖直渐变，标题带因此有轻微光泽而非整块死色。
-        const headerGradient = ctx.createLinearGradient(0, clipTop, 0, clipTop + headerHeight);
-        headerGradient.addColorStop(0, visualStyle.headerFillTop);
-        headerGradient.addColorStop(1, visualStyle.headerFillBottom);
-        ctx.fillStyle = headerGradient;
+        // header：轨道色提亮后的纯色带，clip 归属一眼可辨。
+        ctx.fillStyle = visualStyle.headerFill;
         ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
 
-        // body：上浅下深，给 Clip 一点体积感，波形在较深的底部更醒目。
-        const bodyGradient = ctx.createLinearGradient(0, bodyTop, 0, clipTop + clipHeight);
-        bodyGradient.addColorStop(0, visualStyle.bodyFillTop);
-        bodyGradient.addColorStop(1, visualStyle.bodyFillBottom);
-        ctx.fillStyle = bodyGradient;
+        // body：压暗的中性底，波形是视觉主角。
+        ctx.fillStyle = visualStyle.bodyFill;
         ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
 
         if (fadeShadeRange) {
@@ -290,38 +284,23 @@ export function drawTimelineCanvas(
             );
         }
 
-        // header/body 分隔：暗线 + 其下 1px 亮线构成"刻线"，比单条黑线有质感。
-        ctx.fillStyle = "rgba(0, 0, 0, 0.26)";
+        // header/body 分隔线：单条暗线，仅做分区提示。
+        ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
         ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
-        ctx.fillStyle = visualStyle.separatorHighlightFill;
-        ctx.fillRect(clipLeft, clipTop + headerHeight + 1, clipWidth, 1);
-
-        // 顶缘内侧高光（微弱玻璃质感）。
-        ctx.fillStyle = visualStyle.topHighlightFill;
-        ctx.fillRect(clipLeft, clipTop, clipWidth, 1);
 
         ctx.restore();
 
         // 选中/编组指示必须在 Clip 体画布内绘制：DOM 交互层的 box-shadow
         // 随原生滚动移动，会与 sticky 画布错帧；视觉状态统一由画布输出。
+        // 选中 = 亮色细描边（无发光）；编组激活 = 金色描边。
         if (clip.selected || isGroupActive) {
-            if (clip.selected) {
-                // 外发光让选中态在密集轨道里"浮"起来；shadowBlur 只作用于这次
-                // 描边，随后立即 restore，不影响后续元素。
-                ctx.save();
-                ctx.shadowColor = visualStyle.glowColor;
-                ctx.shadowBlur = 7;
-                ctx.strokeStyle = visualStyle.borderStroke;
-                ctx.lineWidth = visualStyle.borderLineWidth;
-                borderRect();
-                ctx.stroke();
-                ctx.restore();
-            } else {
-                ctx.strokeStyle = "rgba(255, 200, 50, 0.60)";
-                ctx.lineWidth = 1;
-                borderRect();
-                ctx.stroke();
-            }
+            ctx.strokeStyle =
+                !clip.selected && isGroupActive
+                    ? "rgba(255, 200, 50, 0.60)"
+                    : visualStyle.borderStroke;
+            ctx.lineWidth = clip.selected ? visualStyle.borderLineWidth : 1;
+            borderRect();
+            ctx.stroke();
             if (isGroupActive) {
                 ctx.strokeStyle = "rgba(255, 200, 50, 0.60)";
                 ctx.lineWidth = 1;
@@ -333,8 +312,7 @@ export function drawTimelineCanvas(
                 );
             }
         } else {
-            // 整个 Clip 一圈描边（含 header）：此前只描 body，标题带没有轮廓，
-            // 圆角化后会显得上半截缺口。
+            // 整个 Clip 一圈描边（含 header）：此前只描 body，标题带没有轮廓。
             ctx.strokeStyle = visualStyle.borderStroke;
             ctx.lineWidth = visualStyle.borderLineWidth;
             borderRect();

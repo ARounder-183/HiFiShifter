@@ -213,21 +213,6 @@ export function buildTimelineClipVisualStyle(args: {
 }): {
     headerFill: string;
     bodyFill: string;
-    /**
-     * 竖直渐变停靠点。header / body 各给"上亮下暗"两端，绘制端用
-     * createLinearGradient 输出——纯色平涂缺少体积感，密集轨道里 Clip 之间
-     * 的分界不够清晰。
-     */
-    headerFillTop: string;
-    headerFillBottom: string;
-    bodyFillTop: string;
-    bodyFillBottom: string;
-    /** 顶缘内侧 1px 高光（微弱玻璃质感）。 */
-    topHighlightFill: string;
-    /** header/body 分隔线下方的 1px 亮线，与上方暗线构成"刻线"。 */
-    separatorHighlightFill: string;
-    /** 选中态外发光颜色（无 DOM 时回退到派生色）。 */
-    glowColor: string;
     borderStroke: string;
     textFill: string;
     muteBadgeFill: string;
@@ -281,37 +266,26 @@ export function buildTimelineClipVisualStyle(args: {
 } {
     const fontFamily = args.fontFamily || resolveFontFamily();
     const trackColor = args.trackColor ?? "#68839d";
-    const headerRgb = mixHexColor(trackColor, { r: 160, g: 171, b: 183 }, 0.16);
-    const bodyRgb = mixHexColor(trackColor, { r: 58, g: 63, b: 71 }, 0.68);
+    // ── 纯色配色（简洁风，参考 Ableton / REAPER）──────────────────
+    // header：轨道色直接提亮成干净的纯色带，clip 归属一眼可辨；
+    // body：压暗压灰的中性底，波形才是视觉主角。
+    // 刻意不用渐变/高光/发光：平涂边界最清晰、渲染最便宜，密集轨道不糊。
+    //
+    // muted 时去饱和：仅靠降 alpha（旧 0.29）会让 Clip 几乎融进背景；
+    // 去饱和 + 适度 alpha 既明确"已静音"，又保留轮廓与波形可读性。
+    const muteSaturation = args.muted ? 0.62 : 0;
+    const headerRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 255, g: 255, b: 255 }, 0.12),
+        muteSaturation,
+    );
+    const bodyRgb = desaturateRgb(
+        mixHexColor(trackColor, { r: 38, g: 42, b: 50 }, 0.72),
+        muteSaturation,
+    );
     const borderRgb = mixHexColor(trackColor, { r: 133, g: 144, b: 156 }, 0.3);
     const knobRgb = mixHexColor(trackColor, { r: 205, g: 212, b: 220 }, 0.24);
     const controlRgb = mixHexColor(trackColor, { r: 40, g: 46, b: 55 }, 0.52);
     const controlActiveRgb = mixHexColor(trackColor, { r: 120, g: 64, b: 69 }, 0.4);
-
-    // ── 竖直渐变停靠点 ────────────────────────────────────────────
-    // 参考 Ableton Live：标题带用**高饱和的轨道原色**（识别 Clip 归属的第一
-    // 信号），只在上下两端做轻微明暗，而不是往灰里混 —— 混灰会让轨道色失去
-    // 辨识度。body 反其道而行：压暗压灰，让波形成为视觉主角。
-    //
-    // muted 时整体去饱和：仅靠降低 alpha（旧的 0.29）会让 Clip 几乎融进背景，
-    // 连"这里有个 Clip"都看不出来；去饱和保留了轮廓与波形可读性。
-    const muteSaturation = args.muted ? 0.62 : 0;
-    const headerTopRgb = desaturateRgb(
-        mixHexColor(trackColor, { r: 255, g: 255, b: 255 }, 0.1),
-        muteSaturation,
-    );
-    const headerBottomRgb = desaturateRgb(
-        mixHexColor(trackColor, { r: 30, g: 34, b: 42 }, 0.18),
-        muteSaturation,
-    );
-    const bodyTopRgb = desaturateRgb(
-        mixHexColor(trackColor, { r: 66, g: 72, b: 86 }, 0.66),
-        muteSaturation,
-    );
-    const bodyBottomRgb = desaturateRgb(
-        mixHexColor(trackColor, { r: 22, g: 26, b: 34 }, 0.78),
-        muteSaturation,
-    );
 
     const isPitchAdj = args.isPitchAdjustment === true;
     const {
@@ -421,15 +395,10 @@ export function buildTimelineClipVisualStyle(args: {
 
     return {
         headerFill: rgba(headerRgb, 0.95),
-        bodyFill: rgba(bodyRgb, 0.74),
-        headerFillTop: rgba(headerTopRgb, 0.97),
-        headerFillBottom: rgba(headerBottomRgb, 0.95),
-        bodyFillTop: rgba(bodyTopRgb, 0.8),
-        bodyFillBottom: rgba(bodyBottomRgb, 0.88),
-        topHighlightFill: "rgba(255, 255, 255, 0.10)",
-        separatorHighlightFill: "rgba(255, 255, 255, 0.05)",
-        glowColor: selectedBorder,
-        borderStroke: args.selected ? selectedBorder : rgba(borderRgb, 0.62),
+        bodyFill: rgba(bodyRgb, 0.84),
+        // 未选中边框刻意低调（半透明）：分界要有，但不能抢波形和标题的戏。
+        // 选中 = CSS 变量的亮色细描边，无发光。
+        borderStroke: args.selected ? selectedBorder : rgba(borderRgb, 0.5),
         borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(241, 245, 249, 0.94)",
         muteBadgeFill: rgba(args.muted ? controlActiveRgb : controlRgb, args.muted ? 0.96 : 0.9),
