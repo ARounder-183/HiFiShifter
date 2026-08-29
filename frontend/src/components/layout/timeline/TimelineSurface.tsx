@@ -147,7 +147,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 layerRef={props.gridOverlayLayerRef}
                 // 叠加网格：竖线按行分段 —— 出现在波形之上、clip header 之下
                 //（跳过每行 header 条带，header 不被网格穿过）。
-                lineOpacity={0.8}
+                lineOpacity={1}
                 rowSegmentHeightPx={props.rowHeight}
                 rowSegmentSkipPx={CLIP_HEADER_HEIGHT}
                 viewportBus={timelineViewportBus}
