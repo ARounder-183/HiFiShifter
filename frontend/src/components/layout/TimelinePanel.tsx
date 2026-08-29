@@ -575,6 +575,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clearContextMenu,
         ensureTrackLaneSelected,
         selectTrackLaneClipRemote,
+        deselectAllTrackLaneClips,
         openTrackLaneContextMenu,
         seekFromTrackLaneClientX,
         toggleTrackLaneClipMuted,
@@ -1898,6 +1899,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             trackColor={track.color || undefined}
                                             ensureSelected={ensureTrackLaneSelected}
                                             selectClipRemote={selectTrackLaneClipRemote}
+                                            deselectAllClips={deselectAllTrackLaneClips}
                                             onShiftRangeSelect={selectClipRangeByRect}
                                             rangeSelectAnchorClipId={rangeSelectAnchorClipId}
                                             recordLastClickPosition={recordLastClickPosition}

@@ -91,6 +91,8 @@ type TrackLaneProps = {
 
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
+    /** 点击轨道空白区（非 clip）：清空 clip 选中状态。 */
+    deselectAllClips: () => void;
     openContextMenu: (clipId: string, clientX: number, clientY: number) => void;
 
     seekFromClientX: (clientX: number, commit: boolean) => void;
@@ -213,6 +215,7 @@ export const TrackLane = React.memo(
             trackColor,
             ensureSelected,
             selectClipRemote,
+            deselectAllClips,
             openContextMenu,
             seekFromClientX,
             startClipDrag,
@@ -655,8 +658,10 @@ export const TrackLane = React.memo(
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
                     if (!hit.clipId) {
-                        // 空白区 = 最低优先级播放头手势（播放头自身 pointer-events-none，
+                        // 空白区点击 = 取消 clip 选中（DAW 通用约定），随后进入
+                        // 最低优先级播放头手势（播放头自身 pointer-events-none，
                         // 拖拽/单击落点都在这里响应）。
+                        deselectAllClips();
                         beginBackgroundSeekInteraction(event);
                         return;
                     }

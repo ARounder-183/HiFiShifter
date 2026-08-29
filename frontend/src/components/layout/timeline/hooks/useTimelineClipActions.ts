@@ -147,6 +147,8 @@ export interface UseTimelineClipActionsResult {
     // TrackLane callbacks
     ensureTrackLaneSelected: (clipId: string) => void;
     selectTrackLaneClipRemote: (clipId: string) => void;
+    /** 点击轨道空白区：清空 clip 选中（单选 + 多选），保留轨道焦点。 */
+    deselectAllTrackLaneClips: () => void;
     openTrackLaneContextMenu: (clipId: string, clientX: number, clientY: number) => void;
     seekFromTrackLaneClientX: (clientX: number, commit: boolean) => void;
     toggleTrackLaneClipMuted: (clipId: string, nextMuted: boolean) => void;
@@ -689,6 +691,19 @@ export function useTimelineClipActions(
         [dispatch, updateRangeSelectAnchor, sessionRef],
     );
 
+    // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
+    // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
+    const deselectAllTrackLaneClips = React.useCallback(() => {
+        if (
+            multiSelectedClipIdsRef.current.length === 0 &&
+            !sessionRef.current.selectedClipId
+        ) {
+            return;
+        }
+        setMultiSelectedClipIds([]);
+        dispatch(setSelectedClipPreservingTrack(null));
+    }, [dispatch, setMultiSelectedClipIds, sessionRef]);
+
     const toggleTrackLaneCtrlSelection = React.useCallback(
         (clipId: string) => {
             updateRangeSelectAnchor(clipId);
@@ -898,6 +913,7 @@ export function useTimelineClipActions(
 
         ensureTrackLaneSelected,
         selectTrackLaneClipRemote,
+        deselectAllTrackLaneClips,
         openTrackLaneContextMenu,
         seekFromTrackLaneClientX,
         toggleTrackLaneClipMuted,
