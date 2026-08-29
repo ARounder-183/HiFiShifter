@@ -198,10 +198,9 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
     return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
 }
 
-/** 色块的感知亮度目标带：参考 Ableton Live 暗色主题 —— 明亮粉彩块 + 深色
- * 波形。上一版（0.52-0.62）配低饱和会发出"脏橄榄"调；明度再抬一档后
- * 波形的深色轮廓与粉彩底同时清晰，是深底 DAW 的成熟观感。 */
-const CLIP_LUMINANCE_BAND = { min: 0.58, max: 0.68 } as const;
+/** 色块的感知亮度目标带：参考 REAPER Hazy 主题 —— 饱和宝石色（紫/品红/
+ * 绯红/青），中等明度配近纯黑波形，轮廓锐利、色彩浓郁。 */
+const CLIP_LUMINANCE_BAND = { min: 0.45, max: 0.56 } as const;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -216,10 +215,10 @@ function normalizeTrackHsl(color: string): Hsl {
     const base = rgbToHsl(parseHexColor(color) ?? { r: 104, g: 131, b: 157 });
     const hsl: Hsl = {
         h: base.h,
-        // 明亮粉彩带：饱和度适中（保色彩身份、不发闷），明度足够高让深色
-        // 波形成为清晰的"纹理"。完全低饱和会发出脏橄榄调（用户实测）。
-        s: clamp(base.s, 0.40, 0.58),
-        l: clamp(base.l, 0.48, 0.64),
+        // 宝石色带（参考 REAPER Hazy）：高饱和保住浓郁的色彩身份，明度
+        // 中等让近纯黑的波形既锐利又不把色块拖成黑洞。
+        s: clamp(base.s, 0.52, 0.72),
+        l: clamp(base.l, 0.38, 0.58),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));
