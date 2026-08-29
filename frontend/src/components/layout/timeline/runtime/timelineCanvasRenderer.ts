@@ -362,7 +362,7 @@ export function drawTimelineCanvas(
             const indicatorInnerY = knobCenterY + Math.sin(angle) * 1.6;
             ctx.beginPath();
             ctx.strokeStyle = visualStyle.gainKnobIndicator;
-            ctx.lineWidth = 1.2;
+            ctx.lineWidth = 1.7;
             ctx.moveTo(indicatorInnerX, indicatorInnerY);
             ctx.lineTo(indicatorOuterX, indicatorOuterY);
             ctx.stroke();
@@ -505,8 +505,8 @@ export function drawTimelineCanvas(
             ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
             // 渐变曲线 = 半透明白：在压暗区与彩色块上都稳定可见（REAPER 式）。
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
-            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+            ctx.lineWidth = 1.7;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
                 topPx: bodyTop,
@@ -525,8 +525,8 @@ export function drawTimelineCanvas(
                 Math.min(clipWidth, clip.fadeOutPx),
                 bodyHeight,
             );
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
-            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+            ctx.lineWidth = 1.7;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 topPx: bodyTop,
