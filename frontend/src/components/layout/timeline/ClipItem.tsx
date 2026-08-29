@@ -279,6 +279,9 @@ export const ClipItem = React.memo(function ClipItem({
 
     const startDeferredFadeEditDrag = React.useCallback(
         (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {
+            // 仅左键触发渐变编辑：中键（aux click/自动滚动）与右键（上下文菜单）
+            // 不得抢占渐变握把手势。
+            if (e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();
             clearContextMenu();

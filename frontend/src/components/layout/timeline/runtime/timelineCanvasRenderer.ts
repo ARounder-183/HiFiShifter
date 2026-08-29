@@ -303,7 +303,7 @@ export function drawTimelineCanvas(
         }
 
         if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
             ctx.fillRect(
                 clipLeft + fadeShadeRange.startPx,
                 bodyTop,
@@ -502,9 +502,10 @@ export function drawTimelineCanvas(
 
         if (clip.fadeInPx > 0) {
             // 淡入区压暗：音量从 0 爬升，视觉上"还没到全响"就该更暗。
-            ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
-            ctx.strokeStyle = "rgba(20, 24, 31, 0.62)";
+            // 渐变曲线 = 半透明白：在压暗区与彩色块上都稳定可见（REAPER 式）。
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
@@ -517,14 +518,14 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
             ctx.fillRect(
                 clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 bodyTop,
                 Math.min(clipWidth, clip.fadeOutPx),
                 bodyHeight,
             );
-            ctx.strokeStyle = "rgba(20, 24, 31, 0.62)";
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
