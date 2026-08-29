@@ -21,36 +21,32 @@ export const CLIP_BODY_PADDING_Y = 2;
 // 每条左/右边缘按高度分成两段、归属两种手势（几何级切分，非 z 竞争）：
 //   y ∈ [0, FADE_CORNER_RESERVE_PX)      → 淡入/淡出角部拖拽控件；
 //   y ∈ [FADE_CORNER_RESERVE_PX, 底部]   → ClipEdgeHandles 裁短/延长/拉伸。
-/** 角部横帽：从边缘向内的宽度；高度恰为 header 带，覆盖"真边角"。 */
+/** 角部横帽：从边缘向内的宽度；位于 body 区顶部（header 之下）。 */
 export const FADE_CORNER_CAP_WIDTH_PX = 22;
-export const FADE_CORNER_CAP_HEIGHT_PX = CLIP_HEADER_HEIGHT;
+export const FADE_CORNER_CAP_HEIGHT_PX = 14;
 /** 边缘上部竖条宽度（骑在边缘线上，位于横帽正下方直至保留区下沿）。 */
 export const FADE_CORNER_EDGE_WIDTH_PX = 6;
 
-/** 淡化角控件在边缘上保留的顶部带**上限**（px）。 */
+/** 淡化角控件在 body 区内保留的总高度**上限**（px）。 */
 export const FADE_CORNER_RESERVE_MAX_PX = 34;
 /**
- * 裁短/拉伸至少要拿到的边缘高度占比。
+ * 裁短/拉伸至少要拿到的 body 高度占比。
  *
  * 保留区按此比例收缩，保证短 Clip 上 trim 手势仍有充裕的纵向空间。
  */
 export const FADE_CORNER_TRIM_MIN_RATIO = 0.62;
 
 /**
- * 计算某条边缘让给淡化角控件的顶部高度（px）。
+ * 淡化角控件在 **body 区内**（header 之下）保留的总高度（px）。
  *
- * 【为什么不是固定值】原先固定 48px，而典型 Clip 高度只有
- * `rowHeight - CLIP_BODY_PADDING_Y`（80–96 行高 → 74–90px），角控件因此吃掉
- * 53%–65% 的边缘；用户想裁短 Clip、在边缘偏上位置按下时，命中的却是淡化
- * 控件——即"拉边界被判定成渐变"。
+ * 角控件不得覆盖 header：header 上有旋钮 / badge / 名称等交互控件，
+ * 角控件压在上面会让 header 无法点击。
  *
- * 【策略】按比例收缩并加上限：trim 至少拿到 `FADE_CORNER_TRIM_MIN_RATIO` 的
- * 边缘高度，Clip 越高保留区越接近上限。保留区不会小于横帽本身，否则真边角
- * 就没有落点。
+ * @param bodyHeightPx body 高度（= clip 高 - header 高）。
  */
-export function fadeCornerReservePx(clipHeightPx: number): number {
-    const height = Number.isFinite(clipHeightPx) ? Math.max(0, clipHeightPx) : 0;
-    const byRatio = height * (1 - FADE_CORNER_TRIM_MIN_RATIO);
+export function fadeCornerReservePx(bodyHeightPx: number): number {
+    const bodyH = Number.isFinite(bodyHeightPx) ? Math.max(0, bodyHeightPx) : 0;
+    const byRatio = bodyH * (1 - FADE_CORNER_TRIM_MIN_RATIO);
     return Math.min(
         FADE_CORNER_RESERVE_MAX_PX,
         Math.max(FADE_CORNER_CAP_HEIGHT_PX, byRatio),

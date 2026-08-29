@@ -39,9 +39,9 @@ test("components/layout/timeline/constants.test.ts scripted checks", async () =>
             `clipHeight=${clipHeight}: reserve never smaller than the corner cap`,
         );
     }
-    // 退化矮 Clip：reserve 退化为横帽高度本身（真边角必须有落点）。
-    if (Math.abs(fadeCornerReservePx(40) - FADE_CORNER_CAP_HEIGHT_PX) > 1e-9) {
-        throw new Error("degenerate short clip falls back to the corner cap height");
+    // 退化矮 body：reserve 退化为横帽高度本身（真边角必须有落点）。
+    if (Math.abs(fadeCornerReservePx(20) - FADE_CORNER_CAP_HEIGHT_PX) > 1e-9) {
+        throw new Error("degenerate short body falls back to the corner cap height");
     }
 
     // 具体数值锚点：回归防护，防止未来调参时无意回到"吃掉大半边缘"。
