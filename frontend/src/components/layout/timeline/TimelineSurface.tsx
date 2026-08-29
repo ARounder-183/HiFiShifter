@@ -125,6 +125,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     top: props.topPx,
                     width: props.widthPx,
                     height: props.heightPx,
+                    // 显式高于 clip body 画布：波形必须绘制在色块之上。
+                    zIndex: 2,
                 }}
             >
                 <TimelineWaveformSurface
