@@ -9,6 +9,7 @@ import {
     clampDenominator,
     clampNumerator,
     createTempoPointAt,
+    clampTempoPointSec,
     effectiveScaleAtSec,
     effectiveTimeSignatureAt,
     formatTempoBpm,
@@ -1098,21 +1099,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 // 吸附竖线会冻结在画面上，直到 mouseup 才消失。
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             }
-            // 不与其它点重叠、不越过相邻点、不越过工程末尾：
-            // 用相邻点钳制实现（最小间距按工程 BPM 折算 1/16 拍）。
+            // 不与其它点重叠、不越过相邻点：用相邻点钳制实现
+            // （最小间距按工程 BPM 折算 1/16 拍）。
             // 快速拖拽若跨越相邻点，点数组会乱序（updateTempoPoint 虽会
             // 防御性重排，但 UI 上点会互相穿插），钳制是正确行为。
             const minGapSec = 60 / Math.max(1, mapFallback.bpm) / 16;
-            const idx = tempoMap.points.findIndex((p) => p.id === drag.pointId);
-            if (idx >= 0) {
-                const prevSec = idx > 0 ? tempoMap.points[idx - 1].positionSec + minGapSec : 0;
-                const nextSec =
-                    idx + 1 < tempoMap.points.length
-                        ? tempoMap.points[idx + 1].positionSec - minGapSec
-                        : projectSec;
-                // 相邻点间距不足 2×minGapSec 时退化为钳到 prevSec。
-                sec = Math.min(Math.max(prevSec, sec), Math.max(nextSec, prevSec));
-            }
+            // 末点的上限不能再取 projectSec：它由 clips 末尾派生
+            // （getDynamicProjectSec 对空工程返回 1 秒），拿它当速度标记的位置
+            // 上限，会把标记一把钳到工程开头、且此后再也拖不动。速度标记属于
+            // 时间轴本身，与 clip 分布无关，因此上限取"工程末尾与当前视口末尾"
+            // 的较大者——保证标记始终落在用户看得见、够得着的范围内。
+            const viewportEndSec =
+                (scrollLeft + Math.max(0, viewportWidth)) / Math.max(1e-9, pxPerSec);
+            sec = clampTempoPointSec({
+                points: tempoMap.points,
+                pointId: drag.pointId,
+                desiredSec: sec,
+                minGapSec,
+                maxSec: Math.max(projectSec, viewportEndSec),
+            });
             const draft = updateTempoPoint(tempoMap, drag.pointId, { positionSec: sec });
             dragDraftRef.current = draft;
             onChange(draft);
