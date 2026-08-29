@@ -4622,7 +4622,8 @@ const sessionSlice = createSlice({
             })
 
             .addCase(selectTrackRemote.pending, (state, action) => {
-                state.selectedTrackId = action.meta.arg;
+                state.selectedTrackId =
+                    typeof action.meta.arg === "string" ? action.meta.arg : action.meta.arg.trackId;
             })
 
             .addCase(selectTrackRemote.fulfilled, (state, action) => {
@@ -4634,7 +4635,13 @@ const sessionSlice = createSlice({
                 }
                 const currentPlayheadSec = state.playheadSec;
                 applyTimelineTracksOnly(state, payload);
-                if (payload.selected_clip_id !== undefined) {
+                // applySelectedClip: false（点击轨道空白切轨）时不得恢复后端
+                // 记住的 selected_clip_id —— 否则异步 fulfilled 会把刚完成的
+                // "点击空白取消选中"覆盖回去。
+                const applySelectedClip =
+                    typeof action.meta.arg !== "object" ||
+                    action.meta.arg.applySelectedClip !== false;
+                if (applySelectedClip && payload.selected_clip_id !== undefined) {
                     state.selectedClipId = payload.selected_clip_id;
                 }
                 state.playheadSec = currentPlayheadSec;

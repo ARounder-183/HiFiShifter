@@ -1508,24 +1508,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }
                         }
                     }}
-                    // 任意空白处按下即取消 clip 选中：容器捕获先于所有 lane
-                    // 处理器执行，保证"点击任意轨道的空白（含轨道区下方空白）
-                    // 都取消选中"；clip / overlap 层 / 标尺 / 输入目标除外
-                    //（它们各自的路由会决定选中的去向）。
-                    onPointerDownCapture={(e) => {
-                        if (e.button !== 0) return;
-                        const target = e.target as HTMLElement | null;
-                        if (!target) return;
-                        if (isEditableTarget(target)) return;
-                        if (
-                            target.closest?.(
-                                "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
-                            )
-                        ) {
-                            return;
-                        }
-                        deselectAllTrackLaneClips();
-                    }}
                     onMouseDownCapture={(e) => {
                         if (e.button === 1) {
                             e.preventDefault();
@@ -1746,9 +1728,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             return;
                         }
                         if (e.button === 0) {
+                            const target = e.target as HTMLElement | null;
+                            // 任意空白处按下即取消 clip 选中：容器捕获先于所有
+                            // lane 处理器执行，保证"点击任意轨道的空白（含轨道区
+                            // 下方空白）都取消选中"。clip / overlap 层 / 标尺 /
+                            // 输入目标除外 —— 它们各自的路由决定选中的去向。
+                            if (
+                                !isEditableTarget(e.target) &&
+                                !target?.closest?.(
+                                    "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
+                                )
+                            ) {
+                                deselectAllTrackLaneClips();
+                            }
                             // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
                             // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
                             // “允许时间轴点击切换轨道”也能稳定触发。
+                            // applySelectedClip: false —— 点击切轨不得让后端把
+                            // 该轨道记住的 selected_clip_id 恢复回来，否则刚完成
+                            // 的空白取消选中会被异步覆盖（"点其他轨道空白不取消
+                            // 选中"的根因）。
                             if (!isEditableTarget(e.target)) {
                                 const trackId = trackIdFromClientY(e.clientY);
                                 if (
@@ -1756,7 +1755,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     trackId &&
                                     trackId !== sessionRef.current.selectedTrackId
                                 ) {
-                                    void dispatch(selectTrackRemote(trackId));
+                                    void dispatch(
+                                        selectTrackRemote({
+                                            trackId,
+                                            applySelectedClip: false,
+                                        }),
+                                    );
                                 }
                             }
                             return;
@@ -1786,7 +1790,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             trackId &&
                             trackId !== sessionRef.current.selectedTrackId
                         ) {
-                            void dispatch(selectTrackRemote(trackId));
+                            // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
+                            void dispatch(
+                                selectTrackRemote({ trackId, applySelectedClip: false }),
+                            );
                         }
                         startDeferredPlayheadSeek({
                             startClientX: e.clientX,

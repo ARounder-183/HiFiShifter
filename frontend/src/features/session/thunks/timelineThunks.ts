@@ -54,7 +54,8 @@ export const moveTrackRemote = createAsyncThunk(
 
 export const selectTrackRemote = createAsyncThunk(
     "session/selectTrackRemote",
-    async (trackId: string) => {
+    async (arg: string | { trackId: string; applySelectedClip?: boolean }) => {
+        const trackId = typeof arg === "string" ? arg : arg.trackId;
         return webApi.selectTrack(trackId);
     },
 );
