@@ -1327,19 +1327,24 @@ fn render_single_clip(
 
     // Step 4: Convert noise mono to stereo, matching harmonic_only length
     let out_len = harmonic_only.len();
+    let out_frames = out_len / 2;
     let noise_stereo: Vec<f32> = {
         let noise_mono_raw = noise_mono.as_ref();
+        // 时间拉伸若由处理器内部完成（mel 域），谐波输出是**时间轴**长度，
+        // 而 HNSEP 的噪声 stem 仍是**源速率**长度。必须重采样对齐后再转立体声，
+        // 否则拉伸出来的尾巴会整段缺失（此前是直接补静音）。
+        let aligned = crate::renderer::chain::resample_noise_to_len(noise_mono_raw, out_frames);
         let mut stereo = Vec::with_capacity(out_len);
-        let noise_len = noise_mono_raw.len();
         // Duplicate each mono sample to L/R channels
-        let sample_count = (out_len / 2).min(noise_len);
-        for &s in &noise_mono_raw[..sample_count] {
+        for &s in &aligned {
             stereo.push(s);
             stereo.push(s);
         }
-        // Pad with silence if noise is shorter than harmonic
+        // 长度兜底（重采样在极小输入下可能少一帧）
         if stereo.len() < out_len {
             stereo.resize(out_len, 0.0f32);
+        } else if stereo.len() > out_len {
+            stereo.truncate(out_len);
         }
         stereo
     };

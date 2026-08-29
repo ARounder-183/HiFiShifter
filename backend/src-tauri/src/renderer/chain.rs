@@ -206,6 +206,40 @@ fn sample_curve_at_abs_sec(
     a + (b - a) * frac
 }
 
+/// 把噪声 stem 线性重采样到目标长度（按样本数，而非采样率比）。
+///
+/// 时间拉伸只作用在谐波分支上：`render_mel_stretch_with_formant` 在 mel 域把
+/// 谐波拉伸到**时间轴**长度，而 HNSEP 分离出的噪声 stem 仍是**源速率**长度。
+/// 若直接按 `min(harmonic, noise)` 混合：
+/// - `playback_rate < 1`（拉长）时谐波比噪声长，输出被截断到噪声长度，
+///   clip 拉伸出来的尾巴整段丢失（听感上就是"下一段音频被截断"）；
+/// - `playback_rate > 1`（缩短）时噪声比谐波长，噪声尾部被丢掉。
+///
+/// 噪声是随机信号，线性重采样即可保持其统计特性，代价远低于再跑一次分离。
+pub(crate) fn resample_noise_to_len(noise: &[f32], target_len: usize) -> Vec<f32> {
+    if target_len == 0 || noise.is_empty() {
+        return Vec::new();
+    }
+    if noise.len() == target_len {
+        return noise.to_vec();
+    }
+    if noise.len() == 1 {
+        return vec![noise[0]; target_len];
+    }
+
+    let src_last = noise.len() - 1;
+    let scale = src_last as f64 / (target_len.saturating_sub(1)).max(1) as f64;
+    let mut out = Vec::with_capacity(target_len);
+    for idx in 0..target_len {
+        let src = idx as f64 * scale;
+        let i0 = (src as usize).min(src_last.saturating_sub(1));
+        let i1 = (i0 + 1).min(src_last);
+        let frac = (src - i0 as f64) as f32;
+        out.push(noise[i0] + (noise[i1] - noise[i0]) * frac);
+    }
+    out
+}
+
 impl ProcessingStage for HiFiGanStage {
     fn id(&self) -> &str {
         "nsf_hifigan"
@@ -302,7 +336,10 @@ impl ProcessingStage for HiFiGanStage {
             return Ok(processed_harmonic);
         }
 
-        let out_len = processed_harmonic.len().min(noise.len());
+        // 噪声 stem 与谐波对齐到同一（时间轴）长度后再混合。
+        // 不能用 `min(harmonic, noise)`：那会在拉伸后把谐波尾巴裁掉。
+        let noise_aligned = resample_noise_to_len(&noise, processed_harmonic.len());
+        let out_len = processed_harmonic.len();
 
         let has_varying_curve = breath_curve.map_or(false, |c| {
             if c.len() <= 1 {
@@ -316,7 +353,7 @@ impl ProcessingStage for HiFiGanStage {
             let inv_sample_rate = 1.0 / cc.sample_rate.max(1) as f64;
             processed_harmonic
                 .iter()
-                .zip(noise.iter())
+                .zip(noise_aligned.iter())
                 .take(out_len)
                 .enumerate()
                 .map(|(index, (&h, &n))| {
@@ -333,14 +370,14 @@ impl ProcessingStage for HiFiGanStage {
                 // gain == 1.0: simple addition, most common case for unity_breath
                 processed_harmonic
                     .iter()
-                    .zip(noise.iter())
+                    .zip(noise_aligned.iter())
                     .take(out_len)
                     .map(|(&h, &n)| h + n)
                     .collect()
             } else {
                 processed_harmonic
                     .iter()
-                    .zip(noise.iter())
+                    .zip(noise_aligned.iter())
                     .take(out_len)
                     .map(|(&h, &n)| h + n * gain)
                     .collect()
@@ -379,5 +416,42 @@ mod tests {
     fn hifigan_chain_no_longer_handles_time_stretch() {
         let chain = super::hifigan_chain();
         assert!(!chain.handles_time_stretch);
+    }
+
+    #[test]
+    fn resample_noise_to_len_keeps_identity_length() {
+        let noise = vec![0.1f32, 0.2, 0.3, 0.4];
+        assert_eq!(super::resample_noise_to_len(&noise, 4), noise);
+    }
+
+    #[test]
+    fn resample_noise_to_len_stretches_without_truncating() {
+        // 拉伸场景（playback_rate < 1）：谐波比噪声长，噪声必须被拉长，
+        // 否则 min() 会把谐波（进而整个 clip）的尾巴裁掉。
+        let noise = vec![1.0f32, 2.0, 3.0, 4.0];
+        let out = super::resample_noise_to_len(&noise, 8);
+        assert_eq!(out.len(), 8);
+        // 端点应贴合原始端点
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!((out[7] - 4.0).abs() < 1e-6);
+        // 中间值必须来自原始信号，而不是补零
+        assert!(out.iter().all(|v| *v >= 1.0 - 1e-6 && *v <= 4.0 + 1e-6));
+    }
+
+    #[test]
+    fn resample_noise_to_len_shrinks_for_speedup() {
+        let noise = vec![0.0f32, 1.0, 2.0, 3.0];
+        let out = super::resample_noise_to_len(&noise, 2);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!((out[1] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resample_noise_to_len_handles_degenerate_inputs() {
+        assert!(super::resample_noise_to_len(&[], 8).is_empty());
+        assert!(super::resample_noise_to_len(&[0.5], 0).is_empty());
+        // 单样本输入：按常数填充，不得 panic
+        assert_eq!(super::resample_noise_to_len(&[0.5], 3), vec![0.5, 0.5, 0.5]);
     }
 }

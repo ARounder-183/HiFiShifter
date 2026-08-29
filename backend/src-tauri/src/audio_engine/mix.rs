@@ -752,3 +752,79 @@ pub(crate) fn render_callback_u16(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_mix_automation, sample_automation_curve};
+    use crate::audio_engine::types::{EngineClip, ResampledStereo};
+    use std::sync::Arc;
+
+    fn clip_with_curves(volume_curve: Option<Vec<f32>>) -> EngineClip {
+        let pcm = Arc::new(vec![1.0f32; 8]);
+        EngineClip {
+            clip_id: "clip-a".to_string(),
+            track_id: "track-a".to_string(),
+            start_frame: 0,
+            length_frames: 4,
+            src: ResampledStereo {
+                sample_rate: 44_100,
+                frames: 4,
+                pcm,
+            },
+            src_start_frame: 0,
+            src_end_frame: 4,
+            reversed: false,
+            playback_rate: 1.0,
+            local_src_offset_frames: 0,
+            repeat: false,
+            loop_anchor_frame: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            fade_in_lut: None,
+            fade_out_lut: None,
+            gain: 1.0,
+            rendered_pcm: None,
+            breath_noise_pcm: None,
+            breath_curve: None,
+            breath_curve_frame_period_ms: 5.0,
+            volume_curve: volume_curve.map(Arc::new),
+            volume_curve_frame_period_ms: 5.0,
+            pan_curve: None,
+            pan_curve_frame_period_ms: 5.0,
+            needs_synthesis: false,
+        }
+    }
+
+    #[test]
+    fn volume_curve_scales_mixed_output() {
+        // 曲线第 0 帧为 0.5：0 号样本必须被压到一半。
+        let clip = clip_with_curves(Some(vec![0.5f32]));
+        let (l, r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 0.5).abs() < 1e-6, "left got {l}");
+        assert!((r - 0.5).abs() < 1e-6, "right got {r}");
+    }
+
+    #[test]
+    fn missing_volume_curve_is_unity() {
+        let clip = clip_with_curves(None);
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 1.0).abs() < 1e-6, "left got {l}");
+    }
+
+    #[test]
+    fn volume_curve_samples_at_timeline_absolute_frame() {
+        // 曲线按**绝对时间**索引：fp=5ms → 每秒 200 帧。
+        // 断言采样索引随绝对时间线性推进（而非 clip 局部时间）。
+        let curve = vec![0.0f32, 1.0, 2.0, 3.0, 4.0];
+        let at = |abs_frame: u64| {
+            sample_automation_curve(Some(&curve), abs_frame, 44_100, 5.0, 1.0)
+        };
+        assert!(at(0) < 1e-6, "abs 0s reads curve frame 0");
+        // 1ms = 44.1 样本 → 曲线帧 0.2
+        assert!((at(44) - 0.2).abs() < 0.05, "got {}", at(44));
+        // 5ms = 220.5 样本 → 曲线帧 1
+        assert!((at(220) - 1.0).abs() < 0.05, "got {}", at(220));
+        // 曲线末尾之后保持末值（不回落到 default）
+        assert!((at(44_100) - 4.0).abs() < 1e-6, "got {}", at(44_100));
+    }
+}
