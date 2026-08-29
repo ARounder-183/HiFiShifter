@@ -40,7 +40,7 @@ set +e  # bundling may fail; AppDir is already created
 HIFISHIFTER_SKIP_FRONTEND_BUILD=1 cargo tauri build \
     --bundles appimage \
     -- --no-default-features --features onnx \
-    ${CARGO_PROFILE:+--profile "$CARGO_PROFILE"} 2>&1 | tail -5
+    ${CARGO_PROFILE:+-- --profile "$CARGO_PROFILE"} 2>&1 | tail -5
 set -e
 echo "(Tauri bundling step may have failed — this is OK, AppDir should be ready)"
 

@@ -327,12 +327,12 @@ jobs:
           # Do NOT pass --target: every runner in this matrix is native to its
           # target architecture (windows-11-arm is a native ARM64 runner), so
           # cargo builds for the host default target and writes to
-          # target/dist, exactly like a local `cargo tauri build --profile dist`.
+          # target/dist, exactly like a local `cargo tauri build -- --profile dist`.
           # Passing --target would move the output to target/<triple>/dist
           # and diverge from developer builds.
-          # --profile dist = full-fat LTO (see [profile.dist] in Cargo.toml);
+          # -- --profile dist = full-fat LTO (see [profile.dist] in Cargo.toml);
           # local developers keep plain `cargo build --release` (no LTO).
-          args: --profile dist ${{ matrix.cargo_extra }}
+          args: -- --profile dist ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -346,7 +346,7 @@ jobs:
           # tauri-bundler deletes the intermediate .app from bundle/macos right
           # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
           # nothing on disk for the bundle verification step to inspect.
-          args: --bundles app,dmg --profile dist ${{ matrix.cargo_extra }}
+          args: --bundles app,dmg -- --profile dist ${{ matrix.cargo_extra }}
 
       - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
         if: runner.os == 'Linux'
@@ -366,7 +366,7 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --bundles appimage --profile dist ${{ matrix.cargo_extra }}
+          args: --bundles appimage -- --profile dist ${{ matrix.cargo_extra }}
 
       # CI builds use --profile dist (fat LTO, see [profile.dist] in
       # Cargo.toml) with the host default target (no --target), so the output
