@@ -23,25 +23,8 @@
 CFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
 CXXFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
 
-# ── Windows: delay-load comctl32.dll ────────────────────────────────────
-# The dependency tree (winit/tauri dialog) statically imports
-# comctl32.dll!TaskDialogIndirect, which exists only in the v6 side-by-side
-# assembly. Without a v6 manifest the loader binds to the v5 copy in
-# System32 and process init fails immediately with
-# STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139).
-# The main binary gets a Common-Controls v6 manifest from tauri_build;
-# cargo has no link-arg channel for the lib unit-test harness
-# (rustc-link-arg-tests only reaches tests/ integration targets), so the
-# harness cannot embed a manifest.
-# Fix: delay-load comctl32 wholesale — the harness never binds comctl32 at
-# startup and unit tests never open dialogs (so the load never triggers);
-# the main binary keeps its v6 manifest and binds v6 on first real dialog
-# use. `cargo test` (lib + integration) and `cargo build` now work directly
-# on Windows with no manifest injection of any kind.
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-C", "link-arg=/DELAYLOAD:comctl32.dll",
-    "-C", "link-arg=/DEFAULTLIB:delayimp.lib",
-    # Link targets without a comctl32 import report LNK4199 "ignored"; silence it.
-    "-C", "link-arg=/IGNORE:4199",
-]
+# NOTE: comctl32.dll is delay-loaded via build.rs `cargo:rustc-link-arg`
+# (Windows msvc only), NOT via `[target.*] rustflags` here: per-target
+# rustflags are baked into the fingerprint of every dependency crate and
+# force a full rebuild of the whole dependency graph, while build-script
+# link args only apply to this package's own targets.

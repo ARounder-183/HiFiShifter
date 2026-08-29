@@ -64,17 +64,28 @@ fn main() {
     //
     // The main binary gets a Common-Controls v6 manifest from tauri_build
     // (resource.lib); cargo has no link-arg channel for the lib unit-test
-    // harness (the block below only reaches tests/ integration targets), so
-    // the harness cannot embed a manifest.
+    // harness, so the harness cannot embed a manifest.
     //
-    // Root fix (see .cargo/config.toml at the repo root): delay-load
-    // comctl32 wholesale (/DELAYLOAD) — the harness never binds comctl32 at
-    // startup and unit tests never open dialogs (so the load never
-    // triggers); the main binary keeps its v6 manifest and binds v6 on
-    // first real dialog use. `cargo test` and `cargo build` now work
-    // directly on Windows with no manifest injection of any kind.
+    // Root fix: delay-load comctl32 wholesale (/DELAYLOAD) for every target
+    // of this crate via `cargo:rustc-link-arg` (build-script link args only
+    // apply to this package's own targets and do not touch the ~400
+    // dependency crates — unlike `[target.*] rustflags`, which rewrites
+    // every crate's fingerprint and forces a full rebuild). The harness
+    // never binds comctl32 at startup and unit tests never open dialogs (so
+    // the load never triggers); the main binary keeps its v6 manifest and
+    // binds v6 on first real dialog use. `cargo test` and `cargo build`
+    // work directly on Windows with no manifest injection of any kind.
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
     {
+        // Delay-load comctl32 for all targets of this package (bin, lib
+        // unit-test harness, integration tests). Static TaskDialogIndirect
+        // imports are only resolvable against the v6 assembly; delaying the
+        // whole module keeps harness executables loadable without a
+        // manifest. delayimp.lib provides the __delayLoadHelper2 stub.
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+        println!("cargo:rustc-link-arg=/DEFAULTLIB:delayimp.lib");
+        // Targets without a comctl32 import report LNK4199 "ignored"; silence it.
+        println!("cargo:rustc-link-arg=/IGNORE:4199");
         // The manifest below is still embedded for integration tests
         // (tests/): kept defensively, so any future integration test that
         // really opens a system dialog binds the v6 assembly.
@@ -100,9 +111,7 @@ fn main() {
         // Only `-tests` may be used here (integration test targets only).
         // A generic `rustc-link-arg` would also reach the main binary — it
         // already embeds a manifest from tauri_build's resource.lib and a
-        // second /MANIFEST:EMBED would hit CVT1100 duplicate resource. The
-        // lib unit-test harness has no such channel and is covered by the
-        // comctl32 delay-load setup in .cargo/config.toml.
+        // second /MANIFEST:EMBED would hit CVT1100 duplicate resource.
         println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
         println!(
             "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
