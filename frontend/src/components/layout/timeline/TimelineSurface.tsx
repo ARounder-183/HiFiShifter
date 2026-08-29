@@ -97,6 +97,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             <BackgroundGrid
                 {...gridBaseProps}
                 layerRef={props.gridLayerRef}
+                // 背景网格（空白区）满不透明度：网格线必须清晰可见。
+                lineOpacity={1}
                 viewportBus={timelineViewportBus}
                 layerOrder={LAYER_ORDER.gridBack}
             />
@@ -142,10 +144,10 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             <BackgroundGrid
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
-                // 叠加在 clip 之上的网格：低不透明度只做节拍参考，不把色块
-                // 蒙灰（用户反馈"半透明有点脏"）。空白区的背景网格由
-                // gridBack 层（0.9）负责，不受影响。
-                lineOpacity={0.15}
+                // 叠加在 clip 之上的网格彻底关闭：clip 必须是 100% 不透明的
+                // 实心块，任何网格都不得从色块上透出（用户明确要求）。
+                // 网格可见性由空白区的 gridBack 层承担。
+                lineOpacity={0}
                 viewportBus={timelineViewportBus}
                 layerOrder={LAYER_ORDER.gridOverlay}
             />
