@@ -613,7 +613,7 @@ export const TrackLane = React.memo(
         return (
             <div
                 key={track.id}
-                className="border-b border-qt-border relative"
+                className="relative"
                 style={{
                     height: rowHeight,
                     backgroundColor: showVerticalTrackLock

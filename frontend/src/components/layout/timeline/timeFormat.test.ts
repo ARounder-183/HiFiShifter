@@ -298,8 +298,8 @@ test("components/layout/timeline/timeFormat.test.ts scripted checks", async () =
         assertEqual(sparse[0].primaryLabel, "1.1", "sparse first label");
         assertEqual(
             sparse.map((t) => t.primaryLabel).join(","),
-            "1.1,9.1,17.1,25.1",
-            "sparse labels every 8 bars",
+            "1.1,9.1,17.1,25.1,33.1,41.1,49.1,57.1,65.1,73.1,81.1",
+            "sparse labels continue past the project end",
         );
         assertEqual(
             sparse.every((t) => t.isBarStart),
@@ -327,8 +327,8 @@ test("components/layout/timeline/timeFormat.test.ts scripted checks", async () =
         });
         assertEqual(
             triple.map((t) => t.primaryLabel).join(","),
-            "1.1,2.1,3.1,4.1,5.1,6.1",
-            "3/4 labels every bar uniformly",
+            "1.1,2.1,3.1,4.1,5.1,6.1,7.1,8.1",
+            "3/4 labels every bar uniformly and continue past the end",
         );
 
         const tripleBeats = buildRulerTicks({

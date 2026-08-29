@@ -1025,10 +1025,12 @@ export function buildTempoGridLineXsForViewport(args: {
         minSpacingPx = 8,
     } = args;
     if (!tempoMap || tempoMap.points.length === 0) return null;
+    // 工程末尾之后继续填充：右边界取可见范围，不再钳到 projectSec。
+    void projectSec;
     const bufferPx = Math.max(240, (Number.isFinite(viewportWidth) ? viewportWidth : 0) * 0.5);
     const startSec = Math.max(0, (scrollLeft - bufferPx) / Math.max(1e-9, pxPerSec));
-    const endSec = Math.min(
-        projectSec,
+    const endSec = Math.max(
+        startSec,
         (scrollLeft + viewportWidth + bufferPx) / Math.max(1e-9, pxPerSec),
     );
 
@@ -1046,15 +1048,24 @@ export function buildTempoGridLineXsForViewport(args: {
     );
     const MAX_WEAK = maxWeak;
     const MAX_STRONG = Math.max(1, Math.ceil(maxWeak / 3));
-    // ★ 先用“拍跨度”估算所需步长，再开始生成 —— 若先以最细网格全量生成，
+    // ★ 先用“视口跨度”估算所需步长，再开始生成 —— 若以最细网格全量生成，
     // 长工程 + 细网格（如 2 小时 @960BPM、1/64）会先分配数百万条网格线，
     // 与“消除卡死”的目标背道而驰。
+    // 工程末尾之后仍继续填充网格，因此跨度不能取“生成范围”（会随右侧空白
+    // 区无限变长、把工程内的网格越估越粗）；以真实视口跨度估步长，样式才能
+    // 与工程长度内的网格保持一致。
+    const viewportSpanSec = Math.max(
+        1e-9,
+        (Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : 0) /
+            Math.max(1e-9, pxPerSec),
+    );
     const spanBeats = Math.max(
         1e-9,
-        secToBeat(tempoMap, endSec, fallbackBpm) - secToBeat(tempoMap, startSec, fallbackBpm),
+        secToBeat(tempoMap, startSec + viewportSpanSec, fallbackBpm) -
+            secToBeat(tempoMap, startSec, fallbackBpm),
     );
     let weakStep = Math.max(1e-9, stepBeats);
-    while (spanBeats / weakStep > MAX_WEAK && weakStep < 256) {
+    while (spanBeats / weakStep > MAX_WEAK) {
         weakStep *= 2;
     }
     // 强网格（小节线）抽取步长：按工程拍号近似估算每小节拍数。
@@ -1065,22 +1076,10 @@ export function buildTempoGridLineXsForViewport(args: {
             denominator: 4,
         }),
     );
-    const strongStride = Math.max(1, Math.ceil(spanBeats / bpbEst / MAX_STRONG));
+    let strongStride = Math.max(1, Math.ceil(spanBeats / bpbEst / MAX_STRONG));
 
-    let weakLines = buildTempoGridLines({
-        startSec,
-        endSec,
-        map: tempoMap,
-        stepBeats: weakStep,
-        fallbackBpm,
-        fallbackBeatsPerBar,
-        swingPercent,
-        strongStride,
-    });
-    // 兜底：分段对齐可能让估算偏少，仍保留按实际条数加倍的逻辑。
-    while (weakLines.filter((l) => !l.isBar).length > MAX_WEAK && weakStep < 256) {
-        weakStep *= 2;
-        weakLines = buildTempoGridLines({
+    const buildLines = () =>
+        buildTempoGridLines({
             startSec,
             endSec,
             map: tempoMap,
@@ -1090,6 +1089,17 @@ export function buildTempoGridLineXsForViewport(args: {
             swingPercent,
             strongStride,
         });
+
+    let weakLines = buildLines();
+    // 兜底：分段对齐可能让估算偏少，仍保留按实际条数加倍的逻辑。
+    while (weakLines.filter((l) => !l.isBar).length > MAX_WEAK) {
+        weakStep *= 2;
+        weakLines = buildLines();
+    }
+    // 不同段拍号/速度会让强线估算失准，同样按实际条数加粗抽取步长。
+    while (weakLines.filter((l) => l.isBar).length > MAX_STRONG) {
+        strongStride *= 2;
+        weakLines = buildLines();
     }
     const weak = dedupeSorted(weakLines.filter((l) => !l.isBar).map((l) => l.sec * pxPerSec));
     const strong = dedupeSorted(weakLines.filter((l) => l.isBar).map((l) => l.sec * pxPerSec));

@@ -13,16 +13,24 @@ export const TimelineCanvasViewport: React.FC<{
         activeGroupIds?: Set<string>;
         disabledGroupIds?: string[];
     };
-}> = ({ width, height, model }) => {
+    /** 轨道横向分界线的可见行窗口；用于让分界线延伸到工程末尾之后。 */
+    rowGuides?: {
+        startTrackIndex: number;
+        rowCount: number;
+        rowHeight: number;
+    };
+}> = ({ width, height, model, rowGuides }) => {
     const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
     const widthRef = React.useRef(width);
     const heightRef = React.useRef(height);
     const modelRef = React.useRef(model);
+    const rowGuidesRef = React.useRef(rowGuides);
     const viewportRef = React.useRef(timelineViewportBus.getSnapshot());
 
     widthRef.current = width;
     heightRef.current = height;
     modelRef.current = model;
+    rowGuidesRef.current = rowGuides;
     const invalidate = React.useCallback(() => {
         // 同步绘制：滚动事件在绘制前触发，本画布必须与原生滚动的 DOM 内容层
         // 在同一帧内提交位移。任何 rAF 延迟都会让 sticky 画布与 DOM 层分离。
@@ -54,6 +62,9 @@ export const TimelineCanvasViewport: React.FC<{
             fontFamily: resolveFontFamily(),
             activeGroupIds: modelRef.current.activeGroupIds,
             disabledGroupIds: modelRef.current.disabledGroupIds,
+            rowGuides: rowGuidesRef.current,
+            viewportLeft: viewportRef.current.scrollLeft,
+            viewportTopPx: viewportRef.current.scrollTopPx,
         });
     }, []);
 

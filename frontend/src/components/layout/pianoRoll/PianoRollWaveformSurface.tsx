@@ -4,6 +4,7 @@ import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import type { WaveformColors } from "../../../theme/waveformColors";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
+import { pianoRollViewportBus } from "./pianoRollViewportBus";
 
 function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
     if (!entry.sourcePath || entry.muted) return null;
@@ -66,6 +67,7 @@ export const PianoRollWaveformSurface = React.memo(function PianoRollWaveformSur
             pxPerSec={pxPerSec}
             color={props.colors.stroke}
             style={{ opacity: 0.86 }}
+            viewportSource={pianoRollViewportBus}
         />
     );
 });

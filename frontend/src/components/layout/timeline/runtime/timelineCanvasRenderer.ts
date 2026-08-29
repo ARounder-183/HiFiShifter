@@ -162,6 +162,15 @@ export function drawTimelineCanvas(
             /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
             snapOffsetPx?: number;
         }>;
+        /** 轨道横向分界线（延伸到工程末尾之后）。 */
+        rowGuides?: {
+            startTrackIndex: number;
+            rowCount: number;
+            rowHeight: number;
+        };
+        /** 当前视口水平/竖直偏移（内容坐标），供分界线横跨可见区域。 */
+        viewportLeft?: number;
+        viewportTopPx?: number;
         fontFamily?: string;
         activeGroupIds?: Set<string>;
         disabledGroupIds?: string[];
@@ -170,6 +179,32 @@ export function drawTimelineCanvas(
     const fontFamily = args.fontFamily || resolveFontFamily();
 
     ctx.clearRect(0, 0, args.width, args.height);
+
+    // 轨道横向分界线由 sticky 画布统一绘制：工程末尾之后的空白区也要有
+    // 同样的分界线，且滚动/缩放时与 Clip 体同帧同步。
+    if (args.rowGuides && args.rowGuides.rowCount > 0) {
+        const { startTrackIndex, rowCount, rowHeight } = args.rowGuides;
+        const viewportLeft = Number.isFinite(args.viewportLeft) ? (args.viewportLeft as number) : 0;
+        const viewportTopPx = Number.isFinite(args.viewportTopPx)
+            ? (args.viewportTopPx as number)
+            : 0;
+        const borderColor =
+            (typeof document !== "undefined"
+                ? getComputedStyle(document.documentElement).getPropertyValue("--qt-border").trim()
+                : "") || "rgba(148, 163, 184, 0.22)";
+        ctx.save();
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 1;
+        for (let index = 1; index <= rowCount; index += 1) {
+            const y = (startTrackIndex + index) * rowHeight;
+            if (y < viewportTopPx - 1 || y > viewportTopPx + args.height + 1) continue;
+            ctx.beginPath();
+            ctx.moveTo(viewportLeft, y);
+            ctx.lineTo(viewportLeft + args.width, y);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
 
     for (const clip of args.clips) {
         const clipLeft = clip.leftPx;
@@ -222,14 +257,40 @@ export function drawTimelineCanvas(
             );
         }
 
-        ctx.strokeStyle = visualStyle.borderStroke;
-        ctx.lineWidth = visualStyle.borderLineWidth;
-        ctx.strokeRect(
-            clipLeft + 0.5,
-            bodyTop + 0.5,
-            Math.max(0, clipWidth - 1),
-            Math.max(0, bodyHeight - 1),
-        );
+        // 选中/编组指示必须在 Clip 体画布内绘制：DOM 交互层的 box-shadow
+        // 随原生滚动移动，会与 sticky 画布错帧；视觉状态统一由画布输出。
+        if (clip.selected || isGroupActive) {
+            ctx.strokeStyle =
+                !clip.selected && isGroupActive
+                    ? "rgba(255, 200, 50, 0.60)"
+                    : visualStyle.borderStroke;
+            ctx.lineWidth = clip.selected ? visualStyle.borderLineWidth : 1;
+            ctx.strokeRect(
+                clipLeft + 0.5,
+                clipTop + 0.5,
+                Math.max(0, clipWidth - 1),
+                Math.max(0, clipHeight - 1),
+            );
+            if (isGroupActive) {
+                ctx.strokeStyle = "rgba(255, 200, 50, 0.60)";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(
+                    clipLeft - 1.5,
+                    clipTop - 1.5,
+                    Math.max(0, clipWidth + 3),
+                    Math.max(0, clipHeight + 3),
+                );
+            }
+        } else {
+            ctx.strokeStyle = visualStyle.borderStroke;
+            ctx.lineWidth = visualStyle.borderLineWidth;
+            ctx.strokeRect(
+                clipLeft + 0.5,
+                bodyTop + 0.5,
+                Math.max(0, clipWidth - 1),
+                Math.max(0, bodyHeight - 1),
+            );
+        }
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.24)";
         ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);

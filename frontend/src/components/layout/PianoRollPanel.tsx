@@ -115,6 +115,7 @@ import { averageSelectionValues, smoothSelectionValues } from "./pianoRoll/selec
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
+import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
@@ -1729,7 +1730,6 @@ export const PianoRollPanel: React.FC = () => {
 
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
-    const gridBoundaryRef = useRef<HTMLDivElement | null>(null);
 
     function pitchDeltaToDegreeSteps(
         basePitch: number,
@@ -1862,16 +1862,11 @@ export const PianoRollPanel: React.FC = () => {
             invokeGridRedrawHandler(gridLayerRef.current, next);
         }
 
-        if (gridBoundaryRef.current) {
-            const left = contentWidth - 1 - next;
-            gridBoundaryRef.current.style.left = `${left}px`;
-            gridBoundaryRef.current.style.opacity =
-                left >= -2 && left <= viewSizeRef.current.w + 2 ? "0.9" : "0";
-        }
-
         // 同步绘制：滚动事件在绘制前触发，画布必须与标尺/网格（上方已同步
         // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
         drawRef.current();
+        // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
+        pianoRollViewportBus.emit(next, pxPerSecRef.current, viewSizeRef.current.w);
     }
 
     function syncScrollLeft(scroller: HTMLDivElement) {
@@ -5327,7 +5322,6 @@ export const PianoRollPanel: React.FC = () => {
                 {/* Right: ruler + scrollable canvas */}
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
                     <TimeRuler
-                        contentWidth={contentWidth}
                         scrollLeft={scrollLeft}
                         ticks={timeRulerTicks}
                         pxPerBeat={pxPerBeat}
@@ -5407,7 +5401,6 @@ export const PianoRollPanel: React.FC = () => {
                                             : 0
                                     }
                                     layerRef={gridLayerRef}
-                                    boundaryRef={gridBoundaryRef}
                                     weakLineXs={tempoGridLineXs?.weak ?? null}
                                     strongLineXs={tempoGridLineXs?.strong ?? null}
                                     sticky

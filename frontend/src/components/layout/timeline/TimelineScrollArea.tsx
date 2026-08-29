@@ -20,6 +20,10 @@ export const TimelineScrollArea: React.FC<
         rowHeight: number;
         setRowHeight: React.Dispatch<React.SetStateAction<number>>;
         setScrollLeft: React.Dispatch<React.SetStateAction<number>>;
+        /** 缩放的同一 flushSync 内提交 scrollLeft state（供窗口化立即使用）。 */
+        commitScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
+        /** 竖直缩放提交 rowHeight 时同步提交 scrollTop state。 */
+        commitScrollTopState: React.Dispatch<React.SetStateAction<number>>;
         rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
         scrollHorizontalKb?: Keybinding;
         scrollVerticalKb?: Keybinding;
@@ -36,6 +40,8 @@ export const TimelineScrollArea: React.FC<
     rowHeight,
     setRowHeight,
     setScrollLeft,
+    commitScrollLeftState,
+    commitScrollTopState,
     rulerContentRef,
     onScroll,
     scrollHorizontalKb,
@@ -238,6 +244,9 @@ export const TimelineScrollArea: React.FC<
                     nextRowHeight,
                     nextScrollTop: Math.max(0, rowUnitAtPointer * nextRowHeight - pointerY),
                 };
+                // 与 rowHeight 同批提交 scrollTop state：下一渲染立即使用新的
+                // 竖直窗口，避免窗口化滞后把 Clip 整体裁掉。
+                commitScrollTopState(pendingVerticalZoomRef.current.nextScrollTop);
                 setRowHeight(nextRowHeight);
                 return;
             }
@@ -293,10 +302,11 @@ export const TimelineScrollArea: React.FC<
                     // 原子缩放：flushSync 让 DOM（Clip/网格/contentWidth）在本帧内
                     // 按新缩放重排，layout effect 随即写原生 scrollLeft 并经
                     // syncScrollLeft 同步重绘标尺与画布——全部发生在绘制前。
-                    // 若按旧路径先 emit 总线/改标尺、state 异步提交，画布会先于
-                    // DOM 一帧切换缩放、再跳一次滚动位置，产生可见抽动。
+                    // scrollLeft state 也必须在同一 flushSync 提交：窗口化/裁剪
+                    // 会读取该 state，旧值会短暂把视口内的 Clip 判为屏外而消失。
                     flushSync(() => {
                         setPxPerSec(pending.nextPxPerSec);
+                        commitScrollLeftState(pending.nextScrollLeft);
                     });
                 });
             }
@@ -312,6 +322,8 @@ export const TimelineScrollArea: React.FC<
         scrollRef,
         setPxPerSec,
         setRowHeight,
+        commitScrollLeftState,
+        commitScrollTopState,
         rulerContentRef,
         scrollHorizontalKb,
         scrollVerticalKb,

@@ -88,7 +88,6 @@ import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
-import { beginSnapGesture, endSnapGesture } from "../../utils/timelineSnapping";
 import type { TempoMap } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
@@ -154,7 +153,9 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
             (visualPlayheadSec: number) => {
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
                 if (playheadRef.current) {
-                    playheadRef.current.style.left = `${playheadLeftPx}px`;
+                    const scroller = scrollRef.current;
+                    const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                    playheadRef.current.style.left = `${screenLeft}px`;
                 }
                 if (rulerPlayheadLineRef.current) {
                     rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
@@ -282,7 +283,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
     // 记录名称区域的第一次点击，让播放头在短时间内收到同位置点击时转而进入重命名。
     const renameClickCandidateRef = React.useRef<ClipRenameClickCandidate | null>(null);
-    const suppressPlayheadMouseDownRef = React.useRef(false);
     const registerRenameClickCandidate = React.useCallback(
         (candidate: ClipRenameClickCandidate | null) => {
             renameClickCandidateRef.current = candidate;
@@ -327,14 +327,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         scrollRef,
         trackListScrollRef,
         trackGridLayerRef,
-        trackGridBoundaryRef,
         trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
-        playheadDragRef,
         lastClickedClipIdRef,
         syncScrollTop,
         pxPerSecRef,
@@ -379,6 +377,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         pendingDropDurationPathRef,
         syncScrollLeft,
         setScrollLeftAction,
+        setScrollLeftState,
         beatFromClientX,
         trackIdFromClientY,
         rowTopForTrackId,
@@ -870,6 +869,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         keyboardZoomPendingRef,
         pxPerSec,
         setPxPerSec,
+        commitScrollLeftState: setScrollLeftState,
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
@@ -1184,6 +1184,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         timelineScroller.scrollTop = scrollTop;
     }, []);
 
+    const trackGridHeight = Math.max(0, contentHeight - TRACK_ADD_ROW_HEIGHT);
     const timelineRenderModel = useMemo(
         () =>
             buildTimelineRenderModel({
@@ -1343,7 +1344,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
                     真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
                 <TimeRuler
-                    contentWidth={contentWidth}
                     scrollLeft={scrollLeft}
                     ticks={ticks}
                     pxPerBeat={pxPerBeat}
@@ -1436,6 +1436,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     rowHeight={rowHeight}
                     setRowHeight={setRowHeight}
                     setScrollLeft={setScrollLeftAction}
+                    commitScrollLeftState={setScrollLeftState}
+                    commitScrollTopState={setTimelineScrollTop}
                     rulerContentRef={rulerContentRef}
                     scrollHorizontalKb={scrollHorizontalKb}
                     scrollVerticalKb={scrollVerticalKb}
@@ -1685,6 +1687,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             scroller &&
                             isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
                         ) {
+                            return;
+                        }
+                        if (e.button === 0) {
+                            // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
+                            // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
+                            // “允许时间轴点击切换轨道”也能稳定触发。
+                            if (!isEditableTarget(e.target)) {
+                                const trackId = trackIdFromClientY(e.clientY);
+                                if (
+                                    s.paramEditorTimelineClickSelectTrackEnabled &&
+                                    trackId &&
+                                    trackId !== sessionRef.current.selectedTrackId
+                                ) {
+                                    void dispatch(selectTrackRemote(trackId));
+                                }
+                            }
                             return;
                         }
                         if (e.button !== 1) return;
@@ -1939,128 +1957,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 />
                             ) : null}
 
-                            {/* Playhead Cursor
-                                交互等级最低：pointer-events-none 让播放头永远不
-                                拦截其它编辑目标（淡入淡出包络、Clip 边缘、Body 拖拽等）。
-                                视觉顺序不变 —— z-20 仍在 Clip 之上。播放头拖拽由
-                                轨道空白区（TrackLane 的 seek 手势）与标尺承接。 */}
-                            <div
-                                ref={playheadRef}
-                                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 pointer-events-none"
-                                style={{
-                                    left: (Number(s.playheadSec ?? 0) || 0) * pxPerSec,
-                                }}
-                                onMouseDown={(e) => {
-                                    // pointer-events-none：此事件不会派发到播放头，
-                                    // 保留分支仅为与上方 pointerdown 的 ref 语义一致。
-                                    if (!suppressPlayheadMouseDownRef.current) return;
-                                    suppressPlayheadMouseDownRef.current = false;
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                }}
-                                onPointerDown={(e) => {
-                                    // pointer-events-none：播放头自身不再接收指针
-                                    // 事件，此分支不再执行（播放头拖拽改由轨道空白区
-                                    // 与标尺承接）。保留代码以避免清理相关 ref 时
-                                    // 波及双击重命名候选逻辑。
-                                    if (e.button !== 0) return;
-
-                                    // 双击名称的第二次点击：第一次点击已把播放头移到这里，
-                                    // 因此本次 pointerdown 会命中播放头而不是名称 div。
-                                    const candidate = renameClickCandidateRef.current;
-                                    const now = performance.now();
-                                    if (
-                                        candidate &&
-                                        candidate.pointerId === e.pointerId &&
-                                        Math.abs(candidate.clientX - e.clientX) <= 6 &&
-                                        Math.abs(candidate.clientY - e.clientY) <= 6 &&
-                                        now - candidate.time <= 500
-                                    ) {
-                                        renameClickCandidateRef.current = null;
-                                        suppressPlayheadMouseDownRef.current = true;
-                                        // mousedown 紧随 pointerdown；若本次事件未产生 mousedown，
-                                        // 下一个任务里清除标记，避免影响后续播放头拖拽。
-                                        setTimeout(() => {
-                                            suppressPlayheadMouseDownRef.current = false;
-                                        }, 0);
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        clipActions.setRenamingClipId(candidate.clipId);
-                                        return;
-                                    }
-
-                                    e.stopPropagation();
-                                    const scroller = scrollRef.current;
-                                    if (!scroller) return;
-                                    const startX = e.clientX;
-                                    const startY = e.clientY;
-                                    let moved = false;
-                                    const bounds = scroller.getBoundingClientRect();
-                                    const initialSec =
-                                        Number(sessionRef.current.playheadSec ?? 0) || 0;
-                                    playheadDragRef.current = {
-                                        pointerId: e.pointerId,
-                                        lastBeat: initialSec,
-                                    };
-                                    // 拖拽播放头同样登记吸附手势：拖动中高亮吸附目标
-                                    //（光标自身不重复高亮），工具栏吸附状态同步。
-                                    beginSnapGesture();
-                                    (e.currentTarget as HTMLDivElement).setPointerCapture(
-                                        e.pointerId,
-                                    );
-
-                                    function onPointerMove(ev: PointerEvent) {
-                                        const drag = playheadDragRef.current;
-                                        const currentScroller = scrollRef.current;
-                                        if (
-                                            !drag ||
-                                            drag.pointerId !== e.pointerId ||
-                                            !currentScroller
-                                        ) {
-                                            return;
-                                        }
-                                        const dx = ev.clientX - startX;
-                                        const dy = ev.clientY - startY;
-                                        if (!moved && dx * dx + dy * dy >= 9) {
-                                            moved = true;
-                                        }
-                                        if (!moved) return;
-                                        const currentBounds =
-                                            currentScroller.getBoundingClientRect();
-                                        drag.lastBeat = setPlayheadFromClientX(
-                                            ev.clientX,
-                                            currentBounds,
-                                            currentScroller.scrollLeft,
-                                            false,
-                                        );
-                                    }
-
-                                    function endDrag() {
-                                        const drag = playheadDragRef.current;
-                                        if (!drag || drag.pointerId !== e.pointerId) return;
-                                        playheadDragRef.current = null;
-                                        if (!moved) {
-                                            drag.lastBeat = setPlayheadFromClientX(
-                                                startX,
-                                                bounds,
-                                                scroller!.scrollLeft,
-                                                false,
-                                            );
-                                        }
-                                        void dispatch(seekPlayhead(drag.lastBeat));
-                                        // 拖拽结束：解除手势并清除吸附竖线高亮。
-                                        endSnapGesture();
-                                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                                        window.removeEventListener("pointermove", onPointerMove);
-                                        window.removeEventListener("pointerup", endDrag);
-                                        window.removeEventListener("pointercancel", endDrag);
-                                    }
-
-                                    window.addEventListener("pointermove", onPointerMove);
-                                    window.addEventListener("pointerup", endDrag);
-                                    window.addEventListener("pointercancel", endDrag);
-                                }}
-                            />
+                            {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
+                                波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
                         </div>
 
                         {viewportWidth > 0 ? (
@@ -2079,6 +1977,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 viewportEndSec={viewportEndSec}
                                 pxPerSec={pxPerSec}
                                 scrollLeft={scrollLeft}
+                                playheadSec={s.playheadSec}
                                 clipModel={timelineCanvasModel}
                                 contentWidth={contentWidth}
                                 pxPerBeat={pxPerBeat}
@@ -2091,9 +1990,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }
                                 gridWeakLineXs={tempoGridLineXs?.weak ?? null}
                                 gridStrongLineXs={tempoGridLineXs?.strong ?? null}
+                                gridBottomPx={trackGridHeight}
                                 gridLayerRef={trackGridLayerRef}
-                                gridBoundaryRef={trackGridBoundaryRef}
                                 gridOverlayLayerRef={trackGridOverlayLayerRef}
+                                playheadLineRef={playheadRef}
                             />
                         ) : null}
                     </div>

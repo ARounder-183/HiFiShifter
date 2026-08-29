@@ -8,7 +8,7 @@
  * component lifecycle.
  */
 
-type GridRedrawHandler = (scrollLeft: number) => void;
+type GridRedrawHandler = (scrollLeft: number, scrollTopPx?: number) => void;
 
 const gridRedrawHandlers = new WeakMap<HTMLElement, GridRedrawHandler>();
 
@@ -23,7 +23,8 @@ export function clearGridRedrawHandler(element: HTMLElement): void {
 export function invokeGridRedrawHandler(
     element: HTMLElement | null | undefined,
     scrollLeft: number,
+    scrollTopPx?: number,
 ): void {
     if (!element) return;
-    gridRedrawHandlers.get(element)?.(scrollLeft);
+    gridRedrawHandlers.get(element)?.(scrollLeft, scrollTopPx);
 }

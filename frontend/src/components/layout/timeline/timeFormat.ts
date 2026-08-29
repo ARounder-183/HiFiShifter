@@ -550,6 +550,8 @@ export function buildRulerTicks(args: {
         minLabelSpacingPx,
         tempoMap,
     } = args;
+    // 工程末尾之后不再截断：标尺与网格一样继续按可见范围填充。
+    void projectSec;
     const bpb = normalizeBeatsPerBar(beatsPerBar);
     const secPerBeat = 60 / Math.max(1, bpm);
     const ctx: TimeFormatContext = { bpm, beatsPerBar: bpb, grid, tempoMap };
@@ -566,13 +568,12 @@ export function buildRulerTicks(args: {
             beatsPerBar: bpb,
             minLabelSpacingPx,
         });
-        const totalBeats = Math.max(0, projectSec / secPerBeat);
         const leftBeat = leftPx / pxPerBeat;
         const rightBeat = rightPx / pxPerBeat;
         const ticks = new Map<number, RulerTick>();
 
         const addTick = (beat: number) => {
-            if (!Number.isFinite(beat) || beat < -1e-9 || beat > totalBeats + 1e-9) return;
+            if (!Number.isFinite(beat) || beat < -1e-9) return;
             const key = Math.round(beat * 1e9) / 1e9;
             const isBarStart = Math.abs(key / bpb - Math.round(key / bpb)) < 1e-9;
             const existing = ticks.get(key);
@@ -604,12 +605,11 @@ export function buildRulerTicks(args: {
     // 每个变化点处重新对齐小节/节拍（与 barBeatAtSec、背景网格、吸附规则一致），
     // 因此刻度必须在每段内以段起点为原点等距生成（段内拍 = k*step，按该段 BPM 折算秒）。
     const visStartSec = Math.max(0, leftPx / Math.max(1e-9, pxPerSec));
-    const visEndSec = Math.min(projectSec, rightPx / Math.max(1e-9, pxPerSec));
+    const visEndSec = rightPx / Math.max(1e-9, pxPerSec);
     const ticks = new Map<number, RulerTick>();
 
     const pushTick = (sec: number, isBarStart: boolean) => {
         if (!Number.isFinite(sec) || sec < visStartSec - 1e-6 || sec > visEndSec + 1e-6) return;
-        if (sec > projectSec + 1e-6) return;
         const beat = secToBeat(tempoMap, sec, bpm);
         const key = Math.round(beat * 1e6) / 1e6;
         const existing = ticks.get(key);
@@ -628,7 +628,7 @@ export function buildRulerTicks(args: {
         });
     };
 
-    const segments = tempoMapSegments(tempoMap, projectSec);
+    const segments = tempoMapSegments(tempoMap, visEndSec);
 
     for (let i = 0; i < segments.length; i += 1) {
         const segment = segments[i];
@@ -658,8 +658,8 @@ export function buildRulerTicks(args: {
         for (let k = 0; k <= maxK; k += 1) {
             const localBeat = k * step;
             const sec = segStartSec + localBeat * segSecPerBeat;
-            // 跳过段右边界：非末段由下一段起始刻度承担；末段的工程结束位置
-            // 不展示时间单位字符串（与无 Tempo Map 时一致，边界由网格边界线表示）。
+            // 跳过段右边界：非末段由下一段起始刻度承担；末段的可见范围右边界
+            // 不额外展示刻度（右边界本身通常已超出视口，避免缓冲区边缘标签闪烁）。
             if (Math.abs(sec - segEndSec) < 1e-6) continue;
             const rem = (localBeat / segBpb) % 1;
             const isBarStart = rem < 1e-9 || rem > 1 - 1e-9;

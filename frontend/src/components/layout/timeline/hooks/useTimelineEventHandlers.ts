@@ -46,6 +46,8 @@ export interface UseTimelineEventHandlersArgs {
     // state values
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
+    /** 缩放时与 pxPerSec 同帧提交的 scrollLeft state。 */
+    commitScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     rowHeight: number;
 
     // multi-select
@@ -110,6 +112,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         keyboardZoomPendingRef,
         pxPerSec,
         setPxPerSec,
+        commitScrollLeftState,
         rowHeight,
         multiSelectedClipIds,
         setMultiSelectedClipIds,
@@ -376,8 +379,10 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             // 原子缩放：flushSync 保证 DOM 按新缩放重排后，layout effect 在
             // 同一绘制帧内写原生 scrollLeft 并同步重绘标尺与画布（与滚轮
             // 缩放的 TimelineScrollArea 路径一致，避免画布先行的抽动）。
+            // 同帧提交 scrollLeft state，防止窗口化把屏内 Clip 裁掉。
             flushSync(() => {
                 setPxPerSec(zoom.nextPxPerSec);
+                commitScrollLeftState(zoom.nextScrollLeft);
             });
         }
 

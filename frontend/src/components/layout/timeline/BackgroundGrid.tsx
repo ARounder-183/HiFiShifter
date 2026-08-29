@@ -18,6 +18,7 @@ function resolveRefElement(ref: React.Ref<HTMLDivElement> | undefined): HTMLDivE
     if (typeof ref === "function") return null;
     return ref.current;
 }
+
 export const BackgroundGrid: React.FC<{
     contentWidth: number;
     contentHeight: number;
@@ -27,9 +28,7 @@ export const BackgroundGrid: React.FC<{
     viewportWidth?: number;
     scrollLeft?: number;
     layerRef?: React.Ref<HTMLDivElement>;
-    boundaryRef?: React.Ref<HTMLDivElement>;
     lineOpacity?: number;
-    showBoundary?: boolean;
     sticky?: boolean;
     /** 网格显示总开关（Snap/Grid 设置）。 */
     visible?: boolean;
@@ -37,6 +36,16 @@ export const BackgroundGrid: React.FC<{
     minSpacingPx?: number;
     /** Swing 强度（0-100），仅作用于弱网格线的奇数格。 */
     swingPercent?: number;
+    /**
+     * Sticky 视口的竖直偏移（内容绝对坐标）。网格线从 -viewportTopPx
+     * 处开始可见；垂直滚动时由命令式 draw(scrollLeft, scrollTopPx) 同步。
+     */
+    viewportTopPx?: number;
+    /**
+     * 网格在内容绝对坐标中的底部边界。Sticky 层绘制时会把网格裁剪到
+     * [0, contentBottomPx]，避免覆盖“添加轨道”等网格区之外的底部内容。
+     */
+    contentBottomPx?: number;
     /** Tempo Map 显式网格线位置（内容坐标 x，升序）。 */
     weakLineXs?: number[] | null;
     strongLineXs?: number[] | null;
@@ -49,13 +58,13 @@ export const BackgroundGrid: React.FC<{
     viewportWidth,
     scrollLeft,
     layerRef,
-    boundaryRef,
     lineOpacity = 0.9,
-    showBoundary = true,
     sticky = false,
     visible = true,
     minSpacingPx,
     swingPercent = 0,
+    viewportTopPx = 0,
+    contentBottomPx,
     weakLineXs = null,
     strongLineXs = null,
 }) => {
@@ -104,7 +113,8 @@ export const BackgroundGrid: React.FC<{
         scrollLeft: scrollLeft ?? 0,
         isSticky,
         lineOpacity,
-        showBoundary,
+        viewportTopPx,
+        contentBottomPx,
     });
 
     useLayoutEffect(() => {
@@ -124,7 +134,8 @@ export const BackgroundGrid: React.FC<{
             scrollLeft: scrollLeft ?? 0,
             isSticky,
             lineOpacity,
-            showBoundary,
+            viewportTopPx,
+            contentBottomPx,
         };
     });
 
@@ -135,7 +146,7 @@ export const BackgroundGrid: React.FC<{
     });
 
     const draw = useCallback(
-        (nextScrollLeft?: number) => {
+        (nextScrollLeft?: number, nextViewportTopPx?: number) => {
             const svg = svgRef.current;
             if (!svg) return;
             const paths = svg.querySelectorAll<SVGPathElement>("path");
@@ -145,6 +156,9 @@ export const BackgroundGrid: React.FC<{
             const sl = Number.isFinite(nextScrollLeft)
                 ? (nextScrollLeft as number)
                 : latest.scrollLeft;
+            const vpTop = Number.isFinite(nextViewportTopPx)
+                ? (nextViewportTopPx as number)
+                : latest.viewportTopPx;
             const offset = latest.isSticky ? sl : 0;
             const bufferPx = Math.max(240, latest.viewportWidth * 0.5);
             const visibleStart = latest.isSticky ? 0 : Math.max(0, sl - bufferPx);
@@ -152,19 +166,16 @@ export const BackgroundGrid: React.FC<{
                 ? latest.width
                 : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
-            // 工程边界线同样属于“背景层”，必须与网格线在同一帧提交：
-            // 画布/波形都在 scroll 事件内同步重绘，边界线不能等 React 的
-            // rAF 状态提交后再移动，否则滚动到工程末端附近时会与网格分裂。
-            const boundaryEl = resolveRefElement(boundaryRef);
-            if (latest.isSticky && boundaryEl) {
-                const boundaryLeft = latest.contentWidth - 1 - sl;
-                boundaryEl.style.left = `${boundaryLeft}px`;
-                const boundaryVisible =
-                    Number.isFinite(boundaryLeft) &&
-                    boundaryLeft >= -2 &&
-                    boundaryLeft <= latest.width + 2;
-                boundaryEl.style.opacity =
-                    latest.showBoundary && boundaryVisible ? String(latest.lineOpacity) : "0";
+            // Sticky 层绘制时按内容绝对坐标裁剪竖直范围：
+            // 网格只覆盖 [0, contentBottomPx]，不得画进底部“添加轨道”行。
+            let lineTop = 0;
+            let lineBottom = latest.height;
+            if (latest.isSticky && Number.isFinite(latest.contentBottomPx)) {
+                lineTop = Math.max(0, -vpTop);
+                lineBottom = Math.max(
+                    lineTop,
+                    Math.min(latest.height, (latest.contentBottomPx as number) - vpTop),
+                );
             }
 
             // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
@@ -172,6 +183,7 @@ export const BackgroundGrid: React.FC<{
             // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
             const drawKey = [
                 sl,
+                vpTop,
                 latest.weakStepPx,
                 latest.strongStepPx,
                 latest.swingPercent,
@@ -183,10 +195,16 @@ export const BackgroundGrid: React.FC<{
                 latest.viewportWidth,
                 latest.isSticky,
                 latest.lineOpacity,
-                latest.showBoundary,
+                latest.contentBottomPx,
             ].join("|");
             if (lastDrawKeyRef.current === drawKey) return;
             lastDrawKeyRef.current = drawKey;
+
+            if (lineBottom <= lineTop) {
+                paths[0].setAttribute("d", "");
+                paths[1].setAttribute("d", "");
+                return;
+            }
 
             const buildUniformPath = (stepPx: number): string => {
                 if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
@@ -199,7 +217,7 @@ export const BackgroundGrid: React.FC<{
                     // Swing：奇数网格位置向右偏移（最大半步）。
                     const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
                     if (x < -1 || x > latest.width + 1) continue;
-                    parts.push(`M${x} 0V${latest.height}`);
+                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
                 }
                 return parts.join("");
             };
@@ -225,7 +243,7 @@ export const BackgroundGrid: React.FC<{
                     const x = lineXs[i] - offset;
                     if (x > latest.width + 1) break;
                     if (x < -1) continue;
-                    parts.push(`M${x} 0V${latest.height}`);
+                    parts.push(`M${x} ${lineTop}V${lineBottom}`);
                 }
                 return parts.join("");
             };
@@ -243,7 +261,7 @@ export const BackgroundGrid: React.FC<{
                     : buildUniformPath(latest.strongStepPx),
             );
         },
-        [boundaryRef, useExplicitLines],
+        [useExplicitLines],
     );
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
@@ -251,10 +269,11 @@ export const BackgroundGrid: React.FC<{
     // 切换，与 Clip/标尺产生一帧错位。滚动仅影响窗口化（位置为内容坐标，
     // 随原生滚动移动），同样受益于同帧提交。
     useLayoutEffect(() => {
-        draw(scrollLeft);
+        draw(scrollLeft, viewportTopPx);
     }, [
         draw,
         scrollLeft,
+        viewportTopPx,
         samplingPlan.weakStepPx,
         samplingPlan.strongStepPx,
         swingPercent,
@@ -265,8 +284,8 @@ export const BackgroundGrid: React.FC<{
         contentWidth,
         viewportWidth,
         isSticky,
-        showBoundary,
         lineOpacity,
+        contentBottomPx,
     ]);
 
     // 用 useLayoutEffect 注册命令式重绘句柄：TimelineSurface 挂载后会在
@@ -282,53 +301,34 @@ export const BackgroundGrid: React.FC<{
         };
     }, [draw, layerRef]);
 
-    const boundaryLeft = isSticky ? contentWidth - 1 - (scrollLeft as number) : contentWidth - 1;
-    const boundaryVisible =
-        Number.isFinite(boundaryLeft) && boundaryLeft >= -2 && boundaryLeft <= width + 2;
-    const manualViewportSync = isSticky && boundaryRef != null;
-
     if (!visible) return null;
 
     return (
-        <>
-            <div
-                ref={layerRef}
-                className="absolute left-0 top-0 pointer-events-none"
-                style={{ width, height }}
+        <div
+            ref={layerRef}
+            className="absolute left-0 top-0 pointer-events-none"
+            style={{ width, height }}
+        >
+            <svg
+                ref={svgRef}
+                width={width}
+                height={height}
+                className="absolute inset-0"
+                style={{ display: "block" }}
             >
-                <svg
-                    ref={svgRef}
-                    width={width}
-                    height={height}
-                    className="absolute inset-0"
-                    style={{ display: "block" }}
-                >
-                    <path
-                        fill="none"
-                        strokeWidth={1}
-                        opacity={lineOpacity}
-                        style={{ stroke: "var(--qt-graph-grid-weak)" }}
-                    />
-                    <path
-                        fill="none"
-                        strokeWidth={2}
-                        opacity={lineOpacity}
-                        style={{ stroke: "var(--qt-graph-grid-strong)" }}
-                    />
-                </svg>
-            </div>
-
-            <div
-                ref={boundaryRef}
-                className="absolute top-0 w-px z-20"
-                style={{
-                    left: manualViewportSync ? 0 : boundaryLeft,
-                    height,
-                    backgroundColor: "var(--qt-highlight)",
-                    opacity:
-                        manualViewportSync || !boundaryVisible ? 0 : showBoundary ? lineOpacity : 0,
-                }}
-            />
-        </>
+                <path
+                    fill="none"
+                    strokeWidth={1}
+                    opacity={lineOpacity}
+                    style={{ stroke: "var(--qt-graph-grid-weak)" }}
+                />
+                <path
+                    fill="none"
+                    strokeWidth={2}
+                    opacity={lineOpacity}
+                    style={{ stroke: "var(--qt-graph-grid-strong)" }}
+                />
+            </svg>
+        </div>
     );
 };

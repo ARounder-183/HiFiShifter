@@ -262,20 +262,8 @@ export const ClipItem = React.memo(function ClipItem({
             ? `linear-gradient(to right, rgba(0,0,0,${LEADING_OVERLAP_ALPHA}) 0px, rgba(0,0,0,${LEADING_OVERLAP_ALPHA}) ${leadingOverlapPx}px, rgba(0,0,0,1) ${leadingOverlapPx}px, rgba(0,0,0,1) 100%)`
             : undefined;
 
-    const isGroupHighlighted =
-        activeGroupIds != null && clip.groupId != null && activeGroupIds.has(clip.groupId);
-
     const interactionHintBoxShadow =
-        selected && isGroupHighlighted
-            ? // blue inner ring (selected) + golden outer ring (grouped)
-              "0 0 0 1px rgba(156, 196, 255, 0.68), 0 0 0 2px rgba(156, 196, 255, 0.16), 0 0 0 3px rgba(255, 200, 50, 0.60), 0 0 0 4px rgba(255, 200, 50, 0.18)"
-            : selected
-              ? "0 0 0 1px rgba(156, 196, 255, 0.68), 0 0 0 2px rgba(156, 196, 255, 0.16)"
-              : isGroupHighlighted
-                ? "0 0 0 1px rgba(255, 200, 50, 0.60), 0 0 0 2px rgba(255, 200, 50, 0.18)"
-                : hovered && clip.groupId == null
-                  ? "0 0 0 1px rgba(255, 255, 255, 0.24)"
-                  : undefined;
+        hovered && clip.groupId == null ? "0 0 0 1px rgba(255, 255, 255, 0.24)" : undefined;
 
     const startDeferredFadeEditDrag = React.useCallback(
         (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {

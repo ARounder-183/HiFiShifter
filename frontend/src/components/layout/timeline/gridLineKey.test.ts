@@ -90,8 +90,8 @@ test("components/layout/timeline/gridLineKey.test.ts scripted checks", async () 
         return buildTempoGridLineXsForViewport({
             tempoMap: map,
             scrollLeft: 0,
-            viewportWidth: 800,
-            pxPerSec: 0.5, // 小水平缩放：1px ≈ 2 秒
+            viewportWidth: 400,
+            pxPerSec: 2, // 小水平缩放：1px ≈ 0.5 秒
             projectSec: 180,
             stepBeats: 1,
             fallbackBpm: 120,

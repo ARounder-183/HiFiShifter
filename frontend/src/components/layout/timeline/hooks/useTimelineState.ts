@@ -135,7 +135,6 @@ export interface TimelineStateResult {
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackGridLayerRef: React.MutableRefObject<HTMLDivElement | null>;
-    trackGridBoundaryRef: React.MutableRefObject<HTMLDivElement | null>;
     trackGridOverlayLayerRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -321,7 +320,6 @@ export function useTimelineState(): TimelineStateResult {
     const trackListScrollRef = useRef<HTMLDivElement | null>(null);
     // Sticky 网格层的命令式重绘句柄：滚动事件内同步刷新（与画布/波形同帧）。
     const trackGridLayerRef = useRef<HTMLDivElement | null>(null);
-    const trackGridBoundaryRef = useRef<HTMLDivElement | null>(null);
     const trackGridOverlayLayerRef = useRef<HTMLDivElement | null>(null);
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
@@ -443,7 +441,9 @@ export function useTimelineState(): TimelineStateResult {
         }
         const playheadLeftPx =
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        if (playheadRef.current) playheadRef.current.style.left = `${playheadLeftPx}px`;
+        if (playheadRef.current) {
+            playheadRef.current.style.left = `${playheadLeftPx - next}px`;
+        }
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
         }
@@ -459,10 +459,11 @@ export function useTimelineState(): TimelineStateResult {
             scrollTopPxRef.current,
             rowHeightRef.current,
         );
-        // 背景网格与边界线走同一条同步链：滚动事件在 paint 前触发，
+        // 背景网格走同一条同步链：滚动事件在 paint 前触发，
         // 网格、Clip 体、波形必须在同一帧提交，禁止等 React state/rAF。
-        invokeGridRedrawHandler(trackGridLayerRef.current, next);
-        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, next);
+        // 同时携带 scrollTop：sticky 网格需要据此裁剪出轨道区底边。
+        invokeGridRedrawHandler(trackGridLayerRef.current, next, scrollTopPxRef.current);
+        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, next, scrollTopPxRef.current);
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -486,6 +487,9 @@ export function useTimelineState(): TimelineStateResult {
             next,
             rowHeightRef.current,
         );
+        // 竖直滚动同样要在 paint 前重画网格，以裁剪轨道区底边。
+        invokeGridRedrawHandler(trackGridLayerRef.current, scrollLeftRef.current, next);
+        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, scrollLeftRef.current, next);
     }, []);
 
     const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
@@ -1002,7 +1006,9 @@ export function useTimelineState(): TimelineStateResult {
                 dispatch(setplayheadSec(beat));
                 // 同时直接操作 DOM 确保竖线无延迟跟随
                 if (playheadRef.current) {
-                    playheadRef.current.style.left = `${beat * pxPerSecRef.current}px`;
+                    playheadRef.current.style.left = `${
+                        beat * pxPerSecRef.current - scrollLeftRef.current
+                    }px`;
                 }
             }
             return beat;
@@ -1163,7 +1169,6 @@ export function useTimelineState(): TimelineStateResult {
         scrollRef,
         trackListScrollRef,
         trackGridLayerRef,
-        trackGridBoundaryRef,
         trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,

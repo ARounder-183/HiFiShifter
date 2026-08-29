@@ -20,6 +20,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     viewportEndSec: number;
     pxPerSec: number;
     scrollLeft: number;
+    playheadSec: number;
     clipModel: {
         drawClips: import("./runtime/timelineCanvasModel").TimelineCanvasClipModel[];
         activeGroupIds?: Set<string>;
@@ -35,9 +36,12 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     gridSwingPercent?: number;
     gridWeakLineXs?: number[] | null;
     gridStrongLineXs?: number[] | null;
+    /** 网格内容底部边界（内容绝对坐标 y，通常为最后一条轨道底边）。 */
+    gridBottomPx: number;
     gridLayerRef: React.RefObject<HTMLDivElement | null>;
-    gridBoundaryRef: React.RefObject<HTMLDivElement | null>;
     gridOverlayLayerRef: React.RefObject<HTMLDivElement | null>;
+    /** 播放光标竖直参考线：随滚动/缩放与其它 sticky 层在同一帧移动。 */
+    playheadLineRef: React.Ref<HTMLDivElement>;
 }) {
     const gridBaseProps = {
         contentWidth: props.contentWidth,
@@ -53,14 +57,24 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         weakLineXs: props.gridWeakLineXs ?? null,
         strongLineXs: props.gridStrongLineXs ?? null,
         sticky: true,
+        viewportTopPx: 0,
+        contentBottomPx: props.gridBottomPx,
     } as const;
 
     // 挂载时按总线快照立即同步一次网格：恢复滚动位置时 React 的 scrollLeft
     // state 可能仍是 rAF 前值，不能让网格与 Clip 体画布在首帧分叉。
     React.useLayoutEffect(() => {
         const viewport = timelineViewportBus.getSnapshot();
-        invokeGridRedrawHandler(props.gridLayerRef.current, viewport.scrollLeft);
-        invokeGridRedrawHandler(props.gridOverlayLayerRef.current, viewport.scrollLeft);
+        invokeGridRedrawHandler(
+            props.gridLayerRef.current,
+            viewport.scrollLeft,
+            viewport.scrollTopPx,
+        );
+        invokeGridRedrawHandler(
+            props.gridOverlayLayerRef.current,
+            viewport.scrollLeft,
+            viewport.scrollTopPx,
+        );
     }, [props.gridLayerRef, props.gridOverlayLayerRef, props.gridVisible]);
 
     return (
@@ -68,11 +82,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             className="sticky left-0 top-0 pointer-events-none"
             style={{ width: props.widthPx, zIndex: 1 }}
         >
-            <BackgroundGrid
-                {...gridBaseProps}
-                layerRef={props.gridLayerRef}
-                boundaryRef={props.gridBoundaryRef}
-            />
+            <BackgroundGrid {...gridBaseProps} layerRef={props.gridLayerRef} />
             <div
                 className="absolute pointer-events-none"
                 style={{
@@ -85,6 +95,11 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     width={props.widthPx}
                     height={props.heightPx}
                     model={props.clipModel}
+                    rowGuides={{
+                        startTrackIndex: props.startTrackIndex,
+                        rowCount: props.tracks.length,
+                        rowHeight: props.rowHeight,
+                    }}
                 />
             </div>
             <div
@@ -111,7 +126,15 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
                 lineOpacity={0.38}
-                showBoundary={false}
+            />
+            <div
+                ref={props.playheadLineRef}
+                className="absolute w-px bg-qt-playhead z-20 pointer-events-none"
+                style={{
+                    top: props.topPx,
+                    height: props.heightPx,
+                    left: (Number(props.playheadSec) || 0) * props.pxPerSec - props.scrollLeft,
+                }}
             />
         </div>
     );

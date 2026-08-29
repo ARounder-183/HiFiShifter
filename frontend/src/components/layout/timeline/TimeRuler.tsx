@@ -70,14 +70,12 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
     ticks,
     secPerBeat: _secPerBeat,
     pxPerSec,
-    boundaryLeft,
     scrollLeft,
     viewportWidth,
 }: {
     ticks: RulerTick[];
     secPerBeat: number;
     pxPerSec: number;
-    boundaryLeft: number;
     scrollLeft: number;
     viewportWidth?: number;
 }) {
@@ -161,17 +159,6 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                     </div>
                 );
             })}
-
-            {Number.isFinite(boundaryLeft) && boundaryLeft >= -2 ? (
-                <div
-                    className="absolute top-0 bottom-0 w-px z-20"
-                    style={{
-                        left: boundaryLeft,
-                        backgroundColor: "var(--qt-highlight)",
-                        opacity: 0.9,
-                    }}
-                />
-            ) : null}
         </>
     );
 });
@@ -486,7 +473,6 @@ function TimeRulerContextMenu({
 }
 
 export const TimeRuler: React.FC<{
-    contentWidth: number;
     scrollLeft: number;
     ticks: RulerTick[];
     pxPerBeat: number;
@@ -524,7 +510,6 @@ export const TimeRuler: React.FC<{
     /** 离散提交（对话框/菜单/拖拽结束），同步后端。 */
     onTempoMapCommit?: (next: TempoMap | null) => void;
 }> = ({
-    contentWidth,
     scrollLeft,
     ticks,
     pxPerBeat: _pxPerBeat,
@@ -560,7 +545,6 @@ export const TimeRuler: React.FC<{
 }) => {
     void _pxPerBeat;
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
-    const boundaryLeft = contentWidth - 1;
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);
     const [hover, setHover] = useState<{ x: number; y: number; sec: number } | null>(null);
@@ -807,7 +791,6 @@ export const TimeRuler: React.FC<{
                         ticks={ticks}
                         secPerBeat={secPerBeat}
                         pxPerSec={pxPerSec}
-                        boundaryLeft={boundaryLeft}
                         scrollLeft={scrollLeft}
                         viewportWidth={viewportWidth}
                     />
