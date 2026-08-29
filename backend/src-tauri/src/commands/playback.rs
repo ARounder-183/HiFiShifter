@@ -34,6 +34,14 @@ pub(crate) static BG_RENDER_RESTART_NEEDED: std::sync::atomic::AtomicBool =
 pub(crate) static BG_RENDER_PITCH_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 后台渲染代数。每次取消或启动都会递增；旧渲染线程结束时只有在代数仍匹配时
+/// 才允许清理全局标志，避免取消旧渲染后开新一轮时被旧线程把新状态清掉。
+pub(crate) static BG_RENDER_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `render_single_clip` 内部检测到后台渲染取消时返回的错误标记。
+const BG_RENDER_CANCELLED_ERR: &str = "bg_render_cancelled";
+
 fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
     let state = app.state::<AppState>();
     state
@@ -881,6 +889,10 @@ fn collect_clips_needing_render(
 /// 渲染单个 clip 的完整 stereo PCM（从源文件解码 -> resample -> pitch edit -> stereo）。
 ///
 /// 复用 mixdown.rs 中的解码和 resample 逻辑，通过 Renderer trait 调用 pitch edit。
+fn bg_render_cancel_requested() -> bool {
+    BG_RENDER_CANCEL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn render_single_clip(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
@@ -900,6 +912,9 @@ fn render_single_clip(
     let in_frames = pcm.len() / in_channels_usize;
     if in_frames < 2 {
         return Err("source audio too short".to_string());
+    }
+    if bg_render_cancel_requested() {
+        return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
 
     // 2. 源裁剪
@@ -1000,6 +1015,10 @@ fn render_single_clip(
     };
     let mut segment = segment;
 
+    if bg_render_cancel_requested() {
+        return Err(BG_RENDER_CANCELLED_ERR.to_string());
+    }
+
     if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
         // Loop（循环源）键必须编码**实际消费的平铺区间**（与 mixdown 的键公式
         // 完全一致 —— 本函数无导出窗口，skip=0、consumed=整条 clip 消费量）。
@@ -1087,6 +1106,10 @@ fn render_single_clip(
     // build_loop_tiled_segment）—— segment 天然覆盖整条 clip 的消费量，
     // 参数线阶段按绝对帧读取当前曲线即可，无需额外平铺。
 
+    if bg_render_cancel_requested() {
+        return Err(BG_RENDER_CANCELLED_ERR.to_string());
+    }
+
     let clip_start_sec = clip.start_sec.max(0.0);
     let seg_start_sec = clip_start_sec + pre_silence_sec;
     let clip_timeline_frames = (clip.length_sec.max(0.0) * out_rate as f64)
@@ -1156,6 +1179,9 @@ fn render_single_clip(
     };
 
     if !breath_enabled {
+        if bg_render_cancel_requested() {
+            return Err(BG_RENDER_CANCELLED_ERR.to_string());
+        }
         return Ok(RenderedClipOutput {
             rendered_stereo: render_variant(clip),
             breath_noise_stereo: None,
@@ -1259,6 +1285,9 @@ fn render_single_clip(
         harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
         harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
         harmonic_only_clip.extra_curves = Some(harmonic_curves);
+        if bg_render_cancel_requested() {
+            return Err(BG_RENDER_CANCELLED_ERR.to_string());
+        }
         let harmonic_only = render_variant(&harmonic_only_clip);
 
         if harmonic_only.len() == cached_noise_arc.len() {
@@ -1315,6 +1344,9 @@ fn render_single_clip(
     // Step 2: Pre-populate HNSEP cache by doing separation once.
     // This ensures the subsequent render_variant(harmonic_only) hits the cache
     // and only runs HiFiGAN, skipping HNSEP.
+    if bg_render_cancel_requested() {
+        return Err(BG_RENDER_CANCELLED_ERR.to_string());
+    }
     let noise_mono = crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate)?;
 
     // Step 3: Render harmonic_only through ProcessorChain (HNSEP cache hits → HiFiGAN only)
@@ -1323,6 +1355,9 @@ fn render_single_clip(
     harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
     harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
     harmonic_only_clip.extra_curves = Some(harmonic_curves);
+    if bg_render_cancel_requested() {
+        return Err(BG_RENDER_CANCELLED_ERR.to_string());
+    }
     let harmonic_only = render_variant(&harmonic_only_clip);
 
     // Step 4: Convert noise mono to stereo, matching harmonic_only length
@@ -1403,6 +1438,9 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     }
     // 清除可能残留的上一轮取消标志
     BG_RENDER_CANCEL.store(false, Ordering::Release);
+    // 每次启动递增代数：旧渲染线程的清理逻辑不能再影响这一次新渲染。
+    BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
+    let render_generation = BG_RENDER_GENERATION.load(Ordering::Acquire);
 
     // ★ panic 隔离：收集/启动阶段（native 推理库、缓存锁、AppState 访问等）
     // 可能 panic。本函数现在也会被 `request_background_render` 放到独立线程
@@ -1410,7 +1448,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     // 后续所有渲染请求都会因 “already active” 被跳过，后台预渲染永久失效，
     // 且前端进度事件永远不结束。
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        start_background_render_inner(app)
+        start_background_render_inner(app, render_generation)
     }));
     match result {
         Ok(value) => value,
@@ -1427,7 +1465,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     }
 }
 
-fn start_background_render_inner(app: tauri::AppHandle) -> serde_json::Value {
+fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
     // Clone app before getting state (state borrows from the clone),
@@ -1504,7 +1542,13 @@ fn start_background_render_inner(app: tauri::AppHandle) -> serde_json::Value {
     crate::nsf_hifigan_onnx::reset_chunk_progress(total);
 
     let app_for_progress = app.clone();
+    let progress_generation = render_generation;
     crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(move |progress: f64| {
+        // 旧代渲染线程的进度事件不得再刷新前端状态，否则新工程渲染结束后
+        // 会被迟到的旧事件重新点亮“渲染中 XX%”。
+        if BG_RENDER_GENERATION.load(Ordering::Acquire) != progress_generation {
+            return;
+        }
         let _ = app_for_progress.emit(
             "playback_rendering_state",
             PlaybackRenderingStateEvent {
@@ -1532,13 +1576,17 @@ fn start_background_render_inner(app: tauri::AppHandle) -> serde_json::Value {
                 render_timeline_version,
                 &timeline,
                 skipped_not_ready,
+                render_generation,
             );
         }));
         if outcome.is_err() {
             eprintln!("[bg_render] render thread panicked; resetting flags");
-            BG_RENDER_ACTIVE.store(false, Ordering::Release);
-            BG_RENDER_CANCEL.store(false, Ordering::Release);
-            BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            // 只有当前代数仍属于本线程时才清理，避免把新工程的新一轮状态清掉。
+            if BG_RENDER_GENERATION.load(Ordering::Acquire) == render_generation {
+                BG_RENDER_ACTIVE.store(false, Ordering::Release);
+                BG_RENDER_CANCEL.store(false, Ordering::Release);
+                BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+            }
             let _ = app.emit(
                 "playback_rendering_state",
                 PlaybackRenderingStateEvent {
@@ -1562,6 +1610,7 @@ fn render_background_pass(
     render_timeline_version: u64,
     timeline: &crate::state::TimelineState,
     skipped_not_ready: usize,
+    render_generation: u64,
 ) {
     use std::sync::atomic::Ordering;
 
@@ -1692,6 +1741,10 @@ fn render_background_pass(
                         render_success_count += 1;
                     }
                     Err(e) => {
+                        if e == BG_RENDER_CANCELLED_ERR {
+                            cancelled = true;
+                            break;
+                        }
                         render_elapsed += render_started_at.elapsed();
                         eprintln!(
                             "[bg_render] clip render failed: clip_id={} err={}",
@@ -1769,6 +1822,11 @@ fn render_background_pass(
         }
 
         if cancelled {
+            // 如果取消后已经启动了新一轮渲染（代数已变），旧线程不得再清理
+            // 全局状态或触发旧工程的重启，直接退出即可。
+            if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {
+                return;
+            }
             crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
             for clip_id in pending_clip_ids_written {
                 crate::synth_clip_cache::remove_pending_rendered_key(&clip_id);
@@ -1837,6 +1895,11 @@ fn render_background_pass(
             render_failed_count,
             started_at.elapsed().as_secs_f64()
         );
+
+        // 旧代数线程完成时不得清理新一轮渲染的全局状态。
+        if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {
+            return;
+        }
 
         crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
@@ -1923,7 +1986,7 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
 }
 
 /// 取消当前正在运行的后台预渲染（如果有）。
-pub(super) fn cancel_background_render() -> serde_json::Value {
+pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_json::Value {
     use std::sync::atomic::Ordering;
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
     // 让正在运行的渲染循环在下一个 clip 边界立刻退出，而不是继续把旧工程
@@ -1931,7 +1994,21 @@ pub(super) fn cancel_background_render() -> serde_json::Value {
     BG_RENDER_CANCEL.store(true, Ordering::Release);
     BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
+    // 递增代数，使旧渲染线程的收尾清理不再影响新的一轮渲染。
+    BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
     eprintln!("[bg_render] cancel requested, was_active={was_active}");
+    // 立即通知前端“后台渲染已结束”，避免旧线程迟到的进度事件让状态卡在
+    // “渲染中 100%”。如果随后有新工程的新一轮渲染，会再发 active=true。
+    if let Some(app) = app {
+        let _ = app.emit(
+            "playback_rendering_state",
+            PlaybackRenderingStateEvent {
+                active: false,
+                progress: Some(1.0),
+                target: Some("background".to_string()),
+            },
+        );
+    }
     serde_json::json!({"ok": true, "was_active": was_active})
 }
 

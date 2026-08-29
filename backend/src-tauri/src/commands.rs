@@ -1316,8 +1316,8 @@ pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
 
 /// 取消正在进行的后台预渲染。
 #[tauri::command(rename_all = "camelCase")]
-pub fn cancel_background_render() -> serde_json::Value {
-    playback::cancel_background_render()
+pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
+    playback::cancel_background_render(Some(&app))
 }
 
 // ===================== debug =====================
