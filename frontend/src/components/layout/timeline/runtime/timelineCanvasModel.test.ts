@@ -1,6 +1,7 @@
 import { test } from "vitest";
 
 import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
+import { createTimelineAxis } from "./timelineAxis.js";
 
 test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -71,7 +72,7 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted ch
                 },
             ],
         },
-        pxPerSec: 100,
+        axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 1000 }),
         rowHeight: 48,
         selectedClipId: "clip-b",
         multiSelectedClipIds: ["clip-c", "clip-b"],

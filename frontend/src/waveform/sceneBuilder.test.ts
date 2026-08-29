@@ -1,6 +1,7 @@
 import { test } from "vitest";
 
 import { buildWaveformScene, type WaveformSceneClip } from "./sceneBuilder.ts";
+import { createTimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
 
 test("waveform/sceneBuilder.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -38,9 +39,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 10,
-            viewportEndSec: 20,
-            pxPerSec: 100,
+            axis: createTimelineAxis({
+                pxPerSec: 100,
+                scrollLeftPx: 1000,
+                viewportWidthPx: 1000,
+            }),
             widthPx: 1000,
             rows: [
                 {
@@ -66,9 +69,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 0,
-            viewportEndSec: 10,
-            pxPerSec: 100,
+            axis: createTimelineAxis({
+                pxPerSec: 100,
+                scrollLeftPx: 0,
+                viewportWidthPx: 1000,
+            }),
             widthPx: 1000,
             rows: [
                 {
@@ -98,9 +103,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 0,
-            viewportEndSec: 15,
-            pxPerSec: 10,
+            axis: createTimelineAxis({
+                pxPerSec: 10,
+                scrollLeftPx: 0,
+                viewportWidthPx: 150,
+            }),
             widthPx: 150,
             rows: [
                 {
@@ -137,9 +144,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 0,
-            viewportEndSec: 5,
-            pxPerSec: 100,
+            axis: createTimelineAxis({
+                pxPerSec: 100,
+                scrollLeftPx: 0,
+                viewportWidthPx: 500,
+            }),
             widthPx: 500,
             rows: [
                 {
@@ -176,9 +185,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 0,
-            viewportEndSec: 10,
-            pxPerSec: 100,
+            axis: createTimelineAxis({
+                pxPerSec: 100,
+                scrollLeftPx: 0,
+                viewportWidthPx: 1000,
+            }),
             widthPx: 1000,
             rows: [
                 {
@@ -210,9 +221,11 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
 
     {
         const scene = buildWaveformScene({
-            viewportStartSec: 0,
-            viewportEndSec: 15,
-            pxPerSec: 10,
+            axis: createTimelineAxis({
+                pxPerSec: 10,
+                scrollLeftPx: 0,
+                viewportWidthPx: 150,
+            }),
             widthPx: 150,
             rows: [
                 {

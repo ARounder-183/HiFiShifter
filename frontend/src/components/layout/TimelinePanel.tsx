@@ -108,6 +108,7 @@ import {
 } from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
+import { createTimelineAxis } from "./timeline/runtime/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
@@ -1263,13 +1264,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
         return ids.size > 0 ? ids : undefined;
     }, [multiSelectedClipIds, clipById, s.selectedClipId, disabledGroupIds]);
+    // 全图层共享的统一坐标投影：网格 / 标尺 / clip 体 / 波形 / 播放头都从这里
+    // 取位置与缩放，任何图层都不许再自行执行 `sec * pxPerSec`（历史错位根因）。
+    // 用 useMemo 缓存引用，否则下游 React.memo 会因新对象引用而每帧失效。
+    const timelineAxis = useMemo(
+        () =>
+            createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                scrollTopPx: timelineScrollTop,
+                viewportWidthPx: Math.max(1, Math.ceil(viewportWidth)),
+                dpr: window.devicePixelRatio || 1,
+            }),
+        [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
+    );
     const sparseClipRenderModel = useMemo(
         () =>
             buildSparseClipRenderModel({
                 visibleTracks,
                 startTrackIndex: timelineRenderModel.startIndex,
                 visibleTrackClipsById,
-                pxPerSec,
+                axis: timelineAxis,
                 rowHeight,
                 selectedClipId: s.selectedClipId,
                 multiSelectedClipIds,
@@ -1278,7 +1293,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }),
         [
             multiSelectedClipIds,
-            pxPerSec,
+            timelineAxis,
             renamingClipId,
             rowHeight,
             s.selectedClipId,
@@ -1973,10 +1988,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 widthPx={Math.max(1, Math.ceil(viewportWidth))}
                                 heightPx={visibleTrackCanvasHeight}
                                 topPx={0}
-                                viewportStartSec={viewportStartSec}
-                                viewportEndSec={viewportEndSec}
-                                pxPerSec={pxPerSec}
-                                scrollLeft={scrollLeft}
+                                axis={timelineAxis}
                                 playheadSec={s.playheadSec}
                                 clipModel={timelineCanvasModel}
                                 contentWidth={contentWidth}

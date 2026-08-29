@@ -1,6 +1,25 @@
+/**
+ * 波形画布（WebGL2 主路径 + Canvas2D 回退）的 React 入口。
+ *
+ * 【主要内容】组装波形绘制所需的视口状态、调度场景与几何构建、管理渲染器
+ * 生命周期（含 WebGL 上下文丢失恢复）、并在视口变化时同步重绘。
+ *
+ * 【作用】时间线与参数编辑器共用同一块波形面，本组件是它们与底层渲染器
+ * 之间唯一的适配层：把「行数据 + 坐标投影」翻译成「场景 → 几何 → 顶点」。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`TimelineWaveformSurface` / `PianoRollWaveformSurface` 组装
+ *   `WaveformSceneRow[]` 并传入 `TimelineAxis`。
+ * - 横向：所有时间↔像素换算由 `timelineAxis.ts` 提供；本组件在总线驱动时用
+ *   总线快照派生 axis（`withAxis`），保证与 DOM 内容层同帧。
+ * - 下游：`sceneBuilder.ts` → `geometry.ts` → `surfaceRenderer.ts`。
+ */
+
 import React from "react";
 
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
+import type { TimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
+import { withAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
 import { buildWaveformGeometry } from "./geometry";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
@@ -13,14 +32,17 @@ export interface WaveformSurfaceProps {
     rows: readonly WaveformSceneRow[];
     widthPx: number;
     heightPx: number;
-    viewportStartSec: number;
-    viewportEndSec: number;
-    pxPerSec: number;
+    /**
+     * 统一坐标投影：视口起点、缩放倍率、滚动位置的**唯一来源**。
+     * 总线驱动时会被总线快照覆盖 scrollLeftPx / pxPerSec / scrollTopPx。
+     */
+    axis: TimelineAxis;
     color: string;
     className?: string;
     style?: React.CSSProperties;
-    /** 行 topPx 坐标系（内容绝对）到画布的竖直偏移（= scrollTopPx）。
-     * 仅在无 viewportSource（非总线驱动）时作为回退值。 */
+    /** 行 topPx 坐标系（内容绝对）到画布的竖直偏移。
+     * 仅在无 viewportSource（非总线驱动）时作为回退值；总线驱动时一律以
+     * axis.scrollTopPx 为准。 */
     viewportTopPx?: number;
     viewportSource?: {
         getSnapshot(): {
@@ -70,24 +92,36 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         [],
     );
 
+    /**
+     * 按当前视口重建波形场景与几何并提交渲染。
+     *
+     * 流程：
+     * 1. 取视口快照：总线驱动时用总线快照派生 axis，否则用 props.axis；
+     * 2. 由 axis 构建场景（`buildWaveformScene`）与顶点几何；
+     * 3. 提交给 WebGL2 渲染器，失败时降级到 Canvas2D。
+     *
+     * 特殊说明：视口的秒级窗口一律由 axis 派生（禁止 `scrollLeft / pxPerSec`
+     * 反算），以保证与 clip 体画布、网格、标尺严格同源。
+     */
     const draw = React.useCallback(() => {
         const liveViewport = props.viewportSource?.getSnapshot();
-        const pxPerSec = liveViewport?.pxPerSec ?? props.pxPerSec;
-        const widthPx = liveViewport?.viewportWidth ?? props.widthPx;
-        const viewportStartSec = liveViewport
-            ? liveViewport.scrollLeft / Math.max(1e-9, pxPerSec)
-            : props.viewportStartSec;
-        const viewportEndSec = liveViewport
-            ? viewportStartSec + widthPx / Math.max(1e-9, pxPerSec)
-            : props.viewportEndSec;
+        // 滚动事件在绘制前触发：总线快照优先，保证 sticky 波形面与原生滚动的
+        // DOM 内容层在同一帧提交位移（DAW 式无缝滚动）。
+        const axis = liveViewport
+            ? withAxis(props.axis, {
+                  pxPerSec: liveViewport.pxPerSec,
+                  scrollLeftPx: liveViewport.scrollLeft,
+                  viewportWidthPx: liveViewport.viewportWidth,
+                  scrollTopPx: liveViewport.scrollTopPx,
+              })
+            : props.axis;
+        const pxPerSec = axis.pxPerSec;
+        const widthPx = axis.viewportWidthPx;
         // 竖直锚点：行坐标是内容绝对值，滚动容器竖直滚动时必须同步平移，
-        // 否则波形与 DOM Clip 在竖直方向分层（scroll 事件在绘制前触发，
-        // 总线快照与 props 回退都能保证同帧取值）。
-        const viewportTopPx = liveViewport?.scrollTopPx ?? props.viewportTopPx ?? 0;
+        // 否则波形与 DOM Clip 在竖直方向分层。
+        const viewportTopPx = liveViewport ? axis.scrollTopPx : (props.viewportTopPx ?? 0);
         const scene = buildWaveformScene({
-            viewportStartSec,
-            viewportEndSec,
-            pxPerSec,
+            axis,
             widthPx,
             viewportTopPx,
             rows: props.rows,
@@ -135,9 +169,9 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             color: props.color,
             widthPx: props.widthPx,
             heightPx: props.heightPx,
-            pxPerSec: props.pxPerSec,
+            axis: props.axis,
         }),
-        [props.rows, props.color, props.widthPx, props.heightPx, props.pxPerSec],
+        [props.rows, props.color, props.widthPx, props.heightPx, props.axis],
     );
     const previousVisualSignatureRef = React.useRef(visualSignature);
 

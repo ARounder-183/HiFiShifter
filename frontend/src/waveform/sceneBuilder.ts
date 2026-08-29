@@ -1,8 +1,35 @@
+/**
+ * 波形场景构建：把 clip 元数据投影为「屏幕矩形 + 源时间区间」的绘制段。
+ *
+ * 【主要内容】按当前视口裁剪每个 clip 的可见部分，按 loop 展开成若干
+ * source tile，再产出 `WaveformSceneSegment[]`（屏幕矩形 + 对应源音频区间）
+ * 与 `WaveformSceneMarker[]`（loop 边界 / 媒体边界标记）。
+ *
+ * 【作用】波形几何层（`geometry.ts`）只消费本文件产出的屏幕矩形，不再接触
+ * clip 的时间语义；loop、reverse、playbackRate、多 take lane 的复杂性全部
+ * 收敛在这里。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`WaveformSurface` 在每次绘制时用 `TimelineAxis` 调用
+ *   `buildWaveformScene()`；`TimelineWaveformSurface` / `PianoRollWaveformSurface`
+ *   负责组装 `WaveformSceneRow[]`。
+ * - 横向：**所有时间↔像素换算必须走 `timelineAxis.ts`**。本文件使用视口
+ *   坐标系（`secToViewportPx`），与 clip 体画布的内容坐标系相差一个
+ *   `scrollLeftPx`，二者由 axis 保证严格同源。
+ * - 下游：`geometry.ts` 按像素列采样 mipmap 生成顶点。
+ */
+
 import {
     modEuclid,
     resolveLoopMediaDurationSec,
     resolvePlaybackWindowSec,
 } from "../utils/loopRender.ts";
+import {
+    secToViewportPx,
+    viewportEndSec as axisViewportEndSec,
+    viewportStartSec as axisViewportStartSec,
+    type TimelineAxis,
+} from "../components/layout/timeline/runtime/timelineAxis.ts";
 
 export interface WaveformSceneClip {
     id: string;
@@ -151,10 +178,31 @@ function sourceRangeForLocal(
     ];
 }
 
+/**
+ * 构建波形绘制场景。
+ *
+ * 流程：
+ * 1. 由 axis 取出视口的秒级窗口，用于可见性裁剪；
+ * 2. 逐 clip 求可见区间，按是否 loop 展开成 source tile；
+ * 3. 每个 tile 再按 leading overlap 切段，投影为屏幕矩形输出；
+ * 4. loop / 媒体边界额外产出 marker。
+ *
+ * 特殊说明：
+ * - 输出的 `screenRect` 使用**视口坐标系**（已减 scrollLeftPx），因为波形
+ *   画布是 sticky 的。与 clip 体画布的内容坐标系通过同一个 axis 保持同源，
+ *   禁止在本文件内自行做 `sec * pxPerSec - scrollLeft` 之类的换算。
+ * - 视口秒区间**只用于裁剪**，不得再乘回 pxPerSec（那会退化成「先除后乘」，
+ *   重新引入与 clip / 网格的不等价）。
+ *
+ * @param args.axis 统一坐标投影（唯一的时间↔像素来源）。
+ * @param args.widthPx 画布宽度（CSS 像素），用于把段裁剪到画布内。
+ * @param args.viewportTopPx 行 topPx（内容绝对）到画布坐标的竖直偏移
+ *        （= scrollTopPx），保证竖直滚动时与 DOM 内容层同帧对齐。
+ * @param args.rows 轨道行场景数据（clip 列表与波形带几何）。
+ * @returns 供 `buildWaveformGeometry` 消费的段与标记。
+ */
 export function buildWaveformScene(args: {
-    viewportStartSec: number;
-    viewportEndSec: number;
-    pxPerSec: number;
+    axis: TimelineAxis;
     widthPx: number;
     /** 行 topPx 所在坐标系（内容绝对）到画布坐标系的竖直偏移
      * （= scrollTopPx）。波形面画布视口锚定，须按此平移后才与 DOM
@@ -164,9 +212,9 @@ export function buildWaveformScene(args: {
 }): WaveformScene {
     const segments: WaveformSceneSegment[] = [];
     const markers: WaveformSceneMarker[] = [];
-    const pxPerSec = finitePositive(args.pxPerSec, 1);
-    const viewportStartSec = Number.isFinite(args.viewportStartSec) ? args.viewportStartSec : 0;
-    const viewportEndSec = Math.max(viewportStartSec, args.viewportEndSec);
+    const axis = args.axis;
+    const viewportStartSec = axisViewportStartSec(axis);
+    const viewportEndSec = axisViewportEndSec(axis);
     const widthPx = Math.max(1, args.widthPx);
 
     const viewportTopPx = Number.isFinite(args.viewportTopPx) ? (args.viewportTopPx ?? 0) : 0;
@@ -258,7 +306,7 @@ export function buildWaveformScene(args: {
                     markers.push({
                         clipId: clip.id,
                         timelineSec: clip.startSec + markerLocalSec,
-                        xPx: (clip.startSec + markerLocalSec - viewportStartSec) * pxPerSec,
+                        xPx: secToViewportPx(axis, clip.startSec + markerLocalSec),
                         yPx: rowTopCanvasPx + bandTopPx,
                         heightPx: bandHeightPx,
                         kind: "loop",
@@ -309,8 +357,8 @@ export function buildWaveformScene(args: {
                         localStartSec,
                         localEndSec,
                     );
-                    const x = (clip.startSec + localStartSec - viewportStartSec) * pxPerSec;
-                    const right = (clip.startSec + localEndSec - viewportStartSec) * pxPerSec;
+                    const x = secToViewportPx(axis, clip.startSec + localStartSec);
+                    const right = secToViewportPx(axis, clip.startSec + localEndSec);
                     const clippedX = Math.max(0, x);
                     const clippedRight = Math.min(widthPx, right);
                     if (clippedRight <= clippedX) continue;
@@ -361,7 +409,7 @@ export function buildWaveformScene(args: {
                     markers.push({
                         clipId: clip.id,
                         timelineSec: clip.startSec + localSec,
-                        xPx: (clip.startSec + localSec - viewportStartSec) * pxPerSec,
+                        xPx: secToViewportPx(axis, clip.startSec + localSec),
                         yPx: rowTopCanvasPx + bandTopPx,
                         heightPx: bandHeightPx,
                         kind: "media-boundary",

@@ -1,3 +1,19 @@
+/**
+ * 时间线 sticky 可视层：网格 / clip 体画布 / 波形 / 播放头的堆叠容器。
+ *
+ * 【主要内容】按固定层序堆叠背景网格 → clip 体画布 → 波形面 → 网格覆盖层 →
+ * 播放头，并在挂载时用视口总线快照同步一次网格。
+ *
+ * 【作用】这些图层都不随原生滚动移动（sticky），必须共享同一份视口状态才能
+ * 与 DOM 内容层同帧；本组件是它们共用的定位与传参入口。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`TimelinePanel` 传入窗口化的轨道数据与 `TimelineAxis`。
+ * - 横向：所有子层的位置/缩放参数一律来自 axis；网格的重绘同步走
+ *   `gridRedrawBridge`（P2 将并入统一帧提交器）。
+ * - 下游：`BackgroundGrid`、`TimelineCanvasViewport`、`TimelineWaveformSurface`。
+ */
+
 import React from "react";
 
 import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
@@ -6,6 +22,7 @@ import { BackgroundGrid } from "./BackgroundGrid";
 import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
+import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
 
 export const TimelineSurface = React.memo(function TimelineSurface(props: {
     tracks: readonly TrackInfo[];
@@ -16,10 +33,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     widthPx: number;
     heightPx: number;
     topPx: number;
-    viewportStartSec: number;
-    viewportEndSec: number;
-    pxPerSec: number;
-    scrollLeft: number;
+    /** 统一坐标投影：全部子层位置与缩放的唯一来源。 */
+    axis: TimelineAxis;
     playheadSec: number;
     clipModel: {
         drawClips: import("./runtime/timelineCanvasModel").TimelineCanvasClipModel[];
@@ -50,7 +65,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         grid: props.grid,
         beatsPerBar: props.beatsPerBar,
         viewportWidth: props.widthPx,
-        scrollLeft: props.scrollLeft,
+        scrollLeft: props.axis.scrollLeftPx,
         visible: props.gridVisible,
         minSpacingPx: props.gridMinSpacingPx,
         swingPercent: props.gridSwingPercent,
@@ -117,9 +132,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     rowHeight={props.rowHeight}
                     widthPx={props.widthPx}
                     heightPx={props.heightPx}
-                    viewportStartSec={props.viewportStartSec}
-                    viewportEndSec={props.viewportEndSec}
-                    pxPerSec={props.pxPerSec}
+                    axis={props.axis}
                 />
             </div>
             <BackgroundGrid
@@ -133,7 +146,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 style={{
                     top: props.topPx,
                     height: props.heightPx,
-                    left: (Number(props.playheadSec) || 0) * props.pxPerSec - props.scrollLeft,
+                    left: secToViewportPx(props.axis, Number(props.playheadSec) || 0),
                 }}
             />
         </div>
