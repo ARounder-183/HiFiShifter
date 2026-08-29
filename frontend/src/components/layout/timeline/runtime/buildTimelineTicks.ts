@@ -228,29 +228,50 @@ export function buildTimelineTicks(args: {
     const ctx: TimeFormatContext = { bpm, beatsPerBar, grid, tempoMap };
     const showSecondary = args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
 
-    const ticks: TimelineTick[] = [];
+    // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
+    // 单个刻度、小节样式优先。不去重的后果是标尺出现间距为 0 的相邻刻度，
+    // 触发 labelHidden（间距 < 26px）把标签整片隐藏，只剩一堆裸竖线。
+    const merged = new Map<number, { sec: number; isBar: boolean }>();
     for (const line of lines) {
-        const beat = hasTempoMap ? secToBeat(tempoMap, line.sec, bpm) : line.sec / secPerBeat;
-        // 标签落在标签步长的整数倍上；小节起点始终带标签，保证标签密度下限。
+        const key = Math.round(line.sec * 1e6) / 1e6;
+        const existing = merged.get(key);
+        if (existing) {
+            existing.isBar = existing.isBar || line.isBar;
+            continue;
+        }
+        merged.set(key, { sec: line.sec, isBar: line.isBar });
+    }
+
+    const ticks: TimelineTick[] = [];
+    for (const entry of merged.values()) {
+        const beat = hasTempoMap ? secToBeat(tempoMap, entry.sec, bpm) : entry.sec / secPerBeat;
+        // 标签只落在标签步长的整数倍上。这里**不能**把小节起点无条件计入：
+        // 缩小时小节间距会小到放不下标签，标尺便会只剩一堆没有文字的竖线。
+        // 小节通过 isBarStart 影响刻度样式（2px 强线 + 加粗文字），而不是额外
+        // 增加刻度数量——与旧 buildRulerTicks 的语义一致。
         const stepsFromOrigin = beat / labelStepBeats;
         const onLabelStep = Math.abs(stepsFromOrigin - Math.round(stepsFromOrigin)) < 1e-6;
         ticks.push({
-            sec: line.sec,
+            sec: entry.sec,
             beat,
-            contentPx: secToContentPx(axis, line.sec),
-            isBarStart: line.isBar,
-            isStrongGridLine: line.isBar,
-            showLabel: line.isBar || onLabelStep,
+            contentPx: secToContentPx(axis, entry.sec),
+            isBarStart: entry.isBar,
+            isStrongGridLine: entry.isBar,
+            showLabel: onLabelStep,
             primaryLabel: hasTempoMap
-                ? formatTempoRulerTick(args.primaryUnit, line.sec, ctx)
+                ? formatTempoRulerTick(args.primaryUnit, entry.sec, ctx)
                 : formatRulerTick(args.primaryUnit, beat, ctx),
             secondaryLabel: showSecondary
                 ? hasTempoMap
-                    ? formatTempoRulerTick(args.secondaryUnit as TimeUnit, line.sec, ctx)
+                    ? formatTempoRulerTick(args.secondaryUnit as TimeUnit, entry.sec, ctx)
                     : formatRulerTick(args.secondaryUnit as TimeUnit, beat, ctx)
                 : null,
         });
     }
+
+    // merged 的迭代顺序即 lines 的顺序（已升序），显式排序以消除对上游顺序的
+    // 隐式依赖。
+    ticks.sort((a, b) => a.sec - b.sec);
 
     return ticks;
 }

@@ -244,7 +244,17 @@ export const BackgroundGrid: React.FC<{
                 return;
             }
 
-            const buildUniformPath = (stepPx: number): string => {
+            /**
+             * 竖线的落笔 x。
+             *
+             * SVG 的描边以路径为中心向两侧展开，而标尺用 DOM 盒子绘制：
+             * - 1px 弱线：标尺是 `left: 0; width: 1`（占据 [x, x+1]），网格若画在
+             *   x 则会变成 [x-0.5, x+0.5]，两者相差半个像素。因此弱线落笔要
+             *   右移 0.5，使线体正好覆盖 [x, x+1]。
+             * - 2px 强线：标尺是 `left: -1; width: 2`（占据 [x-1, x+1]），与描边
+             *   居中一致，无需偏移。
+             */
+            const buildUniformPath = (stepPx: number, halfPixelOffset: number): string => {
                 if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
                 const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
                 const lastIndex = Math.max(firstIndex, Math.ceil((visibleEnd + offset) / stepPx));
@@ -253,14 +263,18 @@ export const BackgroundGrid: React.FC<{
                 const parts: string[] = [];
                 for (let index = firstIndex; index <= lastIndex; index += 1) {
                     // Swing：奇数网格位置向右偏移（最大半步）。
-                    const x = index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset;
+                    const x =
+                        index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset + halfPixelOffset;
                     if (x < -1 || x > latest.width + 1) continue;
                     parts.push(`M${x} ${lineTop}V${lineBottom}`);
                 }
                 return parts.join("");
             };
 
-            const buildExplicitPath = (lineXs: number[] | null): string => {
+            const buildExplicitPath = (
+                lineXs: number[] | null,
+                halfPixelOffset: number,
+            ): string => {
                 if (!lineXs || lineXs.length === 0) return "";
                 const parts: string[] = [];
                 // 二分定位可见范围
@@ -278,7 +292,7 @@ export const BackgroundGrid: React.FC<{
                 };
                 const start = lowerBound(visibleStart + offset);
                 for (let i = start; i < lineXs.length; i += 1) {
-                    const x = lineXs[i] - offset;
+                    const x = lineXs[i] - offset + halfPixelOffset;
                     if (x > latest.width + 1) break;
                     if (x < -1) continue;
                     parts.push(`M${x} ${lineTop}V${lineBottom}`);
@@ -286,17 +300,19 @@ export const BackgroundGrid: React.FC<{
                 return parts.join("");
             };
 
+            // 弱线 1px：右移半像素与标尺的 DOM 盒子对齐（见 buildUniformPath 注释）；
+            // 强线 2px：描边天然居中，与标尺的 left:-1/width:2 一致，不偏移。
             paths[0].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.weakLineXs)
-                    : buildUniformPath(latest.weakStepPx),
+                    ? buildExplicitPath(latest.weakLineXs, 0.5)
+                    : buildUniformPath(latest.weakStepPx, 0.5),
             );
             paths[1].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.strongLineXs)
-                    : buildUniformPath(latest.strongStepPx),
+                    ? buildExplicitPath(latest.strongLineXs, 0)
+                    : buildUniformPath(latest.strongStepPx, 0),
             );
         },
         [useExplicitLines],

@@ -83,7 +83,9 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
     viewportWidth?: number;
 }) {
     const visibleTicks = React.useMemo(() => {
-        const labeled = ticks.filter((tick) => tick.showLabel || tick.isBarStart);
+        // 只渲染带标签的刻度：网格负责画出全部刻度（含无标签的小节线），
+        // 标尺若连无标签的一起渲染，缩小时会留下一堆没有文字的竖线。
+        const labeled = ticks.filter((tick) => tick.showLabel);
         if (!Number.isFinite(viewportWidth) || viewportWidth == null || viewportWidth <= 0) {
             return labeled;
         }

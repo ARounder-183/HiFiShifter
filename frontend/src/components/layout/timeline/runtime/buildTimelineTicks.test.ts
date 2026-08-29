@@ -33,6 +33,12 @@ function assertTrue(condition: boolean, label: string): void {
     if (!condition) throw new Error(`${label}: expected true`);
 }
 
+/**
+ * 标尺隐藏标签的间距阈值（与 TimeRulerMarks 的 labelHidden 判定一致）。
+ * 带标签的刻度间距必须大于它，否则标尺上只剩没有文字的竖线。
+ */
+const RULER_LABEL_HIDDEN_PX = 26;
+
 /** 两段式 Tempo Map：10 秒处提速并换成 3/4 拍。 */
 function twoSegmentTempoMap(): TempoMap {
     return {
@@ -129,6 +135,25 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
             }
             assertTrue(labeledCount > 0, `${tag}: some ticks carry labels`);
             assertTrue(barCount > 0, `${tag}: some ticks are bar starts`);
+
+            // ── 3b. 带标签的刻度间距必须放得下文字 ──────────────────
+            // 回归防御：曾把「小节起点」无条件计入标尺刻度，缩小时小节间距会
+            // 小于标签隐藏阈值（26px），标尺于是只剩一堆没有文字的竖线。
+            // 放大到足够大时最细网格步长已超过标签间距，此时每个刻度都可以带
+            // 号、两者相等是正常的；关键在于**间距**必须始终放得下文字。
+            assertTrue(
+                labeledCount <= ticks.length,
+                `${tag}: labeled ticks cannot exceed all ticks (${labeledCount}/${ticks.length})`,
+            );
+            const labeled = ticks.filter((tick) => tick.showLabel);
+            for (let i = 1; i < labeled.length; i += 1) {
+                const gapPx = labeled[i].contentPx - labeled[i - 1].contentPx;
+                assertTrue(
+                    gapPx >= RULER_LABEL_HIDDEN_PX + 1e-6,
+                    `${tag}: label gap ${gapPx}px must clear the ${RULER_LABEL_HIDDEN_PX}px ` +
+                        `hide threshold, otherwise the ruler is left with bare lines`,
+                );
+            }
 
             // ── 4. 密度上限：防止极端缩放下生成海量线 ────────────────
             const weakCount = ticks.filter((tick) => !tick.isStrongGridLine).length;
