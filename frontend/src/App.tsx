@@ -6,6 +6,8 @@ import { TimelinePanel } from "./components/layout/TimelinePanel";
 import { PianoRollPanel } from "./components/layout/PianoRollPanel";
 import { useAppDispatch, useAppSelector } from "./app/hooks";
 import { webApi } from "./services/webviewApi";
+import { settingsApi } from "./services/api/settings";
+import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
 import {
     closeVocalShifterSkippedFilesDialog,
@@ -454,54 +456,52 @@ function AppInner() {
 
     // 加载 MIDI 相关设置
     useEffect(() => {
-        import("./services/api/settings").then(({ settingsApi }) => {
-            settingsApi.getUiSettings().then((s) => {
-                if (s?.midiFillGaps != null) {
-                    setFillGaps(s.midiFillGaps);
-                }
-                if (s?.midiMultiTrackMerge != null) {
-                    setMultiTrackMerge(s.midiMultiTrackMerge);
-                }
-                if (s?.midiImportBpmAsProject != null) {
-                    setImportBpmAsProject(s.midiImportBpmAsProject);
-                }
-                if (s?.midiNoteBpmMode != null) {
-                    setNoteBpmMode(s.midiNoteBpmMode);
-                }
-                if (s?.midiSpecifiedBpm != null) {
-                    setSpecifiedBpm(s.midiSpecifiedBpm);
-                }
-                if (s?.midiImportPosition != null) {
-                    setImportPosition(s.midiImportPosition);
-                }
-                if (s?.midiCloseLeadingGap != null) {
-                    setCloseLeadingGap(s.midiCloseLeadingGap);
-                }
-                if (s?.midiImportAsTempoMap != null) {
-                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-                }
-                if (s?.midiImportTempoMapTempo != null) {
-                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-                }
-                if (s?.midiImportTempoMapTimeSignature != null) {
-                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-                }
-                if (s?.midiImportTempoMapKeySignature != null) {
-                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-                }
-                if (s?.midiImportTargetMenu != null) {
-                    setMidiImportTargetMenu(s.midiImportTargetMenu);
-                }
-                if (s?.midiImportTargetDragDrop != null) {
-                    setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-                }
-                if (typeof s?.autoReloadModifiedMedia === "boolean") {
-                    setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
-                }
-                if (typeof s?.loopNewClips === "boolean") {
-                    setLoopNewClips(s.loopNewClips);
-                }
-            });
+        settingsApi.getUiSettings().then((s) => {
+            if (s?.midiFillGaps != null) {
+                setFillGaps(s.midiFillGaps);
+            }
+            if (s?.midiMultiTrackMerge != null) {
+                setMultiTrackMerge(s.midiMultiTrackMerge);
+            }
+            if (s?.midiImportBpmAsProject != null) {
+                setImportBpmAsProject(s.midiImportBpmAsProject);
+            }
+            if (s?.midiNoteBpmMode != null) {
+                setNoteBpmMode(s.midiNoteBpmMode);
+            }
+            if (s?.midiSpecifiedBpm != null) {
+                setSpecifiedBpm(s.midiSpecifiedBpm);
+            }
+            if (s?.midiImportPosition != null) {
+                setImportPosition(s.midiImportPosition);
+            }
+            if (s?.midiCloseLeadingGap != null) {
+                setCloseLeadingGap(s.midiCloseLeadingGap);
+            }
+            if (s?.midiImportAsTempoMap != null) {
+                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+            }
+            if (s?.midiImportTempoMapTempo != null) {
+                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+            }
+            if (s?.midiImportTempoMapTimeSignature != null) {
+                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+            }
+            if (s?.midiImportTempoMapKeySignature != null) {
+                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+            }
+            if (s?.midiImportTargetMenu != null) {
+                setMidiImportTargetMenu(s.midiImportTargetMenu);
+            }
+            if (s?.midiImportTargetDragDrop != null) {
+                setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
+            }
+            if (typeof s?.autoReloadModifiedMedia === "boolean") {
+                setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
+            }
+            if (typeof s?.loopNewClips === "boolean") {
+                setLoopNewClips(s.loopNewClips);
+            }
         });
     }, []);
 
@@ -516,104 +516,74 @@ function AppInner() {
 
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiFillGaps: v }),
-        );
+        settingsApi.saveUiSettings({ midiFillGaps: v });
     }, []);
 
     const handleAutoReloadModifiedMediaChange = useCallback((v: boolean) => {
         setAutoReloadModifiedMedia(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ autoReloadModifiedMedia: v }),
-        );
+        settingsApi.saveUiSettings({ autoReloadModifiedMedia: v });
     }, []);
 
     const handleLoopNewClipsChange = useCallback((v: boolean) => {
         setLoopNewClips(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ loopNewClips: v }),
-        );
+        settingsApi.saveUiSettings({ loopNewClips: v });
     }, []);
 
     const handleMultiTrackMergeChange = useCallback((v: boolean) => {
         setMultiTrackMerge(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiMultiTrackMerge: v }),
-        );
+        settingsApi.saveUiSettings({ midiMultiTrackMerge: v });
     }, []);
 
     const handleImportBpmAsProjectChange = useCallback((v: boolean) => {
         setImportBpmAsProject(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportBpmAsProject: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportBpmAsProject: v });
     }, []);
 
     const handleNoteBpmModeChange = useCallback((v: string) => {
         setNoteBpmMode(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiNoteBpmMode: v }),
-        );
+        settingsApi.saveUiSettings({ midiNoteBpmMode: v });
     }, []);
 
     const handleSpecifiedBpmChange = useCallback((v: number) => {
         setSpecifiedBpm(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiSpecifiedBpm: v }),
-        );
+        settingsApi.saveUiSettings({ midiSpecifiedBpm: v });
     }, []);
 
     const handleImportPositionChange = useCallback((position: string) => {
         setImportPosition(position);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportPosition: position }),
-        );
+        settingsApi.saveUiSettings({ midiImportPosition: position });
     }, []);
 
     const handleCloseLeadingGapChange = useCallback((v: boolean) => {
         setCloseLeadingGap(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiCloseLeadingGap: v }),
-        );
+        settingsApi.saveUiSettings({ midiCloseLeadingGap: v });
     }, []);
 
     const handleImportTempoMapEnabledChange = useCallback((v: boolean) => {
         setImportTempoMapEnabled(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportAsTempoMap: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportAsTempoMap: v });
     }, []);
     const handleImportTempoMapTempoChange = useCallback((v: boolean) => {
         setImportTempoMapTempo(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTempo: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportTempoMapTempo: v });
     }, []);
     const handleImportTempoMapTimeSignatureChange = useCallback((v: boolean) => {
         setImportTempoMapTimeSignature(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportTempoMapTimeSignature: v });
     }, []);
     const handleImportTempoMapKeySignatureChange = useCallback((v: boolean) => {
         setImportTempoMapKeySignature(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportTempoMapKeySignature: v });
     }, []);
 
     const handleImportTargetMenuChange = useCallback((v: string) => {
         setMidiImportTargetMenu(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetMenu: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportTargetMenu: v });
     }, []);
 
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
-        void import("./services/api/settings").then(({ settingsApi }) =>
-            settingsApi.saveUiSettings({ midiImportTargetDragDrop: v }),
-        );
+        settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
     }, []);
 
     const splitter = useMemo(() => {
@@ -2026,7 +1996,6 @@ function AppInner() {
             return;
         }
 
-        const { fileBrowserApi } = await import("./services/api/fileBrowser");
         let picked: { ok: boolean; canceled?: boolean; path?: string } | undefined;
         try {
             picked = await fileBrowserApi.pickDirectory();

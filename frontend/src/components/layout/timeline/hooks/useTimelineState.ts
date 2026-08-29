@@ -23,6 +23,7 @@ import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
+import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
@@ -859,8 +860,8 @@ export function useTimelineState(): TimelineStateResult {
     function ensureDropPreviewDuration(path: string) {
         if (!path || pendingDropDurationPathRef.current === path) return;
         pendingDropDurationPathRef.current = path;
-        void import("../../../../services/api/fileBrowser")
-            .then(({ fileBrowserApi }) => fileBrowserApi.getAudioFileInfo(path))
+        void fileBrowserApi
+            .getAudioFileInfo(path)
             .then((info) => {
                 setDropPreview((prev) => {
                     if (!prev || prev.path !== path) return prev;
