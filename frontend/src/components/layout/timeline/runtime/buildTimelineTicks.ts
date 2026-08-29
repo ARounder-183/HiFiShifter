@@ -24,7 +24,11 @@
 
 import type { GridSize } from "../../../../features/session/sessionTypes.ts";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
-import { buildTempoGridLines, secToBeat } from "../../../../utils/tempoMap.ts";
+import {
+    buildTempoGridLines,
+    secToBeat,
+    tempoMapSegments,
+} from "../../../../utils/tempoMap.ts";
 import type { TimeUnit, TimeUnitChoice } from "../timeFormat.ts";
 import {
     formatRulerTick,
@@ -219,21 +223,109 @@ export function buildTimelineTicks(args: {
     }
 
     // ── 3. 标签步长与格式化 ────────────────────────────────────────
-    // Tempo Map 下 beat 是分段折算值（非均匀），不能用均匀 beat 域选出的
-    // labelStepBeats 去做整除判定——旧 buildRulerTicks 的 Tempo Map 路径正是
-    // 逐段局部对齐生成刻度的。这里改用时间域步长：用 fallback BPM 把 beat 步长
-    // 折算为秒，再按 sec 判定是否落在标签位置。
     const labelStepBeats = selectRulerStep({
         pxPerBeat,
         grid,
         beatsPerBar,
         minLabelSpacingPx: args.minLabelSpacingPx,
     });
-    /** 时间域标签步长（秒）。Tempo Map 下用它判定，均匀网格下等价于 beat 域。 */
-    const labelStepSec = labelStepBeats * secPerBeat;
     const ctx: TimeFormatContext = { bpm, beatsPerBar, grid, tempoMap };
     const showSecondary =
         args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
+
+    // ── 3b. Tempo Map 的标签位置：显式枚举，而非对线做整除判定 ─────
+    // Tempo Map 下网格线逐段局部对齐生成（段内第 k 条 = 段起点 +
+    // k*stepBeats*(60/段BPM)），段与段的秒间距随 BPM 变化，不存在任何全局常量
+    // 步长能整除这些秒位——这正是旧 buildRulerTicks 为 Tempo Map 单独按段生成
+    // 刻度的原因。
+    //
+    // 这里按**与 buildTempoGridLines 完全相同的公式**（含同一顺序的浮点运算与
+    // swing 偏移）显式枚举出标签秒位，再用集合匹配决定哪条线带标签。相比"把线
+    // 的秒位 round 成索引再取模"，枚举法不会把一批不同的线折叠成同一个索引：
+    // 曾出现 3/4 拍段内 stepBeats=32、每条小节线的局部索引 3m/32 全部 round 成
+    // 0，于是相邻 1 秒（2px）的小节线整批被判为标签，标尺因间距小于 26px 隐藏
+    // 阈值而整片空白。
+    //
+    // 与均匀网格路径的对称点：均匀路径用严格整除（|v-round(v)|<1e-6）天然排除
+    // 不在标签栅格上的小节线；枚举法在这里起到同样的作用。
+    // 直接判空而非用 hasTempoMap 布尔量：后者无法让 TS 收窄 tempoMap 的类型。
+    const labelSegments =
+        tempoMap && tempoMap.points.length > 0
+            ? tempoMapSegments(
+                  tempoMap,
+                  Math.max(endSec, tempoMap.points[tempoMap.points.length - 1].positionSec),
+              )
+            : [];
+
+    // 逐段计算标签 stride：段内一步的像素宽度随该段 BPM 变化，若用全局 fallback
+    // BPM 统一取 stride，快段（BPM 高 → 每拍像素少）的标签会挤成一团。这与旧
+    // buildRulerTicks 每段按自己的 segPxPerBeat 选 step 的做法一致。
+    // stride 只依赖 (tempoMap, pxPerSec, grid, minLabelSpacingPx)，与视口滚动
+    // 无关，因此标签相位在滚动时保持稳定。
+    const segmentLabelStrides = labelSegments.map((segment) => {
+        const segPxPerBeat = (60 / Math.max(1, segment.point.bpm)) * Math.max(0, pxPerSec);
+        const segStep = selectRulerStep({
+            pxPerBeat: segPxPerBeat,
+            grid,
+            beatsPerBar: Math.max(1, segment.beatsPerBar),
+            minLabelSpacingPx: args.minLabelSpacingPx,
+        });
+        return Math.max(1, Math.round(segStep / stepBeats));
+    });
+
+    const swingPercent = Math.max(0, Math.min(100, args.swingPercent ?? 0));
+    /** 标签秒位集合，键为 sec 四舍五入到 1e-6。 */
+    const labelSecKeys = new Set<number>();
+    if (hasTempoMap) {
+        // 跨段传递上一个已接受的标签位置。每段都在自己的起点重新锚定相位，
+        // 因此段 A 的末个标签与段 B 的首个标签（m=0）可能挨得极近——实测
+        // pps=8 处仅 16px，低于标尺 26px 的隐藏阈值，边界附近会成片空白。
+        let lastLabelPx: number | null = null;
+        for (let i = 0; i < labelSegments.length; i += 1) {
+            const segment = labelSegments[i];
+            const stride = segmentLabelStrides[i];
+            const segBpm = Math.max(1, segment.point.bpm);
+            const segSecPerBeat = 60 / segBpm;
+            const stepSec = stepBeats * segSecPerBeat;
+            if (!Number.isFinite(stepSec) || stepSec <= 1e-12) continue;
+            // 只枚举可见范围：段起点可能远在视口左侧，全段枚举会退化成 O(段长)。
+            const fromSec = Math.max(startSec, segment.startSec);
+            const toSec = Math.min(endSec, segment.endSec);
+            if (toSec < fromSec - 1e-9) continue;
+            const firstM = Math.max(0, Math.ceil((fromSec - segment.startSec) / stepSec - 1e-9));
+            const lastM = Math.floor((toSec - segment.startSec) / stepSec + 1e-9);
+            // 相位锚定到 stride 的整数倍（相对段起点），保证滚动/缩放不跳变。
+            const startM = Math.ceil(firstM / stride) * stride;
+            for (let m = startM; m <= lastM; m += stride) {
+                // 与 buildTempoGridLines 的 swingAt 同式同序，确保浮点结果一致。
+                const swing =
+                    swingPercent > 0 && m % 2 !== 0
+                        ? ((swingPercent / 100) * 0.5 * stepBeats) * segSecPerBeat
+                        : 0;
+                const sec = segment.startSec + m * stepBeats * segSecPerBeat + swing;
+                // add() 内部按 [startSec, endSec] 裁剪，这里同样只收范围内的值。
+                if (!Number.isFinite(sec) || sec < startSec - 1e-9 || sec > endSec + 1e-9) {
+                    continue;
+                }
+                // 最小间距约束：段边界处跳过与上一个标签挨太近的候选。段内间距
+                // 均匀，正常情况下不会触发；触发即说明该处标签会重叠。
+                const px = secToContentPx(axis, sec);
+                if (lastLabelPx !== null && px - lastLabelPx < args.minLabelSpacingPx) continue;
+                lastLabelPx = px;
+                labelSecKeys.add(Math.round(sec * 1e6) / 1e6);
+            }
+        }
+    }
+
+    /** 匹配标签秒位（±1 个量化单位，吸收浮点末位差异）。 */
+    const isTempoLabelPosition = (sec: number): boolean => {
+        const base = Math.round(sec * 1e6);
+        return (
+            labelSecKeys.has(base / 1e6) ||
+            labelSecKeys.has((base - 1) / 1e6) ||
+            labelSecKeys.has((base + 1) / 1e6)
+        );
+    };
 
     // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
     // 单个刻度、小节样式优先。不去重的后果是标尺出现间距为 0 的相邻刻度，
@@ -257,14 +349,11 @@ export function buildTimelineTicks(args: {
         // 小节通过 isBarStart 影响刻度样式（2px 强线 + 加粗文字），而不是额外
         // 增加刻度数量——与旧 buildRulerTicks 的语义一致。
         //
-        // Tempo Map 下必须用时间域判定：beat 是分段折算值（非均匀），而
-        // labelStepBeats 是在均匀 beat 域选出的，两者不在同一坐标系。用 sec 域
-        // 的 labelStepSec（= labelStepBeats * fallbackSecPerBeat）做整除，与旧
-        // buildRulerTicks Tempo Map 路径的逐段局部对齐语义一致。
-        const stepsFromOrigin = hasTempoMap
-            ? entry.sec / labelStepSec
-            : beat / labelStepBeats;
-        const onLabelStep = Math.abs(stepsFromOrigin - Math.round(stepsFromOrigin)) < 1e-6;
+        // Tempo Map 下改按段内局部索引抽取（见 3b）。均匀网格下 beat 与 sec 线性
+        // 相关，保持原有的整数倍判定。
+        const onLabelStep = hasTempoMap
+            ? isTempoLabelPosition(entry.sec)
+            : Math.abs(beat / labelStepBeats - Math.round(beat / labelStepBeats)) < 1e-6;
         ticks.push({
             sec: entry.sec,
             beat,

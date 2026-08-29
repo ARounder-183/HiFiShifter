@@ -59,10 +59,36 @@ function twoSegmentTempoMap(): TempoMap {
     } as unknown as TempoMap;
 }
 
+/**
+ * 多变化点 Tempo Map。
+ *
+ * 这是本文件的核心回归用例：变化点越多，各段折算出的累计拍数越"不整"，
+ * 用均匀 beat 域步长去做整除判定的命中率就越低。两段式（twoSegmentTempoMap）
+ * 只会让标签变稀，多点式才会退化成整条标尺空白——正是用户报告的现象。
+ */
+function multiPointTempoMap(): TempoMap {
+    return {
+        points: [
+            { positionSec: 0, bpm: 120 },
+            { positionSec: 8, bpm: 128 },
+            { positionSec: 16, bpm: 96 },
+            { positionSec: 24, bpm: 144 },
+            { positionSec: 32, bpm: 110 },
+            { positionSec: 40, bpm: 132 },
+        ].map((point, index) => ({
+            id: `tp-${index}`,
+            positionSec: point.positionSec,
+            bpm: point.bpm,
+            timeSignature: { numerator: 4, denominator: 4 },
+        })),
+    } as unknown as TempoMap;
+}
+
 test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted checks", async () => {
     const scenarios = [
         { label: "uniform", tempoMap: null as TempoMap | null },
-        { label: "tempo-map", tempoMap: twoSegmentTempoMap() },
+        { label: "tempo-2seg", tempoMap: twoSegmentTempoMap() },
+        { label: "tempo-multi", tempoMap: multiPointTempoMap() },
     ];
 
     for (const scenario of scenarios) {
@@ -77,7 +103,7 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
                 scrollLeftPx,
                 viewportWidthPx: 1200,
             });
-            const ticks = buildTimelineTicks({
+            const args = {
                 axis,
                 bpm: 120,
                 beatsPerBar: 4,
@@ -86,7 +112,8 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
                 secondaryUnit: "none",
                 minLabelSpacingPx: 60,
                 tempoMap: scenario.tempoMap,
-            });
+            } as const;
+            const ticks = buildTimelineTicks(args);
             const tag = `${scenario.label} pps=${pxPerSec} sl=${scrollLeftPx}`;
 
             assertTrue(ticks.length > 0, `${tag}: produces ticks`);
@@ -154,6 +181,40 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
                         `hide threshold, otherwise the ruler is left with bare lines`,
                 );
             }
+
+            // ── 3c. 标签必须铺满生成范围，不得聚在一端 ────────────────
+            // 回归防御：Tempo Map 下曾因"用均匀 beat 域的步长去整除分段折算的
+            // beat"，标签判定几乎恒为 false，缩到最小时整条标尺只剩 2 个标签。
+            //
+            // 注意"间距 ≥ 隐藏阈值"这条（3b）抓不到它：标签越少、间距越大，反而
+            // 越容易通过。只查相邻间距也不够——若仅有的 2 个标签挨在一起，唯一
+            // 的那个间距同样很小。真正的不变量是**跨度覆盖**：标签必须分布到整
+            // 个生成范围，而不是蜷在起点附近。
+            assertTrue(
+                labeled.length >= 2,
+                `${tag}: needs several labels to cover the viewport (got ${labeled.length})`,
+            );
+            const tickSpanPx = ticks[ticks.length - 1].contentPx - ticks[0].contentPx;
+            const labelSpanPx = labeled[labeled.length - 1].contentPx - labeled[0].contentPx;
+            assertTrue(
+                labelSpanPx >= tickSpanPx * 0.8,
+                `${tag}: labels span only ${labelSpanPx}px of the ${tickSpanPx}px tick range, ` +
+                    `they must cover the whole range rather than cluster at one end`,
+            );
+
+            // 内部不得出现大段空白。上界取视口的一半：高缩放下标签步长会被量化
+            // 到较粗的乐理值（实测 pps=1600 时为 400px），属既有行为；而故障态
+            // 下其余区域完全没有标签，会由上面的跨度检查捕获。
+            let maxGapPx = 0;
+            for (let i = 1; i < labeled.length; i += 1) {
+                maxGapPx = Math.max(maxGapPx, labeled[i].contentPx - labeled[i - 1].contentPx);
+            }
+            const maxAllowedGapPx = axis.viewportWidthPx / 2;
+            assertTrue(
+                maxGapPx <= maxAllowedGapPx,
+                `${tag}: largest label gap ${maxGapPx}px exceeds ${maxAllowedGapPx}px, ` +
+                    `the ruler is left with a blank stretch`,
+            );
 
             // ── 4. 密度上限：防止极端缩放下生成海量线 ────────────────
             const weakCount = ticks.filter((tick) => !tick.isStrongGridLine).length;
