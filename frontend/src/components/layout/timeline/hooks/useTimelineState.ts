@@ -20,6 +20,7 @@ import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
+import { invokeGridRedrawHandler } from "../gridRedrawBridge";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
@@ -133,6 +134,9 @@ export interface TimelineStateResult {
     // DOM refs
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    trackGridLayerRef: React.MutableRefObject<HTMLDivElement | null>;
+    trackGridBoundaryRef: React.MutableRefObject<HTMLDivElement | null>;
+    trackGridOverlayLayerRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -315,6 +319,10 @@ export function useTimelineState(): TimelineStateResult {
     // ── DOM refs ──────────────────────────────────────────────
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const trackListScrollRef = useRef<HTMLDivElement | null>(null);
+    // Sticky 网格层的命令式重绘句柄：滚动事件内同步刷新（与画布/波形同帧）。
+    const trackGridLayerRef = useRef<HTMLDivElement | null>(null);
+    const trackGridBoundaryRef = useRef<HTMLDivElement | null>(null);
+    const trackGridOverlayLayerRef = useRef<HTMLDivElement | null>(null);
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
@@ -451,6 +459,10 @@ export function useTimelineState(): TimelineStateResult {
             scrollTopPxRef.current,
             rowHeightRef.current,
         );
+        // 背景网格与边界线走同一条同步链：滚动事件在 paint 前触发，
+        // 网格、Clip 体、波形必须在同一帧提交，禁止等 React state/rAF。
+        invokeGridRedrawHandler(trackGridLayerRef.current, next);
+        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, next);
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -465,6 +477,7 @@ export function useTimelineState(): TimelineStateResult {
     // 必须与 DOM 内容层在同一帧内拿到新 scrollTop。滚动事件在绘制前触发，
     // 这里同步 emit，任何经 React state 的延迟都会造成画布与 Clip 分层。
     const syncScrollTop = React.useCallback((next: number) => {
+        if (Math.abs(scrollTopPxRef.current - next) <= 1e-6) return;
         scrollTopPxRef.current = next;
         timelineViewportBus.emit(
             scrollLeftRef.current,
@@ -1149,6 +1162,9 @@ export function useTimelineState(): TimelineStateResult {
 
         scrollRef,
         trackListScrollRef,
+        trackGridLayerRef,
+        trackGridBoundaryRef,
+        trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,

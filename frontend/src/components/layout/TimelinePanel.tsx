@@ -71,7 +71,6 @@ import { QuickClipExportDialog } from "./QuickClipExportDialog";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 
 import {
-    BackgroundGrid,
     ClipContextMenu,
     TRACK_ADD_ROW_HEIGHT,
     TrackAreaContextMenu,
@@ -327,6 +326,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sessionRef,
         scrollRef,
         trackListScrollRef,
+        trackGridLayerRef,
+        trackGridBoundaryRef,
+        trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
@@ -1182,7 +1184,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         timelineScroller.scrollTop = scrollTop;
     }, []);
 
-    const trackGridHeight = Math.max(0, contentHeight - TRACK_ADD_ROW_HEIGHT);
     const timelineRenderModel = useMemo(
         () =>
             buildTimelineRenderModel({
@@ -1755,23 +1756,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 />
                             ) : null}
 
-                            <BackgroundGrid
-                                contentWidth={contentWidth}
-                                contentHeight={trackGridHeight}
-                                pxPerBeat={pxPerBeat}
-                                grid={s.grid}
-                                beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                viewportWidth={viewportWidth}
-                                scrollLeft={scrollLeft}
-                                visible={s.timelineSnap.gridVisible}
-                                minSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                swingPercent={
-                                    s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
-                                }
-                                weakLineXs={tempoGridLineXs?.weak ?? null}
-                                strongLineXs={tempoGridLineXs?.strong ?? null}
-                            />
-
                             {clipDropNewTrack ? (
                                 <div
                                     className="absolute left-0 right-0 pointer-events-none z-20"
@@ -1897,29 +1881,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         />
                                     );
                                 })}
-                            </div>
-
-                            <div className="absolute inset-0 pointer-events-none z-[12]">
-                                <BackgroundGrid
-                                    contentWidth={contentWidth}
-                                    contentHeight={trackGridHeight}
-                                    pxPerBeat={pxPerBeat}
-                                    grid={s.grid}
-                                    beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                    viewportWidth={viewportWidth}
-                                    scrollLeft={scrollLeft}
-                                    visible={s.timelineSnap.gridVisible}
-                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                    swingPercent={
-                                        s.timelineSnap.swingEnabled
-                                            ? s.timelineSnap.swingPercent
-                                            : 0
-                                    }
-                                    lineOpacity={0.38}
-                                    showBoundary={false}
-                                    weakLineXs={tempoGridLineXs?.weak ?? null}
-                                    strongLineXs={tempoGridLineXs?.strong ?? null}
-                                />
                             </div>
 
                             {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
@@ -2103,9 +2064,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         </div>
 
                         {viewportWidth > 0 ? (
-                            /* 画布锚定视口顶部（topPx=0），内容按绝对轨道坐标
-                               绘制并由总线 scrollTopPx 同帧平移——竖直滚动
-                               与 DOM 内容层严丝合缝。 */
+                            /* 背景网格 / Clip 体 / 波形面全部锚定在同一 sticky 视口层：
+                               滚动时三者经同一条同步链（scroll 事件内）提交位移，任一
+                               层都不允许再走 React state / rAF，否则会与其它层分裂。 */
                             <TimelineSurface
                                 tracks={visibleTracks}
                                 startTrackIndex={timelineRenderModel.startIndex}
@@ -2117,7 +2078,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 viewportStartSec={viewportStartSec}
                                 viewportEndSec={viewportEndSec}
                                 pxPerSec={pxPerSec}
+                                scrollLeft={scrollLeft}
                                 clipModel={timelineCanvasModel}
+                                contentWidth={contentWidth}
+                                pxPerBeat={pxPerBeat}
+                                grid={s.grid}
+                                beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                gridVisible={s.timelineSnap.gridVisible}
+                                gridMinSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                gridSwingPercent={
+                                    s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
+                                }
+                                gridWeakLineXs={tempoGridLineXs?.weak ?? null}
+                                gridStrongLineXs={tempoGridLineXs?.strong ?? null}
+                                gridLayerRef={trackGridLayerRef}
+                                gridBoundaryRef={trackGridBoundaryRef}
+                                gridOverlayLayerRef={trackGridOverlayLayerRef}
                             />
                         ) : null}
                     </div>

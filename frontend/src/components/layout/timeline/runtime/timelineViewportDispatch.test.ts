@@ -57,4 +57,21 @@ test("components/layout/timeline/runtime/timelineViewportDispatch.test.ts script
         true,
         "first viewport snapshot always dispatches",
     );
+
+    assertEqual(
+        shouldDispatchTimelineViewport({
+            previous: {
+                scrollLeft: 120.25,
+                pxPerSec: 24,
+                viewportWidth: 1400,
+            },
+            next: {
+                scrollLeft: 120.5,
+                pxPerSec: 24,
+                viewportWidth: 1400,
+            },
+        }),
+        true,
+        "sub-pixel scroll changes must dispatch so sticky layers never drift",
+    );
 });

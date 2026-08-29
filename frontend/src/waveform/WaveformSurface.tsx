@@ -122,10 +122,33 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         }
     }, [props, renderWith, rendererKind]);
 
+    /**
+     * 视觉输入（行数据 / 颜色 / 尺寸 / 缩放）变化时必须在 layout effect
+     * 内同步重绘：Clip 拖拽、trim/stretch、行窗口切换都由 React 在同一
+     * commit 中更新 Clip DOM 与 Clip 体画布，波形面若再经 rAF 延迟一帧，
+     * 就会在编辑手势中相对 Clip“甩出去”。
+     * 视口滚动由 timelineViewportBus 的同步订阅负责，这里不重复绘制。
+     */
+    const visualSignature = React.useMemo(
+        () => ({
+            rows: props.rows,
+            color: props.color,
+            widthPx: props.widthPx,
+            heightPx: props.heightPx,
+            pxPerSec: props.pxPerSec,
+        }),
+        [props.rows, props.color, props.widthPx, props.heightPx, props.pxPerSec],
+    );
+    const previousVisualSignatureRef = React.useRef(visualSignature);
+
     React.useLayoutEffect(() => {
         drawRef.current = draw;
-        invalidate();
-    }, [draw, invalidate]);
+        const busDriven = props.viewportSource != null;
+        if (!busDriven || previousVisualSignatureRef.current !== visualSignature) {
+            previousVisualSignatureRef.current = visualSignature;
+            drawRef.current();
+        }
+    }, [draw, props.viewportSource, visualSignature]);
 
     React.useEffect(() => {
         const fallbackCanvas = fallbackCanvasRef.current;

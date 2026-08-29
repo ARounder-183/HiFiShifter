@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useCallback, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
@@ -12,6 +12,12 @@ import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge
  * 提供 `weakLineXs` / `strongLineXs`（内容坐标系 x 像素数组）时，
  * 网格线直接使用这些显式位置（Tempo Map 的不等距网格）。
  */
+
+function resolveRefElement(ref: React.Ref<HTMLDivElement> | undefined): HTMLDivElement | null {
+    if (ref == null) return null;
+    if (typeof ref === "function") return null;
+    return ref.current;
+}
 export const BackgroundGrid: React.FC<{
     contentWidth: number;
     contentHeight: number;
@@ -97,6 +103,8 @@ export const BackgroundGrid: React.FC<{
                 : contentWidth,
         scrollLeft: scrollLeft ?? 0,
         isSticky,
+        lineOpacity,
+        showBoundary,
     });
 
     useLayoutEffect(() => {
@@ -115,6 +123,8 @@ export const BackgroundGrid: React.FC<{
                     : contentWidth,
             scrollLeft: scrollLeft ?? 0,
             isSticky,
+            lineOpacity,
+            showBoundary,
         };
     });
 
@@ -142,6 +152,21 @@ export const BackgroundGrid: React.FC<{
                 ? latest.width
                 : Math.min(latest.contentWidth, sl + latest.viewportWidth + bufferPx);
 
+            // 工程边界线同样属于“背景层”，必须与网格线在同一帧提交：
+            // 画布/波形都在 scroll 事件内同步重绘，边界线不能等 React 的
+            // rAF 状态提交后再移动，否则滚动到工程末端附近时会与网格分裂。
+            const boundaryEl = resolveRefElement(boundaryRef);
+            if (latest.isSticky && boundaryEl) {
+                const boundaryLeft = latest.contentWidth - 1 - sl;
+                boundaryEl.style.left = `${boundaryLeft}px`;
+                const boundaryVisible =
+                    Number.isFinite(boundaryLeft) &&
+                    boundaryLeft >= -2 &&
+                    boundaryLeft <= latest.width + 2;
+                boundaryEl.style.opacity =
+                    latest.showBoundary && boundaryVisible ? String(latest.lineOpacity) : "0";
+            }
+
             // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
             // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
             // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
@@ -157,6 +182,8 @@ export const BackgroundGrid: React.FC<{
                 latest.contentWidth,
                 latest.viewportWidth,
                 latest.isSticky,
+                latest.lineOpacity,
+                latest.showBoundary,
             ].join("|");
             if (lastDrawKeyRef.current === drawKey) return;
             lastDrawKeyRef.current = drawKey;
@@ -216,7 +243,7 @@ export const BackgroundGrid: React.FC<{
                     : buildUniformPath(latest.strongStepPx),
             );
         },
-        [useExplicitLines],
+        [boundaryRef, useExplicitLines],
     );
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
@@ -238,10 +265,14 @@ export const BackgroundGrid: React.FC<{
         contentWidth,
         viewportWidth,
         isSticky,
+        showBoundary,
+        lineOpacity,
     ]);
 
-    useEffect(() => {
-        const el = layerRef && typeof layerRef === "object" ? layerRef.current : null;
+    // 用 useLayoutEffect 注册命令式重绘句柄：TimelineSurface 挂载后会在
+    // 父级 layout effect 中立即用总线快照同步一次，句柄必须已在 paint 前可用。
+    useLayoutEffect(() => {
+        const el = resolveRefElement(layerRef);
         if (!el) return;
         setGridRedrawHandler(el, draw);
         return () => {
@@ -254,7 +285,7 @@ export const BackgroundGrid: React.FC<{
     const boundaryLeft = isSticky ? contentWidth - 1 - (scrollLeft as number) : contentWidth - 1;
     const boundaryVisible =
         Number.isFinite(boundaryLeft) && boundaryLeft >= -2 && boundaryLeft <= width + 2;
-    const manualViewportSync = isSticky && (layerRef != null || boundaryRef != null);
+    const manualViewportSync = isSticky && boundaryRef != null;
 
     if (!visible) return null;
 
@@ -289,9 +320,10 @@ export const BackgroundGrid: React.FC<{
 
             <div
                 ref={boundaryRef}
-                className="absolute top-0 bottom-0 w-px z-20"
+                className="absolute top-0 w-px z-20"
                 style={{
                     left: manualViewportSync ? 0 : boundaryLeft,
+                    height,
                     backgroundColor: "var(--qt-highlight)",
                     opacity:
                         manualViewportSync || !boundaryVisible ? 0 : showBoundary ? lineOpacity : 0,
