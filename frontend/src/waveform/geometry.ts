@@ -197,8 +197,19 @@ export function buildWaveformGeometry(args: {
                     segment.fadeOutShape,
                     segment.fadeOutDir,
                 );
-            const yTop = centerY - peakMax * gain * halfHeight;
-            const yBottom = centerY - peakMin * gain * halfHeight;
+            // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
+            // "溢出" clip 上下边界（DAW 通用 bug）。与 REAPER 一致，增益放大
+            // 的显示按矩形削顶（flat-top），既保留"已削波"的视觉暗示又不越界。
+            const rectTop = segment.screenRect.y;
+            const rectBottom = rectTop + segment.screenRect.height;
+            const yTop = Math.min(
+                rectBottom,
+                Math.max(rectTop, centerY - peakMax * gain * halfHeight),
+            );
+            const yBottom = Math.min(
+                rectBottom,
+                Math.max(rectTop, centerY - peakMin * gain * halfHeight),
+            );
             const alpha =
                 colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
 
