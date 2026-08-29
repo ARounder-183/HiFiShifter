@@ -88,11 +88,13 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(selectedStyle.headerFill, style.headerFill, "selected header keeps default visual");
     assertEqual(selectedStyle.bodyFill, style.bodyFill, "selected body keeps default visual");
     // Selected 边框优先读 CSS 变量 --qt-clip-selected-border；无 DOM 环境
-    // （Node 测试）下回退为轨道色的全不透明变体 —— 与非选中的 0.74 有意区分。
+    // （Node 测试）下回退为归一化轨道色的深色变体（#ff7a00 经 HSL 夹取 +
+    // 感知亮度校正后为 s .72 / l .44，再降 0.17 明度）—— 与非选中的 0.6
+    // alpha 有意区分。
     assertEqual(
         selectedStyle.borderStroke,
-        "rgba(218, 129, 47, 1)",
-        "selected border falls back to full-alpha track color without CSS variables",
+        "rgba(110, 62, 18, 1)",
+        "selected border falls back to full-alpha deep track color without CSS variables",
     );
     assertEqual(selectedStyle.textFill, style.textFill, "selected text keeps default visual");
 
@@ -108,6 +110,38 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
         },
         "shade range sits outside fade areas",
     );
+
+    // ── 色块归一化：极端轨道色也必须落在安全亮度区间 ────────────────────────
+    // 整块用色的前提：无论用户挑了多刺眼/多暗的轨道色，Clip 色块的感知亮度
+    // 都被 HSL 归一化收敛——白字（clip 名）与白波形在色块上永远有对比，
+    // 色块对深色轨道背景也永远有明度差。
+    {
+        const parseLuminance = (fill: string): number => {
+            const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
+            if (!m) throw new Error(`unparseable fill: ${fill}`);
+            const [, rs, gs, bs] = m;
+            return (
+                (Number(rs) * 0.299 + Number(gs) * 0.587 + Number(bs) * 0.114) / 255
+            );
+        };
+        for (const color of ["#ff0000", "#00ff00", "#0000ff", "#ffffff", "#000000", "#808080"]) {
+            const extreme = buildTimelineClipVisualStyle({
+                widthPx: 160,
+                trackColor: color,
+                selected: false,
+                muted: false,
+                gain: 1,
+                playbackRate: 1,
+                name: "x",
+            });
+            const lum = parseLuminance(extreme.bodyFill);
+            if (lum < 0.28 || lum > 0.6) {
+                throw new Error(
+                    `trackColor ${color}: clip block luminance ${lum.toFixed(3)} outside the safe band [0.28, 0.60]`,
+                );
+            }
+        }
+    }
 
     // ── formatPlaybackRateLabel ───────────────────────────────────────────────
     assertEqual(formatPlaybackRateLabel(1), "x1", "unity rate has no fractional part");
