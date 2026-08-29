@@ -27,18 +27,18 @@ export interface WaveformColors {
  * surface 的对比方向相反，不可混用。
  */
 const darkTimelineWaveformColors: WaveformColors = {
-    fill: "rgba(10, 13, 20, 0.9)",
-    stroke: "rgba(6, 9, 16, 1)",
-    midiPitch: "rgba(4, 44, 76, 0.96)",
+    fill: "rgba(4, 6, 12, 0.95)",
+    stroke: "rgba(0, 0, 0, 1)",
+    midiPitch: "rgba(2, 32, 58, 1)",
 };
 
 /**
  * 浅色主题的时间线波形颜色（同为深色系：波形画在亮色块上，与主题无关）
  */
 const lightTimelineWaveformColors: WaveformColors = {
-    fill: "rgba(16, 20, 30, 0.88)",
-    stroke: "rgba(10, 14, 22, 1)",
-    midiPitch: "rgba(2, 56, 96, 0.96)",
+    fill: "rgba(8, 11, 20, 0.94)",
+    stroke: "rgba(0, 0, 0, 1)",
+    midiPitch: "rgba(0, 40, 72, 1)",
 };
 
 const darkPianoRollWaveformColors: WaveformColors = {
