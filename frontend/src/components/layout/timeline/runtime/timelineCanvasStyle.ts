@@ -198,8 +198,9 @@ function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
     return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
 }
 
-/** 色块的感知亮度目标带：参考 REAPER —— 饱和彩色，深色文字/深色波形仍有对比。 */
-const CLIP_LUMINANCE_BAND = { min: 0.40, max: 0.55 } as const;
+/** 色块的感知亮度目标带：参考 Studio One 暗色主题 —— 低饱和粉彩块，
+ * 深色波形成为同色调"纹理"而非"黑洞"，整条时间线安静不发闷。 */
+const CLIP_LUMINANCE_BAND = { min: 0.52, max: 0.62 } as const;
 
 /**
  * 轨道色 → 归一化 HSL。
@@ -214,8 +215,10 @@ function normalizeTrackHsl(color: string): Hsl {
     const base = rgbToHsl(parseHexColor(color) ?? { r: 104, g: 131, b: 157 });
     const hsl: Hsl = {
         h: base.h,
-        s: clamp(base.s, 0.55, 0.88),
-        l: clamp(base.l, 0.38, 0.58),
+        // 低饱和粉彩带：深底 UI 的现代惯例（Studio One / Ableton）。高饱和
+        // 糖果色在 #232323 上会相互嘶鸣，整体观感廉价且压过波形细节。
+        s: clamp(base.s, 0.32, 0.52),
+        l: clamp(base.l, 0.42, 0.60),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));
@@ -362,12 +365,12 @@ export function buildTimelineClipVisualStyle(args: {
     // muted：饱和度压到近灰、明度不动 —— 亮灰块一眼可辨，不靠降 alpha
     // （降 alpha 会透出背景、显脏）。
     const baseHsl = normalizeTrackHsl(trackColor);
-    // 选中 = 色块提亮（Ableton 式），不画边框 —— 深色描边压在饱和色块上
-    // 显得突兀。+0.10 明度在归一化后的亮度带内足够醒目。
+    // 选中 = 色块提亮（Ableton 式）+ 白描边；muted = 同色相灰且压暗一档 ——
+    // 深底上等亮度灰块像"脏水泥"，沉下去后活跃 clip 的层级自然浮现。
     const clipHsl: Hsl = args.muted
-        ? { h: baseHsl.h, s: 0.06, l: baseHsl.l }
+        ? { h: baseHsl.h, s: 0.06, l: Math.max(0.08, baseHsl.l - 0.12) }
         : args.selected
-          ? shadeHsl(baseHsl, 0.1)
+          ? shadeHsl(baseHsl, 0.08)
           : baseHsl;
     const bodyRgb = hslToRgb(clipHsl);
     const headerRgb = hslToRgb(shadeHsl(clipHsl, -0.05));
@@ -474,8 +477,11 @@ export function buildTimelineClipVisualStyle(args: {
         headerFill: rgba(headerRgb, 1),
         bodyFill: rgba(bodyRgb, 1),
         // 描边：选中 = 白色 2px（在提亮的色块上清晰醒目，REAPER 惯例）；
-        // 未选中 = 极淡深色收边 1px（帮助在深背景上定界）。
-        borderStroke: args.selected ? "rgba(255, 255, 255, 0.92)" : "rgba(0, 0, 0, 0.18)",
+        // 未选中 = 同色调深描边 —— 纯黑低透明描边在深底上不可见，同色相
+        // 加深的描边让色块边缘"闭合"且与色块同调。
+        borderStroke: args.selected
+            ? "rgba(255, 255, 255, 0.92)"
+            : rgba(headerRgb, 0.55),
         borderLineWidth: args.selected ? 2 : 1,
         textFill: "rgba(28, 32, 40, 0.92)",
         muteBadgeFill: args.muted ? "rgba(189, 54, 54, 0.95)" : "rgba(0, 0, 0, 0.16)",

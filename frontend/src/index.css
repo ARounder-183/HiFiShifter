@@ -16,7 +16,8 @@
     --qt-surface: #404040;
     --qt-clip-bg: #343434;
     --qt-clip-border: rgba(255, 255, 255, 0.14);
-    --qt-clip-selected-border: rgba(255, 255, 255, 0.88);
+    /* Clip 是明亮色块，选中描边一律深色实线（半透明白在彩色块上发灰） */
+    --qt-clip-selected-border: rgba(24, 28, 35, 0.95);
     --qt-text: #d0d0d0;
     --qt-text-muted: #909090;
     --qt-highlight: #3b82f6;
@@ -32,8 +33,8 @@
     --qt-warning-text: #fcd34d;
     --qt-warning-border: #f59e0b;
     --qt-graph-bg: #232323;
-    --qt-graph-grid-strong: #4a4a4a;
-    --qt-graph-grid-weak: #373737;
+    --qt-graph-grid-strong: #565656;
+    --qt-graph-grid-weak: #454545;
     --qt-scrollbar-thumb: #555555;
     --qt-scrollbar-thumb-hover: #707070;
     --qt-overlay: rgba(0, 0, 0, 0.35);
@@ -63,7 +64,7 @@
     --qt-surface: #e1e4ea;
     --qt-clip-bg: #dde1e8;
     --qt-clip-border: rgba(32, 38, 52, 0.18);
-    --qt-clip-selected-border: rgba(32, 38, 52, 0.72);
+    --qt-clip-selected-border: rgba(24, 28, 35, 0.95);
     --qt-text: #1f232b;
     --qt-text-muted: #666d79;
     --qt-highlight: #4b68d1;
