@@ -525,7 +525,10 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}" -TargetTriple "${{ matrix.cargo_target }}"
+          # Builds run natively without --target and use the dist profile, so
+          # artifacts land in backend/src-tauri/target/dist — no triple path.
+          # The script detects the artifact directory itself.
+          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
 
       # ── Artifact naming ───────────────────────────────────────────────

@@ -7,8 +7,10 @@
     resource files, models, and GPU-dependent DLLs (DirectML/WebGPU) from
     the build output directory and packages them into a portable .zip file.
     All DLLs located in the release directory are automatically collected.
-    Both the host-default target\release layout and the target\<triple>\release
-    layout produced by `--target` builds are supported.
+    Supported artifact layouts (detected automatically, newest exe wins):
+    target\dist and target\release for host-default builds, plus the
+    target\<triple>\dist and target\<triple>\release layouts produced by
+    `--target` builds.
 
 .PARAMETER SkipBuild
     Skip the build step and package from existing artifacts (useful when a
@@ -91,42 +93,52 @@ $TauriTargetRoot = Join-Path $TauriDir "target"
 $SetVersionScript = Join-Path $ProjectRoot "scripts\set-version.ps1"
 
 function Resolve-TauriReleaseDir {
-    # A plain `cargo tauri build` now uses the host default target and writes
-    # to target/release; CI and explicit `--target` builds write to
-    # target/<triple>/release. Accept both layouts and pick the actual one.
+    # Artifact layouts in the wild, per profile directory name:
+    #   dist    — builds with `-- --profile dist` (CI, and local when opting in)
+    #   release — a plain local `cargo tauri build` (default release profile)
+    # and per build layout:
+    #   target/<profile>           — host-default builds (CI runners are native)
+    #   target/<triple>/<profile>  — explicit `--target` builds
+    # Pick the candidate whose HiFiShifter.exe actually exists (newest wins);
+    # an explicit -TargetTriple stays authoritative only while its artifacts
+    # exist, so a stale triple directory can never shadow a fresh build.
+    $Profiles = @("dist", "release")
+    $Triples = @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")
+
+    $ExplicitDirs = New-Object 'System.Collections.Generic.List[string]'
     $ReleaseCandidates = New-Object 'System.Collections.Generic.List[string]'
     if ($script:TargetTriple) {
-        $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple "release")))
+        foreach ($p in $Profiles) {
+            $ExplicitDirs.Add((Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple $p)))
+            $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple $p)))
+        }
     }
-    $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot "release"))
-    foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+    foreach ($p in $Profiles) {
+        $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot $p))
+    }
+    foreach ($t in $Triples) {
         if (-not $script:TargetTriple -or $t -ne $script:TargetTriple) {
-            $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $t "release")))
+            foreach ($p in $Profiles) {
+                $ReleaseCandidates.Add((Join-Path $script:TauriTargetRoot (Join-Path $t $p)))
+            }
         }
     }
 
     $ResolvedRelease = $null
     $ResolvedTriple = $null
     $BestReleaseTime = [datetime]::MinValue
-    $ExplicitReleaseDir = if ($script:TargetTriple) {
-        Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple "release")
-    }
-    else {
-        $null
-    }
 
     foreach ($Candidate in $ReleaseCandidates) {
         $CandidateExe = Join-Path $Candidate "$($script:ProductName).exe"
         if (-not (Test-Path $CandidateExe)) { continue }
 
-        $CandidateTime = (Get-Item $CandidateExe).LastWriteTime
         # An explicitly requested triple is authoritative when its artifacts exist.
-        if ($ExplicitReleaseDir -and $Candidate -eq $ExplicitReleaseDir) {
+        if ($ExplicitDirs.Contains($Candidate)) {
             $ResolvedRelease = $Candidate
             $ResolvedTriple = $script:TargetTriple
-            $BestReleaseTime = $CandidateTime
             break
         }
+        $CandidateTime = (Get-Item $CandidateExe).LastWriteTime
         if ($CandidateTime -gt $BestReleaseTime) {
             $ResolvedRelease = $Candidate
             $BestReleaseTime = $CandidateTime
@@ -134,19 +146,22 @@ function Resolve-TauriReleaseDir {
     }
 
     if (-not $ResolvedRelease) {
-        if ($ExplicitReleaseDir) {
-            $ResolvedRelease = $ExplicitReleaseDir
+        # Nothing resolvable: point the error message at the canonical CI
+        # layout (dist profile) so the failure is actionable.
+        if ($script:TargetTriple) {
+            $ResolvedRelease = Join-Path $script:TauriTargetRoot (Join-Path $script:TargetTriple "dist")
         }
         else {
-            $ResolvedRelease = Join-Path $script:TauriTargetRoot "release"
+            $ResolvedRelease = Join-Path $script:TauriTargetRoot "dist"
         }
     }
 
-    # Remember which triple a triple-specific release directory belongs to.
-    foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
-        if ($ResolvedRelease -eq (Join-Path $script:TauriTargetRoot (Join-Path $t "release"))) {
-            $ResolvedTriple = $t
-            break
+    # Remember which triple a triple-specific directory belongs to.
+    foreach ($t in $Triples) {
+        foreach ($p in $Profiles) {
+            if ($ResolvedRelease -eq (Join-Path $script:TauriTargetRoot (Join-Path $t $p))) {
+                $ResolvedTriple = $t
+            }
         }
     }
 
