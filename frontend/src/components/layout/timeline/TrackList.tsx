@@ -18,14 +18,16 @@ import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 
-/** Color palette options shown when creating a new track.
- * 精简为 4 个低饱和协调色（蓝/绿/橙/紫）—— 与归一化带（s 0.16-0.30）同调，
- * 任意选择落到时间线上都是安静的"彩色灰"。 */
+/** Color palette options shown when creating a new track. */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
-    { value: "#5b8ec4", key: "color_blue" },
-    { value: "#4fa383", key: "color_green" },
-    { value: "#c97a4a", key: "color_orange" },
-    { value: "#8f7bb8", key: "color_purple" },
+    { value: "#4a8fd1", key: "color_blue" },
+    { value: "#7b6bc4", key: "color_purple" },
+    { value: "#43a875", key: "color_green" },
+    { value: "#cf6f2e", key: "color_orange" },
+    { value: "#f087b5", key: "color_pink" },
+    { value: "#b845a5", key: "color_magenta" },
+    { value: "#f0d25e", key: "color_yellow" },
+    { value: "#d94f4a", key: "color_red" },
 ];
 const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
 
