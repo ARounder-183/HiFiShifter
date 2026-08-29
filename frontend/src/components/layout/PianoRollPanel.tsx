@@ -111,7 +111,11 @@ import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
-import { createTimelineAxis } from "./timeline/runtime/timelineAxis.js";
+import {
+    createTimelineAxis,
+    viewportEndSec,
+    viewportStartSec,
+} from "./timeline/runtime/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
@@ -2377,9 +2381,31 @@ export const PianoRollPanel: React.FC = () => {
         [s.clips, groupTrackIds],
     );
 
-    // 可见区域的 sec 范围（统一用 sec 坐标系）
-    const visibleStartSec = scrollLeft / Math.max(1e-9, pxPerSec);
-    const visibleEndSec = visibleStartSec + viewSize.w / Math.max(1e-9, pxPerSec);
+    /**
+     * 参数编辑器的统一坐标投影（渲染期）。
+     *
+     * 用 React state 的 scrollLeft / pxPerSec 构造：本面板所有**渲染期**的时间↔
+     * 像素换算都走它。滚动热路径另用 ref 构造 `drawAxis`（见 drawRef），因为
+     * 滚动时 ref 同步更新而 state 滞后一帧。
+     *
+     * 注意：`scrollLeft` 是**绘制坐标**（由 timelineViewportNativeToState 转换
+     * 得到），与 axis 的契约一致；DOM 原生坐标只在量测边界转换。
+     */
+    const prAxis = useMemo(
+        () =>
+            createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                viewportWidthPx: viewSize.w,
+                dpr: window.devicePixelRatio || 1,
+            }),
+        [pxPerSec, scrollLeft, viewSize.w],
+    );
+
+    // 可见区域的 sec 范围：仅用于数据窗口选择（clip peaks 取窗），
+    // 像素换算一律经 prAxis，不得再由这里除回秒。
+    const visibleStartSec = viewportStartSec(prAxis);
+    const visibleEndSec = viewportEndSec(prAxis);
 
     // Per-clip 波形 peaks（替代原来的 mix 波形）
     const clipPeaks = useClipsPeaksForPianoRoll({
@@ -2512,6 +2538,14 @@ export const PianoRollPanel: React.FC = () => {
 
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
+        // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
+        // state 滞后一帧（渲染期的 prAxis 不能用于此处）。
+        const drawAxis = createTimelineAxis({
+            pxPerSec: pxPerSecRef.current,
+            scrollLeftPx: scrollLeftRef.current,
+            viewportWidthPx: viewSizeRef.current.w,
+            dpr: window.devicePixelRatio || 1,
+        });
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
             canvas: canvasRef.current,
@@ -2532,8 +2566,7 @@ export const PianoRollPanel: React.FC = () => {
                 : null,
             liveEditOverride: liveEditOverrideRef.current,
             selection: selectionRef.current,
-            pxPerSec: pxPerSecRef.current,
-            scrollLeft: scrollLeftRef.current,
+            axis: drawAxis,
             secPerBeat,
             // 画布每帧重绘（onFrame invalidate），播放头必须用插值的视觉值：
             // 用 Redux 提交值会让 60fps 的重绘画着同一个旧播放头（且与标尺
@@ -2549,13 +2582,13 @@ export const PianoRollPanel: React.FC = () => {
             pitchSnapUnit: s.pitchSnapUnit,
             projectScale: effectiveProjectScale,
             scaleHighlightMode: s.scaleHighlightMode,
+            // 可见秒区间由 axis 提供：此前这里写作 scrollLeft / pxPerSec
+            // （先除后乘），与其余图层的换算不等价。
             scaleSegments: buildScaleSegments(
                 s.tempoMap,
                 effectiveProjectScale,
-                Math.max(0, scrollLeftRef.current / Math.max(1e-9, pxPerSecRef.current) - 5),
-                (scrollLeftRef.current + viewSizeRef.current.w) /
-                    Math.max(1e-9, pxPerSecRef.current) +
-                    5,
+                Math.max(0, viewportStartSec(drawAxis) - 5),
+                viewportEndSec(drawAxis) + 5,
             ),
             toolMode: s.toolMode,
             snapToggleHeld: snapToggleHeld,
@@ -4132,11 +4165,7 @@ export const PianoRollPanel: React.FC = () => {
     const timelineTicks = useMemo(
         () =>
             buildTimelineTicks({
-                axis: createTimelineAxis({
-                    pxPerSec,
-                    scrollLeftPx: scrollLeft,
-                    viewportWidthPx: viewSize.w,
-                }),
+                axis: prAxis,
                 bpm: s.bpm,
                 beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
                 grid: s.grid,

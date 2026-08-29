@@ -14,8 +14,17 @@ import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } fr
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { clamp } from "../timeline";
 import { rasterize } from "../timeline/runtime/canvasRaster";
+import {
+    durationToWidthPx,
+    secToContentPx,
+    secToSpanPx,
+    secToViewportPx,
+    viewportEndSec,
+    viewportStartSec,
+    type TimelineAxis,
+} from "../timeline/runtime/timelineAxis";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
-import { framesToTime, timeToPixel } from "./utils";
+import { framesToTime } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import {
     applyGainsToPeaks,
@@ -80,6 +89,16 @@ function midiToLabel(midi: number): string {
     return `${name}${octave}`;
 }
 
+/**
+ * 绘制一条参数曲线。
+ *
+ * 流程：按帧周期把帧号还原成工程时间 → 用统一投影换成视口 x → 逐点连线。
+ *
+ * 特殊规则：x 坐标**只允许**经 `secToViewportPx(axis, tSec)` 得到。此前这里走
+ * 「先除后乘」的 `timeToPixel(t, scrollLeft/p, w/p, w)`，与其余图层的「先乘后减」
+ * 在 IEEE754 下不等价，是曲线与网格/播放头错位的来源。二者的等价性由
+ * `renderProjection.test.ts` 的 2 万组随机比对守护（相对误差 < 1e-9）。
+ */
 function drawCurveTimed(args: {
     ctx: CanvasRenderingContext2D;
     values: number[];
@@ -89,27 +108,18 @@ function drawCurveTimed(args: {
     startFrame: number;
     stride: number;
     framePeriodMs: number;
-    visibleStartSec: number;
-    visibleDurSec: number;
+    /** 统一投影：曲线与其它图层的唯一坐标来源。 */
+    axis: TimelineAxis;
     valueToY: (param: ParamName, v: number, h: number) => number;
 }) {
-    const {
-        ctx,
-        values,
-        param,
-        w,
-        h,
-        startFrame,
-        stride,
-        framePeriodMs,
-        visibleStartSec,
-        visibleDurSec,
-        valueToY,
-    } = args;
+    const { ctx, values, param, w, h, startFrame, stride, framePeriodMs, axis, valueToY } = args;
 
     if (values.length < 2) return;
     const fp = Math.max(1e-6, framePeriodMs);
     const step = Math.max(1, Math.floor(stride));
+    // 可见区间只用于裁剪；必须由 axis 提供，禁止用 scrollLeft / pxPerSec 还原。
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
 
     // Check debug flag
     const debugEnabled =
@@ -155,7 +165,7 @@ function drawCurveTimed(args: {
             started = false;
             continue;
         }
-        const x = timeToPixel(tSec, visibleStartSec, visibleDurSec, w);
+        const x = secToViewportPx(axis, tSec);
 
         // Track first and last points for debugging
         if (!firstPoint && started === false) {
@@ -185,7 +195,7 @@ function drawCurveTimed(args: {
                 x: firstPoint.x,
                 // Verify conversion
                 verifyTime: framesToTime(firstPoint.frame, fp),
-                verifyPixel: timeToPixel(firstPoint.tSec, visibleStartSec, visibleDurSec, w),
+                verifyPixel: secToViewportPx(axis, firstPoint.tSec),
             },
             lastPoint: {
                 frame: lastPoint.frame,
@@ -193,7 +203,7 @@ function drawCurveTimed(args: {
                 x: lastPoint.x,
                 // Verify conversion
                 verifyTime: framesToTime(lastPoint.frame, fp),
-                verifyPixel: timeToPixel(lastPoint.tSec, visibleStartSec, visibleDurSec, w),
+                verifyPixel: secToViewportPx(axis, lastPoint.tSec),
             },
             pixelSpan: lastPoint.x - firstPoint.x,
             timeSpan: lastPoint.tSec - firstPoint.tSec,
@@ -209,25 +219,13 @@ function drawParamMorphOverlay(args: {
     overlay: ParamMorphOverlay;
     editParam: ParamName;
     framePeriodMs: number;
-    visibleStartSec: number;
-    visibleDurSec: number;
-    w: number;
+    /** 统一投影：与曲线、网格、播放头同源。 */
+    axis: TimelineAxis;
     h: number;
     valueToY: (param: ParamName, v: number, h: number) => number;
     isDark: boolean;
 }) {
-    const {
-        ctx,
-        overlay,
-        editParam,
-        framePeriodMs,
-        visibleStartSec,
-        visibleDurSec,
-        w,
-        h,
-        valueToY,
-        isDark,
-    } = args;
+    const { ctx, overlay, editParam, framePeriodMs, axis, h, valueToY, isDark } = args;
     const fp = Math.max(1e-6, framePeriodMs);
     const points = overlay.points.slice().sort((a, b) => a.frame - b.frame);
     if (points.length !== 4) return;
@@ -237,7 +235,7 @@ function drawParamMorphOverlay(args: {
 
     const toCanvasX = (frame: number) => {
         const sec = framesToTime(frame, fp);
-        return timeToPixel(sec, visibleStartSec, visibleDurSec, w);
+        return secToViewportPx(axis, sec);
     };
 
     ctx.save();
@@ -309,8 +307,12 @@ export function drawPianoRoll(args: {
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
     selection: { aBeat: number; bBeat: number } | null;
-    pxPerSec: number;
-    scrollLeft: number;
+    /**
+     * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
+     * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
+     */
+    axis: TimelineAxis;
+    /** 每拍秒数。仅用于 beat↔sec 换算（选区数据以 beat 为单位），不参与投影。 */
     secPerBeat: number;
     playheadSec: number; // 播放头位置（秒）
     pitchAnalysisPending?: boolean;
@@ -358,8 +360,7 @@ export function drawPianoRoll(args: {
         overlayText,
         liveEditOverride,
         selection,
-        pxPerSec,
-        scrollLeft,
+        axis,
         secPerBeat,
         playheadSec,
         pitchAnalysisPending,
@@ -647,11 +648,14 @@ export function drawPianoRoll(args: {
     ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
     ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
 
-    // 统一用 sec 坐标系：所有 x 坐标 = timeSec * pxPerSec - scrollLeft
-    const visibleStartSec = scrollLeft / Math.max(1e-9, pxPerSec);
-    const visibleDurSec = w / Math.max(1e-9, pxPerSec);
-    // beat 坐标系辅助（仅用于 selection 等仍以 beat 为单位的数据）
-    const pxPerBeat = pxPerSec * secPerBeat;
+    // 所有 x 坐标 = axis.secToViewportPx(sec)，与时间线侧同一实现。
+    // 可见区间仅用于裁剪，且只能由 axis 提供：此前这里写作
+    // `scrollLeft / pxPerSec`（先除后乘），与其余图层不等价，是错位根源之一。
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
+    // beat → sec 的换算系数（选区/剪贴板预览数据仍以 beat 为单位）。
+    // 注意：不构造 pxPerBeat —— 像素投影一律走 axis，beat 先转 sec 再投影。
+    const beatToSec = Math.max(1e-9, secPerBeat);
 
     // Horizontal grid lines
     if (editParam === "pitch") {
@@ -695,8 +699,8 @@ export function drawPianoRoll(args: {
                     if (!segment.scale) continue;
                     const segmentNotes = resolveScaleNotes(segment.scale);
                     if (!segmentNotes.includes(pc)) continue;
-                    const x0 = segment.startSec * pxPerSec - scrollLeft;
-                    const x1 = segment.endSec * pxPerSec - scrollLeft;
+                    const x0 = secToViewportPx(axis, segment.startSec);
+                    const x1 = secToViewportPx(axis, segment.endSec);
                     if (x1 < 0 || x0 > w) continue;
                     ctx.beginPath();
                     ctx.moveTo(Math.max(0, x0), y + 0.5);
@@ -831,7 +835,7 @@ export function drawPianoRoll(args: {
 
             const clipStartSec = entry.startSec;
             const clipEndSec = clipStartSec + entry.lengthSec;
-            const clipWidthPx = entry.lengthSec * pxPerSec;
+            const clipWidthPx = secToSpanPx(axis, entry.lengthSec);
             if (clipWidthPx <= 0) continue;
 
             // 只渲染当前视口内的片段
@@ -839,8 +843,8 @@ export function drawPianoRoll(args: {
             const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
             if (visEndSec <= visStartSec) continue;
 
-            const viewportStartPx = Math.round(scrollLeft);
-            const clipStartPx = Math.round(clipStartSec * pxPerSec);
+            const viewportStartPx = Math.round(axis.scrollLeftPx);
+            const clipStartPx = Math.round(secToContentPx(axis, clipStartSec));
 
             const isLoop = Boolean(entry.loopEnabled);
             const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
@@ -981,7 +985,10 @@ export function drawPianoRoll(args: {
             // 实现滞后防抖）。级别只依赖 pxPerSec 与采样率，对本 clip 的所有
             // 瓦片都相同 —— 移到循环外，避免每瓦片重复计算与写回。
             const sampleRate = entry.sourceSampleRate || 44100;
-            const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
+            // 采样密度（每像素采样数）依赖缩放，但**不是**坐标投影：
+            // 它不产生任何 x 坐标，只是挑选 mipmap 等级，因此直接读 axis 的
+            // 缩放标量是安全的（坐标一律走 secToViewportPx / secToContentPx）。
+            const spp = Math.max(1, Math.round(sampleRate / axis.pxPerSec));
             const levelKey = `${entry.sourcePath}::${entry.clipId}`;
             const previousLevel = lastLevelByClip[levelKey];
             const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
@@ -989,7 +996,7 @@ export function drawPianoRoll(args: {
 
             // 边缘外扩（与 WaveformTrackCanvas 相同的公式）：保证像素列插值
             // 在瓦片可见边界处不缺数据。
-            const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, pxPerSec)) * pr);
+            const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, axis.pxPerSec)) * pr);
 
             for (const tile of tiles) {
                 const tileLocalEndSec = tile.localStartSec + tile.durationSec;
@@ -1053,9 +1060,11 @@ export function drawPianoRoll(args: {
 
                 // 瓦片在画布上的可见像素范围
                 const tileVisLeft =
-                    Math.round((clipStartSec + visLocalStart) * pxPerSec) - viewportStartPx;
+                    Math.round(secToContentPx(axis, clipStartSec + visLocalStart)) -
+                    viewportStartPx;
                 const tileVisRight =
-                    Math.round((clipStartSec + visLocalEnd) * pxPerSec) - viewportStartPx;
+                    Math.round(secToContentPx(axis, clipStartSec + visLocalEnd)) -
+                    viewportStartPx;
                 if (tileVisRight <= tileVisLeft) {
                     continue;
                 }
@@ -1064,7 +1073,8 @@ export function drawPianoRoll(args: {
                 // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
                 // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
                 // 子像素漂移。
-                const tileStartTimelinePx = clipStartPx + tile.localStartSec * pxPerSec;
+                const tileStartTimelinePx =
+                    clipStartPx + secToSpanPx(axis, tile.localStartSec);
                 const clipPixelOffset = Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
 
                 const effectiveFadeInPiano =
@@ -1102,7 +1112,9 @@ export function drawPianoRoll(args: {
                     clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
                     clipTotalDurationSec: entry.lengthSec,
                     clipPixelOffset,
-                    clipTotalWidthPx: Math.max(1, tile.durationSec * pxPerSec),
+                    // 与 clip 体画布共用同一宽度下限（durationToWidthPx），
+                    // 否则极小瓦片处波形与 clip 体宽度会分叉。
+                    clipTotalWidthPx: durationToWidthPx(axis, tile.durationSec),
                 };
 
                 // 应用增益（音量 + 淡入淡出）
@@ -1134,8 +1146,9 @@ export function drawPianoRoll(args: {
     if (selection) {
         const a = Math.min(selection.aBeat, selection.bBeat);
         const b = Math.max(selection.aBeat, selection.bBeat);
-        const x0 = a * pxPerBeat - scrollLeft;
-        const x1 = b * pxPerBeat - scrollLeft;
+        // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
+        const x0 = secToViewportPx(axis, a * beatToSec);
+        const x1 = secToViewportPx(axis, b * beatToSec);
         ctx.fillStyle = "rgba(100, 200, 255, 0.08)";
         ctx.fillRect(x0, 0, x1 - x0, h);
         ctx.strokeStyle = "rgba(100, 200, 255, 0.30)";
@@ -1167,8 +1180,7 @@ export function drawPianoRoll(args: {
                 startFrame: overlay.paramView.startFrame,
                 stride: overlay.paramView.stride,
                 framePeriodMs: overlay.paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1209,7 +1221,7 @@ export function drawPianoRoll(args: {
 
                 // 计算当前帧的时间（秒），统一用 sec 坐标系
                 const frameSec = curveStartSec + (i * fp) / 1000;
-                const x = frameSec * pxPerSec - scrollLeft;
+                const x = secToViewportPx(axis, frameSec);
 
                 if (x > w + 10) break;
 
@@ -1274,8 +1286,7 @@ export function drawPianoRoll(args: {
                 startFrame: secondaryParamView.startFrame,
                 stride: secondaryParamView.stride,
                 framePeriodMs: secondaryParamView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1303,8 +1314,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1325,8 +1335,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1336,8 +1345,8 @@ export function drawPianoRoll(args: {
         if (selection && editValues.length >= 2) {
             const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
             const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selX0 = selMinBeat * pxPerBeat - scrollLeft;
-            const selX1 = selMaxBeat * pxPerBeat - scrollLeft;
+            const selX0 = secToViewportPx(axis, selMinBeat * beatToSec);
+            const selX1 = secToViewportPx(axis, selMaxBeat * beatToSec);
 
             ctx.save();
             // 裁剪到选区范围
@@ -1357,8 +1366,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1374,13 +1382,13 @@ export function drawPianoRoll(args: {
         ) {
             const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
             const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selStartSec = selMinBeat * secPerBeat;
-            const selEndSec = selMaxBeat * secPerBeat;
+            const selStartSec = selMinBeat * beatToSec;
+            const selEndSec = selMaxBeat * beatToSec;
 
             const cbFp = Math.max(1e-6, clipboardPreview.framePeriodMs);
 
-            const selX0 = selMinBeat * pxPerBeat - scrollLeft;
-            const selX1 = selMaxBeat * pxPerBeat - scrollLeft;
+            const selX0 = secToViewportPx(axis, selStartSec);
+            const selX1 = secToViewportPx(axis, selEndSec);
 
             ctx.save();
             // 裁剪到选区范围
@@ -1399,7 +1407,7 @@ export function drawPianoRoll(args: {
                 const tSec = selStartSec + (i * cbFp) / 1000;
                 // 超出选区结束点则停止
                 if (tSec > selEndSec) break;
-                const x = timeToPixel(tSec, visibleStartSec, visibleDurSec, w);
+                const x = secToViewportPx(axis, tSec);
                 const rawValue = clipboardPreview.values[i] ?? 0;
                 const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
                 const y = valueToY(editParam, mappedValue, h);
@@ -1420,9 +1428,7 @@ export function drawPianoRoll(args: {
                 overlay: paramMorphOverlay,
                 editParam,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
-                w,
+                axis,
                 h,
                 valueToY,
                 isDark,
@@ -1441,7 +1447,7 @@ export function drawPianoRoll(args: {
     }
 
     // Playhead（统一用 sec 坐标系）
-    const phx = playheadSec * pxPerSec - scrollLeft;
+    const phx = secToViewportPx(axis, playheadSec);
     ctx.strokeStyle = colors.playheadLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
