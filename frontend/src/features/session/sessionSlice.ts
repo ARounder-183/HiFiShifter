@@ -1,4 +1,4 @@
-import { createSlice, current, type PayloadAction } from "@reduxjs/toolkit";
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import type {
     TimelineClip,
     TimelineClipTake,
@@ -473,8 +473,6 @@ export interface SessionState {
         pitchRange: { min: number; max: number };
     };
 
-    historyPast: StateSnapshot[];
-    historyFuture: StateSnapshot[];
     customScalePresets: CustomScalePreset[];
     project: {
         name: string;
@@ -515,7 +513,6 @@ export interface SessionState {
      * 交互锁计数器：当用户正在进行连续操作（拖动、滑动等）时 > 0。
      * 在锁定期间，连续操作类 thunk 的 fulfilled handler 将跳过 applyTimelineState()，
      * 避免后端返回的过期快照覆盖前端乐观更新导致的闪烁。
-     * 不包含在 undo/redo 快照中。
      */
     _interactionLockCount: number;
 
@@ -523,20 +520,8 @@ export interface SessionState {
      * 最近一次 undo/redo 请求的 requestId。快速连续撤销/重做会产生多个
      * in-flight thunk；fulfilled/rejected 到达时与该字段比对，丢弃过期
      * 响应，防止旧快照以 force 覆盖新状态（与 seekPlayhead 的乱序防护同理）。
-     * 不包含在 undo/redo 快照中。
      */
     _latestHistoryOpRequestId: string | null;
-}
-
-interface StateSnapshot {
-    clips: ClipInfo[];
-    clipAutomation: SessionState["clipAutomation"];
-    selectedTrackId: string | null;
-    selectedClipId: string | null;
-    selectedPointId: string | null;
-    playheadSec: number;
-    clipWaveforms: Record<string, WaveformPreview>;
-    clipPitchRanges: Record<string, { min: number; max: number }>;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -572,39 +557,6 @@ function ensureClipAutomation(state: SessionState, clipId: string) {
     if (!state.clipAutomation[clipId]) {
         state.clipAutomation[clipId] = createDefaultAutomation();
     }
-}
-
-function createSnapshot(state: SessionState): StateSnapshot {
-    return {
-        clips: state.clips.map((clip) => ({ ...clip })),
-        clipAutomation: structuredClone(current(state.clipAutomation)),
-        selectedTrackId: state.selectedTrackId,
-        selectedClipId: state.selectedClipId,
-        selectedPointId: state.selectedPointId,
-        playheadSec: state.playheadSec,
-        clipWaveforms: { ...state.clipWaveforms },
-        clipPitchRanges: { ...state.clipPitchRanges },
-    };
-}
-
-function applySnapshot(state: SessionState, snapshot: StateSnapshot) {
-    state.clips = snapshot.clips;
-    state.clipAutomation = snapshot.clipAutomation;
-    state.selectedTrackId = snapshot.selectedTrackId;
-    state.selectedClipId = snapshot.selectedClipId;
-    state.selectedPointId = snapshot.selectedPointId;
-    state.playheadSec = snapshot.playheadSec;
-    state.clipWaveforms = snapshot.clipWaveforms;
-    state.clipPitchRanges = snapshot.clipPitchRanges;
-}
-
-function pushHistory(state: SessionState) {
-    state.historyPast.push(createSnapshot(state));
-    if (state.historyPast.length > 40) {
-        state.historyPast.shift();
-    }
-    state.historyFuture = [];
-    markProjectDirty(state.project);
 }
 
 function normalizeClipColor(color: string | undefined): ClipColor {
@@ -1676,8 +1628,6 @@ const initialState: SessionState = {
         pitchRange: { min: -24, max: 24 },
     },
 
-    historyPast: [],
-    historyFuture: [],
     customScalePresets: [],
     project: {
         name: "Untitled",
@@ -1835,7 +1785,13 @@ const sessionSlice = createSlice({
             state.trackMeters = {};
         },
         checkpointHistory(state) {
-            pushHistory(state);
+            // 撤销/重做由后端权威管理（undo_timeline / redo_timeline 返回完整
+            // 时间线快照）。前端不再维护平行的快照栈——旧实现的本检查点与
+            // 后端检查点在深度与内容上都可能错位，撤销时会先乐观渲染出任意
+            // 旧状态、再被后端快照纠正，造成轨道视图闪屏。此 action 现在
+            // 仅负责：1) 标记工程已修改；2) 递增 paramsEpoch 让参数编辑器
+            // 重新取数（如 shiftParam 系列直接写曲线后的刷新）。
+            markProjectDirty(state.project);
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
         /** 供录音等后端直接导入时间轴的命令同步完整快照。 */
@@ -2385,7 +2341,7 @@ const sessionSlice = createSlice({
             clip.color = normalizeClipColor(action.payload.color);
         },
         addClip(state, action: PayloadAction<{ trackId: string }>) {
-            pushHistory(state);
+            markProjectDirty(state.project);
             const newClipId = createId("clip");
             state.clips.push({
                 id: newClipId,
@@ -2420,7 +2376,7 @@ const sessionSlice = createSlice({
             if (!selectedId) {
                 return;
             }
-            pushHistory(state);
+            markProjectDirty(state.project);
             state.clips = state.clips.filter((clip) => clip.id !== selectedId);
             delete state.clipAutomation[selectedId];
             delete state.clipWaveforms[selectedId];
@@ -2462,7 +2418,7 @@ const sessionSlice = createSlice({
             if (!clipId) {
                 return;
             }
-            pushHistory(state);
+            markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
             const target = state.clipAutomation[clipId][action.payload.param];
             target.push({
@@ -2485,7 +2441,7 @@ const sessionSlice = createSlice({
             if (!clipId) {
                 return;
             }
-            pushHistory(state);
+            markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
             const target = state.clipAutomation[clipId][action.payload.param];
             const point = target.find((entry) => entry.id === action.payload.pointId);
@@ -2503,7 +2459,7 @@ const sessionSlice = createSlice({
             if (!clipId) {
                 return;
             }
-            pushHistory(state);
+            markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
             const target = state.clipAutomation[clipId][action.payload.param];
             state.clipAutomation[clipId][action.payload.param] = target.filter(
@@ -2574,24 +2530,6 @@ const sessionSlice = createSlice({
         closeClipFormantToolWindow(state) {
             state.clipFormantToolWindow.open = false;
             state.clipFormantToolWindow.clipId = null;
-        },
-        undo(state) {
-            const snapshot = state.historyPast.pop();
-            if (!snapshot) {
-                return;
-            }
-            state.historyFuture.push(createSnapshot(state));
-            applySnapshot(state, snapshot);
-            state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
-        },
-        redo(state) {
-            const snapshot = state.historyFuture.pop();
-            if (!snapshot) {
-                return;
-            }
-            state.historyPast.push(createSnapshot(state));
-            applySnapshot(state, snapshot);
-            state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
         },
     },
     extraReducers: (builder) => {
@@ -3372,9 +3310,12 @@ const sessionSlice = createSlice({
             })
 
             .addCase(undoRemote.pending, (state, action) => {
-                // 记录最新请求：乱序到达的旧响应在 fulfilled/rejected 中被丢弃。
+                // 撤销/重做以后端为唯一权威：pending 阶段不做任何本地快照
+                // 回放（旧实现会先乐观渲染前端快照——它与其后端检查点在深度
+                // 与内容上都可能错位，造成轨道视图闪现任意旧状态后再被
+                // fulfilled 的后端快照纠正）。这里仅记录最新请求，乱序到达
+                // 的旧响应在 fulfilled/rejected 中被丢弃。
                 state._latestHistoryOpRequestId = action.meta.requestId;
-                sessionSlice.caseReducers.undo(state);
             })
 
             .addCase(undoRemote.fulfilled, (state, action) => {
@@ -3393,13 +3334,14 @@ const sessionSlice = createSlice({
             })
 
             .addCase(undoRemote.rejected, (state, action) => {
+                // 无乐观本地变更需要回滚：后端 undo 失败时时间线未变，
+                // 前端保持现状即可（仅丢弃过期响应）。
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
-                sessionSlice.caseReducers.redo(state);
             })
 
             .addCase(redoRemote.pending, (state, action) => {
+                // 同 undoRemote.pending：以后端为唯一权威，不做本地快照回放。
                 state._latestHistoryOpRequestId = action.meta.requestId;
-                sessionSlice.caseReducers.redo(state);
             })
 
             .addCase(redoRemote.fulfilled, (state, action) => {
@@ -3415,8 +3357,8 @@ const sessionSlice = createSlice({
             })
 
             .addCase(redoRemote.rejected, (state, action) => {
+                // 同 undoRemote.rejected：无乐观本地变更需要回滚。
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
-                sessionSlice.caseReducers.undo(state);
             })
 
             .addCase(newProjectRemote.fulfilled, (state, action) => {
@@ -4786,8 +4728,6 @@ export const {
     setClipFormantToolWindowPosition,
     closeClipFormantToolWindow,
     removeClipPitchData,
-    undo,
-    redo,
     bumpParamsEpoch,
 } = sessionSlice.actions;
 

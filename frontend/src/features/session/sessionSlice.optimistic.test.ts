@@ -100,61 +100,6 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
             ],
             selectedTrackId: "track-a",
             selectedClipId: "clip-a",
-            historyPast: [
-                {
-                    clips: [
-                        {
-                            id: "clip-a",
-                            trackId: "track-a",
-                            name: "Clip A",
-                            startSec: 1,
-                            lengthSec: 2,
-                            color: "emerald",
-                            gain: 1,
-                            muted: false,
-                            sourcePath: "a.wav",
-                            durationSec: 8,
-                            sourceStartSec: 0,
-                            sourceEndSec: 8,
-                            playbackRate: 1,
-                            reversed: false,
-                            loopEnabled: false,
-                            fadeInSec: 0,
-                            fadeOutSec: 0,
-                            fadeInCurve: "sine",
-                            fadeOutCurve: "sine",
-                        },
-                        {
-                            id: "clip-b",
-                            trackId: "track-b",
-                            name: "Clip B",
-                            startSec: 8,
-                            lengthSec: 3,
-                            color: "amber",
-                            gain: 1,
-                            muted: false,
-                            sourcePath: "b.wav",
-                            durationSec: 12,
-                            sourceStartSec: 0,
-                            sourceEndSec: 12,
-                            playbackRate: 1,
-                            reversed: false,
-                            loopEnabled: false,
-                            fadeInSec: 0,
-                            fadeOutSec: 0,
-                            fadeInCurve: "sine",
-                            fadeOutCurve: "sine",
-                        },
-                    ],
-                    clipAutomation: {},
-                    selectedTrackId: "track-a",
-                    selectedClipId: "clip-a",
-                    selectedPointId: null,
-                    playheadSec: 0,
-                    clipWaveforms: {},
-                    clipPitchRanges: {},
-                },
-            ],
         } as any;
     }
 
@@ -232,7 +177,14 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
     }
 
     {
+        // 撤销以后端为唯一权威：pending 阶段不做本地快照回放，状态保持不变
+        // （旧实现会乐观渲染与后端检查点错位的前端快照，造成轨道视图闪屏）。
         const next = reducer(createState(), undoRemote.pending("req-undo", undefined));
-        assertEqual(next.clips[0].startSec, 1, "undo pending applies local snapshot immediately");
+        assertEqual(next.clips[0].startSec, 4, "undo pending leaves state untouched");
+        assertEqual(
+            next._latestHistoryOpRequestId,
+            "req-undo",
+            "undo pending records request id for stale-response discard",
+        );
     }
 });
