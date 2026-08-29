@@ -32,8 +32,20 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
     return webApi.redoTimeline();
 });
 
+/** 新工程的初始轨道统一为中性灰（后端 add_track 会分配彩色，这里覆盖）。 */
+const NEW_PROJECT_TRACK_COLOR = "#74787e";
+
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
-    return webApi.newProject();
+    const result = await webApi.newProject();
+    // 就地修正快照：reducer 应用时初始轨道即为灰色（仅新建工程；打开既有
+    // 工程走 openProjectFromDialog，不在此列，用户自选的颜色不受影响）。
+    const snapshot = result as { ok?: boolean; tracks?: Array<{ color?: string }> };
+    if (snapshot.ok !== false && Array.isArray(snapshot.tracks)) {
+        for (const track of snapshot.tracks) {
+            track.color = NEW_PROJECT_TRACK_COLOR;
+        }
+    }
+    return result;
 });
 
 export const openProjectFromDialog = createAsyncThunk(

@@ -23,7 +23,7 @@ import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
  * （橙/黄/红）取更亮的原色，避免亮度归一化把它们抬成"洗白"的粉调；
  * 灰色为默认轨道色。 */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
-    { value: "#8a9099", key: "color_gray" },
+    { value: "#74787e", key: "color_gray" },
     { value: "#4a8fd1", key: "color_blue" },
     { value: "#7b6bc4", key: "color_purple" },
     { value: "#43a875", key: "color_green" },

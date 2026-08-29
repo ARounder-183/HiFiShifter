@@ -9,9 +9,9 @@ import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 // 我们在此处用 type-only import，避免运行时循环依赖�?
 import type { SessionState } from "../sessionSlice";
 
-/** 新建轨道的默认颜色：中性灰。后端 add_track 会自行分配彩色，创建成功后
- * 立即覆盖为灰色 —— 除非用户之后手动改色。 */
-const NEW_TRACK_DEFAULT_COLOR = "#8a9099";
+/** 新建轨道的默认颜色：中性灰（偏深）。后端 add_track 会自行分配彩色，
+ * 创建成功后立即覆盖为灰色 —— 除非用户之后手动改色。 */
+const NEW_TRACK_DEFAULT_COLOR = "#74787e";
 
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
