@@ -1,7 +1,6 @@
 import {
     buildTimelineClipVisualStyle,
     CLIP_CORNER_RADIUS_PX,
-    computeTimelineFadeShadeRange,
     resolveFontFamily,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
@@ -235,12 +234,6 @@ export function drawTimelineCanvas(
             isGroupActive,
             isGroupDisabled,
         });
-        const fadeShadeRange = computeTimelineFadeShadeRange({
-            widthPx: clipWidth,
-            fadeInPx: clip.fadeInPx,
-            fadeOutPx: clip.fadeOutPx,
-        });
-
         ctx.save();
         ctx.globalAlpha = visualStyle.mutedAlpha;
 
@@ -302,15 +295,9 @@ export function drawTimelineCanvas(
             ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
         }
 
-        if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.50)";
-            ctx.fillRect(
-                clipLeft + fadeShadeRange.startPx,
-                bodyTop,
-                Math.max(1, fadeShadeRange.endPx - fadeShadeRange.startPx),
-                bodyHeight,
-            );
-        }
+        // body 中段（两条渐变之间）不再叠加黑色遮罩：此前 0.18→0.50 的加深
+        // 让波形区域的背景发闷显脏（用户反馈"更干净一点"）。渐变区域自身的
+        // 压暗由下方 fadeIn/fadeOut 的独立 fillRect 负责。
 
         // header/body 分隔线：亮色块上的细深线，仅做分区提示。
         ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
