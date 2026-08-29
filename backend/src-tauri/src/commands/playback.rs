@@ -1405,6 +1405,22 @@ fn render_single_clip(
 }
 
 pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
+    // DAW 暂停语义：停止播放时把引擎当前可听位置（base + elapsed，即暂停点）
+    // 写回 timeline.playhead_sec。播放期间该字段不会前进（只有显式 seek 会
+    // 改），仍停留在本次播放的起始位置；若不回写，暂停后的任何编辑操作回灌
+    // 全量快照都会把前端播放头拉回"播放起始位置"。停止（Stop）流程随后由
+    // 前端显式 seek 回锚点覆盖，不受影响。
+    // 必须在 stop() 之前取快照，且仅在确实在播放时写入——否则未播放时的
+    // stop 调用（如录音收尾）会把 0 写进播放头。仅改字段、不做撤销检查点
+    // （与 set_transport 的 playhead 分支一致：播放头不参与撤销）。
+    let pb = state.audio_engine.snapshot_state();
+    if pb.is_playing {
+        let paused_sec = pb.base_sec + pb.position_sec;
+        if paused_sec.is_finite() && paused_sec >= 0.0 {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            tl.playhead_sec = paused_sec;
+        }
+    }
     state.audio_engine.stop();
     ok_bool()
 }

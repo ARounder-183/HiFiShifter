@@ -1327,7 +1327,14 @@ function applyTimelineState(
     state.selectedClipId = timeline.selected_clip_id;
     // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
     state.bpm = clamp(Number(timeline.bpm ?? state.bpm), 10, 960);
-    state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
+    // 播放中光标由 30Hz 轮询（引擎 base+position）驱动；后端快照的
+    // playhead_sec 只在显式 seek/transport 时同步，播放期间停留在本次播放
+    // 的起始位置，采纳它会把播放头瞬时拉回起点。暂停/停止后后端已在
+    // stop_audio 中把暂停点写回，此处采纳即为准确值。需要移动光标的操作
+    // （如粘贴跳转 pasteEndSec）在本函数之后显式设置，不受影响。
+    if (!state.runtime.isPlaying) {
+        state.playheadSec = Math.max(0, Number(timeline.playhead_sec ?? 0));
+    }
     state.projectSec = Math.max(4, Number(timeline.project_sec ?? state.projectSec));
     state.disabledGroupIds = Array.isArray(timeline.disabled_group_ids)
         ? [...timeline.disabled_group_ids]
