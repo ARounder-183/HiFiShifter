@@ -3217,6 +3217,68 @@ mod tests {
         assert_eq!(tl.clips.len(), 2);
     }
 
+    /// "将 Take 展开为独立音频块"向下展开回归：第 idx 个 Take 放到源轨道
+    /// 可视顺序下方第 idx 行；下方没有现成轨道时克隆源轨道设置新建。
+    #[test]
+    fn explode_clip_takes_places_takes_downward_across_tracks() {
+        let mut tl = TimelineState::default();
+        let track_a = tl.tracks[0].id.clone();
+        let track_b = tl.add_track(Some("B".into()), None, None);
+        let track_c = tl.add_track(Some("C".into()), None, None);
+
+        let clip_id = tl.add_clip(
+            Some(track_a.clone()),
+            Some("Multi".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            for n in 1..4 {
+                let mut take = clip.active_take().clone();
+                take.id = new_id("take");
+                take.name = format!("Take {n}");
+                clip.add_take(take);
+            }
+        }
+        assert_eq!(tl.tracks.len(), 3);
+
+        let exploded = tl.explode_clip_takes(&clip_id);
+        assert_eq!(exploded.len(), 4);
+
+        let track_of = |cid: &String| {
+            tl.clips
+                .iter()
+                .find(|c| c.id == *cid)
+                .map(|c| c.track_id.clone())
+                .unwrap()
+        };
+        assert_eq!(track_of(&exploded[0]), track_a, "take 1 stays on track A");
+        assert_eq!(track_of(&exploded[1]), track_b, "take 2 lands on track B");
+        assert_eq!(track_of(&exploded[2]), track_c, "take 3 lands on track C");
+
+        // 第 4 个 Take：下方没有现成轨道 → 新建轨道 D（克隆 A 的设置）。
+        let track_d = track_of(&exploded[3]);
+        assert_ne!(track_d, track_a, "take 4 must get a new track");
+        assert_eq!(tl.tracks.len(), 4, "one track auto-created for take 4");
+        let track_a_meta = tl.tracks.iter().find(|t| t.id == track_a).unwrap();
+        let track_d_meta = tl.tracks.iter().find(|t| t.id == track_d).unwrap();
+        assert_eq!(track_d_meta.parent_id, track_a_meta.parent_id);
+        assert_eq!(
+            track_d_meta.pitch_analysis_algo,
+            track_a_meta.pitch_analysis_algo
+        );
+        assert_eq!(track_d_meta.name, track_a_meta.name);
+        assert_eq!(track_d_meta.volume, track_a_meta.volume);
+
+        // 可视顺序自上而下为 A、B、C、D。
+        assert_eq!(
+            tl.visual_track_ids(),
+            vec![track_a, track_b, track_c, track_d]
+        );
+    }
+
     #[test]
     fn clip_take_remap_preserves_active_pointer() {
         let mut tl = TimelineState::default();
@@ -6926,18 +6988,94 @@ impl TimelineState {
         Some(packed_id)
     }
 
+    /// 与 build_track_payload 一致的 DFS 可视顺序（自上而下的轨道 id 列表）。
+    fn visual_track_ids(&self) -> Vec<String> {
+        let mut by_parent: HashMap<Option<String>, Vec<&Track>> = HashMap::new();
+        for t in &self.tracks {
+            by_parent.entry(t.parent_id.clone()).or_default().push(t);
+        }
+        for group in by_parent.values_mut() {
+            group.sort_by_key(|t| t.order);
+        }
+
+        let mut out: Vec<String> = Vec::with_capacity(self.tracks.len());
+        fn walk(
+            t: &Track,
+            by_parent: &HashMap<Option<String>, Vec<&Track>>,
+            out: &mut Vec<String>,
+        ) {
+            out.push(t.id.clone());
+            if let Some(children) = by_parent.get(&Some(t.id.clone())) {
+                for child in children {
+                    walk(child, by_parent, out);
+                }
+            }
+        }
+        if let Some(roots) = by_parent.get(&None) {
+            for root in roots {
+                walk(root, &by_parent, &mut out);
+            }
+        }
+        out
+    }
+
     /// 把一个多 Take Clip 展开为多个独立 Clip（每个 Take 一个），
     /// 保留原 Clip 的几何位置、长度与容器级属性。返回新 Clip id 列表。
+    ///
+    /// 放置采用"向下展开"：第 idx 个 Take 放到源轨道可视顺序下方第 idx 行的
+    /// 轨道上（idx=0 即源轨道本身）；下方没有现成轨道时，克隆源轨道的设置
+    /// （父轨道 / 算法 / 音量 / 颜色等）在可视顺序底部新建轨道，保证每个
+    /// Take 独占一行，而不是全部挤在源轨道上。
     pub fn explode_clip_takes(&mut self, clip_id: &str) -> Vec<String> {
         let Some(mut source) = self.clips.iter().find(|c| c.id == clip_id).cloned() else {
             return Vec::new();
         };
         source.normalize_takes();
+        let source_track_id = source.track_id.clone();
+        let source_track = self
+            .tracks
+            .iter()
+            .find(|t| t.id == source_track_id)
+            .cloned();
+        let mut visual_ids = self.visual_track_ids();
+        let source_row = visual_ids
+            .iter()
+            .position(|id| *id == source_track_id)
+            .unwrap_or(0);
+
         let mut created = Vec::new();
         for (idx, take) in source.takes.iter().enumerate() {
+            // 目标行 = 源轨道下方第 idx 行；没有现成轨道则新建（克隆源轨道
+            // 设置，追加到可视顺序末尾）并重算可视行表。
+            let target_row = source_row + idx;
+            while visual_ids.len() <= target_row {
+                let Some(template) = source_track.as_ref() else {
+                    break;
+                };
+                let track = Track {
+                    id: new_id("track"),
+                    name: template.name.clone(),
+                    parent_id: template.parent_id.clone(),
+                    order: self.next_track_order,
+                    muted: template.muted,
+                    solo: template.solo,
+                    volume: template.volume,
+                    compose_enabled: template.compose_enabled,
+                    pitch_analysis_algo: template.pitch_analysis_algo.clone(),
+                    color: template.color.clone(),
+                };
+                self.next_track_order += 1;
+                self.tracks.push(track);
+                visual_ids = self.visual_track_ids();
+            }
+            let Some(target_track_id) = visual_ids.get(target_row).cloned() else {
+                continue;
+            };
+
             let mut clip = source.clone();
             clip.id = new_id("clip");
             clip.group_id = None;
+            clip.track_id = target_track_id;
             if idx > 0 {
                 clip.name = if take.name.trim().is_empty() {
                     format!("{} {}", source.name, idx + 1)
