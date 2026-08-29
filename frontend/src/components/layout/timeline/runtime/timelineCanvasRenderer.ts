@@ -489,7 +489,8 @@ export function drawTimelineCanvas(
 
         if (clip.fadeInPx > 0) {
             // 淡入区压暗：音量从 0 爬升，视觉上"还没到全响"就该更暗。
-            ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+            // （0.45 在短渐变时像突兀的黑柱，降到 0.32。）
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
             // 渐变曲线 = 半透明白：在压暗区与彩色块上都稳定可见（REAPER 式）。
             ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
@@ -505,7 +506,7 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
             ctx.fillRect(
                 clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 bodyTop,
