@@ -18,6 +18,23 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
 
     timelineViewportSync.reset();
 
+    // seeded 语义：reset 后未播种；任何 setViewport 调用（即使值与模块
+    // 默认一致——启动时恰为 scrollLeft=0 / pxPerSec=150 的场景）都视为
+    // 拥有方（时间轴）已播种。参数编辑器在 isSeeded() 为 false 时必须
+    // 拒绝应用，否则启动瞬间会先把一帧默认视口画出来（"一闪"）。
+    {
+        assertEqual(timelineViewportSync.isSeeded(), false, "reset clears seeded");
+        timelineViewportSync.setViewport({ scrollLeft: 0, pxPerSec: 150 });
+        assertEqual(timelineViewportSync.isSeeded(), true, "setViewport seeds even with default values");
+    }
+    timelineViewportSync.reset();
+    {
+        timelineViewportSync.setViewport({ scrollLeft: 321 });
+        assertEqual(timelineViewportSync.isSeeded(), true, "setViewport seeds");
+    }
+    timelineViewportSync.reset();
+    assertEqual(timelineViewportSync.isSeeded(), false, "reset clears seeded again");
+
     // Atomic update: zoom and scroll are broadcast together so consumers never
     // observe a "new scroll + old zoom" intermediate state.
     {

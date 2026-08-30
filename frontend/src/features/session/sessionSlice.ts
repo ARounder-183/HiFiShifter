@@ -1815,6 +1815,11 @@ const initialState: SessionState = {
             muted: false,
             solo: false,
             volume: 1,
+            // 与后端 TRACK_COLOR_PALETTE[0]（TimelineState::default 的初始
+            // Main 轨道色）保持一致：灰色。前端最初始状态（未加载/未新建
+            // 工程）必须与"新建工程"看到同一个颜色，否则轨道头缺色回退
+            // 会显示成旧版高亮蓝。
+            color: "#74787e",
 
             composeEnabled: false,
             pitchAnalysisAlgo: "nsf_hifigan_onnx",

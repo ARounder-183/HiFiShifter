@@ -1135,6 +1135,12 @@ function AppInner() {
                             progress: p,
                         });
                     } else if (status === "done" || status === "cached") {
+                        // 波形数据就绪信号：清除该文件的 mipmap 失败负缓存
+                        // 并按需重载——打开工程瞬间的抢先请求常早于后端分析
+                        // 完成，若无此重试，波形要等用户滚动/缩放才出现。
+                        if (sourcePath) {
+                            waveformMipmapStore.refresh(sourcePath);
+                        }
                         // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
                         if (status === "done") {
                             currentProgress = 1.0;

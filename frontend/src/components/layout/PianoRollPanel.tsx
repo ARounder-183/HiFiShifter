@@ -1035,6 +1035,11 @@ export const PianoRollPanel: React.FC = () => {
         horizontalZoomPendingRef.current = null;
         horizontalZoomChainRef.current = null;
         const applyViewport = () => {
+            // 未播种（时间轴尚未把当前位置写入共享视口）时拒绝应用：
+            // 模块默认 {0,150} 只是占位，提前应用会把一帧错误缩放/位置
+            // 画出来再被纠正（启动"一闪"）。时间轴在挂载/切换的 layout
+            // effect（首帧绘制前）播种，播种后 emit 会驱动本订阅应用。
+            if (!timelineViewportSync.isSeeded()) return;
             const store = timelineViewportSync.get();
             const offset = timelineOffsetRef.current;
             const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);

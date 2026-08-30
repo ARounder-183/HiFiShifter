@@ -20,6 +20,16 @@ const state: TimelineViewportState = {
     pxPerSec: 150,
 };
 
+/**
+ * 是否已被"拥有方"（时间轴视图）播种。
+ *
+ * 模块默认值 {0, 150} 只是占位，不是任何面板的当前位置；参数编辑器在
+ * 未播种时必须**拒绝应用**共享视口，否则启动时会把一帧"默认缩放/位置"
+ * 画出来再被纠正（"一闪"）。时间轴在挂载 layout effect 阶段（首帧绘制前）
+ * 播种；任何 setViewport 调用都视为播种完成。
+ */
+let seeded = false;
+
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -32,6 +42,10 @@ export const timelineViewportSync = {
     get(): Readonly<TimelineViewportState> {
         return state;
     },
+    /** 共享视口是否已由时间轴播种（见 seeded 注释）。 */
+    isSeeded(): boolean {
+        return seeded;
+    },
     /**
      * 一次写入缩放与滚动位置，并只广播一次。
      *
@@ -40,6 +54,9 @@ export const timelineViewportSync = {
      * 的中间状态，进而在内容宽度尚未更新时被浏览器钳制、反向写回。
      */
     setViewport(next: Partial<TimelineViewportState>): void {
+        // 播种语义：拥有方已确定当前位置（即使值与模块默认一致，例如启动
+        // 时恰为 scrollLeft=0 / pxPerSec=150），也要立即可被订阅方应用。
+        seeded = true;
         let changed = false;
 
         if (next.scrollLeft != null && Number.isFinite(next.scrollLeft)) {
@@ -71,6 +88,7 @@ export const timelineViewportSync = {
     reset(): void {
         state.scrollLeft = 0;
         state.pxPerSec = 150;
+        seeded = false;
         emit();
     },
 };

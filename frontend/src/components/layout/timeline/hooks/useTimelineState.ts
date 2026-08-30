@@ -561,7 +561,10 @@ export function useTimelineState(): TimelineStateResult {
     }, [s.paramEditorSyncTimeline]);
 
     // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
-    useEffect(() => {
+    // 必须用 layout effect（而非被动 effect）：挂载/切换都要在**首帧绘制前**
+    // 播种共享视口，参数编辑器才能在首帧前完成对齐——若拖到被动 effect，
+    // 参数编辑器会先画出一帧未同步内容（"一闪"）再被纠正。
+    useLayoutEffect(() => {
         if (s.paramEditorSyncTimeline) {
             timelineViewportSync.setViewport({
                 scrollLeft: scrollLeftRef.current,

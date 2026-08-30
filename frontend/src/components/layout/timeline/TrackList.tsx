@@ -1547,7 +1547,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             backgroundColor:
                                                 track.color != null
                                                     ? normalizedTrackColorCss(track.color, darkMode)
-                                                    : "var(--qt-highlight)",
+                                                    : normalizedTrackColorCss(undefined, darkMode),
                                         }}
                                     />
 
@@ -1587,7 +1587,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 backgroundColor:
                                                     track.color != null
                                                         ? normalizedTrackColorCss(track.color, darkMode)
-                                                        : "var(--qt-highlight)",
+                                                        : normalizedTrackColorCss(undefined, darkMode),
                                             }}
                                         />
 
