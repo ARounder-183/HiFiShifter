@@ -52,6 +52,8 @@ import { NotebookPanel } from "./components/layout/NotebookPanel";
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
+import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
+import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
 import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
@@ -2199,6 +2201,10 @@ function AppInner() {
         setSourceFileChangedDialog((prev) => ({ ...prev, open: false }));
     }, []);
 
+    // 参数线上移/下移的长按重复：上一拍尚未完成（后端请求仍在途中）时
+    // 跳过本拍，避免 50ms 节奏下 IPC 与历史检查点堆积。
+    const paramShiftBusyRef = useRef(false);
+
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
         (actionId: ActionId) => {
@@ -2327,21 +2333,41 @@ function AppInner() {
                 case "track.add": {
                     // 新建轨道继承当前选中轨道的轨道层级（同 parentId），
                     // 并紧跟在选中轨道下方插入（同级列表紧后一位）。
-                    const ss = store.getState().session;
-                    const placement = computeInsertBelowPlacement(ss.tracks, ss.selectedTrackId);
-                    void dispatch(
-                        addTrackRemote({
-                            parentTrackId: placement.parentTrackId,
-                            index: placement.index,
-                        }),
-                    );
+                    // 长按 Ctrl+T = 连续添加（每拍读取最新选区，轨道依次向下排）。
+                    const fire = () => {
+                        const ss = store.getState().session;
+                        const placement = computeInsertBelowPlacement(
+                            ss.tracks,
+                            ss.selectedTrackId,
+                        );
+                        void dispatch(
+                            addTrackRemote({
+                                parentTrackId: placement.parentTrackId,
+                                index: placement.index,
+                            }),
+                        );
+                        return true;
+                    };
+                    fire();
+                    beginHoldRepeat(selectMergedKeybindings(store.getState())["track.add"], fire);
                     break;
                 }
                 case "track.clone": {
-                    const ss = store.getState().session;
-                    const selectedId = ss.selectedTrackId;
-                    if (!selectedId) break;
-                    void dispatch(duplicateTrackRemote(selectedId));
+                    // 长按 Ctrl+D = 连续克隆（每拍克隆当前选中轨道；克隆后后端
+                    // 会选中新克隆，因此连续克隆依次向下堆叠）。
+                    const fire = () => {
+                        const ss = store.getState().session;
+                        const selectedId = ss.selectedTrackId;
+                        if (!selectedId) return false;
+                        void dispatch(duplicateTrackRemote(selectedId));
+                        return true;
+                    };
+                    if (fire()) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["track.clone"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 case "track.delete": {
@@ -2374,196 +2400,233 @@ function AppInner() {
                 case "pianoRoll.shiftParamUp":
                 case "pianoRoll.shiftParamDown": {
                     const isUp = actionId === "pianoRoll.shiftParamUp";
-                    const ss = store.getState().session;
-                    const rootTrkId = resolveRootTrackId(ss.tracks, ss.selectedTrackId);
-                    if (!rootTrkId) break;
-                    const editP = ss.editParam;
-                    const rootTrk = ss.tracks.find((tr) => tr.id === rootTrkId);
-                    // pitch 参数需要 pitch 分析可用才能操作
-                    if (editP === "pitch") {
-                        if (!rootTrk?.composeEnabled || rootTrk.pitchAnalysisAlgo === "none") break;
-                    }
-                    const selClipId = ss.selectedClipId;
-                    // 优先使用多选 clip 列表，否则 fallback 到单选
-                    const multiIds = ss.multiSelectedClipIds;
-                    const clipIds = multiIds.length >= 1 ? multiIds : selClipId ? [selClipId] : [];
-                    if (clipIds.length === 0) break;
-                    const selClips = ss.clips.filter((c) => clipIds.includes(c.id));
-                    if (selClips.length === 0) break;
-                    const minSec = Math.min(...selClips.map((c) => c.startSec));
-                    const maxSec = Math.max(...selClips.map((c) => c.startSec + c.lengthSec));
-                    // 默认 framePeriodMs = 5
-                    const fp = 5;
-                    const startFrame = Math.max(0, Math.floor((minSec * 1000) / fp));
-                    const frameCount = Math.max(
-                        1,
-                        Math.min(200_000, Math.ceil(((maxSec - minSec) * 1000) / fp)),
-                    );
-                    void (async () => {
-                        let descriptor: ProcessorParamDescriptor | undefined;
-                        if (editP !== "pitch" && rootTrk?.pitchAnalysisAlgo) {
-                            const algo = rootTrk.pitchAnalysisAlgo;
-                            let descriptors = processorParamCacheRef.current.get(algo);
-                            if (!descriptors) {
-                                try {
-                                    descriptors = await paramsApi.getProcessorParams(algo);
-                                    processorParamCacheRef.current.set(algo, descriptors);
-                                } catch {
-                                    descriptors = undefined;
-                                }
+                    const busyRef = paramShiftBusyRef;
+                    // 长按 "=" / "-" = 连续上移/下移参数线。异步链路进行中时
+                    // 跳过本拍，避免 50ms 节奏下 IPC 与历史检查点堆积。
+                    const fire = (): boolean => {
+                        if (busyRef.current) return false;
+                        const ss = store.getState().session;
+                        const rootTrkId = resolveRootTrackId(ss.tracks, ss.selectedTrackId);
+                        if (!rootTrkId) return false;
+                        const editP = ss.editParam;
+                        const rootTrk = ss.tracks.find((tr) => tr.id === rootTrkId);
+                        // pitch 参数需要 pitch 分析可用才能操作
+                        if (editP === "pitch") {
+                            if (!rootTrk?.composeEnabled || rootTrk.pitchAnalysisAlgo === "none") {
+                                return false;
                             }
-                            descriptor = descriptors?.find((param) => param.id === editP);
                         }
-                        const step = getParamShiftStep(editP, descriptor);
-                        const delta = isUp ? step : -step;
-                        const clampNum = (v: number, minV: number, maxV: number) =>
-                            Math.min(maxV, Math.max(minV, v));
-                        const smoothness = clampNum(Number(ss.edgeSmoothnessPercent) || 0, 0, 100);
-                        const maxTransitionFrames = Math.floor(frameCount / 2);
-                        const transitionFrames =
-                            smoothness > 0 && maxTransitionFrames > 0
-                                ? Math.round((smoothness / 100) * maxTransitionFrames)
-                                : 0;
-                        const halfSpan = transitionFrames > 0 ? transitionFrames / 2 : 0;
-                        const extend = Math.max(0, Math.ceil(halfSpan));
-                        const extStart = Math.max(0, startFrame - extend);
-                        const extCount = frameCount + Math.max(0, startFrame - extStart) + extend;
-                        const selOffset = startFrame - extStart;
-
-                        const extRes = await paramsApi.getParamFrames(
-                            rootTrkId,
-                            editP,
-                            extStart,
-                            extCount,
+                        const selClipId = ss.selectedClipId;
+                        // 优先使用多选 clip 列表，否则 fallback 到单选
+                        const multiIds = ss.multiSelectedClipIds;
+                        const clipIds =
+                            multiIds.length >= 1 ? multiIds : selClipId ? [selClipId] : [];
+                        if (clipIds.length === 0) return false;
+                        const selClips = ss.clips.filter((c) => clipIds.includes(c.id));
+                        if (selClips.length === 0) return false;
+                        const minSec = Math.min(...selClips.map((c) => c.startSec));
+                        const maxSec = Math.max(...selClips.map((c) => c.startSec + c.lengthSec));
+                        // 默认 framePeriodMs = 5
+                        const fp = 5;
+                        const startFrame = Math.max(0, Math.floor((minSec * 1000) / fp));
+                        const frameCount = Math.max(
                             1,
+                            Math.min(200_000, Math.ceil(((maxSec - minSec) * 1000) / fp)),
                         );
-                        if (!extRes?.ok) return;
-                        const extPayload = extRes as ParamFramesPayload;
-                        const beforeDense = (extPayload.edit ?? []).map((v) => Number(v) || 0);
-                        if (beforeDense.length === 0) return;
+                        busyRef.current = true;
+                        void (async () => {
+                            try {
+                                let descriptor: ProcessorParamDescriptor | undefined;
+                                if (editP !== "pitch" && rootTrk?.pitchAnalysisAlgo) {
+                                    const algo = rootTrk.pitchAnalysisAlgo;
+                                    let descriptors = processorParamCacheRef.current.get(algo);
+                                    if (!descriptors) {
+                                        try {
+                                            descriptors = await paramsApi.getProcessorParams(algo);
+                                            processorParamCacheRef.current.set(algo, descriptors);
+                                        } catch {
+                                            descriptors = undefined;
+                                        }
+                                    }
+                                    descriptor = descriptors?.find((param) => param.id === editP);
+                                }
+                                const step = getParamShiftStep(editP, descriptor);
+                                const delta = isUp ? step : -step;
+                                const clampNum = (v: number, minV: number, maxV: number) =>
+                                    Math.min(maxV, Math.max(minV, v));
+                                const smoothness = clampNum(
+                                    Number(ss.edgeSmoothnessPercent) || 0,
+                                    0,
+                                    100,
+                                );
+                                const maxTransitionFrames = Math.floor(frameCount / 2);
+                                const transitionFrames =
+                                    smoothness > 0 && maxTransitionFrames > 0
+                                        ? Math.round((smoothness / 100) * maxTransitionFrames)
+                                        : 0;
+                                const halfSpan = transitionFrames > 0 ? transitionFrames / 2 : 0;
+                                const extend = Math.max(0, Math.ceil(halfSpan));
+                                const extStart = Math.max(0, startFrame - extend);
+                                const extCount =
+                                    frameCount + Math.max(0, startFrame - extStart) + extend;
+                                const selOffset = startFrame - extStart;
 
-                        const selEnd = Math.min(beforeDense.length - 1, selOffset + frameCount - 1);
-                        if (
-                            selOffset < 0 ||
-                            selOffset >= beforeDense.length ||
-                            selEnd < selOffset
-                        ) {
-                            return;
-                        }
-                        const actualSelLen = selEnd - selOffset + 1;
-                        const editedDense = beforeDense.slice();
-                        for (let i = 0; i < actualSelLen; i += 1) {
-                            const orig = beforeDense[selOffset + i] ?? 0;
-                            editedDense[selOffset + i] = orig + delta;
-                        }
+                                const extRes = await paramsApi.getParamFrames(
+                                    rootTrkId,
+                                    editP,
+                                    extStart,
+                                    extCount,
+                                    1,
+                                );
+                                if (!extRes?.ok) return;
+                                const extPayload = extRes as ParamFramesPayload;
+                                const beforeDense = (extPayload.edit ?? []).map(
+                                    (v) => Number(v) || 0,
+                                );
+                                if (beforeDense.length === 0) return;
 
-                        if (smoothness > 0 && transitionFrames > 0) {
-                            const calcMean = (arr: number[]) => {
-                                let sum = 0;
-                                let count = 0;
+                                const selEnd = Math.min(
+                                    beforeDense.length - 1,
+                                    selOffset + frameCount - 1,
+                                );
+                                if (
+                                    selOffset < 0 ||
+                                    selOffset >= beforeDense.length ||
+                                    selEnd < selOffset
+                                ) {
+                                    return;
+                                }
+                                const actualSelLen = selEnd - selOffset + 1;
+                                const editedDense = beforeDense.slice();
                                 for (let i = 0; i < actualSelLen; i += 1) {
-                                    const v = Number(arr[selOffset + i] ?? 0);
-                                    if (editP === "pitch" && v === 0) continue;
-                                    sum += v;
-                                    count += 1;
+                                    const orig = beforeDense[selOffset + i] ?? 0;
+                                    editedDense[selOffset + i] = orig + delta;
                                 }
-                                return { sum, count };
-                            };
 
-                            const beforeMean = calcMean(beforeDense);
-                            const afterMean = calcMean(editedDense);
-                            const meanDelta =
-                                beforeMean.count > 0 && afterMean.count > 0
-                                    ? Math.abs(
-                                          afterMean.sum / afterMean.count -
-                                              beforeMean.sum / beforeMean.count,
-                                      )
-                                    : 0;
+                                if (smoothness > 0 && transitionFrames > 0) {
+                                    const calcMean = (arr: number[]) => {
+                                        let sum = 0;
+                                        let count = 0;
+                                        for (let i = 0; i < actualSelLen; i += 1) {
+                                            const v = Number(arr[selOffset + i] ?? 0);
+                                            if (editP === "pitch" && v === 0) continue;
+                                            sum += v;
+                                            count += 1;
+                                        }
+                                        return { sum, count };
+                                    };
 
-                            let boundaryDelta = 0;
-                            let boundaryCount = 0;
-                            if (selOffset > 0) {
-                                boundaryDelta += Math.abs(
-                                    Number(beforeDense[selOffset] ?? 0) -
-                                        Number(beforeDense[selOffset - 1] ?? 0),
-                                );
-                                boundaryCount += 1;
-                            }
-                            if (selEnd < beforeDense.length - 1) {
-                                boundaryDelta += Math.abs(
-                                    Number(beforeDense[selEnd] ?? 0) -
-                                        Number(beforeDense[selEnd + 1] ?? 0),
-                                );
-                                boundaryCount += 1;
-                            }
-                            const boundaryMean =
-                                boundaryCount > 0 ? boundaryDelta / boundaryCount : 0;
-                            const changeFactor = clampNum(
-                                meanDelta / (meanDelta + boundaryMean + 1e-6),
-                                0,
-                                1,
-                            );
+                                    const beforeMean = calcMean(beforeDense);
+                                    const afterMean = calcMean(editedDense);
+                                    const meanDelta =
+                                        beforeMean.count > 0 && afterMean.count > 0
+                                            ? Math.abs(
+                                                  afterMean.sum / afterMean.count -
+                                                      beforeMean.sum / beforeMean.count,
+                                              )
+                                            : 0;
 
-                            if (changeFactor > 0) {
-                                const snapshot = editedDense.slice();
-                                const span = Math.max(1e-9, 2 * halfSpan);
-                                if (selOffset > 0) {
-                                    const left = Math.max(0, Math.floor(selOffset - halfSpan));
-                                    const right = Math.min(
-                                        editedDense.length - 1,
-                                        Math.ceil(selOffset + halfSpan),
-                                    );
-                                    for (let idx = left; idx <= right; idx += 1) {
-                                        const t = clampNum(
-                                            (idx - (selOffset - halfSpan)) / span,
-                                            0,
-                                            1,
+                                    let boundaryDelta = 0;
+                                    let boundaryCount = 0;
+                                    if (selOffset > 0) {
+                                        boundaryDelta += Math.abs(
+                                            Number(beforeDense[selOffset] ?? 0) -
+                                                Number(beforeDense[selOffset - 1] ?? 0),
                                         );
-                                        const outsideIdx = Math.min(selOffset - 1, idx);
-                                        const insideIdx = Math.max(selOffset, idx);
-                                        const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                                        const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                                        const smoothed = outsideVal + (insideVal - outsideVal) * t;
-                                        editedDense[idx] =
-                                            snapshot[idx] +
-                                            (smoothed - snapshot[idx]) * changeFactor;
+                                        boundaryCount += 1;
+                                    }
+                                    if (selEnd < beforeDense.length - 1) {
+                                        boundaryDelta += Math.abs(
+                                            Number(beforeDense[selEnd] ?? 0) -
+                                                Number(beforeDense[selEnd + 1] ?? 0),
+                                        );
+                                        boundaryCount += 1;
+                                    }
+                                    const boundaryMean =
+                                        boundaryCount > 0 ? boundaryDelta / boundaryCount : 0;
+                                    const changeFactor = clampNum(
+                                        meanDelta / (meanDelta + boundaryMean + 1e-6),
+                                        0,
+                                        1,
+                                    );
+
+                                    if (changeFactor > 0) {
+                                        const snapshot = editedDense.slice();
+                                        const span = Math.max(1e-9, 2 * halfSpan);
+                                        if (selOffset > 0) {
+                                            const left = Math.max(
+                                                0,
+                                                Math.floor(selOffset - halfSpan),
+                                            );
+                                            const right = Math.min(
+                                                editedDense.length - 1,
+                                                Math.ceil(selOffset + halfSpan),
+                                            );
+                                            for (let idx = left; idx <= right; idx += 1) {
+                                                const t = clampNum(
+                                                    (idx - (selOffset - halfSpan)) / span,
+                                                    0,
+                                                    1,
+                                                );
+                                                const outsideIdx = Math.min(selOffset - 1, idx);
+                                                const insideIdx = Math.max(selOffset, idx);
+                                                const outsideVal =
+                                                    snapshot[outsideIdx] ?? editedDense[idx];
+                                                const insideVal =
+                                                    snapshot[insideIdx] ?? editedDense[idx];
+                                                const smoothed =
+                                                    outsideVal + (insideVal - outsideVal) * t;
+                                                editedDense[idx] =
+                                                    snapshot[idx] +
+                                                    (smoothed - snapshot[idx]) * changeFactor;
+                                            }
+                                        }
+                                        if (selEnd < editedDense.length - 1) {
+                                            const left = Math.max(0, Math.floor(selEnd - halfSpan));
+                                            const right = Math.min(
+                                                editedDense.length - 1,
+                                                Math.ceil(selEnd + halfSpan),
+                                            );
+                                            for (let idx = left; idx <= right; idx += 1) {
+                                                const t = clampNum(
+                                                    (idx - (selEnd - halfSpan)) / span,
+                                                    0,
+                                                    1,
+                                                );
+                                                const insideIdx = Math.min(selEnd, idx);
+                                                const outsideIdx = Math.max(selEnd + 1, idx);
+                                                const insideVal =
+                                                    snapshot[insideIdx] ?? editedDense[idx];
+                                                const outsideVal =
+                                                    snapshot[outsideIdx] ?? editedDense[idx];
+                                                const smoothed =
+                                                    insideVal + (outsideVal - insideVal) * t;
+                                                editedDense[idx] =
+                                                    snapshot[idx] +
+                                                    (smoothed - snapshot[idx]) * changeFactor;
+                                            }
+                                        }
                                     }
                                 }
-                                if (selEnd < editedDense.length - 1) {
-                                    const left = Math.max(0, Math.floor(selEnd - halfSpan));
-                                    const right = Math.min(
-                                        editedDense.length - 1,
-                                        Math.ceil(selEnd + halfSpan),
-                                    );
-                                    for (let idx = left; idx <= right; idx += 1) {
-                                        const t = clampNum(
-                                            (idx - (selEnd - halfSpan)) / span,
-                                            0,
-                                            1,
-                                        );
-                                        const insideIdx = Math.min(selEnd, idx);
-                                        const outsideIdx = Math.max(selEnd + 1, idx);
-                                        const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                                        const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                                        const smoothed = insideVal + (outsideVal - insideVal) * t;
-                                        editedDense[idx] =
-                                            snapshot[idx] +
-                                            (smoothed - snapshot[idx]) * changeFactor;
-                                    }
-                                }
-                            }
-                        }
 
-                        await paramsApi.setParamFrames(
-                            rootTrkId,
-                            editP,
-                            extStart,
-                            editedDense,
-                            true,
-                        );
-                        // 通知 PianoRoll 刷新曲线
-                        dispatch(checkpointHistory());
-                    })();
+                                await paramsApi.setParamFrames(
+                                    rootTrkId,
+                                    editP,
+                                    extStart,
+                                    editedDense,
+                                    true,
+                                );
+                                // 通知 PianoRoll 刷新曲线
+                                dispatch(checkpointHistory());
+                            } finally {
+                                busyRef.current = false;
+                            }
+                        })();
+                        return true;
+                    };
+                    if (fire()) {
+                        beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
+                    }
                     break;
                 }
                 case "pianoRoll.shiftParamUpSelection":

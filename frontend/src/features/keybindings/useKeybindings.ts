@@ -5,6 +5,7 @@ import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
 import type { RootState } from "../../app/store";
 import { resolveActionByFocus, type KeybindingFocusDomain } from "./focusRouting";
+import { consumeHoldRepeatKeyDown } from "./holdRepeat";
 import {
     matchesKeybinding,
     matchesKeybindingAllowingFineModifier,
@@ -93,6 +94,11 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
     useEffect(() => {
         function onKeyDown(e: KeyboardEvent) {
+            // 长按重复（添加轨道/克隆轨道等，见 holdRepeat.ts）：同键自动
+            // 重复被吞掉（节奏由计时器控制），其它按键终止长按。放在最前，
+            // 与粘贴的长按终止语义一致（新按键 = 意图变化）。
+            if (consumeHoldRepeatKeyDown(e)) return;
+
             if (isEditableTarget(document.activeElement) || isEditableTarget(e.target)) return;
 
             // 快捷键设置对话框打开时，阻塞所有快捷键
