@@ -262,6 +262,7 @@ export const jaJP = {
     status_position: "再生位置",
     status_ready: "準備完了",
     status_failed: "失敗",
+    status_import_audio_failed: "オーディオの読み込みに失敗しました",
     status_runtime_updated: "ランタイム情報を更新しました",
     status_runtime_update_failed: "ランタイム情報の更新に失敗しました",
     status_import_canceled: "インポートがキャンセルされました",

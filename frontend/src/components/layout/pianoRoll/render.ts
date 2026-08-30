@@ -381,13 +381,13 @@ export function drawPianoRoll(args: {
     // 主题颜色查找表
     const colors = isDark
         ? {
-              // 琴键区
+              // 琴键区（白键降亮一档、黑键提亮一档：在深色画布上既不刺眼也不淹没）
               axisBorder: "rgba(255,255,255,0.08)",
-              whiteKey: "#e8e8e8",
-              blackKey: "#1a1a1a",
+              whiteKey: "#d7dade",
+              blackKey: "#2e3136",
               blackKeyGradient: "rgba(0,0,0,0.35)",
               cLabel: "#3b82f6",
-              whiteKeyLabel: "rgba(80,80,80,0.70)",
+              whiteKeyLabel: "rgba(60,63,70,0.75)",
               blackKeyLabel: "rgba(220,220,220,0.80)",
               cSeparator: "rgba(100,100,100,0.45)",
               keySeparator: "rgba(160,160,160,0.20)",
@@ -396,12 +396,15 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(255,255,255,0.10)",
               pitchGridOther: "rgba(255,255,255,0.05)",
-              // 曲线
-              origCurve: "rgba(200,200,200,0.55)",
-              editCurve: "rgba(255,255,255,0.90)",
+              // 曲线：与浅色主题共用一套色相语义 ——
+              // 编辑包络 = 琥珀（在灰底衬波形上 ≥2:1 分离，不再用白色）；
+              // 原始音高 = 橄榄黄虚线；选区高亮 = 青蓝。
+              origCurve: "rgba(200,164,60,0.70)",
+              editCurve: "rgba(255,176,32,0.95)",
               selectionCurve: "rgba(100,200,255,0.95)",
-              // 叠加文字 & 播放头
-              overlayTextColor: "rgba(255,255,255,0.35)",
+              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
+              // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
+              overlayTextColor: "rgba(235,240,248,0.45)",
               playheadLine: "rgba(255,255,255,0.25)",
           }
         : {
@@ -420,12 +423,14 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(0,0,0,0.12)",
               pitchGridOther: "rgba(0,0,0,0.06)",
-              // 曲线
-              origCurve: "rgba(132,104,26,0.72)",
-              editCurve: "rgba(224,154,0,1)",
-              selectionCurve: "rgba(255,186,0,1)",
-              // 叠加文字 & 播放头
-              overlayTextColor: "rgba(0,0,0,0.35)",
+              // 曲线：色相语义与深色主题一致 ——
+              // 编辑包络 = 琥珀（加深到对浅底 ≥3.5:1，不再是发飘的亮橙）；
+              // 原始音高 = 橄榄黄虚线；选区高亮 = 青蓝（与琥珀编辑线区分开）。
+              origCurve: "rgba(132,104,26,0.80)",
+              editCurve: "rgba(178,108,0,1)",
+              selectionCurve: "rgba(0,116,200,1)",
+              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
+              overlayTextColor: "rgba(30,36,48,0.60)",
               playheadLine: "rgba(0,0,0,0.20)",
           };
 
@@ -1191,12 +1196,22 @@ export function drawPianoRoll(args: {
     // 渲染在用户编辑曲线下方，不干扰主曲线的视觉层次�?
     if (editParam === "pitch" && detectedPitchCurves && detectedPitchCurves.length > 0) {
         // �?clip 时循环颜色，增强区分�?
-        const DETECTED_COLORS = [
-            "rgba(80, 220, 180, 0.56)", // 青绿
-            "rgba(255, 180, 60, 0.56)", // 橙黄
-            "rgba(180, 120, 255, 0.56)", // 紫色
-            "rgba(60, 180, 255, 0.56)", // 天蓝
-        ];
+        // 候选曲线色板：按主题给两套 —— 浅色主题提高不透明度并加深，
+        // 否则在白底上几乎隐形（旧版青绿在白底仅 ~1.4:1）。
+        // 橙黄一员改为玫红：琥珀色现在是编辑包络线的专属色相，避免混淆。
+        const DETECTED_COLORS = isDark
+            ? [
+                  "rgba(80, 220, 180, 0.56)", // 青绿
+                  "rgba(255, 110, 197, 0.60)", // 玫红
+                  "rgba(180, 120, 255, 0.56)", // 紫色
+                  "rgba(60, 180, 255, 0.56)", // 天蓝
+              ]
+            : [
+                  "rgba(0, 150, 118, 0.80)", // 青绿
+                  "rgba(214, 44, 140, 0.75)", // 玫红
+                  "rgba(124, 58, 237, 0.70)", // 紫色
+                  "rgba(2, 132, 199, 0.80)", // 天蓝
+              ];
 
         for (let ci = 0; ci < detectedPitchCurves.length; ci++) {
             const curve = detectedPitchCurves[ci];
@@ -1251,12 +1266,21 @@ export function drawPianoRoll(args: {
     // Curves
     // 副参数曲线（半透明、细线，绘制在主参数曲线下方�?
     if (showSecondaryParam && secondaryParamIds.length > 0) {
-        const secondaryPalette = [
-            "rgba(100, 200, 255, 0.62)",
-            "rgba(255, 180, 60, 0.62)",
-            "rgba(160, 120, 255, 0.62)",
-            "rgba(90, 220, 160, 0.62)",
-        ];
+        // 副参数曲线调色板：按主题给两套（浅色主题加深加浓，否则在白底上发飘）；
+        // 琥珀成员换成玫红 —— 琥珀是编辑包络线的专属色相，避免撞色。
+        const secondaryPalette = isDark
+            ? [
+                  "rgba(100, 200, 255, 0.62)",
+                  "rgba(255, 110, 197, 0.62)",
+                  "rgba(160, 120, 255, 0.62)",
+                  "rgba(90, 220, 160, 0.62)",
+              ]
+            : [
+                  "rgba(2, 132, 199, 0.75)",
+                  "rgba(214, 44, 140, 0.72)",
+                  "rgba(124, 58, 237, 0.72)",
+                  "rgba(22, 163, 116, 0.75)",
+              ];
         secondaryParamIds.forEach((paramId, index) => {
             const secondaryParamView = secondaryParamViews[paramId];
             if (
@@ -1396,7 +1420,9 @@ export function drawPianoRoll(args: {
             ctx.rect(selX0, 0, selX1 - selX0, h);
             ctx.clip();
 
-            ctx.strokeStyle = isDark ? "rgba(255, 180, 60, 0.65)" : "rgba(220, 140, 20, 0.65)";
+            // 剪贴板预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
+            // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
+            ctx.strokeStyle = isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
             ctx.lineWidth = 2;
             ctx.setLineDash(getFixedDashPattern(4, 4));
             ctx.beginPath();

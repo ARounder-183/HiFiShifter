@@ -24,17 +24,21 @@ export const TimelineCanvasViewport: React.FC<{
         /** 轨道内容底部边界，与网格相同；分界线只画到该边界。 */
         contentBottomPx?: number;
     };
-}> = ({ width, height, model, rowGuides }) => {
+    /** 主题模式：切换时驱动画布当帧按新主题重绘 clip 配色。 */
+    darkMode?: boolean;
+}> = ({ width, height, model, rowGuides, darkMode }) => {
     const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
     const widthRef = React.useRef(width);
     const heightRef = React.useRef(height);
     const modelRef = React.useRef(model);
     const rowGuidesRef = React.useRef(rowGuides);
+    const darkModeRef = React.useRef(darkMode);
 
     widthRef.current = width;
     heightRef.current = height;
     modelRef.current = model;
     rowGuidesRef.current = rowGuides;
+    darkModeRef.current = darkMode;
     /**
      * 按给定投影重绘 clip 体。
      *
@@ -75,12 +79,13 @@ export const TimelineCanvasViewport: React.FC<{
             rowGuides: rowGuidesRef.current,
             viewportLeft: current.scrollLeftPx,
             viewportTopPx: current.scrollTopPx,
+            darkMode: darkModeRef.current,
         });
     }, []);
 
     React.useLayoutEffect(() => {
         invalidate();
-    }, [height, invalidate, model, width]);
+    }, [darkMode, height, invalidate, model, width]);
 
     React.useEffect(() => {
         // 注册到统一帧提交器：与网格 / 波形的绘制顺序固定，且同一帧内重复的

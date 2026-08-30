@@ -178,9 +178,18 @@ export function drawTimelineCanvas(
         fontFamily?: string;
         activeGroupIds?: Set<string>;
         disabledGroupIds?: string[];
+        /** 主题模式（React 侧显式传入，切换时驱动画布同帧重绘） */
+        darkMode?: boolean;
     },
 ): void {
     const fontFamily = args.fontFamily || resolveFontFamily();
+    // Clip 前景方向随主题（深色主题 = 暗色块 + 浅色前景）。
+    // 优先用 React 侧显式传入的 darkMode（保证切主题当帧即重绘），
+    // 未传时回退读 DOM（兼容旧调用方）。
+    const darkMode =
+        args.darkMode ??
+        (typeof document !== "undefined" &&
+            document.documentElement.dataset.theme === "dark");
 
     ctx.clearRect(0, 0, args.width, args.height);
 
@@ -241,6 +250,7 @@ export function drawTimelineCanvas(
             groupId: clip.groupId,
             isGroupActive,
             isGroupDisabled,
+            darkMode,
         });
         ctx.save();
         ctx.globalAlpha = visualStyle.mutedAlpha;
@@ -554,9 +564,11 @@ export function drawTimelineCanvas(
             ctx.lineTo(triX, triYBottom);
             ctx.lineTo(triX + size, triYBottom);
             ctx.closePath();
-            ctx.fillStyle = "#fac03d";
+            // 填充色随 clip 体感亮度取深/浅（timelineCanvasStyle 派生），
+            // 写死的黄色在绿/黄轨道色块上会隐身。
+            ctx.fillStyle = visualStyle.snapOffsetTriFill;
             ctx.fill();
-            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.strokeStyle = visualStyle.snapOffsetTriStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
             ctx.restore();

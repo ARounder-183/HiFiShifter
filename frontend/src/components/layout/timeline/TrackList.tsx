@@ -22,6 +22,7 @@ import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
 
 /** Color palette options shown when creating a new track.
  * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
@@ -431,6 +432,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
     headerHeight = 48,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
+    const { mode } = useAppTheme();
+    const darkMode = mode === "dark";
     const rowHeightRef = useRef(rowHeight);
     const pendingVerticalZoomRef = useRef<{
         nextRowHeight: number;
@@ -1495,7 +1499,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         style={{
                                             backgroundColor:
                                                 track.color != null
-                                                    ? normalizedTrackColorCss(track.color)
+                                                    ? normalizedTrackColorCss(track.color, darkMode)
                                                     : "var(--qt-highlight)",
                                         }}
                                     />
@@ -1535,7 +1539,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             style={{
                                                 backgroundColor:
                                                     track.color != null
-                                                        ? normalizedTrackColorCss(track.color)
+                                                        ? normalizedTrackColorCss(track.color, darkMode)
                                                         : "var(--qt-highlight)",
                                             }}
                                         />
@@ -1846,8 +1850,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 color={
                                                                     Math.abs(gainToDb(volume)) <
                                                                     0.05
-                                                                        ? "blue"
+                                                                        ? "iris"
                                                                         : "gray"
+                                                                }
+                                                                /* 0.0 dB 用强调色标记"默认增益"，
+                                                                   highContrast 保证小字在面板底色上可读 */
+                                                                highContrast={
+                                                                    Math.abs(gainToDb(volume)) <
+                                                                    0.05
                                                                 }
                                                                 className="leading-none tabular-nums select-none"
                                                                 data-track-gain-value
@@ -1872,8 +1882,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 {isRoot ? (
                                                     <IconButton
                                                         size="1"
-                                                        variant={composeEnabled ? "solid" : "ghost"}
-                                                        color={composeEnabled ? "blue" : "gray"}
+                                                        variant={composeEnabled ? "solid" : "surface"}
+                                                        color={composeEnabled ? "iris" : "gray"}
                                                         data-tooltip={t("compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
@@ -1897,7 +1907,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 )}
                                                 <IconButton
                                                     size="1"
-                                                    variant={muted ? "solid" : "ghost"}
+                                                    variant={muted ? "solid" : "surface"}
                                                     color={muted ? "red" : "gray"}
                                                     data-tooltip={
                                                         muted ? t("clip_unmute") : t("clip_mute")
@@ -1918,7 +1928,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 </IconButton>
                                                 <IconButton
                                                     size="1"
-                                                    variant={solo ? "solid" : "ghost"}
+                                                    variant={solo ? "solid" : "surface"}
                                                     color={solo ? "amber" : "gray"}
                                                     data-tooltip={t("solo")}
                                                     onPointerDown={(e) => e.stopPropagation()}

@@ -3013,7 +3013,12 @@ const sessionSlice = createSlice({
                         }
                     }
                 }
-                state.status = payload.imported?.ok ? "Audio imported" : "Import audio failed";
+                if (payload.imported?.ok) {
+                    state.status = "Audio imported";
+                } else {
+                    state.status = "Import audio failed";
+                    state.error = "import_audio_failed";
+                }
             })
             .addCase(importAudioFromDialog.rejected, setRejected)
 
@@ -3038,9 +3043,12 @@ const sessionSlice = createSlice({
                         }
                     }
                 }
-                state.status = payload.imported?.ok
-                    ? "Dropped audio imported"
-                    : "Import audio failed";
+                if (payload.imported?.ok) {
+                    state.status = "Dropped audio imported";
+                } else {
+                    state.status = "Import audio failed";
+                    state.error = "import_audio_failed";
+                }
             })
             .addCase(importAudioFromPath.rejected, setRejected)
 
@@ -3056,7 +3064,13 @@ const sessionSlice = createSlice({
                     newClipIds?: string[];
                 };
                 const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
+                    state.error = "import_audio_failed";
+                }
                 if (ok && payload.imported && (payload.imported as any).tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
@@ -3080,7 +3094,13 @@ const sessionSlice = createSlice({
                     newClipIds?: string[];
                 };
                 const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
+                    state.error = "import_audio_failed";
+                }
                 if (ok && payload.imported && (payload.imported as any).tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
@@ -3104,7 +3124,13 @@ const sessionSlice = createSlice({
                     newClipIds?: string[];
                 };
                 const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
+                    state.error = "import_audio_failed";
+                }
                 if (ok && payload.imported && (payload.imported as any).tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
@@ -3128,7 +3154,13 @@ const sessionSlice = createSlice({
                     newClipIds?: string[];
                 };
                 const ok = Boolean(payload.ok);
-                state.status = ok ? "Import done" : "Import failed";
+                if (ok) {
+                    state.status = "Import done";
+                } else {
+                    state.status = "Import failed";
+                    // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
+                    state.error = "import_audio_failed";
+                }
                 if (ok && payload.imported && (payload.imported as any).tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {

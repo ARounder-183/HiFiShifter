@@ -277,10 +277,8 @@ type ParamToolbarPillProps = {
     label: string;
     /** 完整参数名（ToolTip） */
     labelTooltip?: string;
-    /** 是否为主参数（激活）：整个药丸整体高亮 */
+    /** 是否为主参数（激活）：整个药丸整体高亮（统一用全局强调色） */
     active: boolean;
-    /** 激活时的强调色（音高=grass，共振峰/其它=amber） */
-    accent: "grass" | "amber";
     /** 点击标签：选中该参数 */
     onSelect: () => void;
     /** 眼睛状态：main=主参数（仅展示“睁开”，不响应点击）；on/off=副曲线叠加可见/隐藏 */
@@ -299,14 +297,13 @@ type ParamToolbarPillProps = {
 
 /**
  * 参数编辑器工具栏的“参数分组药丸”：眼睛 → 参数名 →（气声开关/子参数下拉）。
- * 各片段共享一块连续背景（由 data-accent-color 决定激活色），
+ * 各片段共享一块连续背景；激活参数统一铺全局强调色（--accent-9），
  * 片段间用细分隔线区分；悬停时只高亮当前片段，提示其独立可点击。
  */
 const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     label,
     labelTooltip,
     active,
-    accent,
     onSelect,
     eyeMode,
     onToggleEye,
@@ -320,8 +317,8 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     return (
         <div
             className="param-pill"
-            data-accent-color={accent}
             data-active={active ? "true" : undefined}
+            data-eye-off={eyeMode === "off" ? "true" : undefined}
         >
             <button
                 type="button"
@@ -408,7 +405,6 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
                 label={rootLabel}
                 labelTooltip={rootTooltip}
                 active={rootActive}
-                accent="amber"
                 onSelect={onSelectRoot}
                 eyeMode={eyeMode}
                 onToggleEye={onToggleSecondary}
@@ -424,7 +420,6 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
                 label={childActive ? childLabel : rootLabel}
                 labelTooltip={childActive ? (childMenuLabel ?? childLabel) : rootTooltip}
                 active={rootActive || childActive}
-                accent="amber"
                 onSelect={onSelectRoot}
                 eyeMode={eyeMode}
                 onToggleEye={onToggleSecondary}
@@ -4258,7 +4253,6 @@ export const PianoRollPanel: React.FC = () => {
                     <IconButton
                         size="1"
                         variant={s.paramEditorSyncTimeline ? "solid" : "ghost"}
-                        color="gray"
                         data-tooltip={tAny("sync_timeline_view_tooltip")}
                         aria-label={tAny("sync_timeline_view")}
                         tabIndex={-1}
@@ -4277,7 +4271,6 @@ export const PianoRollPanel: React.FC = () => {
                         <IconButton
                             size="1"
                             variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
-                            color="gray"
                             data-tooltip={t("select")}
                             tabIndex={-1}
                             onClick={() => dispatch(setToolMode("select"))}
@@ -4288,7 +4281,6 @@ export const PianoRollPanel: React.FC = () => {
                             <IconButton
                                 size="1"
                                 variant={s.toolModeGroup === "draw" ? "solid" : "ghost"}
-                                color="gray"
                                 data-tooltip={drawToolButtonTitle}
                                 tabIndex={-1}
                                 onClick={() => dispatch(setToolMode(currentDrawTool))}
@@ -4465,7 +4457,6 @@ export const PianoRollPanel: React.FC = () => {
                             <IconButton
                                 size="1"
                                 variant={effectivePitchSnapVisual ? "solid" : "ghost"}
-                                color="gray"
                                 data-tooltip={`${t("pitch_snap")}: ${
                                     effectivePitchSnapVisual
                                         ? s.pitchSnapUnit === "semitone"
@@ -4636,7 +4627,6 @@ export const PianoRollPanel: React.FC = () => {
                         <IconButton
                             size="1"
                             variant={s.scaleHighlightMode === "always" ? "solid" : "ghost"}
-                            color="gray"
                             data-tooltip={tAny("scale_highlight")}
                             tabIndex={-1}
                             onClick={() => {
@@ -4704,7 +4694,6 @@ export const PianoRollPanel: React.FC = () => {
                         <IconButton
                             size="1"
                             variant={s.lockParamLinesEnabled ? "solid" : "ghost"}
-                            color="gray"
                             data-tooltip={t("lock_param_lines")}
                             tabIndex={-1}
                             onClick={() => {
@@ -4742,6 +4731,7 @@ export const PianoRollPanel: React.FC = () => {
                                 {tAny("edge_smoothness_short")}:
                             </Text>
                             <input
+                                className="qt-range"
                                 type="range"
                                 min={0}
                                 max={100}
@@ -4884,8 +4874,8 @@ export const PianoRollPanel: React.FC = () => {
                                 >
                                     <Button
                                         size="1"
+                                        /* 跟随全局强调色（原独立 blue 与播放键的 iris 是两种蓝） */
                                         variant="soft"
-                                        color="blue"
                                         onClick={handleOpenMidiDialog}
                                         disabled={!pitchEnabled}
                                         style={{ cursor: "pointer" }}
@@ -4902,7 +4892,6 @@ export const PianoRollPanel: React.FC = () => {
                                     label={pitchGroupLabel}
                                     labelTooltip={pitchGroupTooltip}
                                     active={pitchGroupActive}
-                                    accent="grass"
                                     onSelect={() => dispatch(setEditParam("pitch"))}
                                     eyeMode={
                                         pitchGroupActive
@@ -4962,7 +4951,6 @@ export const PianoRollPanel: React.FC = () => {
                                 label={t("param_btn_pitch")}
                                 labelTooltip={t("pitch")}
                                 active={editParam === "pitch"}
-                                accent="grass"
                                 onSelect={() => dispatch(setEditParam("pitch"))}
                                 eyeMode={
                                     editParam === "pitch"
@@ -5067,7 +5055,6 @@ export const PianoRollPanel: React.FC = () => {
                                     label={getProcessorParamShortLabel(p)}
                                     labelTooltip={getProcessorParamLabel(p)}
                                     active={paramActive}
-                                    accent="amber"
                                     onSelect={() => dispatch(setEditParam(p.id))}
                                     eyeMode={paramActive ? "main" : paramEyeVisible ? "on" : "off"}
                                     onToggleEye={() => toggleSecondaryParam(p.id)}

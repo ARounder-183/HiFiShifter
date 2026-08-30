@@ -19,7 +19,6 @@ import React from "react";
 import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { BackgroundGrid } from "./BackgroundGrid";
-import { CLIP_HEADER_HEIGHT } from "./constants";
 import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
@@ -44,6 +43,8 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         activeGroupIds?: Set<string>;
         disabledGroupIds?: string[];
     };
+    /** 主题模式：透传给 clip 体画布，切换时同帧重绘配色。 */
+    darkMode?: boolean;
     /** Sticky 背景网格参数（与内容层同坐标系，随滚动同步重绘）。 */
     contentWidth: number;
     pxPerBeat: number;
@@ -115,6 +116,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     width={props.widthPx}
                     height={props.heightPx}
                     model={props.clipModel}
+                    darkMode={props.darkMode}
                     rowGuides={{
                         startTrackIndex: props.startTrackIndex,
                         rowCount: props.tracks.length,
@@ -146,11 +148,9 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             <BackgroundGrid
                 {...gridBaseProps}
                 layerRef={props.gridOverlayLayerRef}
-                // 叠加网格：竖线按行分段 —— 出现在波形之上、clip header 之下
-                //（跳过每行 header 条带，header 不被网格穿过）。
+                // 叠加网格：竖线一根到底（不分段、不跳过 header），与背景层
+                // 完全同形，只是绘制顺序在波形之上。
                 lineOpacity={1}
-                rowSegmentHeightPx={props.rowHeight}
-                rowSegmentSkipPx={CLIP_HEADER_HEIGHT}
                 viewportBus={timelineViewportBus}
                 layerOrder={LAYER_ORDER.gridOverlay}
             />

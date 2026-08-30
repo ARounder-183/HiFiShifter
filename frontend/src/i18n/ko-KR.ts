@@ -336,6 +336,7 @@ export const koKR = {
     status_position: "재생 위치",
     status_ready: "준비됨",
     status_failed: "실패",
+    status_import_audio_failed: "오디오 가져오기 실패",
     status_runtime_updated: "런타임 정보가 업데이트되었습니다",
     status_runtime_update_failed: "런타임 정보 업데이트에 실패했습니다",
     status_import_canceled: "가져오기가 취소되었습니다",

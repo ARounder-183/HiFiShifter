@@ -248,6 +248,7 @@ export const zhCN = {
     status_position: "播放位置",
     status_ready: "就绪",
     status_failed: "失败",
+    status_import_audio_failed: "导入音频失败",
     status_runtime_updated: "运行时信息已更新",
     status_runtime_update_failed: "运行时信息更新失败",
     status_import_canceled: "已取消导入",

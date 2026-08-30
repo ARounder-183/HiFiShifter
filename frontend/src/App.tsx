@@ -122,6 +122,8 @@ const errorCodeKey: Record<string, string> = {
     no_pitch_line_selected: "vs_paste_no_pitch_line",
     import_read_failed: "vs_import_read_failed",
     import_parse_failed: "vs_import_parse_failed",
+    /* 前端合成码：音频导入 fulfilled 但 ok=false（原版只写灰色 status，失败不可辨） */
+    import_audio_failed: "status_import_audio_failed",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，

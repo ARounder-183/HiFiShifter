@@ -249,6 +249,7 @@ export const zhTW = {
     status_position: "播放位置",
     status_ready: "就緒",
     status_failed: "失敗",
+    status_import_audio_failed: "匯入音訊失敗",
     status_runtime_updated: "執行階段資訊已更新",
     status_runtime_update_failed: "執行階段資訊更新失敗",
     status_import_canceled: "已取消匯入",

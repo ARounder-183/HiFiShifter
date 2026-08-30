@@ -8,6 +8,7 @@ import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybin
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
 import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
 import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
@@ -247,6 +248,9 @@ export const TrackLane = React.memo(
 
         // 淡变信息浮标与子层 i18n 文案。
         const { t } = useI18n();
+        // ghost clip 的 color-mix 需要和时间线画布同一套主题化轨道色。
+        const { mode } = useAppTheme();
+        const darkMode = mode === "dark";
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
@@ -812,7 +816,7 @@ export const TrackLane = React.memo(
                                 style={{
                                     height: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 40%, ${normalizedTrackColorCss(trackColor)} 60%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 40%, ${normalizedTrackColorCss(trackColor, darkMode)} 60%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />
@@ -822,7 +826,7 @@ export const TrackLane = React.memo(
                                 style={{
                                     top: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 45%, ${normalizedTrackColorCss(trackColor)} 55%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 45%, ${normalizedTrackColorCss(trackColor, darkMode)} 55%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />

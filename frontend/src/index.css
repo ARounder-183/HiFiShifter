@@ -32,9 +32,13 @@
     --qt-warning-bg: #3d2a0a;
     --qt-warning-text: #fcd34d;
     --qt-warning-border: #f59e0b;
-    --qt-graph-bg: #232323;
-    --qt-graph-grid-strong: #5e5e5e;
-    --qt-graph-grid-weak: #4e4e4e;
+    /* 画布区（时间线轨道/参数编辑器）比 chrome 区（window/panel）深一档，
+       让工具栏/标尺/画布靠明度而不是仅靠 1px 细线分区 */
+    --qt-graph-bg: #1f1f1f;
+    /* 半透明白：在泳道和彩色 clip 上都呈同色调细线，
+       不会在波形上切出生硬的条纹 */
+    --qt-graph-grid-strong: rgba(255, 255, 255, 0.22);
+    --qt-graph-grid-weak: rgba(255, 255, 255, 0.10);
     --qt-scrollbar-thumb: #555555;
     --qt-scrollbar-thumb-hover: #707070;
     --qt-overlay: rgba(0, 0, 0, 0.35);
@@ -79,9 +83,11 @@
     --qt-warning-bg: #fff1dc;
     --qt-warning-text: #9b5f13;
     --qt-warning-border: #d59140;
-    --qt-graph-bg: #f6f7fa;
-    --qt-graph-grid-strong: #aab1bf;
-    --qt-graph-grid-weak: #cfd4df;
+    --qt-graph-bg: #edf0f5;
+    /* 半透明蓝灰：在泳道上与旧实色等效，在 clip 色块/波形上则化为
+       同色调的细线，不再切出高对比条纹 */
+    --qt-graph-grid-strong: rgba(74, 88, 112, 0.55);
+    --qt-graph-grid-weak: rgba(74, 88, 112, 0.30);
     --qt-scrollbar-thumb: #b4bac7;
     --qt-scrollbar-thumb-hover: #969ead;
     --qt-overlay: rgba(20, 24, 32, 0.22);
@@ -364,6 +370,51 @@ textarea {
 .param-pill__seg--breath {
     min-width: 22px;
     padding-inline: 3px;
+}
+/* 参数整体不可见（眼睛关闭）时，参数名降为弱化色：
+   与「禁用」的浅灰斜眼、激活态的实底拉开三个层次 */
+.param-pill[data-eye-off] .param-pill__seg--label {
+    color: var(--qt-text-muted);
+}
+
+/*
+ * 原生 range 滑杆（参数编辑器「平滑度」等）：
+ * 未填充的轨道槽用 --qt-border，保证在浅色工具栏上可见；
+ * 滑块用全局强调色 --accent-9（跟随 Radix accent 设置）。
+ */
+.qt-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 14px;
+    background: transparent;
+    cursor: pointer;
+}
+.qt-range::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--qt-border);
+}
+.qt-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    margin-top: -4px; /* 4px 槽 + 12px 滑块 → 垂直居中 */
+    width: 12px;
+    height: 12px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent-9);
+}
+.qt-range::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--qt-border);
+}
+.qt-range::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent-9);
 }
 
 .rt-DropdownMenuItem,

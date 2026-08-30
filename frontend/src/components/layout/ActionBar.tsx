@@ -839,8 +839,10 @@ export function ActionBar() {
                 <Box style={{ position: "relative" }} data-hs-context-menu>
                     <IconButton
                         size="1"
-                        variant={recording.active ? "solid" : "ghost"}
-                        color={recording.active ? "red" : "gray"}
+                        /* 录音语义色：待机态就用 soft 红点（旧版待机是灰色 ghost 点，
+                           录音键的"红"只在录制中才出现，语义色缺失） */
+                        variant={recording.active ? "solid" : "soft"}
+                        color="red"
                         data-tooltip={recordingTooltip}
                         disabled={recording.busy && recording.countdownRemaining === 0}
                         onClick={() => {
@@ -1124,7 +1126,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={fileBrowserVisible ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("fb_title")}
                     onClick={() => dispatch(toggleVisible())}
                 >
@@ -1144,7 +1145,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={notebookVisible ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={t("notebook")}
                     onClick={() => dispatch(toggleNotebookVisible())}
                 >
@@ -1160,7 +1160,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.autoCrossfadeEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("auto_crossfade")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1196,7 +1195,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.splitTransitionEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("split_transition_tooltip")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1225,7 +1223,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={effectiveSnapVisual ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={`${tAny("snap")}${
                         snapGestureActive && snapToggleHeld
                             ? ` · ${tAny("snap")}: ${tAny("snap_toggle_inverted")}`
@@ -1291,7 +1288,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.playheadZoomEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("playhead_zoom")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1318,7 +1314,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.autoScrollEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("auto_scroll")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1334,7 +1329,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.paramEditorSeekPlayheadEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("param_editor_seek_playhead")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1369,7 +1363,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.paramEditorTimelineClickSelectTrackEnabled ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("param_editor_timeline_click_select_track")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1434,7 +1427,6 @@ export function ActionBar() {
                 <IconButton
                     size="1"
                     variant={s.ignoreGrouping ? "solid" : "ghost"}
-                    color="gray"
                     data-tooltip={tAny("ignore_grouping")}
                     tabIndex={-1}
                     onClick={() => {
@@ -1662,7 +1654,6 @@ function RippleModeButton({
             <IconButton
                 size="1"
                 variant={mode !== "off" ? "solid" : "ghost"}
-                color="gray"
                 data-tooltip={(tAny(`ripple_tooltip_${mode}`) as string) ?? tAny("ripple")}
                 tabIndex={-1}
                 onClick={onCycle}

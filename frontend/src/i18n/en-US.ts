@@ -342,6 +342,7 @@ export const enUS = {
     status_position: "Position",
     status_ready: "Ready",
     status_failed: "Failed",
+    status_import_audio_failed: "Import audio failed",
     status_runtime_updated: "Runtime updated",
     status_runtime_update_failed: "Runtime update failed",
     status_import_canceled: "Import canceled",

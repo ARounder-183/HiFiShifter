@@ -21,32 +21,32 @@ export interface WaveformColors {
 /**
  * 深色主题的时间线波形颜色。
  *
- * 时间线波形画在**饱和的轨道色块**上（timelineCanvasStyle 的色块方案），
- * 采用半透明深黑：不透明度 ~0.73 叠在色块上呈现"深色调波形"（REAPER 式），
- * 轨道色仍从波形中透出，既保证对比度又不至于把色块完全盖死（全不透明
- * 纯黑会吞掉整个色块，见用户实测反馈）。
- * 钢琴卷帘波形画在深色画布上，仍为浅色（见下方 pianoRoll 组）。两个
- * surface 的对比方向相反，不可混用。
+ * 深色主题的 clip 色块整体压暗（timelineCanvasStyle 的 darkMode 方案），
+ * 波形用**半透明浅色**（~0.80 白）：与浅色文字同方向，在暗色块上清晰可辨，
+ * 且底色透出让波形带同色相的浅调（Ableton 深色主题式）。
+ * 钢琴卷帘波形画在深色画布上，同为浅色系（见下方 pianoRoll 组）。
  */
 const darkTimelineWaveformColors: WaveformColors = {
-    fill: "#04060c",
-    // 低饱和色块配 73% 黑：用户确认的最终版本。
-    stroke: "rgba(0, 0, 0, 0.73)",
-    midiPitch: "#02203a",
+    fill: "#f2f6fb",
+    stroke: "rgba(255, 255, 255, 0.80)",
+    midiPitch: "#d8e8fa",
 };
 
 /**
- * 浅色主题的时间线波形颜色（同为深色系：波形画在亮色块上，与主题无关）
+ * 浅色主题的时间线波形颜色：中明度低饱和色块 + 深色波形
+ * （透明度让底色透出，波形带同色相深调，对比 ≥4:1）
  */
 const lightTimelineWaveformColors: WaveformColors = {
     fill: "#080b14",
-    stroke: "rgba(0, 0, 0, 0.73)",
+    stroke: "rgba(0, 0, 0, 0.70)",
     midiPitch: "#002848",
 };
 
+// 钢琴卷帘底衬波形：两主题保持同一「蓝灰」色相族（对应参考轨道的语义），
+// 深色主题的亮度压低，给琥珀色的编辑包络线留出 ≥2:1 的分离度。
 const darkPianoRollWaveformColors: WaveformColors = {
-    fill: "rgba(146,182,218,0.24)",
-    stroke: "rgba(214,230,246,0.56)",
+    fill: "rgba(116,136,160,0.28)",
+    stroke: "rgba(168,186,208,0.55)",
 };
 
 const lightPianoRollWaveformColors: WaveformColors = {

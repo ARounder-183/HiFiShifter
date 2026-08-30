@@ -12,6 +12,7 @@
 import React, { useMemo } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
@@ -1336,6 +1337,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }),
         [sparseClipRenderModel.drawClips, activeGroupIds, disabledGroupIds],
     );
+    // 主题切换 → darkMode prop 变化 → clip 体画布同帧按新主题重绘配色。
+    const { mode: themeMode } = useAppTheme();
+    const darkMode = themeMode === "dark";
     const timelineScrollRange = useMemo(
         () => resolveTimelineScrollRange({ contentWidth, viewportWidth }),
         [contentWidth, viewportWidth],
@@ -2041,6 +2045,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 axis={timelineAxis}
                                 playheadSec={s.playheadSec}
                                 clipModel={timelineCanvasModel}
+                                darkMode={darkMode}
                                 contentWidth={contentWidth}
                                 pxPerBeat={pxPerBeat}
                                 grid={s.grid}
