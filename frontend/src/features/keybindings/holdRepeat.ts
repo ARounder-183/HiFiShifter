@@ -14,6 +14,14 @@
  * `consumeHoldRepeatKeyDown` 吞掉（节奏完全由计时器控制，避免
  * 双触发）；未进行长按时，OS 自动重复由各调用方自行决定
  * （如方向键类导航仍在 REPEATABLE_ACTIONS 中走系统重复）。
+ *
+ * 多监听器安全：全局 keydown 由 App（useKeybindings）与
+ * TimelinePanel（useKeyboardShortcuts）两个捕获监听器依次消费，
+ * 两者都会调用 `consumeHoldRepeatKeyDown`。因此"非重复按键 = 终止"
+ * 的规则只对**异键**生效：同一个 keydown 事件在第二个监听器到达时
+ * （同键、非重复）绝不会杀死第一个监听器刚布防的长按；同键真重按
+ * 仍由动作路径的 `begin`（内部先 stop 再布防）重建，与粘贴的重启
+ * 语义等价。
  */
 
 import type { Keybinding } from "./types";
@@ -113,19 +121,27 @@ export function stopHoldRepeat(): void {
  * - 长按进行中：
  *   - 同键 OS 自动重复 → preventDefault 并吞掉（节奏由计时器控制）；
  *   - 其它按键的自动重复 → 同样吞掉（避免与计时器双触发）；
- *   - 任何非重复按键 → 视为意图变化，终止长按（粘贴语义）。
+ *   - 非重复按键：**异键** → 视为意图变化，终止长按（粘贴语义）；
+ *     **同键** → 不终止（同一 keydown 事件被多个监听器依次消费时，
+ *     后到的监听器必须放行刚布防的长按，否则布防即被误杀）。
  * - 无长按进行中：返回 false，调用方照常处理。
  *
  * @returns true 表示该 keydown 已被管理器消费，调用方应直接 return。
  */
 export function consumeHoldRepeatKeyDown(e: KeyboardEvent): boolean {
     if (!active) return false;
+    const key = e.key.toLowerCase();
     if (e.repeat) {
-        if (e.key.toLowerCase() === active.key) {
+        if (key === active.key) {
             e.preventDefault();
         }
         return true;
     }
-    stop();
+    // 同键非重复事件：放行。同键真重按（松开再按下）由动作路径的
+    // beginHoldRepeat（内部先 stop）重建 —— 与「重新按下粘贴键 = 重启
+    // 长按」的既有语义等价。
+    if (key !== active.key) {
+        stop();
+    }
     return false;
 }
