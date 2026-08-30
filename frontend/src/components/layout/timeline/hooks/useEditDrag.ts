@@ -298,6 +298,17 @@ export type EditDragState = {
             promoteFromLinear: boolean;
         };
     } | null;
+    /**
+     * 多选曲率拖拽：每个选中 clip 自身的包络基准环境（跨轨各行 body 高度
+     * 与增益=1 基线的客户 Y 均不同，无法共用 anchor 的环境）。
+     * anchor clip 仍用 fadeCurveEnv；此处存放其余选中（DOM 查表失败则缺项）。
+     */
+    fadeCurveEnvByClipId: Record<string, FadeCurvePointerEnv> | null;
+    /** 多选曲率拖拽：每个选中 clip 该侧的 {leftSec, shape, baseDir, widthSec} 快照。 */
+    fadeCurveSidesByClipId: Record<
+        string,
+        { leftSec: number; shape: number; baseDir: number; widthSec: number }
+    > | null;
     /** Per-clip base state for multi-clip trim operations */
     baseByClipId: Record<
         string,
@@ -620,6 +631,74 @@ export function useEditDrag(deps: {
                 },
             };
         }
+        // 多选曲率拖拽：为每个选中 clip 采集独立的"增益=1 基准线"环境。
+        // 跨轨各行 body 高度/顶部客户 Y 不同，曲率求解必须逐 clip 用自己的
+        // 环境（anchor 用上面 fadePointerEnv；其余按 data-hs-clip-id 查 DOM）。
+        // DOM 不可见（虚拟化卸载）的 clip 直接缺项跳过 —— 宁可少改不可算错。
+        let fadeCurveEnvByClipId: EditDragState["fadeCurveEnvByClipId"] = null;
+        let fadeCurveSidesByClipId: EditDragState["fadeCurveSidesByClipId"] = null;
+        if (type === "fade_in" || type === "fade_out") {
+            const envMap: Record<string, FadeCurvePointerEnv> = {};
+            const sideMap: Record<
+                string,
+                { leftSec: number; shape: number; baseDir: number; widthSec: number }
+            > = {};
+            for (const otherId of selectedClipIds) {
+                if (otherId === clipId) continue;
+                const otherClip = sessionRef.current.clips.find((c) => c.id === otherId);
+                if (!otherClip) continue;
+                let rootEl: Element | null = null;
+                try {
+                    rootEl = document.querySelector(
+                        `[data-hs-clip-id="${CSS.escape(otherId)}"]`,
+                    );
+                } catch {
+                    rootEl = null;
+                }
+                const bodyEl = rootEl?.querySelector("[data-hs-clip-body]");
+                if (bodyEl instanceof HTMLElement) {
+                    const rect = bodyEl.getBoundingClientRect();
+                    if (rect.height > 0) {
+                        envMap[otherId] = {
+                            envTopClientY: rect.top,
+                            bodyHeightPx: rect.height,
+                        };
+                    }
+                }
+                const otherWidthSec = Math.max(
+                    0,
+                    Math.min(
+                        type === "fade_in"
+                            ? Number(otherClip.fadeInSec ?? 0)
+                            : Number(otherClip.fadeOutSec ?? 0),
+                        otherClip.lengthSec,
+                    ),
+                );
+                const otherRawShape = Number(
+                    type === "fade_in" ? otherClip.fadeInShape : otherClip.fadeOutShape,
+                );
+                const otherBase = resolveCurvatureEditBase(Number.isFinite(otherRawShape) ? otherRawShape : 0);
+                sideMap[otherId] = {
+                    // leftSec：淡化区域左缘（秒）—— resolveCurvePointer 用它把
+                    // 指针时间归一化到 [0,1]；fade_in 从 clip 起点开始，fade_out
+                    // 从 clip 末尾减去区域宽度处开始。
+                    leftSec:
+                        type === "fade_in"
+                            ? otherClip.startSec
+                            : otherClip.startSec + otherClip.lengthSec - otherWidthSec,
+                    shape: otherBase.shape,
+                    baseDir:
+                        (type === "fade_in"
+                            ? Number(otherClip.fadeInDir ?? 0)
+                            : Number(otherClip.fadeOutDir ?? 0)) || 0,
+                    widthSec: otherWidthSec,
+                };
+            }
+            if (Object.keys(envMap).length > 0 || Object.keys(sideMap).length > 0) {
+                fadeCurveEnvByClipId = envMap;
+                fadeCurveSidesByClipId = sideMap;
+            }
+        }
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -655,6 +734,8 @@ export function useEditDrag(deps: {
             crossfadePartnerFadeInAuto,
             fadeCurveEnv: fadePointerEnv,
             fadeCurveSide,
+            fadeCurveEnvByClipId,
+            fadeCurveSidesByClipId,
             crossfadeCurveSides,
             baseByClipId: Object.fromEntries(
                 selectedClipIds.map((id) => {
@@ -1164,39 +1245,73 @@ export function useEditDrag(deps: {
                         drag.fadeCurveEnv &&
                         drag.fadeCurveSide
                     ) {
-                        const pt = resolveCurvePointer(
+                        // 求解器输出按"位置差"累积的方向基准（side.baseDir 每帧更新），
+                        // 保证从任意位置拖拽都不跳变。多选时每 clip 用**自己的**环境与
+                        // 形状/基准（跨轨各行 body 高度/基线客户 Y 不同，不能共用 anchor
+                        // 的指针→增益映射），逐 clip 解算并广播。
+                        const curveEnvByClipId = drag.fadeCurveEnvByClipId ?? {};
+                        const curveSidesByClipId = drag.fadeCurveSidesByClipId ?? {};
+                        const solvedPerClip: Array<{ clipId: string; dir: number }> = [];
+                        const anchorPt = resolveCurvePointer(
                             drag.fadeCurveEnv,
                             drag.fadeCurveSide,
                             beat,
                             currentEv.clientY,
                         );
-                        if (!pt) return;
-                        const nextDir = solveNearestCurveDir({
-                            shape: drag.fadeCurveSide.shape,
-                            dir: drag.fadeCurveSide.baseDir,
-                            mode: "in",
-                            pointerX01: pt.t,
-                            pointerY01: pt.gain,
-                            aspectYOverX:
-                                drag.fadeCurveEnv.bodyHeightPx /
-                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
-                        }).dir;
-                        const side = drag.fadeCurveSide;
-                        side.baseDir = nextDir;
-                        // 曲率只作用于当前 clip 的该侧（跨轨多选各行基准不同，
-                        // 无法共用同一指针 Y；对齐 REAPER 只改当前 item）。
-                        dispatch(setClipFades({ clipId: drag.clipId, fadeInDir: nextDir }));
+                        if (anchorPt) {
+                            const anchorDir = solveNearestCurveDir({
+                                shape: drag.fadeCurveSide.shape,
+                                dir: drag.fadeCurveSide.baseDir,
+                                mode: "in",
+                                pointerX01: anchorPt.t,
+                                pointerY01: anchorPt.gain,
+                                aspectYOverX:
+                                    drag.fadeCurveEnv.bodyHeightPx /
+                                    Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                            }).dir;
+                            drag.fadeCurveSide.baseDir = anchorDir;
+                            solvedPerClip.push({ clipId: drag.clipId, dir: anchorDir });
+                        }
+                        for (const otherId of drag.selectedClipIds) {
+                            if (otherId === drag.clipId) continue;
+                            const env = (curveEnvByClipId as Record<string, FadeCurvePointerEnv>)[
+                                otherId
+                            ];
+                            const side = curveSidesByClipId[otherId];
+                            if (!env || !side) continue;
+                            const pt = resolveCurvePointer(env, side, beat, currentEv.clientY);
+                            if (!pt) continue;
+                            const dir = solveNearestCurveDir({
+                                shape: side.shape,
+                                dir: side.baseDir,
+                                mode: "in",
+                                pointerX01: pt.t,
+                                pointerY01: pt.gain,
+                                aspectYOverX:
+                                    env.bodyHeightPx / Math.max(1, side.widthSec * pxPerSec),
+                            }).dir;
+                            side.baseDir = dir;
+                            solvedPerClip.push({ clipId: otherId, dir });
+                        }
+                        if (solvedPerClip.length === 0) return;
+                        batch(() => {
+                            for (const s of solvedPerClip) {
+                                dispatch(setClipFades({ clipId: s.clipId, fadeInDir: s.dir }));
+                            }
+                        });
                         try {
                             const now = Date.now();
-                            const key = `${drag.clipId}:curve-in`;
-                            const last = lastRemoteSentRef.current[key] || 0;
-                            if (now - last > 200) {
-                                lastRemoteSentRef.current[key] = now;
-                                void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    fadeInDir: nextDir,
-                                    checkpoint: false,
-                                });
+                            for (const s of solvedPerClip) {
+                                const key = `${s.clipId}:curve-in`;
+                                const last = lastRemoteSentRef.current[key] || 0;
+                                if (now - last > 200) {
+                                    lastRemoteSentRef.current[key] = now;
+                                    void webApi.setClipState({
+                                        clipId: s.clipId,
+                                        fadeInDir: s.dir,
+                                        checkpoint: false,
+                                    });
+                                }
                             }
                         } catch {
                             // Best-effort remote preview update.
@@ -1225,20 +1340,26 @@ export function useEditDrag(deps: {
                         }
                     });
                     try {
-                        if (drag.selectedClipIds.length === 1) {
-                            const now = Date.now();
-                            const last = lastRemoteSentRef.current[drag.clipId] || 0;
+                        // 多选：逐个选中 clip 发送节流预览 + 清除该侧自动交叉淡化。
+                        const now = Date.now();
+                        const nextByClipId = new Map(fadeUpdates.map((u) => [u.clipId, u]));
+                        for (const id of drag.selectedClipIds) {
+                            const perClipNext =
+                                (nextByClipId.get(id) as { fadeInSec?: number } | undefined)
+                                    ?.fadeInSec ?? next;
+                            const key = `${id}:fade-in`;
+                            const last = lastRemoteSentRef.current[key] || 0;
                             if (now - last > 200) {
-                                lastRemoteSentRef.current[drag.clipId] = now;
+                                lastRemoteSentRef.current[key] = now;
                                 // 手动拖拽淡入 = 用户手动 fade，且清除该侧自动交叉淡化。
                                 dispatch(
-                                    setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }),
+                                    setClipAutoFades({ clipId: id, autoFadeInSec: 0 }),
                                 );
                                 // 直接 webApi 持久化（不走 thunk）：其 fulfilled 不会 force-apply
                                 // 整份时间线覆盖本地乐观值，避免拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    fadeInSec: next,
+                                    clipId: id,
+                                    fadeInSec: perClipNext,
                                     autoFadeInSec: 0,
                                     checkpoint: false,
                                 });
@@ -1256,37 +1377,70 @@ export function useEditDrag(deps: {
                         drag.fadeCurveEnv &&
                         drag.fadeCurveSide
                     ) {
-                        const pt = resolveCurvePointer(
+                        // 多选：逐 clip 用自己的环境/形状/基准解算（见 fade_in 分支注释）。
+                        const curveEnvByClipId = drag.fadeCurveEnvByClipId ?? {};
+                        const curveSidesByClipId = drag.fadeCurveSidesByClipId ?? {};
+                        const solvedPerClip: Array<{ clipId: string; dir: number }> = [];
+                        const anchorPt = resolveCurvePointer(
                             drag.fadeCurveEnv,
                             drag.fadeCurveSide,
                             beat,
                             currentEv.clientY,
                         );
-                        if (!pt) return;
-                        const nextDir = solveNearestCurveDir({
-                            shape: drag.fadeCurveSide.shape,
-                            dir: drag.fadeCurveSide.baseDir,
-                            mode: "out",
-                            pointerX01: pt.t,
-                            pointerY01: pt.gain,
-                            aspectYOverX:
-                                drag.fadeCurveEnv.bodyHeightPx /
-                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
-                        }).dir;
-                        const side = drag.fadeCurveSide;
-                        side.baseDir = nextDir;
-                        dispatch(setClipFades({ clipId: drag.clipId, fadeOutDir: nextDir }));
+                        if (anchorPt) {
+                            const anchorDir = solveNearestCurveDir({
+                                shape: drag.fadeCurveSide.shape,
+                                dir: drag.fadeCurveSide.baseDir,
+                                mode: "out",
+                                pointerX01: anchorPt.t,
+                                pointerY01: anchorPt.gain,
+                                aspectYOverX:
+                                    drag.fadeCurveEnv.bodyHeightPx /
+                                    Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                            }).dir;
+                            drag.fadeCurveSide.baseDir = anchorDir;
+                            solvedPerClip.push({ clipId: drag.clipId, dir: anchorDir });
+                        }
+                        for (const otherId of drag.selectedClipIds) {
+                            if (otherId === drag.clipId) continue;
+                            const env = (curveEnvByClipId as Record<string, FadeCurvePointerEnv>)[
+                                otherId
+                            ];
+                            const side = curveSidesByClipId[otherId];
+                            if (!env || !side) continue;
+                            const pt = resolveCurvePointer(env, side, beat, currentEv.clientY);
+                            if (!pt) continue;
+                            const dir = solveNearestCurveDir({
+                                shape: side.shape,
+                                dir: side.baseDir,
+                                mode: "out",
+                                pointerX01: pt.t,
+                                pointerY01: pt.gain,
+                                aspectYOverX:
+                                    env.bodyHeightPx / Math.max(1, side.widthSec * pxPerSec),
+                            }).dir;
+                            side.baseDir = dir;
+                            solvedPerClip.push({ clipId: otherId, dir });
+                        }
+                        if (solvedPerClip.length === 0) return;
+                        batch(() => {
+                            for (const s of solvedPerClip) {
+                                dispatch(setClipFades({ clipId: s.clipId, fadeOutDir: s.dir }));
+                            }
+                        });
                         try {
                             const now = Date.now();
-                            const key = `${drag.clipId}:curve-out`;
-                            const last = lastRemoteSentRef.current[key] || 0;
-                            if (now - last > 200) {
-                                lastRemoteSentRef.current[key] = now;
-                                void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    fadeOutDir: nextDir,
-                                    checkpoint: false,
-                                });
+                            for (const s of solvedPerClip) {
+                                const key = `${s.clipId}:curve-out`;
+                                const last = lastRemoteSentRef.current[key] || 0;
+                                if (now - last > 200) {
+                                    lastRemoteSentRef.current[key] = now;
+                                    void webApi.setClipState({
+                                        clipId: s.clipId,
+                                        fadeOutDir: s.dir,
+                                        checkpoint: false,
+                                    });
+                                }
                             }
                         } catch {
                             // Best-effort remote preview update.
@@ -1315,20 +1469,26 @@ export function useEditDrag(deps: {
                         }
                     });
                     try {
-                        if (drag.selectedClipIds.length === 1) {
-                            const now = Date.now();
-                            const last = lastRemoteSentRef.current[drag.clipId] || 0;
+                        // 多选：逐个选中 clip 发送节流预览 + 清除该侧自动交叉淡化。
+                        const now = Date.now();
+                        const nextByClipId = new Map(fadeUpdates.map((u) => [u.clipId, u]));
+                        for (const id of drag.selectedClipIds) {
+                            const perClipNext =
+                                (nextByClipId.get(id) as { fadeOutSec?: number } | undefined)
+                                    ?.fadeOutSec ?? next;
+                            const key = `${id}:fade-out`;
+                            const last = lastRemoteSentRef.current[key] || 0;
                             if (now - last > 200) {
-                                lastRemoteSentRef.current[drag.clipId] = now;
+                                lastRemoteSentRef.current[key] = now;
                                 // 手动拖拽淡出 = 手动 fade，且清除该侧自动交叉淡化。
                                 dispatch(
-                                    setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }),
+                                    setClipAutoFades({ clipId: id, autoFadeOutSec: 0 }),
                                 );
                                 // 直接 webApi 持久化（不走 thunk）：避免 force-apply 覆盖本地
                                 // 乐观 fade 导致拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
-                                    clipId: drag.clipId,
-                                    fadeOutSec: next,
+                                    clipId: id,
+                                    fadeOutSec: perClipNext,
                                     autoFadeOutSec: 0,
                                     checkpoint: false,
                                 });
@@ -1893,8 +2053,18 @@ export function useEditDrag(deps: {
 
             const clipNow = sessionRef.current.clips.find((c) => c.id === drag.clipId);
             if (!isGroupStretch && !clipNow) {
+                // 目标 clip 已被删除：本次拖拽无法落盘。
+                // ★ 必须关闭**全部**已开的 undo group（fade/crossfade 组在拖拽
+                // 开始时就已打开）——否则后端 suppress_checkpoints 永久置位，
+                // 此后工程内一切撤销点都被吞掉、撤销栈冻结到重启。
                 if (gainUndoGroupPromise) {
                     void finishGainUndoGroup().catch(() => undefined);
+                }
+                if (fadeUndoGroupPromise) {
+                    void finishFadeUndoGroup().catch(() => undefined);
+                }
+                if (crossfadeUndoGroupPromise) {
+                    void finishCrossfadeUndoGroup().catch(() => undefined);
                 }
                 dispatch(endInteraction());
                 return;
@@ -1985,35 +2155,57 @@ export function useEditDrag(deps: {
                     reapplyRates = stretchPatches
                         .filter((p) => p.clipPlaybackRate !== 1)
                         .map((p) => ({ clipId: p.clipId, rate: p.clipPlaybackRate }));
-                    persistPromise = runInsideUndoGroup(async () => {
-                        const stretchPersistPromises = stretchPatches.map((patch) =>
-                            dispatch(
-                                setClipStateRemote({
-                                    clipId: patch.clipId,
-                                    startSec: patch.startSec,
-                                    lengthSec: patch.lengthSec,
-                                    clipPlaybackRate: patch.clipPlaybackRate,
-                                    snapOffsetSec: patch.snapOffsetSec,
-                                    fadeInSec: patch.fadeInSec,
-                                    fadeOutSec: patch.fadeOutSec,
+                    // 无操作守卫（B7）：所有成员都回到拖拽前状态时不再落盘，
+                    // 也不开 undo group —— 不产生"撤销后什么都没变"的死撤销步。
+                    const noChange = stretchPatches.every((patch) => {
+                        const base = drag.baseByClipId[patch.clipId];
+                        return (
+                            base &&
+                            Math.abs(patch.startSec - base.startSec) < 1e-9 &&
+                            Math.abs(patch.lengthSec - base.lengthSec) < 1e-9
+                        );
+                    });
+                    if (noChange) {
+                        persistPromise = Promise.resolve();
+                    } else {
+                        persistPromise = runInsideUndoGroup(async () => {
+                            // 原子批量：单请求 = 单响应 = 无中间部分快照
+                            // （多选松手不再"先闪回原状再弹回编辑后"）。
+                            await dispatch(
+                                setClipsStateBulkRemote({
+                                    updates: buildBulkClipStateUpdates({
+                                        clipIds: stretchPatches.map((p) => p.clipId),
+                                        changesById: new Map(
+                                            stretchPatches.map((patch) => [
+                                                patch.clipId,
+                                                {
+                                                    startSec: patch.startSec,
+                                                    lengthSec: patch.lengthSec,
+                                                    clipPlaybackRate: patch.clipPlaybackRate,
+                                                    snapOffsetSec: patch.snapOffsetSec,
+                                                    fadeInSec: patch.fadeInSec,
+                                                    fadeOutSec: patch.fadeOutSec,
+                                                },
+                                            ]),
+                                        ),
+                                    }),
                                     checkpoint: false,
                                 }),
-                            ).unwrap(),
-                        );
-                        await Promise.allSettled(stretchPersistPromises);
+                            ).unwrap();
 
-                        if (shouldApplyAutoCrossfade) {
-                            await applyAutoCrossfade(
-                                sessionRef.current,
-                                autoCrossfadeClipIds,
-                                dispatch,
-                                {
-                                    affectedSides: drag.initialCrossfadeSides,
-                                    editSides: drag.editSides,
-                                },
-                            );
-                        }
-                    });
+                            if (shouldApplyAutoCrossfade) {
+                                await applyAutoCrossfade(
+                                    sessionRef.current,
+                                    autoCrossfadeClipIds,
+                                    dispatch,
+                                    {
+                                        affectedSides: drag.initialCrossfadeSides,
+                                        editSides: drag.editSides,
+                                    },
+                                );
+                            }
+                        });
+                    }
                 }
             } else if (drag.type === "trim_left" && singleClipNow) {
                 if (drag.selectedClipIds.length > 1) {
@@ -2032,60 +2224,88 @@ export function useEditDrag(deps: {
                         })
                         .filter((p) => p != null);
                     if (trimPatches.length > 0) {
-                        persistPromise = runInsideUndoGroup(async () => {
-                            const promises = trimPatches.map((patch) => {
-                                const src = patch.reversed
-                                    ? { sourceEndSec: patch.sourceEndSec }
-                                    : { sourceStartSec: patch.sourceStartSec };
-                                return dispatch(
-                                    setClipStateRemote({
-                                        clipId: patch.clipId,
-                                        startSec: patch.startSec,
-                                        lengthSec: patch.lengthSec,
-                                        ...src,
+                        // 无操作守卫：全部回到拖拽前 → 不落盘、不开组。
+                        const noChange = trimPatches.every((patch) => {
+                            const base = drag.baseByClipId[patch.clipId];
+                            return (
+                                base &&
+                                Math.abs(patch.startSec - base.startSec) < 1e-9 &&
+                                Math.abs(patch.lengthSec - base.lengthSec) < 1e-9
+                            );
+                        });
+                        if (noChange) {
+                            persistPromise = Promise.resolve();
+                        } else {
+                            persistPromise = runInsideUndoGroup(async () => {
+                                // 原子批量：多选裁短单请求 = 单响应 = 无中间快照。
+                                const changesById = new Map(
+                                    trimPatches.map((patch) => [
+                                        patch.clipId,
+                                        {
+                                            startSec: patch.startSec,
+                                            lengthSec: patch.lengthSec,
+                                            ...(patch.reversed
+                                                ? { sourceEndSec: patch.sourceEndSec }
+                                                : { sourceStartSec: patch.sourceStartSec }),
+                                        },
+                                    ]),
+                                );
+                                await dispatch(
+                                    setClipsStateBulkRemote({
+                                        updates: buildBulkClipStateUpdates({
+                                            clipIds: trimPatches.map((p) => p.clipId),
+                                            changesById,
+                                        }),
                                         checkpoint: false,
                                     }),
                                 ).unwrap();
+                                if (shouldApplyAutoCrossfade) {
+                                    await applyAutoCrossfade(
+                                        sessionRef.current,
+                                        autoCrossfadeClipIds,
+                                        dispatch,
+                                        {
+                                            affectedSides: drag.initialCrossfadeSides,
+                                            editSides: drag.editSides,
+                                        },
+                                    );
+                                }
                             });
-                            await Promise.allSettled(promises);
-                            if (shouldApplyAutoCrossfade) {
-                                await applyAutoCrossfade(
-                                    sessionRef.current,
-                                    autoCrossfadeClipIds,
-                                    dispatch,
-                                    {
-                                        affectedSides: drag.initialCrossfadeSides,
-                                        editSides: drag.editSides,
-                                    },
-                                );
-                            }
-                        });
+                        }
                     }
                 } else {
                     const sourceRangePatch = singleClipNow.reversed
                         ? { sourceEndSec: singleClipNow.sourceEndSec }
                         : { sourceStartSec: singleClipNow.sourceStartSec };
+                    // 无操作守卫：拖回起点 → 不落盘、不产生死撤销步。
+                    const noChange =
+                        Math.abs(singleClipNow.startSec - drag.basestartSec) < 1e-9 &&
+                        Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9;
                     if (shouldApplyAutoCrossfade) {
-                        persistPromise = runWithOptionalAutoCrossfade(async () => {
-                            await dispatch(
-                                setClipStateRemote({
-                                    clipId: drag.clipId,
-                                    startSec: singleClipNow.startSec,
-                                    lengthSec: singleClipNow.lengthSec,
-                                    ...sourceRangePatch,
-                                    checkpoint: false,
-                                }),
-                            ).unwrap();
-                        });
+                        persistPromise = noChange
+                            ? Promise.resolve()
+                            : runWithOptionalAutoCrossfade(async () => {
+                                  await dispatch(
+                                      setClipStateRemote({
+                                          clipId: drag.clipId,
+                                          startSec: singleClipNow.startSec,
+                                          lengthSec: singleClipNow.lengthSec,
+                                          ...sourceRangePatch,
+                                          checkpoint: false,
+                                      }),
+                                  ).unwrap();
+                              });
                     } else {
-                        persistPromise = dispatch(
-                            setClipStateRemote({
-                                clipId: drag.clipId,
-                                startSec: singleClipNow.startSec,
-                                lengthSec: singleClipNow.lengthSec,
-                                ...sourceRangePatch,
-                            }),
-                        ).unwrap();
+                        persistPromise = noChange
+                            ? Promise.resolve()
+                            : dispatch(
+                                  setClipStateRemote({
+                                      clipId: drag.clipId,
+                                      startSec: singleClipNow.startSec,
+                                      lengthSec: singleClipNow.lengthSec,
+                                      ...sourceRangePatch,
+                                  }),
+                              ).unwrap();
                     }
                 }
             } else if (drag.type === "trim_right" && singleClipNow) {
@@ -2104,90 +2324,126 @@ export function useEditDrag(deps: {
                         })
                         .filter((p) => p != null);
                     if (trimPatches.length > 0) {
-                        persistPromise = runInsideUndoGroup(async () => {
-                            const promises = trimPatches.map((patch) => {
-                                const src = patch.reversed
-                                    ? { sourceStartSec: patch.sourceStartSec }
-                                    : { sourceEndSec: patch.sourceEndSec };
-                                return dispatch(
-                                    setClipStateRemote({
-                                        clipId: patch.clipId,
-                                        lengthSec: patch.lengthSec,
-                                        ...src,
+                        // 无操作守卫：全部回到拖拽前 → 不落盘、不开组。
+                        const noChange = trimPatches.every((patch) => {
+                            const base = drag.baseByClipId[patch.clipId];
+                            return (
+                                base &&
+                                Math.abs(patch.lengthSec - base.lengthSec) < 1e-9
+                            );
+                        });
+                        if (noChange) {
+                            persistPromise = Promise.resolve();
+                        } else {
+                            persistPromise = runInsideUndoGroup(async () => {
+                                // 原子批量：多选裁短单请求 = 单响应 = 无中间快照。
+                                const changesById = new Map(
+                                    trimPatches.map((patch) => [
+                                        patch.clipId,
+                                        {
+                                            lengthSec: patch.lengthSec,
+                                            ...(patch.reversed
+                                                ? { sourceStartSec: patch.sourceStartSec }
+                                                : { sourceEndSec: patch.sourceEndSec }),
+                                        },
+                                    ]),
+                                );
+                                await dispatch(
+                                    setClipsStateBulkRemote({
+                                        updates: buildBulkClipStateUpdates({
+                                            clipIds: trimPatches.map((p) => p.clipId),
+                                            changesById,
+                                        }),
                                         checkpoint: false,
                                     }),
                                 ).unwrap();
+                                if (shouldApplyAutoCrossfade) {
+                                    await applyAutoCrossfade(
+                                        sessionRef.current,
+                                        autoCrossfadeClipIds,
+                                        dispatch,
+                                        {
+                                            affectedSides: drag.initialCrossfadeSides,
+                                            editSides: drag.editSides,
+                                        },
+                                    );
+                                }
                             });
-                            await Promise.allSettled(promises);
-                            if (shouldApplyAutoCrossfade) {
-                                await applyAutoCrossfade(
-                                    sessionRef.current,
-                                    autoCrossfadeClipIds,
-                                    dispatch,
-                                    {
-                                        affectedSides: drag.initialCrossfadeSides,
-                                        editSides: drag.editSides,
-                                    },
-                                );
-                            }
-                        });
+                        }
                     }
                 } else {
                     const sourceRangePatch = singleClipNow.reversed
                         ? { sourceStartSec: singleClipNow.sourceStartSec }
                         : { sourceEndSec: singleClipNow.sourceEndSec };
+                    // 无操作守卫：拖回起点 → 不落盘、不产生死撤销步。
+                    const noChange =
+                        Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9;
                     if (shouldApplyAutoCrossfade) {
-                        persistPromise = runWithOptionalAutoCrossfade(async () => {
-                            await dispatch(
-                                setClipStateRemote({
-                                    clipId: drag.clipId,
-                                    lengthSec: singleClipNow.lengthSec,
-                                    ...sourceRangePatch,
-                                    checkpoint: false,
-                                }),
-                            ).unwrap();
-                        });
+                        persistPromise = noChange
+                            ? Promise.resolve()
+                            : runWithOptionalAutoCrossfade(async () => {
+                                  await dispatch(
+                                      setClipStateRemote({
+                                          clipId: drag.clipId,
+                                          lengthSec: singleClipNow.lengthSec,
+                                          ...sourceRangePatch,
+                                          checkpoint: false,
+                                      }),
+                                  ).unwrap();
+                              });
                     } else {
-                        persistPromise = dispatch(
-                            setClipStateRemote({
-                                clipId: drag.clipId,
-                                lengthSec: singleClipNow.lengthSec,
-                                ...sourceRangePatch,
-                            }),
-                        ).unwrap();
+                        persistPromise = noChange
+                            ? Promise.resolve()
+                            : dispatch(
+                                  setClipStateRemote({
+                                      clipId: drag.clipId,
+                                      lengthSec: singleClipNow.lengthSec,
+                                      ...sourceRangePatch,
+                                  }),
+                              ).unwrap();
                     }
                 }
             } else if (drag.type === "stretch_left" && singleClipNow) {
+                // 无操作守卫：拖回起点 → 不落盘、不产生死撤销步。
+                const stretchNoChange =
+                    Math.abs(singleClipNow.startSec - drag.basestartSec) < 1e-9 &&
+                    Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9 &&
+                    Math.abs((singleClipNow.clipPlaybackRate ?? 1) - drag.baseClipPlaybackRate) <
+                        1e-6;
                 if (shouldApplyAutoCrossfade) {
-                    persistPromise = runWithOptionalAutoCrossfade(async () => {
-                        await dispatch(
-                            setClipStateRemote({
-                                clipId: drag.clipId,
-                                startSec: singleClipNow.startSec,
-                                lengthSec: singleClipNow.lengthSec,
-                                clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
-                                snapOffsetSec: singleClipNow.snapOffsetSec,
-                                fadeInSec: singleClipNow.fadeInSec,
-                                fadeOutSec: singleClipNow.fadeOutSec,
-                                checkpoint: false,
-                            }),
-                        ).unwrap();
-                    });
+                    persistPromise = stretchNoChange
+                        ? Promise.resolve()
+                        : runWithOptionalAutoCrossfade(async () => {
+                              await dispatch(
+                                  setClipStateRemote({
+                                      clipId: drag.clipId,
+                                      startSec: singleClipNow.startSec,
+                                      lengthSec: singleClipNow.lengthSec,
+                                      clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
+                                      snapOffsetSec: singleClipNow.snapOffsetSec,
+                                      fadeInSec: singleClipNow.fadeInSec,
+                                      fadeOutSec: singleClipNow.fadeOutSec,
+                                      checkpoint: false,
+                                  }),
+                              ).unwrap();
+                          });
                 } else {
-                    persistPromise = dispatch(
-                        setClipStateRemote({
-                            clipId: drag.clipId,
-                            startSec: singleClipNow.startSec,
-                            lengthSec: singleClipNow.lengthSec,
-                            // 与上方 auto-crossfade 分支同口径：拉伸修改的是
-                            // Clip 级倍率；发平铺 playbackRate 会在后端被当作
-                            // 组合有效速率写坏 Take 自身速率。
-                            clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
-                            snapOffsetSec: singleClipNow.snapOffsetSec,
-                            fadeInSec: singleClipNow.fadeInSec,
-                            fadeOutSec: singleClipNow.fadeOutSec,
-                        }),
-                    ).unwrap();
+                    persistPromise = stretchNoChange
+                        ? Promise.resolve()
+                        : dispatch(
+                              setClipStateRemote({
+                                  clipId: drag.clipId,
+                                  startSec: singleClipNow.startSec,
+                                  lengthSec: singleClipNow.lengthSec,
+                                  // 与上方 auto-crossfade 分支同口径：拉伸修改的是
+                                  // Clip 级倍率；发平铺 playbackRate 会在后端被当作
+                                  // 组合有效速率写坏 Take 自身速率。
+                                  clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
+                                  snapOffsetSec: singleClipNow.snapOffsetSec,
+                                  fadeInSec: singleClipNow.fadeInSec,
+                                  fadeOutSec: singleClipNow.fadeOutSec,
+                              }),
+                          ).unwrap();
                 }
                 if ((singleClipNow.clipPlaybackRate ?? 1) !== 1) {
                     reapplyRates = [
@@ -2195,33 +2451,42 @@ export function useEditDrag(deps: {
                     ];
                 }
             } else if (drag.type === "stretch_right" && singleClipNow) {
+                // 无操作守卫：拖回起点 → 不落盘、不产生死撤销步。
+                const stretchNoChange2 =
+                    Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9 &&
+                    Math.abs((singleClipNow.clipPlaybackRate ?? 1) - drag.baseClipPlaybackRate) <
+                        1e-6;
                 if (shouldApplyAutoCrossfade) {
-                    persistPromise = runWithOptionalAutoCrossfade(async () => {
-                        await dispatch(
-                            setClipStateRemote({
-                                clipId: drag.clipId,
-                                lengthSec: singleClipNow.lengthSec,
-                                clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
-                                snapOffsetSec: singleClipNow.snapOffsetSec,
-                                fadeInSec: singleClipNow.fadeInSec,
-                                fadeOutSec: singleClipNow.fadeOutSec,
-                                checkpoint: false,
-                            }),
-                        ).unwrap();
-                    });
+                    persistPromise = stretchNoChange2
+                        ? Promise.resolve()
+                        : runWithOptionalAutoCrossfade(async () => {
+                              await dispatch(
+                                  setClipStateRemote({
+                                      clipId: drag.clipId,
+                                      lengthSec: singleClipNow.lengthSec,
+                                      clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
+                                      snapOffsetSec: singleClipNow.snapOffsetSec,
+                                      fadeInSec: singleClipNow.fadeInSec,
+                                      fadeOutSec: singleClipNow.fadeOutSec,
+                                      checkpoint: false,
+                                  }),
+                              ).unwrap();
+                          });
                 } else {
-                    persistPromise = dispatch(
-                        setClipStateRemote({
-                            clipId: drag.clipId,
-                            lengthSec: singleClipNow.lengthSec,
-                            // 与上方 auto-crossfade 分支同口径：发 Clip 级倍率
-                            // 而不是组合有效速率（理由见 stretch_left 分支）。
-                            clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
-                            snapOffsetSec: singleClipNow.snapOffsetSec,
-                            fadeInSec: singleClipNow.fadeInSec,
-                            fadeOutSec: singleClipNow.fadeOutSec,
-                        }),
-                    ).unwrap();
+                    persistPromise = stretchNoChange2
+                        ? Promise.resolve()
+                        : dispatch(
+                              setClipStateRemote({
+                                  clipId: drag.clipId,
+                                  lengthSec: singleClipNow.lengthSec,
+                                  // 与上方 auto-crossfade 分支同口径：发 Clip 级倍率
+                                  // 而不是组合有效速率（理由见 stretch_left 分支）。
+                                  clipPlaybackRate: singleClipNow.clipPlaybackRate ?? 1,
+                                  snapOffsetSec: singleClipNow.snapOffsetSec,
+                                  fadeInSec: singleClipNow.fadeInSec,
+                                  fadeOutSec: singleClipNow.fadeOutSec,
+                              }),
+                          ).unwrap();
                 }
                 if ((singleClipNow.clipPlaybackRate ?? 1) !== 1) {
                     reapplyRates = [
@@ -2271,11 +2536,21 @@ export function useEditDrag(deps: {
                         } => patch != null,
                     );
                 if (patches.length > 0) {
+                    // 无操作守卫：两侧都回到拖拽前 → 不落盘、不开组。
+                    const noChange = patches.every((patch) => {
+                        const base = drag.baseByClipId[patch.clipId];
+                        if (!base) return false;
+                        return (
+                            Math.abs(patch.startSec - base.startSec) < 1e-9 &&
+                            Math.abs(patch.lengthSec - base.lengthSec) < 1e-9
+                        );
+                    });
                     const commitPatches = async () => {
-                        const promises = patches.map((patch) =>
-                            dispatch(
-                                setClipStateRemote({
-                                    clipId: patch.clipId,
+                        // 原子批量：交叉点两个 clip 一次提交 = 单响应 = 无中间快照。
+                        const changesById = new Map(
+                            patches.map((patch) => [
+                                patch.clipId,
+                                {
                                     startSec: patch.startSec,
                                     lengthSec: patch.lengthSec,
                                     sourceStartSec: patch.sourceStartSec,
@@ -2284,19 +2559,30 @@ export function useEditDrag(deps: {
                                     fadeOutSec: patch.fadeOutSec,
                                     autoFadeInSec: patch.autoFadeInSec,
                                     autoFadeOutSec: patch.autoFadeOutSec,
+                                    // 交叉点曲率拖拽的最终落盘：随整份 patch 一并提交，
+                                    // 避免 bulk/远端回灌丢掉拖拽期方向。
                                     fadeInShape: patch.fadeInShape,
                                     fadeInDir: patch.fadeInDir,
                                     fadeOutShape: patch.fadeOutShape,
                                     fadeOutDir: patch.fadeOutDir,
-                                    checkpoint: false,
-                                }),
-                            ).unwrap(),
+                                },
+                            ]),
                         );
-                        await Promise.allSettled(promises);
+                        await dispatch(
+                            setClipsStateBulkRemote({
+                                updates: buildBulkClipStateUpdates({
+                                    clipIds: patches.map((p) => p.clipId),
+                                    changesById,
+                                }),
+                                checkpoint: false,
+                            }),
+                        ).unwrap();
                     };
-                    persistPromise = crossfadeUndoGroupPromise
-                        ? crossfadeUndoGroupPromise.then(commitPatches)
-                        : commitPatches();
+                    persistPromise = noChange
+                        ? Promise.resolve()
+                        : crossfadeUndoGroupPromise
+                          ? crossfadeUndoGroupPromise.then(commitPatches)
+                          : commitPatches();
                 }
             } else if (drag.type === "fade_in" && singleClipNow) {
                 const changesById = new Map(
@@ -2327,13 +2613,17 @@ export function useEditDrag(deps: {
                 )
                     .unwrap()
                     .then(() => {
-                        // 用户手动拖拽淡入 → 手动 fade 生效，清除该侧自动交叉淡化。
-                        dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeInSec: 0 }));
-                        return webApi.setClipState({
-                            clipId: drag.clipId,
-                            autoFadeInSec: 0,
-                            checkpoint: false,
+                        // 用户手动拖拽淡入 → 手动 fade 生效，清除**全部被编辑 clip**
+                        // 该侧自动交叉淡化（多选时漏清会让 auto 值盖住手动值）。
+                        const clears = drag.selectedClipIds.map((clipId) => {
+                            dispatch(setClipAutoFades({ clipId, autoFadeInSec: 0 }));
+                            return webApi.setClipState({
+                                clipId,
+                                autoFadeInSec: 0,
+                                checkpoint: false,
+                            });
                         });
+                        return Promise.allSettled(clears).then(() => undefined);
                     });
             } else if (drag.type === "fade_out" && singleClipNow) {
                 const changesById = new Map(
@@ -2361,13 +2651,17 @@ export function useEditDrag(deps: {
                 )
                     .unwrap()
                     .then(() => {
-                        // 用户手动拖拽淡出 → 手动 fade 生效，清除该侧自动交叉淡化。
-                        dispatch(setClipAutoFades({ clipId: drag.clipId, autoFadeOutSec: 0 }));
-                        return webApi.setClipState({
-                            clipId: drag.clipId,
-                            autoFadeOutSec: 0,
-                            checkpoint: false,
+                        // 用户手动拖拽淡出 → 手动 fade 生效，清除**全部被编辑 clip**
+                        // 该侧自动交叉淡化（多选时漏清会让 auto 值盖住手动值）。
+                        const clears = drag.selectedClipIds.map((clipId) => {
+                            dispatch(setClipAutoFades({ clipId, autoFadeOutSec: 0 }));
+                            return webApi.setClipState({
+                                clipId,
+                                autoFadeOutSec: 0,
+                                checkpoint: false,
+                            });
                         });
+                        return Promise.allSettled(clears).then(() => undefined);
                     });
             } else if (drag.type === "gain" && singleClipNow) {
                 const changesById = new Map(

@@ -385,14 +385,22 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             clipId: string;
             gain?: number;
             muted?: boolean;
-            fadeInSec?: number;
-            fadeOutSec?: number;
-            reversed?: boolean;
-            loopEnabled?: boolean;
-            // 与 reducer 的批量乐观类型 / service API 对齐：方向翻转换算、
-            // 关 Loop 归一窗口等场景会随开关一起携带显式源窗口。
+            startSec?: number;
+            lengthSec?: number;
             sourceStartSec?: number;
             sourceEndSec?: number;
+            snapOffsetSec?: number;
+            clipPlaybackRate?: number;
+            fadeInSec?: number;
+            fadeOutSec?: number;
+            fadeInShape?: number;
+            fadeInDir?: number;
+            fadeOutShape?: number;
+            fadeOutDir?: number;
+            autoFadeInSec?: number;
+            autoFadeOutSec?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
         }>;
         checkpoint?: boolean;
     }) => {

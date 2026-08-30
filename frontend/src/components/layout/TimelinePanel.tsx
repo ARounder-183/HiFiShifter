@@ -57,6 +57,7 @@ import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks"
 import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
 import { useEditDrag } from "./timeline/hooks/useEditDrag";
 import { useSlipDrag } from "./timeline/hooks/useSlipDrag";
+import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
@@ -631,38 +632,59 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const clipRangeSelectKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeSelect"),
     );
-    /** 单侧循环到下一个形状并重置默认曲率。 */
+    /**
+     * 单侧循环到下一个形状并重置默认曲率。
+     *
+     * 多选：重点 clip 属于选区时应用到全部选中（与淡变菜单同一判定），
+     * 每个 clip 从**自身**当前形状循环前进；一次 bulk 提交 = 单撤销步。
+     *
+     * @param checkpoint 单独调用默认 true（一笔后端写入 = 一个撤销步）；
+     *                   交叉点双列循环时传 false 并由调用方开 undo group
+     *                   合并为单步。
+     */
     const cycleOneFade = React.useCallback(
-        (clipId: string, side: "in" | "out") => {
-            const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
-            if (!clip) return;
-            const currentShape = Number.isFinite(
-                side === "in" ? clip.fadeInShape : clip.fadeOutShape,
-            )
-                ? Math.trunc(side === "in" ? clip.fadeInShape : clip.fadeOutShape)
-                : 0;
-            const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
-            const nextPreset =
-                FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
-            const nextDir = defaultFadeDirFor(nextPreset.shape, side === "out");
-            dispatch(
-                setClipFades({
-                    clipId,
+        (clipId: string, side: "in" | "out", checkpoint = true) => {
+            const targets = getBulkEditableClipIds({
+                activeClipId: clipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
+            });
+            const updates: Array<{
+                clipId: string;
+                fadeInShape?: number;
+                fadeInDir?: number;
+                fadeOutShape?: number;
+                fadeOutDir?: number;
+            }> = [];
+            for (const targetId of targets) {
+                const clip = sessionRef.current.clips.find((entry) => entry.id === targetId);
+                if (!clip) continue;
+                const rawShape = side === "in" ? clip.fadeInShape : clip.fadeOutShape;
+                const currentShape = Number.isFinite(rawShape) ? Math.trunc(rawShape) : 0;
+                const index = FADE_PRESETS.findIndex((preset) => preset.shape === currentShape);
+                const nextPreset =
+                    FADE_PRESETS[(index + 1 + FADE_PRESETS.length) % FADE_PRESETS.length];
+                const nextDir = defaultFadeDirFor(nextPreset.shape, side === "out");
+                dispatch(
+                    setClipFades({
+                        clipId: targetId,
+                        ...(side === "in"
+                            ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
+                            : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
+                    }),
+                );
+                updates.push({
+                    clipId: targetId,
                     ...(side === "in"
                         ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
                         : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
-                }),
-            );
-            void dispatch(
-                setClipStateRemote({
-                    clipId,
-                    ...(side === "in"
-                        ? { fadeInShape: nextPreset.shape, fadeInDir: nextDir }
-                        : { fadeOutShape: nextPreset.shape, fadeOutDir: nextDir }),
-                }),
-            );
+                });
+            }
+            if (updates.length > 0) {
+                void dispatch(setClipsStateBulkRemote({ updates, checkpoint }));
+            }
         },
-        [dispatch, sessionRef],
+        [dispatch, sessionRef, multiSelectedClipIds, multiSelectedSet],
     );
 
     // Ctrl+点击循环切换：普通包络线只切该线；交叉点抓手同时切换两侧
@@ -675,9 +697,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleCrossfadeCycleClick = React.useCallback(
         (sides: Array<{ clipId: string; isOut: boolean }>) => {
-            for (const side of sides) {
-                cycleOneFade(side.clipId, side.isOut ? "out" : "in");
-            }
+            // 交叉点双列循环 = 一次手势：开 undo group 把两侧循环合并为
+            // 单个撤销步（否则两笔 checkpoint:true 会变成两个撤销步）。
+            void (async () => {
+                await webApi.beginUndoGroup();
+                try {
+                    for (const side of sides) {
+                        cycleOneFade(side.clipId, side.isOut ? "out" : "in", false);
+                    }
+                } finally {
+                    await webApi.endUndoGroup();
+                }
+            })().catch(() => undefined);
         },
         [cycleOneFade],
     );
@@ -2265,6 +2296,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       void dispatch(removeClipsRemote(ids));
                                   }}
                                   onMute={(ids, muted) => {
+                                      // 批量走 bulk 通道：单次 IPC + 单个撤销步
+                                      //（逐个 setClipStateRemote 会产生 N 次
+                                      // IPC/N 步撤销）。乐观更新先行。
                                       for (const id of ids) {
                                           dispatch(
                                               setClipMuted({
@@ -2272,13 +2306,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                   muted,
                                               }),
                                           );
-                                          void dispatch(
-                                              setClipStateRemote({
+                                      }
+                                      void dispatch(
+                                          setClipsStateBulkRemote({
+                                              updates: ids.map((id) => ({
                                                   clipId: id,
                                                   muted,
-                                              }),
-                                          );
-                                      }
+                                              })),
+                                              checkpoint: true,
+                                          }),
+                                      );
                                   }}
                                   onRename={(clipId) => {
                                       setContextMenu(null);

@@ -387,6 +387,7 @@ export function useTimelineClipActions(
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
         (ids: string[]) => {
+            const changesById = new Map<string, { gain: number }>();
             for (const id of ids) {
                 const clip = sessionRef.current.clips.find((c) => c.id === id);
                 if (!clip) continue;
@@ -403,8 +404,27 @@ export function useTimelineClipActions(
                 });
                 if (newGain == null) continue;
                 dispatch(setClipGain({ clipId: id, gain: newGain }));
-                void dispatch(setClipStateRemote({ clipId: id, gain: newGain }));
+                changesById.set(id, { gain: newGain });
             }
+            if (changesById.size === 0) return;
+            const clipIds = [...changesById.keys()];
+            // 批量归一化 = 单个撤销步：undo group 内一次 bulk 提交
+            //（逐个 setClipStateRemote 会产生 N 步撤销 + N 次中间快照）。
+            void (async () => {
+                await webApi.beginUndoGroup();
+                try {
+                    await dispatch(
+                        setClipsStateBulkRemote({
+                            updates: buildBulkClipStateUpdates({ clipIds, changesById }),
+                            checkpoint: false,
+                        }),
+                    ).unwrap();
+                } catch {
+                    // 非致命：乐观值保留，此后权威快照会纠正。
+                } finally {
+                    await webApi.endUndoGroup();
+                }
+            })().catch(() => undefined);
         },
         [dispatch, sessionRef],
     );

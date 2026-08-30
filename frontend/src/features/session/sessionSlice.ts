@@ -524,6 +524,16 @@ export interface SessionState {
      * 响应，防止旧快照以 force 覆盖新状态（与 seekPlayhead 的乱序防护同理）。
      */
     _latestHistoryOpRequestId: string | null;
+
+    /**
+     * 最近一次**编辑类**请求的 requestId（setClipState / bulk / move 族）。
+     * 编辑 thunk 的 fulfilled 会 force-apply 后端全量快照；多选批量等场景
+     * 若旧请求的响应迟到（或后端返回中间状态），会覆盖更新的乐观状态、
+     * 造成"闪回原状 / 部分 Clip 还原"。pending 记录、fulfilled 比对，
+     * 过期响应直接丢弃 —— 最新一次编辑的响应（含此前所有已提交变更）
+     * 总是最后一个生效，撤/重做等权威操作不受影响。
+     */
+    _latestEditRequestId: string | null;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -896,12 +906,22 @@ function applyOptimisticBulkClipState(
         clipId: string;
         gain?: number;
         muted?: boolean;
-        fadeInSec?: number;
-        fadeOutSec?: number;
-        reversed?: boolean;
-        loopEnabled?: boolean;
+        startSec?: number;
+        lengthSec?: number;
         sourceStartSec?: number;
         sourceEndSec?: number;
+        snapOffsetSec?: number;
+        clipPlaybackRate?: number;
+        fadeInSec?: number;
+        fadeOutSec?: number;
+        fadeInShape?: number;
+        fadeInDir?: number;
+        fadeOutShape?: number;
+        fadeOutDir?: number;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
+        reversed?: boolean;
+        loopEnabled?: boolean;
     }>,
 ) {
     for (const update of updates) {
@@ -912,6 +932,35 @@ function applyOptimisticBulkClipState(
         }
         if (update.muted !== undefined) {
             clip.muted = Boolean(update.muted);
+        }
+        if (update.startSec !== undefined) {
+            clip.startSec = Math.max(0, Number(update.startSec) || 0);
+        }
+        if (update.lengthSec !== undefined) {
+            clip.lengthSec = Math.max(0, Number(update.lengthSec) || 0);
+            // trim 改写长度而未携带 snapOffset 时同步下钳（与后端 patch_clip_state
+            // 口径一致），避免残留 offset > length 的"幻影吸附目标"。
+            if (update.snapOffsetSec === undefined) {
+                clip.snapOffsetSec = Math.min(Math.max(0, clip.snapOffsetSec), clip.lengthSec);
+            }
+        }
+        if (update.snapOffsetSec !== undefined) {
+            clip.snapOffsetSec = Math.min(
+                Math.max(0, Number(update.snapOffsetSec) || 0),
+                clip.lengthSec,
+            );
+        }
+        if (update.clipPlaybackRate !== undefined) {
+            // 与 applyOptimisticClipState 同口径：写 Clip 级倍率，组合有效
+            // 速率 = Clip 级 × active take 速率。
+            const nextClipRate = clamp(Number(update.clipPlaybackRate) || 1, 0.1, 10);
+            const takes = clip.takes ?? [];
+            const activeTake = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+            const previousTakeRate = activeTake
+                ? activeTake.playbackRate
+                : clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
+            clip.clipPlaybackRate = nextClipRate;
+            clip.playbackRate = clamp(nextClipRate * previousTakeRate, 0.1, 10);
         }
         if (update.sourceStartSec !== undefined) {
             clip.sourceStartSec = Number(update.sourceStartSec) || 0;
@@ -926,6 +975,24 @@ function applyOptimisticBulkClipState(
         }
         if (update.fadeOutSec !== undefined) {
             clip.fadeOutSec = Math.max(0, Number(update.fadeOutSec) || 0);
+        }
+        if (update.fadeInShape !== undefined) {
+            clip.fadeInShape = update.fadeInShape;
+        }
+        if (update.fadeInDir !== undefined) {
+            clip.fadeInDir = Math.min(1, Math.max(-1, Number(update.fadeInDir) || 0));
+        }
+        if (update.fadeOutShape !== undefined) {
+            clip.fadeOutShape = update.fadeOutShape;
+        }
+        if (update.fadeOutDir !== undefined) {
+            clip.fadeOutDir = Math.min(1, Math.max(-1, Number(update.fadeOutDir) || 0));
+        }
+        if (update.autoFadeInSec !== undefined) {
+            clip.autoFadeInSec = Math.max(0, Number(update.autoFadeInSec) || 0);
+        }
+        if (update.autoFadeOutSec !== undefined) {
+            clip.autoFadeOutSec = Math.max(0, Number(update.autoFadeOutSec) || 0);
         }
         if (update.reversed !== undefined) {
             // 方向翻转（且本请求未显式指定源窗口）时镜像后端换算，保持
@@ -1822,6 +1889,7 @@ const initialState: SessionState = {
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
     _latestHistoryOpRequestId: null,
+    _latestEditRequestId: null,
 };
 
 export {
@@ -3541,6 +3609,8 @@ const sessionSlice = createSlice({
                 // fulfilled 的后端快照纠正）。这里仅记录最新请求，乱序到达
                 // 的旧响应在 fulfilled/rejected 中被丢弃。
                 state._latestHistoryOpRequestId = action.meta.requestId;
+                // 作废在途编辑响应：迟到的编辑快照不得覆盖撤销结果。
+                state._latestEditRequestId = null;
             })
 
             .addCase(undoRemote.fulfilled, (state, action) => {
@@ -3567,6 +3637,8 @@ const sessionSlice = createSlice({
             .addCase(redoRemote.pending, (state, action) => {
                 // 同 undoRemote.pending：以后端为唯一权威，不做本地快照回放。
                 state._latestHistoryOpRequestId = action.meta.requestId;
+                // 作废在途编辑响应：迟到的编辑快照不得覆盖重做结果。
+                state._latestEditRequestId = null;
             })
 
             .addCase(redoRemote.fulfilled, (state, action) => {
@@ -3586,6 +3658,10 @@ const sessionSlice = createSlice({
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
             })
 
+            .addCase(newProjectRemote.pending, (state) => {
+                // 新建工程为权威替换：作废一切在途编辑响应。
+                state._latestEditRequestId = null;
+            })
             .addCase(newProjectRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -3599,9 +3675,11 @@ const sessionSlice = createSlice({
                 state.status = "New project";
             })
 
-            .addCase(openProjectFromDialog.pending, (state) =>
-                setPending(state, "Opening project..."),
-            )
+            .addCase(openProjectFromDialog.pending, (state) => {
+                setPending(state, "Opening project...");
+                // 工程载入为权威替换：作废一切在途编辑响应。
+                state._latestEditRequestId = null;
+            })
             .addCase(openProjectFromDialog.fulfilled, (state, action) => {
                 state.busy = false;
                 const payload = action.payload as
@@ -3640,9 +3718,11 @@ const sessionSlice = createSlice({
                 state.status = "Open failed";
             })
 
-            .addCase(openProjectFromPath.pending, (state) =>
-                setPending(state, "Opening project..."),
-            )
+            .addCase(openProjectFromPath.pending, (state) => {
+                setPending(state, "Opening project...");
+                // 工程载入为权威替换：作废一切在途编辑响应。
+                state._latestEditRequestId = null;
+            })
             .addCase(openProjectFromPath.fulfilled, (state, action) => {
                 state.busy = false;
                 const payload = action.payload as {
@@ -4378,7 +4458,14 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(moveClipRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(moveClipRemote.fulfilled, (state, action) => {
+                // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4389,8 +4476,14 @@ const sessionSlice = createSlice({
                 // 交互锁期间若不强制应用，后端返回的波纹位移会被丢弃，导致波纹“无效”。
                 applyTimelineState(state, payload, { force: true });
             })
-
+            .addCase(moveClipsRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
+            })
             .addCase(moveClipsRemote.fulfilled, (state, action) => {
+                // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4485,6 +4578,13 @@ const sessionSlice = createSlice({
             })
 
             .addCase(setClipStateRemote.fulfilled, (state, action) => {
+                // 乱序守卫：只采纳最近一次编辑请求的响应（见 _latestEditRequestId）。
+                // 多选批量松手时若旧请求的中间状态快照迟到，会被这里丢弃，
+                // 避免"闪回原状/部分 Clip 还原"；最新响应（含此前全部已提交
+                // 变更）总是最后一个生效。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4496,6 +4596,7 @@ const sessionSlice = createSlice({
             })
 
             .addCase(setClipStateRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 applyOptimisticClipState(state, action.meta.arg);
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
                 const formantEnabled =
@@ -4509,8 +4610,18 @@ const sessionSlice = createSlice({
                     state.clipFormantStatus[action.meta.arg.clipId] = "rebuilding";
                 }
             })
+            .addCase(setClipStateRemote.rejected, (state, action) => {
+                // 后端拒绝：保留乐观值（用户意图可见），给出非致命反馈。
+                // 此后任何权威快照会以真实状态纠正；不静默回滚。
+                applyOptimisticClipState(state, action.meta.arg);
+                state.status = "Clip edit rejected";
+            })
 
             .addCase(setClipsStateBulkRemote.fulfilled, (state, action) => {
+                // 乱序守卫：见 setClipStateRemote.fulfilled。
+                if (state._latestEditRequestId !== action.meta.requestId) {
+                    return;
+                }
                 const payload = action.payload as {
                     ok?: boolean;
                 } & TimelineState;
@@ -4522,7 +4633,13 @@ const sessionSlice = createSlice({
             })
 
             .addCase(setClipsStateBulkRemote.pending, (state, action) => {
+                state._latestEditRequestId = action.meta.requestId;
                 applyOptimisticBulkClipState(state, action.meta.arg.updates);
+            })
+            .addCase(setClipsStateBulkRemote.rejected, (state, action) => {
+                // 后端拒绝：保留乐观值（用户意图可见），给出非致命反馈。
+                applyOptimisticBulkClipState(state, action.meta.arg.updates);
+                state.status = "Clip edit rejected";
             })
 
             .addCase(setClipActiveTakeRemote.pending, (state, action) => {

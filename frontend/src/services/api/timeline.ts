@@ -249,12 +249,20 @@ export const timelineApi = {
             clipId: string;
             gain?: number;
             muted?: boolean;
+            startSec?: number;
+            lengthSec?: number;
+            sourceStartSec?: number;
+            sourceEndSec?: number;
+            snapOffsetSec?: number;
+            clipPlaybackRate?: number;
             fadeInSec?: number;
             fadeOutSec?: number;
             fadeInShape?: number;
             fadeInDir?: number;
             fadeOutShape?: number;
             fadeOutDir?: number;
+            autoFadeInSec?: number;
+            autoFadeOutSec?: number;
             /** 倒放开关（后端 ClipStatePatch 支持，必须与乐观更新字段一致）。 */
             reversed?: boolean;
             /** Loop（循环源）开关。 */

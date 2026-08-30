@@ -1,6 +1,11 @@
 type BulkClipRemoteChange = {
     gain?: number;
     muted?: boolean;
+    /** 尺寸编辑（多选裁短/延长/拉伸的原子批量提交；后端 ClipStatePatch 原生支持）。 */
+    startSec?: number;
+    lengthSec?: number;
+    snapOffsetSec?: number;
+    clipPlaybackRate?: number;
     fadeInSec?: number;
     fadeOutSec?: number;
     /** REAPER 形状 id / 曲率：拖拽期间的修改必须随最终提交一并落盘，
@@ -9,6 +14,9 @@ type BulkClipRemoteChange = {
     fadeInDir?: number;
     fadeOutShape?: number;
     fadeOutDir?: number;
+    /** 自动交叉淡化（交叉点拖拽/粘贴后跟随）：与手动 fade 分离。 */
+    autoFadeInSec?: number;
+    autoFadeOutSec?: number;
     /** 倒放开关（后端 ClipStatePatch 支持，乐观更新同步应用）。 */
     reversed?: boolean;
     /** Loop（循环源）开关。 */
