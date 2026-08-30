@@ -403,6 +403,7 @@ export const enUS = {
     clip_take_cycle_next: "Cycle to Next Take",
     clip_take_cycle_prev: "Cycle to Previous Take",
     clip_take_duplicate: "Duplicate Current Take",
+    clip_take_reverse: "Reverse",
     clip_take_remove: "Delete Take",
     clip_take_explode: "Explode Takes into Clips",
     clip_take_rename: "Rename Take",

@@ -351,6 +351,13 @@ export const renameClipTakeRemote = createAsyncThunk(
     },
 );
 
+export const setClipTakeReversedRemote = createAsyncThunk(
+    "session/setClipTakeReversedRemote",
+    async (payload: { clipId: string; takeId: string; reversed: boolean; checkpoint?: boolean }) => {
+        return webApi.setClipTakeReversed(payload);
+    },
+);
+
 export const addClipTakeFromMediaRemote = createAsyncThunk(
     "session/addClipTakeFromMediaRemote",
     async (payload: {
@@ -374,6 +381,10 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             fadeOutSec?: number;
             reversed?: boolean;
             loopEnabled?: boolean;
+            // 与 reducer 的批量乐观类型 / service API 对齐：方向翻转换算、
+            // 关 Loop 归一窗口等场景会随开关一起携带显式源窗口。
+            sourceStartSec?: number;
+            sourceEndSec?: number;
         }>;
         checkpoint?: boolean;
     }) => {

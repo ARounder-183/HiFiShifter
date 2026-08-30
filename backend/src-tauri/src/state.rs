@@ -869,6 +869,90 @@ fn clip_take_media_duration_sec(take: &ClipTake) -> Option<f64> {
     None
 }
 
+/// 方向翻转（正放 ↔ 倒放）时保持**消费内容**不变的源窗口/锚点换算。
+///
+/// 非 Loop 的消费窗口正放为 `[ss, ss+span)`、倒放为 `[se−span, se)`，翻转
+/// 方向必须以**翻转前的消费窗口**为准推导新方向的锚点字段 —— 派生窗口
+/// 模型下非锚定方向的存储字段不参与消费数学、可能是陈旧值，直接翻转布尔
+/// 会让消费内容跳变（如裁剪过的 Clip 倒放后播到陈旧 se 所指的文件末段）：
+///
+///   - 翻为倒放：`se := ss + span`（原正放消费窗口的终点成为倒放锚点）；
+///   - 翻为正放：`ss := se − span`（原倒放消费窗口的起点成为正放锚点）。
+///
+/// Loop 的字段承载回绕锚点（引擎正放自 `mod(ss, D)` 升、倒放自 `mod(se, D)`
+/// 降），换算同样以原方向的消费区间为准：
+///
+///   - 翻为倒放：原正放自锚点升 span 秒，消费终点为 `ss + span`；倒放自
+///     锚点**下降**，故新锚 = `mod(ss + span, D)` —— 直接取 `mod(ss, D)`
+///     会从原正放的起点降奏，播到锚点下方的另一段内容；
+///   - 翻为正放：原倒放自锚点降 span 秒，消费起点为 `se − span`；正放自
+///     锚点**上升**，故新锚 = `mod(se − span, D)`。
+///
+/// Loop 锚点按整文件回绕归一 —— 引擎对倒放锚先 `min(se, D)` 再 rem_euclid，
+/// 存储 se 必须已落在 [0, D) 内，否则超界锚点被钳到 D 会错相。媒体时长未知
+/// 时退化为原始字段直算（引擎侧 rem_euclid 仍会回绕）。
+///
+/// `span_sec` = length × clip_rate × take_rate（该 Take 的组合消费速率）。
+pub(crate) fn flip_direction_source_window(
+    flip_to_reversed: bool,
+    loop_enabled: bool,
+    span_sec: f64,
+    media_total_sec: Option<f64>,
+    source_start_sec: &mut f64,
+    source_end_sec: &mut f64,
+) {
+    if loop_enabled {
+        match media_total_sec {
+            Some(d) if d.is_finite() && d > 1e-9 => {
+                if flip_to_reversed {
+                    *source_end_sec = (*source_start_sec + span_sec).rem_euclid(d);
+                } else {
+                    *source_start_sec = (*source_end_sec - span_sec).rem_euclid(d);
+                }
+            }
+            _ => {
+                if flip_to_reversed {
+                    *source_end_sec = *source_start_sec + span_sec;
+                } else {
+                    *source_start_sec = *source_end_sec - span_sec;
+                }
+            }
+        }
+        return;
+    }
+    if flip_to_reversed {
+        *source_end_sec = *source_start_sec + span_sec;
+    } else {
+        *source_start_sec = *source_end_sec - span_sec;
+    }
+}
+
+/// [`flip_direction_source_window`] 的 Take 便捷封装：span 按该 Take 的
+/// 组合消费速率（clip_rate × take.playback_rate）计算。在改写
+/// `take.reversed` **之前**调用 —— 内部按“翻转前方向”读取消费窗口。
+pub(crate) fn flip_take_playback_direction(take: &mut ClipTake, length_sec: f64, clip_rate: f64) {
+    let take_rate = if take.playback_rate.is_finite() && take.playback_rate > 1e-6 {
+        take.playback_rate as f64
+    } else {
+        1.0
+    };
+    let clip_rate = if clip_rate.is_finite() && clip_rate > 1e-6 {
+        clip_rate
+    } else {
+        1.0
+    };
+    let span = length_sec.max(0.0) * clip_rate * take_rate;
+    let media_total = clip_take_media_duration_sec(take);
+    flip_direction_source_window(
+        !take.reversed,
+        take.loop_enabled,
+        span,
+        media_total,
+        &mut take.source_start_sec,
+        &mut take.source_end_sec,
+    );
+}
+
 /// 对单个 Take 应用分割几何。
 ///
 /// `clip_rate` 是 Clip 级倍率；每个 Take 的实际消费速率为
@@ -3024,6 +3108,11 @@ impl AppState {
 mod tests {
     use super::*;
 
+    /// 串行化触及进程级“同步编辑所有 Take”开关的测试：该设置是全局原子，
+    /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
+    /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
+    static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
         timeline
             .clips
@@ -3085,6 +3174,9 @@ mod tests {
 
     #[test]
     fn split_clip_splits_every_take_independent_of_sync_setting() {
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut tl = TimelineState::default();
         let track_id = tl.tracks[0].id.clone();
         let clip_id = tl
@@ -3307,6 +3399,466 @@ mod tests {
                 "active 指向重映射后的第二个 take"
             );
         }
+    }
+
+    // ── 方向翻转（倒放）的源窗口/锚点换算 ──────────────────────────────
+
+    /// 核心回归：非 Loop 正放 Clip 的存储 se 可能是陈旧值（派生窗口模型下
+    /// 不参与消费数学）。右键“倒放”翻转方向时必须以原消费窗口 [ss, ss+len·r)
+    /// 推导新锚点 se —— 否则裁剪过的 Clip 倒放后会播到陈旧 se 所指的文件末段。
+    #[test]
+    fn reverse_flip_preserves_consumed_window_with_stale_source_end() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("R".into()),
+                Some(0.0),
+                Some(8.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 10.0;
+            // 模拟陈旧存储：长度 8、组合速率 1 的有效消费终点是 18，
+            // 存储 se 停留在导入期的文件末端值。
+            clip.source_end_sec = 30.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        assert!(
+            (clip.source_end_sec - 18.0).abs() < 1e-9,
+            "se 应换算为原消费窗口终点 18，实际 {}",
+            clip.source_end_sec
+        );
+        assert!((clip.source_start_sec - 10.0).abs() < 1e-9);
+        let (win_start, win_end) = clip_playback_window_sec(clip);
+        assert!((win_start - 10.0).abs() < 1e-9);
+        assert!((win_end - 18.0).abs() < 1e-9);
+        let take = clip.active_take();
+        assert!(take.reversed);
+        assert!((take.source_end_sec - 18.0).abs() < 1e-9);
+    }
+
+    /// 倒放 → 正放的对称方向：以倒放消费窗口 [se−len·r, se) 的起点换算
+    /// 新锚点 ss，存储中的陈旧 ss（不参与倒放消费数学）必须被覆盖。
+    #[test]
+    fn unreverse_flip_preserves_consumed_window_with_stale_source_start() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("R".into()),
+                Some(0.0),
+                Some(8.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.reversed = true;
+            clip.source_end_sec = 18.0;
+            // 陈旧 ss：倒放消费窗口 [10, 18) 不读该字段。
+            clip.source_start_sec = 999.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(false),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(!clip.reversed);
+        assert!(
+            (clip.source_start_sec - 10.0).abs() < 1e-9,
+            "ss 应换算为原倒放窗口起点 10，实际 {}",
+            clip.source_start_sec
+        );
+        let (win_start, win_end) = clip_playback_window_sec(clip);
+        assert!((win_start - 10.0).abs() < 1e-9);
+        assert!((win_end - 18.0).abs() < 1e-9);
+    }
+
+    /// “同步编辑所有 Take”下的方向翻转：每个 Take 按自身组合消费速率
+    /// （clip 倍率 × take 速率）换算窗口，不能共享 flat 的同一窗口。
+    #[test]
+    fn reverse_flip_sync_converts_every_take_with_own_rate() {
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::config::set_sync_edits_across_takes(true);
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("Multi".into()),
+                Some(0.0),
+                Some(4.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 10.0;
+            clip.source_end_sec = 14.0;
+            let mut second = clip.active_take().clone();
+            second.id = new_id("take");
+            second.playback_rate = 2.0;
+            second.source_start_sec = 5.0;
+            second.source_end_sec = 20.0;
+            clip.add_take(second);
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        let take1 = &clip.takes[0];
+        assert!(take1.reversed);
+        assert!(
+            (take1.source_end_sec - 14.0).abs() < 1e-9,
+            "take1 se = {}",
+            take1.source_end_sec
+        );
+        let take2 = &clip.takes[1];
+        assert!(take2.reversed);
+        assert!(
+            (take2.source_end_sec - 13.0).abs() < 1e-9,
+            "take2（rate 2）se 应为 5 + 4×2 = 13，实际 {}",
+            take2.source_end_sec
+        );
+        crate::config::set_sync_edits_across_takes(true);
+    }
+
+    /// 关闭同步设置时，Clip 级倒放只翻转 active take；inactive take 的
+    /// 方向与窗口保持不变。
+    #[test]
+    fn reverse_flip_without_sync_touches_active_take_only() {
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::config::set_sync_edits_across_takes(false);
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("Multi".into()),
+                Some(0.0),
+                Some(4.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 10.0;
+            clip.source_end_sec = 14.0;
+            let mut second = clip.active_take().clone();
+            second.id = new_id("take");
+            second.source_start_sec = 20.0;
+            second.source_end_sec = 24.0;
+            clip.add_take(second);
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        assert!(clip.takes[0].reversed);
+        assert!((clip.takes[0].source_end_sec - 14.0).abs() < 1e-9);
+        assert!(!clip.takes[1].reversed, "inactive take 不被翻转");
+        assert!((clip.takes[1].source_start_sec - 20.0).abs() < 1e-9);
+        assert!((clip.takes[1].source_end_sec - 24.0).abs() < 1e-9);
+        crate::config::set_sync_edits_across_takes(true);
+    }
+
+    /// 单 Take 倒放命令：翻转目标 Take 的窗口按其自身速率换算；inactive
+    /// take 不动 flat 投影，active take 物化到 flat。
+    #[test]
+    fn set_clip_take_reversed_flips_only_target_take() {
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::config::set_sync_edits_across_takes(false);
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("Multi".into()),
+                Some(0.0),
+                Some(4.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        let take2_id = {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 10.0;
+            clip.source_end_sec = 14.0;
+            clip.sync_take_from_flat();
+            let mut second = clip.active_take().clone();
+            second.id = new_id("take");
+            second.playback_rate = 2.0;
+            second.source_start_sec = 5.0;
+            second.source_end_sec = 20.0;
+            let id = second.id.clone();
+            clip.add_take(second);
+            id
+        };
+        // 翻转 inactive take：返回 false，flat 与其它 take 不变。
+        let flipped_active = tl
+            .set_clip_take_reversed(&clip_id, &take2_id, true)
+            .unwrap();
+        assert!(!flipped_active);
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert!(!clip.reversed, "inactive take 翻转不改 flat 投影");
+            assert!(!clip.takes[0].reversed);
+            let take2 = &clip.takes[1];
+            assert!(take2.reversed);
+            assert!(
+                (take2.source_end_sec - 13.0).abs() < 1e-9,
+                "take2 se 应为 5 + 4×1×2 = 13，实际 {}",
+                take2.source_end_sec
+            );
+        }
+        // 翻转 active take：返回 true，flat 投影随 take 物化。
+        let take1_id = {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            clip.takes[0].id.clone()
+        };
+        let flipped_active = tl
+            .set_clip_take_reversed(&clip_id, &take1_id, true)
+            .unwrap();
+        assert!(flipped_active);
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert!(clip.reversed);
+            assert!((clip.source_end_sec - 14.0).abs() < 1e-9);
+            assert!((clip.source_start_sec - 10.0).abs() < 1e-9);
+            assert!(clip.active_take().reversed);
+        }
+        // 幂等：目标方向与当前一致时不改动窗口。
+        let flipped_active = tl
+            .set_clip_take_reversed(&clip_id, &take1_id, true)
+            .unwrap();
+        assert!(flipped_active);
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert!((clip.source_end_sec - 14.0).abs() < 1e-9);
+        }
+        crate::config::set_sync_edits_across_takes(true);
+    }
+
+    /// Loop take 的方向翻转以**原方向消费区间**为准换算锚点：正放锚 12、
+    /// D=30、span=4 → 翻为倒放后锚定消费终点 mod(12+4, 30) = 16（自 16 降奏
+    /// 覆盖 [12,16) 的镜像），而非正放起点 12；翻回正放还原 mod(16−4, 30)=12。
+    #[test]
+    fn reverse_flip_loop_anchors_at_consumption_end() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("L".into()),
+                Some(0.0),
+                Some(4.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.duration_sec = Some(30.0);
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 12.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert!(clip.reversed);
+            assert!(
+                (clip.source_end_sec - 16.0).abs() < 1e-9,
+                "Loop 倒放锚应为消费终点 mod(12+4, 30) = 16，实际 {}",
+                clip.source_end_sec
+            );
+            assert!((clip.source_start_sec - 12.0).abs() < 1e-9);
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(false),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert!(!clip.reversed);
+            assert!(
+                (clip.source_start_sec - 12.0).abs() < 1e-9,
+                "Loop 正放锚应还原为消费起点 mod(16−4, 30) = 12，实际 {}",
+                clip.source_start_sec
+            );
+        }
+    }
+
+    /// 用户场景回归：10s 媒体、Loop 开启（应用默认）、Clip 修剪为源 [2,4)
+    /// （存储 se 停留在导入期的 10），倒放必须锚定消费终点 4 —— 自 4 降奏
+    /// 覆盖 4~2s，而不是从正放锚 2 向下降奏到 [0,2)。
+    #[test]
+    fn reverse_flip_loop_trimmed_region_plays_backwards_in_place() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("L".into()),
+                Some(0.0),
+                Some(2.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.duration_sec = Some(10.0);
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 2.0;
+            // 陈旧存储：导入期的文件末端值。
+            clip.source_end_sec = 10.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        assert!(
+            (clip.source_end_sec - 4.0).abs() < 1e-9,
+            "Loop 倒放锚应为 mod(2+2, 10) = 4，实际 {}",
+            clip.source_end_sec
+        );
+        assert!((clip.source_start_sec - 2.0).abs() < 1e-9);
+    }
+
+    /// 变速下的 Loop 翻转：span 按组合速率换算 —— 源窗口锚 2、组合速率 2
+    /// （clip 长 2s 消费 4 源秒）→ 倒放锚 mod(2 + 2×2, 10) = 6。
+    #[test]
+    fn reverse_flip_loop_with_rate_uses_combined_span() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("L".into()),
+                Some(0.0),
+                Some(2.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = true;
+            clip.duration_sec = Some(10.0);
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 2.0;
+            clip.playback_rate = 2.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        assert!(
+            (clip.source_end_sec - 6.0).abs() < 1e-9,
+            "Loop 倒放锚应为 mod(2+2×2, 10) = 6，实际 {}",
+            clip.source_end_sec
+        );
+    }
+
+    /// 显式携带源窗口的 reversed 请求（粘贴/导入模板路径）以调用方窗口为准，
+    /// 不做方向换算。
+    #[test]
+    fn reverse_patch_with_explicit_window_skips_conversion() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl
+            .add_clip(
+                Some(track_id),
+                Some("R".into()),
+                Some(0.0),
+                Some(8.0),
+                Some("C:/a.wav".into()),
+            )
+            .clone();
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.loop_enabled = false;
+            clip.sync_take_from_flat();
+            clip.source_start_sec = 10.0;
+            clip.source_end_sec = 30.0;
+            clip.sync_take_from_flat();
+        }
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                reversed: Some(true),
+                source_start_sec: Some(2.0),
+                source_end_sec: Some(6.0),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert!(clip.reversed);
+        assert!((clip.source_start_sec - 2.0).abs() < 1e-9);
+        assert!((clip.source_end_sec - 6.0).abs() < 1e-9);
     }
 
     /// Loop 音符放置：D == 窗口时与"窗口内相对偏移 + 镜像 + 周期平铺"的
@@ -6587,6 +7139,32 @@ impl TimelineState {
                 }
             }
             if let Some(v) = patch.reversed {
+                // 方向翻转（且本请求未显式指定源窗口，如右键“倒放”）时，
+                // 按翻转前的消费窗口换算新方向的锚点字段 —— 派生窗口模型下
+                // 非锚定方向的存储字段可能陈旧，直接翻转布尔会让消费内容
+                // 跳变（裁剪过的 Clip 倒放后播到陈旧 se 所指的文件末段）。
+                // 显式携带 source_start/end 的请求（粘贴/导入等）以调用方
+                // 给出的窗口为准，不做换算。
+                if c.reversed != v
+                    && patch.source_start_sec.is_none()
+                    && patch.source_end_sec.is_none()
+                {
+                    let rate = if c.playback_rate.is_finite() && c.playback_rate > 1e-6 {
+                        c.playback_rate as f64
+                    } else {
+                        1.0
+                    };
+                    let span = c.length_sec.max(0.0) * rate;
+                    let media_total = clip_source_media_duration_sec(c);
+                    flip_direction_source_window(
+                        v,
+                        c.loop_enabled,
+                        span,
+                        media_total,
+                        &mut c.source_start_sec,
+                        &mut c.source_end_sec,
+                    );
+                }
                 c.reversed = v;
             }
             if let Some(v) = patch.loop_enabled {
@@ -6649,6 +7227,7 @@ impl TimelineState {
                     } else {
                         1.0
                     };
+                let clip_len_for_sync = c.length_sec;
                 for take in &mut c.takes {
                     if let Some(v) = content_sync_patch.gain {
                         take.gain = v.clamp(0.0, 4.0);
@@ -6666,6 +7245,19 @@ impl TimelineState {
                             (v.clamp(0.1, 10.0) / clip_rate_for_sync).clamp(0.1, 10.0);
                     }
                     if let Some(v) = content_sync_patch.reversed {
+                        // 与 flat 投影同口径：方向翻转时按各 Take **自身**的
+                        // 组合消费速率换算源窗口/锚点，保持每个 Take 的消费
+                        // 内容不变（不同 Take 速率/窗口各不相同，不能只翻布尔）。
+                        if take.reversed != v
+                            && content_sync_patch.source_start_sec.is_none()
+                            && content_sync_patch.source_end_sec.is_none()
+                        {
+                            flip_take_playback_direction(
+                                take,
+                                clip_len_for_sync,
+                                clip_rate_for_sync as f64,
+                            );
+                        }
                         take.reversed = v;
                     }
                     if let Some(v) = content_sync_patch.loop_enabled {
@@ -6799,6 +7391,51 @@ impl TimelineState {
         }
 
         created_clip_ids
+    }
+
+    /// 翻转单个 Take 的播放方向（正放 ↔ 倒放）。
+    ///
+    /// 与 [`TimelineState::patch_clip_state`] 的方向翻转同口径：按翻转前的
+    /// 消费窗口换算该 Take 的源窗口/Loop 锚点（span 用该 Take 的组合消费
+    /// 速率），使消费内容不变。**不**受“同步编辑所有 Take”影响 —— 这是
+    /// 针对单个 Take 的内容操作。
+    ///
+    /// 返回该 Take 是否为 active take（调用方据此决定是否需要重调度音频
+    /// 分析/共振峰重建 —— inactive take 的翻转不改变当前可听内容）。
+    pub fn set_clip_take_reversed(
+        &mut self,
+        clip_id: &str,
+        take_id: &str,
+        reversed: bool,
+    ) -> Result<bool, String> {
+        let clip = self
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+        let clip_len = clip.length_sec;
+        let clip_rate = clip.clip_playback_rate;
+        let is_active = clip.active_take_id.as_deref() == Some(take_id);
+        if is_active {
+            // active take 以内存投影为消费权威：先把 flat 物化到 Take 条目，
+            // 避免条目滞后的窗口被当作翻转前的消费窗口。
+            clip.sync_take_from_flat();
+        }
+        let take = clip
+            .takes
+            .iter_mut()
+            .find(|t| t.id == take_id)
+            .ok_or_else(|| format!("take not found: {take_id}"))?;
+        if take.reversed != reversed {
+            flip_take_playback_direction(take, clip_len, clip_rate as f64);
+            take.reversed = reversed;
+        }
+        if is_active {
+            // active take 的翻转改变可听内容：物化到内存投影。
+            let take = take.clone();
+            take.apply_to_clip(clip);
+        }
+        Ok(is_active)
     }
 
     /// 把选中的多个 Clip 聚合为一个多 Take Clip。

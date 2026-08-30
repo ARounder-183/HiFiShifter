@@ -461,6 +461,7 @@ pub fn run() {
             commands::duplicate_clip_take,
             commands::remove_clip_take,
             commands::rename_clip_take,
+            commands::set_clip_take_reversed,
             commands::add_clip_take_from_media,
             commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,

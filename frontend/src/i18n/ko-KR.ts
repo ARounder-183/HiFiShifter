@@ -397,6 +397,7 @@ export const koKR = {
     clip_take_cycle_next: "다음 테이크로 전환",
     clip_take_cycle_prev: "이전 테이크로 전환",
     clip_take_duplicate: "현재 테이크 복제",
+    clip_take_reverse: "역재생",
     clip_take_remove: "테이크 삭제",
     clip_take_explode: "테이크를 개별 클립으로 분리",
     clip_take_rename: "테이크 이름 바꾸기",

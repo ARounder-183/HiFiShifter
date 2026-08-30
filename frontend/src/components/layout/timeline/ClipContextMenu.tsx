@@ -14,6 +14,7 @@ import {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipActiveTakeRemote,
+    setClipTakeReversedRemote,
 } from "../../../features/session/sessionSlice";
 import { webApi } from "../../../services/webviewApi";
 import { sortAndFilterFadedClips } from "./clipFadeContext";
@@ -49,6 +50,55 @@ const MenuItem: React.FC<{
 );
 
 const Divider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
+
+/**
+ * Take 行菜单项：点击行切换 active take；行尾“倒放”小按钮翻转**该 Take
+ * 自身**的播放方向 —— 不切换 active take、不受“同步编辑所有 Take”设置
+ * 影响（对单个 Take 的内容操作，窗口换算由后端
+ * `set_clip_take_reversed` 按消费窗口完成）。
+ */
+const TakeMenuItem: React.FC<{
+    label: string;
+    disabled?: boolean;
+    reversed: boolean;
+    reverseLabel: string;
+    onSwitch: () => void;
+    onToggleReverse: () => void;
+}> = ({ label, disabled = false, reversed, reverseLabel, onSwitch, onToggleReverse }) => (
+    <div className="relative flex items-center w-full">
+        <button
+            role="menuitem"
+            className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors pr-14
+                ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
+            disabled={disabled}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+                e.stopPropagation();
+                onSwitch();
+            }}
+        >
+            <span>{label}</span>
+        </button>
+        <button
+            role="menuitem"
+            aria-label={`${reverseLabel}: ${label}`}
+            title={reverseLabel}
+            className={`absolute right-1.5 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+                ${
+                    reversed
+                        ? "border-qt-highlight text-qt-highlight"
+                        : "border-qt-border text-qt-text-muted opacity-70"
+                } hover:bg-qt-button-hover`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+                e.stopPropagation();
+                onToggleReverse();
+            }}
+        >
+            {reverseLabel}
+        </button>
+    </div>
+);
 
 /** 一级菜单中的二级子菜单；悬停或点击均可展开。 */
 const SubMenu: React.FC<{
@@ -388,7 +438,7 @@ export const ClipContextMenu: React.FC<{
                 {isSingle && (
                     <>
                         {takes.map((take) => (
-                            <MenuItem
+                            <TakeMenuItem
                                 key={take.id}
                                 // 活跃 take 用 ● 标记；非活跃用 em-space（U+2003，
                                 // 不会被 HTML 空白折叠）保持对齐。
@@ -398,7 +448,9 @@ export const ClipContextMenu: React.FC<{
                                         : "\u2003"
                                 } ${take.name || take.id}`}
                                 disabled={takes.length <= 1}
-                                onClick={() => {
+                                reversed={Boolean(take.reversed)}
+                                reverseLabel={t("clip_take_reverse")}
+                                onSwitch={() => {
                                     // 点击已激活的 take 是 no-op：跳过 dispatch，
                                     // 避免无谓的乐观切换+回滚快照+全量快照刷新。
                                     if (take.id === clip.activeTakeId) {
@@ -409,6 +461,16 @@ export const ClipContextMenu: React.FC<{
                                         setClipActiveTakeRemote({
                                             clipId: clip.id,
                                             takeId: take.id,
+                                        }),
+                                    );
+                                    close();
+                                }}
+                                onToggleReverse={() => {
+                                    void dispatch(
+                                        setClipTakeReversedRemote({
+                                            clipId: clip.id,
+                                            takeId: take.id,
+                                            reversed: !take.reversed,
                                         }),
                                     );
                                     close();

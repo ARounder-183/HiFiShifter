@@ -26,6 +26,7 @@ import type {
     ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
+import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 
 import {
     addClipOnTrack,
@@ -46,6 +47,7 @@ import {
     duplicateClipTakeRemote,
     removeClipTakeRemote,
     renameClipTakeRemote,
+    setClipTakeReversedRemote,
     addClipTakeFromMediaRemote,
     ungroupClipsRemote,
     toggleGroupDisabledRemote,
@@ -821,6 +823,28 @@ function applyOptimisticClipState(
         clip.playbackRate = clamp(nextClipRate * previousTakeRate, 0.1, 10);
     }
     if (payload.reversed !== undefined) {
+        // 方向翻转（且本请求未显式指定源窗口）时镜像后端 flip_direction_source_window
+        // 的换算，保持消费窗口不变 —— 权威载荷到达前波形不跳变。
+        if (
+            payload.reversed !== clip.reversed &&
+            payload.sourceStartSec === undefined &&
+            payload.sourceEndSec === undefined
+        ) {
+            const rate =
+                Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
+                    ? clip.playbackRate
+                    : 1;
+            const mediaTotal = resolveLoopMediaDurationSec({
+                durationFrames: clip.durationFrames,
+                sourceSampleRate: clip.sourceSampleRate,
+                durationSec: clip.durationSec,
+            });
+            flipSourceWindowForDirection(
+                clip,
+                Math.max(0, clip.lengthSec) * rate,
+                mediaTotal > 0 ? mediaTotal : null,
+            );
+        }
         clip.reversed = Boolean(payload.reversed);
     }
     if (payload.loopEnabled !== undefined) {
@@ -904,6 +928,28 @@ function applyOptimisticBulkClipState(
             clip.fadeOutSec = Math.max(0, Number(update.fadeOutSec) || 0);
         }
         if (update.reversed !== undefined) {
+            // 方向翻转（且本请求未显式指定源窗口）时镜像后端换算，保持
+            // 消费窗口不变 —— 权威载荷到达前波形不跳变。
+            if (
+                update.reversed !== clip.reversed &&
+                update.sourceStartSec === undefined &&
+                update.sourceEndSec === undefined
+            ) {
+                const rate =
+                    Number.isFinite(clip.playbackRate) && clip.playbackRate > 1e-6
+                        ? clip.playbackRate
+                        : 1;
+                const mediaTotal = resolveLoopMediaDurationSec({
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
+                });
+                flipSourceWindowForDirection(
+                    clip,
+                    Math.max(0, clip.lengthSec) * rate,
+                    mediaTotal > 0 ? mediaTotal : null,
+                );
+            }
             clip.reversed = Boolean(update.reversed);
         }
         if (update.loopEnabled !== undefined) {
@@ -992,6 +1038,84 @@ function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo[] {
 function getClipRateMultiplier(clip: ClipInfo): number {
     const rate = Number(clip.clipPlaybackRate ?? 1);
     return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+
+/**
+ * 方向翻转（正放 ↔ 倒放）时保持**消费内容**不变的源窗口/锚点换算。
+ *
+ * 与后端 `flip_direction_source_window` 逐字段同口径，必须在改写
+ * `reversed` **之前**调用（内部按"翻转前方向"读取消费窗口）：
+ *   - 非 Loop 正放消费窗口 [ss, ss+span)、倒放 [se−span, se)。派生窗口
+ *     模型下非锚定方向的存储字段可能陈旧，直接翻布尔会让消费内容跳变
+ *     （如裁剪过的 Clip 倒放后播到陈旧 se 所指的文件末段）；
+ *   - Loop 的字段承载回绕锚点（引擎正放自 mod(ss, D) 升、倒放自
+ *     mod(se, D) 降），换算以原方向消费区间为准：翻为倒放锚定消费
+ *     终点 mod(ss + span, D)（自该点下降覆盖原区间的镜像），翻为正放
+ *     锚定消费起点 mod(se − span, D)。
+ */
+function flipSourceWindowForDirection(
+    fields: {
+        reversed: boolean;
+        loopEnabled: boolean;
+        sourceStartSec: number;
+        sourceEndSec: number;
+    },
+    spanSec: number,
+    mediaTotalSec: number | null,
+): void {
+    if (fields.loopEnabled) {
+        if (mediaTotalSec != null && mediaTotalSec > 0) {
+            if (fields.reversed) {
+                // 翻为正放：正放自锚点上升 → 新锚 = 原倒放消费起点。
+                fields.sourceStartSec = modEuclid(
+                    fields.sourceEndSec - spanSec,
+                    mediaTotalSec,
+                );
+            } else {
+                // 翻为倒放：倒放自锚点下降 → 新锚 = 原正放消费终点。
+                fields.sourceEndSec = modEuclid(
+                    fields.sourceStartSec + spanSec,
+                    mediaTotalSec,
+                );
+            }
+        } else if (fields.reversed) {
+            // 媒体时长未知：退化为原始字段直算（引擎侧回绕兜底）。
+            fields.sourceStartSec = fields.sourceEndSec - spanSec;
+        } else {
+            fields.sourceEndSec = fields.sourceStartSec + spanSec;
+        }
+        return;
+    }
+    if (fields.reversed) {
+        // 翻为正放：ss := se − span（原倒放消费窗口的起点）。
+        fields.sourceStartSec = fields.sourceEndSec - spanSec;
+    } else {
+        // 翻为倒放：se := ss + span（原正放消费窗口的终点）。
+        fields.sourceEndSec = fields.sourceStartSec + spanSec;
+    }
+}
+
+/** [`flipSourceWindowForDirection`] 的 Take 封装：span 按该 Take 的组合消费
+ * 速率（Clip 倍率 × Take 速率）计算。 */
+function flipTakeSourceWindowForDirection(
+    take: ClipTakeInfo,
+    lengthSec: number,
+    clipRate: number,
+): void {
+    const clipRateNum = Number.isFinite(clipRate) && clipRate > 1e-6 ? clipRate : 1;
+    const takeRate =
+        Number.isFinite(take.playbackRate) && take.playbackRate > 1e-6 ? take.playbackRate : 1;
+    const span = Math.max(0, Number(lengthSec) || 0) * clipRateNum * takeRate;
+    const mediaTotal = resolveLoopMediaDurationSec({
+        durationFrames: take.durationFrames,
+        sourceSampleRate: take.sourceSampleRate,
+        durationSec: take.durationSec,
+    });
+    flipSourceWindowForDirection(
+        take,
+        span,
+        mediaTotal > 0 ? mediaTotal : null,
+    );
 }
 
 function updateActiveTakeFromFlat(clip: ClipInfo): void {
@@ -1756,6 +1880,7 @@ export {
     duplicateClipTakeRemote,
     removeClipTakeRemote,
     renameClipTakeRemote,
+    setClipTakeReversedRemote,
     addClipTakeFromMediaRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
@@ -4430,6 +4555,38 @@ const sessionSlice = createSlice({
                 restoreTakeRollback(state, action.meta.arg.clipIds);
                 setRejected(state, action);
             })
+
+            .addCase(setClipTakeReversedRemote.pending, (state, action) => {
+                // 乐观翻转单个 Take：与后端 flip_take_playback_direction 同口径
+                // 换算该 Take 的源窗口/锚点（保持消费内容不变）。active take
+                // 需物化到 flat 投影；inactive take 只动自身条目。
+                const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
+                if (!clip) return;
+                const takes = clip.takes ?? [];
+                const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
+                if (!take) return;
+                if (take.reversed !== action.meta.arg.reversed) {
+                    flipTakeSourceWindowForDirection(
+                        take,
+                        clip.lengthSec,
+                        clip.clipPlaybackRate ?? 1,
+                    );
+                }
+                take.reversed = action.meta.arg.reversed;
+                if (take.id === clip.activeTakeId) {
+                    applyActiveTakeToFlat(clip, take);
+                }
+            })
+            .addCase(setClipTakeReversedRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Take reverse rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(setClipTakeReversedRemote.rejected, setRejected)
 
             .addCase(packClipsIntoTakesRemote.rejected, setRejected)
 

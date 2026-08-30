@@ -307,6 +307,7 @@ export const zhCN = {
     clip_take_cycle_next: "循环切换到下一个 Take",
     clip_take_cycle_prev: "循环切换到上一个 Take",
     clip_take_duplicate: "复制当前 Take",
+    clip_take_reverse: "倒放",
     clip_take_remove: "删除 Take",
     clip_take_explode: "将 Take 展开为独立音频块",
     clip_take_rename: "重命名 Take",

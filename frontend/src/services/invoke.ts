@@ -309,6 +309,14 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[3],
             };
 
+        case "set_clip_take_reversed":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                reversed: args[2],
+                checkpoint: args[3],
+            };
+
         case "add_clip_take_from_media":
             return {
                 clipId: args[0],

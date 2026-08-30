@@ -130,6 +130,11 @@ test("services/invoke.test.ts scripted checks", async () => {
         "rename_clip_take mapping",
     );
     assertEqual(
+        buildTauriArgs("set_clip_take_reversed", ["clip-1", "take-2", true, false]),
+        { clipId: "clip-1", takeId: "take-2", reversed: true, checkpoint: false },
+        "set_clip_take_reversed mapping",
+    );
+    assertEqual(
         buildTauriArgs("add_clip_take_from_media", ["clip-1", "C:/a.wav", "Take B", false]),
         { clipId: "clip-1", sourcePath: "C:/a.wav", name: "Take B", checkpoint: false },
         "add_clip_take_from_media mapping",

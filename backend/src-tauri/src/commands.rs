@@ -885,6 +885,17 @@ pub fn rename_clip_take(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn set_clip_take_reversed(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    reversed: bool,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,

@@ -308,6 +308,7 @@ export const zhTW = {
     clip_take_cycle_next: "循環切換到下一個 Take",
     clip_take_cycle_prev: "循環切換到上一個 Take",
     clip_take_duplicate: "複製目前 Take",
+    clip_take_reverse: "倒放",
     clip_take_remove: "刪除 Take",
     clip_take_explode: "將 Take 展開為獨立音訊塊",
     clip_take_rename: "重新命名 Take",

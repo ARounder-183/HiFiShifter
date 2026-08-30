@@ -323,6 +323,7 @@ export const jaJP = {
     clip_take_cycle_next: "次のテイクへ切替",
     clip_take_cycle_prev: "前のテイクへ切替",
     clip_take_duplicate: "現在のテイクを複製",
+    clip_take_reverse: "逆再生",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",

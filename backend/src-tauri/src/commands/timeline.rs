@@ -1327,6 +1327,60 @@ pub(super) fn rename_clip_take(
     payload
 }
 
+/// 翻转**单个 Take** 的播放方向（倒放 ↔ 正放）。
+///
+/// 与 Clip 级“倒放”不同：这是针对单个 Take 的内容操作，不受
+/// “同步编辑所有 Take”设置影响；方向翻转时按该 Take 的消费窗口换算
+/// 源窗口/Loop 锚点（见 `flip_take_playback_direction`）。
+pub(super) fn set_clip_take_reversed(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    reversed: bool,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验、后 checkpoint：失败路径不留“空 undo 步”。
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if clip.take(&take_id).is_none() {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl);
+    }
+    let flipped_active = tl
+        .set_clip_take_reversed(&clip_id, &take_id, reversed)
+        .unwrap_or(false);
+    invalidate_take_related_caches(&clip_id);
+    let root_track_id = tl
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .map(|c| c.track_id.clone())
+        .and_then(|t| tl.resolve_root_track_id(&t));
+    // active take 的翻转改变可听内容，需要重调度分析；inactive take 的
+    // 翻转不改变当前可听内容，跳过以免无谓重算（与 remove_clip_take 同模式）。
+    if flipped_active {
+        maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if flipped_active {
+        if let Some(root) = root_track_id {
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        }
+    }
+    payload
+}
+
 pub(super) fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,

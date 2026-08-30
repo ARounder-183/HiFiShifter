@@ -315,6 +315,20 @@ export const timelineApi = {
             payload.checkpoint,
         ),
 
+    setClipTakeReversed: (payload: {
+        clipId: string;
+        takeId: string;
+        reversed: boolean;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clip_take_reversed",
+            payload.clipId,
+            payload.takeId,
+            payload.reversed,
+            payload.checkpoint,
+        ),
+
     addClipTakeFromMedia: (payload: {
         clipId: string;
         sourcePath: string;
