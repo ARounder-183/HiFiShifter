@@ -53,9 +53,14 @@ fn is_audio_supported(path: &str) -> bool {
     crate::media::is_media_extension(Path::new(path))
 }
 
-/// 将 Reaper 音量倍率转换为 HiFiShifter 的 0.0–1.0 范围。
+/// 将 Reaper 的线性音量倍率转换为 HiFiShifter 的增益（0.0–4.0）。
+///
+/// REAPER 的音量是线性倍率（0.5 = −6 dB、1.0 = 0 dB、2.0 = +6 dB），
+/// item trim 与 take volume 相乘后最高可达 +24 dB（16×）；负值表示相位
+/// 反转。HiFiShifter 的 gain 支持 [0, 4]（0..+12 dB）且无反相概念：
+/// 负值取绝对值保留响度，超出上限截断到 4.0。
 fn convert_volume(vol: f64) -> f32 {
-    (vol as f32).clamp(0.0, 1.0)
+    (vol.abs() as f32).clamp(0.0, 4.0)
 }
 
 /// 将 REAPER fade 数组换算为（浮点形状 id, 曲率）。
@@ -301,43 +306,52 @@ fn compute_take_source_anchor_sec(
     anchor
 }
 
-fn reaper_take_volume(values: &[f64]) -> f64 {
-    // Item 默认 take：VOLPAN <trim> <pan> <volume> <pan law> → volume = [2]。
-    // 显式 take：TAKEVOLPAN <pan> <volume> <pan law> → volume = [1]。
-    // 兜底候选同样跳过 index 0（trim/pan 不是增益）：显式 take 的
-    // [pan=0.5, vol=0, law] 若回退到 index 0 会把 pan 当成 0.5 倍增益。
-    let candidates: &[usize] = if values.len() >= 4 { &[2, 1] } else { &[1] };
-    for &idx in candidates {
-        if let Some(v) = values.get(idx).copied() {
-            if v.is_finite() && v > 0.0 {
-                return v;
-            }
-        }
-    }
-    1.0
+fn reaper_take_volume(values: &[f64], explicit_take: bool) -> f64 {
+    // 布局由“默认 take vs 显式 take”决定（不能靠长度启发式）：
+    // - 默认 take（ITEM 的 VOLPAN）：<item trim> <pan> <take volume> <pan law>
+    //   → volume = [2]；
+    // - 显式 take（TAKEVOLPAN）：<pan> <take volume> <pan law> → volume = [1]。
+    // volume 可以合法地为 0（静音）、负（反相）或 >1（提升），只排除非有限值。
+    let idx = if explicit_take { 1 } else { 2 };
+    values
+        .get(idx)
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0)
 }
 
 fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
-    let vol = reaper_take_volume(&take.vol_pan);
-    if vol > 0.0 {
-        return vol;
-    }
-
-    // 兼容部分 Reaper 多 Take 工程：非主 take 的 TAKEVOLPAN 可能写成 0，
-    // 但实际可听音量继承自主 take。此处仅对“显式 take”做回退。
+    // REAPER 的可听增益 = item trim（VOLPAN[0]，item 级） × take volume
+    // （VOLPAN[2] / TAKEVOLPAN[1]）。只取 take volume 会丢掉用户在 item
+    // 音量把手上设置的音量（REAPER 把它写进 trim）。
     let explicit_take = item
         .takes
         .iter()
         .any(|candidate| std::ptr::eq(candidate, take));
-    if !explicit_take {
-        return vol.max(0.0);
+    let trim = item
+        .default_take
+        .vol_pan
+        .first()
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0);
+
+    let vol = reaper_take_volume(&take.vol_pan, explicit_take);
+    if vol != 0.0 {
+        return trim * vol;
     }
 
-    let fallback = reaper_take_volume(&item.default_take.vol_pan);
-    if fallback > 0.0 {
-        fallback
+    // 兼容部分 Reaper 多 Take 工程：非主 take 的 TAKEVOLPAN 可能写成 0，
+    // 但实际可听音量继承自主 take。此处仅对“显式 take”做回退。
+    if !explicit_take {
+        return 0.0;
+    }
+
+    let fallback = reaper_take_volume(&item.default_take.vol_pan, false);
+    if fallback != 0.0 {
+        trim * fallback
     } else {
-        vol.max(0.0)
+        0.0
     }
 }
 
@@ -1957,21 +1971,77 @@ mod tests {
 
     #[test]
     fn reaper_take_volume_reads_explicit_takevolpan_layout() {
-        let item = ReaperItem::default();
-        // 显式 take 的 TAKEVOLPAN：<pan> <volume> <pan law>。
+        let mut item = ReaperItem::default();
+        // 显式 take 的 TAKEVOLPAN：<pan> <volume> <pan law> → volume = [1]。
         let explicit = ReaperTake {
             vol_pan: vec![0.0, 1.25, -1.0],
             ..ReaperTake::default()
         };
-        assert!((reaper_take_volume(&explicit.vol_pan) - 1.25).abs() < 1e-9);
-        assert!((take_linear_gain(&item, &explicit) - 1.25).abs() < 1e-9);
+        item.takes.push(explicit);
+        assert!((reaper_take_volume(&item.takes[0].vol_pan, true) - 1.25).abs() < 1e-9);
+        assert!((take_linear_gain(&item, &item.takes[0]) - 1.25).abs() < 1e-9);
 
-        // Item 默认 take 的 VOLPAN：<trim> <pan> <volume> <pan law>。
-        let default = ReaperTake {
-            vol_pan: vec![1.0, 0.0, 0.8, -1.0],
+        // Item 默认 take 的 VOLPAN：<trim> <pan> <volume> <pan law> → volume = [2]。
+        let mut item2 = ReaperItem::default();
+        item2.default_take.vol_pan = vec![1.0, 0.0, 0.8, -1.0];
+        assert!((reaper_take_volume(&item2.default_take.vol_pan, false) - 0.8).abs() < 1e-9);
+        assert!((take_linear_gain(&item2, &item2.default_take) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn take_linear_gain_combines_item_trim_with_take_volume() {
+        // REAPER 可听增益 = item trim（VOLPAN[0]）× take volume（VOLPAN[2]）。
+        // 用户拖动 item 音量把手写的是 trim —— 只取 take volume 会丢增益。
+        let mut item = ReaperItem::default();
+        item.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0]; // trim -6dB
+        assert!((take_linear_gain(&item, &item.default_take) - 0.5).abs() < 1e-9);
+
+        // 提升：trim 与 volume 都 >1（+6dB × +6dB = +12dB）。
+        let mut boost = ReaperItem::default();
+        boost.default_take.vol_pan = vec![2.0, 0.0, 2.0, -1.0];
+        assert!((take_linear_gain(&boost, &boost.default_take) - 4.0).abs() < 1e-9);
+
+        // 负 volume（REAPER 反相）：响度取绝对值保留。
+        let mut inverted = ReaperItem::default();
+        inverted.default_take.vol_pan = vec![1.0, 0.0, -0.8, -1.0];
+        assert!((take_linear_gain(&inverted, &inverted.default_take) - -0.8).abs() < 1e-9);
+        assert!(
+            (convert_volume(take_linear_gain(&inverted, &inverted.default_take)) - 0.8).abs()
+                < 1e-6
+        );
+
+        // 显式 take 音量写 0 时回退主 take 音量（多 take 兼容）。
+        let mut multi = ReaperItem::default();
+        multi.default_take.vol_pan = vec![1.0, 0.0, 0.9, -1.0];
+        multi.takes.push(ReaperTake {
+            vol_pan: vec![0.0, 0.0, -1.0],
             ..ReaperTake::default()
-        };
-        assert!((reaper_take_volume(&default.vol_pan) - 0.8).abs() < 1e-9);
+        });
+        assert!((take_linear_gain(&multi, &multi.takes[0]) - 0.9).abs() < 1e-9);
+
+        // 显式 take 的 TAKEVOLPAN 音量同样乘以 item trim。
+        let mut explicit_trim = ReaperItem::default();
+        explicit_trim.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0];
+        explicit_trim.takes.push(ReaperTake {
+            vol_pan: vec![0.0, 1.5, -1.0],
+            ..ReaperTake::default()
+        });
+        assert!(
+            (take_linear_gain(&explicit_trim, &explicit_trim.takes[0]) - 0.75).abs() < 1e-9,
+            "explicit take gain must include item trim"
+        );
+    }
+
+    #[test]
+    fn convert_volume_keeps_boost_and_inverts_phase_to_amplitude() {
+        // HiFiShifter 增益范围 [0, 4]：0 dB → 1.0、+6 dB → 2.0 原样保留；
+        // 负值（REAPER 相位反转）取绝对值保留响度；超出 +12 dB（4×）截断。
+        assert!((convert_volume(1.0) - 1.0).abs() < 1e-6);
+        assert!((convert_volume(0.5) - 0.5).abs() < 1e-6);
+        assert!((convert_volume(2.0) - 2.0).abs() < 1e-6);
+        assert!((convert_volume(-0.8) - 0.8).abs() < 1e-6);
+        assert!((convert_volume(16.0) - 4.0).abs() < 1e-6);
+        assert!((convert_volume(0.0) - 0.0).abs() < 1e-6);
     }
 
     #[test]
