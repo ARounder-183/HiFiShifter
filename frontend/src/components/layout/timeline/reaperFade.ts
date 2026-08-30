@@ -21,14 +21,6 @@
  * - 快收/陡峭快收锚在 |u|=1 且线性点恰在 dir=0；
  * - 线性预设自身就是这条轴的全量程视图（端点近似快起形态）。
  * 切换形状时必须把 dir 重置为新形状的方向相关默认值（DEFAULT_FADE_DIR_BY_SHAPE）。
- *
- * ## 端点着陆（de-click landing，与 Rust 侧一致）
- *
- * 幂族曲线端点斜率可能趋近无穷（e<1 时淡出末端 g(ε)=ε^e 下降极快），
- * 逐帧点采样会在 clip 末尾留下不可忽略的增益阶跃 → Click。因此对所有
- * 曲线施加 raised-cosine 着陆窗：淡出在末尾 `FADE_LANDING_FRAC` 区间
- * 内把增益平滑拉到 0、淡入在开头对称地从 0 平滑拉起（C¹ 衔接、端点
- * 零斜率）。内部采样点（黄金锚点 t≤0.75 / ≥0.25）不受影响。
  */
 
 /** REAPER 标准形状 id。 */
@@ -43,32 +35,6 @@ export const FADE_S_SHARP = 6; // "Slow Start/End Steep"
 /** 指数安全范围：防止 dir 极值处视觉爆炸或数值下溢。 */
 const E_MIN = 0.01;
 const E_MAX = 64;
-
-/**
- * 端点着陆窗长度（归一化进度比例，与 Rust `fade_curves.rs`
- * `FADE_LANDING_FRAC` 同步）。淡出的末尾 / 淡入的开头这段被
- * raised-cosine 窗覆盖，把曲线平滑拉回/拉离 0。
- */
-export const FADE_LANDING_FRAC = 1 / 8;
-
-/**
- * raised-cosine 着陆窗：淡出在 (1-τ, 1]、淡入在 [0, τ) 内取值；窗外恒为 1。
- * 两端窗导数均为 0，与原始曲线 C¹ 衔接（淡出 t=1 处、淡入 t=0 处零斜率）。
- */
-function landingWindow(t: number, mode: "in" | "out"): number {
-    const tau = FADE_LANDING_FRAC;
-    let u: number;
-    if (mode === "out") {
-        const lo = 1 - tau;
-        if (t <= lo) return 1;
-        u = (t - lo) / tau;
-    } else {
-        if (t >= tau) return 1;
-        u = (tau - t) / tau;
-    }
-    const c = Math.cos((u * Math.PI) / 2);
-    return c * c;
-}
 
 type ShapeSpec =
     | { kind: "power"; p0: number; u0: number; k: number }
@@ -137,9 +103,6 @@ function coreAscending(spec: ShapeSpec, u: number, x: number): number {
  * @param dir   该侧存储的曲率 [-1,1]（淡入/淡出各自约定）
  * @param mode  'in'（上升）/ 'out'（下降；内部完成时间镜像与 σ 符号归一）
  * @param t     该侧区间内的进度 [0,1]
- *
- * 端点着陆：淡出末尾/淡入开头乘 raised-cosine 窗（见模块头注释），
- * 保证端部零斜率、逐帧增益步长有界（防 Click）。
  */
 export function fadeGainSigned(shape: number, dir: number, mode: "in" | "out", t: number): number {
     const clampedT = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
@@ -150,7 +113,7 @@ export function fadeGainSigned(shape: number, dir: number, mode: "in" | "out", t
     const u = sigma * Math.min(1, Math.max(-1, dir));
     const x = mode === "out" ? 1 - clampedT : clampedT;
     const spec = resolveShapeSpec(shape);
-    const gain = coreAscending(spec, u, x) * landingWindow(clampedT, mode);
+    const gain = coreAscending(spec, u, x);
     return Number.isFinite(gain) ? gain : clampedT;
 }
 

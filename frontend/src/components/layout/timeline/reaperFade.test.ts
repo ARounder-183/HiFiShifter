@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
     DEFAULT_FADE_DIR_BY_SHAPE,
-    FADE_LANDING_FRAC,
     FADE_PRESETS,
     defaultFadeDirFor,
     fadeGainSigned,
@@ -84,81 +83,6 @@ describe("fadeGainSigned", () => {
                     const gOut = fadeGainSigned(shape, -d, "out", 1 - x);
                     expect(gIn).toBeCloseTo(gOut, 12);
                 }
-            }
-        }
-    });
-
-    it("landing window is continuous at its junctions", () => {
-        const eps = 1e-9;
-        const tau = FADE_LANDING_FRAC;
-        const shapes = [...FADE_PRESETS.map((p) => p.shape), 1.1, 5.1];
-        for (const shape of shapes) {
-            for (const dir of [-1, 0, 1]) {
-                const lo = 1 - tau;
-                expect(
-                    Math.abs(
-                        fadeGainSigned(shape, dir, "out", lo - eps) -
-                            fadeGainSigned(shape, dir, "out", lo + eps),
-                    ),
-                ).toBeLessThan(1e-6);
-                expect(
-                    Math.abs(
-                        fadeGainSigned(shape, dir, "in", tau - eps) -
-                            fadeGainSigned(shape, dir, "in", tau + eps),
-                    ),
-                ).toBeLessThan(1e-6);
-            }
-        }
-    });
-
-    it("per-frame gain step is click-safe for slow-start fade-outs", () => {
-        // “先慢后快”最恶劣组合：淡出 u=-dir<0 → e<1（末端陡峭、旧实现
-        // 在末帧留下 (1/N)^e 级增益阶跃 → Click）。端点锁定约定：
-        // 第 k 帧进度 (k+1)/N，最后一帧恰为 1 → 增益精确 0。
-        const worstCases: Array<[number, number]> = [
-            [1, 1],
-            [1, 0.6],
-            [3, 1],
-            [3, 0.35],
-        ];
-        for (const [shape, dir] of worstCases) {
-            for (const frames of [480, 2048, 48000]) {
-                let prev = fadeGainSigned(shape, dir, "out", 0);
-                let maxStep = 0;
-                for (let frame = 0; frame < frames; frame += 1) {
-                    const consumed = (frame + 1) / frames;
-                    const g = fadeGainSigned(shape, dir, "out", consumed);
-                    expect(g).toBeLessThanOrEqual(prev + 1e-6);
-                    maxStep = Math.max(maxStep, prev - g);
-                    prev = g;
-                }
-                expect(prev).toBe(0);
-                expect(maxStep).toBeLessThan(0.025);
-            }
-        }
-    });
-
-    it("per-frame gain step is click-safe for fast-start fade-ins", () => {
-        // 对称问题：淡入 u=dir<0 → e<1（起点陡峭），首帧不再携带
-        // (1/N)^e 级增益突跳。
-        const worstCases: Array<[number, number]> = [
-            [1, -1],
-            [1, -0.6],
-            [3, -1],
-            [3, -0.35],
-        ];
-        for (const [shape, dir] of worstCases) {
-            for (const frames of [480, 2048, 48000]) {
-                let prev = fadeGainSigned(shape, dir, "in", 0);
-                let maxStep = 0;
-                for (let frame = 0; frame < frames; frame += 1) {
-                    const consumed = (frame + 1) / frames;
-                    const g = fadeGainSigned(shape, dir, "in", consumed);
-                    expect(g).toBeGreaterThanOrEqual(prev - 1e-6);
-                    maxStep = Math.max(maxStep, g - prev);
-                    prev = g;
-                }
-                expect(maxStep).toBeLessThan(0.025);
             }
         }
     });
