@@ -4,6 +4,7 @@ import type { ClipInfo, ClipFormantMorph } from "../../../../features/session/se
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { VowelChart } from "./VowelChart";
 import { useClipFormantEditor } from "./useClipFormantEditor";
+import { registerDragAbort } from "../gestureFocusGuard";
 import {
     CLIP_FORMANT_ACTIVE_ATTR,
     CLIP_FORMANT_FOCUS_WINDOW,
@@ -67,10 +68,15 @@ export const ClipFormantToolWindow: React.FC<{
             onMove(positionRef.current.x, positionRef.current.y);
         };
 
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 以最后一次位置收尾（与 pointerup 语义一致）。
+        const unregisterAbort = registerDragAbort(onEndPointer);
+
         window.addEventListener("pointermove", onMovePointer, true);
         window.addEventListener("pointerup", onEndPointer, true);
         window.addEventListener("pointercancel", onEndPointer, true);
         return () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMovePointer, true);
             window.removeEventListener("pointerup", onEndPointer, true);
             window.removeEventListener("pointercancel", onEndPointer, true);

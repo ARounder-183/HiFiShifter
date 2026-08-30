@@ -10,6 +10,7 @@
  * 手势，不与时间轴网格/候选直接交互（吸附仅服务于移动/编辑类拖拽）。
  */
 import { useRef, useState } from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import type * as React from "react";
 
 import type { SessionState } from "../../../features/session/sessionSlice";
@@ -131,6 +132,9 @@ export function useTimelineSelectionRect(params: {
             selectionBeforeDrag: currentSelectionIds,
             deferredContextMenu: null,
         };
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 走与 end() 完全相同的收尾（提交框选结果 / 重放被抑制的右键菜单）。
+        const unregisterAbort = registerDragAbort(end);
 
         // GTK/WebKit fires `contextmenu` on right-button *press* (unlike
         // WebView2, which fires it on release). Keep the native event
@@ -190,6 +194,7 @@ export function useTimelineSelectionRect(params: {
             const drag = selectionDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             selectionDragRef.current = null;
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
 
             window.removeEventListener("contextmenu", suppressContextMenu, true);
             window.removeEventListener("pointermove", onMove);

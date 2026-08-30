@@ -11,6 +11,7 @@
  *   持久化到后端。
  */
 import { useRef } from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
@@ -142,10 +143,12 @@ export function useSnapOffsetDrag(deps: {
             applyOffset(absPos - clipStart);
         }
 
-        function onEnd(ev: PointerEvent) {
+        function finish() {
             const drag = dragRef.current;
-            if (!drag || drag.pointerId !== ev.pointerId) return;
+            if (!drag) return;
             dragRef.current = null;
+            // 收尾第一步注销失焦守卫（幂等防双触发）。
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onEnd);
             window.removeEventListener("pointercancel", onEnd);
@@ -180,6 +183,16 @@ export function useSnapOffsetDrag(deps: {
                     dispatch(endInteraction());
                 });
         }
+
+        function onEnd(ev: PointerEvent) {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== ev.pointerId) return;
+            finish();
+        }
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，注册
+        // 事件无关的 finish()，由 gestureFocusGuard 在窗口 blur 时统一收尾。
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onEnd);

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -964,6 +965,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
             const onUp = (ev: PointerEvent) => {
                 cleanup();
+                unregisterAbort();
                 if (inlineDragArmedRef.current) return;
                 if (!hadSelection) return;
                 // 按下时因存在选区而阻止了默认行为（防止原生文本拖拽吞掉
@@ -986,6 +988,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     // 忽略光标放置失败
                 }
             };
+
+            // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+            // 只做监听清理（不合成点击/拖拽语义；文本框状态由输入框自身持有）。
+            let aborted = false;
+            const unregisterAbort = registerDragAbort(() => {
+                if (aborted) return;
+                aborted = true;
+                cleanup();
+                unregisterAbort(); // 一次性事件：用完即注销，避免集合积累
+            });
 
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
@@ -1150,6 +1162,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             onChange(draft);
         };
         const handleUp = () => {
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             const draft = dragDraftRef.current;
             dragRef.current = null;
             dragDraftRef.current = null;
@@ -1159,10 +1172,15 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(null);
             if (draft) commitMap(draft);
         };
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 走与 handleUp 完全相同的收尾（提交已拖到的位置，防止标签卡在
+        // 拖拽态 / 吸附高亮冻结）。
+        const unregisterAbort = registerDragAbort(handleUp);
         window.addEventListener("pointermove", handleMove);
         window.addEventListener("pointerup", handleUp);
         window.addEventListener("pointercancel", handleUp);
         return () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", handleMove);
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);

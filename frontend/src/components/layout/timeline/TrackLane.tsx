@@ -3,6 +3,7 @@
  */
 import React from "react";
 
+import { registerDragAbort } from "./gestureFocusGuard";
 import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
@@ -388,6 +389,7 @@ export const TrackLane = React.memo(
                 const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const startX = event.clientX;
                 const startY = event.clientY;
+                let lastClientX = event.clientX;
                 let moved = false;
 
                 event.preventDefault();
@@ -403,10 +405,17 @@ export const TrackLane = React.memo(
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
                     if (dx * dx + dy * dy >= 9) moved = true;
+                    lastClientX = ev.clientX;
                 };
 
-                const onUp = (ev: PointerEvent) => {
-                    if (ev.pointerId !== event.pointerId) return;
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口。
+                // blur 时走与 onUp 完全相同的收尾（本地仅做选择/seek 语义；
+                // 真正的 clip 拖拽由 useClipDrag 自身的失焦守卫收尾）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onUp, true);
                     window.removeEventListener("pointercancel", onUp, true);
@@ -417,10 +426,15 @@ export const TrackLane = React.memo(
                             primeSelection(clip.id, true, event.clientX);
                         }
                         if (allowSeek) {
-                            seekFromClientX(ev.clientX, true);
+                            seekFromClientX(lastClientX, true);
                         }
                     }
                 };
+                const onUp = (ev: PointerEvent) => {
+                    if (ev.pointerId !== event.pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
 
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onUp, true);
@@ -455,24 +469,38 @@ export const TrackLane = React.memo(
                 event.preventDefault();
                 event.stopPropagation();
                 const pointerId = event.pointerId;
+                let lastClientX = event.clientX;
                 seekFromClientX(event.clientX, true);
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== pointerId) return;
+                    lastClientX = ev.clientX;
                     seekFromClientX(ev.clientX, false);
                 };
-                const onEnd = (ev: PointerEvent) => {
-                    if (ev.pointerId !== pointerId) return;
+
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，
+                // 用最后一次已知的客户坐标提交播放头并清理（防高亮冻结）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onEnd, true);
                     window.removeEventListener("pointercancel", onEnd, true);
-                    seekFromClientX(ev.clientX, true);
+                    seekFromClientX(lastClientX, true);
                     // 拖拽结束（含 pointercancel 中断）＝播放头手势语境终止：
                     // 清除吸附竖线高亮。提交式 seek（setPlayheadFromClientX）内部
                     // 也会清理，这里显式兜底保证手势语义自包含 — 否则最后一步
                     // 网格吸附的高亮会冻结在轨道空白区，只有其它拖拽才能覆盖掉。
                     clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
+
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onEnd, true);
                 window.addEventListener("pointercancel", onEnd, true);
@@ -537,8 +565,14 @@ export const TrackLane = React.memo(
                     startEditDrag(event, clipId, mode);
                 };
 
-                const onEnd = (ev: PointerEvent) => {
-                    if (ev.pointerId !== pointerId) return;
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口。
+                // blur 时走与 onEnd 相同的收尾（真正的裁短/拉伸拖拽由
+                // useEditDrag 自身的失焦守卫收尾并提交）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onEnd, true);
                     window.removeEventListener("pointercancel", onEnd, true);
@@ -566,6 +600,11 @@ export const TrackLane = React.memo(
                         seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
                     }
                 };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
 
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onEnd, true);

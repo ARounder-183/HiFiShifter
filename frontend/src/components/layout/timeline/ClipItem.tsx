@@ -11,6 +11,7 @@
  */
 import React from "react";
 
+import { registerDragAbort } from "./gestureFocusGuard";
 import { useAppSelector } from "../../../app/hooks";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
@@ -313,6 +314,7 @@ export const ClipItem = React.memo(function ClipItem({
 
             const startX = e.clientX;
             const startY = e.clientY;
+            let lastClientX = startX;
             const pointerId = e.pointerId;
             const targetEl = e.currentTarget as HTMLElement;
             // 曲率拖拽环境：包络“gain=1 基准线”的客户坐标。**基准 y 在按下
@@ -337,6 +339,7 @@ export const ClipItem = React.memo(function ClipItem({
                 const dy = ev.clientY - startY;
                 if (dx * dx + dy * dy < 9) return;
                 dragStarted = true;
+                lastClientX = ev.clientX;
                 startEditDrag(
                     {
                         button: 0,
@@ -354,8 +357,14 @@ export const ClipItem = React.memo(function ClipItem({
                 modifierWatcher.refreshFromEvent(ev);
             };
 
-            const onEnd = (ev: PointerEvent) => {
-                if (ev.pointerId !== pointerId) return;
+            // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+            // 时走与 onEnd 相同的收尾（真正的淡化拖拽由 useEditDrag 自身的
+            // 失焦守卫收尾并提交；此处只负责本地点击语义与监听清理）。
+            let finished = false;
+            const finish = () => {
+                if (finished) return;
+                finished = true;
+                unregisterAbort();
                 window.removeEventListener("pointermove", onMove, true);
                 window.removeEventListener("pointerup", onEnd, true);
                 window.removeEventListener("pointercancel", onEnd, true);
@@ -381,7 +390,8 @@ export const ClipItem = React.memo(function ClipItem({
                     // （OverlapEditLayer 抓手）仍按点击位置跳转。坐标用 **clip
                     // 根元素** rect 计算 —— hit 元素自身位于 clip 内部，取其
                     // rect 会多算一级偏移。
-                    const fadeSec = type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
+                    const fadeSec =
+                        type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
                     const innerEdgeSec =
                         type === "fade_in"
                             ? clip.startSec + fadeSec
@@ -394,10 +404,15 @@ export const ClipItem = React.memo(function ClipItem({
                             true,
                         );
                     } else {
-                        seekFromClientX(ev.clientX, true);
+                        seekFromClientX(lastClientX, true);
                     }
                 }
             };
+            const onEnd = (ev: PointerEvent) => {
+                if (ev.pointerId !== pointerId) return;
+                finish();
+            };
+            const unregisterAbort = registerDragAbort(finish);
 
             window.addEventListener("pointermove", onMove, true);
             window.addEventListener("pointerup", onEnd, true);
@@ -538,6 +553,7 @@ export const ClipItem = React.memo(function ClipItem({
                     clickedInactiveTakeId == null;
                 const startX = e.clientX;
                 const startY = e.clientY;
+                let lastClientX = startX;
                 let moved = false;
 
                 function onMove(ev: PointerEvent) {
@@ -545,10 +561,17 @@ export const ClipItem = React.memo(function ClipItem({
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
                     if (dx * dx + dy * dy >= 9) moved = true;
+                    lastClientX = ev.clientX;
                 }
 
-                function onUp(ev: PointerEvent) {
-                    if (ev.pointerId !== e.pointerId) return;
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+                // 时走与 onUp 相同的收尾（真正的 clip 拖拽由 useClipDrag 自身
+                // 的失焦守卫收尾并提交；此处只负责点击语义与监听清理）。
+                let finished = false;
+                function finish() {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onUp, true);
                     window.removeEventListener("pointercancel", onUp, true);
@@ -557,7 +580,7 @@ export const ClipItem = React.memo(function ClipItem({
                             // 暂停/停止状态下，点击 inactive take 除了切换，
                             // 还会把播放光标带到点击位置；播放中不打断当前位置。
                             if (!isPlaying) {
-                                seekFromClientX(ev.clientX, true);
+                                seekFromClientX(lastClientX, true);
                             }
                             onActivateTake?.(clip.id, clickedInactiveTakeId);
                             return;
@@ -572,10 +595,15 @@ export const ClipItem = React.memo(function ClipItem({
                             recordLastClickPosition?.(e.clientX);
                         }
                         if (allowSeek) {
-                            seekFromClientX(ev.clientX, true);
+                            seekFromClientX(lastClientX, true);
                         }
                     }
                 }
+                function onUp(ev: PointerEvent) {
+                    if (ev.pointerId !== e.pointerId) return;
+                    finish();
+                }
+                const unregisterAbort = registerDragAbort(finish);
 
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onUp, true);

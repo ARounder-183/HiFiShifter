@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { bumpParamsEpoch } from "../../../../features/session/sessionSlice";
@@ -188,11 +189,13 @@ export function useClipPitchDrag(deps: {
                 scheduleSend();
             }
 
-            async function onUp(ev: PointerEvent) {
+            async function finish() {
                 const st = dragRef.current;
-                if (!st || ev.pointerId !== st.pointerId || finalized) return;
+                if (!st || finalized) return;
                 finalized = true;
                 dragRef.current = null;
+                // 收尾第一步注销失焦守卫（幂等防双触发）。
+                unregisterAbort();
                 teardown();
                 if (st.sendTimer != null) {
                     window.clearTimeout(st.sendTimer);
@@ -231,6 +234,18 @@ export function useClipPitchDrag(deps: {
                 // 通知参数编辑器重新取数（与拉伸联动参数线同一刷新通道）。
                 dispatch(bumpParamsEpoch());
             }
+
+            function onUp(ev: PointerEvent) {
+                const st = dragRef.current;
+                if (!st || ev.pointerId !== st.pointerId || finalized) return;
+                void finish();
+            }
+
+            // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，注册
+            // 事件无关的 finish()，由 gestureFocusGuard 在窗口 blur 时统一收尾。
+            const unregisterAbort = registerDragAbort(() => {
+                void finish();
+            });
 
             window.addEventListener("pointermove", onMove, true);
             window.addEventListener("pointerup", onUp, true);
@@ -271,6 +286,8 @@ export function useClipPitchDrag(deps: {
                     if (dragRef.current !== state) return;
                     if (!res?.ok) {
                         dragRef.current = null;
+                        finalized = true;
+                        unregisterAbort();
                         teardown();
                         setPitchDragTooltip(null);
                         return;

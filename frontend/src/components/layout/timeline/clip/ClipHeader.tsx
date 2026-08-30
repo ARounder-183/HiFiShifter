@@ -1,4 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import type { ClipFormantMorph, ClipInfo } from "../../../../features/session/sessionTypes";
 import { activeClipTakeName, clipDisplayName } from "../../../../features/session/sessionTypes";
 import { CLIP_HEADER_HEIGHT } from "../constants";
@@ -272,6 +273,24 @@ export const ClipHeader: React.FC<{
                             );
                         };
 
+                        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+                        // 时走与 onEnd 相同的收尾（真正的 gain 拖拽由 useEditDrag
+                        // 自身的失焦守卫收尾并提交；此处只复位本地悬停/基准状态）。
+                        let finished = false;
+                        const tearDown = () => {
+                            unregisterAbort();
+                            window.removeEventListener("pointermove", onMove, true);
+                            window.removeEventListener("pointerup", onEnd, true);
+                            window.removeEventListener("pointercancel", onEnd, true);
+                        };
+                        const finish = () => {
+                            if (finished) return;
+                            finished = true;
+                            // 失去焦点时指针必然离开旋钮，按"不在旋钮上"处理。
+                            setGainHovered(false);
+                            setGainDragBaseDb(null);
+                            tearDown();
+                        };
                         const onEnd = (ev: PointerEvent) => {
                             if (ev.pointerId !== pointerId) return;
                             const knobRect = targetEl.getBoundingClientRect();
@@ -282,10 +301,9 @@ export const ClipHeader: React.FC<{
                                 ev.clientY <= knobRect.bottom;
                             setGainHovered(stillOverKnob);
                             setGainDragBaseDb(null);
-                            window.removeEventListener("pointermove", onMove, true);
-                            window.removeEventListener("pointerup", onEnd, true);
-                            window.removeEventListener("pointercancel", onEnd, true);
+                            tearDown();
                         };
+                        const unregisterAbort = registerDragAbort(finish);
 
                         window.addEventListener("pointermove", onMove, true);
                         window.addEventListener("pointerup", onEnd, true);

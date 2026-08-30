@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
@@ -847,17 +848,28 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onScrollTopChange?.(cur.scrollTop);
         }
 
-        function end(ev: PointerEvent) {
+        function finish() {
             const pan = panRef.current;
             if (!pan) return;
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
             panRef.current = null;
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             document.body.style.cursor = prevCursor;
             document.body.style.userSelect = prevSelect;
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", end);
             window.removeEventListener("pointercancel", end);
         }
+
+        function end(ev: PointerEvent) {
+            const pan = panRef.current;
+            if (!pan) return;
+            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
+            finish();
+        }
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 走与 end 相同的收尾 —— 关键：复位 body 的 grabbing 光标与 userSelect。
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", end);
@@ -1042,11 +1054,27 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onVolumeUiChange(trackId, dbToGain(nextDb));
         };
 
-        const onEnd = (ev: PointerEvent) => {
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时以
+        // 最后一次音量值收尾提交（与 pointerup 语义一致），并复位悬停/拖拽态。
+        let finished = false;
+        const tearDown = () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onEnd);
             window.removeEventListener("pointercancel", onEnd);
             setVolumeDrag(null);
+            onVolumeCommit(trackId, dbToGain(lastDb));
+        };
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            // 失去焦点时指针必然离开旋钮，按"不在旋钮上"处理。
+            setVolumeHoveredTrackId(null);
+            tearDown();
+        };
+        const onEnd = (ev: PointerEvent) => {
+            if (finished) return;
+            finished = true;
             const knobRect = knobEl.getBoundingClientRect();
             const stillOverKnob =
                 ev.clientX >= knobRect.left &&
@@ -1054,8 +1082,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 ev.clientY >= knobRect.top &&
                 ev.clientY <= knobRect.bottom;
             setVolumeHoveredTrackId(stillOverKnob ? trackId : null);
-            onVolumeCommit(trackId, dbToGain(lastDb));
+            tearDown();
         };
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onEnd);
@@ -1358,9 +1387,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         const prevCursor = document.body.style.cursor;
                                         const prevSelect = document.body.style.userSelect;
 
+                                        let lastClientX = e.clientX;
+                                        let lastClientY = e.clientY;
+
                                         function onMove(ev: PointerEvent) {
                                             const drag = dragRef.current;
                                             if (!drag || drag.pointerId !== e.pointerId) return;
+
+                                            lastClientX = ev.clientX;
+                                            lastClientY = ev.clientY;
 
                                             if (!drag.hasMoved) {
                                                 const dx = ev.clientX - drag.startClientX;
@@ -1429,11 +1464,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             });
                                         }
 
-                                        function end(ev: PointerEvent) {
+                                        function finish() {
                                             const drag = dragRef.current;
-                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            if (!drag) return;
                                             dragRef.current = null;
-
+                                            unregisterAbort(); // 收尾第一步注销失焦守卫
                                             window.removeEventListener("pointermove", onMove);
                                             window.removeEventListener("pointerup", end);
                                             window.removeEventListener("pointercancel", end);
@@ -1448,21 +1483,21 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 return;
                                             }
 
-                                            // 与预览一致：按复制/移动语义计算放置位置。
+                                            // 与预览一致：按复制/移动语义计算放置位置
+                                            // （blur 收尾用最后一次已知指针位置；修饰键
+                                            // 以按下瞬间的状态为准 —— 失焦时没有可信的实时按键）。
                                             const copyActive = Boolean(
-                                                copyDragKb && isModifierActive(copyDragKb, ev),
+                                                copyDragKb && isModifierActive(copyDragKb, e),
                                             );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
-                                                ev.clientX,
-                                                ev.clientY,
+                                                lastClientX,
+                                                lastClientY,
                                                 copyActive && onDuplicateTrackTo != null,
                                             );
 
                                             // “复制拖动”修饰键按住时：在放置位置克隆轨道
                                             // （克隆子树移动到拖放位置），源轨道保持原位。
-                                            // 与移动不同，克隆到“与源相同的位置”同样有意义，
-                                            // 因此跳过同位 no-op 判断。
                                             if (copyActive && onDuplicateTrackTo) {
                                                 onDuplicateTrackTo({
                                                     trackId: drag.trackId,
@@ -1485,6 +1520,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 parentTrackId: spec.parentTrackId,
                                             });
                                         }
+
+                                        function end(ev: PointerEvent) {
+                                            const drag = dragRef.current;
+                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            lastClientX = ev.clientX;
+                                            lastClientY = ev.clientY;
+                                            finish();
+                                        }
+
+                                        // 失焦取消：切屏期间 pointerup/pointercancel 不送达
+                                        // 本窗口，blur 时走与 end 相同的收尾（含光标复位）。
+                                        const unregisterAbort = registerDragAbort(finish);
 
                                         window.addEventListener("pointermove", onMove);
                                         window.addEventListener("pointerup", end);

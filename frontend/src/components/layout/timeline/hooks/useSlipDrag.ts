@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import type { AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import type { TimelineSnapSettings } from "../../../../features/session/sessionTypes";
@@ -326,10 +327,12 @@ export function useSlipDrag(deps: {
             }
         }
 
-        function end(ev: PointerEvent) {
+        function finish() {
             const drag = slipDragRef.current;
-            if (!drag || drag.pointerId !== ev.pointerId) return;
+            if (!drag) return;
             slipDragRef.current = null;
+            // 收尾第一步注销失焦守卫（幂等防双触发）。
+            unregisterAbort();
             endSnapGesture();
 
             // 无操作守卫（B7）：零位移/拖回原点 → 不落盘、不开 undo group、
@@ -409,6 +412,16 @@ export function useSlipDrag(deps: {
             window.removeEventListener("pointerup", end);
             window.removeEventListener("pointercancel", end);
         }
+
+        function end(ev: PointerEvent) {
+            const drag = slipDragRef.current;
+            if (!drag || drag.pointerId !== ev.pointerId) return;
+            finish();
+        }
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，注册
+        // 事件无关的 finish()，由 gestureFocusGuard 在窗口 blur 时统一收尾。
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", end);

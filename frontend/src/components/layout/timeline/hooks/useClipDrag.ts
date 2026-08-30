@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { batch } from "react-redux";
+import { registerDragAbort } from "../gestureFocusGuard";
 import { store, type AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
@@ -386,6 +387,10 @@ export function useClipDrag(deps: {
             initialAutoFadeById,
             initialCrossfadeSides,
         };
+        // 失焦取消：切屏（Alt+Tab）期间 pointerup/pointercancel 不会送达本
+        // 窗口，拖拽会永久卡死（交互锁/undo group/ghost 全部悬置）。注册
+        // 事件无关的 end()，由 gestureFocusGuard 在窗口 blur 时统一收尾。
+        const unregisterAbort = registerDragAbort(end);
         setVerticalTrackLockTrackId(null);
         scroller.setPointerCapture(e.pointerId);
 
@@ -611,6 +616,7 @@ export function useClipDrag(deps: {
             const drag = clipDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             clipDragRef.current = null;
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             setClipDropNewTrack(false);
             setVerticalTrackLockTrackId(null);
 

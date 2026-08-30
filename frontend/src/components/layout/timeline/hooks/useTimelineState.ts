@@ -15,6 +15,7 @@
  * - Mipmap 预加载
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
@@ -996,6 +997,7 @@ export function useTimelineState(): TimelineStateResult {
         }) => {
             const { startClientX, startClientY, getBounds, getScrollLeft } = args;
             let moved = false;
+            let lastClientX = startClientX;
             let lastSec = 0;
 
             const updateAt = (clientX: number, commit: boolean) => {
@@ -1012,28 +1014,40 @@ export function useTimelineState(): TimelineStateResult {
                     moved = true;
                 }
                 if (!moved) return;
+                lastClientX = ev.clientX;
                 const sec = updateAt(ev.clientX, false);
                 if (sec != null) lastSec = sec;
             };
 
-            const onEnd = (ev: MouseEvent) => {
+            // 失焦取消：切屏期间 mouseup 不送达本窗口。blur 时以最后一次
+            // 已知指针位置收尾（提交 seek + 清除吸附高亮），防止播放头
+            // 拖拽状态与高亮冻结。
+            const finish = () => {
+                unregisterAbort();
                 window.removeEventListener("mousemove", onMove, true);
                 window.removeEventListener("mouseup", onEnd, true);
                 window.removeEventListener("mouseleave", onEnd, true);
 
                 if (!moved) {
-                    updateAt(ev.clientX, true);
+                    updateAt(lastClientX, true);
                     // 单击跳转不走高亮通道；兜底清理一次。
                     clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                     return;
                 }
 
-                const sec = updateAt(ev.clientX, false);
+                const sec = updateAt(lastClientX, false);
                 const finalSec = sec == null ? lastSec : sec;
                 void dispatch(seekPlayhead(finalSec));
                 // 拖拽结束：最后一次 update 会发布高亮，必须在其后清除。
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             };
+
+            const onEnd = (ev: MouseEvent) => {
+                lastClientX = ev.clientX;
+                finish();
+            };
+
+            const unregisterAbort = registerDragAbort(finish);
 
             window.addEventListener("mousemove", onMove, true);
             window.addEventListener("mouseup", onEnd, true);
@@ -1110,17 +1124,29 @@ export function useTimelineState(): TimelineStateResult {
             syncScrollTop(el.scrollTop);
         }
 
-        function end(ev: PointerEvent) {
+        function finish() {
             const pan = panRef.current;
             if (!pan) return;
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
             panRef.current = null;
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             document.body.style.cursor = prevCursor;
             document.body.style.userSelect = prevSelect;
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", end);
             window.removeEventListener("pointercancel", end);
         }
+
+        function end(ev: PointerEvent) {
+            const pan = panRef.current;
+            if (!pan) return;
+            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
+            finish();
+        }
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 走与 end 相同的收尾 —— 关键：必须复位 body 的 grabbing 光标与
+        // userSelect，否则切回后鼠标呈"抓取"态且无法选中文本。
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", end);

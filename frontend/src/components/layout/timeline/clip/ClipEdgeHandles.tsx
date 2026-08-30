@@ -1,4 +1,5 @@
 import React from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "../../../../features/keybindings/defaultKeybindings";
 import type { Keybinding } from "../../../../features/keybindings/types";
@@ -119,8 +120,14 @@ export const ClipEdgeHandles: React.FC<{
                         );
                     };
 
-                    const onEnd = (ev: PointerEvent) => {
-                        if (ev.pointerId !== pointerId) return;
+                    // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+                    // 时走与 onEnd 相同的收尾（真正的裁短/拉伸拖拽由 useEditDrag
+                    // 自身的失焦守卫收尾并提交；此处只负责点击语义与监听清理）。
+                    let finished = false;
+                    const finish = () => {
+                        if (finished) return;
+                        finished = true;
+                        unregisterAbort();
                         window.removeEventListener("pointermove", onMove, true);
                         window.removeEventListener("pointerup", onEnd, true);
                         window.removeEventListener("pointercancel", onEnd, true);
@@ -143,6 +150,11 @@ export const ClipEdgeHandles: React.FC<{
                             seekFromClientX(seekToEdgeClientX(), true);
                         }
                     };
+                    const onEnd = (ev: PointerEvent) => {
+                        if (ev.pointerId !== pointerId) return;
+                        finish();
+                    };
+                    const unregisterAbort = registerDragAbort(finish);
 
                     window.addEventListener("pointermove", onMove, true);
                     window.addEventListener("pointerup", onEnd, true);
@@ -201,8 +213,14 @@ export const ClipEdgeHandles: React.FC<{
                         );
                     };
 
-                    const onEnd = (ev: PointerEvent) => {
-                        if (ev.pointerId !== pointerId) return;
+                    // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+                    // 时走与 onEnd 相同的收尾（真正的裁短/拉伸拖拽由 useEditDrag
+                    // 自身的失焦守卫收尾并提交；此处只负责点击语义与监听清理）。
+                    let finished = false;
+                    const finish = () => {
+                        if (finished) return;
+                        finished = true;
+                        unregisterAbort();
                         window.removeEventListener("pointermove", onMove, true);
                         window.removeEventListener("pointerup", onEnd, true);
                         window.removeEventListener("pointercancel", onEnd, true);
@@ -225,6 +243,11 @@ export const ClipEdgeHandles: React.FC<{
                             seekFromClientX(seekToEdgeClientX(), true);
                         }
                     };
+                    const onEnd = (ev: PointerEvent) => {
+                        if (ev.pointerId !== pointerId) return;
+                        finish();
+                    };
+                    const unregisterAbort = registerDragAbort(finish);
 
                     window.addEventListener("pointermove", onMove, true);
                     window.addEventListener("pointerup", onEnd, true);

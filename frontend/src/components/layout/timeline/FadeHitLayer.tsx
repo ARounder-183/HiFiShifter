@@ -16,6 +16,7 @@
  * - modifier.fadeShapeCycleClick + 左键点击包络线 = 循环切换类型并重置曲率。
  */
 import React from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { buildFadeHitTargets } from "./fadeHitTargets";
@@ -223,15 +224,26 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                                         stopPropagation() {},
                                     } as unknown as React.PointerEvent<HTMLDivElement>);
                                 };
-                                const onUp = (ev: PointerEvent) => {
+                                // 失焦取消：切屏期间 pointerup/pointercancel 不送达，
+                                // blur 只做监听清理，不合成点击（真正的长度拖拽由
+                                // useEditDrag 自身的失焦守卫收尾）。
+                                let finished = false;
+                                const finish = () => {
+                                    if (finished) return;
+                                    finished = true;
+                                    unregisterAbort();
                                     window.removeEventListener("pointermove", onMove, true);
                                     window.removeEventListener("pointerup", onUp, true);
                                     window.removeEventListener("pointercancel", onUp, true);
+                                };
+                                const onUp = (ev: PointerEvent) => {
+                                    finish();
                                     if (!dragStarted && ev.pointerId === pointerId) {
                                         // 未拖动 = 点击：循环切换到下一个形状。
                                         onShapeCycleClick(side);
                                     }
                                 };
+                                const unregisterAbort = registerDragAbort(finish);
                                 window.addEventListener("pointermove", onMove, true);
                                 window.addEventListener("pointerup", onUp, true);
                                 window.addEventListener("pointercancel", onUp, true);

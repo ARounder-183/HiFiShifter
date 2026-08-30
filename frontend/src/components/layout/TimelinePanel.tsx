@@ -58,6 +58,7 @@ import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
 import { useEditDrag } from "./timeline/hooks/useEditDrag";
 import { useSlipDrag } from "./timeline/hooks/useSlipDrag";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
+import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
 import { collectFadeContextClips } from "./timeline/clipFadeContext";
 import { emitExternalFileAction } from "../../features/session/projectOpenEvents";
@@ -1459,6 +1460,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         if (!scroller) return;
                         const ruler = e.currentTarget as HTMLDivElement;
                         let moved = false;
+                        let lastClientX = e.clientX;
                         let lastSec = 0;
 
                         const updateAt = (clientX: number, commit: boolean): number =>
@@ -1474,10 +1476,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                         const onMove = (ev: MouseEvent) => {
                             moved = true;
+                            lastClientX = ev.clientX;
                             lastSec = updateAt(ev.clientX, false);
                         };
 
-                        const onEnd = (ev: MouseEvent) => {
+                        // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
+                        // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
+                        // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
+                        const finish = () => {
+                            unregisterAbort();
                             window.removeEventListener("mousemove", onMove, true);
                             window.removeEventListener("mouseup", onEnd, true);
                             window.removeEventListener("mouseleave", onEnd, true);
@@ -1487,13 +1494,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                                 return;
                             }
-                            lastSec = updateAt(ev.clientX, false);
+                            lastSec = updateAt(lastClientX, false);
                             void dispatch(seekPlayhead(lastSec));
                             // 最后一步 update 仍会发布一次吸附高亮，必须在其后
                             // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
                             // 且任何单击跳转都不再清理它。
                             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         };
+                        const onEnd = (ev: MouseEvent) => {
+                            lastClientX = ev.clientX;
+                            finish();
+                        };
+                        const unregisterAbort = registerDragAbort(finish);
 
                         window.addEventListener("mousemove", onMove, true);
                         window.addEventListener("mouseup", onEnd, true);

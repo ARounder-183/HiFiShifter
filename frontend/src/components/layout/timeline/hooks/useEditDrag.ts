@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { batch } from "react-redux";
+import { registerDragAbort } from "../gestureFocusGuard";
 import { store, type AppDispatch } from "../../../../app/store";
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
@@ -693,6 +694,13 @@ export function useEditDrag(deps: {
                 }),
             ),
         };
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不会送达本窗口，拖拽
+        // 会永久卡死（交互锁/undo group/吸附高亮全部悬置）。注册事件无关的
+        // end()，由 gestureFocusGuard 在窗口 blur 时统一收尾 —— 走的就是
+        // pointerup/pointercancel 的同一条 end()，undo group 在 finally 中
+        // 必然关闭，后端撤销栈不会被冻结。
+        const unregisterAbort = registerDragAbort(end);
 
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
@@ -1887,6 +1895,8 @@ export function useEditDrag(deps: {
             const drag = editDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) return;
             editDragRef.current = null;
+            // 收尾第一步注销失焦守卫（幂等防双触发；blur 与 pointerup 竞态安全）。
+            unregisterAbort();
             // 先解绑再走后续逻辑：任何早退分支（如目标 clip 已被删除）
             // 都不能把 window 上的监听器泄漏成永久悬挂。
             window.removeEventListener("pointermove", onMove);

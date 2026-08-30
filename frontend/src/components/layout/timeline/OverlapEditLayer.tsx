@@ -19,6 +19,7 @@
  *   3. 包络线命中块最次。
  */
 import React from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import type { ReactNode } from "react";
 
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -628,6 +629,19 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
             // useEditDrag 从原生 pointermove 持续自愈）。
             modifierWatcher.refreshFromEvent(ev);
         };
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur
+        // 时走与 onEnd 相同的收尾（真正的淡化/交叉拖拽由 useEditDrag
+        // 自身的失焦守卫收尾并提交；此处只做监听清理）。失焦时手势并未
+        // 完成——不合成"点击"语义（不触发循环切换/寻址）。
+        let finished = false;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            unregisterAbort();
+            window.removeEventListener("pointermove", onMove, true);
+            window.removeEventListener("pointerup", onEnd, true);
+            window.removeEventListener("pointercancel", onEnd, true);
+        };
         const onEnd = (ev: PointerEvent) => {
             if (ev.pointerId !== pointerId) return;
             window.removeEventListener("pointermove", onMove, true);
@@ -638,6 +652,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                 deferredClick(ev);
             }
         };
+        const unregisterAbort = registerDragAbort(finish);
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerup", onEnd, true);
         window.addEventListener("pointercancel", onEnd, true);

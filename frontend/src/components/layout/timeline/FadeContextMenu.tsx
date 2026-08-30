@@ -15,6 +15,7 @@
  */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { registerDragAbort } from "./gestureFocusGuard";
 import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import {
@@ -79,6 +80,15 @@ const CurvatureSlider: React.FC<{
     );
     const svgRef = useRef<SVGSVGElement | null>(null);
     const draggingRef = useRef(false);
+    /** 失焦守卫注销函数（拖拽期间非空；blur/抬起/取消/卸载时清理）。 */
+    const unregisterAbortRef = useRef<(() => void) | null>(null);
+    // 卸载兜底：菜单被外部关闭时（如点击外部）不能残留失焦注册。
+    useEffect(() => {
+        return () => {
+            unregisterAbortRef.current?.();
+            unregisterAbortRef.current = null;
+        };
+    }, []);
     // 展示用的预览采样点（迷你曲线），随形状与曲率实时重绘。
     // mode='out' 时 fadeGainSigned 内部完成 σ 符号归一与时间镜像，
     // 画出的曲线方向与该侧在 Clip 上看到的完全一致（淡出=左上→右下）。
@@ -134,6 +144,16 @@ const CurvatureSlider: React.FC<{
                     e.preventDefault();
                     e.stopPropagation();
                     draggingRef.current = true;
+                    // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口
+                    //（svg 上的 pointer capture 不会在窗口外释放时派发事件），
+                    // blur 必须复位 draggingRef —— 否则切回后任意鼠标移动都会
+                    // 持续改写曲率。
+                    unregisterAbortRef.current?.();
+                    unregisterAbortRef.current = registerDragAbort(() => {
+                        draggingRef.current = false;
+                        unregisterAbortRef.current?.();
+                        unregisterAbortRef.current = null;
+                    });
                     try {
                         (e.currentTarget as SVGSVGElement).setPointerCapture(e.pointerId);
                     } catch {
@@ -147,9 +167,13 @@ const CurvatureSlider: React.FC<{
                 }}
                 onPointerUp={() => {
                     draggingRef.current = false;
+                    unregisterAbortRef.current?.();
+                    unregisterAbortRef.current = null;
                 }}
                 onPointerCancel={() => {
                     draggingRef.current = false;
+                    unregisterAbortRef.current?.();
+                    unregisterAbortRef.current = null;
                 }}
                 style={{ cursor: "crosshair", touchAction: "none", flexShrink: 0 }}
             >
