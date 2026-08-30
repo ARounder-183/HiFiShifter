@@ -397,8 +397,7 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(255,255,255,0.10)",
               pitchGridOther: "rgba(255,255,255,0.05)",
-              // 曲线：参数线深浅随主题（深=白、浅=黑），在色块化的界面里
-              // 永远是最清晰的一条；原始音高 = 浅灰虚线；选区高亮 = 青蓝。
+              // 曲线
               origCurve: "rgba(200,200,200,0.55)",
               editCurve: "rgba(255,255,255,0.92)",
               selectionCurve: "rgba(100,200,255,0.95)",
@@ -423,9 +422,9 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(0,0,0,0.12)",
               pitchGridOther: "rgba(0,0,0,0.06)",
-              // 曲线：参数线深浅随主题（深=白、浅=黑）。
-              origCurve: "rgba(132,104,26,0.72)",
-              editCurve: "rgba(28,32,40,0.95)",
+              // 曲线
+              origCurve: "rgba(132,104,26,0.80)",
+              editCurve: "rgba(178,108,0,1)",
               selectionCurve: "rgba(0,116,200,1)",
               // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
               overlayTextColor: "rgba(30,36,48,0.60)",
@@ -1082,8 +1081,7 @@ export function drawPianoRoll(args: {
                     Math.round(secToContentPx(axis, clipStartSec + visLocalStart)) -
                     viewportStartPx;
                 const tileVisRight =
-                    Math.round(secToContentPx(axis, clipStartSec + visLocalEnd)) -
-                    viewportStartPx;
+                    Math.round(secToContentPx(axis, clipStartSec + visLocalEnd)) - viewportStartPx;
                 if (tileVisRight <= tileVisLeft) {
                     continue;
                 }
@@ -1092,8 +1090,7 @@ export function drawPianoRoll(args: {
                 // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
                 // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
                 // 子像素漂移。
-                const tileStartTimelinePx =
-                    clipStartPx + secToSpanPx(axis, tile.localStartSec);
+                const tileStartTimelinePx = clipStartPx + secToSpanPx(axis, tile.localStartSec);
                 const clipPixelOffset = Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
 
                 const effectiveFadeInPiano =
