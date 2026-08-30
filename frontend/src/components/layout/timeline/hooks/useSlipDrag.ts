@@ -171,8 +171,9 @@ export function useSlipDrag(deps: {
         const scroller = scrollRef.current;
         if (!scroller) return;
 
-        dispatch(checkpointHistory());
-        dispatch(beginInteraction());
+        // 交互锁 / dirty 标记推迟到首次真实移动（B8）：纯点击（零位移）不
+        // 置 dirty、不开锁 —— 与 useClipDrag/useSnapOffsetDrag 一致。
+        let armed = false;
 
         const bounds = scroller.getBoundingClientRect();
         const beatAtPointer = beatFromClientX(e.clientX, bounds, scroller.scrollLeft);
@@ -221,6 +222,15 @@ export function useSlipDrag(deps: {
             const drag = slipDragRef.current;
             const el = scrollRef.current;
             if (!drag || drag.pointerId !== e.pointerId || !el) return;
+            // 首次真实移动时武装交互（锁 + dirty 标记）。
+            if (!armed) {
+                if (Math.abs(ev.clientX - e.clientX) < 2 && Math.abs(ev.clientY - e.clientY) < 2) {
+                    return;
+                }
+                armed = true;
+                dispatch(checkpointHistory());
+                dispatch(beginInteraction());
+            }
             const b = el.getBoundingClientRect();
             const beatNow = beatFromClientX(ev.clientX, b, el.scrollLeft);
 
@@ -321,6 +331,20 @@ export function useSlipDrag(deps: {
             if (!drag || drag.pointerId !== ev.pointerId) return;
             slipDragRef.current = null;
             endSnapGesture();
+
+            // 无操作守卫（B7）：零位移/拖回原点 → 不落盘、不开 undo group、
+            // 不产生死撤销步。注意未武装（纯点击）时也不能解锁（锁未开）。
+            const zeroNet = drag.appliedTotal === 0 || Math.abs(drag.appliedTotal) < 1e-12;
+            if (zeroNet) {
+                if (armed) {
+                    dispatch(endInteraction());
+                    armed = false;
+                }
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", end);
+                window.removeEventListener("pointercancel", end);
+                return;
+            }
 
             // 持久化交互数学的最终值（不回读 Redux）。实时吸附已在 move 中
             // 把累计位移收敛到循环节候选上，无需松手二次修正。

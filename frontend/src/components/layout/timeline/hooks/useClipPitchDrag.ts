@@ -115,6 +115,21 @@ export function useClipPitchDrag(deps: {
 
             let finalized = false;
 
+            // ── undo group（惰性开启）────────────────────────────────
+            // 预览写入（checkpoint:false）会**真实改动后端参数帧**；若最终
+            // 提交才 checkpoint:true，压入的快照是"已预览后"的状态 → 撤销
+            // 变成无操作（B2）。因此首次预览写入前必须开 undo group，让组
+            // 快照 = 拖拽前状态；最终写入留在组内（checkpoint:false），
+            // 收尾时关闭 —— 整个拖拽 = 单个撤销步，且零位移点击不开组、
+            // 不产生死撤销步。
+            let undoGroupPromise: Promise<unknown> | null = null;
+            const ensureUndoGroup = (): Promise<unknown> => {
+                if (!undoGroupPromise) {
+                    undoGroupPromise = webApi.beginUndoGroup();
+                }
+                return undoGroupPromise;
+            };
+
             const scheduleSend = () => {
                 if (!state.base || state.currentCents === state.sentCents) return;
                 if (state.sendTimer != null) return;
@@ -128,6 +143,7 @@ export function useClipPitchDrag(deps: {
                     state.lastSentAt = Date.now();
                     const values = shiftPitchFrames(state.base, cents / 100);
                     state.sendChain = state.sendChain
+                        .then(() => ensureUndoGroup())
                         .then(() =>
                             webApi.setParamFrames(
                                 state.rootTrackId,
@@ -183,19 +199,34 @@ export function useClipPitchDrag(deps: {
                     st.sendTimer = null;
                 }
                 setPitchDragTooltip(null);
-                // 未产生偏移或基准帧未就绪：无变更，不落盘。
+                // 未产生偏移或基准帧未就绪：无变更，不落盘（也未开组）。
                 if (!st.base || st.currentCents === 0) return;
                 try {
                     await st.sendChain;
+                    // 最终提交留在 undo group 内（checkpoint:false）：
+                    // 组快照（拖拽前）+ 全部预览写入 = 单个撤销步。
                     await webApi.setParamFrames(
                         st.rootTrackId,
                         "pitch",
                         st.startFrame,
                         shiftPitchFrames(st.base, st.currentCents / 100),
-                        true,
+                        false,
                     );
                 } catch {
                     // 后端写入失败时保留现状；epoch 仍需推进以让编辑器回读。
+                } finally {
+                    if (undoGroupPromise) {
+                        try {
+                            await undoGroupPromise;
+                        } catch {
+                            // ignore
+                        }
+                        try {
+                            await webApi.endUndoGroup();
+                        } catch {
+                            // 收尾失败不影响下一次拖拽（组已尽力关闭）。
+                        }
+                    }
                 }
                 // 通知参数编辑器重新取数（与拉伸联动参数线同一刷新通道）。
                 dispatch(bumpParamsEpoch());

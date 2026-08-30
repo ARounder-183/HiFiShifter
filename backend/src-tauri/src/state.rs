@@ -7137,7 +7137,12 @@ impl TimelineState {
                 }
             }
             if let Some(v) = patch.source_end_sec {
-                c.source_end_sec = v.max(0.0);
+                // 与前端契约一致：source_end < 0 是合法状态（倒放 Clip 的消费窗口
+                // 锚定 se；整窗在媒体下方的静音段）。旧实现 v.max(0.0) 会把
+                // 前导静音/负窗口钳回 0，造成"拖拽时正常、后端快照回灌后跳变"。
+                if v.is_finite() {
+                    c.source_end_sec = v.clamp(-1_000_000.0, 1_000_000.0);
+                }
             }
             if let Some(v) = patch.playback_rate {
                 c.playback_rate = v.clamp(0.1, 10.0);
@@ -7272,7 +7277,11 @@ impl TimelineState {
                         }
                     }
                     if let Some(v) = content_sync_patch.source_end_sec {
-                        take.source_end_sec = v.max(0.0);
+                        // 与 flat 投影同口径：se<0 合法（倒放负窗口/前导静音），
+                        // 不得钳回 0（详情见 patch_clip_state 中 source_end_sec）。
+                        if v.is_finite() {
+                            take.source_end_sec = v.clamp(-1_000_000.0, 1_000_000.0);
+                        }
                     }
                     if let Some(v) = content_sync_patch.playback_rate {
                         take.playback_rate =
