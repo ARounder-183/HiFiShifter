@@ -1177,22 +1177,13 @@ export const PianoRollPanel: React.FC = () => {
         (nextPxPerSec: number, nextNativeScrollLeft: number) => {
             pxPerBeatRef.current = nextPxPerSec * (60 / Math.max(1e-6, s.bpm));
             pxPerSecRef.current = nextPxPerSec;
-            // 与时间轴缩放一致：pxPerSec 和 scrollLeft 必须在同一 React render 中提交，
-            // 否则数据窗口（prAxis/clipPeaks/paramView/referencePitchOverlays）会用
-            // “新缩放 + 旧滚动”计算一帧，导致参数线/原始音高线缩放出错后“抽搐”。
-            const syncEnabled = s.paramEditorSyncTimeline;
-            const offset = syncEnabled ? timelineOffsetRef.current : 0;
-            const drawingScrollLeft = timelineViewportNativeToState(nextNativeScrollLeft, offset);
-            scrollLeftRef.current = drawingScrollLeft;
-            lastScrollLeftRef.current = drawingScrollLeft;
             horizontalZoomPendingRef.current = {
                 nextScale: nextPxPerSec,
                 nextScrollLeft: nextNativeScrollLeft,
             };
-            setScrollLeft(drawingScrollLeft);
             setPxPerSec(nextPxPerSec);
         },
-        [s.bpm, s.paramEditorSyncTimeline, setPxPerSec, setScrollLeft],
+        [s.bpm, setPxPerSec],
     );
 
     useEffect(() => {
