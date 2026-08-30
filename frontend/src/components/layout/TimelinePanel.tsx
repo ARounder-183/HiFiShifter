@@ -307,6 +307,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [],
     );
     const [timelineScrollTop, setTimelineScrollTop] = React.useState(0);
+    // 时间轴 scroller 水平滚动条的占用高度（offsetHeight - clientHeight）。
+    // 轨道头底部按此留出同高占位（bottomGutterHeightPx），保证轨道头与
+    // 时间轴区域的竖直滚动范围严格一致。
+    const [horizontalScrollbarGutterPx, setHorizontalScrollbarGutterPx] = React.useState(0);
     const [quickExportDialog, setQuickExportDialog] = React.useState<{
         open: boolean;
         clipIds: string[];
@@ -412,6 +416,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
+
+    // ── 轨道头与时间轴区域的竖直滚动对齐 ─────────────────
+    // 右侧时间轴 scroller 常驻水平滚动条（占高 h），其竖直滚动范围因此比
+    // 轨道头少 h 像素：内容同为「轨道数 × rowHeight」时，轨道头滚到底会
+    // 比时间轴多滚 h 像素，行无法对齐。这里实测 h（offsetHeight 减去
+    // clientHeight），平台/样式自适应（overlay 滚动条占位为 0）。
+    React.useLayoutEffect(() => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        const measure = () => {
+            setHorizontalScrollbarGutterPx(scroller.offsetHeight - scroller.clientHeight);
+        };
+        measure();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(measure);
+            observer.observe(scroller);
+            return () => observer.disconnect();
+        }
+        window.addEventListener("resize", measure);
+        return () => window.removeEventListener("resize", measure);
+    }, [scrollRef]);
 
     // ── 粘贴后“聚焦播放光标”（提交后执行）────────────────────
     // 粘贴可能大幅扩充工程全长（dynamicProjectSec / 水平可滚动范围随之
@@ -1428,6 +1453,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 headerHeight={timeRulerHeightPx(
                     Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
                 )}
+                bottomGutterHeightPx={horizontalScrollbarGutterPx}
             />
 
             {/* Timeline View (Right) */}

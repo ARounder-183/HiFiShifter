@@ -396,10 +396,14 @@ type TrackListProps = {
     onTrackNameChange?: (trackId: string, name: string) => void;
     onDuplicateTrack?: (trackId: string) => void;
     onScrollTopChange?: (scrollTop: number) => void;
-    /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚�?*/
+    /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚动。 */
     listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
     /** 顶部角落高度（与右侧时间标尺对齐；Tempo Map 行可见时增高）。 */
     headerHeight?: number;
+    /** 底部占位条高度（= 右侧时间轴水平滚动条的占用高度，由 TimelinePanel
+     * 实测传入）。轨道头列表底部留出同高空间后，两侧竖直滚动范围一致，
+     * 滚动到底时轨道行与时间轴区域严格对齐。 */
+    bottomGutterHeightPx?: number;
 };
 
 const TrackListInner: React.FC<TrackListProps> = ({
@@ -431,6 +435,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onScrollTopChange,
     listScrollRef,
     headerHeight = 48,
+    bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
@@ -2059,6 +2064,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     <PlusIcon className="mr-1" /> <Text size="1">{t("track_add")}</Text>
                 </Flex>
             </div>
+
+            {/* 底部占位条：高度 = 右侧时间轴水平滚动条的占用高度（TimelinePanel
+                实测传入）。轨道头列表可视高度因此与时间轴区域一致，竖直滚动
+                范围相同——滚动到底时轨道行与时间轴严格对齐。 */}
+            {bottomGutterHeightPx > 0 ? (
+                <div
+                    aria-hidden
+                    className="shrink-0 border-t border-qt-border bg-qt-window pointer-events-none"
+                    style={{ height: bottomGutterHeightPx }}
+                />
+            ) : null}
 
             {/* 轨道右键菜单 */}
             {trackCtxMenu && (
