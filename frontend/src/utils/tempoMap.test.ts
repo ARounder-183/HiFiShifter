@@ -6,6 +6,7 @@ import {
     buildScaleSegments,
     buildTempoGridLineXsForViewport,
     buildTempoGridLines,
+    clampTempoPointSec,
     computeTempoFloatingLabelState,
     createTempoPointAt,
     effectiveScaleAtSec,
@@ -822,4 +823,92 @@ test("utils/tempoMap.test.ts scripted checks", async () => {
             throw new Error(`grid density: strong lines bounded (got ${xs.strong.length})`);
         }
     }
+});
+
+/**
+ * 变化点拖拽的位置钳制回归。
+ *
+ * 覆盖"拖动速度标记会飞到最左边、之后再也拖不动"的两个直接成因：
+ * 1. 上界退化时把点永久钉死；
+ * 2. 非法位置（NaN）被折叠成 0，导致标记与 0 位置基准点重合而被去重删除。
+ */
+test("utils/tempoMap.test.ts tempo point drag clamping", async () => {
+    let checks = 0;
+
+    function check(condition: boolean, label: string): void {
+        checks += 1;
+        if (!condition) throw new Error(label);
+    }
+
+    function near(actual: number, expected: number, label: string): void {
+        checks += 1;
+        if (Math.abs(actual - expected) > 1e-6) {
+            throw new Error(`${label}: expected ${expected}, received ${actual}`);
+        }
+    }
+
+    const point = (id: string, positionSec: number): TempoPoint => ({
+        id,
+        positionSec,
+        bpm: 120,
+        timeSignature: null,
+        scale: null,
+    });
+
+    // ── 1. 上界低于下界时不得把点钉死 ──────────────────────────────
+    // 回归防御：旧实现写作 min(max(prev, sec), max(next, prev))。当 next <= prev
+    // 时上界退化成 prev，点被永久固定在 prev 上——此后无论怎么拖都得到同一个
+    // 值，表现为"拖一下就飞到最左边、再也拖不动"。
+    {
+        const map: TempoMap = { points: [point("a", 5), point("b", 10)] };
+        const clamped = clampTempoPointSec({
+            points: map.points,
+            pointId: "b",
+            desiredSec: 20,
+            minGapSec: 0.03,
+            maxSec: 5, // 低于下界 5.03：退化的上界
+        });
+        near(clamped, 20, "degenerate upper bound must not pin the point");
+    }
+
+    // ── 2. 正常邻居钳制 ────────────────────────────────────────────
+    {
+        const map: TempoMap = { points: [point("a", 0), point("b", 10), point("c", 20)] };
+        const clamp = (desiredSec: number) =>
+            clampTempoPointSec({
+                points: map.points,
+                pointId: "b",
+                desiredSec,
+                minGapSec: 0.03,
+                maxSec: Number.POSITIVE_INFINITY,
+            });
+        near(clamp(15), 15, "inside range keeps the desired position");
+        near(clamp(25), 19.97, "clamped below the next point");
+        near(clamp(-5), 0.03, "clamped above the previous point");
+    }
+
+    // ── 3. NaN 位置不得让标记瞬移到 0 并被去重删除 ─────────────────
+    // 回归防御：旧实现 `Number(x) || 0` 把 NaN 折叠成 0，标记随即与 0 位置的
+    // 工程基准点重合，被 normalizeTempoMap 的相邻去重删除 → 标记消失、无法再拖。
+    {
+        const map: TempoMap = {
+            points: [
+                { ...point("a", 0), timeSignature: { numerator: 4, denominator: 4 } },
+                point("b", 10),
+            ],
+        };
+        const patched = updateTempoPoint(map, "b", { positionSec: Number.NaN });
+        near(
+            patched.points[1].positionSec,
+            10,
+            "NaN patch preserves the previous position instead of jumping to 0",
+        );
+        const normalized = normalizeTempoMap(patched, 120, 4);
+        check(
+            normalized !== null && normalized.points.length === 2,
+            "point survives a NaN patch instead of being deduped away",
+        );
+    }
+
+    void checks;
 });

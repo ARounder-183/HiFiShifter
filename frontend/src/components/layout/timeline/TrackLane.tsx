@@ -15,6 +15,7 @@ import { ClipItem } from "./ClipItem";
 import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
+import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../utils/snapHighlight";
 
@@ -90,6 +91,8 @@ type TrackLaneProps = {
 
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
+    /** 点击轨道空白区（非 clip）：清空 clip 选中状态。 */
+    deselectAllClips: () => void;
     openContextMenu: (clipId: string, clientX: number, clientY: number) => void;
 
     seekFromClientX: (clientX: number, commit: boolean) => void;
@@ -212,6 +215,7 @@ export const TrackLane = React.memo(
             trackColor,
             ensureSelected,
             selectClipRemote,
+            deselectAllClips,
             openContextMenu,
             seekFromClientX,
             startClipDrag,
@@ -654,8 +658,10 @@ export const TrackLane = React.memo(
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
                     if (!hit.clipId) {
-                        // 空白区 = 最低优先级播放头手势（播放头自身 pointer-events-none，
+                        // 空白区点击 = 取消 clip 选中（DAW 通用约定），随后进入
+                        // 最低优先级播放头手势（播放头自身 pointer-events-none，
                         // 拖拽/单击落点都在这里响应）。
+                        deselectAllClips();
                         beginBackgroundSeekInteraction(event);
                         return;
                     }
@@ -794,25 +800,29 @@ export const TrackLane = React.memo(
                                 width: ghostWidth,
                                 top: 0,
                                 height: rowHeight - CLIP_BODY_PADDING_Y,
+                                // 抬到 TimelineSurface（zIndex:1，含不透明 clip body
+                                // 画布）之上：clip body 改为不透明后，z 序低于画布的
+                                // ghost 会被完全盖住。
+                                zIndex: 2,
                             }}
                         >
-                            {/* Ghost header 条 */}
+                            {/* Ghost header 条：与真实 Clip 同用归一化轨道色 */}
                             <div
                                 className="absolute left-0 right-0 top-0"
                                 style={{
                                     height: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 56%, ${trackColor} 44%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 40%, ${normalizedTrackColorCss(trackColor)} 60%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />
                             {/* Ghost body 区域 */}
                             <div
-                                className="absolute left-0 right-0 bottom-0 border border-dashed border-white/60"
+                                className="absolute left-0 right-0 bottom-0 border border-dashed border-black/40"
                                 style={{
                                     top: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 60%, ${trackColor} 40%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 45%, ${normalizedTrackColorCss(trackColor)} 55%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />

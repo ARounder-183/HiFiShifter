@@ -25,13 +25,12 @@ import { resolveCurvatureEditBase } from "./reaperFade";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
 import type { ClipFormantMorph, ClipInfo } from "../../../features/session/sessionTypes";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
 import type { EditDragChannelOpts } from "./hooks/useEditDrag";
 import {
     FADE_CORNER_CAP_HEIGHT_PX,
     FADE_CORNER_CAP_WIDTH_PX,
     FADE_CORNER_EDGE_WIDTH_PX,
-    FADE_CORNER_RESERVE_PX,
+    fadeCornerReservePx,
     CLIP_BODY_PADDING_Y,
     CLIP_HEADER_HEIGHT,
     SNAP_OFFSET_HANDLE_SIZE_PX,
@@ -48,7 +47,8 @@ import {
     type ClipRenameController,
 } from "./clip/ClipHeader";
 
-const LEADING_OVERLAP_ALPHA = 0.5;
+/** 重叠遮罩：被压住的 Clip 以该不透明度透出。0.5 会把两个彩色块混成脏色。 */
+const LEADING_OVERLAP_ALPHA = 0.3;
 
 export const ClipItem = React.memo(function ClipItem({
     clip,
@@ -192,7 +192,6 @@ export const ClipItem = React.memo(function ClipItem({
 }) {
     const { t } = useI18n();
     const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
-    const { mode: themeMode } = useAppTheme();
     const renameControllerRef = React.useRef<ClipRenameController | null>(null);
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
@@ -268,10 +267,21 @@ export const ClipItem = React.memo(function ClipItem({
             : undefined;
 
     const interactionHintBoxShadow =
-        hovered && clip.groupId == null ? "0 0 0 1px rgba(255, 255, 255, 0.24)" : undefined;
+        hovered && clip.groupId == null ? "0 0 0 1px rgba(0, 0, 0, 0.35)" : undefined;
+
+    // Clip 总高：边缘所有权切分（淡化角控件 vs 裁短）依赖它，取单一来源。
+    const clipHeightPx = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y);
+    /**
+     * 淡化角控件在 body 区内（header 之下）保留的高度；其下沿以下归裁短。
+     * 角控件不得覆盖 header —— header 上有旋钮/badge/名称等交互控件。
+     */
+    const fadeCornerReserve = fadeCornerReservePx(bodyHeight);
 
     const startDeferredFadeEditDrag = React.useCallback(
         (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {
+            // 仅左键触发渐变编辑：中键（aux click/自动滚动）与右键（上下文菜单）
+            // 不得抢占渐变握把手势。
+            if (e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();
             clearContextMenu();
@@ -442,7 +452,7 @@ export const ClipItem = React.memo(function ClipItem({
                 left,
                 width,
                 top: 0,
-                height: rowHeight - CLIP_BODY_PADDING_Y,
+                height: clipHeightPx,
                 boxShadow: interactionHintBoxShadow,
                 // 名称编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
                 // 否则 Canvas 中的原始名称会把输入框盖住。
@@ -596,6 +606,7 @@ export const ClipItem = React.memo(function ClipItem({
             >
                 <ClipEdgeHandles
                     clipId={clip.id}
+                    clipHeightPx={clipHeightPx}
                     altPressed={altPressed}
                     isInMultiSelectedSet={isInMultiSelectedSet}
                     multiSelectedCount={multiSelectedCount}
@@ -611,17 +622,19 @@ export const ClipItem = React.memo(function ClipItem({
                     startEditDrag={startEditDrag}
                 />
 
-                {/* Fade 角落创建/编辑手柄（L 形）：真左上/右上边角 —— 顶部横帽
-                    覆盖 header 带与 body 上沿，左右竖条覆盖边缘上部直至
-                    FADE_CORNER_RESERVE_PX；此高度带以下才是 EdgeHandles 的
-                    裁短/延长区（constants 中做了所有权切分，不靠 z 竞争）。
+                {/* Fade 角落创建/编辑手柄（L 形）：**body 区**的左上/右上 ——
+                    顶部横帽与竖条都在 header 之下，不与 header 上的旋钮 /
+                    badge / 名称争事件；竖条覆盖 body 上部直至 fadeCornerReserve，
+                    此高度带以下才是 EdgeHandles 的裁短/延长区（几何切分）。
+                    保留高度随 body 高度自适应，避免矮 Clip 上裁短手势无处下手。
                     悬停信息为富内容三行淡变 ToolTips（首行为内联曲线图标，
                     经 publishFadeRichTooltip 注册）；长度显示当前有效值
                     （未创建时为 0）。z 高于 SnapOffset 握把不影响：互不相交。 */}
                 <div
                     ref={cornerInCapRef}
-                    className="absolute left-0 top-0 z-[65]"
+                    className="absolute left-0 z-[65]"
                     style={{
+                        top: CLIP_HEADER_HEIGHT,
                         width: FADE_CORNER_CAP_WIDTH_PX,
                         height: FADE_CORNER_CAP_HEIGHT_PX,
                         cursor: "nwse-resize",
@@ -635,9 +648,9 @@ export const ClipItem = React.memo(function ClipItem({
                     ref={cornerInEdgeRef}
                     className="absolute left-0 z-[65]"
                     style={{
-                        top: FADE_CORNER_CAP_HEIGHT_PX,
+                        top: CLIP_HEADER_HEIGHT + FADE_CORNER_CAP_HEIGHT_PX,
                         width: FADE_CORNER_EDGE_WIDTH_PX,
-                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        height: Math.max(0, fadeCornerReserve - FADE_CORNER_CAP_HEIGHT_PX),
                         cursor: "ew-resize",
                     }}
                     onPointerDown={(e) => {
@@ -647,8 +660,9 @@ export const ClipItem = React.memo(function ClipItem({
                 />
                 <div
                     ref={cornerOutCapRef}
-                    className="absolute right-0 top-0 z-[65]"
+                    className="absolute right-0 z-[65]"
                     style={{
+                        top: CLIP_HEADER_HEIGHT,
                         width: FADE_CORNER_CAP_WIDTH_PX,
                         height: FADE_CORNER_CAP_HEIGHT_PX,
                         cursor: "nesw-resize",
@@ -662,9 +676,9 @@ export const ClipItem = React.memo(function ClipItem({
                     ref={cornerOutEdgeRef}
                     className="absolute right-0 z-[65]"
                     style={{
-                        top: FADE_CORNER_CAP_HEIGHT_PX,
+                        top: CLIP_HEADER_HEIGHT + FADE_CORNER_CAP_HEIGHT_PX,
                         width: FADE_CORNER_EDGE_WIDTH_PX,
-                        height: FADE_CORNER_RESERVE_PX - FADE_CORNER_CAP_HEIGHT_PX,
+                        height: Math.max(0, fadeCornerReserve - FADE_CORNER_CAP_HEIGHT_PX),
                         cursor: "ew-resize",
                     }}
                     onPointerDown={(e) => {
@@ -787,10 +801,8 @@ export const ClipItem = React.memo(function ClipItem({
                         className="pointer-events-none absolute left-0 right-0 h-px"
                         style={{
                             top: CLIP_HEADER_HEIGHT + lane.top,
-                            backgroundColor:
-                                themeMode === "dark"
-                                    ? "rgba(255, 255, 255, 0.18)"
-                                    : "rgba(0, 0, 0, 0.2)",
+                            // 亮色块上一律深色分线（白线在彩色块上看不见）。
+                            backgroundColor: "rgba(0, 0, 0, 0.18)",
                         }}
                     />
                 ))}

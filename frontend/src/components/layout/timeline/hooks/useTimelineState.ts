@@ -20,7 +20,6 @@ import { store, type RootState } from "../../../../app/store";
 import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
-import { invokeGridRedrawHandler } from "../gridRedrawBridge";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
@@ -38,11 +37,10 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
     TRACK_ADD_ROW_HEIGHT,
-    buildRulerTicks,
-    gridStepBeats,
 } from "../";
-import type { RulerTick } from "../timeFormat.js";
-import { buildTempoGridLineXsForViewport } from "../../../../utils/tempoMap.js";
+import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
+import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
+import { createTimelineAxis } from "../runtime/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -179,9 +177,8 @@ export interface TimelineStateResult {
     contentWidth: number;
     contentHeight: number;
     dynamicProjectSec: number;
-    ticks: RulerTick[];
-    /** Tempo Map 显式网格线（内容坐标 x）；无 Tempo Map 时为 null。 */
-    tempoGridLineXs: { weak: number[]; strong: number[] } | null;
+    /** 统一刻度源：标尺刻度与背景网格线共用（由 buildTimelineTicks 生成）。 */
+    timelineTicks: TimelineTick[];
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -459,11 +456,9 @@ export function useTimelineState(): TimelineStateResult {
             scrollTopPxRef.current,
             rowHeightRef.current,
         );
-        // 背景网格走同一条同步链：滚动事件在 paint 前触发，
-        // 网格、Clip 体、波形必须在同一帧提交，禁止等 React state/rAF。
-        // 同时携带 scrollTop：sticky 网格需要据此裁剪出轨道区底边。
-        invokeGridRedrawHandler(trackGridLayerRef.current, next, scrollTopPxRef.current);
-        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, next, scrollTopPxRef.current);
+        // 背景网格无需在这里单独通知：它已注册为统一帧提交的图层，上面的
+        // emit 会由提交器按固定顺序调用（携带 scrollTop，供 sticky 网格裁剪
+        // 轨道区底边）。提交入口唯一，可避免新增视口变更路径时漏通知网格。
         // 用 rAF 合并状态更新，保证自动滚屏可达 60Hz 且避免同步抖动
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -487,9 +482,6 @@ export function useTimelineState(): TimelineStateResult {
             next,
             rowHeightRef.current,
         );
-        // 竖直滚动同样要在 paint 前重画网格，以裁剪轨道区底边。
-        invokeGridRedrawHandler(trackGridLayerRef.current, scrollLeftRef.current, next);
-        invokeGridRedrawHandler(trackGridOverlayLayerRef.current, scrollLeftRef.current, next);
     }, []);
 
     const setScrollLeftAction: React.Dispatch<React.SetStateAction<number>> = React.useCallback(
@@ -736,20 +728,27 @@ export function useTimelineState(): TimelineStateResult {
         (dropPreview && !dropPreview.trackId ? 1 : 0) + (clipDropNewTrack ? 1 : 0);
     const contentHeight = (s.tracks.length + dropExtraRows) * rowHeight + TRACK_ADD_ROW_HEIGHT;
 
-    // ── ticks（自适应标尺刻度）──────────────────────────────────
-    const ticks = useMemo(() => {
+    // ── 统一刻度源（标尺刻度 + 背景网格线）────────────────────────
+    // 网格与标尺消费同一份 tick，标尺只渲染其中 showLabel 的部分，因此标尺
+    // 刻度天然是网格线的子集，两者不可能错位（此前两者各用一套步长选择：
+    // 网格走 resolveGridLineSamplingPlan、标尺走 buildRulerTicks，Tempo Map
+    // 下 beat 与像素非线性，必然分叉）。
+    const timelineTicks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
-        return buildRulerTicks({
-            pxPerSec,
-            scrollLeft,
-            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
-            projectSec: dynamicProjectSec,
+        return buildTimelineTicks({
+            axis: createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                viewportWidthPx: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+            }),
             bpm: s.bpm,
             beatsPerBar,
             grid: s.grid,
             primaryUnit: s.primaryTimeUnit,
             secondaryUnit: s.secondaryTimeUnit,
             minLabelSpacingPx: s.rulerLabelSpacingPx,
+            minGridSpacingPx: s.timelineSnap.gridMinSpacingPx,
+            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
             tempoMap: s.tempoMap,
         });
     }, [
@@ -759,37 +758,11 @@ export function useTimelineState(): TimelineStateResult {
         s.primaryTimeUnit,
         s.secondaryTimeUnit,
         s.rulerLabelSpacingPx,
-        s.tempoMap,
-        dynamicProjectSec,
-        viewportWidth,
-        pxPerSec,
-        scrollLeft,
-    ]);
-
-    // ── Tempo Map 显式网格线（供 BackgroundGrid 使用）──────────
-    const tempoGridLineXs = useMemo(() => {
-        return buildTempoGridLineXsForViewport({
-            tempoMap: s.tempoMap,
-            scrollLeft,
-            viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : 0,
-            pxPerSec,
-            projectSec: dynamicProjectSec,
-            stepBeats: gridStepBeats(s.grid),
-            fallbackBpm: s.bpm,
-            fallbackBeatsPerBar: Math.max(1, Math.round(s.beats || 4)),
-            swingPercent: s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0,
-            minSpacingPx: s.timelineSnap.gridMinSpacingPx,
-        });
-    }, [
-        s.tempoMap,
-        s.bpm,
-        s.beats,
-        s.grid,
         s.timelineSnap,
-        scrollLeft,
+        s.tempoMap,
         viewportWidth,
         pxPerSec,
-        dynamicProjectSec,
+        scrollLeft,
     ]);
 
     // ── clipsByTrackId ───────────────────────────────────────
@@ -1202,8 +1175,7 @@ export function useTimelineState(): TimelineStateResult {
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        ticks,
-        tempoGridLineXs,
+        timelineTicks,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,

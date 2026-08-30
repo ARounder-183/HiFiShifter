@@ -462,6 +462,7 @@ export const zhTW = {
     color_magenta: "洋紅",
     color_yellow: "黃",
     color_red: "紅",
+    color_gray: "灰",
 
     progress_est_remaining: "預計剩餘 {time}",
     progress_cancel: "取消",

@@ -478,6 +478,7 @@ export const jaJP = {
     color_magenta: "マゼンタ",
     color_yellow: "イエロー",
     color_red: "レッド",
+    color_gray: "グレー",
 
     progress_est_remaining: "残り約 {time}",
     progress_cancel: "キャンセル",

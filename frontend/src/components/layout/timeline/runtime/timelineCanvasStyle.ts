@@ -134,23 +134,145 @@ function parseHexColor(color: string): { r: number; g: number; b: number } | nul
     };
 }
 
-function mixHexColor(
-    color: string,
-    target: { r: number; g: number; b: number },
-    ratio: number,
-): { r: number; g: number; b: number } {
-    const base = parseHexColor(color) ?? { r: 104, g: 131, b: 157 };
-    const t = clamp(ratio, 0, 1);
-    return {
-        r: Math.round(base.r * (1 - t) + target.r * t),
-        g: Math.round(base.g * (1 - t) + target.g * t),
-        b: Math.round(base.b * (1 - t) + target.b * t),
-    };
-}
-
 function rgba(rgb: { r: number; g: number; b: number }, alpha: number): string {
     return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
 }
+
+// ── HSL 色彩归一化（Ableton 式"亮色块 + 深色波形"）──────────────────────
+//
+// 设计思路：Clip 主体是一块**明亮的轨道色**（粉彩明度带），波形与文字用
+// 深色画在色块上。此前走的是"中等亮度色块 + 白波形"——为了保白波形对比
+// 不得不把色块压暗，压暗后的颜色发闷发脏；翻转对比方向后色块可以放开
+// 亮度，任何轨道色都出来"干净的糖果色"。
+//
+// 轨道色是用户随意挑的，归一化把任意输入收敛到可控区间：饱和度夹在
+// [0.45, 0.68]、亮度夹在 [0.55, 0.72]，再按感知亮度二次校正。
+
+type Hsl = { h: number; s: number; l: number };
+
+function rgbToHsl(rgb: { r: number; g: number; b: number }): Hsl {
+    const r = rgb.r / 255;
+    const g = rgb.g / 255;
+    const b = rgb.b / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return { h: 0, s: 0, l };
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h: number;
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+    else if (max === g) h = ((b - r) / d + 2) * 60;
+    else h = ((r - g) / d + 4) * 60;
+    return { h, s, l };
+}
+
+function hueToRgb(p: number, q: number, tRaw: number): number {
+    let t = tRaw;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+}
+
+function hslToRgb(hsl: Hsl): { r: number; g: number; b: number } {
+    const { h, s, l } = hsl;
+    if (s === 0) {
+        const v = Math.round(l * 255);
+        return { r: v, g: v, b: v };
+    }
+    const hue = ((h % 360) + 360) % 360 / 360;
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return {
+        r: Math.round(hueToRgb(p, q, hue + 1 / 3) * 255),
+        g: Math.round(hueToRgb(p, q, hue) * 255),
+        b: Math.round(hueToRgb(p, q, hue - 1 / 3) * 255),
+    };
+}
+
+/** 感知亮度（0–1，Rec.601 加权）：人眼对绿最亮、对蓝最暗。 */
+function perceivedLuminance(rgb: { r: number; g: number; b: number }): number {
+    return (rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114) / 255;
+}
+
+/** 默认轨道色：中性灰（偏深）。未设色/异常色的轨道呈现安静的灰块。 */
+export const DEFAULT_TRACK_COLOR = "#74787e";
+
+/** 色块的感知亮度目标带：统一的中等偏亮明度，所有轨道色视觉重量一致，
+ * 时间线整体安静、有序（Cubase 默认主题式"彩色灰"）。 */
+const CLIP_LUMINANCE_BAND = { min: 0.50, max: 0.6 } as const;
+
+/**
+ * 轨道色 → 归一化 HSL。
+ *
+ * 两级收敛：
+ * 1. HSL 夹取（饱和度、亮度各自限幅）；
+ * 2. **感知亮度**校正 —— HSL 的 l 不等于人眼亮度：蓝紫色在 l=0.48 时感知
+ *    亮度只有 ~0.21（发黑，暗背景上隐形），黄绿色则偏亮。按感知亮度迭代
+ *    微调 l，把任意色相的色块都收敛到同一视觉明度带，时间线才整齐。
+ */
+function normalizeTrackHsl(color: string): Hsl {
+    const base = rgbToHsl(parseHexColor(color) ?? { r: 138, g: 144, b: 153 });
+    // 中性灰直通：默认轨道色是灰色，不能被强行拉成彩色 —— 低饱和输入
+    // 只做明度归一，保持无彩（下限放宽到 0.40，允许偏深的灰）。
+    if (base.s < 0.1) {
+        return { h: base.h, s: 0, l: clamp(base.l, 0.4, 0.6) };
+    }
+    const hsl: Hsl = {
+        h: base.h,
+        // 中饱和带：8 个轨道色相需保持可辨识，同时不过度主导画面；
+        // 亮度带统一所有轨道的视觉重量（0.48-0.58 偏暗，已提亮一档）。
+        s: clamp(base.s, 0.3, 0.46),
+        l: clamp(base.l, 0.44, 0.58),
+    };
+    for (let i = 0; i < 16; i += 1) {
+        const lum = perceivedLuminance(hslToRgb(hsl));
+        if (lum < CLIP_LUMINANCE_BAND.min) {
+            hsl.l = Math.min(0.85, hsl.l + 0.02);
+        } else if (lum > CLIP_LUMINANCE_BAND.max) {
+            hsl.l = Math.max(0.05, hsl.l - 0.02);
+        } else {
+            break;
+        }
+    }
+    return hsl;
+}
+
+/**
+ * 轨道色 → 归一化后的 CSS 颜色（轨道头取色显示用）。
+ *
+ * Clip 色块画的是归一化色，轨道头的色条/取色块**必须显示同一个颜色**——
+ * 否则"挑的颜色"和"时间线上实际出现的颜色"对不上，用户会以为取色器坏了。
+ */
+export function normalizedTrackColorCss(color: string | undefined | null): string {
+    const rgb = hslToRgb(normalizeTrackHsl(color ?? DEFAULT_TRACK_COLOR));
+    return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+}
+
+/**
+ * 从基准 HSL 派生明度变体（header 调暗、badge 更暗、旋钮提亮……）。
+ * 整个 Clip 的所有颜色都从同一个归一化基准派生 —— 它们天然同调，
+ * 不会出现"header 和 body 两张皮"。
+ */
+function shadeHsl(base: Hsl, lightnessDelta: number, saturationDelta = 0): Hsl {
+    return {
+        h: base.h,
+        s: clamp(base.s + saturationDelta, 0, 1),
+        l: clamp(base.l + lightnessDelta, 0, 1),
+    };
+}
+
+/**
+ * Clip 圆角半径（px）。
+ *
+ * 参考 Ableton Live / REAPER：Clip 近乎直角 —— 边界即命中边界，用户对
+ * "边缘在哪、能不能抓"的判断不被圆角干扰。保留 1.5px 只为消除直角的
+ * 像素锯齿，视觉上不可辨。绘制端按 Clip 实际尺寸再收敛一次。
+ */
+export const CLIP_CORNER_RADIUS_PX = 1.5;
 
 function ellipsizeText(text: string, maxChars: number): string {
     if (maxChars <= 0) return "";
@@ -242,13 +364,25 @@ export function buildTimelineClipVisualStyle(args: {
     borderLineWidth: number;
 } {
     const fontFamily = args.fontFamily || resolveFontFamily();
-    const trackColor = args.trackColor ?? "#68839d";
-    const headerRgb = mixHexColor(trackColor, { r: 160, g: 171, b: 183 }, 0.16);
-    const bodyRgb = mixHexColor(trackColor, { r: 58, g: 63, b: 71 }, 0.68);
-    const borderRgb = mixHexColor(trackColor, { r: 133, g: 144, b: 156 }, 0.3);
-    const knobRgb = mixHexColor(trackColor, { r: 205, g: 212, b: 220 }, 0.24);
-    const controlRgb = mixHexColor(trackColor, { r: 40, g: 46, b: 55 }, 0.52);
-    const controlActiveRgb = mixHexColor(trackColor, { r: 120, g: 64, b: 69 }, 0.4);
+    const trackColor = args.trackColor ?? DEFAULT_TRACK_COLOR;
+    // ── 色块配色（Ableton 式"亮色块 + 深色前景"）──────────────────
+    // Clip 主体 = 归一化后的明亮轨道色；header 是同色轻微压深的一条带。
+    // 文字 / 波形 / 徽章 / 旋钮全部用**深色**画在亮块上 —— 对比方向与旧方案
+    // 相反，这正是"干净不发闷"的关键：色块可以亮，前景永远深。
+    //
+    // muted：饱和度压到近灰、明度不动 —— 亮灰块一眼可辨，不靠降 alpha
+    // （降 alpha 会透出背景、显脏）。
+    const baseHsl = normalizeTrackHsl(trackColor);
+    // 选中 = 色块提亮（Ableton 式）+ 白描边；muted = 同色相灰且压暗一档 ——
+    // 深底上等亮度灰块像"脏水泥"，沉下去后活跃 clip 的层级自然浮现。
+    const clipHsl: Hsl = args.muted
+        ? { h: baseHsl.h, s: 0.06, l: Math.max(0.08, baseHsl.l - 0.12) }
+        : args.selected
+          ? shadeHsl(baseHsl, 0.04)
+          : baseHsl;
+    const bodyRgb = hslToRgb(clipHsl);
+    const headerRgb = hslToRgb(shadeHsl(clipHsl, -0.05));
+
     const isPitchAdj = args.isPitchAdjustment === true;
     const {
         showChain,
@@ -318,22 +452,22 @@ export function buildTimelineClipVisualStyle(args: {
               : 8;
     const leadingControlsWidth = controlsRightEdge + 10;
 
-    // Chain badge: red when group is disabled, golden when active, neutral otherwise
+    // Chain badge：禁用=红（白字）、激活=金（深字）、中性=半透明深底 + 深字。
     const chainBadgeFill = args.isGroupDisabled
-        ? "rgba(220, 70, 70, 0.45)"
+        ? "rgba(189, 54, 54, 0.95)"
         : args.isGroupActive
-          ? "rgba(255, 200, 50, 0.55)"
-          : `rgba(${controlRgb.r}, ${controlRgb.g}, ${controlRgb.b}, 0.55)`;
+          ? "rgba(233, 185, 47, 0.95)"
+          : "rgba(0, 0, 0, 0.16)";
     const chainBadgeStroke = args.isGroupDisabled
-        ? "rgba(200, 50, 50, 0.80)"
+        ? "rgba(120, 22, 22, 0.8)"
         : args.isGroupActive
-          ? "rgba(255, 200, 50, 0.90)"
-          : `rgba(${borderRgb.r}, ${borderRgb.g}, ${borderRgb.b}, 0.50)`;
+          ? "rgba(122, 88, 6, 0.75)"
+          : "rgba(0, 0, 0, 0.28)";
     const chainBadgeTextFill = args.isGroupDisabled
-        ? "rgba(180, 40, 40, 1)"
+        ? "rgba(255, 244, 244, 0.96)"
         : args.isGroupActive
-          ? "rgba(180, 120, 10, 1)"
-          : "rgba(210, 215, 225, 0.85)";
+          ? "rgba(56, 42, 4, 0.96)"
+          : "rgba(28, 32, 40, 0.92)";
 
     const textStartPx = controlsRightEdge + 6;
 
@@ -348,27 +482,21 @@ export function buildTimelineClipVisualStyle(args: {
     );
 
     return {
-        headerFill: rgba(headerRgb, 0.95),
-        bodyFill: rgba(bodyRgb, 0.74),
+        headerFill: rgba(headerRgb, 1),
+        bodyFill: rgba(bodyRgb, 1),
+        // 描边：选中 = 白色 2px（在提亮的色块上清晰醒目，REAPER 惯例）；
+        // 未选中 = 同色调深描边 —— 纯黑低透明描边在深底上不可见，同色相
+        // 加深的描边让色块边缘"闭合"且与色块同调。
         borderStroke: args.selected
-            ? // CSS 变量优先；无 DOM 运行时（Node/SSR 测试）回退到派生色，
-              // 与本文件其余路径的 typeof 守卫保持一致。
-              (typeof document !== "undefined"
-                  ? getComputedStyle(document.documentElement)
-                        .getPropertyValue("--qt-clip-selected-border")
-                        .trim()
-                  : "") || rgba(borderRgb, 1)
-            : rgba(borderRgb, 0.74),
+            ? "rgba(255, 255, 255, 0.6)"
+            : rgba(headerRgb, 0.55),
         borderLineWidth: args.selected ? 2 : 1,
-        textFill: "rgba(241, 245, 249, 0.94)",
-        muteBadgeFill: rgba(args.muted ? controlActiveRgb : controlRgb, args.muted ? 0.96 : 0.9),
-        muteBadgeStroke: rgba(
-            args.muted
-                ? mixHexColor(trackColor, { r: 216, g: 187, b: 191 }, 0.26)
-                : mixHexColor(trackColor, { r: 182, g: 193, b: 206 }, 0.18),
-            args.muted ? 0.95 : 0.66,
-        ),
-        muteBadgeTextFill: args.muted ? "#fbebeb" : "rgba(244, 247, 250, 0.94)",
+        textFill: "rgba(28, 32, 40, 0.92)",
+        muteBadgeFill: args.muted ? "rgba(189, 54, 54, 0.95)" : "rgba(0, 0, 0, 0.16)",
+        muteBadgeStroke: args.muted ? "rgba(120, 22, 22, 0.8)" : "rgba(0, 0, 0, 0.28)",
+        muteBadgeTextFill: args.muted
+            ? "rgba(255, 244, 244, 0.96)"
+            : "rgba(28, 32, 40, 0.92)",
         muteBadgeLabel: "M",
         muteBadgeWidth,
         muteBadgeHeight,
@@ -383,19 +511,19 @@ export function buildTimelineClipVisualStyle(args: {
         chainBadgeRadius,
         chainBadgeOffsetX,
         chainBadgeOffsetY,
-        formantBadgeFill: rgba(controlRgb, 0.9),
-        formantBadgeStroke: rgba(mixHexColor(trackColor, { r: 182, g: 193, b: 206 }, 0.18), 0.66),
-        formantBadgeTextFill: "rgba(244, 247, 250, 0.94)",
+        formantBadgeFill: "rgba(0, 0, 0, 0.16)",
+        formantBadgeStroke: "rgba(0, 0, 0, 0.28)",
+        formantBadgeTextFill: "rgba(28, 32, 40, 0.92)",
         formantBadgeLabel: "F",
         formantBadgeWidth,
         formantBadgeHeight,
         formantBadgeRadius,
         formantBadgeOffsetX,
         formantBadgeOffsetY,
-        gainKnobFill: rgba(knobRgb, 0.94),
-        gainKnobStroke: rgba(mixHexColor(trackColor, { r: 34, g: 40, b: 48 }, 0.46), 0.92),
-        gainKnobIndicator: "rgba(248, 251, 255, 0.94)",
-        gainKnobCoreFill: rgba(mixHexColor(trackColor, { r: 246, g: 250, b: 255 }, 0.38), 0.9),
+        gainKnobFill: "rgba(0, 0, 0, 0.2)",
+        gainKnobStroke: "rgba(0, 0, 0, 0.38)",
+        gainKnobIndicator: "rgba(28, 32, 40, 0.95)",
+        gainKnobCoreFill: "rgba(255, 255, 255, 0.4)",
         gainKnobAngleDeg: (clampedGainDb / 12) * 135,
         gainKnobRadius,
         gainKnobCenterOffsetX,
@@ -404,7 +532,8 @@ export function buildTimelineClipVisualStyle(args: {
         playbackRateLabel,
         gainLabel,
         displayName: ellipsizeText(args.name, maxChars),
-        mutedAlpha: args.muted ? 0.29 : 1,
+        // muted 已由去饱和的亮灰块表达，保持不透明（透背景会显脏）。
+        mutedAlpha: 1,
         leadingControlsWidth,
         trailingReservePx,
         showMuteBadge: showMute,

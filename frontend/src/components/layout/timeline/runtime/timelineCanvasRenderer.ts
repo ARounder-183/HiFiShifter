@@ -1,6 +1,6 @@
 import {
     buildTimelineClipVisualStyle,
-    computeTimelineFadeShadeRange,
+    CLIP_CORNER_RADIUS_PX,
     resolveFontFamily,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
@@ -161,6 +161,8 @@ export function drawTimelineCanvas(
             isRenaming?: boolean;
             /** 吸附偏移（像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
             snapOffsetPx?: number;
+            /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
+            leadingOverlapPx?: number;
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -240,68 +242,97 @@ export function drawTimelineCanvas(
             isGroupActive,
             isGroupDisabled,
         });
-        const fadeShadeRange = computeTimelineFadeShadeRange({
-            widthPx: clipWidth,
-            fadeInPx: clip.fadeInPx,
-            fadeOutPx: clip.fadeOutPx,
-        });
-
         ctx.save();
         ctx.globalAlpha = visualStyle.mutedAlpha;
 
-        ctx.fillStyle = visualStyle.headerFill;
-        ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
-
-        ctx.fillStyle = visualStyle.bodyFill;
-        ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
-
-        if (fadeShadeRange) {
-            ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
-            ctx.fillRect(
-                clipLeft + fadeShadeRange.startPx,
-                bodyTop,
-                Math.max(1, fadeShadeRange.endPx - fadeShadeRange.startPx),
-                bodyHeight,
-            );
-        }
-
-        // 选中/编组指示必须在 Clip 体画布内绘制：DOM 交互层的 box-shadow
-        // 随原生滚动移动，会与 sticky 画布错帧；视觉状态统一由画布输出。
-        if (clip.selected || isGroupActive) {
-            ctx.strokeStyle =
-                !clip.selected && isGroupActive
-                    ? "rgba(255, 200, 50, 0.60)"
-                    : visualStyle.borderStroke;
-            ctx.lineWidth = clip.selected ? visualStyle.borderLineWidth : 1;
-            ctx.strokeRect(
+        // 圆角半径按 Clip 实际尺寸收敛：极短 / 极矮的 Clip 不能把圆角画爆。
+        const radius = Math.max(
+            0,
+            Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2),
+        );
+        const borderRect = () => {
+            ctx.beginPath();
+            ctx.roundRect(
                 clipLeft + 0.5,
                 clipTop + 0.5,
                 Math.max(0, clipWidth - 1),
                 Math.max(0, clipHeight - 1),
+                radius,
             );
-            if (isGroupActive) {
-                ctx.strokeStyle = "rgba(255, 200, 50, 0.60)";
-                ctx.lineWidth = 1;
-                ctx.strokeRect(
-                    clipLeft - 1.5,
-                    clipTop - 1.5,
-                    Math.max(0, clipWidth + 3),
-                    Math.max(0, clipHeight + 3),
-                );
-            }
+        };
+
+        // 主体填色统一裁剪到圆角矩形内：内部各段纯色平涂，四角被一起收圆。
+        // 简洁风（参考 Ableton / REAPER）：不用渐变、高光、发光 —— 平涂的
+        // 边界最清晰，密集轨道里不糊，渲染也最便宜。
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(clipLeft, clipTop, clipWidth, clipHeight, radius);
+        ctx.clip();
+
+        // 前导重叠区（被同轨前一个 clip 压住的部分）宽度：上 clip 在该区
+        // 半透，让下 clip 的色块/波形透出，避免两层不透明色块叠加成脏色。
+        const leadingOverlapPx = Math.max(
+            0,
+            Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0),
+        );
+        const overlapStart = clipLeft + leadingOverlapPx;
+
+        // header：色块头部带，与 body 同色稍压深。前导重叠区也用半透。
+        if (leadingOverlapPx > 0.5) {
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.globalAlpha *= 0.55;
+            ctx.fillRect(clipLeft, clipTop, leadingOverlapPx, headerHeight);
+            ctx.globalAlpha = visualStyle.mutedAlpha;
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.fillRect(overlapStart, clipTop, clipWidth - leadingOverlapPx, headerHeight);
         } else {
-            ctx.strokeStyle = visualStyle.borderStroke;
-            ctx.lineWidth = visualStyle.borderLineWidth;
-            ctx.strokeRect(
-                clipLeft + 0.5,
-                bodyTop + 0.5,
-                Math.max(0, clipWidth - 1),
-                Math.max(0, bodyHeight - 1),
-            );
+            ctx.fillStyle = visualStyle.headerFill;
+            ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
         }
 
-        ctx.fillStyle = "rgba(0, 0, 0, 0.24)";
+        // body：色块主体。前导重叠区半透。
+        if (leadingOverlapPx > 0.5) {
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.globalAlpha *= 0.55;
+            ctx.fillRect(clipLeft, bodyTop, leadingOverlapPx, bodyHeight);
+            ctx.globalAlpha = visualStyle.mutedAlpha;
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.fillRect(overlapStart, bodyTop, clipWidth - leadingOverlapPx, bodyHeight);
+        } else {
+            ctx.fillStyle = visualStyle.bodyFill;
+            ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
+        }
+
+        // body 中段（两条渐变之间）不再叠加黑色遮罩：此前 0.18→0.50 的加深
+        // 让波形区域的背景发闷显脏（用户反馈"更干净一点"）。渐变区域自身的
+        // 压暗由下方 fadeIn/fadeOut 的独立 fillRect 负责。
+
+        // header/body 分隔线：亮色块上的细深线，仅做分区提示。
+        ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
         ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
+
+        ctx.restore();
+
+        // 编组激活 = 深金描边 + 外圈（编组语义，非选中语义）。
+        // 选中不画边框 —— 由色块提亮表达（Ableton 式，见 style 的 selected 分支）；
+        // 未选中画极淡的深色收边，帮助在深背景上定界。
+        if (isGroupActive) {
+            ctx.strokeStyle = "rgba(146, 104, 10, 0.8)";
+            ctx.lineWidth = 1;
+            borderRect();
+            ctx.stroke();
+            ctx.strokeRect(
+                clipLeft - 1.5,
+                clipTop - 1.5,
+                Math.max(0, clipWidth + 3),
+                Math.max(0, clipHeight + 3),
+            );
+        }
+        // 描边：选中 = 白色 2px；未选中 = 淡收边 1px（值随选中态切换）。
+        ctx.strokeStyle = visualStyle.borderStroke;
+        ctx.lineWidth = visualStyle.borderLineWidth;
+        borderRect();
+        ctx.stroke();
 
         if (visualStyle.showGainKnob) {
             const knobCenterX = clipLeft + visualStyle.gainKnobCenterOffsetX;
@@ -465,9 +496,12 @@ export function drawTimelineCanvas(
         }
 
         if (clip.fadeInPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            // 淡入区压暗：音量从 0 爬升，视觉上"还没到全响"就该更暗。
+            // （0.45 在短渐变时像突兀的黑柱，降到 0.32。）
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
             ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            // 渐变曲线 = 半透明白：在压暗区与彩色块上都稳定可见（REAPER 式）。
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
@@ -480,14 +514,14 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+            ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
             ctx.fillRect(
                 clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
                 bodyTop,
                 Math.min(clipWidth, clip.fadeOutPx),
                 bodyHeight,
             );
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),

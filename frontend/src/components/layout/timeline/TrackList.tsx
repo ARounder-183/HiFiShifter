@@ -16,17 +16,22 @@ import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
+import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 
-/** Color palette options shown when creating a new track. */
+/** Color palette options shown when creating a new track.
+ * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
+ * （橙/黄/红）取更亮的原色，避免亮度归一化把它们抬成"洗白"的粉调；
+ * 灰色为默认轨道色。 */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
+    { value: "#74787e", key: "color_gray" },
     { value: "#4a8fd1", key: "color_blue" },
     { value: "#7b6bc4", key: "color_purple" },
     { value: "#43a875", key: "color_green" },
-    { value: "#cf6f2e", key: "color_orange" },
-    { value: "#f087b5", key: "color_pink" },
-    { value: "#b845a5", key: "color_magenta" },
-    { value: "#f0d25e", key: "color_yellow" },
-    { value: "#d94f4a", key: "color_red" },
+    { value: "#d68a52", key: "color_orange" },
+    { value: "#d982a8", key: "color_pink" },
+    { value: "#bb5fae", key: "color_magenta" },
+    { value: "#d4bc55", key: "color_yellow" },
+    { value: "#cf5252", key: "color_red" },
 ];
 const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
 
@@ -1466,11 +1471,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         window.addEventListener("pointercancel", end);
                                     }}
                                 >
-                                    {/* Always-visible left accent bar (pinned to list edge) */}
+                                    {/* Always-visible left accent bar (pinned to list edge).
+                                        显示归一化轨道色：与时间线 Clip 色块同源，
+                                        挑的颜色与实际出现的颜色严格一致。 */}
                                     <div
                                         className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-80 group-hover:opacity-90"}`}
                                         style={{
-                                            backgroundColor: track.color || "var(--qt-highlight)",
+                                            backgroundColor:
+                                                track.color != null
+                                                    ? normalizedTrackColorCss(track.color)
+                                                    : "var(--qt-highlight)",
                                         }}
                                     />
 
@@ -1508,7 +1518,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-10 group-hover:opacity-30"}`}
                                             style={{
                                                 backgroundColor:
-                                                    track.color || "var(--qt-highlight)",
+                                                    track.color != null
+                                                        ? normalizedTrackColorCss(track.color)
+                                                        : "var(--qt-highlight)",
                                             }}
                                         />
 

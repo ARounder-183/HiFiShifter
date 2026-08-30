@@ -2,10 +2,12 @@ import React from "react";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "../../../../features/keybindings/defaultKeybindings";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { FADE_CORNER_RESERVE_PX } from "../constants";
+import { fadeCornerReservePx } from "../constants";
 
 export const ClipEdgeHandles: React.FC<{
     clipId: string;
+    /** Clip 总高（px）：决定顶部让给淡化角控件的保留高度。 */
+    clipHeightPx: number;
     altPressed: boolean;
     multiSelectedCount: number;
     isInMultiSelectedSet: boolean;
@@ -31,6 +33,7 @@ export const ClipEdgeHandles: React.FC<{
     ) => void;
 }> = ({
     clipId,
+    clipHeightPx,
     altPressed,
     multiSelectedCount,
     isInMultiSelectedSet,
@@ -45,11 +48,14 @@ export const ClipEdgeHandles: React.FC<{
     seekFromClientX,
     startEditDrag,
 }) => {
-    // 左右边缘的垂直所有权切分：顶部 FADE_CORNER_RESERVE_PX 让给淡入/
-    // 淡出角部控件（ClipItem 渲染），裁短/延长只从其下沿开始 —— 几何上
-    // 互不重叠，任何层叠顺序下都不会互相抢事件。
+    // 左右边缘的垂直所有权切分：顶部一段让给淡入/淡出角部控件（ClipItem
+    // 渲染），裁短/延长只从其下沿开始 —— 几何上互不重叠，任何层叠顺序下都
+    // 不会互相抢事件。
+    //
+    // 保留高度随 Clip 高度自适应（fadeCornerReservePx）：固定值会让角控件在矮
+    // Clip 上吃掉大半个边缘，裁短手势无从下手。
     const yStyle: React.CSSProperties = {
-        top: FADE_CORNER_RESERVE_PX,
+        top: fadeCornerReservePx(clipHeightPx),
         bottom: 0,
     };
 

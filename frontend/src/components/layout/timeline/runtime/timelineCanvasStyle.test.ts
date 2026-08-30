@@ -85,15 +85,36 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(style.formantBadgeWidth, 20, "formant badge matches mute width");
     assertEqual(style.gainKnobRadius, 7, "gain knob is enlarged");
     assertEqual(style.gainKnobCenterOffsetX, 15, "gain knob sits at the far left of the header");
-    assertEqual(selectedStyle.headerFill, style.headerFill, "selected header keeps default visual");
-    assertEqual(selectedStyle.bodyFill, style.bodyFill, "selected body keeps default visual");
-    // Selected 边框优先读 CSS 变量 --qt-clip-selected-border；无 DOM 环境
-    // （Node 测试）下回退为轨道色的全不透明变体 —— 与非选中的 0.74 有意区分。
+    // 选中 = 整块提亮（header + body 一起），不再保持默认色。
+    assertEqual(
+        selectedStyle.headerFill === style.headerFill,
+        false,
+        "selected header is brightened (selection expressed by lightness, not border)",
+    );
+    // 选中 = 白色 2px 描边 + 色块提亮；未选中 = 淡收边 1px。
     assertEqual(
         selectedStyle.borderStroke,
-        "rgba(218, 129, 47, 1)",
-        "selected border falls back to full-alpha track color without CSS variables",
+        "rgba(255, 255, 255, 0.6)",
+        "selected clip uses a subdued white 2px stroke",
     );
+    assertEqual(selectedStyle.borderLineWidth, 2, "selected border is 2px");
+    assertEqual(style.borderLineWidth, 1, "unselected border is 1px");
+    {
+        const parseLum = (fill: string): number => {
+            const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
+            if (!m) throw new Error(`unparseable fill: ${fill}`);
+            return (
+                (Number(m[1]) * 0.299 + Number(m[2]) * 0.587 + Number(m[3]) * 0.114) / 255
+            );
+        };
+        const selectedLum = parseLum(selectedStyle.bodyFill);
+        const normalLum = parseLum(style.bodyFill);
+        if (selectedLum <= normalLum) {
+            throw new Error(
+                `selected clip must be brighter than normal (selected=${selectedLum.toFixed(3)}, normal=${normalLum.toFixed(3)})`,
+            );
+        }
+    }
     assertEqual(selectedStyle.textFill, style.textFill, "selected text keeps default visual");
 
     assertEqual(
@@ -108,6 +129,38 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
         },
         "shade range sits outside fade areas",
     );
+
+    // ── 色块归一化：极端轨道色也必须落在安全亮度区间 ────────────────────────
+    // 整块用色的前提：无论用户挑了多刺眼/多暗的轨道色，Clip 色块的感知亮度
+    // 都被 HSL 归一化收敛到**明亮带**——深色文字/深色波形在色块上永远有对比，
+    // 色块对深色轨道背景也永远有明度差（亮块 + 深前景是本方案的核心）。
+    {
+        const parseLuminance = (fill: string): number => {
+            const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
+            if (!m) throw new Error(`unparseable fill: ${fill}`);
+            const [, rs, gs, bs] = m;
+            return (
+                (Number(rs) * 0.299 + Number(gs) * 0.587 + Number(bs) * 0.114) / 255
+            );
+        };
+        for (const color of ["#ff0000", "#00ff00", "#0000ff", "#ffffff", "#000000", "#808080"]) {
+            const extreme = buildTimelineClipVisualStyle({
+                widthPx: 160,
+                trackColor: color,
+                selected: false,
+                muted: false,
+                gain: 1,
+                playbackRate: 1,
+                name: "x",
+            });
+            const lum = parseLuminance(extreme.bodyFill);
+            if (lum < 0.35 || lum > 0.65) {
+                throw new Error(
+                    `trackColor ${color}: clip block luminance ${lum.toFixed(3)} outside the REAPER band [0.35, 0.65]`,
+                );
+            }
+        }
+    }
 
     // ── formatPlaybackRateLabel ───────────────────────────────────────────────
     assertEqual(formatPlaybackRateLabel(1), "x1", "unity rate has no fractional part");

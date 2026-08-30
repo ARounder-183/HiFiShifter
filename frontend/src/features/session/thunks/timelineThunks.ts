@@ -9,10 +9,29 @@ import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 // 我们在此处用 type-only import，避免运行时循环依赖�?
 import type { SessionState } from "../sessionSlice";
 
+/** 新建轨道的默认颜色：中性灰（偏深）。后端 add_track 会自行分配彩色，
+ * 创建成功后立即覆盖为灰色 —— 除非用户之后手动改色。 */
+const NEW_TRACK_DEFAULT_COLOR = "#74787e";
+
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
-    async (payload: { name?: string; parentTrackId?: string | null }) => {
-        return webApi.addTrackNested(payload);
+    async (payload: { name?: string; parentTrackId?: string | null }, { getState }) => {
+        // getState() 返回根 state，session 切片在 .session 下。
+        const state = getState() as { session: SessionState };
+        const beforeIds = new Set(state.session.tracks.map((track) => track.id));
+        const result = await webApi.addTrackNested(payload);
+        const snapshot = result as {
+            ok?: boolean;
+            tracks?: Array<{ id: string; color?: string }>;
+        };
+        const newTrack = (snapshot.tracks ?? []).find((track) => !beforeIds.has(track.id));
+        if (snapshot.ok !== false && newTrack) {
+            // 后端持久化灰色 + 就地修正快照：reducer 应用快照时即是灰色，
+            // 不会出现"后端彩色闪一下再变灰"。
+            void webApi.setTrackState({ trackId: newTrack.id, color: NEW_TRACK_DEFAULT_COLOR });
+            newTrack.color = NEW_TRACK_DEFAULT_COLOR;
+        }
+        return result;
     },
 );
 
@@ -54,7 +73,8 @@ export const moveTrackRemote = createAsyncThunk(
 
 export const selectTrackRemote = createAsyncThunk(
     "session/selectTrackRemote",
-    async (trackId: string) => {
+    async (arg: string | { trackId: string; applySelectedClip?: boolean }) => {
+        const trackId = typeof arg === "string" ? arg : arg.trackId;
         return webApi.selectTrack(trackId);
     },
 );

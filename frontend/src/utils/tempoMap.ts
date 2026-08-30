@@ -843,6 +843,20 @@ export function insertTempoPoint(map: TempoMap, point: TempoPoint): TempoMap {
     return { points };
 }
 
+/**
+ * 解析补丁后的位置秒数。
+ *
+ * 非有限值（NaN / ±Infinity）时**保留原值**，而不是折叠成 0。旧实现写作
+ * `Number(x) || 0`，一旦上游吸附算出 NaN，标记会被静默瞬移到工程起点；接着它
+ * 与 0 位置的工程基准点重合，被 `normalizeTempoMap` 的相邻去重直接删除，表现
+ * 为"拖动一下标记就飞到最左边，然后消失、再也拖不动"。
+ */
+function resolvePatchedPositionSec(patched: number | undefined, current: number): number {
+    const candidate = Number(patched ?? current);
+    const base = Number.isFinite(candidate) ? candidate : Number(current);
+    return Math.max(0, Number.isFinite(base) ? base : 0);
+}
+
 export function updateTempoPoint(
     map: TempoMap,
     id: string,
@@ -854,7 +868,7 @@ export function updateTempoPoint(
         return {
             ...p,
             ...patch,
-            positionSec: Math.max(0, Number(patch.positionSec ?? p.positionSec) || 0),
+            positionSec: resolvePatchedPositionSec(patch.positionSec, p.positionSec),
             bpm: clampBpm(Number(patch.bpm ?? p.bpm)),
             timeSignature:
                 patch.timeSignature === undefined
@@ -878,6 +892,49 @@ export function updateTempoPoint(
         }
     }
     return { points };
+}
+
+/**
+ * 把变化点的目标位置钳制到相邻点之间（拖拽用）。
+ *
+ * 【为什么不简单写成 `min(max(prev, sec), max(next, prev))`】
+ * 旧式写法在 `next <= prev`（相邻点过近，或末点的工程上限低于前一个点）时会把
+ * 上界退化成 `prev`，于是点被**永久钉死**在 `prev` 上：此后无论怎么拖都只能得
+ * 到同一个值。这正是"拖一下就飞到最左边、之后再也拖不动"的成因。
+ *
+ * 这里保证：下界恒为 `prevSec`；上界仅在其严格大于下界时生效，否则视为无上界。
+ * 因此点永远不会进入"上下界重合、动弹不得"的退化状态。
+ *
+ * @param maxSec 末点的位置上限（工程/视口末尾）。仅当大于下限时生效；
+ *               传 `Infinity` 表示不设上限。
+ */
+export function clampTempoPointSec(args: {
+    points: readonly TempoPoint[];
+    pointId: string;
+    desiredSec: number;
+    /** 相邻点最小间距（秒），避免两点重合后被规范化去重。 */
+    minGapSec: number;
+    maxSec: number;
+}): number {
+    const { points, pointId, desiredSec, minGapSec, maxSec } = args;
+    const index = points.findIndex((point) => point.id === pointId);
+    if (index < 0) return desiredSec;
+
+    const gap = Number.isFinite(minGapSec) ? Math.max(0, minGapSec) : 0;
+    // 0 位置点是工程基准记录（调用方已禁止拖动），这里仍给出安全下界。
+    const prevSec = index > 0 ? points[index - 1].positionSec + gap : 0;
+    const hasNext = index + 1 < points.length;
+    const rawUpperSec = hasNext ? points[index + 1].positionSec - gap : maxSec;
+
+    const upperSec =
+        Number.isFinite(rawUpperSec) && rawUpperSec > prevSec
+            ? rawUpperSec
+            : Number.POSITIVE_INFINITY;
+
+    const candidate = Number.isFinite(desiredSec) ? desiredSec : prevSec;
+    const clamped = Math.min(Math.max(prevSec, candidate), upperSec);
+    // 数值兜底：任何异常都退回到下界，绝不返回 NaN（会瞬移到 0）。
+    return Number.isFinite(clamped) ? Math.max(prevSec, clamped) : prevSec;
 }
 
 /** 删除变化点；删除最后一个点或第一个点（map 只剩它）时返回 null。 */

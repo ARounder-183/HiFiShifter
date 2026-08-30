@@ -108,6 +108,8 @@ import {
 } from "../../utils/autoFollowScroll";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
+import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
+import { createTimelineAxis } from "./timeline/runtime/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
@@ -152,9 +154,34 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
-                if (playheadRef.current) {
+
+                // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
+                // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧
+                // 会在"视觉位置"与"同步位置"之间跳动（自动滚屏抽搐的根因）。
+                // 滚动先行、播放头定位收尾，最终写入获胜。
+                if (autoScrollEnabled && transport.isPlaying) {
                     const scroller = scrollRef.current;
-                    const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                    if (scroller) {
+                        const next = computeAutoFollowScrollLeft({
+                            playheadSec: visualPlayheadSec,
+                            pxPerSec: pxPerSecRef.current,
+                            viewportWidth: scroller.clientWidth,
+                            contentWidth: projectSec * pxPerSecRef.current,
+                        });
+                        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
+                            // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近
+                            // 工程右端时请求值可能被钳制，画布层必须与原生 DOM
+                            // 层使用同一偏移。
+                            const applied = applyNativeScrollLeft(scroller, next);
+                            syncScrollLeft(applied);
+                        }
+                    }
+                }
+
+                // 播放头定位（在自动滚动之后，用最新 scrollLeft + 视觉插值）。
+                const scroller = scrollRef.current;
+                const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                if (playheadRef.current) {
                     playheadRef.current.style.left = `${screenLeft}px`;
                 }
                 if (rulerPlayheadLineRef.current) {
@@ -163,20 +190,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 if (rulerPlayheadHeadRef.current) {
                     rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
                 }
-                if (!autoScrollEnabled || !transport.isPlaying) return;
-                const scroller = scrollRef.current;
-                if (!scroller) return;
-                const next = computeAutoFollowScrollLeft({
-                    playheadSec: visualPlayheadSec,
-                    pxPerSec: pxPerSecRef.current,
-                    viewportWidth: scroller.clientWidth,
-                    contentWidth: projectSec * pxPerSecRef.current,
-                });
-                if (Math.abs(scroller.scrollLeft - next) <= 0.5) return;
-                // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近工程右端时
-                // 请求值可能被钳制，画布层必须与原生 DOM 层使用同一偏移。
-                const applied = applyNativeScrollLeft(scroller, next);
-                syncScrollLeft(applied);
             },
             [
                 autoScrollEnabled,
@@ -350,13 +363,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sameSourceConfirmOpen,
         setSameSourceConfirmOpen,
         sameSourceConfirmResolverRef,
-        secPerBeat,
         pxPerBeat,
         contentWidth,
         contentHeight,
         dynamicProjectSec,
-        ticks,
-        tempoGridLineXs,
+        timelineTicks,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -564,6 +575,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clearContextMenu,
         ensureTrackLaneSelected,
         selectTrackLaneClipRemote,
+        deselectAllTrackLaneClips,
         openTrackLaneContextMenu,
         seekFromTrackLaneClientX,
         toggleTrackLaneClipMuted,
@@ -1262,22 +1274,49 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
         return ids.size > 0 ? ids : undefined;
     }, [multiSelectedClipIds, clipById, s.selectedClipId, disabledGroupIds]);
-    const sparseClipRenderModel = useMemo(
+    // 全图层共享的统一坐标投影：网格 / 标尺 / clip 体 / 波形 / 播放头都从这里
+    // 取位置与缩放，任何图层都不许再自行执行 `sec * pxPerSec`（历史错位根因）。
+    // 用 useMemo 缓存引用，否则下游 React.memo 会因新对象引用而每帧失效。
+    const timelineAxis = useMemo(
         () =>
-            buildSparseClipRenderModel({
+            createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                scrollTopPx: timelineScrollTop,
+                viewportWidthPx: Math.max(1, Math.ceil(viewportWidth)),
+                dpr: window.devicePixelRatio || 1,
+            }),
+        [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
+    );
+    const sparseClipRenderModel = useMemo(
+        () => {
+            // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
+            // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
+            // 不透明色块叠加成脏色。
+            const leadingOverlapSecByClipId: Record<string, number> = {};
+            for (const track of visibleTracks) {
+                const clips = visibleTrackClipsById[track.id] ?? [];
+                Object.assign(
+                    leadingOverlapSecByClipId,
+                    computeLeadingOverlapSecByClipId(clips),
+                );
+            }
+            return buildSparseClipRenderModel({
                 visibleTracks,
                 startTrackIndex: timelineRenderModel.startIndex,
                 visibleTrackClipsById,
-                pxPerSec,
+                axis: timelineAxis,
                 rowHeight,
                 selectedClipId: s.selectedClipId,
                 multiSelectedClipIds,
                 renamingClipId,
                 disabledGroupIds,
-            }),
+                leadingOverlapSecByClipId,
+            });
+        },
         [
             multiSelectedClipIds,
-            pxPerSec,
+            timelineAxis,
             renamingClipId,
             rowHeight,
             s.selectedClipId,
@@ -1344,10 +1383,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
                 <TimeRuler
                     scrollLeft={scrollLeft}
-                    ticks={ticks}
+                    ticks={timelineTicks}
                     pxPerBeat={pxPerBeat}
                     pxPerSec={pxPerSec}
-                    secPerBeat={secPerBeat}
                     viewportWidth={viewportWidth}
                     playheadSec={s.playheadSec}
                     playheadLineRef={rulerPlayheadLineRef}
@@ -1689,9 +1727,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             return;
                         }
                         if (e.button === 0) {
+                            const target = e.target as HTMLElement | null;
+                            // 任意空白处按下即取消 clip 选中：容器捕获先于所有
+                            // lane 处理器执行，保证"点击任意轨道的空白（含轨道区
+                            // 下方空白）都取消选中"。clip / overlap 层 / 标尺 /
+                            // 输入目标除外 —— 它们各自的路由决定选中的去向。
+                            if (
+                                !isEditableTarget(e.target) &&
+                                !target?.closest?.(
+                                    "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
+                                )
+                            ) {
+                                deselectAllTrackLaneClips();
+                            }
                             // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
                             // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
                             // “允许时间轴点击切换轨道”也能稳定触发。
+                            // applySelectedClip: false —— 点击切轨不得让后端把
+                            // 该轨道记住的 selected_clip_id 恢复回来，否则刚完成
+                            // 的空白取消选中会被异步覆盖（"点其他轨道空白不取消
+                            // 选中"的根因）。
                             if (!isEditableTarget(e.target)) {
                                 const trackId = trackIdFromClientY(e.clientY);
                                 if (
@@ -1699,7 +1754,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     trackId &&
                                     trackId !== sessionRef.current.selectedTrackId
                                 ) {
-                                    void dispatch(selectTrackRemote(trackId));
+                                    void dispatch(
+                                        selectTrackRemote({
+                                            trackId,
+                                            applySelectedClip: false,
+                                        }),
+                                    );
                                 }
                             }
                             return;
@@ -1729,7 +1789,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             trackId &&
                             trackId !== sessionRef.current.selectedTrackId
                         ) {
-                            void dispatch(selectTrackRemote(trackId));
+                            // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
+                            void dispatch(
+                                selectTrackRemote({ trackId, applySelectedClip: false }),
+                            );
                         }
                         startDeferredPlayheadSeek({
                             startClientX: e.clientX,
@@ -1860,6 +1923,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             trackColor={track.color || undefined}
                                             ensureSelected={ensureTrackLaneSelected}
                                             selectClipRemote={selectTrackLaneClipRemote}
+                                            deselectAllClips={deselectAllTrackLaneClips}
                                             onShiftRangeSelect={selectClipRangeByRect}
                                             rangeSelectAnchorClipId={rangeSelectAnchorClipId}
                                             recordLastClickPosition={recordLastClickPosition}
@@ -1963,10 +2027,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 widthPx={Math.max(1, Math.ceil(viewportWidth))}
                                 heightPx={visibleTrackCanvasHeight}
                                 topPx={0}
-                                viewportStartSec={viewportStartSec}
-                                viewportEndSec={viewportEndSec}
-                                pxPerSec={pxPerSec}
-                                scrollLeft={scrollLeft}
+                                axis={timelineAxis}
                                 playheadSec={s.playheadSec}
                                 clipModel={timelineCanvasModel}
                                 contentWidth={contentWidth}
@@ -1978,8 +2039,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 gridSwingPercent={
                                     s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
                                 }
-                                gridWeakLineXs={tempoGridLineXs?.weak ?? null}
-                                gridStrongLineXs={tempoGridLineXs?.strong ?? null}
+                                ticks={timelineTicks}
                                 gridBottomPx={trackGridHeight}
                                 gridLayerRef={trackGridLayerRef}
                                 gridOverlayLayerRef={trackGridOverlayLayerRef}
