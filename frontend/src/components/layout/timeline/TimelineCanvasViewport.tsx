@@ -96,5 +96,13 @@ export const TimelineCanvasViewport: React.FC<{
         );
     }, [invalidate]);
 
+    React.useEffect(() => {
+        // 浏览器缩放 / 跨屏拖动改变 devicePixelRatio：光栅化与设备像素吸附
+        // 都依赖 dpr，变化后必须重绘一次。
+        const onResize = () => invalidate();
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, [invalidate]);
+
     return <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />;
 };

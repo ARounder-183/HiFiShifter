@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import { useSyncExternalStore } from "react";
 import { useAppSelector } from "../../../app/hooks";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
 import { type RootState } from "../../../app/store";
 import {
     getSnapHighlightSnapshot,
@@ -52,7 +53,6 @@ export const SnapHighlightLayer: React.FC<{
     const snapHighlightEnabled = useAppSelector(
         (state: RootState) => state.session.timelineSnap.snapHighlightEnabled !== false,
     );
-
     const rowIndexById = useMemo(() => {
         const map = new Map<string, number>();
         tracks.forEach((track, index) => map.set(track.id, index));
@@ -89,6 +89,9 @@ const SnapEntryGroup: React.FC<{
     trackCount: number;
     contentHeight: number;
 }> = ({ entry, pxPerSec, rowHeight, rowIndexById, trackCount, contentHeight }) => {
+    // 光晕只适合暗底：浅色主题下吸附线/亮条用无光晕的纯色。
+    const { mode: themeMode } = useAppTheme();
+    const darkMode = themeMode === "dark";
     if (entry.markers.length === 0) return null;
 
     // ── 计算连线的纵向范围 ──
@@ -163,13 +166,17 @@ const SnapEntryGroup: React.FC<{
                               width: 2,
                               height: rangeHeight,
                               backgroundColor: color,
-                              opacity: 0.85,
-                              boxShadow: `0 0 6px 1px color-mix(in oklab, ${color} 60%, transparent)`,
+                              opacity: darkMode ? 0.85 : 0.7,
+                              boxShadow: darkMode
+                                  ? `0 0 6px 1px color-mix(in oklab, ${color} 60%, transparent)`
+                                  : "none",
                           }}
                       />
                   ))
                 : null}
-            {/* 行内亮边：吸附处落在具体 Clip / 轨道行时的贴边高亮 */}
+            {/* 行内亮边：吸附处落在具体 Clip / 轨道行时的贴边高亮。
+                光晕只保留在深色主题（暗底上光晕可读）；浅色主题下去掉光晕、
+                用纯色细条，避免饱和色在浅底上糊成一片。 */}
             {accents.map((accent) => (
                 <div
                     key={accent.key}
@@ -179,8 +186,12 @@ const SnapEntryGroup: React.FC<{
                         top: accent.top,
                         width: 3,
                         height: accent.height,
-                        backgroundColor: `color-mix(in oklab, ${color} 70%, white 30%)`,
-                        boxShadow: `0 0 8px 2px color-mix(in oklab, ${color} 75%, transparent)`,
+                        backgroundColor: darkMode
+                            ? `color-mix(in oklab, ${color} 70%, white 30%)`
+                            : color,
+                        boxShadow: darkMode
+                            ? `0 0 8px 2px color-mix(in oklab, ${color} 75%, transparent)`
+                            : "none",
                     }}
                 />
             ))}

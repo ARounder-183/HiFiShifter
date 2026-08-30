@@ -230,8 +230,9 @@ function drawParamMorphOverlay(args: {
     const points = overlay.points.slice().sort((a, b) => a.frame - b.frame);
     if (points.length !== 4) return;
 
-    const lineColor = isDark ? "rgba(255, 210, 95, 0.9)" : "rgba(160, 90, 10, 0.9)";
-    const fillColor = isDark ? "rgba(255, 210, 95, 0.22)" : "rgba(160, 90, 10, 0.18)";
+    // 变形预览与参数线同向：深=浅色、浅=深色（虚线+半透明填充区分本体）。
+    const lineColor = isDark ? "rgba(255, 255, 255, 0.9)" : "rgba(28, 32, 40, 0.9)";
+    const fillColor = isDark ? "rgba(255, 255, 255, 0.20)" : "rgba(28, 32, 40, 0.16)";
 
     const toCanvasX = (frame: number) => {
         const sec = framesToTime(frame, fp);
@@ -396,11 +397,10 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(255,255,255,0.10)",
               pitchGridOther: "rgba(255,255,255,0.05)",
-              // 曲线：与浅色主题共用一套色相语义 ——
-              // 编辑包络 = 琥珀（在灰底衬波形上 ≥2:1 分离，不再用白色）；
-              // 原始音高 = 橄榄黄虚线；选区高亮 = 青蓝。
+              // 曲线：参数线深浅随主题（深=白、浅=黑），在色块化的界面里
+              // 永远是最清晰的一条；原始音高 = 橄榄黄虚线；选区高亮 = 青蓝。
               origCurve: "rgba(200,164,60,0.70)",
-              editCurve: "rgba(255,176,32,0.95)",
+              editCurve: "rgba(255,255,255,0.92)",
               selectionCurve: "rgba(100,200,255,0.95)",
               // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
               // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
@@ -423,16 +423,21 @@ export function drawPianoRoll(args: {
               // 网格线
               pitchGridC: "rgba(0,0,0,0.12)",
               pitchGridOther: "rgba(0,0,0,0.06)",
-              // 曲线：色相语义与深色主题一致 ——
-              // 编辑包络 = 琥珀（加深到对浅底 ≥3.5:1，不再是发飘的亮橙）；
-              // 原始音高 = 橄榄黄虚线；选区高亮 = 青蓝（与琥珀编辑线区分开）。
+              // 曲线：参数线深浅随主题（深=白、浅=黑）。
               origCurve: "rgba(132,104,26,0.80)",
-              editCurve: "rgba(178,108,0,1)",
+              editCurve: "rgba(28,32,40,0.95)",
               selectionCurve: "rgba(0,116,200,1)",
               // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
               overlayTextColor: "rgba(30,36,48,0.60)",
               playheadLine: "rgba(0,0,0,0.20)",
           };
+
+    // 网格线设备像素对齐：分数 DPR（125%/150%）下 1px CSS 线覆盖 1~2 物理像素，
+    // 随落点相位粗细不一。hairline = 1 物理像素、strong = 2 物理像素。
+    const dpr = window.devicePixelRatio || 1;
+    const hairlineY = (cssY: number): number => (Math.round(cssY * dpr) + 0.5) / dpr;
+    const hairlineW = 1 / dpr;
+    const strongW = 2 / dpr;
 
     // Draw axis (left labels)
     if (axisCanvas) {
@@ -682,16 +687,16 @@ export function drawPianoRoll(args: {
         const scaleSegments = args.scaleSegments ?? null;
 
         for (let midi = startMidi; midi <= endMidi; midi += 1) {
-            const y = valueToY("pitch", midi + 0.5, h);
+            const y = hairlineY(valueToY("pitch", midi + 0.5, h));
             const pc = ((midi % 12) + 12) % 12;
             const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
 
             const normalColor = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
             ctx.strokeStyle = normalColor;
-            ctx.lineWidth = 1;
+            ctx.lineWidth = hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
 
             if (!highlightActive) continue;
@@ -708,8 +713,8 @@ export function drawPianoRoll(args: {
                     const x1 = secToViewportPx(axis, segment.endSec);
                     if (x1 < 0 || x0 > w) continue;
                     ctx.beginPath();
-                    ctx.moveTo(Math.max(0, x0), y + 0.5);
-                    ctx.lineTo(Math.min(w, x1), y + 0.5);
+                    ctx.moveTo(Math.max(0, x0), y);
+                    ctx.lineTo(Math.min(w, x1), y);
                     ctx.stroke();
                 }
                 continue;
@@ -719,8 +724,8 @@ export function drawPianoRoll(args: {
                 ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
                 ctx.lineWidth = 2;
                 ctx.beginPath();
-                ctx.moveTo(0, y + 0.5);
-                ctx.lineTo(w, y + 0.5);
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
                 ctx.stroke();
             }
         }
@@ -733,8 +738,10 @@ export function drawPianoRoll(args: {
         const start = Math.ceil(vMin / step) * step;
 
         for (let v = start; v <= vMax + step * 0.01; v += step) {
-            const y = valueToY(editParam, v, h);
             const isStrong = Math.round(v) % 1200 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -742,10 +749,10 @@ export function drawPianoRoll(args: {
                 : isDark
                   ? "rgba(255,255,255,0.07)"
                   : "rgba(0,0,0,0.08)";
-            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
         }
     } else if (isChildPitchOffsetDegreesParam(editParam)) {
@@ -757,9 +764,11 @@ export function drawPianoRoll(args: {
         const start = Math.ceil(vMin / step) * step;
 
         for (let v = start; v <= vMax + step * 0.01; v += step) {
-            const y = valueToY(editParam, v, h);
             const rounded = Math.round(v);
             const isStrong = rounded % 7 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -767,10 +776,10 @@ export function drawPianoRoll(args: {
                 : isDark
                   ? "rgba(255,255,255,0.07)"
                   : "rgba(0,0,0,0.08)";
-            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
         }
     } else if (isChildFormantOffsetCentsParam(editParam)) {
@@ -782,9 +791,11 @@ export function drawPianoRoll(args: {
         const start = Math.ceil(vMin / step) * step;
 
         for (let v = start; v <= vMax + step * 0.01; v += step) {
-            const y = valueToY(editParam, v, h);
             const rounded = Math.round(v);
             const isStrong = rounded % 600 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -792,10 +803,10 @@ export function drawPianoRoll(args: {
                 : isDark
                   ? "rgba(255,255,255,0.07)"
                   : "rgba(0,0,0,0.08)";
-            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
         }
     }

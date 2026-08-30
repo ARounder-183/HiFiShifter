@@ -141,8 +141,8 @@ test("waveform/geometry.test.ts scripted checks", async () => {
     });
     assertEqual(
         dimmedMarker.vertices.length,
-        36,
-        "inactive marker still emits its triangle lines",
+        84,
+        "inactive marker still emits its scanline-filled triangle",
     );
     assertEqual(
         Array.from(dimmedMarker.vertices.slice(2, 6)),

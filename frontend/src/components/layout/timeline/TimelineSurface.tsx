@@ -57,7 +57,6 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     ticks: readonly TimelineTick[];
     /** 网格内容底部边界（内容绝对坐标 y，通常为最后一条轨道底边）。 */
     gridBottomPx: number;
-    gridLayerRef: React.RefObject<HTMLDivElement | null>;
     gridOverlayLayerRef: React.RefObject<HTMLDivElement | null>;
     /** 播放光标竖直参考线：随滚动/缩放与其它 sticky 层在同一帧移动。 */
     playheadLineRef: React.Ref<HTMLDivElement>;
@@ -83,27 +82,21 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     // state 可能仍是 rAF 前值，不能让网格与 Clip 体画布在首帧分叉。
     React.useLayoutEffect(() => {
         const axis = timelineViewportBus.getAxis();
-        invokeGridRedrawHandler(props.gridLayerRef.current, axis.scrollLeftPx, axis.scrollTopPx);
         invokeGridRedrawHandler(
             props.gridOverlayLayerRef.current,
             axis.scrollLeftPx,
             axis.scrollTopPx,
         );
-    }, [props.gridLayerRef, props.gridOverlayLayerRef, props.gridVisible]);
+    }, [props.gridOverlayLayerRef, props.gridVisible]);
 
     return (
         <div
             className="sticky left-0 top-0 pointer-events-none"
             style={{ width: props.widthPx, zIndex: 1 }}
         >
-            <BackgroundGrid
-                {...gridBaseProps}
-                layerRef={props.gridLayerRef}
-                // 背景网格（空白区）满不透明度：网格线必须清晰可见。
-                lineOpacity={1}
-                viewportBus={timelineViewportBus}
-                layerOrder={LAYER_ORDER.gridBack}
-            />
+            {/* 网格只有叠加层这一份：竖线一根到底、画在波形与半透明 clip 体之上。
+                旧的"背景层 + 叠加层"双份绘制会在空泳道里把同一根线叠两遍，
+                两层亚像素相位稍有出入就出现 3px 的粗线。 */}
             <div
                 className="absolute pointer-events-none"
                 style={{

@@ -208,11 +208,14 @@ export function drawTimelineCanvas(
             (typeof document !== "undefined"
                 ? getComputedStyle(document.documentElement).getPropertyValue("--qt-border").trim()
                 : "") || "rgba(148, 163, 184, 0.22)";
+        const dpr = window.devicePixelRatio || 1;
         ctx.save();
         ctx.strokeStyle = borderColor;
-        ctx.lineWidth = 1;
+        // 行分界线对齐设备像素：分数 DPR 下 1px CSS 线会被抗锯齿拆成
+        // 1~2 物理像素的渐变线，粗细随落点相位漂移。
+        ctx.lineWidth = 1 / dpr;
         for (let index = 1; index <= rowCount; index += 1) {
-            const y = (startTrackIndex + index) * rowHeight;
+            const y = (Math.round(((startTrackIndex + index) * rowHeight) * dpr) + 0.5) / dpr;
             if (y < viewportTopPx - 1 || y > viewportTopPx + args.height + 1) continue;
             // 和网格使用完全相同的轨道内容底边：正常区域与工程末尾延长段落
             // 都不会在轨道区下方画线，也不需要额外 DOM 遮挡。

@@ -226,14 +226,19 @@ export function buildWaveformGeometry(args: {
         const markerGreen = inactive ? green * INACTIVE_TAKE_RGB_SCALE : green;
         const markerBlue = inactive ? blue * INACTIVE_TAKE_RGB_SCALE : blue;
         const alpha = colorAlpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
-        const x = marker.xPx;
-        const y = marker.yPx + 0.5;
-        push(x - halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
-        push(x + halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
-        push(x - halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
-        push(x, y + size, markerRed, markerGreen, markerBlue, alpha);
-        push(x + halfWidth, y, markerRed, markerGreen, markerBlue, alpha);
-        push(x, y + size, markerRed, markerGreen, markerBlue, alpha);
+        // 实心 ▽：按整像素扫描线逐行填充。旧版是 1px 空心折线，WebGL 线元
+        // 无抗锯齿，两条斜边锯齿非常明显；横线落在 x.5 上天然锐利，小尺寸
+        // 下实心标记也更易读。
+        const x = Math.round(marker.xPx) + 0.5;
+        const yTop = Math.round(marker.yPx) + 0.5;
+        const steps = Math.max(2, Math.round(size));
+        for (let i = 0; i < steps; i += 1) {
+            const hw = halfWidth * (1 - i / steps);
+            if (hw < 0.5) break;
+            const y = yTop + i;
+            push(x - hw, y, markerRed, markerGreen, markerBlue, alpha);
+            push(x + hw, y, markerRed, markerGreen, markerBlue, alpha);
+        }
     }
 
     // 先取长度再清零：slice 出独立副本供 GPU/2D 渲染器安全持有。

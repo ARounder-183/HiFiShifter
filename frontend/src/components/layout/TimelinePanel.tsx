@@ -349,7 +349,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sessionRef,
         scrollRef,
         trackListScrollRef,
-        trackGridLayerRef,
         trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
@@ -2088,7 +2087,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }
                                 ticks={timelineTicks}
                                 gridBottomPx={trackGridHeight}
-                                gridLayerRef={trackGridLayerRef}
                                 gridOverlayLayerRef={trackGridOverlayLayerRef}
                                 playheadLineRef={playheadRef}
                             />

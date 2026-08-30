@@ -238,6 +238,7 @@ export const BackgroundGrid: React.FC<{
                 latest.isSticky,
                 latest.lineOpacity,
                 latest.contentBottomPx,
+                window.devicePixelRatio || 1,
             ].join("|");
             if (lastDrawKeyRef.current === drawKey) return;
             lastDrawKeyRef.current = drawKey;
@@ -251,14 +252,18 @@ export const BackgroundGrid: React.FC<{
             /**
              * 竖线的落笔 x。
              *
-             * SVG 的描边以路径为中心向两侧展开，而标尺用 DOM 盒子绘制：
-             * - 1px 弱线：标尺是 `left: 0; width: 1`（占据 [x, x+1]），网格若画在
-             *   x 则会变成 [x-0.5, x+0.5]，两者相差半个像素。因此弱线落笔要
-             *   右移 0.5，使线体正好覆盖 [x, x+1]。
-             * - 2px 强线：标尺是 `left: -1; width: 2`（占据 [x-1, x+1]），与描边
-             *   居中一致，无需偏移。
+             * 线宽与位置都按**设备像素**取整（见下方 stroke-width 说明）：
+             * 分数 DPR（Windows 125%/150% 缩放、浏览器缩放）下，1px CSS 线
+             * 覆盖 1.25/1.5 物理像素，不同线落在不同亚像素相位上，取整后
+             * 有的 1 物理像素、有的 2 物理像素 —— 这就是缩放时"粗细不一"。
+             * 先把 x 吸附到设备像素边界，再配以物理像素线宽，任何缩放下
+             * 每根弱线都恰好 1 物理像素、强线恰好 2 物理像素。
+             * （旧的 +0.5 半像素偏移是 dpr=1 时代与标尺 DOM 盒子对齐用的，
+             * 设备像素吸附后不再需要。）
              */
-            const buildUniformPath = (stepPx: number, halfPixelOffset: number): string => {
+            const dpr = window.devicePixelRatio || 1;
+            const deviceSnap = (cssX: number): number => Math.round(cssX * dpr) / dpr;
+            const buildUniformPath = (stepPx: number): string => {
                 if (!Number.isFinite(stepPx) || stepPx <= 0) return "";
                 const firstIndex = Math.max(0, Math.floor((visibleStart + offset) / stepPx));
                 const lastIndex = Math.max(firstIndex, Math.ceil((visibleEnd + offset) / stepPx));
@@ -267,8 +272,9 @@ export const BackgroundGrid: React.FC<{
                 const parts: string[] = [];
                 for (let index = firstIndex; index <= lastIndex; index += 1) {
                     // Swing：奇数网格位置向右偏移（最大半步）。
-                    const x =
-                        index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset + halfPixelOffset;
+                    const x = deviceSnap(
+                        index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset,
+                    );
                     if (x < -1 || x > latest.width + 1) continue;
                     for (const [segTop, segBottom] of ySegments) {
                         parts.push(`M${x} ${segTop}V${segBottom}`);
@@ -277,10 +283,7 @@ export const BackgroundGrid: React.FC<{
                 return parts.join("");
             };
 
-            const buildExplicitPath = (
-                lineXs: number[] | null,
-                halfPixelOffset: number,
-            ): string => {
+            const buildExplicitPath = (lineXs: number[] | null): string => {
                 if (!lineXs || lineXs.length === 0) return "";
                 const parts: string[] = [];
                 // 二分定位可见范围
@@ -298,7 +301,7 @@ export const BackgroundGrid: React.FC<{
                 };
                 const start = lowerBound(visibleStart + offset);
                 for (let i = start; i < lineXs.length; i += 1) {
-                    const x = lineXs[i] - offset + halfPixelOffset;
+                    const x = deviceSnap(lineXs[i] - offset);
                     if (x > latest.width + 1) break;
                     if (x < -1) continue;
                     for (const [segTop, segBottom] of ySegments) {
@@ -308,23 +311,32 @@ export const BackgroundGrid: React.FC<{
                 return parts.join("");
             };
 
-            // 弱线 1px：右移半像素与标尺的 DOM 盒子对齐（见 buildUniformPath 注释）；
-            // 强线 2px：描边天然居中，与标尺的 left:-1/width:2 一致，不偏移。
+            // 线宽用物理像素整数：配合 deviceSnap，任意缩放下相邻线粗细一致。
+            paths[0].setAttribute("stroke-width", String(1 / dpr));
+            paths[1].setAttribute("stroke-width", String(2 / dpr));
             paths[0].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.weakLineXs, 0.5)
-                    : buildUniformPath(latest.weakStepPx, 0.5),
+                    ? buildExplicitPath(latest.weakLineXs)
+                    : buildUniformPath(latest.weakStepPx),
             );
             paths[1].setAttribute(
                 "d",
                 useExplicitLines
-                    ? buildExplicitPath(latest.strongLineXs, 0)
-                    : buildUniformPath(latest.strongStepPx, 0),
+                    ? buildExplicitPath(latest.strongLineXs)
+                    : buildUniformPath(latest.strongStepPx),
             );
         },
         [useExplicitLines],
     );
+
+    // 浏览器缩放 / 跨屏拖动会改变 devicePixelRatio：线宽按物理像素取整，
+    // dpr 变化后必须重绘一次，否则旧的吸附相位会残留。
+    useEffect(() => {
+        const onResize = () => draw();
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, [draw]);
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
     // 随 pxPerBeat 变化，若走 passive useEffect 会在 DOM 重排后的下一帧才

@@ -132,7 +132,6 @@ export interface TimelineStateResult {
     // DOM refs
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
-    trackGridLayerRef: React.MutableRefObject<HTMLDivElement | null>;
     trackGridOverlayLayerRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -316,7 +315,6 @@ export function useTimelineState(): TimelineStateResult {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const trackListScrollRef = useRef<HTMLDivElement | null>(null);
     // Sticky 网格层的命令式重绘句柄：滚动事件内同步刷新（与画布/波形同帧）。
-    const trackGridLayerRef = useRef<HTMLDivElement | null>(null);
     const trackGridOverlayLayerRef = useRef<HTMLDivElement | null>(null);
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
@@ -1141,7 +1139,6 @@ export function useTimelineState(): TimelineStateResult {
 
         scrollRef,
         trackListScrollRef,
-        trackGridLayerRef,
         trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
