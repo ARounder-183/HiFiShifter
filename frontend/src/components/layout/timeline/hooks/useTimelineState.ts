@@ -388,7 +388,20 @@ export function useTimelineState(): TimelineStateResult {
         if (!scroller) return;
 
         const updateViewportWidth = () => {
-            setViewportWidth(scroller.clientWidth || 0);
+            const width = scroller.clientWidth || 0;
+            setViewportWidth(width);
+            // 视口宽度（含首次测量）必须立即同步到总线：总线初始窗口是
+            // 1px 占位，而波形面/画布按总线 axis 裁剪（sceneBuilder 对
+            // 窗口外的 clip 直接跳过、不发起取数）——fresh 应用在首次
+            // 滚动/缩放之前总线永远不会被 emit，波形因此无法加载显示。
+            // 此处把真实窗口提交给总线，波形在无任何用户操作时也能出现。
+            timelineViewportBus.emit(
+                scroller.scrollLeft,
+                pxPerSecRef.current,
+                width,
+                scroller.scrollTop,
+                rowHeightRef.current,
+            );
         };
 
         updateViewportWidth();
@@ -510,10 +523,14 @@ export function useTimelineState(): TimelineStateResult {
             const scrollLeft = scroller.scrollLeft;
             const scrollTop = scroller.scrollTop;
             const pxPerSec = pxPerSecRef.current;
+            const viewportWidth = scroller.clientWidth;
             if (
                 Math.abs(snap.scrollLeft - scrollLeft) <= 0.25 &&
                 Math.abs(snap.scrollTopPx - scrollTop) <= 0.25 &&
-                Math.abs(snap.pxPerSec - pxPerSec) <= 1e-9
+                Math.abs(snap.pxPerSec - pxPerSec) <= 1e-9 &&
+                // 窗口宽度也纳入对账：纯窗口 resize（无滚动/缩放）时总线
+                // 窗口若失配，波形面按旧窗口裁剪会少画/漏取数，必须自愈。
+                Math.abs(snap.viewportWidth - viewportWidth) <= 0.5
             ) {
                 return;
             }

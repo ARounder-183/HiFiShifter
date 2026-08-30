@@ -1826,6 +1826,11 @@ export const PianoRollPanel: React.FC = () => {
             const h = Math.max(1, Math.floor(el.clientHeight));
             viewSizeRef.current = { w, h };
             setViewSize({ w, h });
+            // 视口尺寸（含首次测量）必须立即同步到参数编辑器总线：总线
+            // 初始窗口是 1px 占位，PianoRollWaveformSurface 按总线 axis
+            // 裁剪（窗口外 clip 直接跳过、不发起取数）——fresh 应用在
+            // 首次滚动/缩放之前总线永远不会被 emit，波形因此无法显示。
+            pianoRollViewportBus.emit(scrollLeftRef.current, pxPerSecRef.current, w);
         });
         ro.observe(el);
         return () => ro.disconnect();
