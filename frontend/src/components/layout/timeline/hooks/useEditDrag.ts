@@ -233,6 +233,14 @@ export type EditDragState = {
     baseSourceEndSec: number;
     basefadeInSec: number;
     basefadeOutSec: number;
+    /**
+     * 每个被编辑 clip **手动**淡入淡出长度（fadeInSec/fadeOutSec 原值，
+     * 与"有效长度"（basefadeInSec = auto>0 ? auto : manual）区分）。
+     * 松手判定"本次手势是否真的改了手动长度"：纯曲率拖拽不改长度，
+     * 必须**保留自动交叉淡化**（只写形状/曲率）；只有长度被改过的手势
+     * 才落盘手动长度并清除该侧自动交叉淡化（自动 → 手动转换）。
+     */
+    baseManualFadeSecByClipId: Record<string, { in: number; out: number }>;
     /** 淡入淡出相对拖拽的指针锚点（秒）：用于“相对偏移”而不是“边缘线对齐指针”。 */
     basePointerSec: number;
     baseGain: number;
@@ -636,6 +644,21 @@ export function useEditDrag(deps: {
             baseSourceEndSec: clip.sourceEndSec,
             basefadeInSec: effectiveFadeInSec,
             basefadeOutSec: effectiveFadeOutSec,
+            // 手动长度基准（逐 clip）：决定松手时是否把"自动交叉淡化"转成
+            // 手动 fade —— 只有长度被本手势改动的 clip 才转换（见类型注释）。
+            baseManualFadeSecByClipId: Object.fromEntries(
+                selectedClipIds.map((id) => {
+                    const c =
+                        id === clipId ? clip : sessionRef.current.clips.find((x) => x.id === id);
+                    return [
+                        id,
+                        {
+                            in: Number(c?.fadeInSec ?? 0) || 0,
+                            out: Number(c?.fadeOutSec ?? 0) || 0,
+                        },
+                    ];
+                }),
+            ),
             basePointerSec,
             baseGain: clip.gain,
             sourceBeats: null,
@@ -2455,10 +2478,17 @@ export function useEditDrag(deps: {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
                         const nextClip = sessionRef.current.clips.find((c) => c.id === clipId);
+                        if (!nextClip) return [clipId, {}] as const;
+                        // 手动长度是否被本手势改动：长度拖拽（含多选）会改
+                        // fadeInSec；纯曲率拖拽只改 dir——此时**必须保留
+                        // 自动交叉淡化的 fade**（不写手动长度、不清 auto）。
+                        const baseManual = drag.baseManualFadeSecByClipId[clipId]?.in ?? 0;
+                        const lengthEdited =
+                            Math.abs((Number(nextClip.fadeInSec) || 0) - baseManual) > 1e-9;
                         return [
                             clipId,
                             {
-                                fadeInSec: nextClip?.fadeInSec ?? 0,
+                                ...(lengthEdited ? { fadeInSec: nextClip.fadeInSec ?? 0 } : {}),
                                 // 曲率/形状拖拽的最终落盘：缺了它们，
                                 // bulk fulfilled 的整份回灌会丢掉拖拽期修改。
                                 fadeInDir: nextClip?.fadeInDir ?? 0,
@@ -2480,26 +2510,41 @@ export function useEditDrag(deps: {
                 )
                     .unwrap()
                     .then(() => {
-                        // 用户手动拖拽淡入 → 手动 fade 生效，清除**全部被编辑 clip**
-                        // 该侧自动交叉淡化（多选时漏清会让 auto 值盖住手动值）。
-                        const clears = drag.selectedClipIds.map((clipId) => {
-                            dispatch(setClipAutoFades({ clipId, autoFadeInSec: 0 }));
-                            return webApi.setClipState({
-                                clipId,
-                                autoFadeInSec: 0,
-                                checkpoint: false,
+                        // 只清除"本手势确实改了手动长度"的 clip 的自动交叉淡化
+                        //（自动 fade → 手动 fade 转换）。纯曲率拖拽保持
+                        // 自动交叉淡化的 fade 关系，只是曲率被更新。
+                        const clears = drag.selectedClipIds
+                            .filter(
+                                (clipId) =>
+                                    Math.abs(
+                                        (sessionRef.current.clips.find(
+                                            (c) => c.id === clipId,
+                                        )?.fadeInSec ?? 0) -
+                                            (drag.baseManualFadeSecByClipId[clipId]?.in ?? 0),
+                                    ) > 1e-9,
+                            )
+                            .map((clipId) => {
+                                dispatch(setClipAutoFades({ clipId, autoFadeInSec: 0 }));
+                                return webApi.setClipState({
+                                    clipId,
+                                    autoFadeInSec: 0,
+                                    checkpoint: false,
+                                });
                             });
-                        });
                         return Promise.allSettled(clears).then(() => undefined);
                     });
             } else if (drag.type === "fade_out" && singleClipNow) {
                 const changesById = new Map(
                     drag.selectedClipIds.map((clipId) => {
                         const nextClip = sessionRef.current.clips.find((c) => c.id === clipId);
+                        if (!nextClip) return [clipId, {}] as const;
+                        const baseManual = drag.baseManualFadeSecByClipId[clipId]?.out ?? 0;
+                        const lengthEdited =
+                            Math.abs((Number(nextClip.fadeOutSec) || 0) - baseManual) > 1e-9;
                         return [
                             clipId,
                             {
-                                fadeOutSec: nextClip?.fadeOutSec ?? 0,
+                                ...(lengthEdited ? { fadeOutSec: nextClip.fadeOutSec ?? 0 } : {}),
                                 fadeOutDir: nextClip?.fadeOutDir ?? 0,
                                 fadeOutShape: nextClip?.fadeOutShape ?? 0,
                             },
@@ -2518,16 +2563,26 @@ export function useEditDrag(deps: {
                 )
                     .unwrap()
                     .then(() => {
-                        // 用户手动拖拽淡出 → 手动 fade 生效，清除**全部被编辑 clip**
-                        // 该侧自动交叉淡化（多选时漏清会让 auto 值盖住手动值）。
-                        const clears = drag.selectedClipIds.map((clipId) => {
-                            dispatch(setClipAutoFades({ clipId, autoFadeOutSec: 0 }));
-                            return webApi.setClipState({
-                                clipId,
-                                autoFadeOutSec: 0,
-                                checkpoint: false,
+                        // 同 fade_in：只对"长度被本手势改动"的 clip 清除自动交叉
+                        // 淡化；纯曲率拖拽保留自动交叉淡化的 fade。
+                        const clears = drag.selectedClipIds
+                            .filter(
+                                (clipId) =>
+                                    Math.abs(
+                                        (sessionRef.current.clips.find(
+                                            (c) => c.id === clipId,
+                                        )?.fadeOutSec ?? 0) -
+                                            (drag.baseManualFadeSecByClipId[clipId]?.out ?? 0),
+                                    ) > 1e-9,
+                            )
+                            .map((clipId) => {
+                                dispatch(setClipAutoFades({ clipId, autoFadeOutSec: 0 }));
+                                return webApi.setClipState({
+                                    clipId,
+                                    autoFadeOutSec: 0,
+                                    checkpoint: false,
+                                });
                             });
-                        });
                         return Promise.allSettled(clears).then(() => undefined);
                     });
             } else if (drag.type === "gain" && singleClipNow) {
