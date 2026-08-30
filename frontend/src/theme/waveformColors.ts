@@ -43,15 +43,18 @@ const lightTimelineWaveformColors: WaveformColors = {
 };
 
 // 钢琴卷帘底衬波形：两主题保持同一「蓝灰」色相族（对应参考轨道的语义），
-// 深色主题的亮度压低，给琥珀色的编辑包络线留出 ≥2:1 的分离度。
+// 深浅各自反向：深色主题 = 浅蓝灰波形，浅色主题 = 深蓝灰波形；亮度都压在
+// 编辑包络线之下（背景层 ≈3:1，曲线 ≥3.5:1），只做参照不抢层级。
 const darkPianoRollWaveformColors: WaveformColors = {
     fill: "rgba(116,136,160,0.28)",
     stroke: "rgba(168,186,208,0.55)",
 };
 
+// 浅色主题：明确的深色波形（旧值 0.48 透明度的中蓝渲染后偏淡，像水洗蓝，
+// 不符合"浅色主题 = 深色波形"的方向）。
 const lightPianoRollWaveformColors: WaveformColors = {
-    fill: "rgba(88,118,152,0.20)",
-    stroke: "rgba(58,86,120,0.48)",
+    fill: "rgba(70,100,135,0.22)",
+    stroke: "rgba(45,70,100,0.60)",
 };
 
 /**
