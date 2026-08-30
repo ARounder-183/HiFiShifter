@@ -11,14 +11,12 @@ test("services/invoke.test.ts scripted checks", async () => {
      * 本测试锁定：每个位置的键名与值一一对应，新增参数必须同步映射表。
      */
 
-    let checks = 0;
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
         const a = JSON.stringify(actual);
         const e = JSON.stringify(expected);
         if (a !== e) {
             throw new Error(`${label}: expected ${e}, received ${a}`);
         }
-        checks += 1;
     }
 
     // 按后端 set_clip_state 参数顺序构造一份全量位置参数，

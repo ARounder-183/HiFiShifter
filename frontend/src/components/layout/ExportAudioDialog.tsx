@@ -9,7 +9,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
-import { coreApi } from "../../services/api/core";
+import { coreApi, type AdvancedExportRequest } from "../../services/api/core";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
 import { applySelectWheelChange } from "../../utils/selectWheel";
@@ -87,7 +87,7 @@ function buildTargetGroups(
     function isTrackExcludedByRule(trackId: string): boolean {
         const track = trackMap.get(trackId);
         if (!track) return true;
-        if (Boolean(track.muted)) return true;
+        if (track.muted) return true;
 
         const stats = trackClipStats.get(trackId);
         if (!stats) return true;
@@ -344,38 +344,51 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("export_audio_progress", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        active?: boolean;
-                        mode?: "project" | "separated";
-                        progress?: number | null;
-                        current?: number | null;
-                        total?: number | null;
-                    };
+                unlisten = await mod.listen(
+                    "export_audio_progress",
+                    (event: {
+                        payload?: {
+                            active?: boolean;
+                            mode?: "project" | "separated";
+                            progress?: number | null;
+                            current?: number | null;
+                            total?: number | null;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            active?: boolean;
+                            mode?: "project" | "separated";
+                            progress?: number | null;
+                            current?: number | null;
+                            total?: number | null;
+                        };
 
-                    const progressValue =
-                        typeof payload.progress === "number" && Number.isFinite(payload.progress)
-                            ? Math.max(0, Math.min(1, payload.progress))
-                            : null;
+                        const progressValue =
+                            typeof payload.progress === "number" &&
+                            Number.isFinite(payload.progress)
+                                ? Math.max(0, Math.min(1, payload.progress))
+                                : null;
 
-                    setExportProgress({
-                        active: Boolean(payload.active),
-                        mode:
-                            payload.mode === "project" || payload.mode === "separated"
-                                ? payload.mode
-                                : null,
-                        progress: progressValue,
-                        current:
-                            typeof payload.current === "number" && Number.isFinite(payload.current)
-                                ? Math.max(0, Math.floor(payload.current))
-                                : null,
-                        total:
-                            typeof payload.total === "number" && Number.isFinite(payload.total)
-                                ? Math.max(0, Math.floor(payload.total))
-                                : null,
-                    });
-                });
+                        setExportProgress({
+                            active: Boolean(payload.active),
+                            mode:
+                                payload.mode === "project" || payload.mode === "separated"
+                                    ? payload.mode
+                                    : null,
+                            progress: progressValue,
+                            current:
+                                typeof payload.current === "number" &&
+                                Number.isFinite(payload.current)
+                                    ? Math.max(0, Math.floor(payload.current))
+                                    : null,
+                            total:
+                                typeof payload.total === "number" && Number.isFinite(payload.total)
+                                    ? Math.max(0, Math.floor(payload.total))
+                                    : null,
+                        });
+                    },
+                );
             } catch {
                 // 非 Tauri 环境下忽略。
             }
@@ -522,8 +535,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         );
     }
 
-    async function resolveExportConflicts(request: any) {
-        const plan = await coreApi.previewExportAudioPlan(request as any);
+    async function resolveExportConflicts(request: AdvancedExportRequest) {
+        const plan = await coreApi.previewExportAudioPlan(request);
         if (!plan?.ok || !Array.isArray(plan.targets)) {
             return {
                 overwriteExistingPaths: [] as string[],

@@ -29,6 +29,7 @@ export function TransposeCentsDialog({
     );
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
         if (open) setSmoothness(String(Math.round(defaultSmoothness)));
     }, [open, defaultSmoothness]);
 
@@ -142,6 +143,7 @@ export function TransposeDegreesDialog({
 
     useEffect(() => {
         if (open) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
             setSmoothness(String(Math.round(defaultSmoothness)));
         }
@@ -281,6 +283,7 @@ export function SetPitchDialog({
 
     useEffect(() => {
         if (open) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setSmoothness(String(Math.round(defaultSmoothness)));
             setNote(String(defaultValue));
         }
@@ -450,6 +453,7 @@ export function SmoothDialog({
     );
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
         if (open) setStrength(Math.max(0, Math.min(100, Math.round(defaultSmoothness))));
     }, [open, defaultSmoothness]);
 
@@ -719,6 +723,7 @@ export function QuantizeDialog({
 
     useEffect(() => {
         if (open) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
             setToleranceCents(String(toleranceDefault));
             setQuantizeUnit(String(defaultQuantizeUnit));
@@ -911,6 +916,7 @@ export function MeanQuantizeDialog({
 
     useEffect(() => {
         if (open) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
             setToleranceCents(String(toleranceDefault));
             setQuantizeUnit(String(defaultQuantizeUnit));

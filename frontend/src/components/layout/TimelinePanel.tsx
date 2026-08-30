@@ -942,7 +942,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     });
 
     // ── 5. 拖拽 hooks 桥接 ──────────────────────────────────
-    const { editDragRef: _editDragRef, startEditDrag } = useEditDrag({
+    const { startEditDrag } = useEditDrag({
         scrollRef,
         sessionRef,
         dispatch,
@@ -997,7 +997,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     });
 
     const {
-        clipDragRef: _clipDragRef,
         startClipDrag: _startClipDragInner,
         ghostDrag,
         verticalTrackLockTrackId,
@@ -1049,6 +1048,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 };
             })
             .filter((clip): clip is (typeof s.clips)[number] => clip != null);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅依赖 s.clips 粒度；加入整个 s 会在任何会话字段变化时重算（既有粒度模式）
     }, [clipById, clipDropNewTrack, ghostDrag, s.clips]);
 
     const startClipDrag = React.useCallback(
@@ -1122,12 +1122,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         },
         [dispatch],
     );
-    const handleTrackVolumeUiChange = React.useCallback((trackId: string, nextVolume: number) => {
-        setTrackVolumeUi((prev) => ({
-            ...prev,
-            [trackId]: nextVolume,
-        }));
-    }, []);
+    const handleTrackVolumeUiChange = React.useCallback(
+        (trackId: string, nextVolume: number) => {
+            setTrackVolumeUi((prev) => ({
+                ...prev,
+                [trackId]: nextVolume,
+            }));
+        },
+        [setTrackVolumeUi],
+    );
     const handleTrackVolumeCommit = React.useCallback(
         (trackId: string, nextVolume: number) => {
             dispatch(setTrackVolume({ trackId, volume: nextVolume }));
@@ -1143,7 +1146,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [dispatch],
+        [dispatch, setTrackVolumeUi],
     );
     const handleAddTrack = React.useCallback(() => {
         dispatch(addTrackRemote({}));
@@ -1229,12 +1232,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         },
         [dispatch, sessionRef],
     );
-    const handleTrackListScrollTopChange = React.useCallback((scrollTop: number) => {
-        const timelineScroller = scrollRef.current;
-        if (!timelineScroller) return;
-        if (Math.abs(timelineScroller.scrollTop - scrollTop) < 0.5) return;
-        timelineScroller.scrollTop = scrollTop;
-    }, []);
+    const handleTrackListScrollTopChange = React.useCallback(
+        (scrollTop: number) => {
+            const timelineScroller = scrollRef.current;
+            if (!timelineScroller) return;
+            if (Math.abs(timelineScroller.scrollTop - scrollTop) < 0.5) return;
+            timelineScroller.scrollTop = scrollTop;
+        },
+        [scrollRef],
+    );
 
     const trackGridHeight = Math.max(0, contentHeight - TRACK_ADD_ROW_HEIGHT);
     const timelineRenderModel = useMemo(
@@ -1248,7 +1254,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 scrollTopPx: timelineScrollTop,
                 viewportHeightPx: scrollRef.current?.clientHeight ?? 0,
             }),
-        [rowHeight, s.clips, s.tracks, timelineScrollTop, viewportEndSec, viewportStartSec],
+        [
+            rowHeight,
+            s.clips,
+            s.tracks,
+            scrollRef,
+            timelineScrollTop,
+            viewportEndSec,
+            viewportStartSec,
+        ],
     );
     // slice 每次渲染都会产生新引用；不缓存的话下游所有 useMemo 与
     // 两块画布的 memo 会在每次无关更新（播放头/滚动/修饰键）时全量重算重绘。
@@ -1298,6 +1312,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
         visibleTrackClipCacheRef.current = nextCache;
         return nextByTrackId;
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅类型位置引用 s.clips（缓存已按需要稳定化）；加入整个 s 会让缓存扫描随任何会话变化失效（既有模式）
     }, [clipById, timelineRenderModel.visibleClipIdsByTrackId, visibleTracks]);
     const selectedClipTrackId = s.selectedClipId
         ? (clipById.get(s.selectedClipId)?.trackId ?? null)
@@ -1359,6 +1374,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         timelineRenderModel.startIndex,
         visibleTrackClipsById,
         visibleTracks,
+        disabledGroupIds,
     ]);
     const timelineCanvasModel = useMemo(
         () => ({

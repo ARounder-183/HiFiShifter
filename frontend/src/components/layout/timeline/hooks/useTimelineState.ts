@@ -575,7 +575,7 @@ export function useTimelineState(): TimelineStateResult {
             unsubscribe();
             pendingTimelineSyncViewportRef.current = null;
         };
-    }, [s.paramEditorSyncTimeline]);
+    }, [s.paramEditorSyncTimeline, syncScrollLeft]);
 
     // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
     // 必须用 layout effect（而非被动 effect）：挂载/切换都要在**首帧绘制前**
@@ -607,7 +607,7 @@ export function useTimelineState(): TimelineStateResult {
         const applied = applyNativeScrollLeft(scroller, pending.scrollLeft);
         syncScrollLeft(applied);
         timelineSyncApplyingRef.current = false;
-    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline]);
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {
@@ -622,7 +622,7 @@ export function useTimelineState(): TimelineStateResult {
         // 画布层与原生 DOM 层不允许以“请求值”为准失步。
         const applied = applyNativeScrollLeft(scroller, pending.nextScrollLeft);
         syncScrollLeft(applied);
-    }, [pxPerSec]);
+    }, [pxPerSec, syncScrollLeft]);
 
     // ── pxPerBeat / secPerBeat ───────────────────────────────
     const secPerBeat = 60 / Math.max(1, s.bpm);
@@ -805,6 +805,7 @@ export function useTimelineState(): TimelineStateResult {
         }
 
         return map;
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- s 为 shallowEqual 每次渲染重建引用的 session 派生对象，加入依赖会让 clipsByTrackId 每次渲染重算（既有 memo 语义）
     }, [s.clips]);
 
     // ── Mipmap 预加载 ────────────────────────────────────────

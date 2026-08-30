@@ -4,7 +4,6 @@ import type {
     MutableRefObject,
     PointerEvent as ReactPointerEvent,
     UIEvent,
-    WheelEvent,
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
 
@@ -310,6 +309,7 @@ export function usePianoRollInteractions(args: {
         paramEditorSeekPlayheadEnabled,
         paramValuePopupEnabled,
         onParamValuePreviewChange,
+        onContextMenu,
     } = args;
 
     const {
@@ -376,18 +376,20 @@ export function usePianoRollInteractions(args: {
     const disposeFineAdjustedPointerState = useCallback(
         (_state: FineAdjustedPointerState | null | undefined) => {
             // 参数微调不再参与参数编辑器拖拽逻辑；此处保留空实现以复用既有拖拽收尾流程。
+            void _state;
         },
         [],
     );
 
     const pointerFineWheelScale = useCallback(
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) =>
-            isModifierActive(paramFineAdjustKb, ev as any) ? PARAM_FINE_WHEEL_SCALE : 1,
+            isModifierActive(paramFineAdjustKb, ev) ? PARAM_FINE_WHEEL_SCALE : 1,
         [paramFineAdjustKb],
     );
 
     const createFineAdjustedPointerState = useCallback(
         (ev: FineAdjustedPointerInput, _dragTarget: HTMLCanvasElement | null = null) => {
+            void _dragTarget;
             return {
                 adjustedClientX: ev.clientX,
                 adjustedClientY: ev.clientY,
@@ -414,7 +416,7 @@ export function usePianoRollInteractions(args: {
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) => {
             const noSnapKb = keybindingMap?.["modifier.clipNoSnap" as ActionId];
             if (noSnapKb) {
-                return Boolean(isModifierActive(noSnapKb, ev as any));
+                return Boolean(isModifierActive(noSnapKb, ev));
             }
             return Boolean(ev.shiftKey);
         },
@@ -1077,7 +1079,7 @@ export function usePianoRollInteractions(args: {
                 !panRef.current &&
                 !strokeRef.current &&
                 !morphDragRef.current &&
-                isModifierActive(paramMorphKb, e as any);
+                isModifierActive(paramMorphKb, e);
             morphModifierDownRef.current = active;
 
             if (!active) {
@@ -1306,11 +1308,11 @@ export function usePianoRollInteractions(args: {
     const onScrollerContextMenu = useCallback(
         (e: ReactMouseEvent) => {
             e.preventDefault();
-            if (args.onContextMenu) {
-                args.onContextMenu(e.clientX, e.clientY);
+            if (onContextMenu) {
+                onContextMenu(e.clientX, e.clientY);
             }
         },
-        [args.onContextMenu],
+        [onContextMenu],
     );
 
     const onScrollerKeyDown = useCallback(
@@ -1390,7 +1392,7 @@ export function usePianoRollInteractions(args: {
                 if (kb.modifierOnly) {
                     keyMatch = isModifierActive(kb, e.nativeEvent);
                 } else {
-                    let pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
+                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
                     if (pressedKey !== kb.key) keyMatch = false;
                     else {
                         const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -1443,7 +1445,7 @@ export function usePianoRollInteractions(args: {
                 if (kb.modifierOnly) {
                     keyMatch = isModifierActive(kb, e.nativeEvent);
                 } else {
-                    let pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
+                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
                     if (pressedKey !== kb.key) keyMatch = false;
                     else {
                         const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -1531,6 +1533,7 @@ export function usePianoRollInteractions(args: {
             toolMode,
             selectedTrackId,
             buildChildOffsetPasteValues,
+            invalidate,
         ],
     );
 
@@ -1766,12 +1769,14 @@ export function usePianoRollInteractions(args: {
             playheadSec,
             playheadZoomEnabled,
             currentParamRange,
+            pxPerSecRef,
+            scrollLeftRef,
         ],
     );
 
     // React's onWheel handler may run in a passive listener in modern React.
     // Keep this for compatibility, but do not call preventDefault here.
-    const onScrollerWheel = useCallback((_e: WheelEvent<HTMLDivElement>) => {
+    const onScrollerWheel = useCallback(() => {
         // no-op; wheel is handled via native listener with passive:false
     }, []);
 
@@ -1863,7 +1868,7 @@ export function usePianoRollInteractions(args: {
     const isPointerNearStretchSelectionEdge = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>): boolean => {
             if (toolMode !== "select") return false;
-            if (!isModifierActive(paramStretchKb, e.nativeEvent as any)) return false;
+            if (!isModifierActive(paramStretchKb, e.nativeEvent)) return false;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
             if (!sel || !canvas) return false;
@@ -1944,6 +1949,7 @@ export function usePianoRollInteractions(args: {
             isPointerNearDraggableSelection,
             setCanvasCursor,
             getDefaultCanvasCursor,
+            pointerSec,
         ],
     );
 
@@ -2231,7 +2237,7 @@ export function usePianoRollInteractions(args: {
                     const aBeat = Math.min(sel.aBeat, sel.bBeat);
                     const bBeat = Math.max(sel.aBeat, sel.bBeat);
 
-                    if (isModifierActive(paramStretchKb, e.nativeEvent as any)) {
+                    if (isModifierActive(paramStretchKb, e.nativeEvent)) {
                         const canvas = canvasRef.current;
                         if (canvas) {
                             const rect = canvas.getBoundingClientRect();
@@ -2796,8 +2802,8 @@ export function usePianoRollInteractions(args: {
                                                 liveEditActiveRef.current = false;
                                             }
                                             setCanvasCursor("grab");
-                                            if (args.onContextMenu && document.hasFocus() && ev) {
-                                                args.onContextMenu(ev.clientX, ev.clientY);
+                                            if (onContextMenu && document.hasFocus() && ev) {
+                                                onContextMenu(ev.clientX, ev.clientY);
                                             }
                                             invalidate();
                                             return;
@@ -3784,7 +3790,6 @@ export function usePianoRollInteractions(args: {
             applyMorphOverlayPreview,
             applyPostStrokeSmoothing,
             buildMorphDense,
-            buildMorphOverlayFromSelection,
             commitStroke,
             bumpRefreshToken,
             liveEditOverrideRef,
@@ -3792,7 +3797,6 @@ export function usePianoRollInteractions(args: {
             setParamView,
             setCanvasCursor,
             onPitchSnapGestureActiveChange,
-            pitchSnapEnabled,
             pitchSnapUnit,
             projectScale,
             scaleAtSec,
@@ -3815,6 +3819,15 @@ export function usePianoRollInteractions(args: {
             clearActivePointerGestureEnd,
             setVibratoDragCaptureActive,
             dynamicProjectSec,
+            dispatch,
+            dragDirection,
+            edgeSmoothnessPercent,
+            getDefaultCanvasCursor,
+            liveEditActiveRef,
+            onContextMenu,
+            onCycleDragDirection,
+            paramStretchKb,
+            snapDrawValue,
         ],
     );
 

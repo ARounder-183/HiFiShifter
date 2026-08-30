@@ -89,6 +89,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         );
     }, [props.gridOverlayLayerRef, props.gridVisible]);
 
+    /* eslint-disable react-hooks/refs -- playhead 参考线：ref 属性透传 + 样式按渲染期当前 props 计算（同一提交内跟随播放头更新，既有模式） */
     return (
         <div
             className="sticky left-0 top-0 pointer-events-none"
@@ -158,4 +159,5 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             />
         </div>
     );
+    /* eslint-enable react-hooks/refs */
 });

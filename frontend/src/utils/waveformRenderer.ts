@@ -104,7 +104,7 @@ export interface WaveformRenderParams {
  * applyGainsToPeaks 内部复用缓冲池
  * 避免每帧 new Float32Array 导致 GC 压力
  */
-let _gainBufferPool: Float32Array[] = [];
+const _gainBufferPool: Float32Array[] = [];
 const _GAIN_POOL_MAX = 32;
 
 function acquireGainBuffer(len: number): Float32Array {

@@ -89,13 +89,7 @@ export const paramsApi = {
             newLengthSec: number;
         }>,
         checkpoint?: boolean,
-    ) =>
-        invoke<{ ok: boolean }>(
-            "stretch_track_linked_params",
-            trackId,
-            mappings,
-            checkpoint,
-        ),
+    ) => invoke<{ ok: boolean }>("stretch_track_linked_params", trackId, mappings, checkpoint),
 
     getStaticParam: (trackId: string, param: string) =>
         invoke<StaticParamValuePayload>("get_static_param", trackId, param),

@@ -176,6 +176,5 @@ export function useClipsPeaksForPianoRoll(args: {
                 loopEnabled: Boolean(clip.loopEnabled),
             };
         });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [clips, visibleStartSec, visibleEndSec, redrawTick]);
 }

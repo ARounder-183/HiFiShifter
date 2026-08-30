@@ -188,20 +188,14 @@ export function drawTimelineCanvas(
     // 未传时回退读 DOM（兼容旧调用方）。
     const darkMode =
         args.darkMode ??
-        (typeof document !== "undefined" &&
-            document.documentElement.dataset.theme === "dark");
+        (typeof document !== "undefined" && document.documentElement.dataset.theme === "dark");
 
     // 全物理清屏：与 rasterize 同契约（round(css*dpr)），CSS 尺寸清屏在
     // 向上取整时会在画布底部遗留 0~0.5 物理行的永久残影。
     const clearDpr = window.devicePixelRatio || 1;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(
-        0,
-        0,
-        Math.round(args.width * clearDpr),
-        Math.round(args.height * clearDpr),
-    );
+    ctx.clearRect(0, 0, Math.round(args.width * clearDpr), Math.round(args.height * clearDpr));
     ctx.restore();
 
     // 轨道横向分界线由 sticky 画布统一绘制：工程末尾之后的空白区也要有
@@ -274,10 +268,7 @@ export function drawTimelineCanvas(
         ctx.globalAlpha = visualStyle.mutedAlpha;
 
         // 圆角半径按 Clip 实际尺寸收敛：极短 / 极矮的 Clip 不能把圆角画爆。
-        const radius = Math.max(
-            0,
-            Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2),
-        );
+        const radius = Math.max(0, Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2));
         const borderRect = () => {
             ctx.beginPath();
             ctx.roundRect(
@@ -299,10 +290,7 @@ export function drawTimelineCanvas(
 
         // 前导重叠区（被同轨前一个 clip 压住的部分）宽度：上 clip 在该区
         // 半透，让下 clip 的色块/波形透出，避免两层不透明色块叠加成脏色。
-        const leadingOverlapPx = Math.max(
-            0,
-            Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0),
-        );
+        const leadingOverlapPx = Math.max(0, Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0));
         const overlapStart = clipLeft + leadingOverlapPx;
 
         // header：色块头部带，与 body 同色稍压深。前导重叠区也用半透。

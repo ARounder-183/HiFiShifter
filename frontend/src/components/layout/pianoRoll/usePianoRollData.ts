@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -102,7 +102,6 @@ export function usePianoRollData(args: {
         setSecondaryParamViews({});
         setReferencePitchViews({});
         setForceParamFetchToken((x) => x + 1);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [paramsEpoch, rootTrackId]);
 
     // 鐩戝惉 pitch_orig_updated 浜嬩欢锛岃Е鍙戞洸绾垮埛鏂帮拷?
@@ -149,7 +148,7 @@ export function usePianoRollData(args: {
             disposed = true;
             if (unlistenUpdated) unlistenUpdated();
         };
-    }, [editParam, pitchEnabled, rootTrackId]);
+    }, [editParam, pitchEnabled, rootTrackId, liveEditActiveRef]);
 
     useEffect(() => {
         if (editParam !== "pitch") return;
@@ -197,7 +196,6 @@ export function usePianoRollData(args: {
         const trackId = rootTrackId;
         if (!trackId) {
             if (debug) {
-                // eslint-disable-next-line no-console
                 console.debug("[PianoRollData] no rootTrackId; skip fetch");
             }
             return null;
@@ -537,7 +535,6 @@ export function usePianoRollData(args: {
                     if (fetchReqIdRef.current !== reqId) return;
                     if (!res?.ok) {
                         if (debug) {
-                            // eslint-disable-next-line no-console
                             console.debug("[PianoRollData] paramFrames not ok", {
                                 trackId,
                                 editParam,

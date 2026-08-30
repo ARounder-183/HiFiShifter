@@ -393,4 +393,6 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
         const zeroOffset = snapTimelineClipMove(ctxEnd, 10.1, 1.2, 0);
         assertTrue(zeroOffset.edgeSide === "start", "zero offset keeps dual-edge behavior");
     }
+
+    void checks;
 });

@@ -38,7 +38,7 @@
     /* 半透明白：在泳道和彩色 clip 上都呈同色调细线，
        不会在波形上切出生硬的条纹 */
     --qt-graph-grid-strong: rgba(255, 255, 255, 0.22);
-    --qt-graph-grid-weak: rgba(255, 255, 255, 0.10);
+    --qt-graph-grid-weak: rgba(255, 255, 255, 0.1);
     --qt-scrollbar-thumb: #555555;
     --qt-scrollbar-thumb-hover: #707070;
     --qt-overlay: rgba(0, 0, 0, 0.35);
@@ -87,7 +87,7 @@
     /* 半透明蓝灰：在泳道上与旧实色等效，在 clip 色块/波形上则化为
        同色调的细线，不再切出高对比条纹 */
     --qt-graph-grid-strong: rgba(74, 88, 112, 0.55);
-    --qt-graph-grid-weak: rgba(74, 88, 112, 0.30);
+    --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
     --qt-scrollbar-thumb-hover: #969ead;
     --qt-overlay: rgba(20, 24, 32, 0.22);

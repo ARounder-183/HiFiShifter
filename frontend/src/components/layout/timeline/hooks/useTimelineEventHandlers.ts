@@ -206,7 +206,13 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [pasteClipsAtPlayhead, sessionRef, splitSelectedAtPlayhead]);
+    }, [
+        dispatch,
+        pasteClipsAtPlayhead,
+        sessionRef,
+        setMultiSelectedClipIds,
+        splitSelectedAtPlayhead,
+    ]);
 
     // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
     useEffect(() => {
@@ -322,7 +328,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 "hifi:selectAdjacentTrack",
                 onSelectAdjacentTrack as EventListener,
             );
-    }, [dispatch, rowHeight]);
+    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef]);
 
     // ── hifi:nudgePlayhead ───────────────────────────────────
     useEffect(() => {
@@ -341,7 +347,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
 
         window.addEventListener("hifi:nudgePlayhead", onNudge as EventListener);
         return () => window.removeEventListener("hifi:nudgePlayhead", onNudge as EventListener);
-    }, [dispatch]);
+    }, [dispatch, sessionRef]);
 
     // ── hifi:zoomTimelineFocus ───────────────────────────────
     useEffect(() => {
@@ -395,7 +401,15 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- dynamicProjectSec 随工程变化，加入依赖会让监听在工程变化时重建（既有模式）
+    }, [
+        commitScrollLeftState,
+        keyboardZoomPendingRef,
+        pxPerSecRef,
+        scrollRef,
+        sessionRef,
+        setPxPerSec,
+    ]);
 
     // ── Context menu dismiss ─────────────────────────────────
     useEffect(() => {
@@ -408,7 +422,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("pointerdown", onAnyPointerDown, true);
         return () => window.removeEventListener("pointerdown", onAnyPointerDown, true);
-    }, [contextMenu, trackAreaMenu]);
+    }, [contextMenu, setContextMenu, setTrackAreaMenu, trackAreaMenu]);
 
     // ── hifi:focusCursor（快捷键"聚焦播放光标"）──────────────
     // 粘贴后的视图聚焦不再走事件：由 reducer 记录的 pendingPlayheadRevealSec

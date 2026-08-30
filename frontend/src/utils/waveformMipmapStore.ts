@@ -801,10 +801,7 @@ class WaveformMipmapStoreImpl {
                     // 是**瞬时**条件：绝不写 failedLevels（否则打开工程
                     // 瞬间的抢先请求会把该级别永久毒化，波形要等用户
                     // 滚动/缩放才出现）。进入重试冷却，等待 refresh()。
-                    this.retryCooldownUntil.set(
-                        retryKey,
-                        Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
-                    );
+                    this.retryCooldownUntil.set(retryKey, Date.now() + RETRY_NOT_READY_COOLDOWN_MS);
                     this.notify(sourcePath, "loading");
                 } else {
                     // 非空但解码失败 = 数据损坏，视为永久失败。

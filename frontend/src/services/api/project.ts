@@ -3,6 +3,19 @@ import type { StretchAlgorithmOption } from "./settings";
 
 import { invoke } from "../invoke";
 
+/** 保存类命令的返回体：目标已存在版本不一致工程时携带冲突信号，其余字段未定形。 */
+type SaveProjectResult =
+    | {
+          ok: false;
+          canceled: false;
+          versionConflict: true;
+          path: string;
+          existingVersion: number;
+          currentVersion: number;
+          existingIsNewer: boolean;
+      }
+    | Record<string, unknown>;
+
 export interface AutoBackupSettings {
     saveOnSaveEnabled: boolean;
     timedBackupEnabled: boolean;
@@ -95,16 +108,18 @@ export const projectApi = {
     openProject: (projectPath: string, force?: boolean) =>
         invoke<TimelineResult>("open_project", projectPath, force),
 
-    saveProject: (notesMarkdown?: string) => invoke<any>("save_project", notesMarkdown),
+    saveProject: (notesMarkdown?: string) =>
+        invoke<SaveProjectResult>("save_project", notesMarkdown),
 
-    saveProjectAs: (notesMarkdown?: string) => invoke<any>("save_project_as", notesMarkdown),
+    saveProjectAs: (notesMarkdown?: string) =>
+        invoke<SaveProjectResult>("save_project_as", notesMarkdown),
 
     /**
      * 保存到指定路径；`force=true` 表示用户已在"版本不一致覆盖"对话框中确认。
      * 目标已存在版本不一致的工程文件（且未 force）时返回 versionConflict 信号。
      */
     saveProjectToPath: (projectPath: string, notesMarkdown?: string, force?: boolean) =>
-        invoke<any>("save_project_to_path", projectPath, notesMarkdown, force),
+        invoke<SaveProjectResult>("save_project_to_path", projectPath, notesMarkdown, force),
 
     getAutoBackupSettings: () => invoke<AutoBackupSettings>("get_auto_backup_settings"),
 

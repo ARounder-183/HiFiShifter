@@ -1134,16 +1134,10 @@ function flipSourceWindowForDirection(
         if (mediaTotalSec != null && mediaTotalSec > 0) {
             if (fields.reversed) {
                 // 翻为正放：正放自锚点上升 → 新锚 = 原倒放消费起点。
-                fields.sourceStartSec = modEuclid(
-                    fields.sourceEndSec - spanSec,
-                    mediaTotalSec,
-                );
+                fields.sourceStartSec = modEuclid(fields.sourceEndSec - spanSec, mediaTotalSec);
             } else {
                 // 翻为倒放：倒放自锚点下降 → 新锚 = 原正放消费终点。
-                fields.sourceEndSec = modEuclid(
-                    fields.sourceStartSec + spanSec,
-                    mediaTotalSec,
-                );
+                fields.sourceEndSec = modEuclid(fields.sourceStartSec + spanSec, mediaTotalSec);
             }
         } else if (fields.reversed) {
             // 媒体时长未知：退化为原始字段直算（引擎侧回绕兜底）。
@@ -1178,11 +1172,7 @@ function flipTakeSourceWindowForDirection(
         sourceSampleRate: take.sourceSampleRate,
         durationSec: take.durationSec,
     });
-    flipSourceWindowForDirection(
-        take,
-        span,
-        mediaTotal > 0 ? mediaTotal : null,
-    );
+    flipSourceWindowForDirection(take, span, mediaTotal > 0 ? mediaTotal : null);
 }
 
 function updateActiveTakeFromFlat(clip: ClipInfo): void {
@@ -1529,7 +1519,7 @@ function applyTimelineState(
         ? [...timeline.disabled_group_ids]
         : [];
 
-    const project = (timeline as any).project as
+    const project = timeline.project as
         | {
               name?: string;
               path?: string | null;
@@ -1572,7 +1562,7 @@ function applyTimelineState(
 
         state.project = {
             name: String(project.name ?? state.project.name ?? "Untitled"),
-            path: project.path === undefined ? state.project.path : ((project.path as any) ?? null),
+            path: project.path === undefined ? state.project.path : (project.path ?? null),
             dirty: Boolean(project.dirty),
             recent: Array.isArray(project.recent) ? project.recent : state.project.recent,
             notesMarkdown:
@@ -2397,14 +2387,9 @@ const sessionSlice = createSlice({
             state.multiSelectedClipIds = action.payload;
         },
         /** 复制/剪切失败（系统剪贴板被占用等）时在状态栏给出可见反馈。 */
-        setClipboardOperationFailed(
-            state,
-            action: PayloadAction<{ op: "copy" | "cut" }>,
-        ) {
+        setClipboardOperationFailed(state, action: PayloadAction<{ op: "copy" | "cut" }>) {
             state.status =
-                action.payload.op === "cut"
-                    ? "Clipboard cut failed"
-                    : "Clipboard copy failed";
+                action.payload.op === "cut" ? "Clipboard cut failed" : "Clipboard copy failed";
         },
         moveClipStart(state, action: PayloadAction<{ clipId: string; startSec: number }>) {
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
@@ -3144,8 +3129,8 @@ const sessionSlice = createSlice({
                     // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                     state.error = "import_audio_failed";
                 }
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3174,8 +3159,8 @@ const sessionSlice = createSlice({
                     // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                     state.error = "import_audio_failed";
                 }
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3204,8 +3189,8 @@ const sessionSlice = createSlice({
                     // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                     state.error = "import_audio_failed";
                 }
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3234,8 +3219,8 @@ const sessionSlice = createSlice({
                     // 合成错误码：让状态栏走红色 error 通道（原版失败只写灰色 status）
                     state.error = "import_audio_failed";
                 }
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                     }
@@ -3261,8 +3246,8 @@ const sessionSlice = createSlice({
                 };
                 const ok = Boolean(payload.ok);
                 state.status = ok ? "MIDI clip created" : "MIDI import failed";
-                if (ok && payload.imported && (payload.imported as any).tracks) {
-                    applyTimelineStatePreservingPitchVisuals(state, payload.imported as any);
+                if (ok && payload.imported && payload.imported.tracks) {
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
@@ -3396,7 +3381,7 @@ const sessionSlice = createSlice({
                     pasteEndSec?: number | null;
                 };
                 if (payload?.tracks) {
-                    applyTimelineState(state, payload as any, { force: true });
+                    applyTimelineState(state, payload as TimelineState, { force: true });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
@@ -3696,7 +3681,7 @@ const sessionSlice = createSlice({
                           error?: string;
                           projectVersionTooNew?: boolean;
                       };
-                if (!payload || (payload as any).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Open canceled";
                     return;
                 }
@@ -3710,7 +3695,7 @@ const sessionSlice = createSlice({
                     state.status = "Open failed";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline as TimelineState, {
                     force: true,
                     preserveProjectNotes: false,
                     adoptPlayhead: true,
@@ -3855,23 +3840,24 @@ const sessionSlice = createSlice({
                           ok: true;
                           canceled: false;
                           timeline: TimelineState;
+                          newClipIds?: string[];
                           skippedFiles?: string[];
                       };
-                if (!payload || (payload as any).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
                     adoptPlayhead: true,
                 });
-                const newClipIds = (payload as any).newClipIds;
+                const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
-                const skippedFiles = (payload as any).skippedFiles;
+                const skippedFiles = payload.skippedFiles;
                 state.vocalShifterSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0 ? skippedFiles : null;
                 state.status = "VocalShifter project imported";
@@ -3896,23 +3882,24 @@ const sessionSlice = createSlice({
                           ok: true;
                           canceled: false;
                           timeline: TimelineState;
+                          newClipIds?: string[];
                           skippedFiles?: string[];
                       };
-                if (!payload || (payload as any).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
                     adoptPlayhead: true,
                 });
-                const newClipIds = (payload as any).newClipIds;
+                const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
-                const skippedFiles = (payload as any).skippedFiles;
+                const skippedFiles = payload.skippedFiles;
                 state.vocalShifterSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0 ? skippedFiles : null;
                 state.status = "VocalShifter project imported";
@@ -3937,23 +3924,24 @@ const sessionSlice = createSlice({
                           ok: true;
                           canceled: false;
                           timeline: TimelineState;
+                          newClipIds?: string[];
                           skippedFiles?: string[];
                       };
-                if (!payload || (payload as any).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
                     adoptPlayhead: true,
                 });
-                const newClipIds = (payload as any).newClipIds;
+                const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
-                const skippedFiles = (payload as any).skippedFiles;
+                const skippedFiles = payload.skippedFiles;
                 state.reaperSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0 ? skippedFiles : null;
                 state.status = "Reaper project imported";
@@ -3976,23 +3964,24 @@ const sessionSlice = createSlice({
                           ok: true;
                           canceled: false;
                           timeline: TimelineState;
+                          newClipIds?: string[];
                           skippedFiles?: string[];
                       };
-                if (!payload || (payload as any).canceled) {
+                if (!payload || payload.canceled) {
                     state.status = "Import canceled";
                     return;
                 }
-                applyTimelineState(state, (payload as any).timeline, {
+                applyTimelineState(state, payload.timeline, {
                     force: true,
                     preserveProjectNotes: false,
                     adoptPlayhead: true,
                 });
-                const newClipIds = (payload as any).newClipIds;
+                const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
-                const skippedFiles = (payload as any).skippedFiles;
+                const skippedFiles = payload.skippedFiles;
                 state.reaperSkippedFilesDialog =
                     Array.isArray(skippedFiles) && skippedFiles.length > 0 ? skippedFiles : null;
                 state.status = "Reaper project imported";
@@ -4005,10 +3994,21 @@ const sessionSlice = createSlice({
             })
 
             .addCase(saveProjectRemote.fulfilled, (state, action) => {
-                const payload = action.payload as any;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    canceled?: boolean;
+                    versionConflict?: boolean;
+                    path?: string;
+                    existingVersion?: number;
+                    currentVersion?: number;
+                    existingIsNewer?: boolean;
+                    timeline?: TimelineState & { ok?: boolean };
+                    tracks?: unknown;
+                    clips?: unknown;
+                };
                 if (payload?.versionConflict) {
                     state.saveVersionConflictDialog = {
-                        path: payload.path,
+                        path: payload.path as string,
                         existingVersion: Number(payload.existingVersion ?? 0),
                         currentVersion: Number(payload.currentVersion ?? 0),
                         existingIsNewer: Boolean(payload.existingIsNewer),
@@ -4055,10 +4055,21 @@ const sessionSlice = createSlice({
             })
 
             .addCase(saveProjectAsRemote.fulfilled, (state, action) => {
-                const payload = action.payload as any;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    canceled?: boolean;
+                    versionConflict?: boolean;
+                    path?: string;
+                    existingVersion?: number;
+                    currentVersion?: number;
+                    existingIsNewer?: boolean;
+                    timeline?: TimelineState & { ok?: boolean };
+                    tracks?: unknown;
+                    clips?: unknown;
+                };
                 if (payload?.versionConflict) {
                     state.saveVersionConflictDialog = {
-                        path: payload.path,
+                        path: payload.path as string,
                         existingVersion: Number(payload.existingVersion ?? 0),
                         currentVersion: Number(payload.currentVersion ?? 0),
                         existingIsNewer: Boolean(payload.existingIsNewer),
@@ -4105,11 +4116,22 @@ const sessionSlice = createSlice({
             })
 
             .addCase(saveProjectToPathRemote.fulfilled, (state, action) => {
-                const payload = action.payload as any;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    canceled?: boolean;
+                    versionConflict?: boolean;
+                    path?: string;
+                    existingVersion?: number;
+                    currentVersion?: number;
+                    existingIsNewer?: boolean;
+                    timeline?: TimelineState & { ok?: boolean };
+                    tracks?: unknown;
+                    clips?: unknown;
+                };
                 if (payload?.versionConflict) {
                     // 理论上 force 保存不会再冲突；兜底再次弹出确认框。
                     state.saveVersionConflictDialog = {
-                        path: payload.path,
+                        path: payload.path as string,
                         existingVersion: Number(payload.existingVersion ?? 0),
                         currentVersion: Number(payload.currentVersion ?? 0),
                         existingIsNewer: Boolean(payload.existingIsNewer),

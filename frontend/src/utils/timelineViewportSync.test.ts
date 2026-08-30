@@ -25,7 +25,11 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
     {
         assertEqual(timelineViewportSync.isSeeded(), false, "reset clears seeded");
         timelineViewportSync.setViewport({ scrollLeft: 0, pxPerSec: 150 });
-        assertEqual(timelineViewportSync.isSeeded(), true, "setViewport seeds even with default values");
+        assertEqual(
+            timelineViewportSync.isSeeded(),
+            true,
+            "setViewport seeds even with default values",
+        );
     }
     timelineViewportSync.reset();
     {
@@ -110,4 +114,6 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
             "project start maps to negative drawing offset for alignment",
         );
     }
+
+    void checks;
 });

@@ -34,10 +34,15 @@ export const TimelineCanvasViewport: React.FC<{
     const rowGuidesRef = React.useRef(rowGuides);
     const darkModeRef = React.useRef(darkMode);
 
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     widthRef.current = width;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     heightRef.current = height;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     modelRef.current = model;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     rowGuidesRef.current = rowGuides;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     darkModeRef.current = darkMode;
     /**
      * 按给定投影重绘 clip 体。

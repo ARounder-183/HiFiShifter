@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { useEffect } from "react";

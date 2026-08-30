@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import reducer from "./sessionSlice.ts";
 import { importAudioAtPosition } from "./thunks/importThunks.ts";
+import type { TimelineResult } from "../../types/api";
 
 test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -22,7 +23,7 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
                 framePeriodMs: 5,
             },
         },
-    } as any;
+    } as unknown as ReturnType<typeof reducer>;
 
     const next = reducer(
         baseState,
@@ -71,7 +72,7 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
                             fade_out_dir: 0,
                         },
                     ],
-                } as any,
+                } as unknown as TimelineResult,
                 newClipIds: ["clip-b"],
             },
             "req-import",

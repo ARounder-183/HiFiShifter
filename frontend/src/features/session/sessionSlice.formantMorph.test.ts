@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import reducer from "./sessionSlice.ts";
 import { fetchTimeline } from "./thunks/transportThunks.ts";
+import type { TimelineResult } from "../../types/api";
 
 test("features/session/sessionSlice.formantMorph.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -63,7 +64,7 @@ test("features/session/sessionSlice.formantMorph.test.ts scripted checks", async
                         },
                     },
                 ],
-            } as any,
+            } as unknown as TimelineResult,
             "req-formant-morph",
             undefined,
         ),

@@ -183,21 +183,19 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
 
     // 播放中：轮询推进光标。
     {
-        const next = reducer(playingState(50), syncPlaybackState.fulfilled(
-            syncPayload(true, 50.02),
-            "req",
-            undefined,
-        ));
+        const next = reducer(
+            playingState(50),
+            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", undefined),
+        );
         assertEqual(next.playheadSec, 50.02, "playing poll advances the playhead");
     }
 
     // 播放→停止跃迁：光标对齐到引擎冻结的精确停止位置。
     {
-        const next = reducer(playingState(50.02), syncPlaybackState.fulfilled(
-            syncPayload(false, 50.09),
-            "req",
-            undefined,
-        ));
+        const next = reducer(
+            playingState(50.02),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", undefined),
+        );
         assertEqual(
             next.playheadSec,
             50.09,
@@ -207,16 +205,14 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
 
     // 已停止后的后续轮询：不再改写光标（例如 handle_stop 后 position 归零）。
     {
-        const stopped = reducer(playingState(50.02), syncPlaybackState.fulfilled(
-            syncPayload(false, 50.09),
-            "req",
-            undefined,
-        ));
-        const next = reducer(stopped, syncPlaybackState.fulfilled(
-            syncPayload(false, 0),
-            "req",
-            undefined,
-        ));
+        const stopped = reducer(
+            playingState(50.02),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", undefined),
+        );
+        const next = reducer(
+            stopped,
+            syncPlaybackState.fulfilled(syncPayload(false, 0), "req", undefined),
+        );
         assertEqual(
             next.playheadSec,
             50.09,

@@ -1272,9 +1272,7 @@ export function useEditDrag(deps: {
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[key] = now;
                                 // 手动拖拽淡入 = 用户手动 fade，且清除该侧自动交叉淡化。
-                                dispatch(
-                                    setClipAutoFades({ clipId: id, autoFadeInSec: 0 }),
-                                );
+                                dispatch(setClipAutoFades({ clipId: id, autoFadeInSec: 0 }));
                                 // 直接 webApi 持久化（不走 thunk）：其 fulfilled 不会 force-apply
                                 // 整份时间线覆盖本地乐观值，避免拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
@@ -1369,9 +1367,7 @@ export function useEditDrag(deps: {
                             if (now - last > 200) {
                                 lastRemoteSentRef.current[key] = now;
                                 // 手动拖拽淡出 = 手动 fade，且清除该侧自动交叉淡化。
-                                dispatch(
-                                    setClipAutoFades({ clipId: id, autoFadeOutSec: 0 }),
-                                );
+                                dispatch(setClipAutoFades({ clipId: id, autoFadeOutSec: 0 }));
                                 // 直接 webApi 持久化（不走 thunk）：避免 force-apply 覆盖本地
                                 // 乐观 fade 导致拖拽中淡入淡出包络闪烁。
                                 void webApi.setClipState({
@@ -2217,10 +2213,7 @@ export function useEditDrag(deps: {
                         // 无操作守卫：全部回到拖拽前 → 不落盘、不开组。
                         const noChange = trimPatches.every((patch) => {
                             const base = drag.baseByClipId[patch.clipId];
-                            return (
-                                base &&
-                                Math.abs(patch.lengthSec - base.lengthSec) < 1e-9
-                            );
+                            return base && Math.abs(patch.lengthSec - base.lengthSec) < 1e-9;
                         });
                         if (noChange) {
                             persistPromise = Promise.resolve();
@@ -2266,8 +2259,7 @@ export function useEditDrag(deps: {
                         ? { sourceStartSec: singleClipNow.sourceStartSec }
                         : { sourceEndSec: singleClipNow.sourceEndSec };
                     // 无操作守卫：拖回起点 → 不落盘、不产生死撤销步。
-                    const noChange =
-                        Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9;
+                    const noChange = Math.abs(singleClipNow.lengthSec - drag.baselengthSec) < 1e-9;
                     if (shouldApplyAutoCrossfade) {
                         persistPromise = noChange
                             ? Promise.resolve()
@@ -2517,9 +2509,8 @@ export function useEditDrag(deps: {
                             .filter(
                                 (clipId) =>
                                     Math.abs(
-                                        (sessionRef.current.clips.find(
-                                            (c) => c.id === clipId,
-                                        )?.fadeInSec ?? 0) -
+                                        (sessionRef.current.clips.find((c) => c.id === clipId)
+                                            ?.fadeInSec ?? 0) -
                                             (drag.baseManualFadeSecByClipId[clipId]?.in ?? 0),
                                     ) > 1e-9,
                             )
@@ -2569,9 +2560,8 @@ export function useEditDrag(deps: {
                             .filter(
                                 (clipId) =>
                                     Math.abs(
-                                        (sessionRef.current.clips.find(
-                                            (c) => c.id === clipId,
-                                        )?.fadeOutSec ?? 0) -
+                                        (sessionRef.current.clips.find((c) => c.id === clipId)
+                                            ?.fadeOutSec ?? 0) -
                                             (drag.baseManualFadeSecByClipId[clipId]?.out ?? 0),
                                     ) > 1e-9,
                             )

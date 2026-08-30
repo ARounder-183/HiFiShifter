@@ -102,7 +102,7 @@ function createVertexSink(): (
             next.set(vertexScratch.subarray(0, vertexScratchLength));
             vertexScratch = next;
         }
-        let i = vertexScratchLength;
+        const i = vertexScratchLength;
         vertexScratch[i] = x;
         vertexScratch[i + 1] = y;
         vertexScratch[i + 2] = r;
@@ -210,8 +210,7 @@ export function buildWaveformGeometry(args: {
                 rectBottom,
                 Math.max(rectTop, centerY - peakMin * gain * halfHeight),
             );
-            const alpha =
-                colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
+            const alpha = colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
 
             push(x + 0.5, yTop, segmentRed, segmentGreen, segmentBlue, alpha);
             push(x + 0.5, yBottom, segmentRed, segmentGreen, segmentBlue, alpha);

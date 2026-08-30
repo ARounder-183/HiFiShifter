@@ -246,7 +246,6 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 根据搜索模式决定展示配表
     const isSearchMode = fb.searchQuery.trim().length > 0;
-    const rawEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
     const trimmedSearchQuery = fb.searchQuery.trim();
 
     const hasRegexError = useMemo(() => {
@@ -264,6 +263,7 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 客户端正则过滤（仅在搜索模式且 regexEnabled 时）
     const regexFilteredEntries = useMemo(() => {
+        const rawEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
         if (!isSearchMode || !fb.regexEnabled || !trimmedSearchQuery) {
             return rawEntries;
         }
@@ -273,7 +273,7 @@ export const FileBrowserPanel: React.FC = () => {
         } catch {
             return [];
         }
-    }, [rawEntries, fb.regexEnabled, trimmedSearchQuery, isSearchMode]);
+    }, [isSearchMode, fb.entries, fb.searchResults, fb.regexEnabled, trimmedSearchQuery]);
 
     // 音频过滤
     const audioFilteredEntries = useMemo(() => {
@@ -426,6 +426,7 @@ export const FileBrowserPanel: React.FC = () => {
         isRightDrag: boolean; // 右键拖拽标记
     } | null>(null);
     const dragStateRef = useRef(dragState);
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     dragStateRef.current = dragState;
 
     // ghost 元素跟随鼠标

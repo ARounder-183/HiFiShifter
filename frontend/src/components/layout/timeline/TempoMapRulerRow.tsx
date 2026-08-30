@@ -1072,6 +1072,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             pendingInlineAddRef.current = { pointId: point.id, baseMap: base };
             startInlineEdit(point);
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- noSnapKb 为 Redux 派生绑定对象，加入依赖会改变回调重建时机（既有 memo 模式）
         [
             tempoMap,
             pxPerSec,
@@ -1191,6 +1192,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 endSnapGesture();
             }
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollLeft/viewportWidth 随滚动变化，加入依赖会让指针监听随滚动重建（既有模式）
     }, [
         draggingId,
         tempoMap,

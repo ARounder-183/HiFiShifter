@@ -8,6 +8,7 @@
  * - 预览/回退机制（外观设置对话框使用）
  */
 
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import {
     createContext,
     useCallback,

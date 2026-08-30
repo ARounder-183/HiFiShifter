@@ -12,7 +12,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
 import { useAppSelector, useAppStore } from "../../../../app/hooks";
-import { useI18n } from "../../../../i18n/I18nProvider";
 import {
     pasteTimelineClipboardRemote,
     removeClipsRemote,
@@ -193,7 +192,6 @@ export function useTimelineClipActions(
         disabledGroupIds,
     } = args;
 
-    const { t } = useI18n();
     // 实时 store：copy/cut 时以 store 最新状态过滤失效 Clip id，
     // 避免闭包/ref 里的过期选区把死 id 传给后端。
     const store = useAppStore();
@@ -474,7 +472,7 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, t, sessionRef, sameSourceConfirmResolverRef, setSameSourceConfirmOpen],
+        [dispatch, sessionRef, sameSourceConfirmResolverRef, setSameSourceConfirmOpen],
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
@@ -747,10 +745,7 @@ export function useTimelineClipActions(
     // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
     // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
     const deselectAllTrackLaneClips = React.useCallback(() => {
-        if (
-            multiSelectedClipIdsRef.current.length === 0 &&
-            !sessionRef.current.selectedClipId
-        ) {
+        if (multiSelectedClipIdsRef.current.length === 0 && !sessionRef.current.selectedClipId) {
             return;
         }
         setMultiSelectedClipIds([]);
@@ -896,7 +891,7 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch],
+        [dispatch, sessionRef],
     );
 
     const handleTrackLaneRenameDone = React.useCallback(() => {

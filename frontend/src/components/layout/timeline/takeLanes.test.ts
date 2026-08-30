@@ -13,7 +13,10 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
         }
     }
 
-    function requireExpanded(value: WaveformSceneClip[] | null, label: string): WaveformSceneClip[] {
+    function requireExpanded(
+        value: WaveformSceneClip[] | null,
+        label: string,
+    ): WaveformSceneClip[] {
         if (value == null) throw new Error(`${label}: expected expanded lanes, received null`);
         return value;
     }

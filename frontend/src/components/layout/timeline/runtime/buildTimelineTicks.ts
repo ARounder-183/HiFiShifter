@@ -24,11 +24,7 @@
 
 import type { GridSize } from "../../../../features/session/sessionTypes.ts";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
-import {
-    buildTempoGridLines,
-    secToBeat,
-    tempoMapSegments,
-} from "../../../../utils/tempoMap.ts";
+import { buildTempoGridLines, secToBeat, tempoMapSegments } from "../../../../utils/tempoMap.ts";
 import type { TimeUnit, TimeUnitChoice } from "../timeFormat.ts";
 import {
     formatRulerTick,
@@ -230,8 +226,7 @@ export function buildTimelineTicks(args: {
         minLabelSpacingPx: args.minLabelSpacingPx,
     });
     const ctx: TimeFormatContext = { bpm, beatsPerBar, grid, tempoMap };
-    const showSecondary =
-        args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
+    const showSecondary = args.secondaryUnit !== "none" && args.secondaryUnit !== args.primaryUnit;
 
     // ── 3b. Tempo Map 的标签位置：显式枚举，而非对线做整除判定 ─────
     // Tempo Map 下网格线逐段局部对齐生成（段内第 k 条 = 段起点 +
@@ -300,7 +295,7 @@ export function buildTimelineTicks(args: {
                 // 与 buildTempoGridLines 的 swingAt 同式同序，确保浮点结果一致。
                 const swing =
                     swingPercent > 0 && m % 2 !== 0
-                        ? ((swingPercent / 100) * 0.5 * stepBeats) * segSecPerBeat
+                        ? (swingPercent / 100) * 0.5 * stepBeats * segSecPerBeat
                         : 0;
                 const sec = segment.startSec + m * stepBeats * segSecPerBeat + swing;
                 // add() 内部按 [startSec, endSec] 裁剪，这里同样只收范围内的值。

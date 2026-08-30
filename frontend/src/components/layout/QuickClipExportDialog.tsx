@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Dialog, Flex, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
+import type { MessageKey } from "../../i18n/messages";
 import { coreApi } from "../../services/api/core";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
 import { buildQuickExportFileName } from "./timeline/quickExportSelection";
@@ -89,7 +90,7 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                           ? "quick_export_error_missing_file_name"
                           : null;
                 setErrorText(
-                    errorKey ? t(errorKey as any) : String(result.error ?? "Export failed"),
+                    errorKey ? t(errorKey as MessageKey) : String(result.error ?? "Export failed"),
                 );
                 return;
             }

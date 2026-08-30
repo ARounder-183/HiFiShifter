@@ -272,9 +272,7 @@ export const BackgroundGrid: React.FC<{
                 const parts: string[] = [];
                 for (let index = firstIndex; index <= lastIndex; index += 1) {
                     // Swing：奇数网格位置向右偏移（最大半步）。
-                    const x = deviceSnap(
-                        index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset,
-                    );
+                    const x = deviceSnap(index * stepPx + (index % 2 === 0 ? 0 : swingPx) - offset);
                     if (x < -1 || x > latest.width + 1) continue;
                     for (const [segTop, segBottom] of ySegments) {
                         parts.push(`M${x} ${segTop}V${segBottom}`);

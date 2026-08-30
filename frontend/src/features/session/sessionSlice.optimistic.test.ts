@@ -20,7 +20,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         }
     }
 
-    function createState(): any {
+    function createState(): ReturnType<typeof reducer> {
         const base = reducer(undefined, {
             type: "@@INIT",
         });
@@ -101,7 +101,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
             ],
             selectedTrackId: "track-a",
             selectedClipId: "clip-a",
-        } as any;
+        } as unknown as ReturnType<typeof reducer>;
     }
 
     {
@@ -212,9 +212,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         const explicit = reducer(
             createState(),
             setClipsStateBulkRemote.pending("req-reverse-explicit", {
-                updates: [
-                    { clipId: "clip-a", reversed: true, sourceStartSec: 1, sourceEndSec: 3 },
-                ],
+                updates: [{ clipId: "clip-a", reversed: true, sourceStartSec: 1, sourceEndSec: 3 }],
                 checkpoint: true,
             }),
         );
@@ -241,11 +239,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
             }),
         );
         assertEqual(loopFlip.clips[0].reversed, true, "loop reverse pending flips direction");
-        assertEqual(
-            loopFlip.clips[0].sourceEndSec,
-            4,
-            "loop reverse anchors at consumption end",
-        );
+        assertEqual(loopFlip.clips[0].sourceEndSec, 4, "loop reverse anchors at consumption end");
         assertEqual(loopFlip.clips[0].sourceStartSec, 2, "loop reverse keeps window start");
         // 翻回正放：ss := mod(4 − 2, 10) = 2，还原原消费区间起点。
         const loopBack = reducer(
@@ -314,11 +308,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         );
         assertEqual(take2Inactive.reversed, true, "inactive take flipped");
         // take2 自身速率 2、clip len 2 → se := 5 + 2×2 = 9（覆盖陈旧 se=20）。
-        assertEqual(
-            take2Inactive.sourceEndSec,
-            9,
-            "inactive take window converted with own rate",
-        );
+        assertEqual(take2Inactive.sourceEndSec, 9, "inactive take window converted with own rate");
         assertEqual(take1Inactive.reversed, false, "other take untouched");
 
         const flipActive = reducer(

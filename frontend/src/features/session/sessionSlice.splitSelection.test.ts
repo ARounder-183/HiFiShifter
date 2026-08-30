@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import reducer from "./sessionSlice.js";
 import { splitClipRemote, splitClipsAtRemote } from "./thunks/timelineThunks.js";
+import type { TimelineResult } from "../../types/api";
 
 /**
  * DAW 惯例回归：分割后选中右段、取消左段。
@@ -40,7 +41,9 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
     }
 
     function createState() {
-        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        const base = reducer(undefined, { type: "@@INIT" }) as unknown as ReturnType<
+            typeof reducer
+        >;
         return {
             ...base,
             selectedTrackId: "track-a",
@@ -65,7 +68,7 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
             bpm: 120,
             disabled_group_ids: [],
             created_clip_ids: rightIds,
-        }) as any;
+        }) as unknown as TimelineResult;
 
     // 单 clip 分割：选中右段，取消左段。
     {
@@ -111,11 +114,10 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
         state.multiSelectedClipIds = ["clip-a", "clip-z"];
         const next = reducer(
             state,
-            splitClipsAtRemote.fulfilled(
-                splitPayload(["clip-a-right"]),
-                "req",
-                { clipIds: ["clip-a"], splitSec: 5 },
-            ),
+            splitClipsAtRemote.fulfilled(splitPayload(["clip-a-right"]), "req", {
+                clipIds: ["clip-a"],
+                splitSec: 5,
+            }),
         );
         assertEqual(
             next.multiSelectedClipIds,
@@ -131,7 +133,7 @@ test("features/session/sessionSlice.splitSelection.test.ts split selects the rig
             created_clip_ids: null,
             selected_clip_id: "clip-a",
             clips: [makeClip("clip-a", 4)],
-        };
+        } as unknown as TimelineResult;
         const next = reducer(
             createState(),
             splitClipsAtRemote.fulfilled(payload, "req", { clipIds: ["clip-a"], splitSec: 5 }),

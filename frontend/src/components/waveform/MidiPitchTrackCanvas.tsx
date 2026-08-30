@@ -320,14 +320,23 @@ export const MidiPitchTrackCanvas = React.memo(
         const clipPitchCurvesRef = React.useRef(clipPitchCurves);
         const clipPitchRangesRef = React.useRef(clipPitchRanges);
 
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         pxPerSecRef.current = props.pxPerSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportStartSecRef.current = props.viewportStartSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportEndSecRef.current = props.viewportEndSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipsRef.current = clips;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         waveformHeightRef.current = waveformHeight;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         strokeWidthRef.current = strokeWidth;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportWidthPxRef.current = viewportWidthPx;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipPitchCurvesRef.current = clipPitchCurves;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipPitchRangesRef.current = clipPitchRanges;
 
         // ========================================
@@ -346,6 +355,7 @@ export const MidiPitchTrackCanvas = React.memo(
         // ========================================
         // 核心绘制函数
         // ========================================
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         drawRef.current = () => {
             const canvas = canvasRef.current;
             if (!canvas) return;

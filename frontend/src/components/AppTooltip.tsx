@@ -71,6 +71,7 @@ export function AppTooltipProvider({
     } | null>(null);
     // 外部抑制 getter 以 ref 桥接进常驻 effect，闭包变化不重启监听。
     const suppressGetterRef = useRef(isSuppressedExternal);
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     suppressGetterRef.current = isSuppressedExternal;
 
     useEffect(() => {

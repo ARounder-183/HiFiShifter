@@ -1088,7 +1088,6 @@ export const PianoRollPanel: React.FC = () => {
                 applyScrollLayers(next);
             }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [s.paramEditorSyncTimeline]);
 
     // 布局偏移变化时，同一共享视口对应的绘制坐标也会变化。
@@ -1172,7 +1171,6 @@ export const PianoRollPanel: React.FC = () => {
         }
         // 同步更新状态：让标尺/网格与画布在同一帧对齐，消除缩放闪屏。
         setScrollLeft(next);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
@@ -1398,7 +1396,7 @@ export const PianoRollPanel: React.FC = () => {
             };
         }
         return undefined;
-    }, [editParam, processorParams]);
+    }, [editParam]);
 
     const currentParamDefaultValue = useMemo(() => {
         if (editParam === "pitch") return 60;
@@ -1417,7 +1415,7 @@ export const PianoRollPanel: React.FC = () => {
             return 1;
         }
         return 0;
-    }, [editParam, processorParams]);
+    }, [editParam]);
 
     const currentParamQuantizeUnit = useMemo(() => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
@@ -1746,7 +1744,7 @@ export const PianoRollPanel: React.FC = () => {
             processorParamIds: processorParamsRef.current.map((p) => p.id as ParamName),
             secondaryParamVisible,
         });
-    }, [editParam, processorParams, secondaryParamVisible]);
+    }, [editParam, secondaryParamVisible]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
@@ -2299,12 +2297,9 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [invalidate, rootTrackId, visibleReferenceRootTrackIds, visibleSecondaryParamIds]);
 
-    const handleMidiImported = useCallback(
-        (_result: { notes_imported: number; frames_touched: number }) => {
-            refreshNow();
-        },
-        [refreshNow],
-    );
+    const handleMidiImported = useCallback(() => {
+        refreshNow();
+    }, [refreshNow]);
 
     const handleImportAsClip = useCallback(
         (result: {
@@ -3033,6 +3028,7 @@ export const PianoRollPanel: React.FC = () => {
         return () => {
             el.removeEventListener("wheel", handler);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- syncScrollLeft 随渲染重建；加入依赖会让 wheel 监听器每渲染重挂（热路径既有模式）
     }, [
         editParam,
         setPitchView,
@@ -3137,7 +3133,7 @@ export const PianoRollPanel: React.FC = () => {
         selectionRef.current = null;
         setSelectionUi(null);
         invalidate();
-    }, [s.toolMode]);
+    }, [s.toolMode, invalidate]);
 
     // 同步 isLoading 和 asyncRefresh 状态到全局 Context
     useEffect(() => {
@@ -3941,6 +3937,7 @@ export const PianoRollPanel: React.FC = () => {
                 }
             }
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- s.editParam/s.toolMode 在调用时经 s 快照读取；加入依赖会改变对话框快照捕获/监听重挂时序（既有模式）
         [
             rootTrackId,
             editParam,
@@ -3959,6 +3956,7 @@ export const PianoRollPanel: React.FC = () => {
             pitchDeltaToDegreeSteps,
             bumpRefreshToken,
             invalidate,
+            dispatch,
         ],
     );
 
@@ -4263,9 +4261,7 @@ export const PianoRollPanel: React.FC = () => {
                 tempoMap: s.tempoMap,
             }),
         [
-            pxPerSec,
-            scrollLeft,
-            viewSize.w,
+            prAxis,
             s.bpm,
             s.beats,
             s.grid,

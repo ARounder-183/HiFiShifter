@@ -176,7 +176,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         if (open && !isReplaceMode) {
             setCurrentTarget(resolveImportTarget());
         }
-    }, [open, defaultImportTarget, isReplaceMode, importTarget]);
+    }, [open, defaultImportTarget, isReplaceMode, importTarget]); // eslint-disable-line react-hooks/exhaustive-deps -- resolveImportTarget 每次渲染重建的纯函数；计入依赖会让初始化 effect 每次渲染重跑（既有语义）
     // 当 currentTarget 为 paramEditor 时，行为即 pitchEdit
     const effectiveMode = isReplaceMode
         ? "replaceMidi"
@@ -317,7 +317,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         }
 
         loadTracks(effectivePath);
-    }, [open, effectivePath, effectiveClipboardGuid, loadTracks]);
+    }, [open, effectivePath, effectiveClipboardGuid, loadTracks, loadTracksFromClipboard]); // eslint-disable-line react-hooks/exhaustive-deps -- tracks.length 计入依赖会让加载 effect 在轨道数据变化时重跑（既有加载时序）
 
     // 弹窗关闭时重置内部状态
     useEffect(() => {

@@ -164,7 +164,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             audioPreview.stop();
             setPreviewingPath(null);
         }
-    }, [open]);
+    }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- previewingPath 随每次预览变化；计入依赖会让该 effect 在预览切换时反复重跑（既有关闭时序）
 
     useEffect(() => {
         if (open) {

@@ -111,10 +111,7 @@ export function rasterize(
  * 彩色残影。因此统一在设备坐标（单位变换）下按 physical 尺寸清除，事后再由
  * 调用方设置/恢复业务变换（本函数内部 save/restore，不改变调用方变换状态）。
  */
-export function clearCanvasPhysical(
-    ctx: CanvasRenderingContext2D,
-    target: RasterTarget,
-): void {
+export function clearCanvasPhysical(ctx: CanvasRenderingContext2D, target: RasterTarget): void {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, target.physicalWidth, target.physicalHeight);

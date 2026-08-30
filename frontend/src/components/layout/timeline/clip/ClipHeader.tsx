@@ -162,6 +162,7 @@ export const ClipHeader: React.FC<{
                 }
             }, 0);
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- triggerRename 一次性触发语义：加入 editTakeName/nameEditing 会在编辑态切换时重跑并再次打开重命名（既有模式）
     }, [triggerRename]);
 
     function commitNameEdit() {

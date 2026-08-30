@@ -109,4 +109,6 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
     );
 
     unsubscribe();
+
+    void checks;
 });

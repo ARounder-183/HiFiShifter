@@ -103,9 +103,7 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
         const parseLum = (fill: string): number => {
             const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
             if (!m) throw new Error(`unparseable fill: ${fill}`);
-            return (
-                (Number(m[1]) * 0.299 + Number(m[2]) * 0.587 + Number(m[3]) * 0.114) / 255
-            );
+            return (Number(m[1]) * 0.299 + Number(m[2]) * 0.587 + Number(m[3]) * 0.114) / 255;
         };
         const selectedLum = parseLum(selectedStyle.bodyFill);
         const normalLum = parseLum(style.bodyFill);
@@ -139,9 +137,7 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
             const m = fill.match(/rgba\((\d+), (\d+), (\d+),/);
             if (!m) throw new Error(`unparseable fill: ${fill}`);
             const [, rs, gs, bs] = m;
-            return (
-                (Number(rs) * 0.299 + Number(gs) * 0.587 + Number(bs) * 0.114) / 255
-            );
+            return (Number(rs) * 0.299 + Number(gs) * 0.587 + Number(bs) * 0.114) / 255;
         };
         for (const color of ["#ff0000", "#00ff00", "#0000ff", "#ffffff", "#000000", "#808080"]) {
             const extreme = buildTimelineClipVisualStyle({

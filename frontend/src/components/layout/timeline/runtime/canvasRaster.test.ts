@@ -167,12 +167,8 @@ test("components/layout/timeline/runtime/canvasRaster.test.ts scripted checks", 
         // 回归守护：CSS 尺寸清屏必须能被识别为错误（清不到尾行）。
         const cssClearActive = calls.some(
             (c) =>
-                c[0] === "clearRect" &&
-                (c[3] === target.cssWidthPx || c[4] === target.cssHeightPx),
+                c[0] === "clearRect" && (c[3] === target.cssWidthPx || c[4] === target.cssHeightPx),
         );
-        assertTrue(
-            !cssClearActive,
-            "must not clear by CSS dimensions (leaves the tail row dirty)",
-        );
+        assertTrue(!cssClearActive, "must not clear by CSS dimensions (leaves the tail row dirty)");
     }
 });

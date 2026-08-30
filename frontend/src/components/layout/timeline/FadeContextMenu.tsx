@@ -13,6 +13,7 @@
  * （HS_FADE_TOOLTIP_SUPPRESS），AppTooltipProvider 看到它即不再显示
  * 淡变信息浮标，避免与菜单互相遮挡。
  */
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { registerDragAbort } from "./gestureFocusGuard";

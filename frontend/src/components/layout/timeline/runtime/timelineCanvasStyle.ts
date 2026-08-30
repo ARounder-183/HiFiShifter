@@ -183,7 +183,7 @@ function hslToRgb(hsl: Hsl): { r: number; g: number; b: number } {
         const v = Math.round(l * 255);
         return { r: v, g: v, b: v };
     }
-    const hue = ((h % 360) + 360) % 360 / 360;
+    const hue = (((h % 360) + 360) % 360) / 360;
     const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
     const p = 2 * l - q;
     return {
@@ -236,7 +236,7 @@ function normalizeTrackHsl(color: string, darkMode: boolean): Hsl {
     const hsl: Hsl = {
         h: base.h,
         s: clamp(base.s, CLIP_SATURATION_BAND.min, CLIP_SATURATION_BAND.max),
-        l: clamp(base.l, darkMode ? 0.28 : 0.46, darkMode ? 0.44 : 0.60),
+        l: clamp(base.l, darkMode ? 0.28 : 0.46, darkMode ? 0.44 : 0.6),
     };
     for (let i = 0; i < 16; i += 1) {
         const lum = perceivedLuminance(hslToRgb(hsl));
@@ -394,9 +394,7 @@ export function buildTimelineClipVisualStyle(args: {
         ? {
               h: baseHsl.h,
               s: 0.06,
-              l: darkMode
-                  ? Math.max(0.1, baseHsl.l - 0.05)
-                  : Math.max(0.08, baseHsl.l - 0.12),
+              l: darkMode ? Math.max(0.1, baseHsl.l - 0.05) : Math.max(0.08, baseHsl.l - 0.12),
           }
         : args.selected
           ? shadeHsl(baseHsl, 0.04)
@@ -530,9 +528,7 @@ export function buildTimelineClipVisualStyle(args: {
         bodyFill: rgba(bodyRgb, darkMode ? 0.82 : 0.76),
         // 描边：选中 = 白色 2px（在提亮的色块上清晰醒目，REAPER 惯例）；
         // 未选中 = 同色调描边 —— 让色块边缘"闭合"且与色块同调。
-        borderStroke: args.selected
-            ? "rgba(255, 255, 255, 0.6)"
-            : rgba(headerRgb, 0.55),
+        borderStroke: args.selected ? "rgba(255, 255, 255, 0.6)" : rgba(headerRgb, 0.55),
         borderLineWidth: args.selected ? 2 : 1,
         snapOffsetTriFill,
         snapOffsetTriStroke,
@@ -568,9 +564,7 @@ export function buildTimelineClipVisualStyle(args: {
         chainBadgeOffsetY,
         formantBadgeFill: darkMode ? "rgba(255, 255, 255, 0.14)" : "rgba(0, 0, 0, 0.16)",
         formantBadgeStroke: darkMode ? "rgba(255, 255, 255, 0.25)" : "rgba(0, 0, 0, 0.28)",
-        formantBadgeTextFill: darkMode
-            ? "rgba(235, 240, 248, 0.95)"
-            : "rgba(28, 32, 40, 0.92)",
+        formantBadgeTextFill: darkMode ? "rgba(235, 240, 248, 0.95)" : "rgba(28, 32, 40, 0.92)",
         formantBadgeLabel: "F",
         formantBadgeWidth,
         formantBadgeHeight,
@@ -579,9 +573,7 @@ export function buildTimelineClipVisualStyle(args: {
         formantBadgeOffsetY,
         gainKnobFill: darkMode ? "rgba(255, 255, 255, 0.16)" : "rgba(0, 0, 0, 0.2)",
         gainKnobStroke: darkMode ? "rgba(255, 255, 255, 0.32)" : "rgba(0, 0, 0, 0.38)",
-        gainKnobIndicator: darkMode
-            ? "rgba(235, 240, 248, 0.95)"
-            : "rgba(28, 32, 40, 0.95)",
+        gainKnobIndicator: darkMode ? "rgba(235, 240, 248, 0.95)" : "rgba(28, 32, 40, 0.95)",
         gainKnobCoreFill: darkMode ? "rgba(0, 0, 0, 0.35)" : "rgba(255, 255, 255, 0.4)",
         gainKnobAngleDeg: (clampedGainDb / 12) * 135,
         gainKnobRadius,

@@ -361,6 +361,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 fileName: string;
                 clientX: number;
                 clientY: number;
+                durationSec: number;
+                filePaths: string[];
+                isRightDrag: boolean;
             };
             if (!detail) return;
 
@@ -379,12 +382,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 setDropPreview((prev) => {
                     if (prev && prev.path === detail.filePath) {
                         if (dropPreviewRef.current) {
-                            const nextDuration = Number((detail as any).durationSec) || 0;
+                            const nextDuration = Number(detail.durationSec) || 0;
                             dropPreviewRef.current.style.width = `${getDropPreviewWidthPx(nextDuration)}px`;
                         }
                         return {
                             ...prev,
-                            durationSec: (detail as any).durationSec,
+                            durationSec: detail.durationSec,
                         };
                     }
                     return prev;
@@ -441,9 +444,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
                     const beat = snapDropBeat(rawBeat, trackId);
-                    const filePaths: string[] = (detail as any).filePaths;
+                    const filePaths: string[] = detail.filePaths;
                     const isMulti = Array.isArray(filePaths) && filePaths.length > 1;
-                    const isRightDrag = !!(detail as any).isRightDrag;
+                    const isRightDrag = !!detail.isRightDrag;
                     const filePath = detail.filePath;
                     const actionKind = detectExternalPathAction(filePath);
 

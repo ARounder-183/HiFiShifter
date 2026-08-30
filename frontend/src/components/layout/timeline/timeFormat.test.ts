@@ -482,4 +482,6 @@ test("components/layout/timeline/timeFormat.test.ts scripted checks", async () =
             "fractional bpb: near-boundary sub carries to next bar",
         );
     }
+
+    void checks;
 });

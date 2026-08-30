@@ -318,8 +318,10 @@ export const TimelineScrollArea: React.FC<
         return () => {
             scroller.removeEventListener("wheel", handler);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- projectSec 随工程长度变化，加入依赖会让 wheel 监听在工程变化时重建（既有模式）
     }, [
         scrollRef,
+        syncScrollLeft,
         setPxPerSec,
         setRowHeight,
         commitScrollLeftState,

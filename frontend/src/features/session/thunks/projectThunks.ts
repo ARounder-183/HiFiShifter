@@ -97,7 +97,7 @@ export const openProjectFromPathForced = createAsyncThunk(
 export const saveProjectRemote = createAsyncThunk(
     "session/saveProjectRemote",
     async (_, { rejectWithValue, getState }) => {
-        const state = getState() as any;
+        const state = getState() as { session: SessionState };
         const hasPath = Boolean(state?.session?.project?.path);
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
 
@@ -118,7 +118,7 @@ export const saveProjectRemote = createAsyncThunk(
 export const saveProjectAsRemote = createAsyncThunk(
     "session/saveProjectAsRemote",
     async (_, { rejectWithValue, getState }) => {
-        const state = getState() as any;
+        const state = getState() as { session: SessionState };
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
         const res: SaveProjectResponse = await webApi.saveProjectAs(notesMarkdown);
         if (res && (res as SaveVersionConflict).versionConflict) {
@@ -135,7 +135,7 @@ export const saveProjectAsRemote = createAsyncThunk(
 export const saveProjectToPathRemote = createAsyncThunk(
     "session/saveProjectToPathRemote",
     async (path: string, { rejectWithValue, getState }) => {
-        const state = getState() as any;
+        const state = getState() as { session: SessionState };
         const notesMarkdown = String(state?.session?.project?.notesMarkdown ?? "");
         const res: SaveProjectResponse = await webApi.saveProjectToPath(path, notesMarkdown, true);
         if (!res || (res as { ok?: boolean }).ok === false) {

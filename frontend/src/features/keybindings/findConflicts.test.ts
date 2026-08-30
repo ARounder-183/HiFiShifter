@@ -113,11 +113,7 @@ describe("findConflicts — 键盘快捷键按作用域检测", () => {
         // 参数编辑器内的参数帧复制/粘贴与时间轴音频块复制/粘贴共绑
         // Ctrl+C/V，由焦点决定期望目标 —— 与「添加轨道 vs 音高设置到」
         // 的焦点路由同构，不视为冲突。
-        const copyConflicts = findConflicts(
-            {},
-            "pianoRoll.copy",
-            DEFAULT_KEYBINDINGS["clip.copy"],
-        );
+        const copyConflicts = findConflicts({}, "pianoRoll.copy", DEFAULT_KEYBINDINGS["clip.copy"]);
         expect(copyConflicts).not.toContain("clip.copy");
         const pasteConflicts = findConflicts(
             {},

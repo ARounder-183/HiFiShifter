@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import { expandLineSegmentsToQuads, WAVEFORM_STROKE_WIDTH_PX } from "./surfaceRenderer.ts";
 
 /** 读取展开输出中某个角点的位置与颜色。 */
-function corner(quads: Float32Array, vertex: number): {
+function corner(
+    quads: Float32Array,
+    vertex: number,
+): {
     x: number;
     y: number;
     r: number;

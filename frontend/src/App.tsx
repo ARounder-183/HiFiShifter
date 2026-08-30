@@ -972,17 +972,20 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("stretch_progress", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        active?: boolean;
-                        clipName?: string | null;
-                    };
-                    const active = Boolean(payload?.active);
-                    const clipName =
-                        typeof payload?.clipName === "string" ? payload.clipName : null;
-                    setStretching({ active, clipName });
-                });
+                unlisten = await mod.listen(
+                    "stretch_progress",
+                    (event: { payload?: { active?: boolean; clipName?: string | null } }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            active?: boolean;
+                            clipName?: string | null;
+                        };
+                        const active = Boolean(payload?.active);
+                        const clipName =
+                            typeof payload?.clipName === "string" ? payload.clipName : null;
+                        setStretching({ active, clipName });
+                    },
+                );
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1002,46 +1005,58 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("track_meter", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        tracks?: Array<{
-                            trackId?: string;
-                            peakLinear?: number;
-                            maxPeakLinear?: number;
-                            clipped?: boolean;
-                        }>;
-                    };
-                    const next: Record<
-                        string,
-                        {
-                            peakLinear: number;
-                            maxPeakLinear: number;
-                            clipped: boolean;
-                        }
-                    > = {};
-
-                    for (const entry of payload?.tracks ?? []) {
-                        if (typeof entry?.trackId !== "string" || !entry.trackId) {
-                            continue;
-                        }
-                        next[entry.trackId] = {
-                            peakLinear:
-                                typeof entry.peakLinear === "number" &&
-                                Number.isFinite(entry.peakLinear)
-                                    ? Math.max(0, entry.peakLinear)
-                                    : 0,
-                            maxPeakLinear:
-                                typeof entry.maxPeakLinear === "number" &&
-                                Number.isFinite(entry.maxPeakLinear)
-                                    ? Math.max(0, entry.maxPeakLinear)
-                                    : 0,
-                            clipped: Boolean(entry.clipped),
+                unlisten = await mod.listen(
+                    "track_meter",
+                    (event: {
+                        payload?: {
+                            tracks?: Array<{
+                                trackId?: string;
+                                peakLinear?: number;
+                                maxPeakLinear?: number;
+                                clipped?: boolean;
+                            }>;
                         };
-                    }
+                    }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            tracks?: Array<{
+                                trackId?: string;
+                                peakLinear?: number;
+                                maxPeakLinear?: number;
+                                clipped?: boolean;
+                            }>;
+                        };
+                        const next: Record<
+                            string,
+                            {
+                                peakLinear: number;
+                                maxPeakLinear: number;
+                                clipped: boolean;
+                            }
+                        > = {};
 
-                    dispatch(setTrackMeters(next));
-                });
+                        for (const entry of payload?.tracks ?? []) {
+                            if (typeof entry?.trackId !== "string" || !entry.trackId) {
+                                continue;
+                            }
+                            next[entry.trackId] = {
+                                peakLinear:
+                                    typeof entry.peakLinear === "number" &&
+                                    Number.isFinite(entry.peakLinear)
+                                        ? Math.max(0, entry.peakLinear)
+                                        : 0,
+                                maxPeakLinear:
+                                    typeof entry.maxPeakLinear === "number" &&
+                                    Number.isFinite(entry.maxPeakLinear)
+                                        ? Math.max(0, entry.maxPeakLinear)
+                                        : 0,
+                                clipped: Boolean(entry.clipped),
+                            };
+                        }
+
+                        dispatch(setTrackMeters(next));
+                    },
+                );
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1067,132 +1082,138 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("waveform_analysis_progress", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        sourcePath?: string;
-                        progress?: number;
-                        status?: string;
-                    };
-                    const status = payload?.status ?? "";
-                    const sourcePath =
-                        typeof payload?.sourcePath === "string" ? payload.sourcePath : null;
-                    const p =
-                        typeof payload?.progress === "number" && Number.isFinite(payload.progress)
-                            ? Math.max(0, Math.min(1, payload.progress))
-                            : null;
+                unlisten = await mod.listen(
+                    "waveform_analysis_progress",
+                    (event: {
+                        payload?: { sourcePath?: string; progress?: number; status?: string };
+                    }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            sourcePath?: string;
+                            progress?: number;
+                            status?: string;
+                        };
+                        const status = payload?.status ?? "";
+                        const sourcePath =
+                            typeof payload?.sourcePath === "string" ? payload.sourcePath : null;
+                        const p =
+                            typeof payload?.progress === "number" &&
+                            Number.isFinite(payload.progress)
+                                ? Math.max(0, Math.min(1, payload.progress))
+                                : null;
 
-                    // 已被用户忽略的源文件不显示任何波形分析进度；若此前正显示该
-                    // 文件的进度，立即清除，避免后端仍在收尾时导致状态条停留。
-                    if (sourcePath && ignoredSourcePathsRef.current.has(sourcePath)) {
-                        if (currentComputingPath === sourcePath) {
-                            if (fadeOutTimer) {
-                                clearTimeout(fadeOutTimer);
-                                fadeOutTimer = null;
+                        // 已被用户忽略的源文件不显示任何波形分析进度；若此前正显示该
+                        // 文件的进度，立即清除，避免后端仍在收尾时导致状态条停留。
+                        if (sourcePath && ignoredSourcePathsRef.current.has(sourcePath)) {
+                            if (currentComputingPath === sourcePath) {
+                                if (fadeOutTimer) {
+                                    clearTimeout(fadeOutTimer);
+                                    fadeOutTimer = null;
+                                }
+                                currentProgress = -1;
+                                currentComputingPath = null;
+                                setWaveformAnalysis({
+                                    active: false,
+                                    sourcePath: null,
+                                    progress: null,
+                                });
                             }
-                            currentProgress = -1;
-                            currentComputingPath = null;
-                            setWaveformAnalysis({
-                                active: false,
-                                sourcePath: null,
-                                progress: null,
-                            });
-                        }
-                        return;
-                    }
-
-                    if (status === "computing") {
-                        // 如果已在显示进度且新进度比当前低，忽略（防止并发去重后
-                        // 残留的事件或不同触发点导致进度回退）
-                        if (
-                            currentProgress > 0 &&
-                            p !== null &&
-                            p < currentProgress &&
-                            // 同一文件的进度回退才忽略；不同文件的 0 是正常的
-                            currentComputingPath === sourcePath
-                        ) {
                             return;
                         }
 
-                        // 清除之前的淡出定时器
-                        if (fadeOutTimer) {
-                            clearTimeout(fadeOutTimer);
-                            fadeOutTimer = null;
-                        }
-                        currentProgress = p ?? 0;
-                        currentComputingPath = sourcePath;
-                        // 提取文件名（不含路径和扩展名）
-                        const fileName = sourcePath
-                            ? (sourcePath
-                                  .replace(/\\/g, "/")
-                                  .split("/")
-                                  .pop()
-                                  ?.replace(/\.[^.]+$/, "") ?? sourcePath)
-                            : null;
-                        setWaveformAnalysis({
-                            active: true,
-                            sourcePath: fileName,
-                            progress: p,
-                        });
-                    } else if (status === "done" || status === "cached") {
-                        // 波形数据就绪信号：清除该文件的 mipmap 失败负缓存
-                        // 并按需重载——打开工程瞬间的抢先请求常早于后端分析
-                        // 完成，若无此重试，波形要等用户滚动/缩放才出现。
-                        if (sourcePath) {
-                            waveformMipmapStore.refresh(sourcePath);
-                        }
-                        // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
-                        if (status === "done") {
-                            currentProgress = 1.0;
-                            currentComputingPath = null;
+                        if (status === "computing") {
+                            // 如果已在显示进度且新进度比当前低，忽略（防止并发去重后
+                            // 残留的事件或不同触发点导致进度回退）
+                            if (
+                                currentProgress > 0 &&
+                                p !== null &&
+                                p < currentProgress &&
+                                // 同一文件的进度回退才忽略；不同文件的 0 是正常的
+                                currentComputingPath === sourcePath
+                            ) {
+                                return;
+                            }
+
+                            // 清除之前的淡出定时器
+                            if (fadeOutTimer) {
+                                clearTimeout(fadeOutTimer);
+                                fadeOutTimer = null;
+                            }
+                            currentProgress = p ?? 0;
+                            currentComputingPath = sourcePath;
+                            // 提取文件名（不含路径和扩展名）
+                            const fileName = sourcePath
+                                ? (sourcePath
+                                      .replace(/\\/g, "/")
+                                      .split("/")
+                                      .pop()
+                                      ?.replace(/\.[^.]+$/, "") ?? sourcePath)
+                                : null;
                             setWaveformAnalysis({
                                 active: true,
-                                sourcePath: null,
-                                progress: 1.0,
+                                sourcePath: fileName,
+                                progress: p,
                             });
-                            fadeOutTimer = setTimeout(() => {
-                                if (!disposed) {
-                                    currentProgress = -1;
-                                    setWaveformAnalysis({
-                                        active: false,
-                                        sourcePath: null,
-                                        progress: null,
-                                    });
+                        } else if (status === "done" || status === "cached") {
+                            // 波形数据就绪信号：清除该文件的 mipmap 失败负缓存
+                            // 并按需重载——打开工程瞬间的抢先请求常早于后端分析
+                            // 完成，若无此重试，波形要等用户滚动/缩放才出现。
+                            if (sourcePath) {
+                                waveformMipmapStore.refresh(sourcePath);
+                            }
+                            // 完成后延迟 1.5 秒隐藏，让用户有时间看到 100%
+                            if (status === "done") {
+                                currentProgress = 1.0;
+                                currentComputingPath = null;
+                                setWaveformAnalysis({
+                                    active: true,
+                                    sourcePath: null,
+                                    progress: 1.0,
+                                });
+                                fadeOutTimer = setTimeout(() => {
+                                    if (!disposed) {
+                                        currentProgress = -1;
+                                        setWaveformAnalysis({
+                                            active: false,
+                                            sourcePath: null,
+                                            progress: null,
+                                        });
+                                    }
+                                }, 1500);
+                            } else if (currentComputingPath === sourcePath) {
+                                // 缓存命中是终态：如果之前曾进入 computing，立刻结束进度显示。
+                                if (fadeOutTimer) {
+                                    clearTimeout(fadeOutTimer);
+                                    fadeOutTimer = null;
                                 }
-                            }, 1500);
-                        } else if (currentComputingPath === sourcePath) {
-                            // 缓存命中是终态：如果之前曾进入 computing，立刻结束进度显示。
-                            if (fadeOutTimer) {
-                                clearTimeout(fadeOutTimer);
-                                fadeOutTimer = null;
+                                currentProgress = -1;
+                                currentComputingPath = null;
+                                setWaveformAnalysis({
+                                    active: false,
+                                    sourcePath: null,
+                                    progress: null,
+                                });
                             }
-                            currentProgress = -1;
-                            currentComputingPath = null;
-                            setWaveformAnalysis({
-                                active: false,
-                                sourcePath: null,
-                                progress: null,
-                            });
-                        }
-                        // cached 状态不显示进度条
-                    } else if (status === "failed") {
-                        // 计算失败（例如文件缺失）也是终态：立即清除“正在分析波形”，
-                        // 避免缺失/被忽略的文件让左下角状态永久停留。
-                        if (sourcePath === null || currentComputingPath === sourcePath) {
-                            if (fadeOutTimer) {
-                                clearTimeout(fadeOutTimer);
-                                fadeOutTimer = null;
+                            // cached 状态不显示进度条
+                        } else if (status === "failed") {
+                            // 计算失败（例如文件缺失）也是终态：立即清除“正在分析波形”，
+                            // 避免缺失/被忽略的文件让左下角状态永久停留。
+                            if (sourcePath === null || currentComputingPath === sourcePath) {
+                                if (fadeOutTimer) {
+                                    clearTimeout(fadeOutTimer);
+                                    fadeOutTimer = null;
+                                }
+                                currentProgress = -1;
+                                currentComputingPath = null;
+                                setWaveformAnalysis({
+                                    active: false,
+                                    sourcePath: null,
+                                    progress: null,
+                                });
                             }
-                            currentProgress = -1;
-                            currentComputingPath = null;
-                            setWaveformAnalysis({
-                                active: false,
-                                sourcePath: null,
-                                progress: null,
-                            });
                         }
-                    }
-                });
+                    },
+                );
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1214,32 +1235,41 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("playback_rendering_state", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        active?: boolean;
-                        progress?: number | null;
-                        target?: string | null;
-                    };
-                    const active = Boolean(payload?.active);
-                    const pRaw = payload?.progress;
-                    const p =
-                        typeof pRaw === "number" && Number.isFinite(pRaw)
-                            ? Math.max(0, Math.min(1, pRaw))
-                            : null;
-                    const target = typeof payload?.target === "string" ? payload.target : null;
+                unlisten = await mod.listen(
+                    "playback_rendering_state",
+                    (event: {
+                        payload?: {
+                            active?: boolean;
+                            progress?: number | null;
+                            target?: string | null;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            active?: boolean;
+                            progress?: number | null;
+                            target?: string | null;
+                        };
+                        const active = Boolean(payload?.active);
+                        const pRaw = payload?.progress;
+                        const p =
+                            typeof pRaw === "number" && Number.isFinite(pRaw)
+                                ? Math.max(0, Math.min(1, pRaw))
+                                : null;
+                        const target = typeof payload?.target === "string" ? payload.target : null;
 
-                    setRendering({ active, progress: p, target });
+                        setRendering({ active, progress: p, target });
 
-                    // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
-                    // 使前端能感知后端已真正开始播放。
-                    if (!active && renderingWasActiveRef.current) {
-                        setTimeout(() => {
-                            dispatch(syncPlaybackState());
-                        }, 200);
-                    }
-                    renderingWasActiveRef.current = active;
-                });
+                        // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
+                        // 使前端能感知后端已真正开始播放。
+                        if (!active && renderingWasActiveRef.current) {
+                            setTimeout(() => {
+                                dispatch(syncPlaybackState());
+                            }, 200);
+                        }
+                        renderingWasActiveRef.current = active;
+                    },
+                );
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1250,7 +1280,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, []);
+    }, [dispatch]);
 
     const runtimeRef = useRef({
         isPlaying: false,
@@ -1332,7 +1362,7 @@ function AppInner() {
             try {
                 const result = (await dispatch(
                     projectPath ? saveProjectRemote() : saveProjectAsRemote(),
-                ).unwrap()) as any;
+                ).unwrap()) as { canceled?: boolean; versionConflict?: boolean };
                 // 取消 或 命中"目标版本不一致"确认框：暂不执行后续操作，
                 // 等待用户完成保存（继续保存成功后由后续入口继续，或重新操作）。
                 if (result?.canceled || result?.versionConflict) {
@@ -1536,11 +1566,11 @@ function AppInner() {
             void (async () => {
                 try {
                     const result = await webApi.startBackgroundRender();
-                    if ((result as any)?.skipped) {
+                    if (result?.skipped) {
                         // 已在渲染中，无需重复启动
                         return;
                     }
-                } catch (e) {
+                } catch {
                     // 静默失败；后台渲染为可选增强功能
                 }
             })();
@@ -1576,7 +1606,6 @@ function AppInner() {
         return () => {
             canceled = true;
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时执行一次
     }, []);
 
     useEffect(() => {
@@ -1644,7 +1673,9 @@ function AppInner() {
                         promptUnsavedAction("exit", closeWindowNow);
                     }
                 });
-            } catch {}
+            } catch {
+                // 非 Tauri 环境：忽略窗口关闭事件监听失败
+            }
         }
 
         void setup();

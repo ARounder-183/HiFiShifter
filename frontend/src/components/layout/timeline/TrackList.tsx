@@ -971,6 +971,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         return () => {
             el.removeEventListener("wheel", handler);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- scheduleVolumeCommit 为渲染期新建的普通函数，加入依赖会让 wheel 监听每次渲染重建（既有模式）
     }, [
         currentTrackVolumeById,
         onScrollTopChange,
@@ -1586,8 +1587,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             style={{
                                                 backgroundColor:
                                                     track.color != null
-                                                        ? normalizedTrackColorCss(track.color, darkMode)
-                                                        : normalizedTrackColorCss(undefined, darkMode),
+                                                        ? normalizedTrackColorCss(
+                                                              track.color,
+                                                              darkMode,
+                                                          )
+                                                        : normalizedTrackColorCss(
+                                                              undefined,
+                                                              darkMode,
+                                                          ),
                                             }}
                                         />
 
@@ -1929,7 +1936,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 {isRoot ? (
                                                     <IconButton
                                                         size="1"
-                                                        variant={composeEnabled ? "solid" : "surface"}
+                                                        variant={
+                                                            composeEnabled ? "solid" : "surface"
+                                                        }
                                                         color={composeEnabled ? "iris" : "gray"}
                                                         data-tooltip={t("compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}

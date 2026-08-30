@@ -1,6 +1,7 @@
 /**
  * TrackLane - 时间轴单轨道视图，负责布局轨道波形、剪辑项与拖拽中的 ghost 预览。
  */
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React from "react";
 
 import { registerDragAbort } from "./gestureFocusGuard";
@@ -289,7 +290,7 @@ export const TrackLane = React.memo(
                 });
             }
             return result;
-        }, [ghostDrag, track.id, trackClips, allClips, allTracks]);
+        }, [ghostDrag, track.id, allClips, allTracks]);
 
         const leadingOverlapSecByClipId = React.useMemo(
             () => computeLeadingOverlapSecByClipId(trackClips),
@@ -443,7 +444,6 @@ export const TrackLane = React.memo(
                 startClipDrag(event, clip.id, clip.startSec, false);
             },
             [
-                altPressed,
                 clearContextMenu,
                 selectedClipId,
                 multiSelectedClipIds,
@@ -610,6 +610,7 @@ export const TrackLane = React.memo(
                 window.addEventListener("pointerup", onEnd, true);
                 window.addEventListener("pointercancel", onEnd, true);
             },
+            // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec/trackClips 为渲染期值，加入依赖会改变回调重建时机（既有 memo 模式）
             [
                 altPressed,
                 clearContextMenu,

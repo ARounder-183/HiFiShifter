@@ -258,16 +258,27 @@ export const WaveformTrackCanvas = React.memo(
         } | null>(null);
 
         // 同步 ref
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         pxPerSecRef.current = props.pxPerSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportStartSecRef.current = props.viewportStartSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportEndSecRef.current = props.viewportEndSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipsRef.current = clips;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         leadingOverlapSecByClipIdRef.current = props.leadingOverlapSecByClipId ?? {};
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         waveformHeightRef.current = waveformHeight;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         strokeColorRef.current = strokeColor;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         strokeWidthRef.current = strokeWidth;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportWidthPxRef.current = viewportWidthPx;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         showAllTakesRef.current = showAllTakes;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         takeSeparatorColorRef.current = takeSeparatorColor;
 
         // ========================================
@@ -287,6 +298,7 @@ export const WaveformTrackCanvas = React.memo(
         // ========================================
         // 核心绘制函数（存入 drawRef，由 invalidate 调度）
         // ========================================
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         drawRef.current = () => {
             wfDiag_frameStart();
             const canvas = canvasRef.current;

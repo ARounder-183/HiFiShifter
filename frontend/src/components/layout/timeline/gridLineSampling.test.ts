@@ -102,4 +102,6 @@ test("components/layout/timeline/gridLineSampling.test.ts scripted checks", asyn
         });
         assertEqual(gridStep, rulerStep, "grid uses the ruler step");
     }
+
+    void checks;
 });

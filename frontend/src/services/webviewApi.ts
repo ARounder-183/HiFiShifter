@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 // 注意：该文件作为“门面层（Facade）”保留历史接口 `webApi`，
 // 以兼容现有调用方（例如 sessionSlice / 各类面板组件）。
 //
@@ -160,7 +158,6 @@ export const webApi = {
 };
 
 // 保留旧类型导入的“锚点”，以降低大范围改动时的冲突概率（不影响运行时）。
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const __webApiTypeAnchors = {
     ModelConfigResult: null as unknown as ModelConfigResult,
     PlaybackStateResult: null as unknown as PlaybackStateResult,

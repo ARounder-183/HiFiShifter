@@ -72,7 +72,6 @@ export const ClipItem = React.memo(function ClipItem({
     startSnapOffsetDrag,
     toggleClipMuted,
     onCtrlToggleSelect,
-    toggleMultiSelect: _toggleMultiSelect,
     onShiftRangeSelect,
     rangeSelectAnchorClipId,
     recordLastClickPosition,
@@ -390,8 +389,7 @@ export const ClipItem = React.memo(function ClipItem({
                     // （OverlapEditLayer 抓手）仍按点击位置跳转。坐标用 **clip
                     // 根元素** rect 计算 —— hit 元素自身位于 clip 内部，取其
                     // rect 会多算一级偏移。
-                    const fadeSec =
-                        type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
+                    const fadeSec = type === "fade_in" ? effectiveFadeInSec : effectiveFadeOutSec;
                     const innerEdgeSec =
                         type === "fade_in"
                             ? clip.startSec + fadeSec
@@ -418,6 +416,7 @@ export const ClipItem = React.memo(function ClipItem({
             window.addEventListener("pointerup", onEnd, true);
             window.addEventListener("pointercancel", onEnd, true);
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- bodyHeight 为渲染派生值，加入依赖会改变回调重建时机（既有 memo 模式）
         [
             clearContextMenu,
             clip.id,
