@@ -398,8 +398,8 @@ export function drawPianoRoll(args: {
               pitchGridC: "rgba(255,255,255,0.10)",
               pitchGridOther: "rgba(255,255,255,0.05)",
               // 曲线：参数线深浅随主题（深=白、浅=黑），在色块化的界面里
-              // 永远是最清晰的一条；原始音高 = 橄榄黄虚线；选区高亮 = 青蓝。
-              origCurve: "rgba(200,164,60,0.70)",
+              // 永远是最清晰的一条；原始音高 = 浅灰虚线；选区高亮 = 青蓝。
+              origCurve: "rgba(200,200,200,0.55)",
               editCurve: "rgba(255,255,255,0.92)",
               selectionCurve: "rgba(100,200,255,0.95)",
               // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
@@ -424,7 +424,7 @@ export function drawPianoRoll(args: {
               pitchGridC: "rgba(0,0,0,0.12)",
               pitchGridOther: "rgba(0,0,0,0.06)",
               // 曲线：参数线深浅随主题（深=白、浅=黑）。
-              origCurve: "rgba(132,104,26,0.80)",
+              origCurve: "rgba(132,104,26,0.72)",
               editCurve: "rgba(28,32,40,0.95)",
               selectionCurve: "rgba(0,116,200,1)",
               // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
