@@ -447,6 +447,7 @@ export const ClipItem = React.memo(function ClipItem({
     return (
         <div
             data-hs-clip-item="1"
+            data-hs-clip-id={clip.id}
             className="absolute overflow-visible group"
             style={{
                 left,
@@ -606,7 +607,7 @@ export const ClipItem = React.memo(function ClipItem({
             >
                 <ClipEdgeHandles
                     clipId={clip.id}
-                    clipHeightPx={clipHeightPx}
+                    bodyHeightPx={bodyHeight}
                     altPressed={altPressed}
                     isInMultiSelectedSet={isInMultiSelectedSet}
                     multiSelectedCount={multiSelectedCount}

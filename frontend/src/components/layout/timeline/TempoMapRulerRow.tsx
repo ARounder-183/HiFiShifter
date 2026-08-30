@@ -689,6 +689,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
     const inlineEditLockRef = useRef(false);
+    /** 内联输入框 DOM 引用（全局"点击外部确认并退出"判定用）。 */
+    const inlineInputRef = useRef<HTMLInputElement | null>(null);
 
     const startInlineEdit = useCallback((point: TempoPoint) => {
         inlineEditLockRef.current = false;
@@ -847,6 +849,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         applyInlineEdit(true);
     }, [editingPointId, applyInlineEdit]);
 
+    /** commitInlineEdit 的每帧镜像：全局捕获监听里必须取最新闭包。 */
+    const commitInlineEditRef = useRef(commitInlineEdit);
+    useEffect(() => {
+        commitInlineEditRef.current = commitInlineEdit;
+    });
+
     const cancelInlineEdit = useCallback(() => {
         inlineEditLockRef.current = true;
         setEditingPointId(null);
@@ -857,6 +865,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             onChange(pending.baseMap);
         }
     }, [onChange]);
+
+    // ── 编辑中点击外部 → 确认并退出 ────────────────────────────────
+    // 时间线画布/轨道/标尺等区域会在各自的 pointerdown 处理里
+    // preventDefault（选中、seek、拖拽起手等），这会取消 Chromium 的默认
+    // 焦点转移 → 输入框收不到 blur → onBlur 提交永不触发（"退出逻辑被拦截"）。
+    // 与轨道改名同一兜底方案（TrackList.tsx 的 window 捕获阶段监听）：
+    // 编辑期间在 window 捕获阶段先于一切目标处理器判定……点击落在输入框
+    // 之外即提交退出；**不 preventDefault/stopPropagation**，同一个点击仍
+    // 正常落到轨道/标尺执行其本职（选中、seek、拖拽）。
+    useEffect(() => {
+        if (!editingPointId) return;
+        const handler = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (target && inlineInputRef.current?.contains(target)) return;
+            commitInlineEditRef.current();
+        };
+        window.addEventListener("pointerdown", handler, true);
+        return () => window.removeEventListener("pointerdown", handler, true);
+    }, [editingPointId]);
 
     /**
      * “输入状态下直接拖动标签”的意图探测。
@@ -1317,6 +1344,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     /** 标签的内联输入框（输入编辑状态）。 */
     const renderInlineInput = (point: TempoPoint, isFirst: boolean) => (
         <input
+            ref={inlineInputRef}
             autoFocus
             value={editingText}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditingText(e.target.value)}

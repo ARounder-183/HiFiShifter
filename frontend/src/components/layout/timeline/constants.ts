@@ -27,30 +27,23 @@ export const FADE_CORNER_CAP_HEIGHT_PX = 14;
 /** 边缘上部竖条宽度（骑在边缘线上，位于横帽正下方直至保留区下沿）。 */
 export const FADE_CORNER_EDGE_WIDTH_PX = 6;
 
-/** 淡化角控件在 body 区内保留的总高度**上限**（px）。 */
-export const FADE_CORNER_RESERVE_MAX_PX = 34;
 /**
- * 裁短/拉伸至少要拿到的 body 高度占比。
+ * 淡化角控件保留区 = body 高度的 1/3（按轨道高度换算，随行高缩放）。
  *
- * 保留区按此比例收缩，保证短 Clip 上 trim 手势仍有充裕的纵向空间。
- */
-export const FADE_CORNER_TRIM_MIN_RATIO = 0.62;
-
-/**
- * 淡化角控件在 **body 区内**（header 之下）保留的总高度（px）。
+ * 历史实现按 `body × 0.38` 且**封顶 34px**：行高超过 ~96px 后拖拽区恒为
+ * 34px，不随轨道高度缩放（"看着是定长"）。现改为 body/3、无全局封顶：
+ * 行高 80→20px、96→25px、120→33px、192→57px；裁短区始终保住 2/3 ≥
+ * 之前的 62% 下限，任意行高下都成立。
  *
  * 角控件不得覆盖 header：header 上有旋钮 / badge / 名称等交互控件，
- * 角控件压在上面会让 header 无法点击。
+ * 角控件压在上面会让 header 无法点击。退化矮 body（< 3×横帽高）时
+ * 回退为横帽高度本身（真边角必须有落点）。
  *
  * @param bodyHeightPx body 高度（= clip 高 - header 高）。
  */
 export function fadeCornerReservePx(bodyHeightPx: number): number {
     const bodyH = Number.isFinite(bodyHeightPx) ? Math.max(0, bodyHeightPx) : 0;
-    const byRatio = bodyH * (1 - FADE_CORNER_TRIM_MIN_RATIO);
-    return Math.min(
-        FADE_CORNER_RESERVE_MAX_PX,
-        Math.max(FADE_CORNER_CAP_HEIGHT_PX, byRatio),
-    );
+    return Math.max(FADE_CORNER_CAP_HEIGHT_PX, Math.round(bodyH / 3));
 }
 
 /**

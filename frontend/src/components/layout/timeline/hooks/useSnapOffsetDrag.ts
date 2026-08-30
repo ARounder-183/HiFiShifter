@@ -157,8 +157,9 @@ export function useSnapOffsetDrag(deps: {
                 return;
             }
             // 松手持久化最终值（读取当前乐观状态，拖拽期间已收敛）。
-            // checkpoint:false：undo 检查点已在首次移动时创建，
-            // 远端默认再建一个会把"无变化的拖前状态"多压一层。
+            // checkpoint:true：整次拖拽只有这一笔后端写入，后端在应用前
+            // 压入"拖拽前状态"快照 → 恰好一个撤销步（前端 checkpointHistory
+            // 只是本地 dirty/epoch 标记，不会在后端栈留下任何条目）。
             const finalClip = sessionRef.current.clips.find((c) => c.id === clipId);
             void dispatch(
                 setClipStateRemote({
@@ -168,7 +169,7 @@ export function useSnapOffsetDrag(deps: {
                         0,
                         clipLen,
                     ),
-                    checkpoint: false,
+                    checkpoint: true,
                 }),
             )
                 .unwrap()
